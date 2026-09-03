@@ -9159,6 +9159,21 @@ impl Tokenizer {
         Ok(!self.is_end(state))
     }
 
+    /// Parser-transparent finite-horizon byte-family proof for an exact
+    /// bounded-code virtual residual state. This deliberately avoids building
+    /// the finite mask projection; `None` means this state cannot be certified
+    /// cheaply and callers should use the ordinary exact walk.
+    #[doc(hidden)]
+    pub fn virtual_residual_parser_transparent_byte_family(
+        &self,
+        state: u32,
+        bytes: U8Set,
+        max_horizon: u32,
+    ) -> Option<bool> {
+        self.virtual_residual_runtime_for_state(state)?
+            .parser_transparent_byte_family(state, bytes, max_horizon)
+    }
+
     #[doc(hidden)]
     pub fn has_virtual_binary_repeat_intersection(&self) -> bool {
         !self.virtual_repeat_intersections.is_empty()

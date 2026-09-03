@@ -1581,6 +1581,12 @@ impl BoundedCodeIntersectionOracle {
         }
     }
 
+    #[inline]
+    fn coordinate_accepting(&self, coordinate: BoundedCodeOracleCoordinate) -> bool {
+        matches!(coordinate.envelope, BoundedCodeEnvelopeState::Done)
+            && !self.pattern.finalizers(coordinate.pattern_state).is_empty()
+    }
+
     fn completion_relation(&mut self, body_state: u32) -> &BoolRelation {
         let index = body_state as usize;
         if self.completion_relations[index].is_none() {
@@ -2420,6 +2426,7 @@ struct ResidualRuntimeStore {
     liveness_oracle: Option<BoundedCodeIntersectionOracle>,
     oracle_coordinates: Vec<BoundedCodeOracleSlot>,
     oracle_futures: Vec<Option<bool>>,
+    parser_transparent_byte_family_cache: FxHashSet<(u32, U8Set, u32)>,
 }
 
 /// Exact general symbolic tokenizer component. The regex upper bounds live in
@@ -2679,6 +2686,7 @@ impl VirtualResidualRuntime {
                 liveness_oracle,
                 oracle_coordinates,
                 oracle_futures,
+                parser_transparent_byte_family_cache: FxHashSet::default(),
             }),
         })
     }
@@ -3063,6 +3071,7 @@ impl VirtualResidualRuntime {
                 state_by_residual_coordinate, coordinate_by_state,
                 oracle_future_by_state: FxHashMap::default(),
                 liveness_oracle: Some(liveness_oracle), oracle_coordinates, oracle_futures,
+                parser_transparent_byte_family_cache: FxHashSet::default(),
             }),
         })
     }
@@ -3089,6 +3098,92 @@ impl VirtualResidualRuntime {
 
     pub(super) fn has_bounded_code_liveness_oracle(&self) -> bool {
         self.store.lock().unwrap().liveness_oracle.is_some()
+    }
+
+    /// Prove that every string over `bytes` of length `1..=max_horizon`
+    /// remains inside this residual terminal without finalizing and still has
+    /// a nonempty continuation. This is intentionally stronger than proving
+    /// only the concrete vocabulary strings: callers can certify an entire
+    /// vocabulary partition from its byte alphabet and maximum token length.
+    ///
+    /// The proof runs directly on the bounded-code oracle coordinate and does
+    /// not materialize the finite one-token mask DFA. `None` means the state
+    /// has no exact oracle coordinate or the bounded work budget was exceeded;
+    /// callers must fall back to the exact vocabulary walk in that case.
+    pub(super) fn parser_transparent_byte_family(
+        &self,
+        state: u32,
+        bytes: U8Set,
+        max_horizon: u32,
+    ) -> Option<bool> {
+        if bytes.is_empty() || max_horizon == 0 || !self.handles_state(state) {
+            return Some(false);
+        }
+
+        const MAX_COORDINATE_BYTE_STEPS: usize = 128 * 1024;
+        let key = (state, bytes, max_horizon);
+        let mut store = self.store.lock().unwrap();
+        if store.parser_transparent_byte_family_cache.contains(&key) {
+            return Some(true);
+        }
+        let residual = Self::residual_for_state(&store, self.root_state, state)?;
+        let coordinate = if self.preserve_oracle_coordinate {
+            store.coordinate_by_state.get(&state).copied()?
+        } else {
+            match store.oracle_coordinates.get(residual as usize).copied()? {
+                BoundedCodeOracleSlot::Exact(coordinate) => coordinate,
+                BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => return None,
+            }
+        };
+        let result = 'proof: {
+            let oracle = store.liveness_oracle.as_mut()?;
+            if oracle.coordinate_accepting(coordinate) || !oracle.has_future(coordinate) {
+                break 'proof Some(false);
+            }
+
+            let mut frontier = FxHashSet::default();
+            frontier.insert(coordinate);
+            let mut work = 0usize;
+            for _ in 0..max_horizon {
+                let mut next = FxHashSet::default();
+                for coordinate in frontier.drain() {
+                    for byte in bytes.iter() {
+                        work = work.saturating_add(1);
+                        if work > MAX_COORDINATE_BYTE_STEPS {
+                            break 'proof None;
+                        }
+                        let Some(target) = oracle.step_coordinate(coordinate, byte) else {
+                            break 'proof Some(false);
+                        };
+                        next.insert(target);
+                    }
+                }
+                if next.is_empty() {
+                    break 'proof Some(false);
+                }
+                for &target in &next {
+                    if oracle.coordinate_accepting(target) || !oracle.has_future(target) {
+                        break 'proof Some(false);
+                    }
+                }
+                frontier = next;
+            }
+            Some(true)
+        };
+        if result == Some(true) {
+            // Virtual residual states may advance throughout a very long
+            // bounded string. Keep successful proofs only (failed partitions
+            // usually fail after one or a few byte steps) and bound retained
+            // state history instead of growing with generation length.
+            const MAX_TRANSPARENT_BYTE_FAMILY_CACHE_ENTRIES: usize = 8 * 1024;
+            if store.parser_transparent_byte_family_cache.len()
+                >= MAX_TRANSPARENT_BYTE_FAMILY_CACHE_ENTRIES
+            {
+                store.parser_transparent_byte_family_cache.clear();
+            }
+            store.parser_transparent_byte_family_cache.insert(key);
+        }
+        result
     }
 
     pub(super) fn finalizers(&self, state: u32) -> Option<&BitSet> {
