@@ -100,7 +100,7 @@ for _ in range(MAX_OUTPUT_TOKENS):
 print(llm.detokenize(generated).decode())
 ```
 
-For comparison, here's what a decoding loop might look like without GLRMask:
+For comparison, here's what the decoding loop might look like without GLRMask:
 
 ```python
 llm.reset()
@@ -285,23 +285,6 @@ if token in end_tokens:
 else:
     state.commit_token(token)
 ```
-
-## Saving compiled constraints
-
-A compiled `Constraint` can be serialized and loaded again:
-
-```python
-blob = constraint.save()
-constraint = glrmask.Constraint.load(blob, vocab)
-```
-
-Load the artifact with the same vocabulary it was compiled against; otherwise it will crash.
-
-## Recommended serving architecture
-
-In production, decouple constraint compilation from model inference. Dedicated compilation workers own constraint construction and the shared cache or artifact store, while inference nodes only consume constraints.
-
-On a cache hit, inference gets a static `Constraint`. On a cache miss, a `DynamicConstraint` is produced for that request so generation can begin immediately, while static compilation proceeds asynchronously and is cached for future requests.
 
 ## How it works
 
