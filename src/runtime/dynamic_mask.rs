@@ -24,7 +24,8 @@ use crate::grammar::flat::TerminalID;
 
 use super::artifact::{
     Constraint, DynamicDenseSubset16, DynamicLazyUnion16Cache, DynamicLazyUnion16Metadata, DynamicMaskLexerStateKey,
-    DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskVocab, FastTokenizerTransitions,
+    DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskTrieFullWalkOp, DynamicMaskVocab,
+    FastTokenizerTransitions,
 };
 use super::state::ConstraintState;
 
@@ -37,6 +38,7 @@ thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_CONFIG_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_PARTITION_SLICER_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_PARTITION_SLICER_DISABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 trait FullWalkTransitionTable {
@@ -88,6 +90,19 @@ trait FullWalkTransitionTable {
         lexer_state: u32,
         parser_node: u32,
     ) -> bool;
+
+    /// Optional direct proof for one parser-transparent vocabulary partition.
+    /// Dense finite lexer coordinates use the precomputed certificate table;
+    /// the lazy config backend overrides this only for exact bounded-code
+    /// virtual residual states.
+    fn virtual_residual_partition_is_transparent(
+        &mut self,
+        _state: u32,
+        _bytes: U8Set,
+        _max_horizon: u32,
+    ) -> Option<bool> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -397,6 +412,19 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             return true;
         }
         parser_cache.token_boundary_allowed_sparse(constraint, self, lexer_state, parser_node)
+    }
+
+    #[inline]
+    fn virtual_residual_partition_is_transparent(
+        &mut self,
+        state: u32,
+        bytes: U8Set,
+        max_horizon: u32,
+    ) -> Option<bool> {
+        let raw_state = self.cache.raw_state_for_config(state)?;
+        self.cache
+            .tokenizer()
+            .virtual_residual_parser_transparent_byte_family(raw_state, bytes, max_horizon)
     }
 }
 
@@ -1678,8 +1706,19 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     let mut scalar_parser = 0u32;
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
+    let profile_partition_slicer =
+        std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PARTITION_SLICER").is_some();
+    let mut partition_slicer_hits = 0usize;
+    let mut partition_slicer_tokens = 0usize;
+    let mut partition_root_slot = 0usize;
+    let root_edges = trie.children(0);
+    #[cfg(test)]
+    let partition_slicer_disabled = TEST_PARTITION_SLICER_DISABLED.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let partition_slicer_disabled = false;
+    let mut remaining_ops = walk_ops.iter();
 
-    for &op in walk_ops {
+    while let Some(&op) = remaining_ops.next() {
         let parent_depth = op.parent_depth() as usize;
         if op.starts_edge() {
             scalar_lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
@@ -1694,6 +1733,47 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         .as_ref()
                         .unwrap_unchecked()
                 });
+            }
+
+            if !partition_slicer_disabled && parent_depth == 0 && !op.consumes_byte() {
+                let root_slot = partition_root_slot;
+                partition_root_slot += 1;
+                if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
+                    let statically_certified =
+                        vocab.transparent_partition_is_certified(scalar_lexer, root_slot);
+                    let directly_certified = if statically_certified {
+                        false
+                    } else if let Some(edge) = root_edges.get(root_slot) {
+                        transitions
+                            .virtual_residual_partition_is_transparent(
+                                scalar_lexer,
+                                U8Set::from_words(trie.subtree_bytes(edge.child)),
+                                trie.subtree_max_byte_len(edge.child),
+                            )
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if (statically_certified || directly_certified)
+                        && parser_cache.token_boundary_allowed_sparse(
+                            state.constraint,
+                            transitions,
+                            scalar_lexer,
+                            scalar_parser,
+                        )
+                    {
+                        partition_slicer_hits += 1;
+                        #[cfg(test)]
+                        TEST_PARTITION_SLICER_HITS.with(|hits| hits.set(hits.get() + 1));
+                        partition_slicer_tokens += full_walk_skip_admitted_subtree_generic(
+                            trie,
+                            walk_ops,
+                            &mut remaining_ops,
+                            &mut token_marker_index,
+                        );
+                        continue;
+                    }
+                }
             }
         }
 
@@ -2112,9 +2192,36 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     // paths. This also handles a token ID that is valid through both routes.
     update_special_token_mask(state, buf);
     state.clear_late_grammar_placeholder_mask(buf);
+    if profile_partition_slicer {
+        eprintln!(
+            "[glrmask/profile][dynamic_partition_slicer] hits={} skipped_tokens={}",
+            partition_slicer_hits, partition_slicer_tokens,
+        );
+    }
     #[cfg(test)]
     TEST_FULL_WALK_USES.with(|count| count.set(count.get() + 1));
     Ok(true)
+}
+
+#[inline(always)]
+fn full_walk_skip_admitted_subtree_generic<'a>(
+    trie: &DynamicMaskTrie,
+    walk_ops: &'a [DynamicMaskTrieFullWalkOp],
+    remaining_ops: &mut std::slice::Iter<'a, DynamicMaskTrieFullWalkOp>,
+    token_marker_index: &mut usize,
+) -> usize {
+    let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
+    let (child, subtree_end_op) = trie.full_walk_dead_subtree(op_index);
+    let token_count = trie.subtree_tokens(child).len();
+    let root_token_offset = usize::from(trie.node(0).token_id.is_some());
+    let token_end = trie
+        .subtree_token_index_range(child)
+        .end
+        .saturating_sub(root_token_offset);
+    debug_assert!(*token_marker_index <= token_end);
+    *token_marker_index = token_end;
+    *remaining_ops = walk_ops[subtree_end_op as usize..].iter();
+    token_count
 }
 
 #[derive(Clone)]
@@ -4375,30 +4482,25 @@ nt start ::= A C | B D;
         let schema = r#"{"type":"string","maxLength":1000000000000}"#;
         let accelerated = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         assert!(
-            accelerated
+            !accelerated
                 .inner
                 .dynamic_mask_vocab
                 .has_transparent_partition_certificates(),
-            "test must exercise the partition slicer certificate table",
+            "current virtual-residual policy should skip the finite certificate table",
         );
-        let mut reference = accelerated.clone();
-        reference
-            .inner
-            .dynamic_mask_vocab
-            .disable_transparent_partition_certificates_for_test();
 
         let mut accelerated_state = accelerated.inner.start();
-        let mut reference_state = reference.inner.start();
         let prefix = b"\"inside a bounded string ";
         accelerated_state.commit_bytes(prefix).unwrap();
-        reference_state.commit_bytes(prefix).unwrap();
 
         TEST_PARTITION_SLICER_HITS.with(|hits| hits.set(0));
         let accelerated_mask = direct_mask(&accelerated_state);
         TEST_PARTITION_SLICER_HITS.with(|hits| {
             assert!(hits.get() > 0, "test state did not exercise the partition slicer")
         });
-        let reference_mask = direct_mask(&reference_state);
+        TEST_PARTITION_SLICER_DISABLED.with(|disabled| disabled.set(true));
+        let reference_mask = direct_mask(&accelerated_state);
+        TEST_PARTITION_SLICER_DISABLED.with(|disabled| disabled.set(false));
         assert_eq!(accelerated_mask, reference_mask);
         for token in [0, 1, 2, 3, 4, 5, 6, 10, 11, 15] {
             assert!(token_allowed(&accelerated_mask, token), "token {token} should remain inside the string");
