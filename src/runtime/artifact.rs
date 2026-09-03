@@ -2745,6 +2745,43 @@ pub(crate) struct DynamicMaskVocabArtifact {
     full_to_mask_state: Vec<u32>,
 }
 
+/// Runtime-only lazily determinized subset-state cache for Flat16 mask execution.
+/// Canonical subset states are shared across mask calls within one constraint runtime; this
+/// is derived acceleration state, never serialized, and reset by
+/// `fresh_runtime_instance`.
+#[derive(Debug)]
+pub(crate) struct DynamicLazyUnion16Metadata {
+    pub(crate) finalizer_code: u32,
+    pub(crate) single_finalizer_continues: u8,
+    pub(crate) matched: BitSet,
+    pub(crate) futures: BitSet,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct DynamicLazyUnion16Cache {
+    pub(crate) base_state_count: u32,
+    pub(crate) state_by_subset: FxHashMap<SmallVec<[u32; 8]>, u32>,
+    pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
+    pub(crate) rows: Vec<[u32; 256]>,
+    pub(crate) metadata: Vec<Option<DynamicLazyUnion16Metadata>>,
+}
+
+/// Runtime-only exact deterministic extension for a parser-filtered union of
+/// Flat16 mask-tokenizer states. IDs in `rows` start at `base_state_count`;
+/// this object is derived, never serialized, and may be reused for every mask
+/// whose canonical lexer-root subset matches its cache key.
+#[derive(Debug)]
+pub(crate) struct DynamicDenseSubset16 {
+    pub(crate) root_state: u32,
+    pub(crate) base_state_count: u32,
+    pub(crate) rows: Vec<Box<[u32; 256]>>,
+    pub(crate) finalizer_code: Vec<u32>,
+    pub(crate) single_finalizer_continues: Vec<u8>,
+    pub(crate) matched: Vec<BitSet>,
+    pub(crate) futures: Vec<BitSet>,
+    pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
+}
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -2764,6 +2801,8 @@ pub(crate) struct DynamicMaskVocab {
     pending_source: Option<DynamicMaskVocabSource>,
     initialized: bool,
     mask_cache: Arc<Mutex<Vec<DynamicMaskCacheEntry>>>,
+    dense_subset16_cache: Arc<Mutex<FxHashMap<Vec<u32>, Arc<DynamicDenseSubset16>>>>,
+    lazy_union16_cache: Arc<Mutex<DynamicLazyUnion16Cache>>,
     direct_regular_frontier_cache:
         Arc<Mutex<FxHashMap<usize, DirectRegularDynamicFrontierCacheEntry>>>,
     direct_regular_wide_frontier_index_cache: Arc<Mutex<FxHashMap<usize, usize>>>,
@@ -2844,7 +2883,11 @@ impl DynamicMaskVocab {
     /// remains unchanged; this is analogous to choosing Flat16 versus Flat32
     /// for the strict mask walk. If the derived representation does not fit,
     /// the strict walker executes the epsilon-NFA coordinate directly.
-    pub(crate) fn prepare_mask_execution(&mut self, source_tokenizer: &Tokenizer) -> bool {
+    pub(crate) fn prepare_mask_execution(
+        &mut self,
+        source_tokenizer: &Tokenizer,
+        horizon: usize,
+    ) -> bool {
         // Bound eager work by the same memory budget that decides whether the
         // result can use Flat32. This avoids introducing an independent
         // state-count determinization policy on top of lexer compilation.
@@ -2862,8 +2905,19 @@ impl DynamicMaskVocab {
             self.mask_tokenizer_fast_transitions = Self::build_full_walk_fast_transitions(source);
             return self.mask_tokenizer_fast_transitions.is_some();
         }
-        let Some((built, source_to_determinized)) =
-            source.try_full_determinization_all_starts(state_limit, transition_limit)
+        let Some((built, source_to_determinized)) = source
+            .try_reusing_horizon_determinization_all_starts(
+                horizon,
+                state_limit,
+                transition_limit,
+            )
+            .or_else(|| {
+                source.try_horizon_determinization_all_starts(
+                    horizon,
+                    state_limit,
+                    transition_limit,
+                )
+            })
         else {
             return false;
         };
@@ -2884,6 +2938,11 @@ impl DynamicMaskVocab {
         self.mask_determinized_tokenizer = Some(Arc::new(deterministic));
         self.mask_projection_to_determinized = Arc::from(source_to_determinized);
         self.mask_tokenizer_fast_transitions = Some(fast);
+        // The derivative determinizer subsets are expressed in the finite
+        // projection coordinate. Retain them so multiple exact lexer states
+        // carrying one parser object can be coalesced into an already-built
+        // execution subset at the beginning of a mask walk.
+        self.set_mask_tokenizer_source_subsets(source_subsets);
         true
     }
 
@@ -2939,6 +2998,8 @@ impl DynamicMaskVocab {
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            lazy_union16_cache: Arc::new(Mutex::new(DynamicLazyUnion16Cache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
@@ -2991,6 +3052,8 @@ impl DynamicMaskVocab {
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            lazy_union16_cache: Arc::new(Mutex::new(DynamicLazyUnion16Cache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(
                 FxHashMap::default(),
@@ -3034,6 +3097,8 @@ impl DynamicMaskVocab {
             pending_source: Some(source),
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            lazy_union16_cache: Arc::new(Mutex::new(DynamicLazyUnion16Cache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
@@ -3094,6 +3159,8 @@ impl DynamicMaskVocab {
             pending_source: None,
             initialized: true,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            lazy_union16_cache: Arc::new(Mutex::new(DynamicLazyUnion16Cache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
@@ -3434,6 +3501,39 @@ impl DynamicMaskVocab {
             // the strict walker, but must not be queried with ConstraintState
             // source lexer states.
             && !(self.mask_tokenizer.is_some() && self.mask_determinized_tokenizer.is_some())
+    }
+
+    #[inline]
+    pub(crate) fn has_mask_subset_provenance(&self) -> bool {
+        !self.mask_source_subset_to_state.is_empty()
+    }
+
+    /// Return an already-materialized mask execution state for the union of
+    /// exact constraint lexer states. For a direct determinization the retained
+    /// subsets are in exact-source coordinates. For a second-stage derivative
+    /// of a finite virtual projection, first map each exact state into that
+    /// projection and close it there; the inverse subset table is keyed in that
+    /// intermediate coordinate.
+    pub(crate) fn mask_runtime_state_for_source_states(
+        &self,
+        source_tokenizer: &Tokenizer,
+        source_states: &[u32],
+    ) -> Option<u32> {
+        if source_states.is_empty() || self.mask_source_subset_to_state.is_empty() {
+            return None;
+        }
+        if self.mask_tokenizer.is_some() && self.mask_determinized_tokenizer.is_some() {
+            let projection = self.mask_tokenizer.as_deref()?;
+            let mut subset = SmallVec::<[u32; 32]>::new();
+            for &state in source_states {
+                let projected = self.mask_projection_state(state);
+                subset.extend_from_slice(&projection.singleton_epsilon_closure(projected));
+            }
+            subset.sort_unstable();
+            subset.dedup();
+            return self.mask_source_subset_to_state.get(subset.as_slice()).copied();
+        }
+        self.mask_projection_state_for_source_states(source_tokenizer, source_states)
     }
 
     pub(crate) fn mask_projection_state_for_source_states(
@@ -3979,6 +4079,69 @@ impl DynamicMaskVocab {
         entry
     }
 
+    pub(crate) fn lock_lazy_union16_cache(
+        &self,
+    ) -> std::sync::MutexGuard<'_, DynamicLazyUnion16Cache> {
+        self.lazy_union16_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn try_lock_lazy_union16_cache(
+        &self,
+    ) -> Option<std::sync::MutexGuard<'_, DynamicLazyUnion16Cache>> {
+        match self.lazy_union16_cache.try_lock() {
+            Ok(cache) => Some(cache),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        }
+    }
+
+    pub(crate) fn cached_dense_subset16(
+        &self,
+        root_states: &[u32],
+    ) -> Option<Arc<DynamicDenseSubset16>> {
+        self.dense_subset16_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(root_states)
+            .cloned()
+    }
+
+    pub(crate) fn cached_dense_subset16_state_for_subset(
+        &self,
+        root_states: &[u32],
+    ) -> Option<(Arc<DynamicDenseSubset16>, u32)> {
+        let cache = self.dense_subset16_cache.lock().unwrap_or_else(|p| p.into_inner());
+        for extension in cache.values() {
+            if let Some(index) = extension.subsets.iter().position(|subset| subset.as_slice() == root_states) {
+                return Some((Arc::clone(extension), extension.base_state_count + index as u32));
+            }
+        }
+        None
+    }
+
+    pub(crate) fn cache_dense_subset16(
+        &self,
+        root_states: Vec<u32>,
+        extension: DynamicDenseSubset16,
+    ) -> Arc<DynamicDenseSubset16> {
+        const MAX_DENSE_SUBSET16_CACHE_ENTRIES: usize = 256;
+        let mut cache = self
+            .dense_subset16_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = cache.get(root_states.as_slice()) {
+            return Arc::clone(existing);
+        }
+        if cache.len() >= MAX_DENSE_SUBSET16_CACHE_ENTRIES {
+            cache.clear();
+        }
+        let extension = Arc::new(extension);
+        cache.insert(root_states, Arc::clone(&extension));
+        extension
+    }
+
     pub(crate) fn copy_cached_mask(
         &self,
         state: &DynamicMaskStateKey,
@@ -4449,6 +4612,8 @@ impl Default for DynamicMaskVocab {
             pending_source: None,
             initialized: false,
             mask_cache: Arc::new(Mutex::new(Vec::new())),
+            dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            lazy_union16_cache: Arc::new(Mutex::new(DynamicLazyUnion16Cache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_wide_frontier_index_cache: Arc::new(Mutex::new(FxHashMap::default())),
             direct_regular_terminal_support: Arc::new(DirectRegularTerminalSupport::default()),
@@ -7030,6 +7195,16 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         );
         assert!(vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"a".to_vec())])));
         assert!(!vocab.matches_token_bytes_exact(&BTreeMap::from([(7, b"b".to_vec())])));
+    }
+
+    #[test]
+    fn lazy_union_cache_try_lock_is_nonblocking_when_in_use() {
+        let vocab = DynamicMaskVocab::from_materialized_ordered(
+            Arc::new(DynamicMaskTrie::new()),
+            Arc::new(Vec::new()),
+        );
+        let _owner = vocab.lock_lazy_union16_cache();
+        assert!(vocab.try_lock_lazy_union16_cache().is_none());
     }
 
     #[test]

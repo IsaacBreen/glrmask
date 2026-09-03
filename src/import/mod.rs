@@ -525,6 +525,18 @@ fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast::NamedGram
     Ok(named?)
 }
 
+fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
+    let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
+    let schema: serde_json::Value = serde_json::from_str(schema_json)
+        .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
+    emit_import_phase_end("serde_json_from_str", json_parse_started_at);
+
+    let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
+    let named = json_schema::schema_to_named_grammar_for_dynamic(&schema);
+    emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
+    Ok(named?)
+}
+
 impl Constraint {
     /// Compile an EBNF grammar for `vocab`.
     pub(crate) fn from_ebnf(ebnf: &str, vocab: &crate::Vocab) -> crate::Result<Self> {
@@ -1085,7 +1097,7 @@ impl DynamicConstraint {
                 schema,
                 vocab,
                 GlrTableConstruction::Lalr,
-                parse_json_schema_to_named,
+                parse_json_schema_to_named_dynamic,
                 Some(prepare_json_schema_named),
                 end_token_ids,
             )
@@ -1161,7 +1173,7 @@ impl DynamicConstraint {
                 schema,
                 vocab,
                 GlrTableConstruction::Lalr,
-                parse_json_schema_to_named,
+                parse_json_schema_to_named_dynamic,
                 Some(prepare_json_schema_named),
                 end_token_ids,
             )
@@ -1249,7 +1261,7 @@ impl DynamicConstraint {
                 schema,
                 vocab,
                 GlrTableConstruction::Lalr,
-                parse_json_schema_to_named,
+                parse_json_schema_to_named_dynamic,
                 Some(prepare_json_schema_named),
                 end_token_ids,
             )

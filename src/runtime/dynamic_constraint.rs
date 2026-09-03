@@ -5277,7 +5277,22 @@ mod tests {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let (schema, vocab) = projected_quotient_fixture::schema_and_vocab();
-        let mut constraint = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        // This is wire-format coverage for a nonempty projected-quotient sidecar,
+        // not a contract on the production dynamic JSON importer's current lexer
+        // partitioning. The dynamic importer now isolates this fixture's large
+        // terminals, so use the ordinary lowering here to retain the historical
+        // shared deterministic component that exercises quotient serialization.
+        let schema_value: serde_json::Value = serde_json::from_str(schema).unwrap();
+        let named = crate::import::json_schema::schema_to_named_grammar(&schema_value).unwrap();
+        let mut factored = crate::grammar::factoring::factor_named_grammar(named);
+        crate::import::json_schema::prepare_named_grammar(&mut factored).unwrap();
+        let grammar = crate::grammar::ast::lower(&factored).unwrap();
+        let mut constraint = crate::compiler::pipeline::compile_dynamic_owned_with_table_construction(
+            grammar,
+            &vocab,
+            crate::compiler::glr::table::GlrTableConstruction::LegacyRowBisim,
+        )
+        .unwrap();
         let quotients = constraint
             .inner
             .tokenizer

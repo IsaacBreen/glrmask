@@ -6821,7 +6821,7 @@ impl Constraint {
         {
             let source_states = mask_execution_source.num_states();
             let started_at = profile.then(std::time::Instant::now);
-            let prepared = dynamic_mask_vocab.prepare_mask_execution(&self.tokenizer);
+            let prepared = dynamic_mask_vocab.prepare_mask_execution(&self.tokenizer, self.max_token_byte_len());
             if profile {
                 eprintln!(
                     "[glrmask/profile][dynamic_runtime_finalize] mask_lexer=deterministic_execution prepared={} source_states={} execution_states={} elapsed_ms={:.3}",
@@ -8735,7 +8735,7 @@ impl Constraint {
             let started_at = profile.then(std::time::Instant::now);
             let prepared = self
                 .dynamic_mask_vocab
-                .prepare_mask_execution(&self.tokenizer);
+                .prepare_mask_execution(&self.tokenizer, self.max_token_byte_len());
             if profile {
                 eprintln!(
                     "[glrmask/profile][static_runtime_finalize] mask_lexer=deterministic_execution prepared={} source_states={} execution_states={} elapsed_ms={:.3}",

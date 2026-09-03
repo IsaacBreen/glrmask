@@ -20,6 +20,41 @@ trait FullWalkTransitionTable {
             Self::cell_target(cell)
         }
     }
+
+    #[inline(always)]
+    fn state_count(&self, tokenizer: &Tokenizer) -> usize {
+        tokenizer.num_states() as usize
+    }
+
+    #[inline(always)]
+    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
+        unsafe { *base.get_unchecked(state as usize) }
+    }
+
+    #[inline(always)]
+    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
+        unsafe { *base.get_unchecked(state as usize) != 0 }
+    }
+
+    #[inline]
+    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
+        tokenizer.matched_terminals_slice(state).iter().copied().collect()
+    }
+
+    #[inline(always)]
+    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
+        tokenizer.possible_future_terminals(state).contains(terminal as usize)
+    }
+
+    #[inline(always)]
+    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
+        !terminals.is_disjoint(tokenizer.possible_future_terminals(state))
+    }
+
+    #[inline]
+    fn union_states(&self, _states: &[u32]) -> Option<u32> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +89,662 @@ impl FullWalkTransitionTable for FullWalkFlat16<'_> {
         u32::from(cell & 0x7fff)
     }
 
+}
+
+
+struct FullWalkLazyUnion16<'a> {
+    base_transitions: &'a [u16],
+    base_state_count: u32,
+    tokenizer: *const Tokenizer,
+    overflowed: &'a std::cell::Cell<bool>,
+    cache: std::cell::UnsafeCell<std::sync::MutexGuard<'a, DynamicLazyUnion16Cache>>,
+}
+
+impl<'a> FullWalkLazyUnion16<'a> {
+    const UNBUILT: u32 = u32::MAX - 1;
+    const SOFT_MAX_EXTENSION_STATES: usize = 4096;
+    const RESERVED_EXTENSION_STATES: usize = 8192;
+
+    fn new(
+        tokenizer: &Tokenizer,
+        base_transitions: &'a [u16],
+        mut cache: std::sync::MutexGuard<'a, DynamicLazyUnion16Cache>,
+        root_states: &[u32],
+        overflowed: &'a std::cell::Cell<bool>,
+    ) -> Option<(Self, u32)> {
+        if root_states.len() < 2 {
+            return None;
+        }
+        let base_state_count = tokenizer.num_states();
+        if cache.base_state_count == 0 {
+            cache.base_state_count = base_state_count;
+        } else if cache.base_state_count != base_state_count {
+            Self::clear_cache(&mut cache);
+            cache.base_state_count = base_state_count;
+        }
+        if cache.subsets.len() >= Self::SOFT_MAX_EXTENSION_STATES {
+            Self::clear_cache(&mut cache);
+            cache.base_state_count = base_state_count;
+        }
+        let table = Self {
+            base_transitions,
+            base_state_count,
+            tokenizer: tokenizer as *const Tokenizer,
+            overflowed,
+            cache: std::cell::UnsafeCell::new(cache),
+        };
+        let root = table.intern_states(root_states)?;
+        Some((table, root))
+    }
+
+    #[inline]
+    fn clear_cache(cache: &mut DynamicLazyUnion16Cache) {
+        cache.state_by_subset.clear();
+        cache.subsets.clear();
+        cache.rows.clear();
+        cache.metadata.clear();
+    }
+
+    fn intern_states(&self, states: &[u32]) -> Option<u32> {
+        let mut physical = SmallVec::<[u32; 8]>::new();
+        {
+            let cache = unsafe { &*self.cache.get() };
+            for &state in states {
+                if state < self.base_state_count {
+                    physical.push(state);
+                } else {
+                    let subset = cache.subsets.get((state - self.base_state_count) as usize)?;
+                    physical.extend_from_slice(subset);
+                }
+            }
+        }
+        let cache = unsafe { &mut *self.cache.get() };
+        let result = Self::intern_physical_inner(self.base_state_count, cache, physical);
+        if result.is_none() {
+            self.overflowed.set(true);
+        }
+        result
+    }
+
+    fn intern_physical_inner(
+        base_state_count: u32,
+        cache: &mut DynamicLazyUnion16Cache,
+        mut states: SmallVec<[u32; 8]>,
+    ) -> Option<u32> {
+        states.sort_unstable();
+        states.dedup();
+        match states.as_slice() {
+            [] => return None,
+            [state] => return Some(*state),
+            _ => {}
+        }
+        if states.iter().any(|&state| state >= base_state_count) {
+            return None;
+        }
+        if let Some(&state) = cache.state_by_subset.get(&states) {
+            return Some(state);
+        }
+        if cache.subsets.len() >= Self::RESERVED_EXTENSION_STATES {
+            return None;
+        }
+        let id = base_state_count.checked_add(cache.subsets.len() as u32)?;
+        cache.state_by_subset.insert(states.clone(), id);
+        cache.subsets.push(states);
+        cache.rows.push([Self::UNBUILT; 256]);
+        cache.metadata.push(None);
+        Some(id)
+    }
+
+    #[inline(always)]
+    fn extension_index(&self, state: u32) -> usize {
+        (state - self.base_state_count) as usize
+    }
+
+    #[inline(always)]
+    fn base_cell(&self, state: u32, byte: u8) -> u32 {
+        let cell = unsafe {
+            *self.base_transitions
+                .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+        };
+        if cell == u16::MAX {
+            u32::MAX
+        } else {
+            u32::from(cell & 0x7fff)
+                | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
+        }
+    }
+
+    #[inline(always)]
+    fn cell_raw(&self, state: u32, byte: u8) -> u32 {
+        if state < self.base_state_count {
+            return self.base_cell(state, byte);
+        }
+        let index = self.extension_index(state);
+        let cached = unsafe {
+            let cache = &*self.cache.get();
+            *cache.rows.get_unchecked(index).get_unchecked(byte as usize)
+        };
+        if cached != Self::UNBUILT {
+            return cached;
+        }
+
+        let mut targets = SmallVec::<[u32; 8]>::new();
+        let mut finalizer_bits = 0u32;
+        {
+            // Keep the canonical subset borrowed only while reading base DFA
+            // cells.  The old code cloned the SmallVec on every first-seen
+            // (virtual-state, byte) transition just so it could later mutate
+            // the interner.  Gathering the derivative first makes that copy
+            // unnecessary while preserving the same borrow separation.
+            let cache = unsafe { &*self.cache.get() };
+            for &member in &cache.subsets[index] {
+                let cell = self.base_cell(member, byte);
+                if cell == u32::MAX {
+                    continue;
+                }
+                finalizer_bits |= cell & 0x8000_0000;
+                targets.push(cell & 0x7fff_ffff);
+            }
+        }
+        targets.sort_unstable();
+        targets.dedup();
+        let target = match targets.as_slice() {
+            [] => u32::MAX,
+            [state] => *state,
+            _ => {
+                let cache = unsafe { &mut *self.cache.get() };
+                let Some(target) =
+                    Self::intern_physical_inner(self.base_state_count, cache, targets)
+                else {
+                    self.overflowed.set(true);
+                    return u32::MAX;
+                };
+                target
+            }
+        };
+        let value = if target == u32::MAX {
+            u32::MAX
+        } else {
+            target | finalizer_bits
+        };
+        unsafe {
+            let cache = &mut *self.cache.get();
+            *cache.rows.get_unchecked_mut(index).get_unchecked_mut(byte as usize) = value;
+        }
+        value
+    }
+
+    #[inline]
+    fn ensure_virtual_metadata(&self, state: u32) {
+        debug_assert!(state >= self.base_state_count);
+        let index = self.extension_index(state);
+        if unsafe { (&*self.cache.get()).metadata[index].is_some() } {
+            return;
+        }
+        let tokenizer = unsafe { &*self.tokenizer };
+        let mut matched = BitSet::new(tokenizer.num_terminals() as usize);
+        let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+        {
+            let cache = unsafe { &*self.cache.get() };
+            for &member in &cache.subsets[index] {
+                matched.union_with(tokenizer.matched_terminal_bitset(member));
+                futures.union_with(tokenizer.possible_future_terminals(member));
+            }
+        }
+        let (first, second) = {
+            let mut iter = matched.iter_ones().map(|terminal| terminal as TerminalID);
+            (iter.next(), iter.next())
+        };
+        let finalizer_code = match (first, second) {
+            (None, _) => u32::MAX,
+            (Some(terminal), None) => terminal,
+            _ => u32::MAX - 1,
+        };
+        let single_finalizer_continues = first
+            .filter(|_| second.is_none())
+            .is_some_and(|terminal| futures.contains(terminal as usize));
+        let metadata = DynamicLazyUnion16Metadata {
+            finalizer_code,
+            single_finalizer_continues: u8::from(single_finalizer_continues),
+            matched,
+            futures,
+        };
+        let cache = unsafe { &mut *self.cache.get() };
+        if cache.metadata[index].is_none() {
+            cache.metadata[index] = Some(metadata);
+        }
+    }
+}
+
+impl FullWalkTransitionTable for FullWalkLazyUnion16<'_> {
+    type Cell = u32;
+
+    #[inline(always)]
+    fn cell(&self, state: u32, byte: u8) -> u32 {
+        self.cell_raw(state, byte)
+    }
+
+    #[inline(always)] fn cell_is_dead(cell: u32) -> bool { cell == u32::MAX }
+    #[inline(always)] fn cell_has_finalizer(cell: u32) -> bool { cell & 0x8000_0000 != 0 }
+    #[inline(always)] fn cell_target(cell: u32) -> u32 { cell & 0x7fff_ffff }
+
+    #[inline(always)]
+    fn state_count(&self, _tokenizer: &Tokenizer) -> usize {
+        self.base_state_count as usize + Self::RESERVED_EXTENSION_STATES
+    }
+
+    #[inline(always)]
+    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
+        if state < self.base_state_count {
+            return unsafe { *base.get_unchecked(state as usize) };
+        }
+        self.ensure_virtual_metadata(state);
+        let cache = unsafe { &*self.cache.get() };
+        cache.metadata[self.extension_index(state)]
+            .as_ref().expect("virtual subset metadata missing").finalizer_code
+    }
+
+    #[inline(always)]
+    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
+        if state < self.base_state_count {
+            return unsafe { *base.get_unchecked(state as usize) != 0 };
+        }
+        self.ensure_virtual_metadata(state);
+        let cache = unsafe { &*self.cache.get() };
+        cache.metadata[self.extension_index(state)]
+            .as_ref().expect("virtual subset metadata missing").single_finalizer_continues != 0
+    }
+
+    #[inline]
+    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
+        if state < self.base_state_count {
+            return tokenizer.matched_terminals_slice(state).iter().copied().collect();
+        }
+        self.ensure_virtual_metadata(state);
+        let cache = unsafe { &*self.cache.get() };
+        cache.metadata[self.extension_index(state)]
+            .as_ref().expect("virtual subset metadata missing").matched
+            .iter_ones().map(|terminal| terminal as TerminalID).collect()
+    }
+
+    #[inline(always)]
+    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
+        if state < self.base_state_count {
+            return tokenizer.possible_future_terminals(state).contains(terminal as usize);
+        }
+        self.ensure_virtual_metadata(state);
+        let cache = unsafe { &*self.cache.get() };
+        cache.metadata[self.extension_index(state)]
+            .as_ref().expect("virtual subset metadata missing").futures.contains(terminal as usize)
+    }
+
+    #[inline(always)]
+    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
+        if state < self.base_state_count {
+            return !terminals.is_disjoint(tokenizer.possible_future_terminals(state));
+        }
+        self.ensure_virtual_metadata(state);
+        let cache = unsafe { &*self.cache.get() };
+        !terminals.is_disjoint(&cache.metadata[self.extension_index(state)]
+            .as_ref().expect("virtual subset metadata missing").futures)
+    }
+
+    #[inline]
+    fn union_states(&self, states: &[u32]) -> Option<u32> {
+        self.intern_states(states)
+    }
+}
+
+struct FullWalkSubset16<'a> {
+    base_transitions: &'a [u16],
+    base_state_count: u32,
+    rows: Vec<Box<[u32; 256]>>,
+    finalizer_code: Vec<u32>,
+    single_finalizer_continues: Vec<u8>,
+    matched: Vec<BitSet>,
+    futures: Vec<BitSet>,
+}
+
+impl<'a> FullWalkSubset16<'a> {
+    const MAX_EXTENSION_STATES: usize = 4096;
+
+    fn build(
+        tokenizer: &Tokenizer,
+        base_transitions: &'a [u16],
+        root_states: &[u32],
+        horizon: usize,
+    ) -> Option<(Self, u32, Vec<SmallVec<[u32; 8]>>)> {
+        let base_state_count = tokenizer.num_states();
+        let mut table = Self {
+            base_transitions,
+            base_state_count,
+            rows: Vec::new(),
+            finalizer_code: Vec::new(),
+            single_finalizer_continues: Vec::new(),
+            matched: Vec::new(),
+            futures: Vec::new(),
+        };
+        let mut state_by_subset = FxHashMap::<SmallVec<[u32; 8]>, u32>::default();
+        let mut subsets = Vec::<SmallVec<[u32; 8]>>::new();
+        let mut depths = Vec::<usize>::new();
+
+        fn intern(
+            table: &mut FullWalkSubset16<'_>,
+            tokenizer: &Tokenizer,
+            state_by_subset: &mut FxHashMap<SmallVec<[u32; 8]>, u32>,
+            subsets: &mut Vec<SmallVec<[u32; 8]>>,
+            depths: &mut Vec<usize>,
+            depth: usize,
+            mut states: SmallVec<[u32; 8]>,
+        ) -> Option<u32> {
+            states.sort_unstable();
+            states.dedup();
+            match states.as_slice() {
+                [] => return None,
+                [state] => return Some(*state),
+                _ => {}
+            }
+            if let Some(&state) = state_by_subset.get(&states) {
+                return Some(state);
+            }
+            if subsets.len() >= FullWalkSubset16::MAX_EXTENSION_STATES {
+                return None;
+            }
+            if states.iter().any(|&state| state >= table.base_state_count) {
+                return None;
+            }
+            let id = table.base_state_count + subsets.len() as u32;
+            let mut matched = BitSet::new(tokenizer.num_terminals() as usize);
+            let mut futures = BitSet::new(tokenizer.num_terminals() as usize);
+            for &state in &states {
+                matched.union_with(tokenizer.matched_terminal_bitset(state));
+                futures.union_with(tokenizer.possible_future_terminals(state));
+            }
+            let (first, second) = {
+                let mut matched_iter = matched.iter_ones().map(|terminal| terminal as TerminalID);
+                (matched_iter.next(), matched_iter.next())
+            };
+            let code = match (first, second) {
+                (None, _) => u32::MAX,
+                (Some(terminal), None) => terminal,
+                _ => u32::MAX - 1,
+            };
+            let continues = first
+                .filter(|_| second.is_none())
+                .is_some_and(|terminal| futures.contains(terminal as usize));
+            state_by_subset.insert(states.clone(), id);
+            subsets.push(states);
+            depths.push(depth);
+            table.rows.push(Box::new([u32::MAX; 256]));
+            table.finalizer_code.push(code);
+            table.single_finalizer_continues.push(u8::from(continues));
+            table.matched.push(matched);
+            table.futures.push(futures);
+            Some(id)
+        }
+
+        let root = intern(
+            &mut table,
+            tokenizer,
+            &mut state_by_subset,
+            &mut subsets,
+            &mut depths,
+            0,
+            SmallVec::from_slice(root_states),
+        )?;
+        if root < base_state_count {
+            return Some((table, root, subsets));
+        }
+
+        let mut build_index = 0usize;
+        while build_index < subsets.len() {
+            let depth = depths[build_index];
+            if depth >= horizon {
+                build_index += 1;
+                continue;
+            }
+            let members = subsets[build_index].clone();
+            let mut row = [u32::MAX; 256];
+            for byte in 0..=u8::MAX {
+                let mut targets = SmallVec::<[u32; 8]>::new();
+                for &state in members.iter() {
+                    let cell = unsafe {
+                        *base_transitions
+                            .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+                    };
+                    if cell != u16::MAX {
+                        targets.push(u32::from(cell & 0x7fff));
+                    }
+                }
+                if targets.is_empty() {
+                    continue;
+                }
+                let target = intern(
+                    &mut table,
+                    tokenizer,
+                    &mut state_by_subset,
+                    &mut subsets,
+                    &mut depths,
+                    depth + 1,
+                    targets,
+                )?;
+                let has_finalizer = if target < base_state_count {
+                    !tokenizer.matched_terminal_bitset(target).is_empty()
+                } else {
+                    !table.matched[(target - base_state_count) as usize].is_empty()
+                };
+                row[byte as usize] = target | if has_finalizer { 0x8000_0000 } else { 0 };
+            }
+            table.rows[build_index] = Box::new(row);
+            build_index += 1;
+        }
+        Some((table, root, subsets))
+    }
+
+    fn into_owned(self, root_state: u32, subsets: Vec<SmallVec<[u32; 8]>>) -> DynamicDenseSubset16 {
+        DynamicDenseSubset16 {
+            root_state,
+            base_state_count: self.base_state_count,
+            rows: self.rows,
+            finalizer_code: self.finalizer_code,
+            single_finalizer_continues: self.single_finalizer_continues,
+            matched: self.matched,
+            futures: self.futures,
+            subsets,
+        }
+    }
+
+    #[inline(always)]
+    fn extension_index(&self, state: u32) -> usize {
+        (state - self.base_state_count) as usize
+    }
+}
+
+impl FullWalkTransitionTable for FullWalkSubset16<'_> {
+    type Cell = u32;
+
+    #[inline(always)]
+    fn cell(&self, state: u32, byte: u8) -> u32 {
+        if state < self.base_state_count {
+            let cell = unsafe {
+                *self
+                    .base_transitions
+                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+            };
+            if cell == u16::MAX {
+                u32::MAX
+            } else {
+                u32::from(cell & 0x7fff)
+                    | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
+            }
+        } else {
+            unsafe {
+                *self
+                    .rows
+                    .get_unchecked(self.extension_index(state))
+                    .get_unchecked(byte as usize)
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn cell_is_dead(cell: u32) -> bool { cell == u32::MAX }
+
+    #[inline(always)]
+    fn cell_has_finalizer(cell: u32) -> bool { cell & 0x8000_0000 != 0 }
+
+    #[inline(always)]
+    fn cell_target(cell: u32) -> u32 { cell & 0x7fff_ffff }
+
+    #[inline(always)]
+    fn state_count(&self, _tokenizer: &Tokenizer) -> usize {
+        self.base_state_count as usize + self.rows.len()
+    }
+
+    #[inline(always)]
+    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
+        if state < self.base_state_count {
+            unsafe { *base.get_unchecked(state as usize) }
+        } else {
+            unsafe { *self.finalizer_code.get_unchecked(self.extension_index(state)) }
+        }
+    }
+
+    #[inline(always)]
+    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
+        if state < self.base_state_count {
+            unsafe { *base.get_unchecked(state as usize) != 0 }
+        } else {
+            unsafe { *self.single_finalizer_continues.get_unchecked(self.extension_index(state)) != 0 }
+        }
+    }
+
+    #[inline]
+    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
+        if state < self.base_state_count {
+            tokenizer.matched_terminals_slice(state).iter().copied().collect()
+        } else {
+            self.matched[self.extension_index(state)]
+                .iter_ones()
+                .map(|terminal| terminal as TerminalID)
+                .collect()
+        }
+    }
+
+    #[inline(always)]
+    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
+        if state < self.base_state_count {
+            tokenizer.possible_future_terminals(state).contains(terminal as usize)
+        } else {
+            self.futures[self.extension_index(state)].contains(terminal as usize)
+        }
+    }
+
+    #[inline(always)]
+    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
+        if state < self.base_state_count {
+            !terminals.is_disjoint(tokenizer.possible_future_terminals(state))
+        } else {
+            !terminals.is_disjoint(&self.futures[self.extension_index(state)])
+        }
+    }
+}
+
+
+struct FullWalkCachedSubset16<'a> {
+    base_transitions: &'a [u16],
+    extension: Arc<DynamicDenseSubset16>,
+}
+
+impl FullWalkCachedSubset16<'_> {
+    #[inline(always)]
+    fn extension_index(&self, state: u32) -> usize {
+        (state - self.extension.base_state_count) as usize
+    }
+}
+
+impl FullWalkTransitionTable for FullWalkCachedSubset16<'_> {
+    type Cell = u32;
+
+    #[inline(always)]
+    fn cell(&self, state: u32, byte: u8) -> u32 {
+        if state < self.extension.base_state_count {
+            let cell = unsafe {
+                *self.base_transitions
+                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+            };
+            if cell == u16::MAX {
+                u32::MAX
+            } else {
+                u32::from(cell & 0x7fff)
+                    | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
+            }
+        } else {
+            unsafe {
+                *self.extension.rows
+                    .get_unchecked(self.extension_index(state))
+                    .get_unchecked(byte as usize)
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn cell_is_dead(cell: u32) -> bool { cell == u32::MAX }
+    #[inline(always)]
+    fn cell_has_finalizer(cell: u32) -> bool { cell & 0x8000_0000 != 0 }
+    #[inline(always)]
+    fn cell_target(cell: u32) -> u32 { cell & 0x7fff_ffff }
+
+    #[inline(always)]
+    fn state_count(&self, _tokenizer: &Tokenizer) -> usize {
+        self.extension.base_state_count as usize + self.extension.rows.len()
+    }
+
+    #[inline(always)]
+    fn finalizer_code(&self, state: u32, base: &[u32]) -> u32 {
+        if state < self.extension.base_state_count {
+            unsafe { *base.get_unchecked(state as usize) }
+        } else {
+            unsafe { *self.extension.finalizer_code.get_unchecked(self.extension_index(state)) }
+        }
+    }
+
+    #[inline(always)]
+    fn single_finalizer_continues(&self, state: u32, base: &[u8]) -> bool {
+        if state < self.extension.base_state_count {
+            unsafe { *base.get_unchecked(state as usize) != 0 }
+        } else {
+            unsafe { *self.extension.single_finalizer_continues.get_unchecked(self.extension_index(state)) != 0 }
+        }
+    }
+
+    #[inline]
+    fn matched_terminals(&self, tokenizer: &Tokenizer, state: u32) -> SmallVec<[TerminalID; 4]> {
+        if state < self.extension.base_state_count {
+            tokenizer.matched_terminals_slice(state).iter().copied().collect()
+        } else {
+            self.extension.matched[self.extension_index(state)]
+                .iter_ones().map(|terminal| terminal as TerminalID).collect()
+        }
+    }
+
+    #[inline(always)]
+    fn future_contains(&self, tokenizer: &Tokenizer, state: u32, terminal: TerminalID) -> bool {
+        if state < self.extension.base_state_count {
+            tokenizer.possible_future_terminals(state).contains(terminal as usize)
+        } else {
+            self.extension.futures[self.extension_index(state)].contains(terminal as usize)
+        }
+    }
+
+    #[inline(always)]
+    fn future_intersects(&self, tokenizer: &Tokenizer, state: u32, terminals: &BitSet) -> bool {
+        if state < self.extension.base_state_count {
+            !terminals.is_disjoint(tokenizer.possible_future_terminals(state))
+        } else {
+            !terminals.is_disjoint(&self.extension.futures[self.extension_index(state)])
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +793,156 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
 ) -> Result<bool, String> {
+    if lexer_scan_cache.subset_union_requested
+        && root_branches.len() >= 2
+        && root_branches.iter().all(|branch| branch.initial_prune_guard.is_passed())
+        && root_branches
+            .iter()
+            .skip(1)
+            .all(|branch| branch.gss.ptr_eq(&root_branches[0].gss))
+    {
+        let mut root_states = root_branches
+            .iter()
+            .map(|branch| branch.tokenizer_config)
+            .collect::<Vec<_>>();
+        root_states.sort_unstable();
+        root_states.dedup();
+        if let Some((extension, root_state)) = vocab.cached_dense_subset16_state_for_subset(&root_states) {
+            let subset_transitions = FullWalkCachedSubset16 { base_transitions: transitions, extension };
+            let mut collapsed = DynamicBranches::new();
+            collapsed.push(DynamicBranch {
+                tokenizer_config: root_state,
+                gss: root_branches[0].gss.clone(),
+                initial_prune_guard: InitialPruneGuard::Passed,
+            });
+            return try_full_walk_mask_with_table::<_, true>(
+                state, vocab, trie, &collapsed, lexer_scan_cache, buf, subset_transitions, finalizer_code, single_finalizer_continues,
+            );
+        }
+        if (2..=4).contains(&root_states.len()) {
+            let Some(subset_cache) = vocab.try_lock_lazy_union16_cache() else {
+                // The persistent lazy-subset cache is shared by all sequences
+                // using this constraint. Never serialize concurrent mask fills
+                // behind that derived acceleration state: contention falls back
+                // to the ordinary exact multi-root walker.
+                return try_full_walk_mask_with_table::<_, HOT_SINGLE_ROOT>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    FullWalkFlat16 { transitions },
+                    finalizer_code,
+                    single_finalizer_continues,
+                );
+            };
+            let overflowed = std::cell::Cell::new(false);
+            if let Some((subset_transitions, root_state)) = FullWalkLazyUnion16::new(
+                lexer_scan_cache.tokenizer(),
+                transitions,
+                subset_cache,
+                &root_states,
+                &overflowed,
+            ) {
+                let mut collapsed = DynamicBranches::new();
+                collapsed.push(DynamicBranch {
+                    tokenizer_config: root_state,
+                    gss: root_branches[0].gss.clone(),
+                    initial_prune_guard: InitialPruneGuard::Passed,
+                });
+                let result = try_full_walk_mask_with_table::<_, true>(
+                    state,
+                    vocab,
+                    trie,
+                    &collapsed,
+                    lexer_scan_cache,
+                    buf,
+                    subset_transitions,
+                    finalizer_code,
+                    single_finalizer_continues,
+                );
+                if !overflowed.get() {
+                    return result;
+                }
+                // Do not carry a saturated partial interner into the next
+                // mask. The retry below does not use this cache, so clearing
+                // here affects only future lazy-union attempts.
+                {
+                    let mut cache = vocab.lock_lazy_union16_cache();
+                    FullWalkLazyUnion16::clear_cache(&mut cache);
+                }
+                // The lazy execution extension is deliberately bounded so
+                // parser-node boundary caches can stay dense. If one mask
+                // discovers more subset states than that execution reserve,
+                // discard the partial mask and rerun through the ordinary
+                // exact multi-root Flat16 walker instead of making the cache
+                // capacity a correctness limit.
+                return try_full_walk_mask_with_table::<_, HOT_SINGLE_ROOT>(
+                    state,
+                    vocab,
+                    trie,
+                    root_branches,
+                    lexer_scan_cache,
+                    buf,
+                    FullWalkFlat16 { transitions },
+                    finalizer_code,
+                    single_finalizer_continues,
+                );
+            }
+        }
+        let extension = if let Some(cached) = vocab.cached_dense_subset16(&root_states) {
+            Some(cached)
+        } else {
+            {
+                let started = std::time::Instant::now();
+                let built = FullWalkSubset16::build(
+                    lexer_scan_cache.tokenizer(),
+                    transitions,
+                    &root_states,
+                    state.constraint.max_token_byte_len(),
+                );
+                if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][dense_subset16_build] roots={} rows={} elapsed_ms={:.3}",
+                        root_states.len(),
+                        built.as_ref().map_or(0, |(table, _, _)| table.rows.len()),
+                        started.elapsed().as_secs_f64() * 1e3,
+                    );
+                }
+                built.map(|(built, root_state, subsets)| {
+                    vocab.cache_dense_subset16(
+                        root_states.clone(),
+                        built.into_owned(root_state, subsets),
+                    )
+                })
+            }
+        };
+        if let Some(extension) = extension {
+            let root_state = extension.root_state;
+            let subset_transitions = FullWalkCachedSubset16 {
+                base_transitions: transitions,
+                extension,
+            };
+            let mut collapsed = DynamicBranches::new();
+            collapsed.push(DynamicBranch {
+                tokenizer_config: root_state,
+                gss: root_branches[0].gss.clone(),
+                initial_prune_guard: InitialPruneGuard::Passed,
+            });
+            return try_full_walk_mask_with_table::<_, true>(
+                state,
+                vocab,
+                trie,
+                &collapsed,
+                lexer_scan_cache,
+                buf,
+                subset_transitions,
+                finalizer_code,
+                single_finalizer_continues,
+            );
+        }
+    }
     try_full_walk_mask_with_table::<_, HOT_SINGLE_ROOT>(
         state,
         vocab,
@@ -184,15 +1025,10 @@ impl FullWalkPruneGuard {
             if target == u32::MAX {
                 continue;
             }
-            if tokenizer
-                .matched_terminals_slice(target)
-                .contains(&terminal)
-            {
+            if transitions.matched_terminals(tokenizer, target).contains(&terminal) {
                 return None;
             }
-            if tokenizer
-                .possible_future_terminals(target)
-                .contains(terminal as usize)
+            if transitions.future_contains(tokenizer, target, terminal)
                 && !next.contains(&(target, terminal))
             {
                 next.push((target, terminal));
@@ -205,16 +1041,14 @@ impl FullWalkPruneGuard {
         }
     }
 
-    fn remember_terminal_match(
+    fn remember_terminal_match<T: FullWalkTransitionTable>(
         &self,
         tokenizer: &Tokenizer,
+        transitions: &T,
         lexer_state: u32,
         terminal: TerminalID,
     ) -> Self {
-        if !tokenizer
-            .possible_future_terminals(lexer_state)
-            .contains(terminal as usize)
-        {
+        if !transitions.future_contains(tokenizer, lexer_state, terminal) {
             return self.clone();
         }
         let mut memories = match self {
@@ -386,10 +1220,11 @@ impl FullWalkParserCache {
     }
 
     #[inline(always)]
-    fn physical_token_boundary_allowed(
+    fn physical_token_boundary_allowed<T: FullWalkTransitionTable>(
         &mut self,
         constraint: &Constraint,
         tokenizer: &Tokenizer,
+        transitions: &T,
         parser_node: u32,
         lexer_state: u32,
     ) -> bool {
@@ -404,11 +1239,14 @@ impl FullWalkParserCache {
         if cached != 0 {
             return cached == 2;
         }
-        let future = tokenizer.possible_future_terminals(lexer_state);
         let allowed = constraint
             .ignore_terminal
-            .is_some_and(|terminal| future.contains(terminal as usize))
-            || !self.admitted(constraint, parser_node).is_disjoint(future);
+            .is_some_and(|terminal| transitions.future_contains(tokenizer, lexer_state, terminal))
+            || transitions.future_intersects(
+                tokenizer,
+                lexer_state,
+                self.admitted(constraint, parser_node),
+            );
         unsafe {
             *self.nodes
                 .get_unchecked_mut(node)
@@ -419,10 +1257,11 @@ impl FullWalkParserCache {
     }
 
     #[inline(always)]
-    fn token_boundary_allowed_raw(
+    fn token_boundary_allowed_raw<T: FullWalkTransitionTable>(
         &mut self,
         constraint: &Constraint,
         tokenizer: &Tokenizer,
+        transitions: &T,
         initial_lexer_state: u32,
         lexer_state: u32,
         parser_node: u32,
@@ -431,22 +1270,25 @@ impl FullWalkParserCache {
             || self.physical_token_boundary_allowed(
                 constraint,
                 tokenizer,
+                transitions,
                 parser_node,
                 lexer_state,
             )
     }
 
     #[inline(always)]
-    fn token_boundary_allowed(
+    fn token_boundary_allowed<T: FullWalkTransitionTable>(
         &mut self,
         constraint: &Constraint,
         tokenizer: &Tokenizer,
+        transitions: &T,
         initial_lexer_state: u32,
         branch: &FullWalkBranch,
     ) -> bool {
         self.token_boundary_allowed_raw(
             constraint,
             tokenizer,
+            transitions,
             initial_lexer_state,
             branch.lexer_state,
             branch.parser_node,
@@ -498,26 +1340,29 @@ fn full_walk_step_two<T: FullWalkTransitionTable>(
     // alive without finalizing, while their exact parser identities differ.
     // Keep the correlation tuple intact and skip the general option/collapse
     // classification below.
-    if branches.0.1 != branches.1.1
-        && !T::cell_is_dead(first_cell)
-        && !T::cell_is_dead(second_cell)
-        && !T::cell_has_finalizer(first_cell)
-        && !T::cell_has_finalizer(second_cell)
-    {
-        return FullWalkTwoStepOutcome::Two(
-            (T::cell_target(first_cell), branches.0.1),
-            (T::cell_target(second_cell), branches.1.1),
-        );
-    }
-
-    // Dominant two-branch case: neither branch finalizes. Keep the whole byte
-    // step as two table loads plus a tiny collapse; only the rare finalizer
-    // case below constructs general branch values.
+    // Dominant two-branch case: neither branch finalizes. A globally live
+    // lexer target may nevertheless be dead for this correlated parser branch
+    // once all of its remaining terminal futures are parser-inadmissible. The
+    // parser-node/lexer-state cache makes this exact test a byte lookup after
+    // the first visit and prevents unrelated lexer residuals from keeping the
+    // branch alive through the rest of a vocabulary token.
     if !T::cell_has_finalizer(first_cell) && !T::cell_has_finalizer(second_cell) {
-        let first = (!T::cell_is_dead(first_cell))
-            .then_some((T::cell_target(first_cell), branches.0.1));
-        let second = (!T::cell_is_dead(second_cell))
-            .then_some((T::cell_target(second_cell), branches.1.1));
+        let first = if T::cell_is_dead(first_cell) {
+            None
+        } else {
+            let target = T::cell_target(first_cell);
+            parser_cache
+                .physical_token_boundary_allowed(constraint, tokenizer, transitions, branches.0.1, target)
+                .then_some((target, branches.0.1))
+        };
+        let second = if T::cell_is_dead(second_cell) {
+            None
+        } else {
+            let target = T::cell_target(second_cell);
+            parser_cache
+                .physical_token_boundary_allowed(constraint, tokenizer, transitions, branches.1.1, target)
+                .then_some((target, branches.1.1))
+        };
         return match (first, second) {
             (None, None) => FullWalkTwoStepOutcome::Dead,
             (Some(branch), None) | (None, Some(branch)) => FullWalkTwoStepOutcome::One(branch),
@@ -534,6 +1379,7 @@ fn full_walk_step_two<T: FullWalkTransitionTable>(
         finalizer_code,
         single_finalizer_continues,
         tokenizer,
+        transitions,
         parser_cache,
         constraint,
     )
@@ -550,6 +1396,7 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkTwoStepOutcome {
@@ -562,14 +1409,22 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
         }
         let target = T::cell_target(cell);
         if !T::cell_has_finalizer(cell) {
-            full_walk_push_unique(
-                &mut next,
-                FullWalkBranch {
-                    lexer_state: target,
-                    parser_node,
-                    prune_guard: FullWalkPruneGuard::Passed,
-                },
-            );
+            if parser_cache.physical_token_boundary_allowed(
+                constraint,
+                tokenizer,
+                transitions,
+                parser_node,
+                target,
+            ) {
+                full_walk_push_unique(
+                    &mut next,
+                    FullWalkBranch {
+                        lexer_state: target,
+                        parser_node,
+                        prune_guard: FullWalkPruneGuard::Passed,
+                    },
+                );
+            }
             continue;
         }
         let _ = source_lexer;
@@ -580,6 +1435,7 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
             finalizer_code,
             single_finalizer_continues,
             tokenizer,
+            transitions,
             parser_cache,
             constraint,
         ) {
@@ -618,18 +1474,19 @@ fn full_walk_step_two_finalizing<T: FullWalkTransitionTable>(
 #[allow(clippy::too_many_arguments)]
 #[cold]
 #[inline(never)]
-fn full_walk_scalar_finalizer(
+fn full_walk_scalar_finalizer<T: FullWalkTransitionTable>(
     target: u32,
     parser_node: u32,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkScalarFinalizerOutcome {
     const MULTI: u32 = u32::MAX - 1;
-    let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    let code = transitions.finalizer_code(target, finalizer_code);
     if code != MULTI {
         if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
             let reset = FullWalkBranch {
@@ -637,7 +1494,7 @@ fn full_walk_scalar_finalizer(
                 parser_node: next_parser,
                 prune_guard: if Some(code) == constraint.ignore_terminal {
                     FullWalkPruneGuard::Passed
-                } else if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
+                } else if transitions.single_finalizer_continues(target, single_finalizer_continues) {
                     FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
                 } else {
                     FullWalkPruneGuard::Passed
@@ -661,7 +1518,7 @@ fn full_walk_scalar_finalizer(
     }
 
     let mut next = FullWalkBranches::new();
-    for &terminal in tokenizer.matched_terminals_slice(target) {
+    for terminal in transitions.matched_terminals(tokenizer, target) {
         if let Some(next_parser) = parser_cache.advance(constraint, parser_node, terminal) {
             full_walk_push_unique(
                 &mut next,
@@ -672,7 +1529,7 @@ fn full_walk_scalar_finalizer(
                         FullWalkPruneGuard::Passed
                     } else {
                         FullWalkPruneGuard::Passed.remember_terminal_match(
-                            tokenizer, target, terminal,
+                            tokenizer, transitions, target, terminal,
                         )
                     },
                 },
@@ -706,18 +1563,19 @@ fn full_walk_scalar_finalizer(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn full_walk_scalar_finalizer_hot_single(
+fn full_walk_scalar_finalizer_hot_single<T: FullWalkTransitionTable>(
     target: u32,
     parser_node: u32,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
     tokenizer: &Tokenizer,
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
 ) -> FullWalkScalarFinalizerOutcome {
     const MULTI: u32 = u32::MAX - 1;
-    let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    let code = transitions.finalizer_code(target, finalizer_code);
     if code == MULTI {
         return full_walk_scalar_finalizer(
             target,
@@ -726,6 +1584,7 @@ fn full_walk_scalar_finalizer_hot_single(
             finalizer_code,
             single_finalizer_continues,
             tokenizer,
+            transitions,
             parser_cache,
             constraint,
         );
@@ -736,7 +1595,7 @@ fn full_walk_scalar_finalizer_hot_single(
             parser_node: next_parser,
             prune_guard: if Some(code) == constraint.ignore_terminal {
                 FullWalkPruneGuard::Passed
-            } else if unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0 {
+            } else if transitions.single_finalizer_continues(target, single_finalizer_continues) {
                 FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
             } else {
                 FullWalkPruneGuard::Passed
@@ -763,12 +1622,13 @@ fn full_walk_scalar_finalizer_hot_single(
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn full_walk_try_apply_plain_single_finalizer(
+fn full_walk_try_apply_plain_single_finalizer<T: FullWalkTransitionTable>(
     target: u32,
     parser_node: u32,
     initial_lexer_state: u32,
     finalizer_code: &[u32],
     single_finalizer_continues: &[u8],
+    transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     constraint: &Constraint,
     two_distinct_marker: u32,
@@ -777,10 +1637,10 @@ fn full_walk_try_apply_plain_single_finalizer(
     current_two: &mut ((u32, u32), (u32, u32)),
 ) -> bool {
     const MULTI: u32 = u32::MAX - 1;
-    let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+    let code = transitions.finalizer_code(target, finalizer_code);
     if code == MULTI
         || (Some(code) != constraint.ignore_terminal
-            && unsafe { *single_finalizer_continues.get_unchecked(target as usize) } != 0)
+            && transitions.single_finalizer_continues(target, single_finalizer_continues))
     {
         return false;
     }
@@ -837,16 +1697,16 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
         if target == u32::MAX {
             continue;
         }
-        let code = unsafe { *finalizer_code.get_unchecked(target as usize) };
+        let code = transitions.finalizer_code(target, finalizer_code);
         if code == MULTI {
-            for &terminal in tokenizer.matched_terminals_slice(target) {
+            for terminal in transitions.matched_terminals(tokenizer, target) {
                 if let Some(parser_node) = parser_cache.advance(
                     constraint, branch.parser_node, terminal,
                 ) {
                     let matched_guard = if Some(terminal) == constraint.ignore_terminal {
                         advanced_guard.clone()
                     } else {
-                        advanced_guard.remember_terminal_match(tokenizer, target, terminal)
+                        advanced_guard.remember_terminal_match(tokenizer, transitions, target, terminal)
                     };
                     full_walk_push_unique(
                         &mut next,
@@ -866,7 +1726,7 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
             let matched_guard = if Some(code) == constraint.ignore_terminal {
                 advanced_guard.clone()
             } else {
-                advanced_guard.remember_terminal_match(tokenizer, target, code)
+                advanced_guard.remember_terminal_match(tokenizer, transitions, target, code)
             };
             full_walk_push_unique(
                 &mut next,
@@ -877,14 +1737,22 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
                 },
             );
         }
-        full_walk_push_unique(
-            &mut next,
-            FullWalkBranch {
-                lexer_state: target,
-                parser_node: branch.parser_node,
-                prune_guard: advanced_guard,
-            },
-        );
+        if parser_cache.physical_token_boundary_allowed(
+            constraint,
+            tokenizer,
+            transitions,
+            branch.parser_node,
+            target,
+        ) {
+            full_walk_push_unique(
+                &mut next,
+                FullWalkBranch {
+                    lexer_state: target,
+                    parser_node: branch.parser_node,
+                    prune_guard: advanced_guard,
+                },
+            );
+        }
     }
     next
 }
@@ -929,7 +1797,8 @@ fn full_walk_projection_union_three(
 }
 
 #[inline]
-fn full_walk_merge_two_same_parser(
+fn full_walk_merge_two_same_parser<T: FullWalkTransitionTable>(
+    transitions: &T,
     vocab: &DynamicMaskVocab,
     pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
     first: (u32, u32),
@@ -938,29 +1807,35 @@ fn full_walk_merge_two_same_parser(
     if first.1 != second.1 {
         return None;
     }
-    full_walk_projection_union_two(vocab, pair_union_cache, first.0, second.0)
+    transitions
+        .union_states(&[first.0, second.0])
+        .or_else(|| full_walk_projection_union_two(vocab, pair_union_cache, first.0, second.0))
         .map(|lexer_state| (lexer_state, first.1))
 }
 
 #[inline]
-fn full_walk_merge_three_same_parser(
+fn full_walk_merge_three_same_parser<T: FullWalkTransitionTable>(
+    transitions: &T,
     vocab: &DynamicMaskVocab,
     triple_union_cache: &mut FxHashMap<(u32, u32, u32), Option<u32>>,
     lexers: (u32, u32, u32),
     parser_node: u32,
 ) -> Option<(u32, u32)> {
-    full_walk_projection_union_three(
-        vocab,
-        triple_union_cache,
-        lexers.0,
-        lexers.1,
-        lexers.2,
-    )
-    .map(|lexer_state| (lexer_state, parser_node))
+    transitions
+        .union_states(&[lexers.0, lexers.1, lexers.2])
+        .or_else(|| full_walk_projection_union_three(
+            vocab,
+            triple_union_cache,
+            lexers.0,
+            lexers.1,
+            lexers.2,
+        ))
+        .map(|lexer_state| (lexer_state, parser_node))
 }
 
 #[inline]
-fn full_walk_merge_branches_same_parser(
+fn full_walk_merge_branches_same_parser<T: FullWalkTransitionTable>(
+    transitions: &T,
     vocab: &DynamicMaskVocab,
     pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
     triple_union_cache: &mut FxHashMap<(u32, u32, u32), Option<u32>>,
@@ -976,25 +1851,31 @@ fn full_walk_merge_branches_same_parser(
         return None;
     }
     let lexer_state = match branches.as_slice() {
-        [first, second] => full_walk_projection_union_two(
-            vocab,
-            pair_union_cache,
-            first.lexer_state,
-            second.lexer_state,
-        ),
-        [first, second, third] => full_walk_projection_union_three(
-            vocab,
-            triple_union_cache,
-            first.lexer_state,
-            second.lexer_state,
-            third.lexer_state,
-        ),
+        [first, second] => transitions
+            .union_states(&[first.lexer_state, second.lexer_state])
+            .or_else(|| full_walk_projection_union_two(
+                vocab,
+                pair_union_cache,
+                first.lexer_state,
+                second.lexer_state,
+            )),
+        [first, second, third] => transitions
+            .union_states(&[first.lexer_state, second.lexer_state, third.lexer_state])
+            .or_else(|| full_walk_projection_union_three(
+                vocab,
+                triple_union_cache,
+                first.lexer_state,
+                second.lexer_state,
+                third.lexer_state,
+            )),
         _ => {
             let lexers = branches
                 .iter()
                 .map(|branch| branch.lexer_state)
                 .collect::<SmallVec<[u32; 4]>>();
-            vocab.mask_projection_state_for_projection_states(&lexers)
+            transitions
+                .union_states(&lexers)
+                .or_else(|| vocab.mask_projection_state_for_projection_states(&lexers))
         }
     }?;
     Some((lexer_state, first.parser_node))
@@ -1061,7 +1942,31 @@ fn full_walk_step_many_state<T: FullWalkTransitionTable>(
                     T::cell_target(second),
                     T::cell_target(third),
                 );
-                if next.0 != next.1 && next.0 != next.2 && next.1 != next.2 {
+                if next.0 != next.1
+                    && next.0 != next.2
+                    && next.1 != next.2
+                    && parser_cache.physical_token_boundary_allowed(
+                        constraint,
+                        tokenizer,
+                        transitions,
+                        *parser_node,
+                        next.0,
+                    )
+                    && parser_cache.physical_token_boundary_allowed(
+                        constraint,
+                        tokenizer,
+                        transitions,
+                        *parser_node,
+                        next.1,
+                    )
+                    && parser_cache.physical_token_boundary_allowed(
+                        constraint,
+                        tokenizer,
+                        transitions,
+                        *parser_node,
+                        next.2,
+                    )
+                {
                     return FullWalkManyState::ThreeSameParser {
                         lexers: next,
                         parser_node: *parser_node,
@@ -1124,7 +2029,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
 
     let (mut parser_cache, root_parser_nodes) = FullWalkParserCache::from_roots(
         root_branches,
-        lexer_scan_cache.tokenizer().num_states() as usize,
+        transitions.state_count(lexer_scan_cache.tokenizer()),
     );
     // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
     // lexer-state coordinate so the common DFS path needs no separate kind
@@ -1153,7 +2058,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         let first = (root_branches[0].tokenizer_config, root_parser_nodes[0]);
         let second = (root_branches[1].tokenizer_config, root_parser_nodes[1]);
         if let Some((lexer_state, parser_node)) =
-            full_walk_merge_two_same_parser(vocab, &mut pair_union_cache, first, second)
+            full_walk_merge_two_same_parser(&transitions, vocab, &mut pair_union_cache, first, second)
         {
             stack_lexer[0] = lexer_state;
             stack_parser[0] = parser_node;
@@ -1179,6 +2084,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             );
         }
         if let Some((lexer_state, parser_node)) = full_walk_merge_branches_same_parser(
+            &transitions,
             vocab,
             &mut pair_union_cache,
             &mut triple_union_cache,
@@ -1239,6 +2145,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                 initial_lexer_state,
                                 finalizer_code,
                                 single_finalizer_continues,
+                                &transitions,
                                 &mut parser_cache,
                                 state.constraint,
                                 FULL_WALK_LEXER_TWO_DISTINCT,
@@ -1255,6 +2162,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                     finalizer_code,
                                     single_finalizer_continues,
                                     tokenizer,
+                                    &transitions,
                                     &mut parser_cache,
                                     state.constraint,
                                 )
@@ -1266,6 +2174,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                     finalizer_code,
                                     single_finalizer_continues,
                                     tokenizer,
+                                    &transitions,
                                     &mut parser_cache,
                                     state.constraint,
                                 )
@@ -1279,6 +2188,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                 if first.prune_guard.is_passed() && second.prune_guard.is_passed() {
                                     if let Some((lexer_state, parser_node)) =
                                         full_walk_merge_two_same_parser(
+                                            &transitions,
                                             vocab,
                                             &mut pair_union_cache,
                                             (first.lexer_state, first.parser_node),
@@ -1311,6 +2221,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                     if first.prune_guard.is_passed() && second.prune_guard.is_passed() {
                                         if let Some((lexer_state, parser_node)) =
                                             full_walk_merge_two_same_parser(
+                                                &transitions,
                                                 vocab,
                                                 &mut pair_union_cache,
                                                 (first.lexer_state, first.parser_node),
@@ -1336,6 +2247,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                                     }
                                 } else if let Some((lexer_state, parser_node)) =
                                     full_walk_merge_branches_same_parser(
+                                        &transitions,
                                         vocab,
                                         &mut pair_union_cache,
                                         &mut triple_union_cache,
@@ -1383,6 +2295,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         FullWalkTwoStepOutcome::Two(first, second) => {
                             if let Some((lexer_state, parser_node)) =
                                 full_walk_merge_two_same_parser(
+                                    &transitions,
                                     vocab,
                                     &mut pair_union_cache,
                                     first,
@@ -1403,6 +2316,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         FullWalkTwoStepOutcome::Many(next) => {
                             if let Some((lexer_state, parser_node)) =
                                 full_walk_merge_branches_same_parser(
+                                            &transitions,
                                             vocab,
                                             &mut pair_union_cache,
                                             &mut triple_union_cache,
@@ -1438,6 +2352,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         FullWalkTwoStepOutcome::Two(first, second) => {
                             if let Some((lexer_state, parser_node)) =
                                 full_walk_merge_two_same_parser(
+                                    &transitions,
                                     vocab,
                                     &mut pair_union_cache,
                                     first,
@@ -1458,6 +2373,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         FullWalkTwoStepOutcome::Many(next) => {
                             if let Some((lexer_state, parser_node)) =
                                 full_walk_merge_branches_same_parser(
+                                            &transitions,
                                             vocab,
                                             &mut pair_union_cache,
                                             &mut triple_union_cache,
@@ -1496,6 +2412,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                             {
                                 if let Some((lexer_state, parser_node)) =
                                     full_walk_merge_two_same_parser(
+                                        &transitions,
                                         vocab,
                                         &mut pair_union_cache,
                                         (first.lexer_state, first.parser_node),
@@ -1519,6 +2436,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                             _ => {
                                 if let Some((lexer_state, parser_node)) =
                                     full_walk_merge_branches_same_parser(
+                                        &transitions,
                                         vocab,
                                         &mut pair_union_cache,
                                         &mut triple_union_cache,
@@ -1537,6 +2455,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                     next @ FullWalkManyState::ThreeSameParser { lexers, parser_node } => {
                         if let Some((lexer_state, parser_node)) =
                             full_walk_merge_three_same_parser(
+                                &transitions,
                                 vocab,
                                 &mut triple_union_cache,
                                 lexers,
@@ -1564,6 +2483,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                     parser_cache.token_boundary_allowed_raw(
                         state.constraint,
                         tokenizer,
+                        &transitions,
                         initial_lexer_state,
                         scalar_lexer,
                         scalar_parser,
@@ -1572,12 +2492,14 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                     parser_cache.token_boundary_allowed_raw(
                         state.constraint,
                         tokenizer,
+                        &transitions,
                         initial_lexer_state,
                         current_two.0.0,
                         current_two.0.1,
                     ) || parser_cache.token_boundary_allowed_raw(
                         state.constraint,
                         tokenizer,
+                        &transitions,
                         initial_lexer_state,
                         current_two.1.0,
                         current_two.1.1,
@@ -1588,6 +2510,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                             parser_cache.token_boundary_allowed(
                                 state.constraint,
                                 tokenizer,
+                                &transitions,
                                 initial_lexer_state,
                                 branch,
                             )
@@ -1598,18 +2521,21 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         } => parser_cache.token_boundary_allowed_raw(
                             state.constraint,
                             tokenizer,
+                            &transitions,
                             initial_lexer_state,
                             lexers.0,
                             *parser_node,
                         ) || parser_cache.token_boundary_allowed_raw(
                             state.constraint,
                             tokenizer,
+                            &transitions,
                             initial_lexer_state,
                             lexers.1,
                             *parser_node,
                         ) || parser_cache.token_boundary_allowed_raw(
                             state.constraint,
                             tokenizer,
+                            &transitions,
                             initial_lexer_state,
                             lexers.2,
                             *parser_node,

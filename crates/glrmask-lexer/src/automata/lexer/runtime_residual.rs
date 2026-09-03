@@ -2023,7 +2023,11 @@ impl BoundedCodeIntersectionOracle {
         // boundary, then retain the transition closure of those roots. This
         // avoids the full count × body × pattern Cartesian product while still
         // covering every exact token-boundary state.
-        let crossed_boundaries = mask_max.checked_sub(self.min)?.checked_sub(1)?;
+        // `mask_max` can equal `min` when the declared interval is fixed
+        // (or otherwise narrower than the one-token stencil). In that case
+        // there is no collapsed interior layer, but the exact lower/upper
+        // boundary is still a perfectly valid finite projection root.
+        let crossed_boundaries = mask_max.saturating_sub(self.min).saturating_sub(1);
         let after_prefix = step_fixed_bytes(&self.pattern, 0, &self.prefix)?;
         let mut pattern_start = BitSet::new(pattern_states);
         pattern_start.set(after_prefix as usize);

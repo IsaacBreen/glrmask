@@ -695,26 +695,34 @@ fn build_dynamic_virtual_tokenizer(
     // itself certify these terminals for the general residual runtime. Static
     // compilation may also reuse this exact representation when every giant
     // terminal is certified and a finite vocabulary-horizon projection exists.
-    let bounded_code_terminals = if giant_terminals.is_empty() {
-        expressions
-            .iter()
-            .enumerate()
-            .filter_map(|(terminal, expression)| {
-                let supported = if preserve_residual_oracle_coordinates {
-                    expression_may_support_bounded_code_residual_runtime(expression)
-                } else {
-                    expression_supports_bounded_code_residual_runtime(expression)
-                };
-                supported.then_some(terminal as TerminalID)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let bounded_code_terminals = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            let supported = if preserve_residual_oracle_coordinates {
+                expression_may_support_bounded_code_residual_runtime(expression)
+            } else {
+                expression_supports_bounded_code_residual_runtime(expression)
+            };
+            supported.then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    // If every giant component is already certified by the same bounded-code
+    // oracle, keep the complete certified family symbolic together. Otherwise a
+    // mixed schema (for example maxLength 255 plus 32767) virtualizes only the
+    // giant member and eagerly materializes thousands of states for the smaller
+    // bounds. The residual runtime and its finite mask projection are explicitly
+    // bound-independent, so that threshold split is both unnecessary and slow.
+    let all_giants_bounded_code = giant_terminals
+        .iter()
+        .all(|terminal| bounded_code_terminals.contains(terminal));
+    let prefer_general_bounded =
+        !bounded_code_terminals.is_empty() && all_giants_bounded_code;
     if giant_terminals.is_empty() && bounded_code_terminals.is_empty() {
         return Ok(None);
     }
-    if !giant_terminals.is_empty()
+    if !prefer_general_bounded
+        && !giant_terminals.is_empty()
         && let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions)
     {
         if compile_profile_enabled() {
@@ -763,7 +771,7 @@ fn build_dynamic_virtual_tokenizer(
             "validated protected tokenizer component could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
         ))
     };
-    let general_residual_terminals = if giant_terminals.is_empty() {
+    let general_residual_terminals = if prefer_general_bounded || giant_terminals.is_empty() {
         &bounded_code_terminals
     } else {
         &giant_terminals
@@ -816,7 +824,7 @@ fn build_dynamic_virtual_tokenizer(
         Ok(Some(tokenizer))
     };
 
-    if giant_terminals.is_empty() || !all_giants_specialized {
+    if prefer_general_bounded || giant_terminals.is_empty() || !all_giants_specialized {
         return build_general_residual();
     }
 

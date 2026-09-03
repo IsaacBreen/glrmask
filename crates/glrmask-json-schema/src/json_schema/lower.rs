@@ -2366,6 +2366,26 @@ mod structural_schema_memo_tests {
         )
     }
 
+    #[test]
+    fn inverted_string_length_range_lowers_to_never() {
+        let document = document();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let schema = Schema::assertions(
+            "#/value",
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                string: Some(StringSchema {
+                    min_length: 10,
+                    max_length: Some(5),
+                    ..StringSchema::default()
+                }),
+                ..SchemaAssertions::default()
+            },
+        );
+
+        assert_eq!(lowerer.lower_schema_memoized(&schema).unwrap(), never());
+    }
+
     fn object_with_bounded_property(location: &str) -> Schema {
         Schema::assertions(
             location,
