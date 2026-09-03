@@ -49,6 +49,12 @@ fn dynamic_partition_slicer_disabled() -> bool {
     })
 }
 
+// The bounded-code proof is not free. Tiny vocabulary partitions are cheaper
+// to walk directly, especially on the first mask before the residual oracle's
+// internal caches are warm. Keep the slicer for partitions large enough that
+// skipping the subtree can plausibly repay the proof work.
+const DYNAMIC_PARTITION_SLICER_MIN_SUBTREE_TOKENS: usize = 128;
+
 trait FullWalkTransitionTable {
     type Cell: Copy;
 
@@ -1749,13 +1755,15 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 partition_root_slot += 1;
                 if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                     let directly_certified = if let Some(edge) = root_edges.get(root_slot) {
-                        transitions
-                            .virtual_residual_partition_is_transparent(
-                                scalar_lexer,
-                                U8Set::from_words(trie.subtree_bytes(edge.child)),
-                                trie.subtree_max_byte_len(edge.child),
-                            )
-                            .unwrap_or(false)
+                        trie.subtree_tokens(edge.child).len()
+                            >= DYNAMIC_PARTITION_SLICER_MIN_SUBTREE_TOKENS
+                            && transitions
+                                .virtual_residual_partition_is_transparent(
+                                    scalar_lexer,
+                                    U8Set::from_words(trie.subtree_bytes(edge.child)),
+                                    trie.subtree_max_byte_len(edge.child),
+                                )
+                                .unwrap_or(false)
                     } else {
                         false
                     };
@@ -4464,7 +4472,7 @@ nt start ::= A C | B D;
         // Keep several distinct structural root classes, including quote/control
         // families which are invalid inside a JSON string. This catches a
         // root-slot/DFS-index mixup as well as the bounded advancing-state proof.
-        let vocab = Vocab::new(vec![
+        let mut tokens = vec![
             (0, b"alpha".to_vec()),
             (1, b" beta".to_vec()),
             (2, b"123".to_vec()),
@@ -4483,7 +4491,13 @@ nt start ::= A C | B D;
             (15, b"x".to_vec()),
             // Keep the finite mask-only bounded-repeat horizon well beyond H64.
             (16, vec![b'z'; 128]),
-        ]);
+        ];
+        // Make one ordinary alphabetic layout partition large enough that the
+        // profitability gate exercises the direct virtual-residual slicer.
+        for index in 0..160u32 {
+            tokens.push((17 + index, format!("extra{index:04}").into_bytes()));
+        }
+        let vocab = Vocab::new(tokens);
         let schema = r#"{"type":"string","maxLength":1000000000000}"#;
         let accelerated = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         assert!(
@@ -4512,6 +4526,39 @@ nt start ::= A C | B D;
             assert!(token_allowed(&accelerated_mask, token), "token {token} should remain inside the string");
         }
         assert!(!token_allowed(&accelerated_mask, 8));
+    }
+
+    #[test]
+    fn dynamic_partition_slicer_declines_tiny_vocab_partitions() {
+        let vocab = Vocab::new(vec![
+            (0, b"alpha".to_vec()),
+            (1, b" beta".to_vec()),
+            (2, b"123".to_vec()),
+            (3, b"!!!".to_vec()),
+            (4, b"_name".to_vec()),
+            (5, b"longword".to_vec()),
+            (6, b" quote".to_vec()),
+            (7, b"\"".to_vec()),
+            (8, b" \"\n".to_vec()),
+            (9, b"\\n".to_vec()),
+            (10, "é".as_bytes().to_vec()),
+            (11, b"a-b".to_vec()),
+            (12, b"{".to_vec()),
+            (13, b"}".to_vec()),
+            (14, b":".to_vec()),
+            (15, b"x".to_vec()),
+            (16, vec![b'z'; 128]),
+        ]);
+        let schema = r#"{"type":"string","maxLength":1000000000000}"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        let mut state = dynamic.inner.start();
+        state.commit_bytes(b"\"inside a bounded string ").unwrap();
+
+        TEST_PARTITION_SLICER_HITS.with(|hits| hits.set(0));
+        let _ = direct_mask(&state);
+        TEST_PARTITION_SLICER_HITS.with(|hits| {
+            assert_eq!(hits.get(), 0, "tiny partitions should use the exact trie walk")
+        });
     }
 
     #[test]
