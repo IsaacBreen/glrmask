@@ -2000,6 +2000,31 @@ fn full_walk_step_many_state<T: FullWalkTransitionTable>(
 
 
 #[inline(always)]
+fn full_walk_skip_admitted_subtree<'a>(
+    trie: &DynamicMaskTrie,
+    walk_ops: &'a [DynamicMaskTrieFullWalkOp],
+    remaining_ops: &mut std::slice::Iter<'a, DynamicMaskTrieFullWalkOp>,
+    token_marker_index: &mut usize,
+) -> usize {
+    let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
+    let (child, subtree_end_op) = trie.full_walk_dead_subtree(op_index);
+    let token_count = trie.subtree_tokens(child).len();
+
+    // The strict walk starts with every ordinary vocabulary token admitted.
+    // A static parser-transparent partition certificate proves that none of
+    // these bits can be cleared anywhere below this structural root, so jump
+    // over the subtree while keeping the token-marker cursor aligned.
+    let root_token_offset = usize::from(trie.node(0).token_id.is_some());
+    let token_end = trie
+        .subtree_token_index_range(child)
+        .end
+        .saturating_sub(root_token_offset);
+    debug_assert!(*token_marker_index <= token_end);
+    *token_marker_index = token_end;
+    *remaining_ops = walk_ops[subtree_end_op as usize..].iter();
+    token_count
+}
+
 fn full_walk_skip_lexically_dead_subtree<'a>(
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
@@ -2140,6 +2165,12 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     let mut scalar_parser = 0u32;
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
+    let profile_partition_slicer =
+        std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PARTITION_SLICER").is_some();
+    let mut partition_slicer_hits = 0usize;
+    let mut partition_slicer_tokens = 0usize;
+    let partition_slicer_enabled = vocab.has_transparent_partition_certificates();
+    let mut partition_root_slot = 0usize;
     let mut remaining_ops = walk_ops.iter();
     while let Some(&op) = remaining_ops.next() {
         let parent_depth = op.parent_depth() as usize;
@@ -2156,6 +2187,40 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         .as_ref()
                         .unwrap_unchecked()
                 });
+            }
+
+            // Dynamic vocabulary partitions are represented by zero-byte
+            // structural edges directly below the true trie root. If the
+            // finite mask DFA proves that every token in this partition stays
+            // parser-transparent and preserves the same possible-future set,
+            // one admission check at the source proves every token end valid.
+            if partition_slicer_enabled && parent_depth == 0 && !op.consumes_byte() {
+                // Structural partition roots are emitted in the same order as
+                // the raw root children. Keep a cursor instead of translating
+                // from DFS walk-edge indices in the hot loop.
+                let root_slot = partition_root_slot;
+                partition_root_slot += 1;
+                if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT
+                    && vocab.transparent_partition_is_certified(scalar_lexer, root_slot)
+                    && parser_cache.physical_token_boundary_allowed(
+                        state.constraint,
+                        tokenizer,
+                        &transitions,
+                        scalar_parser,
+                        scalar_lexer,
+                    )
+                {
+                    partition_slicer_hits += 1;
+                    #[cfg(test)]
+                    TEST_PARTITION_SLICER_HITS.with(|hits| hits.set(hits.get() + 1));
+                    partition_slicer_tokens += full_walk_skip_admitted_subtree(
+                        trie,
+                        walk_ops,
+                        &mut remaining_ops,
+                        &mut token_marker_index,
+                    );
+                    continue;
+                }
             }
         }
 
@@ -2641,6 +2706,13 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 }
             }
         }
+    }
+    if profile_partition_slicer {
+        eprintln!(
+            "[glrmask/profile][dynamic_partition_slicer] hits={} skipped_tokens={}",
+            partition_slicer_hits,
+            partition_slicer_tokens,
+        );
     }
     // Ordinary vocabulary bytes and exact special-token-ID paths are a union.
     // The strict walk above computes the byte-language contribution for every
