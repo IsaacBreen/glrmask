@@ -98,8 +98,11 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn lower_string(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
+        if schema.max_length.is_some_and(|max| max < schema.min_length) {
+            return Ok(never());
+        }
         let should_terminalize_length = schema.max_length.is_none_or(|max_length| {
-            !self.should_split_bounded_string(schema.min_length, max_length)
+            !self.should_split_ordinary_bounded_string(schema.min_length, max_length)
         });
         let has_recognized_format = schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some();
@@ -112,6 +115,14 @@ impl<'a> Lowerer<'a> {
                     } else {
                         "json_string_constrained"
                     });
+                    if lowerer.config.lazy_ordinary_bounded_strings
+                        && schema.pattern.is_none()
+                        && schema.max_length.is_some()
+                    {
+                        let expr = lowerer.lower_lazy_bounded_string_terminal_expr(schema);
+                        lowerer.add_terminal_rule(&name, expr);
+                        return Ok(r(&name));
+                    }
                     if let Some(expr) = lowerer.lower_anchored_prefix_any_suffix_bounded_pattern_expr(schema)? {
                         lowerer.add_nonterminal_rule(&name, expr);
                         return Ok(r(&name));
@@ -141,7 +152,14 @@ impl<'a> Lowerer<'a> {
             } else {
                 "json_string_constrained"
             });
-            let expr = self.lower_constrained_string_terminal_expr(schema)?;
+            let expr = if self.config.lazy_ordinary_bounded_strings
+                && schema.pattern.is_none()
+                && schema.max_length.is_some()
+            {
+                self.lower_lazy_bounded_string_terminal_expr(schema)
+            } else {
+                self.lower_constrained_string_terminal_expr(schema)?
+            };
             self.add_terminal_rule(&name, expr);
             return Ok(r(&name));
         }
@@ -208,7 +226,9 @@ impl<'a> Lowerer<'a> {
             )));
         }
 
-        if string.max_length.is_some_and(|max| self.should_split_bounded_string(string.min_length, max)) {
+        if string.max_length.is_some_and(|max| {
+            self.should_split_ordinary_bounded_string(string.min_length, max)
+        }) {
             return Ok(None);
         }
 
@@ -708,6 +728,46 @@ impl<'a> Lowerer<'a> {
         Ok(Some(self.lower_string_pattern_split_expr_from_expr_branches(branches)))
     }
 
+    /// Exact dynamic representation for a finite-length JSON string without a
+    /// user regex pattern. Recognized formats remain an independent exact
+    /// operand instead of being multiplied into the bounded-length DFA.
+    /// The first operand is the unbounded valid JSON-string language and the
+    /// second is the decoded-character length envelope. Keeping them as an
+    /// explicit intersection lets the dynamic residual runtime attach its
+    /// bounded-code oracle, so the declared maximum remains symbolic while a
+    /// one-token finite projection is used for masking.
+    fn lower_lazy_bounded_string_terminal_expr(&self, schema: &StringSchema) -> GrammarExpr {
+        debug_assert!(schema.pattern.is_none());
+        debug_assert!(schema.max_length.is_some());
+        let string_char = self.json_string_char_regex();
+        // A recognized format body is already used as the complete JSON-string
+        // language on the unbounded fast path above, so do not redundantly
+        // intersect it with the generic JSON-string language here. Keeping the
+        // format as the single pattern operand is important: the bounded-code
+        // residual oracle can then combine that finite DFA with the symbolic
+        // decoded-length envelope without first building their dense product.
+        let valid = if let Some(format_body_regex) =
+            recognized_string_format_body_regex_for_lowering(schema.format.as_deref())
+        {
+            GrammarExpr::RawRegex(quoted_string_body_regex(format_body_regex))
+        } else {
+            GrammarExpr::RawRegex(quoted_string_body_regex(
+                &bounded_json_string_body_regex(&string_char, 0, None),
+            ))
+        };
+        let envelope = GrammarExpr::RawRegex(quoted_string_body_regex(
+            &bounded_json_string_body_regex(
+                &string_char,
+                schema.min_length,
+                schema.max_length,
+            ),
+        ));
+        GrammarExpr::Intersect {
+            expr: Box::new(valid),
+            intersect: Box::new(envelope),
+        }
+    }
+
     fn lower_string_expr(&mut self, schema: &StringSchema) -> ImportResult<GrammarExpr> {
         if schema.max_length.is_some_and(|max| max < schema.min_length) {
             return Ok(never());
@@ -726,7 +786,7 @@ impl<'a> Lowerer<'a> {
 
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
-            && self.should_split_bounded_string(schema.min_length, max_length)
+            && self.should_split_ordinary_bounded_string(schema.min_length, max_length)
         {
             return Ok(self.lower_split_bounded_string(schema.min_length, max_length));
         }
@@ -734,6 +794,9 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
         {
+            if self.config.lazy_ordinary_bounded_strings {
+                return Ok(self.lower_lazy_bounded_string_terminal_expr(schema));
+            }
             // Keep both JSON-string quotes in the bounded terminal. Leaving the
             // body as a parser-visible variable-length terminal exposes an
             // accepting prefix after every admissible body length; wrapping the
@@ -1313,6 +1376,11 @@ impl<'a> Lowerer<'a> {
         r(&name)
     }
 
+    fn should_split_ordinary_bounded_string(&self, min: usize, max: usize) -> bool {
+        !self.config.lazy_ordinary_bounded_strings
+            && self.should_split_bounded_string(min, max)
+    }
+
     fn should_split_bounded_string(&self, min: usize, max: usize) -> bool {
         if max <= self.config.terminalize_bounded_string_max.max(64) {
             return false;
@@ -1619,6 +1687,12 @@ impl<'a> Lowerer<'a> {
             || self.complex_anchored_pattern_plan(schema)?.is_some()
         {
             return self.lower_string(schema);
+        }
+        if self.config.lazy_ordinary_bounded_strings
+            && schema.pattern.is_none()
+            && schema.max_length.is_some()
+        {
+            return Ok(self.lower_lazy_bounded_string_terminal_expr(schema));
         }
         if schema.pattern.is_none()
             && recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_none()

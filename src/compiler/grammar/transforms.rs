@@ -154,14 +154,6 @@ fn nullable_terminals_for_grammar(grammar: &GrammarDef) -> BTreeSet<TerminalID> 
         .collect()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum TerminalIdentity {
-    Literal { bytes: Vec<u8>, is_ignore: bool },
-    Pattern { pattern: String, utf8: bool, is_ignore: bool },
-    Expr { expr: Expr, is_ignore: bool },
-    SpecialToken { token_id: u32, is_ignore: bool },
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum TerminalIdentityRef<'a> {
     Literal {
@@ -196,28 +188,6 @@ fn terminal_identity_ref(terminal: &Terminal, is_ignore: bool) -> TerminalIdenti
         },
         Terminal::Expr { expr, .. } => TerminalIdentityRef::Expr { expr, is_ignore },
         Terminal::SpecialToken { token_id, .. } => TerminalIdentityRef::SpecialToken {
-            token_id: *token_id,
-            is_ignore,
-        },
-    }
-}
-
-fn terminal_identity(terminal: &Terminal, is_ignore: bool) -> TerminalIdentity {
-    match terminal {
-        Terminal::Literal { bytes, .. } => TerminalIdentity::Literal {
-            bytes: bytes.clone(),
-            is_ignore,
-        },
-        Terminal::Pattern { pattern, utf8, .. } => TerminalIdentity::Pattern {
-            pattern: pattern.clone(),
-            utf8: *utf8,
-            is_ignore,
-        },
-        Terminal::Expr { expr, .. } => TerminalIdentity::Expr {
-            expr: expr.clone(),
-            is_ignore,
-        },
-        Terminal::SpecialToken { token_id, .. } => TerminalIdentity::SpecialToken {
             token_id: *token_id,
             is_ignore,
         },
@@ -297,7 +267,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
         .into_iter()
         .enumerate()
         .filter_map(|(terminal, used)| used.then_some(terminal as TerminalID))
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
 
     for &terminal in &used {
         if terminal as usize >= terminal_count {
@@ -307,27 +277,40 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
 
     let mut remap = BTreeMap::<TerminalID, TerminalID>::new();
     let mut compacted = Vec::with_capacity(used.len());
-    let mut canonical_ids =
-        HashMap::<(TerminalIdentity, Option<String>, Option<u32>), TerminalID>::new();
+    {
+        // Keep deduplication identities borrowed from the source grammar. The
+        // previous fallback path cloned every terminal language (including
+        // potentially large Expr trees) solely to own the hash-map key. Source
+        // terminals remain immutable until this pass is complete, so borrowed
+        // identities are sufficient; clone only each genuinely unique terminal
+        // once when constructing the compacted output vector.
+        let mut canonical_ids = HashMap::<
+            (TerminalIdentityRef<'_>, Option<&str>, Option<u32>),
+            TerminalID,
+        >::with_capacity(used.len());
 
-    for old_id in used {
-        let terminal = grammar.terminals.get(old_id as usize).unwrap_or_else(|| {
-            panic!("terminal id {} referenced by a rule but missing from grammar.terminals", old_id)
-        });
-        let is_ignore = grammar.ignore_terminal == Some(old_id);
-        let identity = (
-            terminal_identity(terminal, is_ignore),
-            grammar.lexer_partitions.get(&old_id).cloned(),
-            grammar.residual_isolation_classes.get(&old_id).copied(),
-        );
-        if let Some(&existing_id) = canonical_ids.get(&identity) {
-            remap.insert(old_id, existing_id);
-            continue;
+        for old_id in used {
+            let terminal = grammar.terminals.get(old_id as usize).unwrap_or_else(|| {
+                panic!(
+                    "terminal id {} referenced by a rule but missing from grammar.terminals",
+                    old_id
+                )
+            });
+            let is_ignore = grammar.ignore_terminal == Some(old_id);
+            let identity = (
+                terminal_identity_ref(terminal, is_ignore),
+                grammar.lexer_partitions.get(&old_id).map(String::as_str),
+                grammar.residual_isolation_classes.get(&old_id).copied(),
+            );
+            if let Some(&existing_id) = canonical_ids.get(&identity) {
+                remap.insert(old_id, existing_id);
+                continue;
+            }
+            let new_id = compacted.len() as TerminalID;
+            canonical_ids.insert(identity, new_id);
+            remap.insert(old_id, new_id);
+            compacted.push(remap_terminal_id(terminal, new_id));
         }
-        let new_id = compacted.len() as TerminalID;
-        canonical_ids.insert(identity, new_id);
-        remap.insert(old_id, new_id);
-        compacted.push(remap_terminal_id(terminal, new_id));
     }
 
     for rule in grammar.rules.iter_mut() {

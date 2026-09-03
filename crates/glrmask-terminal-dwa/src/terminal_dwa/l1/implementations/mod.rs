@@ -119,6 +119,7 @@ pub struct BuildInput<'a> {
     pub shared_generic_nfa_topology: Option<&'a TokenBoundedAnalysisTopology>,
     pub shared_generic_nfa_trie: Option<&'a TokenBoundedAnalysisTrie>,
     pub subset_parent_order: Option<&'a L1IdentityVocabOrder>,
+    pub id_map_only: bool,
 }
 
 fn run(implementation: Implementation, input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
@@ -171,4 +172,3 @@ pub fn build_from_env(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
     // contains shape selectors that silently route p1/p2 elsewhere.
     build_with_plan(input, Plan::from_env(input.partition_label))
 }
-

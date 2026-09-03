@@ -95,7 +95,14 @@ impl<'a> Lowerer<'a> {
     }
 
     fn should_terminalize_bounded_scalar_array(&self, max_items: usize) -> bool {
-        max_items <= self.config.repeat_chunk_size.max(2)
+        // The dynamic/lazy-string frontend deliberately keeps bounded string
+        // residuals symbolic. Folding a bounded array of those items back into
+        // one terminal defeats that representation: the lexer has to multiply
+        // the item residual by every array position (for example a 25-item
+        // array of maxLength=1024 strings). Keep the exact item-count bound in
+        // the grammar instead.
+        !self.config.lazy_ordinary_bounded_strings
+            && max_items <= self.config.repeat_chunk_size.max(2)
     }
 
     fn isolated_homogeneous_array_terminal(

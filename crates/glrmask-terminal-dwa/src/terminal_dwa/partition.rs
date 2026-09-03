@@ -336,6 +336,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
             None,
             None,
             false,
+            false,
         ).0;
     }
 
@@ -396,6 +397,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                         None,
                         None,
                         false,
+                        false,
                     )
                     .0
                 };
@@ -433,6 +435,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
             Some(&callback),
             Some(&witness_mask),
             true,
+            false,
         );
 
         if speculative_hit {
@@ -481,6 +484,7 @@ pub fn build_partition_id_map_and_terminal_dwa(
                 None,
                 None,
                 false,
+                false,
             );
             let baseline = baseline.expect("strict speculative p2 baseline vanished");
             let candidate = exact.as_ref().expect("strict speculative p2 candidate vanished");
@@ -509,6 +513,127 @@ pub fn build_partition_id_map_and_terminal_dwa(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn build_partition_id_map_only(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    always_allowed_follows: &[Vec<TerminalID>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
+    flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
+    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+    terminal_filter: Option<&[bool]>,
+) -> Option<PartitionTerminalDwas> {
+    build_partition_id_map_and_terminal_dwa_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        always_allowed_follows,
+        disallowed_follows,
+        token_path_disallowed_follows,
+        normalized_token_path_disallowed_follows,
+        flat_trans,
+        initial_state_map,
+        shared_vocab_dfa_cache,
+        shared_original_vocab_dfa_cache,
+        shared_original_vocab_analysis_dfa_cache,
+        shared_transition_cache,
+        shared_ti_output_cache,
+        shared_classify_cache,
+        terminal_filter,
+        None,
+        None,
+        None,
+        false,
+        true,
+    )
+    .0
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_partition_vocab_map_only(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    always_allowed_follows: &[Vec<TerminalID>],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: &Arc<BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: &Arc<[BitSet]>,
+    flat_trans: &Arc<[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_analysis_dfa_cache: Option<&super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::l2p::equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
+    shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
+    terminal_filter: Option<&[bool]>,
+) -> Option<ManyToOneIdMap> {
+    let parts = build_partition_id_map_only(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        always_allowed_follows,
+        disallowed_follows,
+        token_path_disallowed_follows,
+        normalized_token_path_disallowed_follows,
+        flat_trans,
+        initial_state_map,
+        shared_vocab_dfa_cache,
+        shared_original_vocab_dfa_cache,
+        shared_original_vocab_analysis_dfa_cache,
+        shared_transition_cache,
+        shared_ti_output_cache,
+        shared_classify_cache,
+        terminal_filter,
+    )?;
+    partition_parts_vocab_map(vocab, &parts)
+}
+
+fn partition_parts_vocab_map(
+    vocab: &Vocab,
+    parts: &PartitionTerminalDwas,
+) -> Option<ManyToOneIdMap> {
+    let maps = [
+        parts.l1.as_ref(),
+        parts.l2p.as_ref(),
+        parts.l2p_single_l1.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|part| part.id_map.vocab_tokens.clone())
+    .collect::<Vec<_>>();
+    match maps.as_slice() {
+        [] => None,
+        [only] => Some(only.clone()),
+        _ => Some(common_refine_partition_maps(vocab, &maps)),
+    }
+}
+
 fn build_partition_id_map_and_terminal_dwa_impl(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -534,6 +659,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     witness_probe_callback: Option<&dyn Fn(&BitSet)>,
     speculative_witness_mask: Option<&Mutex<Option<Vec<bool>>>>,
     allow_speculative_skip: bool,
+    id_map_only: bool,
 ) -> (Option<PartitionTerminalDwas>, bool) {
     if vocab.is_empty() {
         return (None, false);
@@ -866,7 +992,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                 let mut result = if let Some(materialized) = materialized.as_ref() {
                     let branch_flat_trans: Arc<[u32]> =
                         Arc::from(super::l1::build_flat_transition_table(&materialized.tokenizer));
-                    let mut result = super::l1::build_l1_id_map_and_terminal_dwa(
+                    let mut result = super::l1::build_l1_id_map_and_terminal_dwa_mode(
                         partition_label,
                         &materialized.tokenizer,
                         vocab,
@@ -881,6 +1007,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        id_map_only,
                     );
                     if let Some(part) = result.as_mut() {
                         part.id_map.tokenizer_states = materialized
@@ -895,7 +1022,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         .as_ref()
                         .map(|(map, _)| map)
                         .or(initial_state_map);
-                    super::l1::build_l1_id_map_and_terminal_dwa(
+                    super::l1::build_l1_id_map_and_terminal_dwa_mode(
                         partition_label,
                         tokenizer,
                         vocab,
@@ -910,6 +1037,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        id_map_only,
                     )
                 };
                 if let (Some(part), Some((_, map_ms))) =
@@ -937,7 +1065,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
             if has_l2p && !speculative_hit {
                 let started_at = Instant::now();
                 let Some(split) = l2p_vocab_split.as_ref() else {
-                    let result = super::l2p::build_l2p_id_map_and_terminal_dwa(
+                    let result = super::l2p::build_l2p_id_map_and_terminal_dwa_mode(
                         partition_label,
                         tokenizer,
                         vocab,
@@ -960,6 +1088,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         Some(flat_trans),
                         shared_l1_token_trie.as_deref(),
                         initial_state_map,
+                        id_map_only,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -1045,7 +1174,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                 let local_original_vocab_analysis_dfa_cache = super::l2p::equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache::default();
                                 let local_transition_cache = std::sync::OnceLock::new();
                                 let local_ti_output_cache = super::l2p::SharedTiTokenizerOutputCache::new();
-                                let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa(
+                                let mut result = super::l2p::build_l2p_id_map_and_terminal_dwa_mode(
                                     partition_label,
                                     &materialized.tokenizer,
                                     &boundary_vocab,
@@ -1066,6 +1195,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     Some(&branch_flat_trans),
                                     shared_l1_token_trie.as_deref(),
                                     None,
+                                    id_map_only,
                                 );
                                 if let Some(part) = result.as_mut() {
                                     part.id_map.tokenizer_states = materialized
@@ -1080,7 +1210,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     .as_ref()
                                     .map(|(map, _)| map)
                                     .or(initial_state_map);
-                                super::l2p::build_l2p_id_map_and_terminal_dwa(
+                                super::l2p::build_l2p_id_map_and_terminal_dwa_mode(
                                     partition_label,
                                     tokenizer,
                                     &boundary_vocab,
@@ -1101,6 +1231,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     Some(flat_trans),
                                     shared_l1_token_trie.as_deref(),
                                     branch_initial_state_map,
+                                    id_map_only,
                                 )
                             };
                             if let (Some(part), Some((_, map_ms))) =
@@ -1128,7 +1259,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         } else {
                             let started_at = Instant::now();
                             let single_vocab = split.single_vocab(vocab);
-                            let result = super::l1::build_l1_id_map_and_terminal_dwa(
+                            let result = super::l1::build_l1_id_map_and_terminal_dwa_mode(
                                 partition_label,
                                 tokenizer,
                                 &single_vocab,
@@ -1143,6 +1274,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                 None,
                                 shared_l1_token_trie.as_deref(),
                                 shared_l1_parent_order.as_deref(),
+                                id_map_only,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
                         }
@@ -1365,7 +1497,7 @@ pub fn build_partition_vocab_equivalence(
                 )
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(2_048);
+                    .unwrap_or(1_024);
                 split.boundary_tokens >= min_tokens
             }
         }
@@ -1414,6 +1546,7 @@ pub fn build_partition_vocab_equivalence(
             shared_generic_nfa_topology: None,
             shared_generic_nfa_trie: None,
             subset_parent_order: None,
+            id_map_only: false,
         };
         if let Some(result) = super::l1::implementations::build_projected_vocab_equivalence(input) {
             if compile_profile_enabled() {
@@ -1493,6 +1626,7 @@ pub fn build_partition_vocab_equivalence(
                 shared_generic_nfa_topology: None,
                 shared_generic_nfa_trie: None,
                 subset_parent_order: None,
+                id_map_only: false,
             };
             if let Some(result) = super::l1::implementations::build_projected_vocab_equivalence(input) {
                 maps.push(result.vocab_map);

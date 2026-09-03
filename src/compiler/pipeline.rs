@@ -9,7 +9,9 @@ use rayon::prelude::*;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
+    build_bounded_code_mask_component_for_vocab,
     build_partitioned_tokenizer_from_precompiled_terminal_dfas,
+    build_partitioned_tokenizer_with_product_trace_terminal_residuals,
     build_exact_partitioned_runtime_tokenizer,
     build_virtual_unit_repeat_tokenizer,
     build_regex,
@@ -665,6 +667,7 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
         &partition_ids,
         Some(&residual_isolation_classes),
         None,
+        false,
     )
 }
 
@@ -695,26 +698,34 @@ fn build_dynamic_virtual_tokenizer(
     // itself certify these terminals for the general residual runtime. Static
     // compilation may also reuse this exact representation when every giant
     // terminal is certified and a finite vocabulary-horizon projection exists.
-    let bounded_code_terminals = if giant_terminals.is_empty() {
-        expressions
-            .iter()
-            .enumerate()
-            .filter_map(|(terminal, expression)| {
-                let supported = if preserve_residual_oracle_coordinates {
-                    expression_may_support_bounded_code_residual_runtime(expression)
-                } else {
-                    expression_supports_bounded_code_residual_runtime(expression)
-                };
-                supported.then_some(terminal as TerminalID)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
+    let bounded_code_terminals = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            let supported = if preserve_residual_oracle_coordinates {
+                expression_may_support_bounded_code_residual_runtime(expression)
+            } else {
+                expression_supports_bounded_code_residual_runtime(expression)
+            };
+            supported.then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    // If every giant component is already certified by the same bounded-code
+    // oracle, keep the complete certified family symbolic together. Otherwise a
+    // mixed schema (for example maxLength 255 plus 32767) virtualizes only the
+    // giant member and eagerly materializes thousands of states for the smaller
+    // bounds. The residual runtime and its finite mask projection are explicitly
+    // bound-independent, so that threshold split is both unnecessary and slow.
+    let all_giants_bounded_code = giant_terminals
+        .iter()
+        .all(|terminal| bounded_code_terminals.contains(terminal));
+    let prefer_general_bounded =
+        !bounded_code_terminals.is_empty() && all_giants_bounded_code;
     if giant_terminals.is_empty() && bounded_code_terminals.is_empty() {
         return Ok(None);
     }
-    if !giant_terminals.is_empty()
+    if !prefer_general_bounded
+        && !giant_terminals.is_empty()
         && let Some(tokenizer) = build_virtual_unit_repeat_tokenizer(&expressions)
     {
         if compile_profile_enabled() {
@@ -757,13 +768,38 @@ fn build_dynamic_virtual_tokenizer(
     let all_giants_specialized = giant_terminals
         .iter()
         .all(|terminal| specialized_terminals.contains(terminal));
+    if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_VIRTUAL_SELECTION").is_some() {
+        let labels = |terminals: &[TerminalID]| {
+            terminals
+                .iter()
+                .map(|&terminal| {
+                    format!(
+                        "{}:{}",
+                        terminal,
+                        grammar.terminal_display_name(terminal)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let specialized = specialized_terminals.iter().copied().collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/profile][dynamic_virtual_selection] preserve_coordinates={} giants=[{}] bounded=[{}] specialized=[{}] prefer_general_bounded={} all_giants_specialized={}",
+            preserve_residual_oracle_coordinates,
+            labels(&giant_terminals),
+            labels(&bounded_code_terminals),
+            labels(&specialized),
+            prefer_general_bounded,
+            all_giants_specialized,
+        );
+    }
 
     let build_error = |detail: &str| {
         crate::Error::Compilation(format!(
             "validated protected tokenizer component could not stay on its exact virtual runtime path ({detail}); refusing eager materialization"
         ))
     };
-    let general_residual_terminals = if giant_terminals.is_empty() {
+    let general_residual_terminals = if prefer_general_bounded || giant_terminals.is_empty() {
         &bounded_code_terminals
     } else {
         &giant_terminals
@@ -788,6 +824,7 @@ fn build_dynamic_virtual_tokenizer(
             &partition_ids,
             Some(&residual_isolation_classes),
             None,
+            false,
         );
         tokenizer.isolate_start_state_and_drain_nullable_terminals();
         tokenizer
@@ -816,7 +853,7 @@ fn build_dynamic_virtual_tokenizer(
         Ok(Some(tokenizer))
     };
 
-    if giant_terminals.is_empty() || !all_giants_specialized {
+    if prefer_general_bounded || giant_terminals.is_empty() || !all_giants_specialized {
         return build_general_residual();
     }
 
@@ -838,6 +875,7 @@ fn build_dynamic_virtual_tokenizer(
         &partition_ids,
         Some(&residual_isolation_classes),
         None,
+        false,
     );
     // Drain ordinary nullable terminals before reserving the arithmetic state
     // interval. A second drain by the caller is then a no-op.
@@ -908,6 +946,154 @@ fn build_dynamic_virtual_tokenizer(
             profile_kind,
             tokenizer.num_states(),
             profile_bound,
+        );
+    }
+    Ok(Some(tokenizer))
+}
+
+fn build_vocab_partition_direct_mask_tokenizer(
+    grammar: &GrammarDef,
+    vocab: &Vocab,
+) -> crate::Result<Option<Tokenizer>> {
+    let profile = compile_profile_enabled();
+    let total_started = Instant::now();
+    // The direct finite-mask lane currently certifies bounded-code
+    // intersections. Do the cheapest possible structural preflight before
+    // parsing/factoring every terminal: ordinary literal/pattern grammars (and
+    // Expr grammars without an intersection anywhere) cannot enter this lane.
+    // This matters for VocabPartition because a failed direct-mask probe would
+    // otherwise duplicate much of the ordinary tokenizer's regex preparation.
+    fn contains_intersection(expr: &Expr) -> bool {
+        match expr {
+            Expr::Intersect { .. } => true,
+            Expr::Seq(parts) | Expr::Choice(parts) => parts.iter().any(contains_intersection),
+            Expr::Exclude { expr, exclude } => {
+                contains_intersection(expr) || contains_intersection(exclude)
+            }
+            Expr::Repeat { expr, .. } => contains_intersection(expr),
+            Expr::Shared(expr) => contains_intersection(expr),
+            Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+        }
+    }
+    let preflight_started = Instant::now();
+    let has_intersection = grammar.terminals.iter().any(|terminal| match terminal {
+        Terminal::Expr { expr, .. } => contains_intersection(expr),
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } => {
+            false
+        }
+    });
+    let preflight_ms = elapsed_ms(preflight_started);
+    if !has_intersection {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][vocab_partition_direct_mask_attempt] selected=false reason=no_intersection preflight_ms={preflight_ms:.3} total_ms={:.3}",
+                elapsed_ms(total_started),
+            );
+        }
+        return Ok(None);
+    }
+    let expressions_started = Instant::now();
+    let expressions = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let expressions_ms = elapsed_ms(expressions_started);
+    let scan_started = Instant::now();
+    let giant_terminals = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            expression_contains_large_bounded_repeat(expression)
+                .then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    let bounded_code_terminals = expressions
+        .iter()
+        .enumerate()
+        .filter_map(|(terminal, expression)| {
+            expression_may_support_bounded_code_residual_runtime(expression)
+                .then_some(terminal as TerminalID)
+        })
+        .collect::<Vec<_>>();
+    let scan_ms = elapsed_ms(scan_started);
+    if bounded_code_terminals.is_empty()
+        || !giant_terminals
+            .iter()
+            .all(|terminal| bounded_code_terminals.contains(terminal))
+    {
+        if profile {
+            eprintln!(
+                "[glrmask/profile][vocab_partition_direct_mask_attempt] selected=false preflight_ms={preflight_ms:.3} expressions_ms={expressions_ms:.3} scan_ms={scan_ms:.3} giants={} bounded={} total_ms={:.3}",
+                giant_terminals.len(),
+                bounded_code_terminals.len(),
+                elapsed_ms(total_started),
+            );
+        }
+        return Ok(None);
+    }
+
+    let mut proxy_expressions = expressions.clone();
+    for &terminal in &bounded_code_terminals {
+        proxy_expressions[terminal as usize] = Expr::U8Class(U8Set::empty());
+    }
+    let terminal_labels = grammar
+        .terminals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+        .collect::<Vec<_>>();
+    let partition_ids = lexer_partition_ids(grammar);
+    let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+    let mut tokenizer = build_tokenizer_from_exprs_partitioned_impl(
+        &proxy_expressions,
+        Some(&terminal_labels),
+        &partition_ids,
+        Some(&residual_isolation_classes),
+        None,
+        true,
+    );
+    tokenizer.isolate_start_state_and_drain_nullable_terminals();
+    tokenizer
+        .restore_terminal_exprs_without_virtual_runtime(Some(expressions.clone()))
+        .map_err(|detail| {
+            crate::Error::Compilation(format!(
+                "direct vocabulary-mask tokenizer expression restoration failed: {detail}"
+            ))
+        })?;
+
+    let repeat_horizons =
+        crate::automata::lexer::compile::VocabularyRepeatHorizonCache::new();
+    let max_token_len = vocab.max_token_byte_len();
+    let components = bounded_code_terminals
+        .par_iter()
+        .map(|&terminal| {
+            build_bounded_code_mask_component_for_vocab(
+                &expressions[terminal as usize],
+                vocab,
+                max_token_len,
+                &repeat_horizons,
+            )
+            .map(|(dfa, root)| (dfa, root, terminal))
+        })
+        .collect::<Option<Vec<_>>>();
+    let Some(components) = components else {
+        return Ok(None);
+    };
+    tokenizer
+        .install_direct_mask_components(components)
+        .ok_or_else(|| {
+            crate::Error::Compilation(
+                "direct vocabulary-mask tokenizer component installation failed".to_owned(),
+            )
+        })?;
+    if compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][vocab_partition_tokenizer] path=direct_mask states={} components={} preflight_ms={preflight_ms:.3} expressions_ms={expressions_ms:.3} scan_ms={scan_ms:.3} total_ms={:.3}",
+            tokenizer.num_states(),
+            bounded_code_terminals.len(),
+            elapsed_ms(total_started),
         );
     }
     Ok(Some(tokenizer))
@@ -1136,6 +1322,7 @@ pub(crate) fn build_tokenizer_with_partition_options(
         &partition_ids,
         Some(&residual_isolation_classes),
         Some(adaptive),
+        false,
     )
 }
 
@@ -1452,6 +1639,7 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned(
         partition_ids,
         None,
         None,
+        false,
     )
 }
 
@@ -1467,6 +1655,7 @@ pub(crate) fn build_tokenizer_from_exprs_partitioned_with_adaptive(
         partition_ids,
         None,
         Some(adaptive),
+        false,
     )
 }
 
@@ -1476,10 +1665,17 @@ fn build_tokenizer_from_exprs_partitioned_impl(
     partition_ids: &[u32],
     residual_isolation_classes: Option<&[Option<u32>]>,
     adaptive_override: Option<bool>,
+    prefer_product_trace_terminal_residuals: bool,
 ) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let started_at = Instant::now();
-    let direct_terminal_residuals = env_flag_enabled("GLRMASK_L1_DIRECT_TERMINAL_RESIDUALS");
+    let product_trace_terminal_residuals = if prefer_product_trace_terminal_residuals {
+        env_flag_enabled_by_default("GLRMASK_L1_PRODUCT_TRACE_TERMINAL_RESIDUALS")
+    } else {
+        env_flag_enabled("GLRMASK_L1_PRODUCT_TRACE_TERMINAL_RESIDUALS")
+    };
+    let direct_terminal_residuals = env_flag_enabled("GLRMASK_L1_DIRECT_TERMINAL_RESIDUALS")
+        && !product_trace_terminal_residuals;
     let precompiled_exprs = direct_terminal_residuals.then(|| {
         let wall_started_at = Instant::now();
         let compiled = exprs
@@ -1512,7 +1708,8 @@ fn build_tokenizer_from_exprs_partitioned_impl(
             .map(|(expr, _)| expr)
             .collect::<Vec<_>>()
     });
-    if let Some(precompiled_exprs) = precompiled_exprs.as_deref()
+    if direct_terminal_residuals
+        && let Some(precompiled_exprs) = precompiled_exprs.as_deref()
         && let Some(tokenizer) = build_partitioned_tokenizer_from_precompiled_terminal_dfas(
             precompiled_exprs,
             partition_ids,
@@ -1522,6 +1719,32 @@ fn build_tokenizer_from_exprs_partitioned_impl(
         if profile_detail {
             eprintln!(
                 "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={} terminal_residual_coordinates=true",
+                exprs.len(),
+                partition_ids
+                    .iter()
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                elapsed_ms(started_at),
+                tokenizer.num_states(),
+                tokenizer.transition_count(),
+            );
+        }
+        return tokenizer;
+    }
+    if product_trace_terminal_residuals
+        && let Some(tokenizer) = build_partitioned_tokenizer_with_product_trace_terminal_residuals(
+            exprs,
+            profile_labels,
+            partition_ids,
+            residual_isolation_classes,
+            Arc::from(exprs.to_vec()),
+            adaptive_override,
+        )
+    {
+        if profile_detail {
+            eprintln!(
+                "[glrmask/profile][tokenizer] partitioned_build_done terminals={} partitions={} elapsed_ms={:.3} final_states={} final_transitions={} product_trace_terminal_residual_coordinates=true",
                 exprs.len(),
                 partition_ids
                     .iter()
@@ -1937,6 +2160,7 @@ fn build_tokenizer_from_planned_expressions(
         &plan.partition_ids,
         Some(&plan.residual_isolation_classes),
         adaptive_override,
+        false,
     )
 }
 
@@ -1947,6 +2171,31 @@ fn build_ordinary_compile_tokenizer(
     adaptive_override.map_or_else(
         || build_tokenizer(grammar),
         |adaptive| build_tokenizer_with_partition_options(grammar, false, adaptive),
+    )
+}
+
+fn build_vocab_partition_ordinary_compile_tokenizer(grammar: &GrammarDef) -> Tokenizer {
+    let expressions = grammar
+        .terminals
+        .iter()
+        .map(terminal_expr)
+        .map(factor_regex_expr)
+        .collect::<Vec<_>>();
+    let labels = grammar
+        .terminals
+        .iter()
+        .enumerate()
+        .map(|(index, _)| grammar.terminal_display_name(index as u32))
+        .collect::<Vec<_>>();
+    let partition_ids = lexer_partition_ids(grammar);
+    let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+    build_tokenizer_from_exprs_partitioned_impl(
+        &expressions,
+        Some(&labels),
+        &partition_ids,
+        Some(&residual_isolation_classes),
+        None,
+        true,
     )
 }
 
@@ -2153,10 +2402,19 @@ pub(crate) fn build_vocab_partition_compile_context(
     Tokenizer,
     Option<ManyToOneIdMap>,
     Option<Arc<crate::compiler::stages::id_map_and_terminal_dwa::PartitionLocalSynthesisPlan>>,
+    bool,
 ) {
     crate::automata::lexer::compile::install_vocabulary_exact_state_certifier(
         crate::compiler::stages::id_map_and_terminal_dwa::synthetic_state_map::certify_vocabulary_exact_state_candidates,
     );
+
+    // VocabPartition consumes only the finite one-token observation coordinate.
+    // Do not construct the exact dynamic runtime tokenizer (or its exact->mask
+    // mapping) merely to throw both away afterward.
+    if let Ok(Some(mask)) = build_vocab_partition_direct_mask_tokenizer(grammar, vocab) {
+        return (mask, None, None, true);
+    }
+
     let plan = plan_synthetic_tokenizer(grammar, vocab);
     let partition_local_synthesis_plan = plan.as_ref().map(|plan| {
         Arc::new(
@@ -2189,16 +2447,6 @@ pub(crate) fn build_vocab_partition_compile_context(
         )
     });
 
-    if static_virtual_residual_candidate(grammar, plan.is_none()) {
-        if let Ok(Some(exact)) = build_dynamic_virtual_tokenizer(grammar, true) {
-            if let Some((mask, _projections)) = exact
-                .virtual_residuals_mask_tokenizer_with_vocab(vocab.max_token_byte_len(), Some(vocab))
-            {
-                return (mask, None, partition_local_synthesis_plan);
-            }
-        }
-    }
-
     let select_pair = |plan: &SyntheticTokenizerPlan| {
         prepare_structural_tokenizer_pair(grammar, plan, vocab, None, true).and_then(
             |(synthesized, full, certified)| {
@@ -2216,7 +2464,7 @@ pub(crate) fn build_vocab_partition_compile_context(
             let direct_token_quotient_compile =
                 env_flag_enabled_by_default("GLRMASK_DIRECT_TOKEN_QUOTIENT_COMPILE");
             if direct_token_quotient_compile {
-                return (synthesized, None, partition_local_synthesis_plan);
+                return (synthesized, None, partition_local_synthesis_plan, false);
             }
 
             let synthesized_states = synthesized.num_states() as usize;
@@ -2241,13 +2489,14 @@ pub(crate) fn build_vocab_partition_compile_context(
                 deferred_full.finish(),
                 Some(initial_state_map),
                 partition_local_synthesis_plan,
+                false,
             );
         }
     }
 
-    let mut tokenizer = build_ordinary_compile_tokenizer(grammar, None);
+    let mut tokenizer = build_vocab_partition_ordinary_compile_tokenizer(grammar);
     tokenizer.isolate_start_state_and_drain_nullable_terminals();
-    (tokenizer, None, partition_local_synthesis_plan)
+    (tokenizer, None, partition_local_synthesis_plan, false)
 }
 
 fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerminal> {

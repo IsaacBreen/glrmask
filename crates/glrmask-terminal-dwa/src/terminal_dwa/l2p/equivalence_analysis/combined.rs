@@ -1974,6 +1974,28 @@ pub fn analyze_equivalences_with_group_filter(
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let use_prepartition = std::env::var("GLRMASK_VOCAB_PARTITION_L2P_PRECLASS")
+        .map(|value| {
+            let value = value.trim();
+            value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+        })
+        .unwrap_or(false);
+    if use_prepartition {
+        return analyze_vocab_first_transition_prepartition(
+            partition_label,
+            tokenizer,
+            vocab,
+            disallowed_follows,
+            ignore_terminal,
+            disallowed_follows_are_ignore_transparent,
+            active_groups,
+            shared_vocab_dfa_cache,
+            shared_analysis_dfa_cache,
+            flat_trans,
+            initial_state_map,
+            prebuilt_token_trie,
+        );
+    }
     analyze_equivalences_impl(
         partition_label,
         tokenizer,
@@ -1993,6 +2015,211 @@ pub fn analyze_equivalences_with_group_filter(
         token_position_partition,
         precomputed_raw_observations,
         prebuilt_token_trie,
+        false,
+    )
+}
+
+/// Vocabulary-only variant of the exact combined analysis.
+///
+/// When the commuting quotient pipeline selects vocabulary-first order, the
+/// token partition is already exact before the final tokenizer-state quotient
+/// is computed.  In that case this returns immediately after materializing the
+/// token map.  Otherwise it deliberately falls back to the full combined
+/// analysis rather than weakening the equivalence relation.
+pub fn analyze_vocab_equivalences_with_group_filter(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    disallowed_follows_are_ignore_transparent: bool,
+    pre_normalized_disallowed_follows: Option<&[BitSet]>,
+    active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_base_setup_ms: f64,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    initial_state_map_has_stable_restricted_observation: bool,
+    token_position_partition: Option<&GlobalTokenPositionStatePartition>,
+    precomputed_raw_observations: Option<(&[u32], &[u32])>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    analyze_equivalences_impl(
+        partition_label,
+        tokenizer,
+        vocab,
+        disallowed_follows,
+        ignore_terminal,
+        disallowed_follows_are_ignore_transparent,
+        pre_normalized_disallowed_follows,
+        active_groups,
+        shared_vocab_dfa_cache,
+        shared_analysis_dfa_cache,
+        shared_base_setup_ms,
+        flat_trans,
+        shared_transition_cache,
+        initial_state_map,
+        initial_state_map_has_stable_restricted_observation,
+        token_position_partition,
+        precomputed_raw_observations,
+        prebuilt_token_trie,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn analyze_vocab_first_transition_prepartition(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<u32>,
+    disallowed_follows_are_ignore_transparent: bool,
+    active_groups: Option<&[bool]>,
+    shared_vocab_dfa_cache: Option<&super::vocab::fast::SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&super::vocab::fast::SharedVocabAnalysisDfaCache>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let total_started_at = Instant::now();
+    let follows_started_at = Instant::now();
+    let token_path_disallowed_follows = (!disallowed_follows_are_ignore_transparent)
+        .then(|| ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal));
+    let effective_disallowed = token_path_disallowed_follows
+        .as_ref()
+        .unwrap_or(disallowed_follows);
+    let effective_follows_normalize_ms = follows_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let prepare_started_at = Instant::now();
+    let prepared = prepare_equivalence_inputs(tokenizer, vocab, initial_state_map);
+    let token_len_stats = token_length_stats(&prepared.token_bytes);
+    let max_token_len = prepared.token_bytes.iter().map(|token| token.len()).max().unwrap_or(0);
+    let prepare_inputs_ms = prepare_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let view_started_at = Instant::now();
+    let owned_view;
+    let mut bounded_initial_states = Vec::new();
+    let tokenizer_view = if tokenizer.has_epsilon_transitions() {
+        let bounded_prebuilt_trie = prebuilt_token_trie
+            .filter(|trie| trie.is_reasonable_superset_for(prepared.token_bytes.len()));
+        let bounded = build_bounded_analysis_view_with_trie(
+            tokenizer,
+            &prepared.initial_states,
+            &prepared.token_bytes,
+            active_groups,
+            bounded_prebuilt_trie,
+        );
+        bounded_initial_states = prepared
+            .initial_states
+            .iter()
+            .map(|&raw| bounded.view_state_for_raw_start(raw))
+            .collect();
+        bounded_initial_states.sort_unstable();
+        bounded_initial_states.dedup();
+        owned_view = bounded.tokenizer_view;
+        &owned_view
+    } else {
+        let compatible_flat_trans =
+            flat_trans.filter(|ft| ft.len() == tokenizer.num_states() as usize * 256);
+        owned_view = match (active_groups, compatible_flat_trans) {
+            (Some(groups), Some(ft)) => {
+                TokenizerView::new_filtered_from_flat_trans(ft, tokenizer, groups)
+            }
+            (Some(groups), None) => TokenizerView::new_filtered(tokenizer, groups),
+            (None, Some(ft)) => TokenizerView::new_from_flat_trans(ft, tokenizer),
+            _ => TokenizerView::new(tokenizer),
+        };
+        &owned_view
+    };
+    let analysis_view_build_ms = view_started_at.elapsed().as_secs_f64() * 1000.0;
+    let analysis_initial_states = if tokenizer.has_epsilon_transitions() {
+        bounded_initial_states.as_slice()
+    } else {
+        prepared.initial_states.as_slice()
+    };
+
+    // Bounded epsilon views use partition-local state coordinates, so never
+    // reuse a grammar-wide DFA cache whose key does not encode that topology.
+    let (analysis_vocab_dfa_cache, analysis_dfa_cache) = if tokenizer.has_epsilon_transitions() {
+        (None, None)
+    } else {
+        (shared_vocab_dfa_cache, shared_analysis_dfa_cache)
+    };
+
+    let vocab_started_at = Instant::now();
+    let (vocab_classes, vocab_analysis_dfa_build_ms) =
+        vocab_equivalence_analysis::find_vocab_first_transition_preclasses_with_group_filter_profiled(
+            tokenizer_view,
+            &prepared.token_bytes,
+            analysis_initial_states,
+            effective_disallowed,
+            None,
+            active_groups,
+            analysis_vocab_dfa_cache,
+            analysis_dfa_cache,
+        );
+    let vocab_equiv_ms = vocab_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let finalize_started_at = Instant::now();
+    let vocab_tokens = build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id);
+    let tokenizer_states = initial_state_map.cloned().unwrap_or_else(|| {
+        let count = tokenizer.num_states();
+        ManyToOneIdMap::from_original_to_internal_allowing_unmapped((0..count).collect(), count)
+    });
+    let reps = tokenizer_states.num_internal_ids() as usize;
+    let id_map_finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+    {
+        eprintln!(
+            "[glrmask/profile][vocab_l2p_first_transition_prepartition] partition={} tokens={} classes={} states={} total_ms={:.3} view_ms={:.3} prepare_ms={:.3} factor_ms={:.3} finalize_ms={:.3}",
+            partition_label,
+            vocab.len(),
+            vocab_tokens.num_internal_ids(),
+            analysis_initial_states.len(),
+            total_started_at.elapsed().as_secs_f64() * 1000.0,
+            analysis_view_build_ms,
+            prepare_inputs_ms,
+            vocab_equiv_ms,
+            id_map_finalize_ms,
+        );
+    }
+    (
+        InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
+        },
+        CombinedEquivalenceProfile {
+            initial_states_considered: analysis_initial_states.len(),
+            max_length_skipped: true,
+            max_token_len,
+            token_len_gt_4: token_len_stats.gt_4,
+            token_len_gt_8: token_len_stats.gt_8,
+            token_len_gt_16: token_len_stats.gt_16,
+            token_len_gt_32: token_len_stats.gt_32,
+            token_len_gt_64: token_len_stats.gt_64,
+            raw_analysis_base_init_ms: 0.0,
+            analysis_view_build_ms,
+            active_mask_filter_ms: 0.0,
+            effective_follows_normalize_ms,
+            prepare_inputs_ms,
+            byte_class_setup_ms: 0.0,
+            vocab_analysis_dfa_build_ms,
+            token_dedup_ms: 0.0,
+            restricted_observation_state_equiv_ms: 0.0,
+            max_length_state_equiv_ms: 0.0,
+            vocab_equiv_ms,
+            exact_state_equiv_ms: 0.0,
+            id_map_finalize_ms,
+            restricted_observation_reps: reps,
+            max_length_reps: reps,
+            exact_reps: reps,
+            exact_rep_confirmation_used: false,
+        },
     )
 }
 
@@ -2019,6 +2246,7 @@ fn analyze_equivalences_impl(
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
+    vocab_only: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
     let prebuilt_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L2P_TOKEN_TRIE")
         .map(|value| {
@@ -3150,6 +3378,56 @@ fn analyze_equivalences_impl(
                 if uses_analysis_quotient { None } else { shared_analysis_dfa_cache },
             );
         let vocab_equiv_ms = vocab_equiv_started_at.elapsed().as_secs_f64() * 1000.0;
+        if vocab_only {
+            let id_map_finalize_started_at = Instant::now();
+            let vocab_classes = expand_vocab_classes(
+                dedup_vocab_classes,
+                &dedup.original_to_repr,
+                dedup.representative_token_bytes.len(),
+            );
+            let vocab_tokens =
+                build_vocab_map(&vocab_classes, &prepared.token_ids, prepared.max_token_id);
+            let tokenizer_states = pre_state_map.clone();
+            let exact_reps = tokenizer_states.num_internal_ids() as usize;
+            let internal_id_map = InternalIdMap {
+                tokenizer_states,
+                vocab_tokens,
+                deferred_vocab_singleton_original_ids: None,
+            };
+            let id_map_finalize_ms =
+                id_map_finalize_started_at.elapsed().as_secs_f64() * 1000.0;
+            return (
+                internal_id_map,
+                CombinedEquivalenceProfile {
+                    initial_states_considered: prepared.initial_states.len(),
+                    max_length_skipped: pipeline_profile.max_length_skipped,
+                    max_token_len,
+                    token_len_gt_4: token_len_stats.gt_4,
+                    token_len_gt_8: token_len_stats.gt_8,
+                    token_len_gt_16: token_len_stats.gt_16,
+                    token_len_gt_32: token_len_stats.gt_32,
+                    token_len_gt_64: token_len_stats.gt_64,
+                    raw_analysis_base_init_ms,
+                    analysis_view_build_ms,
+                    active_mask_filter_ms: 0.0,
+                    effective_follows_normalize_ms,
+                    prepare_inputs_ms,
+                    byte_class_setup_ms,
+                    vocab_analysis_dfa_build_ms,
+                    token_dedup_ms,
+                    restricted_observation_state_equiv_ms: pipeline_profile
+                        .restricted_observation_state_equiv_ms,
+                    max_length_state_equiv_ms: pipeline_profile.max_length_state_equiv_ms,
+                    vocab_equiv_ms,
+                    exact_state_equiv_ms: 0.0,
+                    id_map_finalize_ms,
+                    restricted_observation_reps: pipeline_profile.restricted_observation_reps,
+                    max_length_reps: pipeline_profile.max_length_reps,
+                    exact_reps,
+                    exact_rep_confirmation_used: false,
+                },
+            );
+        }
         let representative_tokens = representative_tokens_for_vocab_classes(
             &dedup_vocab_classes,
             &dedup.representative_token_bytes,

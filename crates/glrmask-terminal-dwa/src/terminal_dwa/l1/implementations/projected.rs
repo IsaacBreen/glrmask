@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 
 use super::{BuildInput, LocalIdMapTerminalDwa, common};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
-use crate::automata::lexer::tokenizer::SingletonEpsilonClosures;
+use crate::automata::lexer::tokenizer::{SingletonEpsilonClosures, TerminalResidualCoordinates};
 use crate::automata::lexer::{DFA, Lexer};
 use crate::terminal_dwa::l1::implementations::support::{DEAD, Scanner};
 use crate::Vocab;
@@ -253,6 +253,7 @@ struct DirectLocalResidual {
 
 fn build_direct_local_residual(
     dfa: &DFA,
+    terminal_group: u32,
     bytes: &[u8],
     symbol_for_representative: &[u8; 256],
 ) -> DirectLocalResidual {
@@ -260,7 +261,11 @@ fn build_direct_local_residual(
     let mut original_to_live = vec![DEAD; dfa.num_states()];
     let mut live_count = 0u32;
     for state in 0..dfa.num_states() as u32 {
-        if dfa.finalizers(state).contains(0) || dfa.possible_future_group_ids(state).contains(0) {
+        if dfa.finalizers(state).contains(terminal_group as usize)
+            || dfa
+                .possible_future_group_ids(state)
+                .contains(terminal_group as usize)
+        {
             original_to_live[state as usize] = live_count;
             live_count += 1;
         }
@@ -385,9 +390,17 @@ fn build_direct_terminal_residual_machine<'a>(
     input: BuildInput<'a>,
     bytes: &[u8],
 ) -> Option<(Projected<'a>, SparseRoots)> {
+    let coordinates = input.tokenizer.terminal_residual_coordinates()?;
+    build_direct_terminal_residual_machine_with_coordinates(input, bytes, coordinates)
+}
+
+fn build_direct_terminal_residual_machine_with_coordinates<'a>(
+    input: BuildInput<'a>,
+    bytes: &[u8],
+    coordinates: &TerminalResidualCoordinates,
+) -> Option<(Projected<'a>, SparseRoots)> {
     let profile = std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some();
     let total_started = profile.then(Instant::now);
-    let coordinates = input.tokenizer.terminal_residual_coordinates()?;
     if coordinates.len() != input.tokenizer.num_states() as usize
         || coordinates.terminal_dfa_count() < input.active_terminals.len()
     {
@@ -419,8 +432,10 @@ fn build_direct_terminal_residual_machine<'a>(
             .par_iter()
             .map(|&terminal| {
                 coordinates
-                    .terminal_dfa(terminal)
-                    .map(|dfa| build_direct_local_residual(dfa, bytes, &symbol_for_representative))
+                    .terminal_dfa_and_group(terminal)
+                    .map(|(dfa, group)| {
+                        build_direct_local_residual(dfa, group, bytes, &symbol_for_representative)
+                    })
             })
             .collect::<Vec<_>>();
         if locals.iter().any(Option::is_none) {
@@ -436,7 +451,7 @@ fn build_direct_terminal_residual_machine<'a>(
                 .max_by(|(_, left), (_, right)| left.elapsed_ms.total_cmp(&right.elapsed_ms))
         {
             let terminal = terminals[index];
-            if let Some(dfa) = coordinates.terminal_dfa(terminal) {
+            if let Some((dfa, _)) = coordinates.terminal_dfa_and_group(terminal) {
                 eprintln!(
                     "[glrmask/profile][l1_direct_local_max] partition={} terminal={} source_states={} source_edges={} reduced_states={} reduced_edges={} elapsed_ms={:.3}",
                     input.partition_label,
@@ -452,7 +467,7 @@ fn build_direct_terminal_residual_machine<'a>(
         if std::env::var_os("GLRMASK_PROFILE_L1_DIRECT_LOCALS").is_some() {
             for (index, local) in locals.iter().enumerate() {
                 let terminal = terminals[index];
-                let Some(dfa) = coordinates.terminal_dfa(terminal) else {
+                let Some((dfa, _)) = coordinates.terminal_dfa_and_group(terminal) else {
                     continue;
                 };
                 if dfa.transition_count() < 500 {
@@ -3129,6 +3144,7 @@ fn finite_compact_runs(
     class_fingerprints: &[Vec<u32>],
     profiles: &[Arc<[ProfileRun]>],
     token_count: usize,
+    materialize_compact_rows: bool,
 ) -> (Vec<u32>, Vec<usize>, Vec<Vec<u32>>, usize, usize) {
     let mut rows = Vec::<Vec<ProfileRun>>::with_capacity(class_fingerprints.len());
     let mut events = Vec::<FiniteRowEvent>::new();
@@ -3195,12 +3211,15 @@ fn finite_compact_runs(
             });
             token_class[token] = class;
         }
-        let mut compact_rows = (0..rows.len())
-            .map(|_| vec![0u32; token_reps.len()])
-            .collect::<Vec<_>>();
-        for (class, &token) in token_reps.iter().enumerate() {
-            for row in 0..rows.len() {
-                compact_rows[row][class] = columns[token][row];
+        let mut compact_rows = Vec::new();
+        if materialize_compact_rows {
+            compact_rows = (0..rows.len())
+                .map(|_| vec![0u32; token_reps.len()])
+                .collect::<Vec<_>>();
+            for (class, &token) in token_reps.iter().enumerate() {
+                for row in 0..rows.len() {
+                    compact_rows[row][class] = columns[token][row];
+                }
             }
         }
         return (token_class, token_reps, compact_rows, 0, referenced_runs);
@@ -3211,7 +3230,14 @@ fn finite_compact_runs(
             let value = value.trim();
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
-        .unwrap_or(true);
+        // The full-vector fingerprint sweep is attractive when the caller also
+        // needs the compact state-class x token-class matrix: its verified
+        // class vectors are then reused directly. VocabPartition asks only for
+        // token classes, so retaining thousands of full column vectors becomes
+        // pure memory/copy work; the canonical persistent-tree sweep is faster
+        // for that mode. Preserve the historical default for ordinary Static
+        // callers and switch only the no-row-materialization path.
+        .unwrap_or(materialize_compact_rows);
     if use_exact_fingerprint_sweep {
         // Event positions are vocabulary indices in a compact bounded domain.
         // Counting-sort them in O(events + tokens) instead of comparison-sorting
@@ -3323,12 +3349,15 @@ fn finite_compact_runs(
                 position = next_position;
             }
         }
-        let mut compact_rows = (0..class_fingerprints.len())
-            .map(|_| vec![0u32; class_vectors.len()])
-            .collect::<Vec<_>>();
-        for (class, column) in class_vectors.iter().enumerate() {
-            for (row, &signature) in column.iter().enumerate() {
-                compact_rows[row][class] = signature;
+        let mut compact_rows = Vec::new();
+        if materialize_compact_rows {
+            compact_rows = (0..class_fingerprints.len())
+                .map(|_| vec![0u32; class_vectors.len()])
+                .collect::<Vec<_>>();
+            for (class, column) in class_vectors.iter().enumerate() {
+                for (row, &signature) in column.iter().enumerate() {
+                    compact_rows[row][class] = signature;
+                }
             }
         }
         return (
@@ -3382,22 +3411,25 @@ fn finite_compact_runs(
         .map(|(class, &token)| (token, class))
         .collect::<Vec<_>>();
     reps_sorted.sort_unstable();
-    let mut compact_rows = Vec::with_capacity(rows.len());
-    for row in &rows {
-        let mut compact = vec![0u32; token_reps.len()];
-        let mut run_index = 0usize;
-        for &(token, class) in &reps_sorted {
-            while run_index < row.len() && row[run_index].end as usize <= token {
-                run_index += 1;
+    let mut compact_rows = Vec::new();
+    if materialize_compact_rows {
+        compact_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut compact = vec![0u32; token_reps.len()];
+            let mut run_index = 0usize;
+            for &(token, class) in &reps_sorted {
+                while run_index < row.len() && row[run_index].end as usize <= token {
+                    run_index += 1;
+                }
+                if let Some(run) = row.get(run_index)
+                    && run.start as usize <= token
+                    && token < run.end as usize
+                {
+                    compact[class] = run.signature;
+                }
             }
-            if let Some(run) = row.get(run_index)
-                && run.start as usize <= token
-                && token < run.end as usize
-            {
-                compact[class] = run.signature;
-            }
+            compact_rows.push(compact);
         }
-        compact_rows.push(compact);
     }
     (token_class, token_reps, compact_rows, events.len(), referenced_runs)
 }
@@ -3758,6 +3790,7 @@ fn build_finite_projected_impl(
                 &class_fingerprints,
                 &profiles,
                 aliases.len(),
+                true,
             );
         let compact_ms = compact_started.elapsed().as_secs_f64() * 1000.0;
         let preordered_vocab = preordered_vocab_map_enabled(input)
@@ -4613,7 +4646,40 @@ pub fn build_projected_vocab_equivalence(input: BuildInput<'_>) -> Option<L1Voca
             build_binary_vocab_only_forced(input)
         };
     }
-    let kernel = projected_kernel(input);
+    // VocabPartition does not need the projected state-transition artifact.
+    // For the medium-sized p5 vocabulary family, the finite exact scan avoids
+    // the residual machine's comparatively expensive state construction while
+    // producing the same token equivalence relation. Keep Static's kernel
+    // policy unchanged; this choice is specific to the vocab-only result.
+    let direct_terminal_residuals_available = input
+        .tokenizer
+        .terminal_residual_coordinates()
+        .is_some()
+        && std::env::var("GLRMASK_L1_DIRECT_TERMINAL_RESIDUALS")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(true);
+    let force_p5_residual = input.partition_label == "p5"
+        && (direct_terminal_residuals_available
+            || std::env::var("GLRMASK_VOCAB_P5_FORCE_RESIDUAL")
+                .map(|value| {
+                    let value = value.trim();
+                    value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+                })
+                .unwrap_or(false));
+    let kernel = if force_p5_residual {
+        ProjectedKernel::Residual
+    } else if input.partition_label == "p5"
+        && input.subset_parent_order.is_none()
+        && input.vocab.len() >= 4_000
+        && input.tokenizer.num_states() >= 5_000
+    {
+        ProjectedKernel::Finite
+    } else {
+        projected_kernel(input)
+    };
     match kernel {
         ProjectedKernel::Finite => build_finite_projected_vocab_only(input, false),
         ProjectedKernel::Residual => build_binary_vocab_only(input),
@@ -4881,6 +4947,7 @@ fn build_finite_projected_vocab_only(
             &class_fingerprints,
             &profiles,
             aliases.len(),
+            false,
         );
     let preordered_vocab = preordered_vocab_map_enabled(input)
         .then(|| finite_vocab.original_order.as_deref())
@@ -4968,34 +5035,63 @@ fn build_binary_vocab_only_with_switch(
     let prep_cpu_ms = 0.0;
 
     let scan_timer = Instant::now();
-    let mut projected = Projected::new(input);
-    let root_rows = if let Some(state_map) = input.initial_state_map {
-        let representative_rows = state_map
-            .representative_original_ids
-            .iter()
-            .map(|&raw| {
-                assert_ne!(raw, u32::MAX, "L1 state quotient has an unmapped representative");
-                projected.root_sparse_row(raw)
+    let direct_terminal_residuals = input
+        .tokenizer
+        .terminal_residual_coordinates()
+        .is_some()
+        && std::env::var("GLRMASK_L1_DIRECT_TERMINAL_RESIDUALS")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
             })
-            .collect::<Vec<_>>();
-        state_map
-            .original_to_internal
-            .iter()
-            .enumerate()
-            .map(|(raw, &class)| {
-                if class == u32::MAX {
-                    projected.root_sparse_row(raw as u32)
-                } else {
-                    representative_rows[class as usize].clone()
-                }
-            })
-            .collect::<Vec<_>>()
+            .unwrap_or(true);
+    let direct_machine = if direct_terminal_residuals {
+        build_direct_terminal_residual_machine(input, &bytes)
     } else {
-        (0..input.tokenizer.num_states())
-            .map(|raw| projected.root_sparse_row(raw))
-            .collect::<Vec<_>>()
+        None
     };
-    let mut roots = SparseRoots::from_rows(root_rows);
+    let direct_selected = direct_machine.is_some();
+    let (mut projected, direct_roots) = if let Some((projected, roots)) = direct_machine {
+        (projected, Some(roots))
+    } else {
+        (Projected::new(input), None)
+    };
+    let mut roots = if let Some(roots) = direct_roots {
+        roots
+    } else {
+        let root_rows = if let Some(state_map) = input.initial_state_map {
+            let representative_rows = state_map
+                .representative_original_ids
+                .iter()
+                .map(|&raw| {
+                    assert_ne!(raw, u32::MAX, "L1 state quotient has an unmapped representative");
+                    projected.root_sparse_row(raw)
+                })
+                .collect::<Vec<_>>();
+            state_map
+                .original_to_internal
+                .iter()
+                .enumerate()
+                .map(|(raw, &class)| {
+                    if class == u32::MAX {
+                        projected.root_sparse_row(raw as u32)
+                    } else {
+                        representative_rows[class as usize].clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+        } else {
+            (0..input.tokenizer.num_states())
+                .map(|raw| projected.root_sparse_row(raw))
+                .collect::<Vec<_>>()
+        };
+        SparseRoots::from_rows(root_rows)
+    };
+    // Direct terminal residual construction changes how we obtain the exact
+    // residual machine, not the residual-vs-finite cost crossover. Preserve
+    // the existing finite handoff when the resulting direct machine is already
+    // beyond that crossover; otherwise enabling direct residuals can turn an
+    // intentionally-finite branch into a much slower residual scan.
     if projected.configs.len() > finite_switch_states {
         return build_finite_projected_vocab_only(input, true);
     }
@@ -5006,26 +5102,28 @@ fn build_binary_vocab_only_with_switch(
     if projected_limit_exceeded(input, projected.configs.len(), limit) {
         return build_finite_projected_vocab_only(input, true);
     }
-    let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
-    while let Some(state) = queue.pop_front() {
-        let mut row = Vec::new();
-        for (symbol, &byte) in bytes.iter().enumerate() {
-            let before = projected.configs.len();
-            let target = projected.step(state, byte, &roots);
-            if target != DEAD {
-                row.push((symbol as u8, target));
-            }
-            if projected.configs.len() > before {
-                queue.extend(before as u32..projected.configs.len() as u32);
-                if projected.configs.len() > finite_switch_states {
-                    return build_finite_projected_vocab_only(input, true);
+    if !direct_selected {
+        let mut queue = VecDeque::from_iter(0..projected.configs.len() as u32);
+        while let Some(state) = queue.pop_front() {
+            let mut row = Vec::new();
+            for (symbol, &byte) in bytes.iter().enumerate() {
+                let before = projected.configs.len();
+                let target = projected.step(state, byte, &roots);
+                if target != DEAD {
+                    row.push((symbol as u8, target));
                 }
-                if projected_limit_exceeded(input, projected.configs.len(), limit) {
-                    return build_finite_projected_vocab_only(input, true);
+                if projected.configs.len() > before {
+                    queue.extend(before as u32..projected.configs.len() as u32);
+                    if projected.configs.len() > finite_switch_states {
+                        return build_finite_projected_vocab_only(input, true);
+                    }
+                    if projected_limit_exceeded(input, projected.configs.len(), limit) {
+                        return build_finite_projected_vocab_only(input, true);
+                    }
                 }
             }
+            projected.transitions[state as usize] = row;
         }
-        projected.transitions[state as usize] = row;
     }
     let groups = projected
         .configs
@@ -5038,7 +5136,9 @@ fn build_binary_vocab_only_with_switch(
             value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
         })
         .unwrap_or(true);
-    let (mut minimized, _) = if use_grouped_minimize {
+    let (mut minimized, _) = if direct_selected {
+        (minimize_direct_residual_union(&projected.transitions, &bytes), None)
+    } else if use_grouped_minimize {
         let (minimized, stats) = minimize_grouped(&projected.transitions, &groups, &bytes);
         (minimized, Some(stats))
     } else {
@@ -5220,7 +5320,7 @@ mod finite_run_sweep_tests {
         }
 
         let (classes, reps, compact_rows, events, referenced_runs) =
-            finite_compact_runs(None, &fingerprints, &profiles, TOKENS);
+            finite_compact_runs(None, &fingerprints, &profiles, TOKENS, true);
         // Small matrices intentionally take the exact dense compactor and
         // therefore do not materialize sweep events. Both compaction paths must
         // preserve the same token-vector equivalence below.

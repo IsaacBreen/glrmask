@@ -965,11 +965,36 @@ pub fn build_l1_id_map_and_terminal_dwa(
     shared_generic_nfa_trie: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
 ) -> Option<LocalIdMapTerminalDwa> {
+    build_l1_id_map_and_terminal_dwa_mode(
+        partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
+        ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
+        initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
+        subset_parent_order, false,
+    )
+}
+
+pub fn build_l1_id_map_and_terminal_dwa_mode(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    flat_trans: &Arc<[u32]>,
+    transitions_by_byte: Option<&[u32]>,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    shared_generic_nfa_topology: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology>,
+    shared_generic_nfa_trie: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>,
+    subset_parent_order: Option<&L1IdentityVocabOrder>,
+    id_map_only: bool,
+) -> Option<LocalIdMapTerminalDwa> {
     implementations::build_from_env(implementations::BuildInput {
         partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
         ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
         initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
-        subset_parent_order,
+        subset_parent_order, id_map_only,
     })
 }
 

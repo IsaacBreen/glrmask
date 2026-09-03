@@ -1380,28 +1380,53 @@ impl BoundedCodeIntersectionOracle {
             pattern_operands.push(operand.clone());
         }
         let (prefix, body_expr, min, max, suffix) = envelope?;
-        if pattern_operands.is_empty() || max == usize::MAX {
+        if max == usize::MAX {
             return None;
         }
-        let pattern_expr = pattern_operands
-            .into_iter()
-            .reduce(|expr, intersect| Expr::Intersect {
-                expr: Box::new(expr),
-                intersect: Box::new(intersect),
-            })?;
+        // An unbounded copy of the envelope language contributes no additional
+        // constraint to the intersection:
+        //
+        //     prefix body* suffix  &  prefix body{min,max} suffix
+        //       == prefix body{min,max} suffix
+        //
+        // This shape is useful to the exact dynamic representation because it
+        // exposes the bounded-code envelope explicitly, but retaining the
+        // redundant operand as the oracle's pattern coordinate multiplies every
+        // finite mask state by an otherwise unnecessary pattern DFA. Drop only
+        // operands whose prefix, body language, and suffix are structurally
+        // identical to the selected envelope; any independent pattern/format
+        // operand remains untouched.
+        pattern_operands.retain(|operand| {
+            unbounded_code_envelope(operand).is_none_or(
+                |(candidate_prefix, candidate_body, candidate_suffix)| {
+                    candidate_prefix != prefix
+                        || candidate_body != body_expr
+                        || candidate_suffix != suffix
+                },
+            )
+        });
+        let pattern_expr = pattern_operands.into_iter().reduce(|expr, intersect| Expr::Intersect {
+            expr: Box::new(expr),
+            intersect: Box::new(intersect),
+        });
         // The oracle is a sidecar for avoiding giant-repeat materialization, so
         // its own proof construction must never eagerly materialize a giant
         // bounded repeat hidden inside either finite coordinate. The outer
         // envelope repeat is represented by the relation-doubling counter and
         // is intentionally not part of this check.
-        if expression_contains_large_bounded_repeat(&pattern_expr)
+        if pattern_expr
+            .as_ref()
+            .is_some_and(expression_contains_large_bounded_repeat)
             || expression_contains_large_bounded_repeat(&body_expr)
         {
             return None;
         }
-        let pattern = Arc::new(canonicalize_bounded_code_oracle_dfa(
-            compile_terminal_expr_dfa(&pattern_expr),
-        ));
+        let pattern = Arc::new(match pattern_expr {
+            Some(pattern_expr) => {
+                canonicalize_bounded_code_oracle_dfa(compile_terminal_expr_dfa(&pattern_expr))
+            }
+            None => universal_pattern_dfa(),
+        });
         let body = Arc::new(canonicalize_bounded_code_oracle_dfa(
             compile_terminal_expr_dfa(&body_expr),
         ));
@@ -1716,6 +1741,39 @@ impl BoundedCodeIntersectionOracle {
     }
 }
 
+/// Build only the finite one-token observation component for a certified
+/// bounded-code expression. Unlike `VirtualResidualRuntime`, this does not
+/// allocate or retain any exact/runtime residual state and does not construct
+/// an exact->mask projection: callers that only need the mask coordinate (for
+/// example vocabulary-equivalence analysis) can compile that coordinate
+/// directly.
+pub(crate) fn build_bounded_code_mask_component_for_vocab(
+    expr: &Expr,
+    vocab: &Vocab,
+    max_token_len: usize,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+) -> Option<(DFA, u32)> {
+    let oracle = BoundedCodeIntersectionOracle::from_expr(expr)?;
+    let crossed_boundaries = repeat_horizons
+        .horizon_for_dfa(oracle.body.as_ref(), vocab)
+        .unwrap_or_else(|| {
+            let minimum_body_width = oracle.body.min_match_byte_len().unwrap_or(1).max(1);
+            max_token_len
+                .div_ceil(minimum_body_width)
+                .saturating_add(1)
+        });
+    if oracle.min > crossed_boundaries.saturating_add(1) {
+        return None;
+    }
+    let desired_mask_max = oracle
+        .min
+        .checked_add(crossed_boundaries)?
+        .checked_add(1)?;
+    let mask_max = oracle.max.min(desired_mask_max);
+    let (dfa, root, _dense_to_mask) = oracle.finite_mask_dfa(mask_max)?;
+    Some((dfa, root))
+}
+
 
 #[derive(Debug, Clone)]
 #[doc(hidden)]
@@ -2023,7 +2081,11 @@ impl BoundedCodeIntersectionOracle {
         // boundary, then retain the transition closure of those roots. This
         // avoids the full count × body × pattern Cartesian product while still
         // covering every exact token-boundary state.
-        let crossed_boundaries = mask_max.checked_sub(self.min)?.checked_sub(1)?;
+        // `mask_max` can equal `min` when the declared interval is fixed
+        // (or otherwise narrower than the one-token stencil). In that case
+        // there is no collapsed interior layer, but the exact lower/upper
+        // boundary is still a perfectly valid finite projection root.
+        let crossed_boundaries = mask_max.saturating_sub(self.min).saturating_sub(1);
         let after_prefix = step_fixed_bytes(&self.pattern, 0, &self.prefix)?;
         let mut pattern_start = BitSet::new(pattern_states);
         pattern_start.set(after_prefix as usize);
@@ -2217,6 +2279,80 @@ fn flatten_sequence_operands<'a>(expr: &'a Expr, out: &mut Vec<&'a Expr>) {
         }
         other => out.push(other),
     }
+}
+
+fn universal_pattern_dfa() -> DFA {
+    let mut dfa = DFA::new(1);
+    dfa.ensure_group_capacity(1);
+    dfa.set_group_u8set(0, crate::ds::u8set::U8Set::all());
+    dfa.set_transitions_from_sorted_entries(0, (u8::MIN..=u8::MAX).map(|byte| (byte, 0)).collect());
+    let mut accepting = BitSet::new(1);
+    accepting.set(0);
+    let mut future = BitSet::new(1);
+    future.set(0);
+    dfa.overwrite_state_metadata(0, accepting, future);
+    dfa
+}
+
+/// Recognize the language skeleton `prefix body* suffix`. This is intentionally
+/// stricter than general regex equivalence: it is used only to prove that an
+/// intersection operand is structurally the unbounded version of a selected
+/// bounded-code envelope.
+fn unbounded_code_envelope(expr: &Expr) -> Option<(Vec<u8>, Expr, Vec<u8>)> {
+    let mut parts = Vec::new();
+    flatten_sequence_operands(expr, &mut parts);
+    let repeat_index = parts.iter().position(|part| {
+        matches!(
+            unwrap_shared_expr(part),
+            Expr::Repeat {
+                min: 0,
+                max: None,
+                ..
+            }
+        )
+    })?;
+    if parts.iter().enumerate().any(|(index, part)| {
+        index != repeat_index
+            && !matches!(unwrap_shared_expr(part), Expr::U8Seq(bytes) if !bytes.is_empty())
+    }) {
+        return None;
+    }
+    if parts[repeat_index + 1..]
+        .iter()
+        .any(|part| matches!(unwrap_shared_expr(part), Expr::Repeat { .. }))
+    {
+        return None;
+    }
+    let mut prefix = Vec::new();
+    for part in &parts[..repeat_index] {
+        let Expr::U8Seq(bytes) = unwrap_shared_expr(part) else {
+            return None;
+        };
+        prefix.extend_from_slice(bytes);
+    }
+    let mut suffix = Vec::new();
+    for part in &parts[repeat_index + 1..] {
+        let Expr::U8Seq(bytes) = unwrap_shared_expr(part) else {
+            return None;
+        };
+        suffix.extend_from_slice(bytes);
+    }
+    if prefix.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    let Expr::Repeat {
+        expr: body,
+        min: 0,
+        max: None,
+    } = unwrap_shared_expr(parts[repeat_index])
+    else {
+        return None;
+    };
+    Some((
+        prefix,
+        unwrap_shared_expr(body).clone(),
+        suffix,
+    ))
 }
 
 fn bounded_code_envelope(expr: &Expr) -> Option<(Vec<u8>, Expr, usize, usize, Vec<u8>)> {
@@ -3580,6 +3716,33 @@ mod tests {
         parts.extend((0..count).map(|_| bounded_code_body()));
         parts.push(bytes(b">"));
         Expr::Seq(parts)
+    }
+
+    #[test]
+    fn bounded_code_oracle_drops_redundant_unbounded_envelope_pattern() {
+        let unbounded = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(bounded_code_body()),
+                min: 0,
+                max: None,
+            },
+            bytes(b">"),
+        ]);
+        let expr = Expr::Intersect {
+            expr: Box::new(unbounded),
+            intersect: Box::new(bounded_code_envelope_expr(2, 4)),
+        };
+        let mut oracle = BoundedCodeIntersectionOracle::from_expr(&expr)
+            .expect("redundant unbounded envelope pattern should certify");
+        assert_eq!(oracle.pattern.num_states(), 1);
+        assert!(oracle.has_future(oracle.root_coordinate()));
+
+        let materialized = compile_terminal_expr_dfa(&expr);
+        assert_eq!(
+            oracle.has_future(oracle.root_coordinate()),
+            materialized.possible_future_group_ids(0).contains(0),
+        );
     }
 
     #[test]

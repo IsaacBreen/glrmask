@@ -614,6 +614,57 @@ pub fn build_l2p_id_map_and_terminal_dwa(
     >,
     initial_state_map: Option<&ManyToOneIdMap>,
 ) -> Option<LocalIdMapTerminalDwa> {
+    build_l2p_id_map_and_terminal_dwa_mode(
+        partition_label,
+        tokenizer,
+        vocab,
+        terminal_coloring,
+        use_terminal_coloring,
+        ignore_terminal,
+        grammar,
+        always_allowed_follows,
+        active_terminals,
+        disallowed_follows,
+        token_path_disallowed_follows,
+        normalized_token_path_disallowed_follows,
+        shared_vocab_dfa_cache,
+        shared_original_vocab_dfa_cache,
+        shared_original_vocab_analysis_dfa_cache,
+        shared_transition_cache,
+        shared_ti_output_cache,
+        flat_trans,
+        prebuilt_token_trie,
+        initial_state_map,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_l2p_id_map_and_terminal_dwa_mode(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    use_terminal_coloring: bool,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    always_allowed_follows: &[Vec<TerminalID>],
+    active_terminals: &[bool],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: Option<&[BitSet]>,
+    shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
+    shared_ti_output_cache: Option<&SharedTiTokenizerOutputCache>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    prebuilt_token_trie: Option<
+        &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    initial_state_map: Option<&ManyToOneIdMap>,
+    id_map_only: bool,
+) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
     }
@@ -941,8 +992,12 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 .is_some_and(|active| active == seed.active_terminals.as_ref())
                 && relevant_bytes == seed.relevant_bytes
         });
-    let (simplified_id_map, equiv_profile) =
-        equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+    let analyze_equivalences = if id_map_only {
+        equivalence_analysis::combined::analyze_vocab_equivalences_with_group_filter
+    } else {
+        equivalence_analysis::combined::analyze_equivalences_with_group_filter
+    };
+    let (simplified_id_map, equiv_profile) = analyze_equivalences(
             partition_label,
             tokenizer_for_build,
             vocab,
@@ -971,6 +1026,22 @@ pub fn build_l2p_id_map_and_terminal_dwa(
                 .flatten(),
             prebuilt_token_trie,
         );
+
+    if id_map_only {
+        let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+        let dwa = crate::automata::weighted_u32::dwa::DWA::new(
+            simplified_id_map.num_tsids(),
+            simplified_id_map.max_internal_token_id(),
+        );
+        return Some(LocalIdMapTerminalDwa {
+            id_map: simplified_id_map,
+            dwa,
+            profile: TerminalDwaPhaseProfile {
+                id_map_ms,
+                ..TerminalDwaPhaseProfile::default()
+            },
+        });
+    }
 
     // Replay and transport-coordinate refinement are intentionally deferred
     // until after the representative-only DWA is minimized and compacted.

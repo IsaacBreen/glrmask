@@ -4880,6 +4880,39 @@ pub fn find_vocab_equivalence_classes_with_group_filter_profiled<S: AsRef<[u8]> 
         shared_analysis_dfa_cache,
         FirstTransitionFactorMode::Environment,
         None,
+        false,
+    )
+}
+
+/// Return only the exact-safe first-transition token prepartition.
+///
+/// The exact authority pass may merge these preliminary classes but does not
+/// split them, so this is a conservative refinement of the final vocabulary
+/// quotient. If factorization cannot prove a merge, return singletons.
+pub fn find_vocab_first_transition_preclasses_with_group_filter_profiled<
+    S: AsRef<[u8]> + Sync,
+>(
+    tokenizer: &TokenizerView,
+    strings: &[S],
+    initial_states: &[usize],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    byte_to_class: Option<&[u8; 256]>,
+    active_groups: Option<&[bool]>,
+    shared_cache: Option<&SharedVocabDfaCache>,
+    shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
+) -> (VocabEquivalenceResult, f64) {
+    find_vocab_equivalence_classes_with_group_filter_profiled_impl(
+        tokenizer,
+        strings,
+        initial_states,
+        disallowed_follows,
+        byte_to_class,
+        active_groups,
+        shared_cache,
+        shared_analysis_dfa_cache,
+        FirstTransitionFactorMode::Force,
+        None,
+        true,
     )
 }
 
@@ -4914,6 +4947,7 @@ pub fn find_vocab_equivalence_classes_with_factor_state_refinement_profiled<
         shared_analysis_dfa_cache,
         FirstTransitionFactorMode::Environment,
         Some(&mut refine_states),
+        false,
     )
 }
 
@@ -4928,6 +4962,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
     shared_analysis_dfa_cache: Option<&SharedVocabAnalysisDfaCache>,
     first_transition_factor_mode: FirstTransitionFactorMode,
     mut factor_state_refiner: Option<&mut dyn FnMut(&[usize]) -> Vec<usize>>,
+    return_factor_prepartition: bool,
 ) -> (VocabEquivalenceResult, f64) {
     let input_state_count = tokenizer.dfa().states.len();
     if let Some((position, &state)) = initial_states
@@ -5131,6 +5166,14 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
                 preliminary_factor_ms,
             );
         }
+    }
+
+    if return_factor_prepartition {
+        let classes = factor_plan.map_or_else(
+            || (0..num_tokens).map(|token| vec![token]).collect::<Vec<_>>(),
+            |plan| plan.preliminary_classes,
+        );
+        return (BTreeSet::from_iter(classes), build_dfa_ms);
     }
 
     let factor_authority_states = factor_plan.as_ref().and_then(|plan| {
@@ -5717,6 +5760,7 @@ fn find_vocab_equivalence_classes_with_group_filter_profiled_impl<S: AsRef<[u8]>
             shared_analysis_dfa_cache,
             FirstTransitionFactorMode::Disabled,
             None,
+            false,
         );
         assert_eq!(
             result, reference,
@@ -6189,6 +6233,7 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Disabled,
             None,
+            false,
         );
         let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
             &view,
@@ -6201,6 +6246,7 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Force,
             None,
+            false,
         );
         let analysis_dfa =
             build_dfa_with_group_filter(&view, &disallowed, Some(&byte_classes), None, None);
@@ -6227,6 +6273,7 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Force,
             Some(&mut refine_states),
+            false,
         );
 
         assert_eq!(ordinary, direct, "ordinary hash partition must match direct observations");
@@ -6342,6 +6389,7 @@ mod shared_base_tests {
                 None,
                 FirstTransitionFactorMode::Disabled,
                 None,
+                false,
             );
             let (factored, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
                 &view,
@@ -6354,6 +6402,7 @@ mod shared_base_tests {
                 None,
                 FirstTransitionFactorMode::Force,
                 None,
+                false,
             );
             let analysis_dfa = build_dfa_with_group_filter(
                 &view,
@@ -6428,6 +6477,7 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Disabled,
             None,
+            false,
         );
         let (forced, _) = find_vocab_equivalence_classes_with_group_filter_profiled_impl(
             &view,
@@ -6440,6 +6490,7 @@ mod shared_base_tests {
             None,
             FirstTransitionFactorMode::Force,
             None,
+            false,
         );
         assert_eq!(forced, ordinary);
     }

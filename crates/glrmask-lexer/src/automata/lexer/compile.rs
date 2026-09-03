@@ -147,6 +147,21 @@ pub struct VocabularyRepeatHorizonCache {
     horizons: Mutex<FxHashMap<RepeatBodyLanguageKey, Option<usize>>>,
 }
 
+#[doc(hidden)]
+pub fn build_bounded_code_mask_component_for_vocab(
+    expr: &Expr,
+    vocab: &Vocab,
+    max_token_len: usize,
+    repeat_horizons: &VocabularyRepeatHorizonCache,
+) -> Option<(DFA, u32)> {
+    super::runtime_residual::build_bounded_code_mask_component_for_vocab(
+        expr,
+        vocab,
+        max_token_len,
+        repeat_horizons,
+    )
+}
+
 impl VocabularyRepeatHorizonCache {
     pub fn new() -> Self {
         Self::default()
@@ -4504,6 +4519,15 @@ fn compile_with_plan_internal(
     plan: ExclusionCompilePlan,
     capture_product_trace: bool,
 ) -> (DFA, Option<ProductBuildTrace>) {
+    compile_with_plan_internal_options(plan, capture_product_trace, true, false)
+}
+
+fn compile_with_plan_internal_options(
+    plan: ExclusionCompilePlan,
+    capture_product_trace: bool,
+    virtual_fixed_sequences: bool,
+    collapse_traced_duplicate_coordinates: bool,
+) -> (DFA, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
@@ -4538,8 +4562,9 @@ fn compile_with_plan_internal(
             &plan.exclusions,
             &plan.intersections,
             capture_product_trace,
-            true,
+            virtual_fixed_sequences,
             plan.local_small_product,
+            collapse_traced_duplicate_coordinates,
         )
     } else {
         (compile_single_expr_dfa(&plan.compiled_exprs[0]), false, None)
@@ -4826,9 +4851,40 @@ pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
                 });
             }
 
-            let local_exprs = terminal_ids
+            // The traced builder historically placed every terminal in the
+            // product independently. Large schema imports contain many exactly
+            // identical single-terminal DFAs, so that needlessly multiplies the
+            // product coordinate even though those terminals can never diverge.
+            // DFA equality is exact structural equality (including group
+            // metadata), making it safe to share one product coordinate and
+            // fan its observation/residual state back out to every alias.
+            let mut unique_dfas = Vec::<Arc<DFA>>::new();
+            let mut unique_members = Vec::<Vec<(usize, usize)>>::new();
+            let mut unique_by_dfa = FxHashMap::<Arc<DFA>, usize>::default();
+            for (local_group, &terminal) in terminal_ids.iter().enumerate() {
+                let terminal_dfa = Arc::clone(terminal_dfas.get(terminal)?);
+                let unique = if let Some(&unique) = unique_by_dfa.get(&terminal_dfa) {
+                    unique
+                } else {
+                    let unique = unique_dfas.len();
+                    unique_by_dfa.insert(Arc::clone(&terminal_dfa), unique);
+                    unique_dfas.push(Arc::clone(terminal_dfas.get(terminal)?));
+                    unique_members.push(Vec::new());
+                    unique
+                };
+                unique_members[unique].push((local_group, terminal));
+            }
+            if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                eprintln!(
+                    "[glrmask/profile][precompiled_terminal_dfa_dedup] terminals={} unique={} saved={}",
+                    terminal_ids.len(),
+                    unique_dfas.len(),
+                    terminal_ids.len().saturating_sub(unique_dfas.len()),
+                );
+            }
+            let local_exprs = unique_dfas
                 .iter()
-                .map(|&terminal| Expr::Dfa(Arc::clone(&terminal_dfas[terminal])))
+                .map(|dfa| Expr::Dfa(Arc::clone(dfa)))
                 .collect::<Vec<_>>();
             let empty_ops = BTreeMap::<u32, BTreeSet<u32>>::new();
             let (mut dfa, group_ops_applied, trace) = build_product_dfa(
@@ -4840,11 +4896,41 @@ pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
                 true,
                 true,
                 false,
+                false,
             );
             if group_ops_applied {
                 return None;
             }
-            dfa.ensure_group_capacity(local_exprs.len());
+            // `build_product_dfa` labels states by unique-DFA coordinate. Expand
+            // those exact labels back to the original terminal-local groups.
+            // This preserves the tokenizer's public terminal observations even
+            // though identical terminals share transition topology.
+            let compact_metadata = (0..dfa.num_states() as u32)
+                .map(|state| {
+                    (
+                        dfa.finalizers(state).clone(),
+                        dfa.possible_future_group_ids(state).clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            dfa.ensure_group_capacity(terminal_ids.len());
+            for (state, (compact_finalizers, compact_futures)) in
+                compact_metadata.into_iter().enumerate()
+            {
+                let mut finalizers = BitSet::new(terminal_ids.len());
+                for unique in compact_finalizers.iter() {
+                    for &(local_group, _) in unique_members.get(unique)? {
+                        finalizers.set(local_group);
+                    }
+                }
+                let mut futures = BitSet::new(terminal_ids.len());
+                for unique in compact_futures.iter() {
+                    for &(local_group, _) in unique_members.get(unique)? {
+                        futures.set(local_group);
+                    }
+                }
+                dfa.overwrite_state_metadata(state as u32, finalizers, futures);
+            }
             for (local_group, &terminal) in terminal_ids.iter().enumerate() {
                 dfa.set_group_u8set(
                     local_group as u32,
@@ -4860,8 +4946,9 @@ pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
                 let tuple = trace.state_tuples.tuple(state);
                 let mut row = Vec::with_capacity(tuple.len());
                 for (coordinate, residual_state) in tuple {
-                    let terminal = *terminal_ids.get(coordinate as usize)?;
-                    row.push((terminal as u32, residual_state));
+                    for &(_, terminal) in unique_members.get(coordinate as usize)? {
+                        row.push((terminal as u32, residual_state));
+                    }
                 }
                 row.sort_unstable();
                 rows.push(row);
@@ -4898,6 +4985,449 @@ pub fn build_partitioned_tokenizer_from_precompiled_terminal_dfas(
     tokenizer.set_terminal_residual_coordinates(
         TerminalResidualCoordinates::from_rows_and_dfas(rows, terminal_dfas),
     );
+    Some(tokenizer)
+}
+
+/// Build the direct-L1 sidecar from the same product components used by normal
+/// partition compilation. This avoids both recompiling every terminal DFA and
+/// projecting terminal residual coordinates back out of the finished tokenizer
+/// after the fact.
+pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
+    exprs: &[Expr],
+    visible_labels: Option<&[String]>,
+    partitions: &[u32],
+    residual_isolation_classes: Option<&[Option<u32>]>,
+    retained_exprs: Arc<[Expr]>,
+    adaptive: Option<bool>,
+) -> Option<Tokenizer> {
+    if exprs.len() != partitions.len() || exprs.len() != retained_exprs.len() || exprs.is_empty() {
+        return None;
+    }
+    if adaptive.unwrap_or_else(adaptive_lexer_enabled) {
+        // Cross-partition adaptive products need their own trace composition.
+        // The default lexer path is non-adaptive; fail closed for explicit
+        // adaptive diagnostics rather than silently changing that topology.
+        return None;
+    }
+    if let Some(labels) = visible_labels
+        && labels.len() != exprs.len()
+    {
+        return None;
+    }
+    if let Some(classes) = residual_isolation_classes
+        && classes.len() != exprs.len()
+    {
+        return None;
+    }
+
+    let started_at = Instant::now();
+    let rewritten_exprs = materialize_repeated_subexpression_dfas(exprs);
+    let exprs = rewritten_exprs.as_deref().unwrap_or(exprs);
+    let mut grouped = BTreeMap::<u32, Vec<usize>>::new();
+    for (terminal, &partition) in partitions.iter().enumerate() {
+        grouped.entry(partition).or_default().push(terminal);
+    }
+    if let Some(classes) = residual_isolation_classes {
+        for terminal_ids in grouped.values() {
+            let mut class = None;
+            let mut has_unprotected = false;
+            for &terminal in terminal_ids {
+                match classes[terminal] {
+                    Some(current) => match class {
+                        Some(previous) if previous != current => return None,
+                        Some(_) => {}
+                        None => class = Some(current),
+                    },
+                    None => has_unprotected = true,
+                }
+            }
+            if class.is_some() && has_unprotected {
+                return None;
+            }
+        }
+    }
+    let shared_duplicates = shared_duplicate_nested_group_op_cache(exprs, &grouped);
+    if let Some(shared_duplicates) = &shared_duplicates {
+        prewarm_shared_duplicate_nested_group_ops(shared_duplicates);
+    }
+
+    struct TracedComponent {
+        terminal_ids: Vec<usize>,
+        dfa: Arc<DFA>,
+        rows: Vec<Vec<(u32, u32)>>,
+        sources: Vec<(usize, Arc<DFA>, u32)>,
+    }
+
+    let components = grouped
+        .into_iter()
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .map(|(_, terminal_ids)| -> Option<TracedComponent> {
+            let local_exprs = terminal_ids
+                .iter()
+                .map(|&terminal| exprs[terminal].clone())
+                .collect::<Vec<_>>();
+            let local_labels = visible_labels.map(|labels| {
+                terminal_ids
+                    .iter()
+                    .map(|&terminal| labels[terminal].clone())
+                    .collect::<Vec<_>>()
+            });
+            let mut nested_group_op_cache = NestedGroupOpCache {
+                shared_duplicates: shared_duplicates.clone(),
+                ..NestedGroupOpCache::default()
+            };
+            let plan = build_exclusion_compile_plan_with_labels_and_cache(
+                &local_exprs,
+                local_labels.as_deref(),
+                &mut nested_group_op_cache,
+            );
+            let visible_groups = plan.visible_groups;
+            if visible_groups != terminal_ids.len() {
+                return None;
+            }
+            let mut complex = vec![false; visible_groups];
+            for &group in plan.exclusions.keys().chain(plan.intersections.keys()) {
+                if let Some(slot) = complex.get_mut(group as usize) {
+                    *slot = true;
+                }
+            }
+
+            let compiled_group_count = plan.compiled_exprs.len();
+            // Preserve only the logical group-op wiring for the rare complex
+            // visible groups. After product compilation we rebuild their
+            // standalone expression from the trace's already-compiled DFA
+            // coordinates, avoiding any recursive recompilation of the source
+            // expressions.
+            let mut complex_ops = vec![None::<(Vec<u32>, Vec<u32>)>; visible_groups];
+            for local_group in 0..visible_groups {
+                if !complex[local_group] {
+                    continue;
+                }
+                let exclusions = plan
+                    .exclusions
+                    .get(&(local_group as u32))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>();
+                let intersections = plan
+                    .intersections
+                    .get(&(local_group as u32))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>();
+                complex_ops[local_group] = Some((exclusions, intersections));
+            }
+
+            let (dfa, trace) = compile_with_plan_internal_options(plan, true, true, true);
+            let dfa = Arc::new(dfa);
+            if visible_groups == 1 {
+                let terminal = terminal_ids[0];
+                let rows = (0..dfa.num_states() as u32)
+                    .map(|state| {
+                        (dfa.finalizers(state).contains(0)
+                            || dfa.possible_future_group_ids(state).contains(0))
+                            .then_some(vec![(terminal as u32, state)])
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                return Some(TracedComponent {
+                    terminal_ids,
+                    dfa: Arc::clone(&dfa),
+                    rows,
+                    sources: vec![(terminal, dfa, 0)],
+                });
+            }
+
+            let trace = trace?;
+            if trace.state_tuples.len() != dfa.num_states() {
+                return None;
+            }
+            let mut coordinate_for_logical_group = vec![usize::MAX; compiled_group_count];
+            for (coordinate, groups) in trace.coordinate_groups.iter().enumerate() {
+                for &group in groups {
+                    if group >= compiled_group_count {
+                        continue;
+                    }
+                    if coordinate_for_logical_group[group] != usize::MAX {
+                        return None;
+                    }
+                    coordinate_for_logical_group[group] = coordinate;
+                }
+            }
+            if coordinate_for_logical_group
+                .iter()
+                .any(|&coordinate| coordinate == usize::MAX)
+            {
+                return None;
+            }
+            // Materialize the sparse product trace once as a dense
+            // state×physical-coordinate table. Complex visible terminals below
+            // are themselves small products of these same coordinates, so this
+            // lets us translate a partition state directly into the standalone
+            // product tuple without replaying every byte edge for every terminal.
+            let mut partition_coordinate_states =
+                vec![vec![u32::MAX; trace.components.len()]; dfa.num_states()];
+            for state in 0..dfa.num_states() {
+                for (coordinate, residual_state) in trace.state_tuples.tuple(state) {
+                    let slot = partition_coordinate_states
+                        .get_mut(state)?
+                        .get_mut(coordinate as usize)?;
+                    *slot = residual_state;
+                }
+            }
+            let mut simple_sources = Vec::<Option<Arc<DFA>>>::with_capacity(visible_groups);
+            for local_group in 0..visible_groups {
+                let coordinate = coordinate_for_logical_group[local_group];
+                let source = (!complex[local_group])
+                    .then(|| trace.components[coordinate].terminal_residual_dfa_arc())
+                    .flatten();
+                simple_sources.push(source);
+            }
+
+            // A visible terminal affected by an exclusion/intersection cannot
+            // use one raw product coordinate directly: its language is the
+            // group operation over several coordinates. Compile only those rare
+            // exceptional terminals independently, then propagate their exact
+            // residual state through the already-built partition DFA. This is
+            // deliberately strict: every reachable partition state must agree
+            // on the standalone residual coordinate and on terminal liveness.
+            // Any disagreement fails closed to the established projected path.
+            let mut complex_sources = (0..visible_groups)
+                .into_par_iter()
+                .map(|local_group| -> Option<Option<(Arc<DFA>, Vec<u32>)>> {
+                if simple_sources[local_group].is_some() {
+                    return Some(None);
+                }
+                let (exclusions, intersections) = complex_ops[local_group].as_ref()?;
+                let component_expr = |logical_group: usize| -> Option<Expr> {
+                    let coordinate = *coordinate_for_logical_group.get(logical_group)?;
+                    trace.components
+                        .get(coordinate)?
+                        .terminal_residual_dfa_arc()
+                        .map(Expr::Dfa)
+                };
+                let mut source_partition_groups = Vec::with_capacity(
+                    1usize
+                        .saturating_add(exclusions.len())
+                        .saturating_add(intersections.len()),
+                );
+                source_partition_groups.push(local_group);
+                source_partition_groups.extend(exclusions.iter().map(|&group| group as usize));
+                source_partition_groups.extend(intersections.iter().map(|&group| group as usize));
+
+                let source_exprs = source_partition_groups
+                    .iter()
+                    .map(|&logical_group| component_expr(logical_group))
+                    .collect::<Option<Vec<_>>>()?;
+                let mut source_exclusions = BTreeMap::new();
+                if !exclusions.is_empty() {
+                    source_exclusions.insert(
+                        0,
+                        (1..=exclusions.len()).map(|group| group as u32).collect(),
+                    );
+                }
+                let mut source_intersections = BTreeMap::new();
+                if !intersections.is_empty() {
+                    let first = 1 + exclusions.len();
+                    source_intersections.insert(
+                        0,
+                        (first..first + intersections.len())
+                            .map(|group| group as u32)
+                            .collect(),
+                    );
+                }
+                let source_plan = ExclusionCompilePlan {
+                    compiled_exprs: source_exprs,
+                    exclusions: source_exclusions,
+                    intersections: source_intersections,
+                    visible_groups: 1,
+                    profile_labels: None,
+                    local_small_product: true,
+                };
+                let source_compile_started = Instant::now();
+                let (source, source_trace) =
+                    compile_with_plan_internal_options(source_plan, true, true, false);
+                let source = Arc::new(source);
+                let source_trace = source_trace?;
+                let source_compile_ms = source_compile_started.elapsed().as_secs_f64() * 1000.0;
+                if source.has_epsilon_transitions() {
+                    return None;
+                }
+
+                let partition_live = |state: u32| {
+                    dfa.finalizers(state).contains(local_group)
+                        || dfa.possible_future_group_ids(state).contains(local_group)
+                };
+                let source_live = |state: u32| {
+                    source.finalizers(state).contains(0)
+                        || source.possible_future_group_ids(state).contains(0)
+                };
+                if partition_live(0) != source_live(0) {
+                    return None;
+                }
+
+                const UNMAPPED: u32 = u32::MAX;
+                let mapping_started = Instant::now();
+                let mut mapping = vec![UNMAPPED; dfa.num_states()];
+                for partition_state in 0..dfa.num_states() {
+                    let mut source_tuple = ProductStateTuple::new();
+                    for (source_coordinate, source_groups) in
+                        source_trace.coordinate_groups.iter().enumerate()
+                    {
+                        let mut coordinate_state = None::<u32>;
+                        for &source_group in source_groups {
+                            let partition_group = *source_partition_groups.get(source_group)?;
+                            let partition_coordinate =
+                                *coordinate_for_logical_group.get(partition_group)?;
+                            let state = *partition_coordinate_states
+                                .get(partition_state)?
+                                .get(partition_coordinate)?;
+                            if state == UNMAPPED {
+                                continue;
+                            }
+                            if let Some(previous) = coordinate_state {
+                                if previous != state {
+                                    return None;
+                                }
+                            } else {
+                                coordinate_state = Some(state);
+                            }
+                        }
+                        if let Some(state) = coordinate_state {
+                            source_tuple.push((source_coordinate as u32, state));
+                        }
+                    }
+
+                    let source_state = source_trace.state_lookup.get(&source_tuple);
+                    let partition_is_live = partition_live(partition_state as u32);
+                    let source_is_live = source_state.is_some_and(source_live);
+                    if partition_is_live != source_is_live {
+                        return None;
+                    }
+                    if partition_is_live {
+                        mapping[partition_state] = source_state?;
+                    }
+                }
+                if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][product_trace_exceptional_terminal] local_group={} exclusions={} intersections={} source_states={} source_transitions={} source_compile_ms={:.3} mapping_ms={:.3}",
+                        local_group,
+                        exclusions.len(),
+                        intersections.len(),
+                        source.num_states(),
+                        source.transition_count(),
+                        source_compile_ms,
+                        mapping_started.elapsed().as_secs_f64() * 1000.0,
+                    );
+                }
+                Some(Some((source, mapping)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+            let mut rows = Vec::with_capacity(dfa.num_states());
+            for state in 0..dfa.num_states() {
+                let tuple = trace.state_tuples.tuple(state);
+                let mut row = Vec::<(u32, u32)>::new();
+                for &(coordinate, residual_state) in &tuple {
+                    for &local_group in trace.coordinate_groups.get(coordinate as usize)? {
+                        if local_group >= visible_groups || simple_sources[local_group].is_none() {
+                            continue;
+                        }
+                        row.push((terminal_ids[local_group] as u32, residual_state));
+                    }
+                }
+                for local_group in 0..visible_groups {
+                    if simple_sources[local_group].is_some() {
+                        continue;
+                    }
+                    let (_, mapping) = complex_sources[local_group].as_ref()?;
+                    let residual_state = mapping[state];
+                    if residual_state != u32::MAX {
+                        row.push((terminal_ids[local_group] as u32, residual_state));
+                    }
+                }
+                row.sort_unstable_by_key(|&(terminal, _)| terminal);
+                rows.push(row);
+            }
+
+            let mut sources = Vec::with_capacity(visible_groups);
+            for local_group in 0..visible_groups {
+                let terminal = terminal_ids[local_group];
+                if let Some(source) = simple_sources[local_group].take() {
+                    sources.push((terminal, source, 0));
+                } else {
+                    let (source, _) = complex_sources[local_group].take()?;
+                    sources.push((terminal, source, 0));
+                }
+            }
+            Some(TracedComponent {
+                terminal_ids,
+                dfa,
+                rows,
+                sources,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+
+    let total_states = 1usize
+        + components
+            .iter()
+            .map(|component| component.dfa.num_states())
+            .sum::<usize>();
+    let mut combined = DFA::new(1);
+    combined.ensure_group_capacity(exprs.len());
+    let mut root_futures = BitSet::new(exprs.len());
+    let mut rows = Vec::<Vec<(u32, u32)>>::with_capacity(total_states);
+    rows.push(Vec::new());
+    let mut terminal_dfas = vec![None::<Arc<DFA>>; exprs.len()];
+    let mut terminal_groups = vec![u32::MAX; exprs.len()];
+    let mut offset = 1u32;
+    for component in components {
+        for (terminal, source, group) in component.sources {
+            if terminal >= exprs.len() || terminal_dfas[terminal].is_some() {
+                return None;
+            }
+            terminal_dfas[terminal] = Some(source);
+            terminal_groups[terminal] = group;
+        }
+        for local_group in component.dfa.possible_future_group_ids(0).iter() {
+            root_futures.set(component.terminal_ids[local_group]);
+        }
+        combined.add_epsilon_transition(0, offset);
+        let actual_offset = combined.append_rebased_component_ref(
+            component.dfa.as_ref(),
+            &component.terminal_ids,
+        );
+        if actual_offset != offset {
+            return None;
+        }
+        rows.extend(component.rows);
+        offset += component.dfa.num_states() as u32;
+    }
+    combined.set_possible_future_group_ids(0, root_futures);
+    let terminal_dfas = terminal_dfas.into_iter().collect::<Option<Vec<_>>>()?;
+    if terminal_groups.iter().any(|&group| group == u32::MAX) || rows.len() != combined.num_states() {
+        return None;
+    }
+    let mut tokenizer = Regex { dfa: combined }.into_tokenizer(exprs.len() as u32, Some(retained_exprs));
+    tokenizer.set_terminal_residual_coordinates(
+        TerminalResidualCoordinates::from_rows_and_dfa_groups(
+            rows,
+            terminal_dfas,
+            terminal_groups,
+        ),
+    );
+    if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
+        eprintln!(
+            "[glrmask/profile][product_trace_terminal_residual_coordinates] terminals={} states={} elapsed_ms={:.3}",
+            exprs.len(),
+            tokenizer.num_states(),
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
     Some(tokenizer)
 }
 
@@ -8063,6 +8593,47 @@ impl ProductComponent {
         }
     }
 
+    fn materialized_dfa_arc(&self) -> Option<Arc<DFA>> {
+        match self {
+            Self::Materialized(dfa) | Self::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+                Some(Arc::clone(dfa))
+            }
+            Self::VirtualFixedSequence { .. } | Self::VirtualBoundedRepeat { .. } => None,
+        }
+    }
+
+    /// Exact one-terminal DFA carrying the same residual state numbering used
+    /// by this product coordinate.  This lets compile-time residual analyses
+    /// consume the normal fast virtual fixed-sequence representation without
+    /// forcing tokenizer construction to materialize those components.
+    fn terminal_residual_dfa_arc(&self) -> Option<Arc<DFA>> {
+        match self {
+            Self::Materialized(dfa) | Self::MaterializedZeroMinRepeatSuffix { dfa, .. } => {
+                Some(Arc::clone(dfa))
+            }
+            Self::VirtualFixedSequence { byte_sets, .. } => {
+                let mut dfa = DFA::new(byte_sets.len() + 1);
+                dfa.ensure_group_capacity(1);
+                let mut support = U8Set::empty();
+                for (position, bytes) in byte_sets.iter().enumerate() {
+                    support = support.union(bytes);
+                    dfa.set_transitions_from_sorted_entries(
+                        position as u32,
+                        bytes
+                            .iter()
+                            .map(|byte| (byte, position as u32 + 1))
+                            .collect(),
+                    );
+                }
+                dfa.set_group_u8set(0, support);
+                mark_state_accepting(&mut dfa, byte_sets.len() as u32);
+                dfa.recompute_possible_futures();
+                Some(Arc::new(dfa))
+            }
+            Self::VirtualBoundedRepeat { .. } => None,
+        }
+    }
+
     fn zero_min_repeat_suffix_trace(&self) -> Option<Arc<ZeroMinRepeatSuffixComponentTrace>> {
         match self {
             Self::MaterializedZeroMinRepeatSuffix { trace, .. } => Some(Arc::clone(trace)),
@@ -8073,6 +8644,11 @@ impl ProductComponent {
 
 struct ProductBuildTrace {
     components: Vec<ProductComponent>,
+    /// Logical product groups represented by each physical product coordinate.
+    /// Normally this is the identity layout. Trace-enabled vocab partition
+    /// builds may collapse duplicate coordinates exactly as the ordinary lexer
+    /// does, while retaining this fan-out map for terminal residual recovery.
+    coordinate_groups: Vec<Vec<usize>>,
     state_tuples: ProductStateTuples,
     state_lookup: ProductStateLookup,
     direct_single_visible_group: bool,
@@ -10760,6 +11336,7 @@ fn build_product_dfa(
     capture_trace: bool,
     virtual_fixed_sequences: bool,
     local_small_product: bool,
+    collapse_traced_duplicate_coordinates: bool,
 ) -> (DFA, bool, Option<ProductBuildTrace>) {
     let profile_trace = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let profile_detail = profile_trace
@@ -10768,11 +11345,12 @@ fn build_product_dfa(
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TIMING").is_some();
     let profile_started_at = Instant::now();
     let component_compile_started_at = Instant::now();
+    let preserve_component_coordinates = capture_trace && !collapse_traced_duplicate_coordinates;
     let (logical_components, component_cache_hits, component_profiles, component_indices) =
         compile_product_components_profiled(
             exprs,
             profile_detail,
-            capture_trace,
+            preserve_component_coordinates,
             virtual_fixed_sequences,
             local_small_product,
         );
@@ -10846,7 +11424,7 @@ fn build_product_dfa(
     let num_groups = logical_components.len();
     let collapse_duplicates = component_cache_hits > 0
         && visible_groups > 1
-        && !capture_trace
+        && (!capture_trace || collapse_traced_duplicate_coordinates)
         && !profile_trace;
     let (components, coordinate_groups) = product_coordinate_layout(
         logical_components,
@@ -11178,6 +11756,7 @@ fn build_product_dfa(
 
     let trace = state_tuples.map(|state_tuples| ProductBuildTrace {
         components,
+        coordinate_groups,
         state_tuples: ProductStateTuples::Generic(state_tuples),
         state_lookup: ProductStateLookup::Hash(state_map),
         direct_single_visible_group,
@@ -12103,6 +12682,7 @@ fn try_discover_dense_binary_intersection_product(
 
     let trace = capture_trace.then(|| ProductBuildTrace {
             components: components.to_vec(),
+            coordinate_groups: identity_product_coordinate_groups(components.len()),
             state_tuples: ProductStateTuples::DenseBinary(pairs),
             state_lookup: ProductStateLookup::DenseBinary {
                 right_states,
@@ -12617,6 +13197,7 @@ fn try_compile_lazy_zero_min_repeat_intersection(
     }
     let trace = ProductBuildTrace {
         components,
+        coordinate_groups: identity_product_coordinate_groups(2),
         state_tuples: ProductStateTuples::DenseBinary(pairs),
         state_lookup: ProductStateLookup::Hash(sparse_lookup),
         direct_single_visible_group: true,
@@ -14536,6 +15117,7 @@ mod tests {
             false,
             true,
             false,
+            false,
         )
         .0;
         let uncollapsed = super::build_product_dfa(
@@ -14547,9 +15129,29 @@ mod tests {
             true,
             true,
             false,
+            false,
         )
         .0;
         assert_eq!(collapsed, uncollapsed);
+
+        let (traced_collapsed, _, trace) = super::build_product_dfa(
+            &expressions,
+            None,
+            expressions.len(),
+            &exclusions,
+            &intersections,
+            true,
+            true,
+            false,
+            true,
+        );
+        assert_eq!(collapsed, traced_collapsed);
+        let trace = trace.expect("trace-enabled collapsed product must retain its state tuples");
+        assert_eq!(trace.state_tuples.len(), traced_collapsed.num_states());
+        assert!(
+            trace.coordinate_groups.iter().any(|groups| groups.len() > 1),
+            "duplicate logical groups should fan out from one physical product coordinate"
+        );
     }
 
     #[test]
@@ -16697,6 +17299,7 @@ mod tests {
             false,
             false,
             false,
+            false,
         )
         .0;
         let virtualized = super::build_product_dfa(
@@ -16707,6 +17310,7 @@ mod tests {
             &intersections,
             false,
             true,
+            false,
             false,
         )
         .0;

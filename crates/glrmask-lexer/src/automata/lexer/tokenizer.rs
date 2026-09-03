@@ -510,6 +510,7 @@ pub struct TerminalResidualCoordinates {
     offsets: Arc<[u32]>,
     entries: Arc<[(u32, u32)]>,
     terminal_dfas: Arc<[Arc<DFA>]>,
+    terminal_groups: Arc<[u32]>,
 }
 
 impl TerminalResidualCoordinates {
@@ -518,6 +519,16 @@ impl TerminalResidualCoordinates {
     }
 
     pub fn from_rows_and_dfas(rows: Vec<Vec<(u32, u32)>>, terminal_dfas: Vec<Arc<DFA>>) -> Self {
+        let terminal_groups = vec![0u32; terminal_dfas.len()];
+        Self::from_rows_and_dfa_groups(rows, terminal_dfas, terminal_groups)
+    }
+
+    pub fn from_rows_and_dfa_groups(
+        rows: Vec<Vec<(u32, u32)>>,
+        terminal_dfas: Vec<Arc<DFA>>,
+        terminal_groups: Vec<u32>,
+    ) -> Self {
+        debug_assert_eq!(terminal_dfas.len(), terminal_groups.len());
         let mut offsets = Vec::with_capacity(rows.len() + 1);
         let mut entries = Vec::with_capacity(rows.iter().map(Vec::len).sum());
         offsets.push(0);
@@ -529,6 +540,7 @@ impl TerminalResidualCoordinates {
             offsets: Arc::from(offsets.into_boxed_slice()),
             entries: Arc::from(entries.into_boxed_slice()),
             terminal_dfas: Arc::from(terminal_dfas.into_boxed_slice()),
+            terminal_groups: Arc::from(terminal_groups.into_boxed_slice()),
         }
     }
 
@@ -551,8 +563,53 @@ impl TerminalResidualCoordinates {
     }
 
     #[inline]
+    pub fn terminal_dfa_and_group(&self, terminal: u32) -> Option<(&DFA, u32)> {
+        Some((
+            self.terminal_dfas.get(terminal as usize)?.as_ref(),
+            *self.terminal_groups.get(terminal as usize)?,
+        ))
+    }
+
+    #[inline]
     pub fn terminal_dfa_count(&self) -> usize {
         self.terminal_dfas.len()
+    }
+
+    fn replace_terminal_with_appended_dfa(
+        &self,
+        terminal: TerminalID,
+        dfa: Arc<DFA>,
+    ) -> Option<Self> {
+        let terminal_index = terminal as usize;
+        if terminal_index >= self.terminal_dfas.len() {
+            return None;
+        }
+
+        // The caller is replacing a placeholder component for `terminal` with
+        // a newly appended exact one-terminal observation DFA. Drop stale
+        // placeholder coordinates from the existing rows, then append the
+        // identity coordinate for every state of the new standalone DFA.
+        let mut rows = Vec::with_capacity(self.len() + dfa.num_states());
+        for state in 0..self.len() {
+            rows.push(
+                self.row(state as u32)?
+                    .iter()
+                    .copied()
+                    .filter(|&(candidate, _)| candidate != terminal)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        rows.extend((0..dfa.num_states()).map(|state| vec![(terminal, state as u32)]));
+
+        let mut terminal_dfas = self.terminal_dfas.iter().cloned().collect::<Vec<_>>();
+        terminal_dfas[terminal_index] = dfa;
+        let mut terminal_groups = self.terminal_groups.iter().copied().collect::<Vec<_>>();
+        terminal_groups[terminal_index] = 0;
+        Some(Self::from_rows_and_dfa_groups(
+            rows,
+            terminal_dfas,
+            terminal_groups,
+        ))
     }
 }
 
@@ -8617,36 +8674,45 @@ impl Tokenizer {
             .map(|index| existing_physical_state_count.checked_add(u32::try_from(index).ok()?))
             .collect::<Option<Vec<_>>>()?;
         let owners = Arc::new(VirtualRuntimeStateOwners::new(physical_state_count, &roots)?);
-        let mut pending = Vec::with_capacity(components.len());
-        for (index, (expression, terminal)) in components.into_iter().enumerate() {
-            let root_state = roots[index];
-            let byte_support = super::compile::expr_u8set(&expression);
-            let runtime = if preserve_oracle_coordinate {
-                VirtualResidualRuntime::new_preserving_oracle_coordinate(
-                    &expression,
-                    u32::try_from(index).ok()?,
-                    terminal,
-                    self.num_terminals,
-                    physical_state_count,
-                    root_state,
-                    Arc::clone(&allocator),
-                    Arc::clone(&owners),
-                )?
-            } else {
-                VirtualResidualRuntime::new(
-                    &expression,
-                    u32::try_from(index).ok()?,
-                    terminal,
-                    self.num_terminals,
-                    physical_state_count,
-                    root_state,
-                    Arc::clone(&allocator),
-                    Arc::clone(&owners),
-                )?
-            };
-            let runtime = Arc::new(runtime);
-            pending.push((terminal, root_state, byte_support, runtime));
-        }
+        // General residual components are independent until their proxy roots
+        // are appended below. Building a bounded-code oracle can involve DFA
+        // construction and relation doubling, so doing that serially makes a
+        // multi-string schema pay the sum of all component setup costs even
+        // though the resulting runtime ordering is fixed. Indexed parallel
+        // collection preserves input order and therefore root/runtime IDs.
+        let pending = components
+            .into_par_iter()
+            .enumerate()
+            .map(|(index, (expression, terminal))| {
+                let root_state = roots[index];
+                let byte_support = super::compile::expr_u8set(&expression);
+                let runtime_index = u32::try_from(index).ok()?;
+                let runtime = if preserve_oracle_coordinate {
+                    VirtualResidualRuntime::new_preserving_oracle_coordinate(
+                        &expression,
+                        runtime_index,
+                        terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )?
+                } else {
+                    VirtualResidualRuntime::new(
+                        &expression,
+                        runtime_index,
+                        terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )?
+                };
+                Some((terminal, root_state, byte_support, Arc::new(runtime)))
+            })
+            .collect::<Option<Vec<_>>>()?;
 
         self.invalidate_derived_caches();
         self.dfa.ensure_group_capacity(self.num_terminals as usize);
@@ -8902,6 +8968,43 @@ impl Tokenizer {
         mask.dfa.recompute_possible_futures();
         mask.invalidate_derived_caches();
         Some((mask, projections))
+    }
+
+    /// Attach already-finite one-token observation components to an ordinary
+    /// physical tokenizer. This is intentionally projection-free: the caller
+    /// has no exact runtime coordinate to map from.
+    #[doc(hidden)]
+    pub fn install_direct_mask_components(
+        &mut self,
+        components: Vec<(DFA, u32, TerminalID)>,
+    ) -> Option<()> {
+        if components.is_empty() {
+            return Some(());
+        }
+        let start = self.start_state();
+        for (component, local_root, terminal) in components {
+            if terminal >= self.num_terminals || local_root as usize >= component.num_states() {
+                return None;
+            }
+            let component = Arc::new(component);
+            let offset = u32::try_from(self.dfa.num_states()).ok()?;
+            let actual_offset = self
+                .dfa
+                .append_rebased_component_ref(component.as_ref(), &[terminal as usize]);
+            if actual_offset != offset {
+                return None;
+            }
+            self.dfa
+                .add_epsilon_transition(start, offset.checked_add(local_root)?);
+            if let Some(coordinates) = self.terminal_residual_coordinates.as_ref() {
+                let updated = coordinates
+                    .replace_terminal_with_appended_dfa(terminal, Arc::clone(&component))?;
+                self.terminal_residual_coordinates = Some(Arc::new(updated));
+            }
+        }
+        self.dfa.recompute_possible_futures();
+        self.invalidate_derived_caches();
+        Some(())
     }
 
     pub fn virtual_binary_repeat_intersections_mask_tokenizer(

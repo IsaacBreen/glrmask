@@ -188,6 +188,29 @@ pub(super) fn finish_compacted(
         )
     };
 
+    if input.id_map_only {
+        let id_map = InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
+        };
+        return Some(Finished {
+            artifact: LocalIdMapTerminalDwa {
+                dwa: DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
+                id_map,
+                profile: TerminalDwaPhaseProfile {
+                    id_map_ms: scan_ms,
+                    compact_ms,
+                    ..TerminalDwaPhaseProfile::default()
+                },
+            },
+            compact_ms,
+            build_ms: 0.0,
+            state_classes: rows.len(),
+            token_classes: token_classes as usize,
+        });
+    }
+
     let build_started = Instant::now();
     let num_terminals = input.grammar.num_terminals as usize;
     let mut by_terminal = vec![Vec::<(u32, Vec<u32>)>::new(); num_terminals];
@@ -313,6 +336,29 @@ pub(super) fn finish_sparse_terminal_rows(
         )
     };
     let vocab_map_ms = vocab_map_started.elapsed().as_secs_f64() * 1000.0;
+
+    if input.id_map_only {
+        let id_map = InternalIdMap {
+            tokenizer_states,
+            vocab_tokens,
+            deferred_vocab_singleton_original_ids: None,
+        };
+        return Some(Finished {
+            artifact: LocalIdMapTerminalDwa {
+                dwa: DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
+                id_map,
+                profile: TerminalDwaPhaseProfile {
+                    id_map_ms: scan_ms + state_map_ms + vocab_map_ms,
+                    compact_ms,
+                    ..TerminalDwaPhaseProfile::default()
+                },
+            },
+            compact_ms,
+            build_ms: 0.0,
+            state_classes: sparse_rows.len(),
+            token_classes: token_classes as usize,
+        });
+    }
 
     let build_started = Instant::now();
     let num_terminals = input.grammar.num_terminals as usize;

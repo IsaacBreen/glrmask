@@ -295,6 +295,17 @@ pub fn schema_to_named_grammar(schema: &Value) -> Result<NamedGrammar, GlrMaskEr
     schema_to_named_grammar_with_config(schema, JsonSchemaConfig::from_env())
 }
 
+/// Convert JSON Schema for the dynamic compiler. Ordinary bounded strings stay
+/// as one quoted terminal so the lazy lexer, rather than parser-level chunks,
+/// owns the bounded-repeat residual. Pattern/format lowering is unchanged.
+pub fn schema_to_named_grammar_for_dynamic(
+    schema: &Value,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.lazy_ordinary_bounded_strings = true;
+    schema_to_named_grammar_with_config(schema, config)
+}
+
 /// Convert JSON Schema while allowing a caller-supplied dynamic-value
 /// subgrammar sentinel at nested property/array value positions. The root
 /// schema remains static and cannot be replaced by the sentinel.

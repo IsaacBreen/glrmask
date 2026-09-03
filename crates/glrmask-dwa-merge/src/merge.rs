@@ -2771,6 +2771,20 @@ fn build_unified_global_id_map(
     )
 }
 
+/// Build only the unified exact ID map used by terminal-DWA merging, without
+/// remapping or constructing any automata.
+pub fn merge_internal_id_maps_only(
+    inputs: &[&InternalIdMap],
+    num_tokenizer_states: usize,
+    max_token_id: u32,
+) -> InternalIdMap {
+    assert!(!inputs.is_empty(), "merge_internal_id_maps_only called with empty inputs");
+    if inputs.len() == 1 {
+        return inputs[0].clone();
+    }
+    build_unified_global_id_map(inputs, num_tokenizer_states, max_token_id).0
+}
+
 fn build_unified_global_token_id_map_sparse_generic(
     inputs: &[&InternalIdMap],
     max_token_id: u32,

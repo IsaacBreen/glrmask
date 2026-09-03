@@ -1066,6 +1066,26 @@ pub(crate) fn classify_terminal_path_lengths_with_probe(
         disallowed_follows,
         &heuristic_two_plus,
     )
+    .or_else(|| {
+        let enabled = std::env::var("GLRMASK_CLASSIFY_FINITE_FOLLOWER_EMPTY")
+            .map(|value| {
+                let value = value.trim();
+                value.is_empty() || (value != "0" && !value.eq_ignore_ascii_case("false"))
+            })
+            .unwrap_or(false);
+        (enabled
+            && finite_follower_suffix_empty_certificate(
+                tokenizer,
+                vocab,
+                disallowed_follows,
+                &heuristic_two_plus,
+                bytesets,
+            ) == Some(true))
+        .then(|| ExactTerminalPathTwoPlus {
+            two_plus: BitSet::new(heuristic_two_plus.len()),
+            witnesses: vec![None; heuristic_two_plus.len()],
+        })
+    })
     .unwrap_or_else(|| {
         // This path propagates reset-state continuations after every discovered
         // terminal boundary. The older direct prefix/suffix scanners only saw
@@ -2278,6 +2298,125 @@ fn collect_finite_literal_strings(expr: &Expr) -> Option<Vec<Vec<u8>>> {
     values.sort_unstable();
     values.dedup();
     (!values.is_empty() && values.iter().all(|value| !value.is_empty())).then_some(values)
+}
+
+/// Prove that no candidate terminal boundary can have a viable reset-side
+/// follower using only finite literal follower languages.
+///
+/// This is deliberately an emptiness certificate, not a replacement for the
+/// exact boundary classifier.  We over-approximate possible left terminals by
+/// adjacent byte pairs, but require every directionally possible follower to
+/// have a finite literal language.  For a finite literal `L`, a token suffix is
+/// viable from lexer reset iff the suffix and some literal in `L` are
+/// prefix-comparable: either the literal finishes inside the suffix or the
+/// suffix finishes while the literal remains completable.  If no indexed
+/// feasible split has such a follower, no exact within-token boundary exists.
+fn finite_follower_suffix_empty_certificate(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    candidates: &BitSet,
+    bytesets: &SharedClassifyBytesets,
+) -> Option<bool> {
+    let started_at = std::time::Instant::now();
+    let candidate_ids = candidates.iter().collect::<Vec<_>>();
+    if candidate_ids.is_empty() || candidate_ids.len() > 64 {
+        return None;
+    }
+
+    let index = vocab_adjacent_pair_index(vocab);
+    let mut follower_masks_by_pair = vec![0u64; 1 << 16];
+    let mut follower_mask = 0u64;
+    for (local_1, &terminal_1) in candidate_ids.iter().enumerate() {
+        let blocked = disallowed_follows.get(&(terminal_1 as u32));
+        for (local_2, &terminal_2) in candidate_ids.iter().enumerate() {
+            if blocked.is_some_and(|blocked| blocked.contains(terminal_2)) {
+                continue;
+            }
+            let follower_bit = 1u64 << local_2;
+            for left in bytesets.last_bytes[terminal_1].iter() {
+                for right in bytesets.first_bytes[terminal_2].iter() {
+                    if index.occurrences_for_pair(left, right).is_empty() {
+                        continue;
+                    }
+                    follower_masks_by_pair[((left as usize) << 8) | right as usize] |= follower_bit;
+                    follower_mask |= follower_bit;
+                }
+            }
+        }
+        let _ = local_1;
+    }
+    if follower_mask == 0 {
+        return Some(true);
+    }
+
+    let mut literals_by_local = vec![None::<Vec<Vec<u8>>>; candidate_ids.len()];
+    let mut pending = follower_mask;
+    while pending != 0 {
+        let local = pending.trailing_zeros() as usize;
+        pending &= pending - 1;
+        let terminal = candidate_ids[local];
+        let literals = collect_finite_literal_strings(tokenizer.terminal_expr(terminal as u32)?)?;
+        literals_by_local[local] = Some(literals);
+    }
+
+    let mut checked_splits = 0usize;
+    let mut checked_literal_pairs = 0usize;
+    for pair in 0..(1 << 16) {
+        let followers = follower_masks_by_pair[pair];
+        if followers == 0 {
+            continue;
+        }
+        let left = (pair >> 8) as u8;
+        let right = pair as u8;
+        for &packed in index.occurrences_for_pair(left, right) {
+            checked_splits += 1;
+            let entry_index = (packed >> 32) as usize;
+            let split_after = packed as u32 as usize;
+            let token_id = index.entry_token_ids[entry_index];
+            let bytes = vocab.get(token_id)?;
+            let suffix = &bytes[split_after + 1..];
+            let mut possible = followers;
+            while possible != 0 {
+                let local = possible.trailing_zeros() as usize;
+                possible &= possible - 1;
+                let literals = literals_by_local[local].as_ref()?;
+                for literal in literals {
+                    checked_literal_pairs += 1;
+                    let viable = if suffix.len() <= literal.len() {
+                        literal.starts_with(suffix)
+                    } else {
+                        suffix.starts_with(literal)
+                    };
+                    if viable {
+                        if super::types::compile_profile_enabled() {
+                            eprintln!(
+                                "[glrmask/profile][terminal_path_finite_follower_empty] candidates={} followers={} checked_splits={} checked_literal_pairs={} certified=false ms={:.3}",
+                                candidate_ids.len(),
+                                follower_mask.count_ones(),
+                                checked_splits,
+                                checked_literal_pairs,
+                                started_at.elapsed().as_secs_f64() * 1000.0,
+                            );
+                        }
+                        return Some(false);
+                    }
+                }
+            }
+        }
+    }
+
+    if super::types::compile_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][terminal_path_finite_follower_empty] candidates={} followers={} checked_splits={} checked_literal_pairs={} certified=true ms={:.3}",
+            candidate_ids.len(),
+            follower_mask.count_ones(),
+            checked_splits,
+            checked_literal_pairs,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Some(true)
 }
 
 /// Exact terminal-path classification for a small family of finite literal
