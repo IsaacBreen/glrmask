@@ -2426,7 +2426,7 @@ struct ResidualRuntimeStore {
     liveness_oracle: Option<BoundedCodeIntersectionOracle>,
     oracle_coordinates: Vec<BoundedCodeOracleSlot>,
     oracle_futures: Vec<Option<bool>>,
-    parser_transparent_byte_family_cache: FxHashMap<(u32, U8Set, u32), bool>,
+    parser_transparent_byte_family_cache: FxHashSet<(u32, U8Set, u32)>,
 }
 
 /// Exact general symbolic tokenizer component. The regex upper bounds live in
@@ -2686,7 +2686,7 @@ impl VirtualResidualRuntime {
                 liveness_oracle,
                 oracle_coordinates,
                 oracle_futures,
-                parser_transparent_byte_family_cache: FxHashMap::default(),
+                parser_transparent_byte_family_cache: FxHashSet::default(),
             }),
         })
     }
@@ -3071,7 +3071,7 @@ impl VirtualResidualRuntime {
                 state_by_residual_coordinate, coordinate_by_state,
                 oracle_future_by_state: FxHashMap::default(),
                 liveness_oracle: Some(liveness_oracle), oracle_coordinates, oracle_futures,
-                parser_transparent_byte_family_cache: FxHashMap::default(),
+                parser_transparent_byte_family_cache: FxHashSet::default(),
             }),
         })
     }
@@ -3123,8 +3123,8 @@ impl VirtualResidualRuntime {
         const MAX_COORDINATE_BYTE_STEPS: usize = 128 * 1024;
         let key = (state, bytes, max_horizon);
         let mut store = self.store.lock().unwrap();
-        if let Some(&cached) = store.parser_transparent_byte_family_cache.get(&key) {
-            return Some(cached);
+        if store.parser_transparent_byte_family_cache.contains(&key) {
+            return Some(true);
         }
         let residual = Self::residual_for_state(&store, self.root_state, state)?;
         let coordinate = if self.preserve_oracle_coordinate {
@@ -3170,8 +3170,18 @@ impl VirtualResidualRuntime {
             }
             Some(true)
         };
-        if let Some(value) = result {
-            store.parser_transparent_byte_family_cache.insert(key, value);
+        if result == Some(true) {
+            // Virtual residual states may advance throughout a very long
+            // bounded string. Keep successful proofs only (failed partitions
+            // usually fail after one or a few byte steps) and bound retained
+            // state history instead of growing with generation length.
+            const MAX_TRANSPARENT_BYTE_FAMILY_CACHE_ENTRIES: usize = 8 * 1024;
+            if store.parser_transparent_byte_family_cache.len()
+                >= MAX_TRANSPARENT_BYTE_FAMILY_CACHE_ENTRIES
+            {
+                store.parser_transparent_byte_family_cache.clear();
+            }
+            store.parser_transparent_byte_family_cache.insert(key);
         }
         result
     }
