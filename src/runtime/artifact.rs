@@ -1421,6 +1421,12 @@ pub(crate) struct DynamicMaskTrie {
     subtree_tokens: Vec<u32>,
     walk_edges: Vec<DynamicMaskTrieWalkEdge>,
     full_walk_ops: Vec<DynamicMaskTrieFullWalkOp>,
+    /// Edge index owning each strict full-walk op. Read only after death.
+    full_walk_op_edges: Vec<u32>,
+    /// Starting full-walk op index for each DFS-preorder walk edge, plus one
+    /// sentinel at the end. Combined with `DynamicMaskTrieWalkEdge::subtree_end`
+    /// this gives an O(1) exact jump past a dead child subtree.
+    full_walk_edge_op_starts: Vec<u32>,
     full_walk_token_nodes: Vec<u32>,
     /// Maximum structural radix-edge parent depth encoded by `full_walk_ops`.
     /// This is deliberately distinct from token byte length: one long
@@ -1487,6 +1493,8 @@ impl DynamicMaskTrie {
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
             full_walk_ops: Vec::new(),
+            full_walk_op_edges: Vec::new(),
+            full_walk_edge_op_starts: Vec::new(),
             full_walk_token_nodes: Vec::new(),
             full_walk_max_parent_depth: 0,
             root_layout_classes: Vec::new(),
@@ -1547,6 +1555,18 @@ impl DynamicMaskTrie {
     #[inline]
     pub(crate) fn full_walk_ops(&self) -> &[DynamicMaskTrieFullWalkOp] {
         &self.full_walk_ops
+    }
+
+    #[inline(always)]
+    pub(crate) fn full_walk_dead_subtree(&self, op_index: usize) -> (u32, u32) {
+        debug_assert!(op_index < self.full_walk_op_edges.len());
+        let edge_index = unsafe { *self.full_walk_op_edges.get_unchecked(op_index) } as usize;
+        let edge = unsafe { *self.walk_edges.get_unchecked(edge_index) };
+        let subtree_end_edge = edge.subtree_end as usize;
+        debug_assert!(subtree_end_edge < self.full_walk_edge_op_starts.len());
+        let subtree_end_op =
+            unsafe { *self.full_walk_edge_op_starts.get_unchecked(subtree_end_edge) };
+        (edge.child, subtree_end_op)
     }
 
     #[inline]
@@ -1710,6 +1730,8 @@ impl DynamicMaskTrie {
         debug_assert_eq!(self.walk_edges.len(), self.edges.len());
 
         self.full_walk_ops.clear();
+        self.full_walk_op_edges.clear();
+        self.full_walk_edge_op_starts.clear();
         self.full_walk_token_nodes.clear();
         self.full_walk_max_parent_depth = self
             .walk_edges
@@ -1718,8 +1740,13 @@ impl DynamicMaskTrie {
             .max()
             .unwrap_or(0);
         self.full_walk_ops.reserve(self.edge_bytes.len().max(self.walk_edges.len()));
+        self.full_walk_op_edges
+            .reserve(self.edge_bytes.len().max(self.walk_edges.len()));
+        self.full_walk_edge_op_starts.reserve(self.walk_edges.len() + 1);
         self.full_walk_token_nodes.reserve(self.walk_edges.len());
-        for edge in self.walk_edges.iter().copied() {
+        for (edge_index, edge) in self.walk_edges.iter().copied().enumerate() {
+            self.full_walk_edge_op_starts
+                .push(self.full_walk_ops.len() as u32);
             let start = edge.byte_start as usize;
             let end = start + edge.byte_len as usize;
             let bytes = &self.edge_bytes[start..end];
@@ -1731,6 +1758,7 @@ impl DynamicMaskTrie {
                     | DynamicMaskTrieFullWalkOp::END;
                 if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
+                self.full_walk_op_edges.push(edge_index as u32);
                 if child_is_token { self.full_walk_token_nodes.push(edge.child); }
                 continue;
             }
@@ -1743,9 +1771,17 @@ impl DynamicMaskTrie {
                     if child_is_token { meta |= DynamicMaskTrieFullWalkOp::TOKEN; }
                 }
                 self.full_walk_ops.push(DynamicMaskTrieFullWalkOp { meta });
+                self.full_walk_op_edges.push(edge_index as u32);
                 if last && child_is_token { self.full_walk_token_nodes.push(edge.child); }
             }
         }
+        self.full_walk_edge_op_starts
+            .push(self.full_walk_ops.len() as u32);
+        debug_assert_eq!(self.full_walk_op_edges.len(), self.full_walk_ops.len());
+        debug_assert_eq!(
+            self.full_walk_edge_op_starts.len(),
+            self.walk_edges.len() + 1
+        );
     }
 
     fn flatten_vocab_node(node: &VocabPrefixTreeNode, output: &mut Self) -> u32 {
@@ -1795,6 +1831,8 @@ impl DynamicMaskTrie {
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
             full_walk_ops: Vec::new(),
+            full_walk_op_edges: Vec::new(),
+            full_walk_edge_op_starts: Vec::new(),
             full_walk_token_nodes: Vec::new(),
             full_walk_max_parent_depth: 0,
             root_layout_classes: Vec::new(),
@@ -1839,6 +1877,8 @@ impl DynamicMaskTrie {
             subtree_tokens: Vec::with_capacity(node_capacity),
             walk_edges: Vec::with_capacity(edge_capacity),
             full_walk_ops: Vec::with_capacity(byte_capacity.max(edge_capacity)),
+            full_walk_op_edges: Vec::with_capacity(byte_capacity.max(edge_capacity)),
+            full_walk_edge_op_starts: Vec::with_capacity(edge_capacity + 1),
             full_walk_token_nodes: Vec::with_capacity(edge_capacity),
             full_walk_max_parent_depth: 0,
             root_layout_classes: Vec::new(),
@@ -4391,6 +4431,8 @@ impl DynamicMaskVocab {
             subtree_tokens: Vec::new(),
             walk_edges: Vec::new(),
             full_walk_ops: Vec::new(),
+            full_walk_op_edges: Vec::new(),
+            full_walk_edge_op_starts: Vec::new(),
             full_walk_token_nodes: Vec::new(),
             full_walk_max_parent_depth: 0,
             root_layout_classes: Vec::new(),

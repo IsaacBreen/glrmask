@@ -7985,6 +7985,50 @@ impl<'a> ConstraintState<'a> {
             || self.constraint.has_special_token_id(token_id)
     }
 
+    /// Snapshot the exact runtime state only when a reusable mask is currently
+    /// cached. `ParserGSS` is Arc-backed, so cloning this small map keeps the
+    /// old GSS identities alive without copying parser stacks.
+    #[inline]
+    fn snapshot_current_mask_state(&self) -> Option<ParserStateMap> {
+        let cache = self.mask_cache.lock().unwrap();
+        cache
+            .as_ref()
+            .is_some_and(|cache_data| cache_data.generation == self.generation)
+            .then(|| self.state.clone())
+    }
+
+    /// Advance the commit generation while retaining a cached mask when commit
+    /// left the complete semantic runtime state unchanged. `ParserStateMap`
+    /// equality compares tokenizer keys and exact immutable GSS structure;
+    /// `LeveledGSS` itself checks Arc identity first, so the usual unchanged
+    /// object case remains a pointer comparison. `fill_mask` is a pure
+    /// function of this state and the immutable constraint.
+    #[inline]
+    fn finish_commit_generation(
+        &mut self,
+        previous_state: Option<ParserStateMap>,
+        commit_succeeded: bool,
+    ) {
+        let previous_generation = self.generation;
+        self.generation += 1;
+        if !commit_succeeded {
+            return;
+        }
+        let Some(previous_state) = previous_state else {
+            return;
+        };
+        if previous_state != self.state {
+            return;
+        }
+
+        let mut cache = self.mask_cache.lock().unwrap();
+        if let Some(cache_data) = cache.as_mut()
+            && cache_data.generation == previous_generation
+        {
+            cache_data.generation = self.generation;
+        }
+    }
+
     /// Commit a sampled token, advancing the constraint state.
     ///
     /// `token_id` must either exist in the vocabulary the constraint was built
@@ -8019,8 +8063,9 @@ impl<'a> ConstraintState<'a> {
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
             .then(|| self.state.clone());
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
             token_id,
@@ -8049,8 +8094,9 @@ impl<'a> ConstraintState<'a> {
         } else {
             None
         };
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
             token_id,
@@ -8072,10 +8118,11 @@ impl<'a> ConstraintState<'a> {
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
             .then(|| self.state.clone());
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let start = Instant::now();
         let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
         let total_ns = start.elapsed().as_nanos() as u64;
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
             token_id,
@@ -8101,6 +8148,7 @@ impl<'a> ConstraintState<'a> {
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
             .then(|| self.state.clone());
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         expand_runtime_product_states(constraint, &mut self.state);
         let special = if has_special {
@@ -8136,7 +8184,7 @@ impl<'a> ConstraintState<'a> {
         let result = special_merge_result
             .and_then(|()| finish_token_commit(&self.state))
             .map(|()| profile);
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
             token_id,
@@ -8165,6 +8213,7 @@ impl<'a> ConstraintState<'a> {
         let was_in_mask = snapshot_mask_membership(self, token_id, assertion_flags);
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
             .then(|| self.state.clone());
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let total_started_at = std::time::Instant::now();
         let mut advances = Vec::new();
         expand_runtime_product_states(constraint, &mut self.state);
@@ -8207,7 +8256,7 @@ impl<'a> ConstraintState<'a> {
         let result = special_merge_result
             .and_then(|()| finish_token_commit(&self.state))
             .map(|()| (advances, final_stacks(&self.state), profile));
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
             token_id,
@@ -8226,9 +8275,10 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
         let result = clear_state_on_commit_error(&mut self.state, result);
-        self.generation += 1;
+        self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         result
     }
 
@@ -8242,6 +8292,59 @@ mod tests {
 
     type CanonicalCommitState =
         Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
+
+    #[test]
+    fn unchanged_runtime_state_preserves_fill_mask_cache() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"aa".to_vec()),
+            (2, b"b".to_vec()),
+        ]);
+        let constraint = Constraint::compile(
+            Grammar::glrm(
+                r#"glrm 1;
+                start start;
+                t A = /a+/;
+                t B = "b";
+                nt start = A B;
+                "#,
+            ),
+            &vocab,
+        )
+        .unwrap();
+
+        let mut state = constraint.start();
+        state.commit_token(0).unwrap();
+
+        // Populate the ordinary per-sequence mask cache while inside A. A
+        // further `a` is an exact lexer self-loop: no parser terminal is
+        // consumed and the complete runtime state remains identical.
+        let cached_mask = state.mask();
+        let before_generation = state.generation;
+        let before_state = state.state.clone();
+        {
+            let cache = state.mask_cache.lock().unwrap();
+            assert_eq!(cache.as_ref().unwrap().generation, before_generation);
+        }
+
+        state.commit_token(0).unwrap();
+        assert_eq!(state.generation, before_generation + 1);
+        assert_eq!(before_state, state.state);
+        {
+            let cache = state.mask_cache.lock().unwrap();
+            assert_eq!(cache.as_ref().unwrap().generation, state.generation);
+            assert_eq!(cache.as_ref().unwrap().mask, cached_mask);
+        }
+        assert_eq!(state.mask(), cached_mask);
+
+        // Completing A and advancing the parser must invalidate the cached
+        // generation. The following mask is therefore recomputed for B.
+        state.commit_token(2).unwrap();
+        {
+            let cache = state.mask_cache.lock().unwrap();
+            assert_ne!(cache.as_ref().unwrap().generation, state.generation);
+        }
+    }
 
     #[test]
     fn recursive_radix_candidate_admission_matches_pointwise_exact_commit() {

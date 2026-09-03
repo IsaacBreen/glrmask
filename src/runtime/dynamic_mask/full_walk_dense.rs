@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::artifact::DynamicMaskTrieFullWalkOp;
 
 trait FullWalkTransitionTable {
     type Cell: Copy;
@@ -1998,12 +1999,44 @@ fn full_walk_step_many_state<T: FullWalkTransitionTable>(
 
 
 
+#[inline(always)]
+fn full_walk_skip_lexically_dead_subtree<'a>(
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    walk_ops: &'a [DynamicMaskTrieFullWalkOp],
+    remaining_ops: &mut std::slice::Iter<'a, DynamicMaskTrieFullWalkOp>,
+    token_marker_index: &mut usize,
+    buf: &mut [u32],
+) {
+    let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
+    let (child, subtree_end_op) = trie.full_walk_dead_subtree(op_index);
+
+    // The mask starts with all vocabulary tokens admitted. Every token below
+    // a lexically dead prefix is impossible, so clear exactly that subtree.
+    for &token_id in vocab.subtree_original_tokens(child) {
+        clear_mask_bit_known_in_range(buf, token_id);
+    }
+
+    // Token markers follow the same DFS token order as subtree metadata. The
+    // root is normally not a token; account for an empty-token vocabulary
+    // defensively so the cursor remains aligned after the jump.
+    let root_token_offset = usize::from(trie.node(0).token_id.is_some());
+    let token_end = trie
+        .subtree_token_index_range(child)
+        .end
+        .saturating_sub(root_token_offset);
+    debug_assert!(*token_marker_index <= token_end);
+    *token_marker_index = token_end;
+    *remaining_ops = walk_ops[subtree_end_op as usize..].iter();
+}
+
 /// Exact direct dynamic-mask path for bounded deterministic lexer coordinates.
 ///
-/// This deliberately performs the complete vocabulary walk. It does not use
-/// subtree certificates, segment-effect caches, recognizer-state interning, or
-/// any other mechanism that can omit vocabulary edges. Unsupported lexer or
-/// composition shapes return `false` and use the existing exact fallback.
+/// This performs the exact vocabulary walk, skipping only a child subtree once
+/// the current lexer branch is already proven dead. It does not use subtree
+/// certificates, segment-effect caches, recognizer-state interning, or any
+/// speculative admission rule. Unsupported lexer or composition shapes return
+/// `false` and use the existing exact fallback.
 
 #[inline(never)]
 fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_ROOT: bool>(
@@ -2107,8 +2140,8 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     let mut scalar_parser = 0u32;
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
-
-    for &op in walk_ops {
+    let mut remaining_ops = walk_ops.iter();
+    while let Some(&op) = remaining_ops.next() {
         let parent_depth = op.parent_depth() as usize;
         if op.starts_edge() {
             scalar_lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
@@ -2133,6 +2166,15 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 let cell = transitions.cell(scalar_lexer, byte);
                 if T::cell_is_dead(cell) {
                     scalar_lexer = FULL_WALK_LEXER_DEAD;
+                    full_walk_skip_lexically_dead_subtree(
+                        vocab,
+                        trie,
+                        walk_ops,
+                        &mut remaining_ops,
+                        &mut token_marker_index,
+                        buf,
+                    );
+                    continue;
                 } else {
                     let target = T::cell_target(cell);
                     if !T::cell_has_finalizer(cell) {
@@ -2287,7 +2329,18 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         &mut parser_cache,
                         state.constraint,
                     ) {
-                        FullWalkTwoStepOutcome::Dead => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                        FullWalkTwoStepOutcome::Dead => {
+                            scalar_lexer = FULL_WALK_LEXER_DEAD;
+                            full_walk_skip_lexically_dead_subtree(
+                                vocab,
+                                trie,
+                                walk_ops,
+                                &mut remaining_ops,
+                                &mut token_marker_index,
+                                buf,
+                            );
+                            continue;
+                        }
                         FullWalkTwoStepOutcome::One((lexer, parser)) => {
                             scalar_lexer = lexer;
                             scalar_parser = parser;
@@ -2344,7 +2397,18 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         &mut parser_cache,
                         state.constraint,
                     ) {
-                        FullWalkTwoStepOutcome::Dead => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                        FullWalkTwoStepOutcome::Dead => {
+                            scalar_lexer = FULL_WALK_LEXER_DEAD;
+                            full_walk_skip_lexically_dead_subtree(
+                                vocab,
+                                trie,
+                                walk_ops,
+                                &mut remaining_ops,
+                                &mut token_marker_index,
+                                buf,
+                            );
+                            continue;
+                        }
                         FullWalkTwoStepOutcome::One((lexer, parser)) => {
                             scalar_lexer = lexer;
                             scalar_parser = parser;
@@ -2402,7 +2466,18 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 match next {
                     FullWalkManyState::Branches(next) => {
                         match next.as_slice() {
-                            [] => scalar_lexer = FULL_WALK_LEXER_DEAD,
+                            [] => {
+                                scalar_lexer = FULL_WALK_LEXER_DEAD;
+                                full_walk_skip_lexically_dead_subtree(
+                                    vocab,
+                                    trie,
+                                    walk_ops,
+                                    &mut remaining_ops,
+                                    &mut token_marker_index,
+                                    buf,
+                                );
+                                continue;
+                            }
                             [branch] if branch.prune_guard.is_passed() => {
                                 scalar_lexer = branch.lexer_state;
                                 scalar_parser = branch.parser_node;
