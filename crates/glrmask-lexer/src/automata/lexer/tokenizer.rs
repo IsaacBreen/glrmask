@@ -9319,6 +9319,12 @@ impl Tokenizer {
         mask.virtual_unit_repeat = None;
         mask.virtual_repeat_intersections.clear();
         mask.virtual_residuals.clear();
+        // The projection below replaces virtual proxy epsilon roots and appends
+        // finite components. Artifact-loaded tokenizers may keep epsilon closure
+        // metadata packed outside `dfa`; materialize that metadata before any
+        // structural mutation or the raw DFA appears to have no proxy roots and
+        // newly-added epsilon edges would be shadowed by the packed metadata.
+        mask.materialize_runtime_metadata_for_structural_mutation();
         let start = mask.start_state();
         let repeat_horizons = super::compile::VocabularyRepeatHorizonCache::new();
 
@@ -9360,7 +9366,13 @@ impl Tokenizer {
             projection.set_state_offset(offset);
             projections.push(projection);
         }
-        mask.dfa.recompute_possible_futures();
+        // Do not globally recompute futures here. `mask` may retain packed
+        // byte-transition rows for the ordinary physical states; the raw DFA
+        // intentionally does not contain those rows, so a DFA-only fixpoint
+        // would erase valid physical future-terminal metadata. The existing
+        // physical metadata is already exact, each appended finite component
+        // carries exact remapped metadata, and replacing a residual proxy root
+        // with the finite root preserves the same terminal future at `start`.
         mask.invalidate_derived_caches();
         Some((mask, projections))
     }
@@ -13404,6 +13416,79 @@ mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn virtual_residual_mask_projection_preserves_fast_loaded_physical_futures() {
+        const HORIZON: usize = 4;
+        let ordinary = bytes(b"<");
+        let residual = Expr::Intersect {
+            expr: Box::new(Expr::Seq(vec![
+                bytes(b"\""),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                    min: 0,
+                    max: None,
+                },
+                bytes(b"\""),
+            ])),
+            intersect: Box::new(Expr::Seq(vec![
+                bytes(b"\""),
+                Expr::Repeat {
+                    expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                    min: 1,
+                    max: Some(128),
+                },
+                bytes(b"\""),
+            ])),
+        };
+        let expressions = vec![ordinary.clone(), residual.clone()];
+
+        // Build terminal 0 physically and reserve terminal 1 for the exact
+        // residual runtime, matching the hybrid dynamic-tokenizer layout.
+        let mut exact = tokenizer_from_exprs(vec![
+            ordinary,
+            Expr::U8Class(U8Set::empty()),
+        ]);
+        exact
+            .restore_terminal_exprs_without_virtual_runtime(Some(expressions.clone()))
+            .unwrap();
+        exact
+            .install_virtual_residual_components(vec![(residual, 1)])
+            .expect("bounded-code residual runtime must install");
+        let metadata = exact.virtual_runtime_metadata();
+        assert_eq!(metadata.len(), 1);
+        assert!(exact.possible_future_terminals(exact.start_state()).contains(0));
+
+        // Current fast loads keep ordinary byte transitions and observation
+        // metadata packed. Projection construction must structurally replace
+        // the residual proxy without losing the packed physical language.
+        let wire = artifact_serde::to_fast_bytes(&exact);
+        let mut loaded = artifact_serde::from_fast_bytes(&wire).expect("fast tokenizer roundtrip");
+        assert!(loaded.has_packed_runtime_transitions());
+        assert!(loaded.has_packed_runtime_metadata());
+        loaded
+            .restore_terminal_exprs_with_virtual_runtime_metadata(
+                Some(expressions),
+                &metadata,
+                false,
+            )
+            .expect("residual runtime must restore from explicit metadata");
+        assert!(loaded.possible_future_terminals(loaded.start_state()).contains(0));
+
+        let (mask, projections) = loaded
+            .virtual_residuals_mask_tokenizer(HORIZON)
+            .expect("fast-loaded residual tokenizer must admit a finite mask projection");
+        assert_eq!(projections.len(), 1);
+        assert!(
+            mask.possible_future_terminals(mask.start_state()).contains(0),
+            "projection must preserve ordinary physical futures stored in packed transition rows",
+        );
+        assert_eq!(
+            normalized_exec(&mask, b"<", mask.start_state()),
+            normalized_exec(&loaded, b"<", loaded.start_state()),
+            "projection changed the ordinary physical terminal language",
+        );
     }
 
     #[test]

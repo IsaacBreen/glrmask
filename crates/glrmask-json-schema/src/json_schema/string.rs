@@ -27,15 +27,8 @@ use super::pattern_splitting::{
 
 
 const PROGRAMMATIC_JS_WS_REGEX: &str = r"[ \t\n\r]*";
-// Keep this aligned with the dynamic compiler's giant-repeat threshold. Below
-// this bound the established chunked representation is both compact and fast;
-// the lazy residual form is intended for bounds large enough that eager
-// repetition would otherwise dominate compilation.
-const LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX: usize = 4_096;
-
-fn use_lazy_ordinary_bounded_string(config: &JsonSchemaConfig, max_length: usize) -> bool {
+fn use_lazy_ordinary_bounded_string(config: &JsonSchemaConfig) -> bool {
     config.lazy_ordinary_bounded_strings
-        && max_length >= LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
 }
 
 /// Recognize the deliberately small subset of regex syntax whose decoded
@@ -243,7 +236,7 @@ impl<'a> Lowerer<'a> {
             });
             let expr = if schema
                 .max_length
-                .is_some_and(|max| use_lazy_ordinary_bounded_string(&self.config, max))
+                .is_some_and(|max| use_lazy_ordinary_bounded_string(&self.config))
                 && schema.pattern.is_none()
                 && schema.format.is_none()
             {
@@ -315,6 +308,22 @@ impl<'a> Lowerer<'a> {
                 GrammarExpr::RawRegex(quoted_string_body_regex(format_body_regex)),
                 JsonTerminalPartitionClass::Pattern,
             )));
+        }
+
+        if string.max_length.is_some()
+            && string.pattern.is_none()
+            && string.format.is_none()
+            && use_lazy_ordinary_bounded_string(&self.config)
+        {
+            // A lazy bounded string is a semantic lexer terminal in dynamic
+            // mode. Do not inline its intersection into an enclosing array
+            // terminal: the residual runtime is attached at whole-terminal
+            // boundaries, so nesting it under array punctuation/repetition
+            // would force the intersection back through ordinary DFA
+            // materialization. Returning `None` keeps the array structure at
+            // grammar level while `lower_string` emits one exact lazy item
+            // terminal.
+            return Ok(None);
         }
 
         if string.max_length.is_some_and(|max| {
@@ -875,7 +884,7 @@ impl<'a> Lowerer<'a> {
         if schema.pattern.is_none()
             && let Some(max_length) = schema.max_length
         {
-            if use_lazy_ordinary_bounded_string(&self.config, max_length)
+            if use_lazy_ordinary_bounded_string(&self.config)
                 && schema.format.is_none()
             {
                 return Ok(self.lower_lazy_ordinary_bounded_string_terminal_expr(schema));
@@ -1460,7 +1469,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn should_split_ordinary_bounded_string(&self, min: usize, max: usize) -> bool {
-        !use_lazy_ordinary_bounded_string(&self.config, max)
+        !use_lazy_ordinary_bounded_string(&self.config)
             && self.should_split_bounded_string(min, max)
     }
 
@@ -4640,27 +4649,16 @@ mod tests {
         clamp_absolute_single_fixed_width_repetition, preprocess_ascii_shorthand,
         plain_fully_anchored_ascii_literal, quoted_string_body_regex,
         string_pattern_as_body_regex, use_lazy_ordinary_bounded_string, FixedWidthRepeatClamp,
-        JsonStringCompatMode, JsonStringContext,
-        LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX, TEST_COMPAT_MODE,
+        JsonStringCompatMode, JsonStringContext, TEST_COMPAT_MODE,
     };
     use crate::json_schema::config::JsonSchemaConfig;
 
     #[test]
-    fn lazy_ordinary_bounded_strings_start_at_dynamic_giant_threshold() {
+    fn lazy_ordinary_bounded_strings_are_enabled_independent_of_bound() {
         let mut config = JsonSchemaConfig::default();
-        assert!(!use_lazy_ordinary_bounded_string(
-            &config,
-            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
-        ));
+        assert!(!use_lazy_ordinary_bounded_string(&config));
         config.lazy_ordinary_bounded_strings = true;
-        assert!(!use_lazy_ordinary_bounded_string(
-            &config,
-            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX - 1
-        ));
-        assert!(use_lazy_ordinary_bounded_string(
-            &config,
-            LAZY_ORDINARY_BOUNDED_STRING_MIN_MAX
-        ));
+        assert!(use_lazy_ordinary_bounded_string(&config));
     }
 
     #[test]

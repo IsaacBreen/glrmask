@@ -9,7 +9,7 @@ use super::lower::find_repeated_single_byte_terminal_hazards;
 use super::preflight::{swap_allow_large_test_override, swap_max_nodes_test_override};
 use super::{
     GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, lower_exact_subtractions_enabled,
-    schema_to_named_grammar, split_literal_terminals_enabled,
+    schema_to_named_grammar, schema_to_named_grammar_for_dynamic, split_literal_terminals_enabled,
     swap_split_literal_terminals_test_override,
 };
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema, GLRMASK_LLGUIDANCE_COMPAT_ENV};
@@ -3182,6 +3182,42 @@ fn constrained_unbounded_string_arrays_terminalize_and_respect_min_items() {
     assert!(!schema_accepts_bytes(&schema, br#"["aa"]"#));
     assert!(schema_accepts_bytes(&schema, br#"["aa", "aaa"]"#));
     assert!(!schema_accepts_bytes(&schema, br#"["aa", "B"]"#));
+}
+
+#[test]
+fn dynamic_plain_bounded_string_arrays_keep_one_lazy_item_terminal() {
+    for max_items in [None, Some(3usize)] {
+        let mut schema = json!({
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+            }
+        });
+        if let Some(max_items) = max_items {
+            schema["maxItems"] = json!(max_items);
+        }
+
+        let grammar = schema_to_named_grammar_for_dynamic(&schema).unwrap();
+        assert!(
+            !grammar.rules.iter().any(|rule| {
+                rule.is_terminal
+                    && (rule.name.starts_with("bounded_scalar_array")
+                        || rule.name.starts_with("unbounded_scalar_array"))
+            }),
+            "a lazy bounded string must not be nested inside an enclosing array terminal: {:?}",
+            grammar.rules,
+        );
+        assert!(
+            grammar.rules.iter().any(|rule| {
+                rule.is_terminal && rule.name.starts_with("json_string_constrained_bounded")
+            }),
+            "the array item itself must remain one semantic lazy string terminal: {:?}",
+            grammar.rules,
+        );
+        lower(&grammar).unwrap();
+    }
 }
 
 #[test]

@@ -2960,6 +2960,118 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_ordinary_bounded_array_item_stays_a_lazy_terminal() {
+        let vocab = Vocab::new(vec![
+            (0, b"[".to_vec()),
+            (1, b"]".to_vec()),
+            (2, b",".to_vec()),
+            (3, b"\"".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"b".to_vec()),
+            (6, b"aa".to_vec()),
+            (7, b"\"a\"".to_vec()),
+            (8, b"\"b\"".to_vec()),
+            (9, b" ".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "array",
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 1024
+            }
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(
+            dynamic
+                .inner
+                .tokenizer
+                .virtual_residual_bounded_code_liveness_oracle_count(),
+            1,
+        );
+        assert!(
+            dynamic.inner.tokenizer.num_states() < 1_000,
+            "the 1024-character item bound must not be materialized into the physical tokenizer",
+        );
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(accepts(br#"["a", "bb"]"#));
+        assert!(!accepts(br#"[""]"#));
+
+        let mut at_limit = Vec::with_capacity(1028);
+        at_limit.extend_from_slice(b"[\"");
+        at_limit.extend(std::iter::repeat_n(b'a', 1024));
+        at_limit.extend_from_slice(b"\"]");
+        assert!(accepts(&at_limit));
+
+        let mut too_long = Vec::with_capacity(1029);
+        too_long.extend_from_slice(b"[\"");
+        too_long.extend(std::iter::repeat_n(b'a', 1025));
+        too_long.extend_from_slice(b"\"]");
+        assert!(!accepts(&too_long));
+
+        let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
+        assert!(loaded.inner.tokenizer.has_virtual_residual_runtime());
+        assert_eq!(loaded.start().mask(), dynamic.start().mask());
+
+        let mut dynamic_state = dynamic.start();
+        let mut loaded_state = loaded.start();
+        for (step, token) in [0u32, 7, 2, 9, 8, 1]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(dynamic_state.is_accepting(), loaded_state.is_accepting());
+            let dynamic_mask = dynamic_state.mask();
+            let loaded_mask = loaded_state.mask();
+            assert_eq!(dynamic_mask, loaded_mask, "save/load mask mismatch at step {step}");
+            assert!(
+                token_allowed(&dynamic_mask, token),
+                "fixture token {token} must be admitted at step {step}",
+            );
+            dynamic_state
+                .commit_token(token)
+                .unwrap_or_else(|error| panic!("dynamic commit failed at step {step}: {error}"));
+            loaded_state
+                .commit_token(token)
+                .unwrap_or_else(|error| panic!("loaded commit failed at step {step}: {error}"));
+        }
+        assert_eq!(dynamic_state.is_accepting(), loaded_state.is_accepting());
+        assert_eq!(dynamic_state.mask(), loaded_state.mask());
+    }
+
+    #[test]
+    fn dynamic_json_schema_ordinary_bounded_string_bound_is_symbolic() {
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+        ]);
+        let mut physical_state_counts = Vec::new();
+        for max_length in [255usize, 1024, 1_000_000_000_000] {
+            let schema = format!(r#"{{"type":"string","maxLength":{max_length}}}"#);
+            let dynamic = DynamicConstraint::from_json_schema(&schema, &vocab).unwrap();
+            assert!(dynamic.inner.tokenizer.has_virtual_residual_runtime());
+            assert_eq!(
+                dynamic
+                    .inner
+                    .tokenizer
+                    .virtual_residual_bounded_code_liveness_oracle_count(),
+                1,
+            );
+            physical_state_counts.push(dynamic.inner.tokenizer.num_states());
+        }
+        assert!(
+            physical_state_counts.windows(2).all(|pair| pair[0] == pair[1]),
+            "physical tokenizer size must not depend on the numeric bounded-string maximum: {physical_state_counts:?}",
+        );
+    }
+
+    #[test]
     fn dynamic_json_schema_bounded_pattern_uses_exact_code_liveness_oracle() {
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
