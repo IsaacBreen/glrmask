@@ -31,15 +31,88 @@ pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 /// Compile-time detail requested for the reusable dynamic-boundary trigger.
 ///
 /// This setting is orthogonal to whether ordinary component masking is static
-/// or dynamic. `None` is the zero-cost default; `Tokens` adds only a
-/// parser-state-independent candidate set; `Exact` builds the full
-/// GSS-sensitive trigger Parser DWA when the component supports it.
+/// or dynamic. `None` is the zero-cost default; `Tokens` adds independent
+/// conservative model-token and raw-tokenizer-state sets; `Exact` builds the
+/// full GSS-sensitive trigger Parser DWA when the component supports it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BoundaryTriggerDetail {
     #[default]
     None,
     Tokens,
     Exact,
+}
+
+/// Conservative lexical support for a reusable boundary trigger.
+///
+/// Tokens and raw local tokenizer-state IDs are deliberately independent
+/// sets. Their Cartesian product is a conservative accelerator; preserving
+/// token/TSID correlation belongs to `BoundaryTrigger::Exact`, not this cheap
+/// trigger level.
+#[derive(Debug, Clone)]
+pub(crate) enum BoundaryTsidSet {
+    All,
+    Explicit(Arc<[u32]>),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BoundaryTokenTrigger {
+    tokens: Arc<[u32]>,
+    tsids: BoundaryTsidSet,
+}
+
+impl BoundaryTokenTrigger {
+    fn normalize_tokens(mut tokens: Vec<u32>) -> Vec<u32> {
+        tokens.sort_unstable();
+        tokens.dedup();
+        tokens
+    }
+
+    pub(crate) fn token_tsids(tokens: Vec<u32>, mut tsids: Vec<u32>) -> Self {
+        tsids.sort_unstable();
+        tsids.dedup();
+        Self {
+            tokens: Arc::from(Self::normalize_tokens(tokens).into_boxed_slice()),
+            tsids: BoundaryTsidSet::Explicit(Arc::from(tsids.into_boxed_slice())),
+        }
+    }
+
+    pub(crate) fn all_tsids(tokens: Vec<u32>) -> Self {
+        Self {
+            tokens: Arc::from(Self::normalize_tokens(tokens).into_boxed_slice()),
+            tsids: BoundaryTsidSet::All,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn token_summary(&self) -> &[u32] {
+        self.tokens.as_ref()
+    }
+
+    #[inline]
+    pub(crate) fn token_summary_arc(&self) -> Arc<[u32]> {
+        Arc::clone(&self.tokens)
+    }
+
+    #[inline]
+    pub(crate) fn supports_tsid(&self, tsid: u32) -> bool {
+        match &self.tsids {
+            BoundaryTsidSet::All => true,
+            BoundaryTsidSet::Explicit(tsids) => tsids.binary_search(&tsid).is_ok(),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn explicit_tsids(&self) -> Option<&[u32]> {
+        match &self.tsids {
+            BoundaryTsidSet::All => None,
+            BoundaryTsidSet::Explicit(tsids) => Some(tsids.as_ref()),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn tsids_are_all(&self) -> bool {
+        matches!(self.tsids, BoundaryTsidSet::All)
+    }
 }
 
 /// Optional reusable hint for dynamic composition boundaries. This is an
@@ -49,9 +122,10 @@ pub enum BoundaryTriggerDetail {
 pub(crate) enum BoundaryTrigger {
     #[default]
     None,
-    /// Conservative original model-token IDs that may contain the first
-    /// internal boundary crossing. Parser-state independent.
-    Tokens(Arc<[u32]>),
+    /// Independent conservative sets of raw local tokenizer-state IDs and
+    /// original/model-token IDs that may participate in an internal boundary
+    /// crossing. Their Cartesian product deliberately over-accepts.
+    Tokens(BoundaryTokenTrigger),
     /// Exact component-local parser DWA. Its coordinate is deliberately
     /// independent of the ordinary parser-DWA quotient: parser labels are
     /// local LR-state IDs, weight TSIDs are raw local tokenizer-state IDs, and
@@ -69,7 +143,7 @@ impl BoundaryTrigger {
 
     pub(crate) fn token_summary(&self) -> Option<&[u32]> {
         match self {
-            Self::Tokens(tokens) => Some(tokens),
+            Self::Tokens(tokens) => Some(tokens.token_summary()),
             Self::None | Self::Exact(_) => None,
         }
     }

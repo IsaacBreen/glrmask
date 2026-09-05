@@ -247,15 +247,30 @@ struct DynamicConstraintPayloadV6 {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum DynamicBoundaryTriggerWire {
     None,
+    // Legacy/conservative uniform token summary. Keep this variant in place so
+    // previously serialized dynamic artifacts retain their discriminant.
     Tokens(Vec<u32>),
     Exact(DWA),
+    TokenTsids {
+        tokens: Vec<u32>,
+        tsids: Vec<u32>,
+    },
 }
 
 impl DynamicBoundaryTriggerWire {
     fn from_trigger(trigger: &crate::runtime::BoundaryTrigger) -> Self {
         match trigger {
             crate::runtime::BoundaryTrigger::None => Self::None,
-            crate::runtime::BoundaryTrigger::Tokens(tokens) => Self::Tokens(tokens.to_vec()),
+            crate::runtime::BoundaryTrigger::Tokens(tokens) => {
+                if let Some(tsids) = tokens.explicit_tsids() {
+                    Self::TokenTsids {
+                        tokens: tokens.token_summary().to_vec(),
+                        tsids: tsids.to_vec(),
+                    }
+                } else {
+                    Self::Tokens(tokens.token_summary().to_vec())
+                }
+            }
             crate::runtime::BoundaryTrigger::Exact(dwa) => Self::Exact((**dwa).clone()),
         }
     }
@@ -263,16 +278,16 @@ impl DynamicBoundaryTriggerWire {
     fn into_trigger(self) -> crate::runtime::BoundaryTrigger {
         match self {
             Self::None => crate::runtime::BoundaryTrigger::None,
-            Self::Tokens(mut tokens) => {
-                tokens.sort_unstable();
-                tokens.dedup();
-                crate::runtime::BoundaryTrigger::Tokens(Arc::from(tokens.into_boxed_slice()))
-            }
+            Self::Tokens(tokens) => crate::runtime::BoundaryTrigger::Tokens(
+                crate::runtime::BoundaryTokenTrigger::all_tsids(tokens),
+            ),
             Self::Exact(dwa) => crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa)),
+            Self::TokenTsids { tokens, tsids } => crate::runtime::BoundaryTrigger::Tokens(
+                crate::runtime::BoundaryTokenTrigger::token_tsids(tokens, tsids),
+            ),
         }
     }
 }
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct DynamicConstraintPayloadV7Alternative {
     base: DynamicConstraintPayloadV5Alternative,
@@ -2873,7 +2888,7 @@ mod tests {
             terminal_id: 0,
         }];
         constraint.inner.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(
-            Arc::from(vec![1u32].into_boxed_slice()),
+            crate::runtime::BoundaryTokenTrigger::token_tsids(vec![1u32], vec![0u32]),
         );
         let state_count = constraint.inner.tokenizer.num_states() as u32;
         constraint.inner.dynamic_mask_vocab.set_terminal_observation_classes(vec![(
@@ -2898,6 +2913,12 @@ mod tests {
             loaded.inner.boundary_trigger.token_summary().map(|tokens| tokens.to_vec()),
             Some(vec![1]),
         );
+        let crate::runtime::BoundaryTrigger::Tokens(loaded_trigger) =
+            &loaded.inner.boundary_trigger
+        else {
+            panic!("expected Tokens trigger after dynamic save/load");
+        };
+        assert_eq!(loaded_trigger.explicit_tsids(), Some(&[0u32][..]));
         assert_eq!(loaded.start().mask(), constraint.start().mask());
 
         let transfer = constraint.clone().into_saved();
@@ -2916,6 +2937,12 @@ mod tests {
                 .map(|tokens| tokens.to_vec()),
             Some(vec![1]),
         );
+        let crate::runtime::BoundaryTrigger::Tokens(transferred_trigger) =
+            &transferred.inner.boundary_trigger
+        else {
+            panic!("expected Tokens trigger after dynamic transfer round-trip");
+        };
+        assert_eq!(transferred_trigger.explicit_tsids(), Some(&[0u32][..]));
         assert_eq!(transferred.start().mask(), constraint.start().mask());
 
     }

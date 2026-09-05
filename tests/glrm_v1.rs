@@ -451,6 +451,176 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
 }
 
 #[test]
+fn static_boundary_preserves_parent_ignore_prefix_into_child() {
+    let vocab = Vocab::new(vec![
+        (0, b"tools".to_vec()),
+        (1, b" ".to_vec()),
+        (2, b".".to_vec()),
+        (3, b" .".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                ignore WS;
+                t WS = " "+;
+                extern grammar suffix;
+                nt document = "tools" suffix;
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let child = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start suffix;
+                nt suffix = ".";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let reference = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                ignore WS;
+                t WS = " "+;
+                nt document = "tools" ".";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let bound = parent.bind_grammar("suffix", &child).unwrap();
+
+    let mut expected = reference.start();
+    let mut actual = bound.start();
+    expected.commit_token(0).unwrap();
+    actual.commit_token(0).unwrap();
+    assert_eq!(actual.mask(), expected.mask());
+    assert!(
+        allowed(&actual.mask(), 3),
+        "static boundary must admit a token whose parent-IGNORE prefix is followed by the child's first terminal"
+    );
+    actual.commit_token(3).unwrap();
+    expected.commit_token(3).unwrap();
+    assert_eq!(actual.is_accepting(), expected.is_accepting());
+}
+#[test]
+fn static_boundary_preserves_child_ignore_prefix_after_entry() {
+    let vocab = Vocab::new(vec![
+        (0, b"tools".to_vec()),
+        (1, b" ".to_vec()),
+        (2, b".".to_vec()),
+        (3, b" .".to_vec()),
+        (4, b"tools ".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                extern grammar suffix;
+                nt document = "tools" suffix;
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let child = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start suffix;
+                ignore WS;
+                t WS = " "+;
+                nt suffix = ".";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let reference = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                nt document = "tools" child;
+                g child = {
+                    start suffix;
+                    ignore WS;
+                    t WS = " "+;
+                    nt suffix = ".";
+                };
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let bound = parent.bind_grammar("suffix", &child).unwrap();
+
+    let mut expected = reference.start();
+    let mut actual = bound.start();
+    expected.commit_token(0).unwrap();
+    actual.commit_token(0).unwrap();
+    assert_eq!(actual.mask(), expected.mask());
+    assert!(allowed(&actual.mask(), 3));
+    actual.commit_token(3).unwrap();
+    expected.commit_token(3).unwrap();
+    assert_eq!(actual.is_accepting(), expected.is_accepting());
+}
+
+#[test]
+fn static_boundary_preserves_scoped_ignores_on_both_sides() {
+    let vocab = Vocab::new(vec![
+        (0, b"tools".to_vec()),
+        (1, b" ".to_vec()),
+        (2, b".".to_vec()),
+        (3, b"  .".to_vec()),
+    ]);
+    let parent = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start document;
+                ignore PWS;
+                t PWS = " "+;
+                extern grammar suffix;
+                nt document = "tools" suffix;
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let child = Constraint::compile(
+        Grammar::glrm(
+            r#"
+                glrm 1;
+                start suffix;
+                ignore CWS;
+                t CWS = " "+;
+                nt suffix = ".";
+            "#,
+        ),
+        &vocab,
+    )
+    .unwrap();
+    let bound = parent.bind_grammar("suffix", &child).unwrap();
+    let mut state = bound.start();
+    state.commit_token(0).unwrap();
+    assert!(
+        allowed(&state.mask(), 3),
+        "static boundary must preserve a fused token traversing scoped ignore at a component boundary"
+    );
+    state.commit_token(3).unwrap();
+    assert!(state.is_accepting());
+}
+#[test]
 fn compiled_children_are_authoritative_and_compose_both_directions() {
     let vocab = Vocab::new(vec![(0, Vec::new()), (55, Vec::new()), (56, Vec::new())]);
     let child_source = "glrm 1; start start; extern token VALUE; nt start = VALUE;";

@@ -17,6 +17,8 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use rayon::prelude::*;
+
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, SegmentedBoundaryBackend, compose_constraints,
     compose_constraints_owned_parent_segmented_shared,
@@ -25,6 +27,10 @@ use crate::{Constraint, GlrMaskError, Vocab};
 
 const JAVASCRIPT_GLRM: &str = include_str!("programmatic_js/javascript.glrm");
 const PARENT_PLACEHOLDER_NAME: &str = "PROGRAMMATIC_TOOL_SUFFIX";
+// The grammar/compiler stack can be substantially deeper than an ordinary
+// Rayon worker stack. Keep macro-parallel reusable compilation on dedicated
+// large-stack threads; each compile may still use Rayon internally.
+const REUSABLE_COMPONENT_COMPILE_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 const DYNAMIC_VALUE_RULES: &str = r#"
 // Opaque runtime values only. These forms retrieve/produce a runtime value
@@ -63,7 +69,8 @@ nt dynamic_reference_suffix ::=
 /// Reusable compiler for programmatic JavaScript tool calling.
 #[derive(Debug)]
 pub struct ProgrammaticJsCompiler {
-    parent: Constraint,
+    parent: Arc<Constraint>,
+    wrapper_parent: Arc<Constraint>,
     dynamic_value: Constraint,
     condition: Constraint,
     parent_placeholder_terminal: u32,
@@ -72,10 +79,40 @@ pub struct ProgrammaticJsCompiler {
 impl ProgrammaticJsCompiler {
     /// Compile all reusable programmatic-JavaScript components for `vocab`.
     pub fn new(vocab: &Vocab) -> crate::Result<Self> {
-        let parent = Self::compile_parent(vocab)?;
-        let dynamic_value = Self::compile_dynamic_value(vocab)?;
-        let condition = Self::compile_condition(vocab)?;
-        Self::from_components(parent, dynamic_value, condition)
+        let (parent, wrapper_parent, dynamic_value, condition) = std::thread::scope(|scope| {
+            let spawn = |name: &str,
+                         compile: fn(&Vocab) -> crate::Result<Constraint>|
+             -> crate::Result<_> {
+                std::thread::Builder::new()
+                    .name(name.to_owned())
+                    .stack_size(REUSABLE_COMPONENT_COMPILE_STACK_BYTES)
+                    .spawn_scoped(scope, move || compile(vocab))
+                    .map_err(|err| {
+                        GlrMaskError::Compilation(format!(
+                            "failed to spawn programmatic JavaScript compiler thread {name}: {err}"
+                        ))
+                    })
+            };
+
+            let parent = spawn("glrmask-js-parent", Self::compile_parent)?;
+            let wrapper_parent = spawn("glrmask-js-wrapper-parent", Self::compile_wrapper_parent)?;
+            let dynamic_value = spawn("glrmask-js-dynamic-value", Self::compile_dynamic_value)?;
+            let condition = spawn("glrmask-js-condition", Self::compile_condition)?;
+
+            let join = |thread: std::thread::ScopedJoinHandle<'_, crate::Result<Constraint>>| {
+                match thread.join() {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                }
+            };
+            Ok::<_, GlrMaskError>((
+                join(parent)?,
+                join(wrapper_parent)?,
+                join(dynamic_value)?,
+                join(condition)?,
+            ))
+        })?;
+        Self::from_components_with_wrapper(parent, wrapper_parent, dynamic_value, condition)
     }
 
     /// Compile the reusable full-JavaScript parent containing the reserved
@@ -84,18 +121,44 @@ impl ProgrammaticJsCompiler {
     pub fn compile_parent(vocab: &Vocab) -> crate::Result<Constraint> {
         let placeholder_token_id =
             crate::import::external_placeholder_token_id_avoiding(vocab, std::iter::empty())?;
-        Constraint::from_glrm_grammar(&programmatic_parent_source(placeholder_token_id)?, vocab)
+        let mut constraint =
+            Constraint::from_glrm_grammar(&programmatic_parent_source(placeholder_token_id)?, vocab)?;
+        constraint
+            .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+            .map_err(GlrMaskError::Compilation)?;
+        Ok(constraint)
     }
 
     /// Compile the reusable opaque-runtime-value expression subgrammar.
     pub fn compile_dynamic_value(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&dynamic_value_source()?, vocab)
+        let mut constraint = Constraint::from_glrm_grammar(&dynamic_value_source()?, vocab)?;
+        constraint
+            .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+            .map_err(GlrMaskError::Compilation)?;
+        Ok(constraint)
     }
 
     /// Compile the reusable unrestricted JavaScript condition subgrammar used
     /// only as the test of schema-aware conditional expressions.
     pub fn compile_condition(vocab: &Vocab) -> crate::Result<Constraint> {
-        Constraint::from_glrm_grammar(&condition_source()?, vocab)
+        let mut constraint = Constraint::from_glrm_grammar(&condition_source()?, vocab)?;
+        constraint
+            .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+            .map_err(GlrMaskError::Compilation)?;
+        Ok(constraint)
+    }
+
+    fn compile_wrapper_parent(vocab: &Vocab) -> crate::Result<Constraint> {
+        let wrapper_source = prepared_tool_wrapper_source();
+        let mut constraint =
+            Constraint::from_glrm_grammar_with_subgrammars(&wrapper_source, &[], vocab)?;
+        constraint
+            .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+            .map_err(GlrMaskError::Compilation)?;
+        constraint
+            .materialize_composition_metadata_for_compilation()
+            .map_err(GlrMaskError::Compilation)?;
+        Ok(constraint)
     }
 
     /// Assemble a reusable compiler from independently compiled shared parts.
@@ -106,6 +169,40 @@ impl ProgrammaticJsCompiler {
         dynamic_value: Constraint,
         condition: Constraint,
     ) -> crate::Result<Self> {
+        let vocab = crate::public_api::constraint_vocab(&parent);
+        let wrapper_parent = Self::compile_wrapper_parent(&vocab)?;
+        Self::from_components_with_wrapper(parent, wrapper_parent, dynamic_value, condition)
+    }
+
+    fn from_components_with_wrapper(
+        mut parent: Constraint,
+        mut wrapper_parent: Constraint,
+        mut dynamic_value: Constraint,
+        mut condition: Constraint,
+    ) -> crate::Result<Self> {
+        // These four constraints are the reusable intact leaves subsequently
+        // embedded in every programmatic-schema composition. Give each leaf its
+        // own conservative trigger before any Arc sharing/composition occurs;
+        // doing this here also upgrades older cached components loaded by callers
+        // without requiring Arc::make_mut or composition-specific trigger logic.
+        for component in [
+            &mut parent,
+            &mut wrapper_parent,
+            &mut dynamic_value,
+            &mut condition,
+        ] {
+            if component.boundary_trigger.is_none() {
+                component
+                    .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+                    .map_err(GlrMaskError::Compilation)?;
+            }
+        }
+        parent
+            .materialize_composition_metadata_for_compilation()
+            .map_err(GlrMaskError::Compilation)?;
+        wrapper_parent
+            .materialize_composition_metadata_for_compilation()
+            .map_err(GlrMaskError::Compilation)?;
         let parent_placeholder_terminal = parent
             .terminal_display_names
             .iter()
@@ -117,7 +214,8 @@ impl ProgrammaticJsCompiler {
                 )
             })?;
         Ok(Self {
-            parent,
+            parent: Arc::new(parent),
+            wrapper_parent: Arc::new(wrapper_parent),
             dynamic_value,
             condition,
             parent_placeholder_terminal,
@@ -277,8 +375,9 @@ impl ProgrammaticJsCompiler {
             additional_placeholder_terminals: &[],
             constraint: shared[0].as_ref(),
         }];
+        let parent = Arc::try_unwrap(self.parent).unwrap_or_else(|parent| (*parent).clone());
         compose_constraints_owned_parent_segmented_shared(
-            self.parent,
+            parent,
             &inputs,
             &shared,
             vocab,
@@ -299,6 +398,135 @@ impl ProgrammaticJsCompiler {
         self.compose_dispatcher(&dispatcher, vocab)
     }
 
+    /// Compose an owned static tool set through the two-phase static boundary
+    /// pipeline. The dispatcher semantic core may feed the outer JavaScript
+    /// linker while its boundary publication is still finishing.
+    #[doc(hidden)]
+    pub fn compose_tools_static_prepared_owned(
+        &self,
+        tools: Vec<(String, Constraint)>,
+        vocab: &Vocab,
+    ) -> crate::Result<Constraint> {
+        let total_started = std::time::Instant::now();
+        let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
+            || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
+        validate_tool_names(tools.iter().map(|(name, _)| name.as_str()))?;
+        if tools.is_empty() {
+            return Err(GlrMaskError::Compilation(
+                "programmatic JavaScript requires at least one tool".into(),
+            ));
+        }
+
+        // Keep each expensive schema boundary local to a wrapper. The dispatcher owns
+        // `.tool_name`, while each wrapper owns `(` + schema + `)`. This preserves
+        // JavaScript trivia before the dot while keeping schema boundary work local.
+        let tool_names = tools.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+        let dispatcher_source = prepared_dispatcher_source(&tool_names);
+        let wrapper_parent = Arc::clone(&self.wrapper_parent);
+        // These are macro-level coordinators. Each prepared binding parks while
+        // its composition worker publishes the semantic core, and that worker
+        // uses Rayon for micro-parallel compiler phases. Running the parked
+        // coordinators themselves on Rayon workers starves the inner pool (and
+        // can deadlock when the outer fanout reaches the pool size), so keep the
+        // two scheduling layers separate. The dispatcher shell is independent of
+        // every schema wrapper, so compile it in the same scoped macro phase rather
+        // than serializing ~40 ms of tool-specific grammar work ahead of wrappers.
+        let parallel_prepare_started = std::time::Instant::now();
+        let (dispatcher_parent, dispatcher_parent_ms, wrappers, wrappers_ms) =
+            std::thread::scope(|scope| {
+                let dispatcher_handle = std::thread::Builder::new()
+                    .name("glrmask-js-dispatcher-parent".to_owned())
+                    .stack_size(REUSABLE_COMPONENT_COMPILE_STACK_BYTES)
+                    .spawn_scoped(scope, move || {
+                        let started = std::time::Instant::now();
+                        let mut dispatcher_parent =
+                            Constraint::from_glrm_grammar_with_subgrammars(
+                                &dispatcher_source,
+                                &[],
+                                vocab,
+                            )?;
+                        dispatcher_parent
+                            .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+                            .map_err(GlrMaskError::Compilation)?;
+                        Ok::<_, GlrMaskError>((
+                            dispatcher_parent,
+                            started.elapsed().as_secs_f64() * 1000.0,
+                        ))
+                    })
+                    .map_err(|error| {
+                        GlrMaskError::Compilation(format!(
+                            "failed to spawn programmatic dispatcher compiler: {error}"
+                        ))
+                    })?;
+
+                let wrappers_started = std::time::Instant::now();
+            let mut handles = Vec::with_capacity(tools.len());
+            for (index, (_name, constraint)) in tools.into_iter().enumerate() {
+                let wrapper_parent = Arc::clone(&wrapper_parent);
+                let handle = std::thread::Builder::new()
+                    .name(format!("glrmask-js-wrapper-{index}"))
+                    .spawn_scoped(scope, move || {
+                        let wrapper =
+                            crate::public_api::bind_static_shared_parent_shared_prepare_before_boundary(
+                                wrapper_parent,
+                                vec![("args".to_owned(), Arc::new(constraint))],
+                                SegmentedBoundaryBackend::StaticParserDwa,
+                            )?;
+                        Ok::<_, GlrMaskError>((format!("call_{index}"), wrapper))
+                    })
+                    .map_err(|error| {
+                        GlrMaskError::Compilation(format!(
+                            "failed to spawn programmatic tool wrapper compiler: {error}"
+                        ))
+                    })?;
+                handles.push(handle);
+            }
+                let wrappers = handles
+                .into_iter()
+                .map(|handle| match handle.join() {
+                    Ok(result) => result,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                })
+                    .collect::<crate::Result<Vec<_>>>()?;
+                let wrappers_ms = wrappers_started.elapsed().as_secs_f64() * 1000.0;
+                let (dispatcher_parent, dispatcher_parent_ms) = match dispatcher_handle.join() {
+                    Ok(result) => result?,
+                    Err(panic) => std::panic::resume_unwind(panic),
+                };
+                Ok::<_, GlrMaskError>((
+                    dispatcher_parent,
+                    dispatcher_parent_ms,
+                    wrappers,
+                    wrappers_ms,
+                ))
+            })?;
+        let parallel_prepare_ms = parallel_prepare_started.elapsed().as_secs_f64() * 1000.0;
+        let dispatcher_started = std::time::Instant::now();
+        let dispatcher = crate::public_api::bind_static_parent_prepared_children(
+            dispatcher_parent,
+            wrappers,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )?;
+        let dispatcher_ms = dispatcher_started.elapsed().as_secs_f64() * 1000.0;
+        let root_started = std::time::Instant::now();
+        let root = crate::public_api::compose_static_shared_parent_prepared_child_at_terminal(
+            Arc::clone(&self.parent),
+            self.parent_placeholder_terminal,
+            dispatcher,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )?;
+        let root_ms = root_started.elapsed().as_secs_f64() * 1000.0;
+        let finish_started = std::time::Instant::now();
+        let result = root.finish();
+        let finish_ms = finish_started.elapsed().as_secs_f64() * 1000.0;
+        if profile {
+            eprintln!(
+                "[glrmask/profile][programmatic_prepared_static] parallel_prepare_wall_ms={parallel_prepare_ms:.3} wrappers_ms={wrappers_ms:.3} dispatcher_parent_ms={dispatcher_parent_ms:.3} dispatcher_publish_ms={dispatcher_ms:.3} root_publish_ms={root_ms:.3} finish_ms={finish_ms:.3} total_ms={:.3}",
+                total_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        result
+    }
     /// Convenience path that compiles every schema and then composes the full
     /// tool-calling constraint. Use [`Self::compile_schema`] and
     /// [`Self::compose_tools`] separately when build-phase timings matter.
@@ -309,17 +537,13 @@ impl ProgrammaticJsCompiler {
     ) -> crate::Result<Constraint> {
         validate_tool_names(tools.iter().map(|(name, _)| *name))?;
         let compiled = tools
-            .iter()
+            .par_iter()
             .map(|(name, schema)| {
                 self.compile_schema(schema, vocab)
-                    .map(|constraint| (*name, constraint))
+                    .map(|constraint| ((*name).to_owned(), constraint))
             })
             .collect::<crate::Result<Vec<_>>>()?;
-        let borrowed = compiled
-            .iter()
-            .map(|(name, constraint)| (*name, constraint))
-            .collect::<Vec<_>>();
-        self.compose_tools(&borrowed, vocab)
+        self.compose_tools_static_prepared_owned(compiled, vocab)
     }
 }
 
@@ -426,6 +650,24 @@ fn programmatic_parent_source(placeholder_token_id: u32) -> crate::Result<String
     Ok(crate::grammar::glrm::to_glrm(&grammar))
 }
 
+fn prepared_tool_wrapper_source() -> String {
+    "extern grammar args;\nstart wrapped;\nnt wrapped ::= '(' args ')';\n".to_owned()
+}
+
+fn prepared_dispatcher_source(names: &[String]) -> String {
+    let mut source = String::new();
+    for index in 0..names.len() {
+        source.push_str(&format!("extern grammar call_{index};\n"));
+    }
+    source.push_str("start suffix;\nnt suffix ::=\n");
+    for (index, name) in names.iter().enumerate() {
+        let prefix = if index == 0 { "    " } else { "  | " };
+        let head = serde_json::to_string(&format!(".{name}")).expect("tool name is UTF-8");
+        source.push_str(&format!("{prefix}{head} call_{index}\n"));
+    }
+    source.push_str("  ;\n");
+    source
+}
 fn dispatcher_source<'a>(names: impl IntoIterator<Item = &'a str>) -> String {
     let names = names.into_iter().collect::<Vec<_>>();
     let mut source = String::new();
@@ -603,6 +845,78 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn programmatic_compile_tools_reuses_shared_parent() {
+        let vocab = vocab();
+        let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
+        assert!(matches!(
+            compiler.wrapper_parent.boundary_trigger,
+            crate::runtime::BoundaryTrigger::Tokens(_)
+        ));
+        assert!(compiler.wrapper_parent.deferred_composition_metadata_blob.is_none());
+        let schema = r#"{
+          "type":"object",
+          "properties":{"customer_id":{"type":"string"}},
+          "required":["customer_id"],
+          "additionalProperties":false
+        }"#;
+
+        let compiled_schema = compiler.compile_schema(schema, &vocab).unwrap();
+        if let Some(layout) = compiled_schema.recursive_parser_layout().unwrap() {
+            for leaf_index in 0..layout.leaves.len() {
+                let leaf = compiled_schema.recursive_leaf_constraint(leaf_index).unwrap();
+                assert!(
+                    matches!(leaf.boundary_trigger, crate::runtime::BoundaryTrigger::Tokens(_)),
+                    "fresh programmatic schema leaf {leaf_index} has no Tokens trigger",
+                );
+            }
+        }
+
+        let first = compiler.compile_tools(&[("lookup", schema)], &vocab).unwrap();
+        let second = compiler
+            .compile_tools(&[("lookup", schema), ("lookup2", schema)], &vocab)
+            .unwrap();
+        if let Some(layout) = first.recursive_parser_layout().unwrap() {
+            let mut shared_wrapper_leaf_count = 0usize;
+            for leaf_index in 0..layout.leaves.len() {
+                let leaf = first.recursive_leaf_constraint(leaf_index).unwrap();
+                if std::ptr::eq(leaf, compiler.wrapper_parent.as_ref()) {
+                    shared_wrapper_leaf_count += 1;
+                }
+                assert!(
+                    matches!(leaf.boundary_trigger, crate::runtime::BoundaryTrigger::Tokens(_)),
+                    "finished programmatic constraint leaf {leaf_index} has no Tokens trigger",
+                );
+            }
+            assert_eq!(
+                shared_wrapper_leaf_count, 1,
+                "one-tool composition must retain the compiler's exact shared wrapper parent"
+            );
+        }
+        if let Some(layout) = second.recursive_parser_layout().unwrap() {
+            let shared_wrapper_leaf_count = (0..layout.leaves.len())
+                .filter(|&leaf_index| {
+                    let leaf = second.recursive_leaf_constraint(leaf_index).unwrap();
+                    std::ptr::eq(leaf, compiler.wrapper_parent.as_ref())
+                })
+                .count();
+            assert_eq!(
+                shared_wrapper_leaf_count, 2,
+                "two-tool composition must reuse the exact shared wrapper parent twice"
+            );
+        }
+        let valid = b"tools.lookup({customer_id: customer.id});";
+        let valid_second_tool = b"tools.lookup2({customer_id: customer.id});";
+        let valid_with_trivia = b"tools .lookup({customer_id: customer.id});";
+        assert!(accepts_bytes(&first, valid));
+        assert!(accepts_bytes(&second, valid));
+        assert!(accepts_bytes(&second, valid_second_tool));
+        assert!(accepts_bytes(&first, valid_with_trivia));
+        assert!(accepts_bytes(&second, valid_with_trivia));
+        let loaded = Constraint::load(first.save()).unwrap();
+        assert!(accepts_bytes(&loaded, valid));
+        assert!(accepts_bytes(&loaded, valid_with_trivia));
+    }
     #[test]
     fn programmatic_nested_object_and_array_values_stay_schema_aware() {
         let vocab = vocab();

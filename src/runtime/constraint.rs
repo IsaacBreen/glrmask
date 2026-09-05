@@ -1053,7 +1053,85 @@ impl Constraint {
         candidates
     }
 
-    fn boundary_token_trigger_candidates_trie(&self, relevant: &BitSet) -> Vec<u32> {
+    fn boundary_token_trigger_candidate_matches_from_state(
+        &self,
+        relevant: &BitSet,
+        raw_start: u32,
+        bytes: &[u8],
+    ) -> bool {
+        if bytes.len() < 2 {
+            return false;
+        }
+        let reset = self.runtime_commit_initial_state();
+        let mut states = TokenizerStateSet::from_iter(std::iter::once(raw_start));
+        for &byte in &bytes[..bytes.len() - 1] {
+            states = if self.tokenizer_has_epsilon_transitions {
+                self.tokenizer.step_all(states.as_slice(), byte)
+            } else {
+                let mut next = TokenizerStateSet::new();
+                for &state in &states {
+                    let target = self.tokenizer_fast_transitions.transition(
+                        &self.tokenizer,
+                        state,
+                        byte,
+                    );
+                    if target != u32::MAX {
+                        next.push(target);
+                    }
+                }
+                next.sort_unstable();
+                next.dedup();
+                next
+            };
+            if states.is_empty() {
+                return false;
+            }
+            let mut matched_any = false;
+            let mut matched_relevant = false;
+            for state in states.iter().copied() {
+                for terminal in self.tokenizer.matched_terminals_iter(state) {
+                    matched_any = true;
+                    matched_relevant |= relevant.contains(terminal as usize);
+                }
+            }
+            if matched_relevant {
+                return true;
+            }
+            if matched_any && !states.contains(&reset) {
+                states.push(reset);
+                states.sort_unstable();
+            }
+        }
+        false
+    }
+
+    fn boundary_token_trigger_tsids(
+        &self,
+        relevant: &BitSet,
+        candidates: &[u32],
+    ) -> Vec<u32> {
+        let candidate_bytes = candidates
+            .iter()
+            .filter_map(|&token| self.token_bytes_for_id(token).map(|bytes| (token, bytes)))
+            .collect::<Vec<_>>();
+        (0..self.tokenizer.num_states())
+            .into_par_iter()
+            .filter_map(|raw_start| {
+                candidate_bytes.iter().any(|&(_token, bytes)| {
+                    self.boundary_token_trigger_candidate_matches_from_state(
+                        relevant,
+                        raw_start,
+                        bytes,
+                    )
+                }).then_some(raw_start)
+            })
+            .collect()
+    }
+    fn boundary_token_trigger_candidates_trie_from_states(
+        &self,
+        relevant: &BitSet,
+        initial_states: &[u32],
+    ) -> Vec<u32> {
         struct TriggerTrieBuild<'a> {
             constraint: &'a Constraint,
             vocab: &'a DynamicMaskVocab,
@@ -1081,7 +1159,24 @@ impl Constraint {
                     return cached;
                 }
                 let source = self.state_sets[source_id as usize].clone();
-                let mut states = self.constraint.tokenizer.step_all(&source, byte);
+                let mut states = if self.constraint.tokenizer_has_epsilon_transitions {
+                    self.constraint.tokenizer.step_all(&source, byte).as_slice().to_vec()
+                } else {
+                    let mut states = source
+                        .iter()
+                        .filter_map(|&state| {
+                            let target = self.constraint.tokenizer_fast_transitions.transition(
+                                &self.constraint.tokenizer,
+                                state,
+                                byte,
+                            );
+                            (target != u32::MAX).then_some(target)
+                        })
+                        .collect::<Vec<_>>();
+                    states.sort_unstable();
+                    states.dedup();
+                    states
+                };
                 let mut matched_any = false;
                 let mut matched_relevant = false;
                 for state in states.iter().copied() {
@@ -1171,7 +1266,9 @@ impl Constraint {
         }
 
         let vocab = self.dynamic_mask_vocab_for_runtime();
-        let initial = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
+        let mut initial = initial_states.to_vec();
+        initial.sort_unstable();
+        initial.dedup();
         let mut build = TriggerTrieBuild {
             constraint: self,
             vocab,
@@ -1194,6 +1291,22 @@ impl Constraint {
             );
         }
         build.candidates
+    }
+
+    fn boundary_token_trigger_candidates_trie(&self, relevant: &BitSet) -> Vec<u32> {
+        let initial = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
+        self.boundary_token_trigger_candidates_trie_from_states(relevant, &initial)
+    }
+
+    pub(crate) fn proper_prefix_token_candidates_from_states(
+        &self,
+        initial_states: &[u32],
+    ) -> Vec<u32> {
+        let mut relevant = BitSet::new(self.table.num_terminals as usize);
+        for terminal in 0..self.table.num_terminals as usize {
+            relevant.set(terminal);
+        }
+        self.boundary_token_trigger_candidates_trie_from_states(&relevant, initial_states)
     }
 
     /// Build the parser-state-independent trigger level used by dynamic
@@ -1241,21 +1354,21 @@ impl Constraint {
 
         if relevant.is_empty() {
             self.boundary_trigger =
-                crate::runtime::BoundaryTrigger::Tokens(Arc::from([]));
+                crate::runtime::BoundaryTrigger::Tokens(
+                    crate::runtime::BoundaryTokenTrigger::token_tsids(Vec::new(), Vec::new()),
+                );
             self.serialized_artifact_cache = None;
             return Ok(());
         }
 
-        let trie_requested = std::env::var_os("GLRMASK_EXPERIMENT_TRIE_BOUNDARY_TOKEN_TRIGGER").is_some();
         let started_at = std::time::Instant::now();
-        let candidates = if trie_requested {
-            self.boundary_token_trigger_candidates_trie(&relevant)
-        } else {
-            self.boundary_token_trigger_candidates_naive(&relevant)
-        };
-        if trie_requested
-            && std::env::var_os("GLRMASK_VALIDATE_TRIE_BOUNDARY_TOKEN_TRIGGER").is_some()
-        {
+        let candidates_started_at = std::time::Instant::now();
+        let candidates = self.boundary_token_trigger_candidates_trie(&relevant);
+        let candidates_ms = candidates_started_at.elapsed().as_secs_f64() * 1000.0;
+        let tsids_started_at = std::time::Instant::now();
+        let trigger_tsids = self.boundary_token_trigger_tsids(&relevant, &candidates);
+        let tsids_ms = tsids_started_at.elapsed().as_secs_f64() * 1000.0;
+        if std::env::var_os("GLRMASK_VALIDATE_TRIE_BOUNDARY_TOKEN_TRIGGER").is_some() {
             let expected = self.boundary_token_trigger_candidates_naive(&relevant);
             assert_eq!(
                 candidates, expected,
@@ -1264,15 +1377,14 @@ impl Constraint {
         }
         if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_TRIGGER_TRIE").is_some() {
             eprintln!(
-                "[glrmask/profile][boundary_trigger_build] method={} candidates={} total_ms={:.3}",
-                if trie_requested { "trie" } else { "naive" },
+                "[glrmask/profile][boundary_trigger_build] method=trie candidates={} active_tsids={} candidates_ms={candidates_ms:.3} tsids_ms={tsids_ms:.3} total_ms={:.3}",
                 candidates.len(),
+                trigger_tsids.len(),
                 started_at.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        self.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
-            candidates.into_boxed_slice(),
-        ));
+        let trigger = crate::runtime::BoundaryTokenTrigger::token_tsids(candidates, trigger_tsids);
+        self.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(trigger);
         self.serialized_artifact_cache = None;
         Ok(())
     }
@@ -1280,9 +1392,10 @@ impl Constraint {
     /// Build reusable boundary-trigger metadata at the requested detail level.
     ///
     /// `None` is a no-op and preserves the zero-cost default. `Tokens` builds
-    /// only the conservative parser-state-independent token set. `Exact` first
-    /// builds that set as a candidate prefilter, then upgrades to a full local
-    /// Parser DWA when this component supports exact trigger compilation.
+    /// independent conservative model-token and raw-tokenizer-state sets.
+    /// `Exact` first uses the token set as a candidate prefilter, then upgrades
+    /// to a full local Parser DWA when this component supports exact trigger
+    /// compilation.
     pub fn build_boundary_trigger(
         &mut self,
         detail: crate::runtime::BoundaryTriggerDetail,
@@ -1339,8 +1452,7 @@ impl Constraint {
                 self,
                 &candidates,
             )?
-        };
-        let Some(dwa) = dwa else {
+        };        let Some(dwa) = dwa else {
             return Err(
                 "exact boundary trigger construction could not characterize the component parser"
                     .to_owned(),
@@ -2917,6 +3029,11 @@ impl Constraint {
         }))
     }
 
+    #[inline]
+    pub(crate) fn recursive_leaf_component_path(&self, leaf_index: usize) -> Option<&[u32]> {
+        let layout = self.recursive_parser_layout_ref()?;
+        Some(layout.leaves.get(leaf_index)?.component_path.as_slice())
+    }
     #[inline]
     pub(crate) fn recursive_leaf_constraint(&self, leaf_index: usize) -> Option<&Constraint> {
         let layout = self.recursive_parser_layout().ok().flatten()?;
@@ -10630,7 +10747,7 @@ impl Constraint {
         // Threshold: use dense when sparse entries are large enough that a
         // sequential scan beats many indexed read-modify-writes.
         // Dense OR costs ~buf_words ops; sparse OR costs ~n_entries ops.
-        // With buf in L1 cache (≤16KB), sparse random writes are fast,
+        // With buf in L1 cache (â‰¤16KB), sparse random writes are fast,
         // so we only go dense when entries exceed half the buffer size.
         let threshold = buf_words / 4;
         let build = |internal_token: usize| {
@@ -13143,7 +13260,7 @@ impl Constraint {
         // Count set bits to choose path.
         let n_set: usize = dense.iter().map(|w| w.count_ones() as usize).sum();
 
-        // Super-fast path: all internal tokens set → OR all_tokens_buf_mask.
+        // Super-fast path: all internal tokens set â†’ OR all_tokens_buf_mask.
         if n_set >= n_internal && !all_mask.is_empty() {
             if buf_zeroed {
                 copy_dense_buf(buf, all_mask);

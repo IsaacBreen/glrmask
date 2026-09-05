@@ -271,6 +271,11 @@ pub(crate) struct MaskCacheData {
     pub merged_dense: Vec<u64>,
 }
 
+#[derive(Clone)]
+pub(crate) struct RecursiveDynamicBoundaryLexicalCacheEntry {
+    pub(crate) candidate_tokens: Arc<[u32]>,
+    pub(crate) kept_tokens: Arc<[u32]>,
+}
 #[derive(Default)]
 pub(crate) struct MaskScratch {
     pub merged_dense: Vec<u64>,
@@ -305,6 +310,11 @@ pub(crate) struct MaskScratch {
         Option<GssSemanticKeyInterner<u32, TerminalsDisallowed>>,
     pub recursive_dynamic_boundary_exact_cache:
         FxHashMap<RecursiveDynamicBoundaryCacheKey, Arc<[u32]>>,
+    /// Conservative recursive lexical-gate results keyed by immediate component
+    /// and that component's live tokenizer-state set. Each component has one
+    /// immutable boundary candidate domain, so the key need not repeat token IDs.
+    pub recursive_dynamic_boundary_lexical_cache:
+        FxHashMap<SmallVec<[u32; 4]>, SmallVec<[RecursiveDynamicBoundaryLexicalCacheEntry; 2]>>,
 }
 
 impl MaskScratch {
@@ -349,6 +359,7 @@ impl MaskScratch {
             recursive_dynamic_boundary_commit_buffers: None,
             recursive_dynamic_boundary_semantic_keys: Some(GssSemanticKeyInterner::with_capacity(256)),
             recursive_dynamic_boundary_exact_cache: FxHashMap::default(),
+            recursive_dynamic_boundary_lexical_cache: FxHashMap::default(),
         }
     }
 }

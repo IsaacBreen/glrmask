@@ -543,8 +543,13 @@ const COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED: u32 = 1 << 1;
 #[derive(Serialize)]
 enum BoundaryTriggerWireRef<'a> {
     None,
+    // Legacy/conservative uniform token summary. Keep this discriminant stable.
     Tokens(&'a [u32]),
     Exact(&'a crate::automata::weighted_u32::dwa::DWA),
+    TokenTsids {
+        tokens: &'a [u32],
+        tsids: &'a [u32],
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -552,6 +557,10 @@ enum BoundaryTriggerWire {
     None,
     Tokens(Vec<u32>),
     Exact(crate::automata::weighted_u32::dwa::DWA),
+    TokenTsids {
+        tokens: Vec<u32>,
+        tsids: Vec<u32>,
+    },
 }
 
 fn boundary_trigger_wire_ref(
@@ -560,7 +569,14 @@ fn boundary_trigger_wire_ref(
     match trigger {
         crate::runtime::BoundaryTrigger::None => BoundaryTriggerWireRef::None,
         crate::runtime::BoundaryTrigger::Tokens(tokens) => {
-            BoundaryTriggerWireRef::Tokens(tokens.as_ref())
+            if let Some(tsids) = tokens.explicit_tsids() {
+                BoundaryTriggerWireRef::TokenTsids {
+                    tokens: tokens.token_summary(),
+                    tsids,
+                }
+            } else {
+                BoundaryTriggerWireRef::Tokens(tokens.token_summary())
+            }
         }
         crate::runtime::BoundaryTrigger::Exact(dwa) => BoundaryTriggerWireRef::Exact(dwa.as_ref()),
     }
@@ -569,15 +585,15 @@ fn boundary_trigger_wire_ref(
 fn restore_boundary_trigger(trigger: BoundaryTriggerWire) -> crate::runtime::BoundaryTrigger {
     match trigger {
         BoundaryTriggerWire::None => crate::runtime::BoundaryTrigger::None,
-        BoundaryTriggerWire::Tokens(mut tokens) => {
-            tokens.sort_unstable();
-            tokens.dedup();
-            crate::runtime::BoundaryTrigger::Tokens(Arc::from(tokens.into_boxed_slice()))
-        }
+        BoundaryTriggerWire::Tokens(tokens) => crate::runtime::BoundaryTrigger::Tokens(
+            crate::runtime::BoundaryTokenTrigger::all_tsids(tokens),
+        ),
         BoundaryTriggerWire::Exact(dwa) => crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa)),
+        BoundaryTriggerWire::TokenTsids { tokens, tsids } => crate::runtime::BoundaryTrigger::Tokens(
+            crate::runtime::BoundaryTokenTrigger::token_tsids(tokens, tsids),
+        ),
     }
 }
-
 #[derive(Serialize)]
 struct ConstraintCompositionLinkMetadataRef<'a> {
     composition_reset_tokens_by_terminal: &'a [Vec<u32>],
@@ -7553,9 +7569,12 @@ mod tests {
     #[test]
     fn current_constraint_artifact_preserves_boundary_token_trigger() {
         let mut constraint = tiny_constraint();
-        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
-            vec![1u32, 3u32].into_boxed_slice(),
-        ));
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(
+            crate::runtime::BoundaryTokenTrigger::token_tsids(
+                vec![1u32, 3u32],
+                vec![0u32, 2u32],
+            ),
+        );
         let mut loaded = Constraint::load(&constraint.save()).unwrap();
         assert!(matches!(
             loaded.boundary_trigger,
@@ -7565,6 +7584,13 @@ mod tests {
             .materialize_composition_link_metadata_for_compilation()
             .unwrap();
         assert_eq!(loaded.boundary_trigger.token_summary(), Some(&[1u32, 3u32][..]));
+        let crate::runtime::BoundaryTrigger::Tokens(tokens) = &loaded.boundary_trigger else {
+            panic!("expected token trigger after materialization");
+        };
+        assert_eq!(tokens.explicit_tsids(), Some(&[0u32, 2u32][..]));
+        assert!(tokens.supports_tsid(0));
+        assert!(!tokens.supports_tsid(1));
+        assert!(tokens.supports_tsid(2));
     }
 
     #[test]

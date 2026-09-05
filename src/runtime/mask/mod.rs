@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 pub(crate) mod profile;
 pub(crate) mod queue;
 
@@ -22,11 +23,12 @@ use crate::runtime::constraint::{
 };
 use crate::runtime::state::{
     CommitBuffers, ConstraintState, LazyCommitBuffers, MaskCacheData, MaskScratch, ParserStateMap,
-    RecursiveDynamicBoundaryCacheKey,
+    RecursiveDynamicBoundaryCacheKey, RecursiveDynamicBoundaryLexicalCacheEntry,
 };
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -2197,7 +2199,7 @@ impl<'a, 'r> IndexedDagMaskEvaluator<'a, 'r> {
     /// independently of the current seed accumulator.
     ///
     /// The denotation evaluated below uses only union and intersection with
-    /// parser-DWA weights. Therefore `E(q, G, a) = a âˆ© E(q, G, U)` for every
+    /// parser-DWA weights. Therefore `E(q, G, a) = a ÃƒÆ’Ã†â€™Ãƒâ€šÃ‚Â¢ÃƒÆ’Ã¢â‚¬Â¹ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â ÃƒÆ’Ã¢â‚¬Å¡Ãƒâ€šÃ‚Â© E(q, G, U)` for every
     /// seed accumulator `a` and seed universe `U`. Caching `E(q, G, U)` by
     /// `(q, G, tsid)` keeps the result valid when delayed lexer exclusions
     /// produce a different `a` at the next model token.
@@ -3823,21 +3825,84 @@ impl<'a> ConstraintState<'a> {
                             continue;
                         }
                         needs_direct_dynamic = true;
-                        if let Some(tokens) = shard.candidate_tokens.as_deref() {
-                            // The boundary-discovery set is the exact outer
-                            // domain of B for this start component: tokens in
-                            // A never need the composed walker, and tokens not
-                            // in this set cannot cross a linker boundary.
-                            // TriggerDetail is only an accelerator inside that
-                            // domain, so a missing trigger must not broaden B
-                            // to the whole composed mask (which is unsound for
-                            // scoped ignores).
-                            // Exact recursive DynamicDirect candidate filtering is
-                            // part of the compact segmented runtime, not an optional
-                            // experiment. The rejection validator compares every
-                            // removed token against authoritative recursive commit.
-                            let lexical_gate =
-                                self.constraint.uses_compact_segmented_parser_runtime();
+                        let recursive_child_crossing = component
+                            .constraint
+                            .has_recursive_segmented_parser_tree()
+                            || overlay.segmented_parser_links.iter().any(|link| {
+                                link.parent_component == shard.start_component
+                                    && overlay
+                                        .segmented_parser_components
+                                        .get(link.child_component as usize)
+                                        .is_some_and(|child| {
+                                            child.constraint.has_recursive_segmented_parser_tree()
+                                        })
+                            });
+                        if recursive_segmented_runtime
+                            && component.constraint.uses_compact_segmented_parser_runtime()
+                        {
+                            if let Some((local_states, _)) = self
+                                .recursive_dynamic_direct_local_lexer_states(
+                                    component_index,
+                                    component,
+                                    shard,
+                                )
+                            {
+                                let mut leaf_tokens = Vec::<u32>::new();
+                                let mut complete = true;
+                                let mut seen_leaf_states = BTreeSet::<(usize, u32)>::new();
+                                let mut seen_leaves = BTreeSet::<usize>::new();
+                                for &scoped_state in &local_states {
+                                    let Some((leaf_index, local_state)) = component
+                                        .constraint
+                                        .recursive_tokenizer_leaf_state(scoped_state)
+                                    else {
+                                        complete = false;
+                                        break;
+                                    };
+                                    if !seen_leaf_states.insert((leaf_index, local_state)) {
+                                        continue;
+                                    }
+                                    seen_leaves.insert(leaf_index);
+                                    let Some(leaf) = component.constraint.recursive_leaf_constraint(leaf_index) else {
+                                        complete = false;
+                                        break;
+                                    };
+                                    match &leaf.boundary_trigger {
+                                        crate::runtime::BoundaryTrigger::Tokens(tokens) => {
+                                            if tokens.supports_tsid(local_state) {
+                                                leaf_tokens.extend(tokens.token_summary().iter().copied());
+                                            }
+                                        }
+                                        crate::runtime::BoundaryTrigger::Exact(_) => {
+                                            // Exact leaf triggers additionally depend on parser/GSS state;
+                                            // this cheap leaf-local gate deliberately handles Tokens only.
+                                            complete = false;
+                                            break;
+                                        }
+                                        crate::runtime::BoundaryTrigger::None => {
+                                            complete = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if complete {
+                                    leaf_tokens.sort_unstable();
+                                    leaf_tokens.dedup();
+                                    if std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some() {
+                                        eprintln!("[glrmask/profile][recursive_dynamic_boundary_leaf_trigger] component={} active_leaves={} active_leaf_states={} candidates={}", component_index, seen_leaves.len(), seen_leaf_states.len(), leaf_tokens.len());
+                                    }
+                                    direct_candidate_ids.extend(leaf_tokens);
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Some(candidate_tokens) = shard.candidate_tokens.as_ref() {
+                            let tokens = candidate_tokens.as_ref();
+                            // Candidate tokens are a complete pruning domain for this
+                            // shard. Recursive components first apply a conservative
+                            // leaf-local lexical gate; exact recursive commit remains
+                            // authoritative for every retained token.
+                            let lexical_gate = self.constraint.uses_compact_segmented_parser_runtime();
                             let local_projection = lexical_gate.then(|| {
                                 self.recursive_dynamic_direct_local_lexer_states(
                                     component_index,
@@ -3845,6 +3910,123 @@ impl<'a> ConstraintState<'a> {
                                     shard,
                                 )
                             });
+
+                            if recursive_segmented_runtime
+                                && component.constraint.uses_compact_segmented_parser_runtime()
+                                && let Some(Some((local_states, _local_parser_tops))) = local_projection.as_ref()
+                                && !local_states.is_empty()
+                            {
+                                let lexical_started_at = (std::env::var_os("GLRMASK_PROFILE_SEGMENTED_MASK").is_some()).then(Instant::now);
+                                let mut starts_by_leaf = BTreeMap::<usize, SmallVec<[u32; 4]>>::new();
+                                let mut projection_complete = true;
+                                for &scoped_start in local_states {
+                                    let Some((leaf_index, local_start)) = component
+                                        .constraint
+                                        .recursive_tokenizer_leaf_state(scoped_start)
+                                    else {
+                                        projection_complete = false;
+                                        break;
+                                    };
+                                    let starts = starts_by_leaf.entry(leaf_index).or_default();
+                                    if !starts.contains(&local_start) {
+                                        starts.push(local_start);
+                                    }
+                                }
+
+                                let mut filtered = Vec::<u32>::new();
+                                let mut leaf_cache_hits = 0usize;
+                                let mut leaf_cache_misses = 0usize;
+                                if projection_complete {
+                                    for (leaf_index, mut starts) in starts_by_leaf {
+                                        starts.sort_unstable();
+                                        starts.dedup();
+                                        let Some(leaf) = component
+                                            .constraint
+                                            .recursive_leaf_constraint(leaf_index)
+                                        else {
+                                            projection_complete = false;
+                                            break;
+                                        };
+                                        let Some(leaf_scratch) = self.recursive_dynamic_direct_leaf_scratch(
+                                            component_index,
+                                            component,
+                                            leaf_index,
+                                        ) else {
+                                            projection_complete = false;
+                                            break;
+                                        };
+                                        let cached = {
+                                            let scratch = leaf_scratch.lock().unwrap();
+                                            scratch
+                                                .recursive_dynamic_boundary_lexical_cache
+                                                .get(&starts)
+                                                .and_then(|rows| {
+                                                    rows.iter()
+                                                        .find(|entry| entry.candidate_tokens.as_ref() == tokens)
+                                                        .map(|entry| Arc::clone(&entry.kept_tokens))
+                                                })
+                                        };
+                                        let kept = if let Some(cached) = cached {
+                                            leaf_cache_hits += 1;
+                                            cached
+                                        } else {
+                                            leaf_cache_misses += 1;
+                                            let mut kept = Vec::<u32>::new();
+                                            for &token in tokens {
+                                                let keep = if self.constraint.has_special_token_id(token) {
+                                                    true
+                                                } else if let Some(bytes) = self.constraint.token_bytes_for_id(token) {
+                                                    bytes.len() < 2
+                                                        || Self::tokenizer_may_accept_proper_prefix(
+                                                            leaf,
+                                                            &starts,
+                                                            bytes,
+                                                        )
+                                                } else {
+                                                    true
+                                                };
+                                                if keep {
+                                                    kept.push(token);
+                                                }
+                                            }
+                                            let kept: Arc<[u32]> = Arc::from(kept.into_boxed_slice());
+                                            let mut scratch = leaf_scratch.lock().unwrap();
+                                            if scratch.recursive_dynamic_boundary_lexical_cache.len() >= 256 {
+                                                scratch.recursive_dynamic_boundary_lexical_cache.clear();
+                                            }
+                                            scratch
+                                                .recursive_dynamic_boundary_lexical_cache
+                                                .entry(starts.clone())
+                                                .or_default()
+                                                .push(RecursiveDynamicBoundaryLexicalCacheEntry {
+                                                    candidate_tokens: Arc::clone(candidate_tokens),
+                                                    kept_tokens: Arc::clone(&kept),
+                                                });
+                                            kept
+                                        };
+                                        filtered.extend(kept.iter().copied());
+                                    }
+                                }
+                                if !projection_complete {
+                                    filtered.clear();
+                                    filtered.extend_from_slice(tokens);
+                                } else {
+                                    filtered.sort_unstable();
+                                    filtered.dedup();
+                                }
+                                if validate_recursive_direct_gate {
+                                    for &token in tokens {
+                                        if filtered.binary_search(&token).is_err() {
+                                            rejected_direct_candidate_ids.push(token);
+                                        }
+                                    }
+                                }
+                                if let Some(started_at) = lexical_started_at {
+                                    eprintln!("[glrmask/profile][recursive_dynamic_boundary_lexical_gate] component={} leaf_hits={} leaf_misses={} local_states={} input_candidates={} kept={} ns={}", component_index, leaf_cache_hits, leaf_cache_misses, local_states.len(), tokens.len(), filtered.len(), elapsed_ns(started_at));
+                                }
+                                direct_candidate_ids.extend(filtered);
+                                continue;
+                            }
                             for &token in tokens {
                                 let keep = match local_projection.as_ref() {
                                     Some(Some((local_states, local_parser_tops)))
@@ -3873,10 +4055,20 @@ impl<'a> ConstraintState<'a> {
                             }
                             continue;
                         }
+                        if recursive_child_crossing {
+                            // A component-local reusable trigger cannot summarize a token
+                            // that crosses immediately into a recursively composed child and
+                            // returns through nested CALL/RETURN edges before token end. This
+                            // DynamicDirect shard is the correctness fallback for that shape:
+                            // decline trigger pruning and probe the authoritative recursive
+                            // commit relation over the full vocabulary.
+                            direct_candidates_complete = false;
+                            continue;
+                        }
                         let trigger = &component.constraint.boundary_trigger;
                         match trigger {
                             crate::runtime::BoundaryTrigger::Tokens(tokens) => {
-                                for &token in tokens.iter() {
+                                for &token in tokens.token_summary() {
                                     if recursive_segmented_runtime {
                                         direct_candidate_ids.push(token);
                                     } else {
@@ -4344,7 +4536,77 @@ impl<'a> ConstraintState<'a> {
         Some((locals, parser_tops))
     }
 
+    fn recursive_dynamic_direct_leaf_scratch(
+        &self,
+        component_index: usize,
+        component: &crate::runtime::SegmentedParserComponent,
+        leaf_index: usize,
+    ) -> Option<Arc<Mutex<MaskScratch>>> {
+        let path = component.constraint.recursive_leaf_component_path(leaf_index)?;
+        let mut scratch = {
+            let root = self.mask_scratch.lock().unwrap();
+            root.segmented_component_scratch.get(component_index)?.clone()
+        };
+        for &nested_component in path {
+            let next = {
+                let current = scratch.lock().unwrap();
+                current
+                    .segmented_component_scratch
+                    .get(nested_component as usize)?
+                    .clone()
+            };
+            scratch = next;
+        }
+        Some(scratch)
+    }
+
     #[inline]
+    fn tokenizer_may_accept_proper_prefix(
+        constraint: &Constraint,
+        start_states: &[u32],
+        bytes: &[u8],
+    ) -> bool {
+        debug_assert!(bytes.len() >= 2);
+        if constraint.tokenizer_has_epsilon_transitions {
+            let mut states = start_states.to_vec();
+            for &byte in &bytes[..bytes.len() - 1] {
+                states = constraint.tokenizer.step_all(&states, byte).as_slice().to_vec();
+                if states.is_empty() {
+                    return false;
+                }
+                if states.iter().copied().any(|state| {
+                    constraint.tokenizer.matched_terminals_iter(state).next().is_some()
+                }) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        for &start in start_states {
+            let mut state = start;
+            for &byte in &bytes[..bytes.len() - 1] {
+                let target = constraint.tokenizer_fast_transitions.transition(
+                    &constraint.tokenizer,
+                    state,
+                    byte,
+                );
+                if target == u32::MAX {
+                    break;
+                }
+                if constraint
+                    .tokenizer
+                    .matched_terminals_iter(target)
+                    .next()
+                    .is_some()
+                {
+                    return true;
+                }
+                state = target;
+            }
+        }
+        false
+    }
     fn recursive_dynamic_direct_token_has_internal_lexeme(
         component: &crate::runtime::SegmentedParserComponent,
         local_tokenizer_states: &[u32],
@@ -4362,6 +4624,32 @@ impl<'a> ConstraintState<'a> {
             // parser/link closure at token start.
             return true;
         }
+
+        if component.constraint.uses_compact_segmented_parser_runtime() {
+            // `local_tokenizer_states` are in this recursive component's live
+            // leaf-union coordinate. Project each state to the intact leaf that
+            // actually owns its tokenizer before scanning. Parser-row pruning is
+            // intentionally omitted here: a proper-prefix match is only a
+            // conservative lexical gate, while exact recursive commit remains
+            // authoritative for CALL/RETURN and parser admissibility.
+            for &scoped_start in local_tokenizer_states {
+                let Some((leaf_index, local_start)) = component
+                    .constraint
+                    .recursive_tokenizer_leaf_state(scoped_start)
+                else {
+                    return true;
+                };
+                let Some(leaf) = component.constraint.recursive_leaf_constraint(leaf_index) else {
+                    return true;
+                };
+                let (_, matches) = leaf.tokenizer.execute_summary_from_state(bytes, local_start);
+                if matches.into_iter().any(|(_, width)| width < bytes.len()) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         let row_admission_exact = component.constraint.table.control_terminals.is_empty()
             && component.constraint.table.admission_policy
                 == crate::compiler::glr::table::AdmissionPolicy::RowPresenceExact
@@ -4374,18 +4662,6 @@ impl<'a> ConstraintState<'a> {
                 })
         };
         for &local_start in local_tokenizer_states {
-            // Mirror the tokenizer observation used by commit: one longest
-            // match per terminal over the bytes consumed from this residual
-            // state.  Only a match ending at a *proper* model-token prefix can
-            // trigger an internal lexer reset and therefore cross a component
-            // boundary during this token.  A full-width match is handled at
-            // the next model-token boundary and belongs to retained component A.
-            //
-            // This is intentionally stronger than walking every intermediate
-            // accepting lexer state.  The live commit engine also discards a
-            // shorter match when the same terminal matches again later, so
-            // treating the shorter accepting state as a possible reset would
-            // retain false-positive DynamicDirect candidates.
             let (_, matches) = component
                 .constraint
                 .tokenizer
@@ -4398,7 +4674,6 @@ impl<'a> ConstraintState<'a> {
         }
         false
     }
-
     /// OR exact component-trigger candidates into `buf`. Trigger parser labels
     /// are component-local LR IDs, but its weight coordinate is deliberately
     /// raw/original: TSID == local tokenizer-state ID and token == original

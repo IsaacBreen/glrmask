@@ -95,11 +95,11 @@ use crate::compiler::constraint_possible_matches::{
     build_internal_token_bytes_from_groups, runtime_dynamic_vocab_for_vocab,
 };
 use crate::compiler::glr::table::{
-    Action, ComposedTable, ControlEliminationReport, GLRTable, SubgrammarTableInput,
+    Action, AdmissionPolicy, ComposedTable, ControlEliminationReport, GLRTable, GlrTableConstruction, SubgrammarTableInput,
     compose_subgrammar_table_shell_explicit_with_rules,
     compose_subgrammar_tables_explicit_with_rules, compose_subgrammar_tables_with_rules,
 };
-use crate::grammar::flat::Symbol;
+use crate::grammar::flat::{Rule, Symbol};
 use crate::ds::bitset::BitSet;
 use crate::ds::u8set::U8Set;
 use crate::ds::weight::{ScopedWeightOpCache, SharedTokenSet, Weight};
@@ -585,6 +585,11 @@ pub(crate) struct ConstraintComposition {
     pub(crate) terminal_offsets: Vec<u32>,
     pub(crate) tokenizer_state_offsets: Vec<u32>,
     pub(crate) parser_state_relations: Vec<Vec<Vec<u32>>>,
+}
+
+pub(crate) struct PreparedConstraintComposition {
+    pub(crate) constraint: Constraint,
+    pub(crate) terminal_offsets: Vec<u32>,
 }
 
 struct DirectComponentCoordinateMaps {
@@ -1116,6 +1121,66 @@ fn append_dynamic_direct_boundary_shards_for_unselected(
         .sort_unstable_by_key(|shard| shard.start_component);
 }
 
+fn install_dynamic_direct_boundaries_for_recursive_crossing(
+    overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
+    candidate_tokens: Option<Arc<[u32]>>,
+) {
+    let recursive_children = overlay
+        .segmented_parser_components
+        .iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(index, component)| {
+            component
+                .constraint
+                .has_recursive_segmented_parser_tree()
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let recursive_parent = overlay
+        .segmented_parser_components
+        .first()
+        .is_some_and(|component| component.constraint.has_recursive_segmented_parser_tree());
+    if !recursive_parent && recursive_children.is_empty() {
+        return;
+    }
+    let mut exact_components = Vec::with_capacity(recursive_children.len() + 1);
+    // Any recursively composed side can make a token that starts in the parent
+    // cross an inner boundary before/after this outer link, so component 0 must
+    // use the authoritative recursive walker as well.
+    exact_components.push(0usize);
+    exact_components.extend(recursive_children);
+    for component_index in exact_components {
+        let merged_candidate_tokens = candidate_tokens.as_ref().map(|recursive| {
+            let mut tokens = recursive.iter().copied().collect::<BTreeSet<_>>();
+            if let Some(existing) = overlay.segmented_parser_components[component_index]
+                .boundary
+                .as_ref()
+                .and_then(|shard| shard.candidate_tokens.as_deref())
+            {
+                tokens.extend(existing.iter().copied());
+            }
+            Arc::<[u32]>::from(tokens.into_iter().collect::<Vec<_>>())
+        });
+        let shard = crate::runtime::SegmentedBoundaryShard {
+            start_component: component_index as u32,
+            start_parser_states: segmented_boundary_start_parser_states(
+                &overlay.segmented_parser_components[component_index],
+            ),
+            accepts_empty_stack: component_index == 0,
+            candidate_tokens: merged_candidate_tokens,
+            backend: crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect,
+        };
+        overlay.segmented_parser_components[component_index].boundary = Some(shard.clone());
+        overlay
+            .segmented_boundary_shards
+            .retain(|existing| existing.start_component as usize != component_index);
+        overlay.segmented_boundary_shards.push(shard);
+    }
+    overlay
+        .segmented_boundary_shards
+        .sort_unstable_by_key(|existing| existing.start_component);
+}
 fn deterministic_component_union_root_dispatch(
     components: &[crate::runtime::SegmentedParserComponent],
     parser_state_relations: &[Vec<Vec<u32>>],
@@ -8507,6 +8572,11 @@ struct BoundaryTokenDiscovery {
     terminals: BitSet,
     token_ids: Vec<u32>,
     witnesses: Vec<BoundaryTokenWitness>,
+    /// Conservative lexical candidate superset used before exact graph
+    /// expansion. Unlike `token_ids`, this deliberately retains candidates
+    /// whose exact witness is invisible at the current composition level; a
+    /// recursively composed child may make such a token cross a deeper link.
+    prefilter_token_ids: Vec<u32>,
 }
 
 fn boundary_return_suffix_delegations(
@@ -9398,6 +9468,10 @@ fn replace_boundary_discovery_tokens(
     mut base: BoundaryTokenDiscovery,
     replacement: BoundaryTokenDiscovery,
 ) -> BoundaryTokenDiscovery {
+    base.prefilter_token_ids
+        .extend(replacement.prefilter_token_ids.iter().copied());
+    base.prefilter_token_ids.sort_unstable();
+    base.prefilter_token_ids.dedup();
     if replacement.token_ids.is_empty() {
         return base;
     }
@@ -9432,6 +9506,14 @@ pub(crate) fn build_exact_component_boundary_trigger(
     constraint: &Constraint,
     candidate_tokens: &[u32],
 ) -> Result<Option<DWA>, String> {
+    build_exact_component_boundary_trigger_with_events(constraint, candidate_tokens, &[])
+}
+
+pub(crate) fn build_exact_component_boundary_trigger_with_events(
+    constraint: &Constraint,
+    candidate_tokens: &[u32],
+    extra_event_terminals: &[u32],
+) -> Result<Option<DWA>, String> {
     // Exact trigger semantics observe parser readiness *after* zero-width
     // linker closure. Compile that closure into a private table copy when this
     // reusable component is itself composed. Control elimination preserves LR
@@ -9462,7 +9544,15 @@ pub(crate) fn build_exact_component_boundary_trigger(
         .checked_add(1)
         .ok_or_else(|| "boundary trigger terminal-count overflow".to_owned())?;
     let mut event_terminals = placeholders.clone();
+    event_terminals.extend(
+        extra_event_terminals
+            .iter()
+            .copied()
+            .filter(|&terminal| terminal < finish_terminal),
+    );
     event_terminals.push(finish_terminal);
+    event_terminals.sort_unstable();
+    event_terminals.dedup();
 
     let mut terminal_nwa = NWA::new(
         constraint.tokenizer.num_states(),
@@ -10492,6 +10582,55 @@ fn extend_boundary_interfaces_through_stack_neutral_lr_actions(
     pairs
 }
 
+fn extend_boundary_interfaces_through_scoped_ignores(
+    base_pairs: &BTreeSet<(u32, u32)>,
+    components: &[&Constraint],
+    terminal_offsets: &[u32],
+    scoped_ignore_terminals: &BitSet,
+) -> BTreeSet<(u32, u32)> {
+    let mut pairs = base_pairs.clone();
+    if base_pairs.is_empty() || scoped_ignore_terminals.is_empty() {
+        return pairs;
+    }
+    let owner = |terminal: u32| {
+        terminal_offsets
+            .partition_point(|&offset| offset <= terminal)
+            .saturating_sub(1)
+    };
+    let scoped_ignore = |component_index: usize| -> Option<u32> {
+        let component = *components.get(component_index)?;
+        let terminal = terminal_offsets
+            .get(component_index)
+            .copied()?
+            .checked_add(component.ignore_terminal?)?;
+        scoped_ignore_terminals
+            .contains(terminal as usize)
+            .then_some(terminal)
+    };
+
+    for &(left, right) in base_pairs {
+        let left_owner = owner(left);
+        let right_owner = owner(right);
+        if left_owner == right_owner
+            || left_owner >= components.len()
+            || right_owner >= components.len()
+        {
+            continue;
+        }
+        let left_ignore = scoped_ignore(left_owner);
+        let right_ignore = scoped_ignore(right_owner);
+        if let Some(ignore) = left_ignore {
+            pairs.insert((ignore, right));
+        }
+        if let Some(ignore) = right_ignore {
+            pairs.insert((left, ignore));
+        }
+        if let (Some(left_ignore), Some(right_ignore)) = (left_ignore, right_ignore) {
+            pairs.insert((left_ignore, right_ignore));
+        }
+    }
+    pairs
+}
 fn transition_boundary_key(
     key: BoundaryTokenNodeKey,
     terminal: u32,
@@ -12234,6 +12373,7 @@ fn discover_boundary_token_paths(
         terminals: discovered,
         token_ids: boundary_token_ids,
         witnesses,
+        prefilter_token_ids: prefilter.iter().copied().collect(),
     }
 }
 
@@ -13275,7 +13415,7 @@ fn direct_boundary_terminal_automaton(
                 // For a safe component-local terminal word with one or more
                 // ordinary changed terminals, do not rebuild the whole
                 // composed word.  For every changed terminal t we have proved
-                // Old_t âŠ† New_t and materialized the disjoint remainder
+                // Old_t is a subset of New_t and materialized the disjoint remainder
                 // Delta_t = New_t \\ Old_t.  Therefore, for a word t1..tn,
                 //
                 //   New_1..New_n \\ Old_1..Old_n
@@ -13328,7 +13468,7 @@ fn direct_boundary_terminal_automaton(
                                             debug_assert_ne!(target, usize::MAX);
                                             // Once novelty has occurred, later
                                             // changed terminals may use all of
-                                            // New = Old âˆª Delta.
+                                            // New = Old union Delta.
                                             transitions.push((edge.terminal, target));
                                         }
                                     } else {
@@ -19287,7 +19427,7 @@ struct ConcreteBoundaryDeltaPlan {
     /// by an ordinary empty DFA; a missing transported template is unknown and
     /// therefore conservative, never interpreted as the empty language.
     compared_terminals: BTreeSet<u32>,
-    /// Active terminals for which we could not prove `Old ⊆ New` after
+    /// Active terminals for which we could not prove `Old subseteq New` after
     /// transporting the cached component template into composed parser
     /// coordinates. Any local path touching one of these stays on the full
     /// composed-template lane.
@@ -19324,7 +19464,7 @@ fn prepare_concrete_boundary_delta_plan(
             // Characterization produces an explicit empty DFA when the standalone
             // terminal has no parser action. Missing here therefore means template
             // transport failed (for example because the state relation is not
-            // functionally representable), not Old=∅. Keep the full conservative lane.
+            // functionally representable), not Old=empty. Keep the full conservative lane.
             unsafe_terminals.insert(terminal);
             continue;
         };
@@ -23408,8 +23548,8 @@ fn build_boundary_repair(
     // linker can take a zero-width call/return before the next lexical
     // terminal. For a child root N, those lexical beginnings are exactly:
     //
-    //   FIRST(N)  â€” paths which begin the child; and
-    //   FOLLOW(N) â€” paths which begin the parent continuation.
+    //   FIRST(N)  -- paths which begin the child; and
+    //   FOLLOW(N) -- paths which begin the parent continuation.
     //
     // Compute this over the fully composed rule graph, rather than reading the
     // direct child-start/continuation rows. FIRST/FOLLOW propagates through
@@ -23448,9 +23588,15 @@ fn build_boundary_repair(
     {
         base_interface_pairs.clone()
     } else {
-        extend_boundary_interfaces_through_stack_neutral_lr_actions(
+        let pairs = extend_boundary_interfaces_through_stack_neutral_lr_actions(
             &composed_table.table,
             &base_interface_pairs,
+        );
+        extend_boundary_interfaces_through_scoped_ignores(
+            &pairs,
+            components,
+            &composed_table.terminal_offsets,
+            &ignore_terminals.scoped,
         )
     };
     let interface_ms = interface_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -23458,6 +23604,19 @@ fn build_boundary_repair(
     if std::env::var_os("GLRMASK_EXPERIMENT_STRICT_BOUNDARY_FOLLOWS").is_none() {
         for &terminal in &composed_table.table.skip_terminals {
             follow_transparent_terminals.set(terminal as usize);
+        }
+    } else {
+        // A declared scoped `ignore` is an identity transition in its component,
+        // even when strict FOLLOW pruning is enabled. Keep it transparent here;
+        // strict mode may still constrain other parser-visible skip terminals.
+        for (component_index, component) in components.iter().enumerate() {
+            let Some(ignore) = component.ignore_terminal else {
+                continue;
+            };
+            let terminal = composed_table.terminal_offsets[component_index] + ignore;
+            if ignore_terminals.scoped.contains(terminal as usize) {
+                follow_transparent_terminals.set(terminal as usize);
+            }
         }
     }
     let mut boundary_context_terminals = BitSet::new(seed_terminals.len());
@@ -26978,7 +27137,7 @@ pub(crate) fn compose_constraints_owned_parent(
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
-    compose_constraints_owned_parent_impl(parent, children, None, None, None, vocab)
+    compose_constraints_owned_parent_impl(parent, children, None, None, None, vocab, None, PendingCompositionMode::AfterRuntimeMetadata)
 }
 
 /// Boundary policy for the exact segmented composition runtime. Component
@@ -26989,6 +27148,47 @@ pub(crate) fn compose_constraints_owned_parent(
 pub(crate) enum SegmentedBoundaryBackend {
     StaticParserDwa,
     Dynamic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingCompositionMode {
+    AfterRuntimeMetadata,
+    BeforeBoundaryPrivateCoordinate,
+}
+enum CompositionParent {
+    Owned(Constraint),
+    Shared(Arc<Constraint>),
+}
+
+impl std::ops::Deref for CompositionParent {
+    type Target = Constraint;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Owned(parent) => parent,
+            Self::Shared(parent) => parent.as_ref(),
+        }
+    }
+}
+
+impl CompositionParent {
+    fn clone_constraint(&self) -> Constraint {
+        (**self).clone()
+    }
+
+    fn arc_clone(&self) -> Arc<Constraint> {
+        match self {
+            Self::Owned(parent) => Arc::new(parent.clone()),
+            Self::Shared(parent) => Arc::clone(parent),
+        }
+    }
+
+    fn into_arc(self) -> Arc<Constraint> {
+        match self {
+            Self::Owned(parent) => Arc::new(parent),
+            Self::Shared(parent) => parent,
+        }
+    }
 }
 
 pub(crate) fn compose_constraints_owned_parent_segmented(
@@ -27004,6 +27204,8 @@ pub(crate) fn compose_constraints_owned_parent_segmented(
         Some(boundary_backend),
         None,
         vocab,
+        None,
+        PendingCompositionMode::AfterRuntimeMetadata,
     )
 }
 
@@ -27032,6 +27234,8 @@ pub(crate) fn compose_constraints_owned_parent_segmented_hybrid(
         Some(SegmentedBoundaryBackend::StaticParserDwa),
         Some(static_components),
         vocab,
+        None,
+        PendingCompositionMode::AfterRuntimeMetadata,
     )
 }
 
@@ -27057,9 +27261,65 @@ pub(crate) fn compose_constraints_owned_parent_segmented_shared(
         Some(boundary_backend),
         None,
         vocab,
+        None,
+        PendingCompositionMode::AfterRuntimeMetadata,
     )
 }
 
+pub(crate) fn compose_constraints_owned_parent_segmented_shared_prepare_before_boundary(
+    parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: &[Arc<Constraint>],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+    prepared_observer: &mut (dyn FnMut(PreparedConstraintComposition) + Send),
+) -> Result<ConstraintComposition, String> {
+    if shared_children.len() != children.len() {
+        return Err("shared child/component count mismatch".into());
+    }
+    for (index, (input, shared)) in children.iter().zip(shared_children).enumerate() {
+        if !std::ptr::eq(input.constraint, shared.as_ref()) {
+            return Err(format!("shared child {index} does not match borrowed composition input"));
+        }
+    }
+    compose_constraints_owned_parent_impl(
+        parent,
+        children,
+        Some(shared_children),
+        Some(boundary_backend),
+        None,
+        vocab,
+        Some(prepared_observer),
+        PendingCompositionMode::BeforeBoundaryPrivateCoordinate,
+    )
+}
+pub(crate) fn compose_constraints_shared_parent_segmented_shared_prepare_before_boundary(
+    parent: Arc<Constraint>,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: &[Arc<Constraint>],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+    prepared_observer: &mut (dyn FnMut(PreparedConstraintComposition) + Send),
+) -> Result<ConstraintComposition, String> {
+    if shared_children.len() != children.len() {
+        return Err("shared child/component count mismatch".into());
+    }
+    for (index, (input, shared)) in children.iter().zip(shared_children).enumerate() {
+        if !std::ptr::eq(input.constraint, shared.as_ref()) {
+            return Err(format!("shared child {index} does not match borrowed composition input"));
+        }
+    }
+    compose_constraints_parent_impl(
+        CompositionParent::Shared(parent),
+        children,
+        Some(shared_children),
+        Some(boundary_backend),
+        None,
+        vocab,
+        Some(prepared_observer),
+        PendingCompositionMode::BeforeBoundaryPrivateCoordinate,
+    )
+}
 pub(crate) fn compose_constraints_owned_parent_shared(
     parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
@@ -27074,38 +27334,196 @@ pub(crate) fn compose_constraints_owned_parent_shared(
             return Err(format!("shared child {index} does not match borrowed composition input"));
         }
     }
-    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), None, None, vocab)
+    compose_constraints_owned_parent_impl(parent, children, Some(shared_children), None, None, vocab, None, PendingCompositionMode::AfterRuntimeMetadata)
+}
+
+fn direct_recursive_rule_light_shell(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    global_ignores: bool,
+) -> Result<ComposedTable, String> {
+    fn root_nonterminal(table: &GLRTable) -> Result<u32, String> {
+        match table.rules.first().map(|rule| rule.rhs.as_slice()) {
+            Some([Symbol::Nonterminal(root)]) => Ok(*root),
+            _ => Err("recursive rule-light shell requires an augmented start rule".to_owned()),
+        }
+    }
+
+    let mut terminal_offsets = Vec::with_capacity(children.len() + 1);
+    terminal_offsets.push(0);
+    let mut next_terminal = parent.table.num_terminals;
+    for child in children {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal
+            .checked_add(child.constraint.table.num_terminals)
+            .ok_or_else(|| "merged terminal ID overflow".to_owned())?;
+    }
+
+    let parent_nonterminal_count = parent.table.nonterminal_display_names.len() as u32;
+    let mut nonterminal_offsets = Vec::with_capacity(children.len());
+    let mut next_nonterminal = parent_nonterminal_count;
+    for child in children {
+        nonterminal_offsets.push(next_nonterminal);
+        next_nonterminal = next_nonterminal
+            .checked_add(child.constraint.table.nonterminal_display_names.len() as u32)
+            .ok_or_else(|| "merged nonterminal ID overflow".to_owned())?;
+    }
+
+    let parent_root = root_nonterminal(&parent.table)?;
+    let rules = vec![Rule {
+        lhs: parent.table.rules[0].lhs,
+        rhs: vec![Symbol::Nonterminal(parent_root)],
+    }];
+    let mut nonterminal_display_names = parent.table.nonterminal_display_names.clone();
+    let mut boundary_nonterminals = BTreeSet::new();
+    let mut control_terminals = parent.table.control_terminals.clone();
+    let mut skip_terminals = parent.table.skip_terminals.clone();
+    if !global_ignores {
+        if let Some(ignore) = parent.ignore_terminal {
+            skip_terminals.insert(ignore);
+        }
+    }
+
+    for (child_index, child_input) in children.iter().enumerate() {
+        let child = &child_input.constraint.table;
+        let terminal_offset = terminal_offsets[child_index + 1];
+        let nonterminal_offset = nonterminal_offsets[child_index];
+        let child_root = root_nonterminal(child)? + nonterminal_offset;
+        boundary_nonterminals.insert(child_root);
+        control_terminals.extend(child_input.placeholder_terminals());
+        control_terminals.extend(child.control_terminals.iter().map(|terminal| terminal + terminal_offset));
+        skip_terminals.extend(child.skip_terminals.iter().map(|terminal| terminal + terminal_offset));
+        if !global_ignores {
+            if let Some(ignore) = child_input.constraint.ignore_terminal {
+                skip_terminals.insert(ignore + terminal_offset);
+            }
+        }
+        let child_name_prefix = format!("child{child_index}::");
+        nonterminal_display_names.extend(child.nonterminal_display_names.iter().map(|name| {
+            let mut display_name = String::with_capacity(child_name_prefix.len() + name.len());
+            display_name.push_str(&child_name_prefix);
+            display_name.push_str(name);
+            display_name
+        }));
+    }
+
+    let root_nullable = parent
+        .composition_grammar_summary
+        .as_ref()
+        .ok_or_else(|| "rule-light recursive shell requires parent grammar summary".to_owned())?
+        .root_nullable;
+    let mut table = GLRTable {
+        action: Vec::new(),
+        goto: Vec::new(),
+        num_states: 0,
+        num_terminals: next_terminal,
+        num_rules: rules.len() as u32,
+        rules,
+        nonterminal_display_names,
+        construction: GlrTableConstruction::Lalr,
+        admission_policy: AdmissionPolicy::ExactSimulation,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: Default::default(),
+        control_terminals: control_terminals.clone(),
+        skip_terminals,
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    table.set_embedded_start_nullable(root_nullable);
+
+    Ok(ComposedTable {
+        table,
+        terminal_offsets,
+        placeholder_terminals: children
+            .iter()
+            .flat_map(CompiledSubgrammarInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(child_index, child)| {
+                child.placeholder_terminals().map(move |_| child_index + 1)
+            })
+            .collect(),
+        state_relations: (0..=children.len()).map(|_| Vec::new()).collect(),
+        boundary_nonterminals,
+        control_terminals,
+        appended_parent_action_terminals: BTreeSet::new(),
+    })
 }
 
 fn compose_constraints_owned_parent_impl(
-    mut parent: Constraint,
+    parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     shared_children: Option<&[Arc<Constraint>]>,
     explicit_segmented_boundary: Option<SegmentedBoundaryBackend>,
     static_boundary_components: Option<&BitSet>,
     vocab: &Vocab,
+    pending_observer: Option<&mut (dyn FnMut(PreparedConstraintComposition) + Send)>,
+    pending_mode: PendingCompositionMode,
 ) -> Result<ConstraintComposition, String> {
+    compose_constraints_parent_impl(
+        CompositionParent::Owned(parent),
+        children,
+        shared_children,
+        explicit_segmented_boundary,
+        static_boundary_components,
+        vocab,
+        pending_observer,
+        pending_mode,
+    )
+}
+
+fn compose_constraints_parent_impl(
+    mut parent: CompositionParent,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: Option<&[Arc<Constraint>]>,
+    explicit_segmented_boundary: Option<SegmentedBoundaryBackend>,
+    static_boundary_components: Option<&BitSet>,
+    vocab: &Vocab,
+    mut pending_observer: Option<&mut (dyn FnMut(PreparedConstraintComposition) + Send)>,
+    pending_mode: PendingCompositionMode,
+) -> Result<ConstraintComposition, String> {
+    let parent_has_recursive_segmented_parser_tree =
+        parent.has_recursive_segmented_parser_tree();
     let direct_dynamic_boundary =
         explicit_segmented_boundary == Some(SegmentedBoundaryBackend::Dynamic);
     let outer_started_at = Instant::now();
     let phase_started_at = Instant::now();
-    if explicit_segmented_boundary.is_none() {
-        // Flattened composition transforms the parser automata and therefore
-        // needs the ordinary mutable DWA and the compiler-side non-DWA Weight
-        // maps. `main` deliberately establishes both as the single source of
-        // truth before transport; later composition work may move/cache those
-        // fields independently. An explicit segmented boundary does not need
-        // either materialization: A is retained as the component's own runtime
-        // constraint, whose packed static representation is already complete.
-        parent.materialize_parser_dwa_for_compilation()?;
-        parent.materialize_non_dwa_weights_for_compilation()?;
+    match &mut parent {
+        CompositionParent::Owned(parent) => {
+            if explicit_segmented_boundary.is_none() {
+                parent.materialize_parser_dwa_for_compilation()?;
+                parent.materialize_non_dwa_weights_for_compilation()?;
+            }
+        }
+        CompositionParent::Shared(_) if explicit_segmented_boundary.is_none() => {
+            return Err("shared composition parent requires segmented composition".to_owned());
+        }
+        CompositionParent::Shared(_) => {}
     }
     let parent_parser_materialize_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let phase_started_at = Instant::now();
-    if direct_dynamic_boundary {
-        parent.materialize_composition_link_metadata_for_compilation()?;
-    } else {
-        parent.materialize_composition_metadata_for_compilation()?;
+    match &mut parent {
+        CompositionParent::Owned(parent) => {
+            if direct_dynamic_boundary {
+                parent.materialize_composition_link_metadata_for_compilation()?;
+            } else {
+                parent.materialize_composition_metadata_for_compilation()?;
+            }
+        }
+        CompositionParent::Shared(parent) => {
+            let metadata_ready = if direct_dynamic_boundary {
+                parent.deferred_composition_metadata_blob.is_none()
+                    || parent.composition_link_metadata_materialized
+            } else {
+                parent.deferred_composition_metadata_blob.is_none()
+            };
+            if !metadata_ready {
+                return Err("shared composition parent must materialize composition metadata before publication".to_owned());
+            }
+        }
     }
     // Explicit segmented composition is provider-native for both static and
     // dynamic boundary policy. Retained recursive leaves plus CALL/RETURN links
@@ -27147,12 +27565,22 @@ fn compose_constraints_owned_parent_impl(
         shared_children
     };
 
-    parent.serialized_artifact_cache = None;
+    if let CompositionParent::Owned(parent) = &mut parent {
+        parent.serialized_artifact_cache = None;
+    }
     if explicit_segmented_boundary.is_none()
         && (std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
             || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
     {
         return compose_constraints(&parent, children, vocab);
+    }
+    let share_parent_for_pending = pending_mode == PendingCompositionMode::BeforeBoundaryPrivateCoordinate
+        && explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa);
+    if share_parent_for_pending && matches!(parent, CompositionParent::Owned(_)) {
+        parent = match parent {
+            CompositionParent::Owned(parent) => CompositionParent::Shared(Arc::new(parent)),
+            CompositionParent::Shared(parent) => CompositionParent::Shared(parent),
+        };
     }
     if compose_profile_enabled() {
         eprintln!(
@@ -27174,7 +27602,7 @@ fn compose_constraints_owned_parent_impl(
         if segmented_runtime_requested && !segmented_skip_requested && !two_dwa_runtime_requested {
             let started = Instant::now();
             let mut sources = Vec::with_capacity(children.len() + 1);
-            sources.push(parent.clone());
+            sources.push(parent.clone_constraint());
             sources.extend(children.iter().map(|child| child.constraint.clone()));
             if compose_profile_enabled() {
                 eprintln!(
@@ -27194,11 +27622,42 @@ fn compose_constraints_owned_parent_impl(
     if children.is_empty() {
         return Err("constraint composition requires at least one child".into());
     }
-    let parent_rules = parent.retained_table_rules()?;
-    let child_rules = children
-        .iter()
-        .map(|child| child.constraint.retained_table_rules())
-        .collect::<Result<Vec<_>, String>>()?;
+    let rule_light_recursive_shell_requested = explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+        && (pending_mode == PendingCompositionMode::BeforeBoundaryPrivateCoordinate
+            || std::env::var_os("GLRMASK_EXPERIMENT_RULE_LIGHT_RECURSIVE_SHELL").is_some())
+        && children.iter().all(|child| !child.constraint.composition_start_nullable().unwrap_or(true))
+        && parent.composition_grammar_summary.is_some()
+        && children.iter().all(|child| child.constraint.composition_grammar_summary.is_some());
+    if std::env::var_os("GLRMASK_PROFILE_RULE_LIGHT_GATE").is_some() {
+        let child_nullability = children
+            .iter()
+            .map(|child| child.constraint.composition_start_nullable())
+            .collect::<Vec<_>>();
+        let child_summaries = children
+            .iter()
+            .map(|child| child.constraint.composition_grammar_summary.is_some())
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[glrmask/profile][rule_light_gate] requested={} explicit_static={} env={} parent_summary={} child_summaries={child_summaries:?} child_nullability={child_nullability:?}",
+            rule_light_recursive_shell_requested,
+            explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa),
+            std::env::var_os("GLRMASK_EXPERIMENT_RULE_LIGHT_RECURSIVE_SHELL").is_some(),
+            parent.composition_grammar_summary.is_some(),
+        );
+    }
+    let parent_rules = (!rule_light_recursive_shell_requested)
+        .then(|| parent.retained_table_rules())
+        .transpose()?;
+    let child_rules = if rule_light_recursive_shell_requested {
+        None
+    } else {
+        Some(
+            children
+                .iter()
+                .map(|child| child.constraint.retained_table_rules())
+                .collect::<Result<Vec<_>, String>>()?,
+        )
+    };
     let segmented_parser_links = segmented_runtime_requested
         .then(|| build_segmented_parser_links(children))
         .transpose()?
@@ -27208,14 +27667,14 @@ fn compose_constraints_owned_parent_impl(
         .then(|| build_segmented_parser_state_offsets(&parent, children))
         .transpose()?
         .unwrap_or_default();
-    let components_have_no_runtime_product = std::iter::once(&parent)
+    let components_have_no_runtime_product = std::iter::once(&*parent)
         .chain(children.iter().map(|child| child.constraint))
         .all(|constraint| constraint.runtime_source_state_offset().is_none());
-    let component_end_token_ids = std::iter::once(&parent)
+    let component_end_token_ids = std::iter::once(&*parent)
         .chain(children.iter().map(|child| child.constraint))
         .flat_map(|constraint| constraint.table.embedded_end_token_ids())
         .collect::<BTreeSet<_>>();
-    for (component_index, constraint) in std::iter::once(&parent)
+    for (component_index, constraint) in std::iter::once(&*parent)
         .chain(children.iter().map(|child| child.constraint))
         .enumerate()
     {
@@ -27273,7 +27732,7 @@ fn compose_constraints_owned_parent_impl(
             children.iter().map(|child| child.constraint.table.control_terminals.len()).collect::<Vec<_>>(),
             components_have_no_compiled_eof_stack_rewrites(&parent, children),
             children.iter().all(|child| !child.constraint.table.embedded_start_nullable()),
-            legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children),
+            parent_rules.is_some_and(|rules| legacy_splice_has_only_byte_terminal_continuations(&parent, rules, children)),
             children.len());
     }
     let table_inputs = children
@@ -27304,7 +27763,7 @@ fn compose_constraints_owned_parent_impl(
         && components_have_no_explicit_controls(&parent, children)
         && components_have_no_compiled_eof_stack_rewrites(&parent, children)
         && (all_children_nonnullable
-            || legacy_splice_has_only_byte_terminal_continuations(&parent, parent_rules, children));
+            || parent_rules.is_some_and(|rules| legacy_splice_has_only_byte_terminal_continuations(&parent, rules, children)));
     // Provider-native segmented runtimes are expressed by retained recursive
     // components plus CALL/RETURN links, so neither static nor dynamic boundary
     // policy needs a flattened executable coordinator LR table.
@@ -27325,33 +27784,35 @@ fn compose_constraints_owned_parent_impl(
     let table_started_at = Instant::now();
     let (composed_table_result, mut pre_table_base_discovery) = rayon::join(
         || {
-            if direct_parser_shell {
+            if rule_light_recursive_shell_requested {
+                direct_recursive_rule_light_shell(&parent, children, global_ignores)
+            } else if direct_parser_shell {
                 compose_subgrammar_table_shell_explicit_with_rules(
                     &parent.table,
-                    parent_rules,
+                    parent_rules.expect("full recursive shell requires parent rules"),
                     (!global_ignores)
                         .then_some(parent.ignore_terminal)
                         .flatten(),
                     &table_inputs,
-                    &child_rules,
+                    child_rules.as_ref().expect("full recursive shell requires child rules"),
                 )
             } else if use_legacy_splice {
                 compose_subgrammar_tables_with_rules(
                     &parent.table,
-                    parent_rules,
+                    parent_rules.expect("legacy splice requires parent rules"),
                     (!global_ignores).then_some(parent.ignore_terminal).flatten(),
                     &table_inputs,
-                    &child_rules,
+                    child_rules.as_ref().expect("legacy splice requires child rules"),
                 )
             } else {
                 compose_subgrammar_tables_explicit_with_rules(
                     &parent.table,
-                    parent_rules,
+                    parent_rules.expect("explicit splice requires parent rules"),
                     (!global_ignores)
                         .then_some(parent.ignore_terminal)
                         .flatten(),
                     &table_inputs,
-                    &child_rules,
+                    child_rules.as_ref().expect("explicit splice requires child rules"),
                 )
             }
         },
@@ -27364,7 +27825,7 @@ fn compose_constraints_owned_parent_impl(
                     children,
                     global_ignores,
                     vocab,
-                    false,
+                    rule_light_recursive_shell_requested,
                 )
             }
         },
@@ -27434,7 +27895,7 @@ fn compose_constraints_owned_parent_impl(
     }
 
     let metadata_started_at = Instant::now();
-    let component_constraints = std::iter::once(&parent)
+    let component_constraints = std::iter::once(&*parent)
         .chain(children.iter().map(|child| child.constraint))
         .collect::<Vec<_>>();
     let composed_grammar_summary = if use_legacy_splice
@@ -27481,6 +27942,48 @@ fn compose_constraints_owned_parent_impl(
     } else {
         component_tokenizer_state_layout_owned_parent(&component_constraints)
     };
+    let composed_boundary_trigger = {
+        let mut tokens = pre_table_base_discovery
+            .as_ref()
+            .map(|precomputed| {
+                precomputed
+                    .discovery
+                    .prefilter_token_ids
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let mut has_conservative_source = pre_table_base_discovery.is_some();
+        if let Some(parent_tokens) = parent.boundary_trigger.token_summary() {
+            has_conservative_source = true;
+            tokens.extend(parent_tokens.iter().copied());
+        }
+        let mut complete = true;
+        for child in children {
+            if !child.constraint.has_recursive_segmented_parser_tree() {
+                continue;
+            }
+            let Some(nested) = child.constraint.boundary_trigger.token_summary() else {
+                // A recursive child without a conservative token summary cannot
+                // be safely pruned by an outer token trigger. `None` preserves
+                // exactness and lets DynamicDirect fall back conservatively.
+                complete = false;
+                break;
+            };
+            has_conservative_source = true;
+            tokens.extend(nested.iter().copied());
+        }
+        if complete && has_conservative_source {
+            crate::runtime::BoundaryTrigger::Tokens(
+                crate::runtime::BoundaryTokenTrigger::all_tsids(
+                    tokens.into_iter().collect::<Vec<_>>(),
+                ),
+            )
+        } else {
+            crate::runtime::BoundaryTrigger::None
+        }
+    };
     let tokenizer_inputs = component_constraints
         .iter()
         .enumerate()
@@ -27501,8 +28004,16 @@ fn compose_constraints_owned_parent_impl(
         .map(|report| report.elapsed_ms)
         .unwrap_or(0.0);
     let special_token_terminals = if direct_dynamic_shell {
-        // DynamicDirect handles exact-special admission in the retained leaves.
-        Vec::new()
+        // DynamicDirect retains parser/lexer semantics in provider-native leaves,
+        // but root commit dispatch still needs the live exact-token -> terminal
+        // relation so byte-less/exact model tokens can be routed into the active
+        // leaf. Linker/control specials are filtered by this helper.
+        merged_provider_native_special_token_terminals(
+            &parent,
+            children,
+            &composed_table.terminal_offsets,
+            &composed_table.control_terminals,
+        )
     } else if direct_static_shell {
         // Component special lists are already locally live. The only specials
         // killed by the current composition are placeholders rewritten into
@@ -27639,10 +28150,33 @@ fn compose_constraints_owned_parent_impl(
     // the same partition in the coordinate lane.
     let pre_table_component_state_map = pre_table_base_discovery
         .as_mut()
-        .and_then(|precomputed| precomputed.component_state_map.take());
+        .and_then(|precomputed| {
+            (precomputed.tokenizer_state_offsets == expected_tokenizer_state_offsets
+                && precomputed
+                    .component_state_map
+                    .as_ref()
+                    .is_some_and(|map| {
+                        map.original_to_internal.len() == merged_tokenizer_state_count
+                    }))
+            .then(|| precomputed.component_state_map.take())
+            .flatten()
+        });
     let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
+    let early_pending_requested =
+        pending_mode == PendingCompositionMode::BeforeBoundaryPrivateCoordinate
+            || std::env::var_os("GLRMASK_EXPERIMENT_EARLY_PENDING_BEFORE_BOUNDARY").is_some();
+    let partitioned_private_coordinate_experiment =
+        explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+            && ((pending_mode == PendingCompositionMode::BeforeBoundaryPrivateCoordinate
+                && rule_light_recursive_shell_requested)
+                || std::env::var_os("GLRMASK_EXPERIMENT_PARTITIONED_B_PRIVATE_COORDINATE").is_some());
+    let early_pending_before_boundary_experiment =
+        partitioned_private_coordinate_experiment
+            && rule_light_recursive_shell_requested
+            && pending_observer.is_some()
+            && early_pending_requested;
     let skip_boundary_for_floor =
         std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
@@ -27802,11 +28336,15 @@ fn compose_constraints_owned_parent_impl(
                     deferred_vocab_singleton_original_ids: None,
                 };
                 let selected_wait_started_at = Instant::now();
-                let selected_boundary_tokens = loop {
-                    if let Some(selected) = selected_boundary_tokens_cell.get() {
-                        break selected.as_ref().map_err(Clone::clone)?.clone();
+                let selected_boundary_tokens = if partitioned_private_coordinate_experiment {
+                    None
+                } else {
+                    loop {
+                        if let Some(selected) = selected_boundary_tokens_cell.get() {
+                            break selected.as_ref().map_err(Clone::clone)?.clone();
+                        }
+                        std::thread::yield_now();
                     }
-                    std::thread::yield_now();
                 };
                 let selected_wait_ms = selected_wait_started_at.elapsed().as_secs_f64() * 1000.0;
                 let possible_matches_by_component = possible_matches_result?;
@@ -27897,6 +28435,122 @@ fn compose_constraints_owned_parent_impl(
                         remap_ms,
                     }
                 };
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][constraint_owned_component_ready] elapsed_ms={:.3} private_coordinate={}",
+                        preparation_started_at.elapsed().as_secs_f64() * 1000.0,
+                        partitioned_private_coordinate_experiment,
+                    );
+                }
+                if early_pending_before_boundary_experiment {
+                    let pending_snapshot_started_at = Instant::now();
+                    let pending_table =
+                        direct_recursive_rule_light_shell(&parent, children, global_ignores)?;
+                    let pending_num_terminals = pending_table.table.num_terminals as usize;
+                    let pending_id_num_tsids = prepared.id_map.num_tsids();
+                    let pending_id_max_internal_token = prepared.id_map.max_internal_token_id();
+                    let mut pending_result = build_composed_constraint_unfinalized(
+                        pending_table,
+                        parent.tokenizer.clone(),
+                        expected_tokenizer_state_offsets.clone(),
+                        DWA::new(pending_id_num_tsids, pending_id_max_internal_token),
+                        parser_default_domains.parser_state_labels.clone(),
+                        prepared.possible_matches.clone(),
+                        prepared.id_map.clone(),
+                        vec![None; pending_num_terminals],
+                        special_token_terminals.clone(),
+                        embedded_end_token_ids.clone(),
+                        terminal_display_names.clone(),
+                        ignore_terminal,
+                        merged_ignores.canonical_expr.clone(),
+                        Vec::new(),
+                        parent.tokenizer_fast_transitions.clone(),
+                        true,
+                        true,
+                        vocab,
+                    );
+                    pending_result.constraint.composition_grammar_summary =
+                        composed_grammar_summary.clone();
+                    pending_result.constraint.boundary_trigger = composed_boundary_trigger.clone();
+                    let mut pending_sources = if let Some(shared_children) = shared_children {
+                        shared_children
+                            .iter()
+                            .map(|source| (Arc::clone(source), None))
+                            .collect::<Vec<_>>()
+                    } else {
+                        children
+                            .iter()
+                            .map(|child| child.constraint.clone())
+                            .map(|source| (Arc::new(source), None))
+                            .collect::<Vec<_>>()
+                    };
+                    pending_sources.insert(0, (parent.arc_clone(), None));
+                    let pending_global_state_count = pending_result.constraint.table.num_states as usize;
+                    let (pending_components, pending_dispatch, _) = build_segmented_runtime_metadata(
+                        pending_sources,
+                        &pending_result.parser_state_relations,
+                        &pending_result.tokenizer_state_offsets,
+                        &pending_result.terminal_offsets,
+                        &prepared.automata_maps,
+                        pending_global_state_count,
+                        false,
+                        &parser_default_domains,
+                        pending_id_num_tsids,
+                        merged_ignores.canonical,
+                        &merged_ignores.aliases,
+                        true,
+                    )?;
+                    let overlay = pending_result
+                        .constraint
+                        .static_dynamic_overlay
+                        .get_or_insert_with(|| crate::runtime::StaticDynamicOverlayMetadata {
+                            terminal_offsets: pending_result.terminal_offsets.clone(),
+                            tokenizer_state_offsets: pending_result.tokenizer_state_offsets.clone(),
+                            repair_terminals: Vec::new(),
+                            non_parent_only_parser_states: vec![false; pending_global_state_count],
+                            segmented_parser_components: Vec::new(),
+                            segmented_parser_links: Vec::new(),
+                            segmented_parser_state_offsets: Vec::new(),
+                            recursive_parser_layout: Default::default(),
+                            recursive_compiler_table: Default::default(),
+                            recursive_tokenizer_internal_tsids: Default::default(),
+                            segmented_mask_authoritative: false,
+                            segmented_static_baseline: false,
+                            segmented_component_union_root_dispatch: Vec::new(),
+                            segmented_boundary_shards: Vec::new(),
+                            segmented_boundary_parser: None,
+                        });
+                    overlay.segmented_parser_components = pending_components;
+                    overlay.segmented_parser_links = segmented_parser_links.clone();
+                    overlay.segmented_parser_state_offsets = segmented_parser_state_offsets.clone();
+                    overlay.segmented_mask_authoritative = true;
+                    if let Some(dispatch) = pending_dispatch {
+                        overlay.segmented_component_union_root_dispatch = dispatch;
+                    }
+                    pending_result
+                        .constraint
+                        .recursive_parser_layout_for_pending_root()?
+                        .expect("early pending snapshot must have a recursive parser layout");
+                    let pending_recursive_tsids = build_recursive_tokenizer_internal_tsid_relation(
+                        &pending_result.constraint,
+                        &prepared.automata_maps,
+                    )?;
+                    pending_result
+                        .constraint
+                        .install_recursive_tokenizer_internal_tsids(pending_recursive_tsids)?;
+                    if let Some(observer) = pending_observer.as_deref_mut() {
+                        observer(PreparedConstraintComposition {
+                            constraint: pending_result.constraint,
+                            terminal_offsets: pending_result.terminal_offsets,
+                        });
+                    }
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][constraint_early_pending_snapshot] build_ms={:.3}",
+                            pending_snapshot_started_at.elapsed().as_secs_f64() * 1000.0,
+                        );
+                    }
+                }
                 Ok::<_, String>((
                     prepared,
                     component_state_ms.max(token_coordinate_ms),
@@ -27990,6 +28644,17 @@ fn compose_constraints_owned_parent_impl(
     // serialization use the component-owned shards. Keep global publication
     // only for legacy/oracle paths where partitioned work is unavailable.
     let partitioned_static_boundary_complete = static_boundary_shard_work.is_some();
+    if partitioned_private_coordinate_experiment
+        && !partitioned_static_boundary_complete
+        && boundary_work.is_some()
+    {
+        return Err(
+            "partitioned private-coordinate experiment refuses a non-partitioned static boundary"
+                .to_owned(),
+        );
+    }
+
+
     let recursive_global_static_boundary_requested =
         explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
             && !partitioned_static_boundary_complete
@@ -28048,8 +28713,11 @@ fn compose_constraints_owned_parent_impl(
         // each retained leaf owns its own terminal-live index.
         Vec::new()
     } else {
+        let CompositionParent::Owned(parent) = &mut parent else {
+            return Err("shared composition parent requires provider-native parser shell".to_owned());
+        };
         merged_terminal_live_states_owned_parent(
-            &mut parent,
+            parent,
             children,
             &composed_table.terminal_offsets,
             &expected_tokenizer_state_offsets,
@@ -28069,6 +28737,9 @@ fn compose_constraints_owned_parent_impl(
     let parent_fast_transitions = if preserve_parent_runtime {
         parent.tokenizer_fast_transitions.clone()
     } else {
+        let CompositionParent::Owned(parent) = &mut parent else {
+            return Err("shared composition parent cannot consume tokenizer runtime state".to_owned());
+        };
         std::mem::take(&mut parent.tokenizer_fast_transitions)
     };
     let child_fast_transitions = children
@@ -28093,7 +28764,7 @@ fn compose_constraints_owned_parent_impl(
             .iter()
             .any(|child| child.constraint.tokenizer.terminal_exprs().is_none()))
     .then(|| {
-        let components = std::iter::once(&parent)
+        let components = std::iter::once(&*parent)
             .chain(children.iter().map(|child| child.constraint))
             .collect::<Vec<_>>();
         merged_retained_terminal_exprs(
@@ -28233,6 +28904,7 @@ fn compose_constraints_owned_parent_impl(
         result.constraint.composition_parser_templates_by_terminal =
             composition_parser_templates_by_terminal;
         result.constraint.composition_grammar_summary = composed_grammar_summary.clone();
+        result.constraint.boundary_trigger = composed_boundary_trigger.clone();
         if let Some(caches) = token_mask_caches {
             caches.install(&mut result.constraint);
             if compose_profile_enabled() {
@@ -28321,7 +28993,7 @@ fn compose_constraints_owned_parent_impl(
                     .sum::<usize>(),
             );
         }
-        source_constraints.insert(0, (Arc::new(parent), None));
+        source_constraints.insert(0, (parent.into_arc(), None));
 
         let global_state_count = result.constraint.table.num_states as usize;
         if source_constraints.len() != result.parser_state_relations.len()
@@ -28497,6 +29169,39 @@ fn compose_constraints_owned_parent_impl(
             );
         }
 
+        // The recursive tokenizer coordinate depends only on the retained
+        // component tree and its already-prepared local->outer TSID maps. It is
+        // valid before any static boundary shard has been compiled or published.
+        // Install it here so the unfinalized constraint is an exact pending
+        // child while B continues independently.
+        let recursive_layout_started_at = Instant::now();
+        result
+            .constraint
+            .recursive_parser_layout_for_pending_root()?
+            .expect("compact segmented runtime must have a recursive parser layout");
+        let recursive_layout_ms = recursive_layout_started_at.elapsed().as_secs_f64() * 1000.0;
+        let recursive_tsid_started_at = Instant::now();
+        let recursive_tokenizer_tsids = build_recursive_tokenizer_internal_tsid_relation(
+            &result.constraint,
+            &automata_maps,
+        )?;
+        let recursive_tsid_build_ms = recursive_tsid_started_at.elapsed().as_secs_f64() * 1000.0;
+        let recursive_tsid_install_started_at = Instant::now();
+        result
+            .constraint
+            .install_recursive_tokenizer_internal_tsids(recursive_tokenizer_tsids)?;
+        let recursive_tsid_install_ms = recursive_tsid_install_started_at.elapsed().as_secs_f64() * 1000.0;
+        if !early_pending_before_boundary_experiment {
+            if let Some(observer) = pending_observer.as_deref_mut() {
+                observer(PreparedConstraintComposition {
+                    constraint: result.constraint.clone(),
+                    terminal_offsets: result.terminal_offsets.clone(),
+                });
+            }
+        }
+        if compose_profile_enabled() {
+            eprintln!("[glrmask/profile][constraint_recursive_runtime_metadata_early] layout_ms={recursive_layout_ms:.3} tsid_build_ms={recursive_tsid_build_ms:.3} tsid_install_ms={recursive_tsid_install_ms:.3}");
+        }
         if recursive_global_static_boundary_requested {
             let delayed_started_at = Instant::now();
             let mut work = boundary_work.take().ok_or_else(||
@@ -29340,6 +30045,28 @@ fn compose_constraints_owned_parent_impl(
             }
         }
 
+        if explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+            && (parent_has_recursive_segmented_parser_tree
+                || children
+                    .iter()
+                    .any(|child| child.constraint.has_recursive_segmented_parser_tree()))
+        {
+            // Exact RETURN-suffix derivation currently proves only a flat parent ->
+            // leaf-child layer. If either side is already recursively composed, one
+            // model token can cross an inner CALL/RETURN and this new boundary (for
+            // example parent x+left followed by newly bound right). Outer static
+            // discovery can miss that path entirely, so use the authoritative
+            // recursive commit walker for the parent boundary.
+            let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
+                "segmented component metadata must exist before recursive-child boundary fallback",
+            );
+            let recursive_candidates = match &composed_boundary_trigger {
+                crate::runtime::BoundaryTrigger::Tokens(tokens) => Some(tokens.token_summary_arc()),
+                crate::runtime::BoundaryTrigger::None | crate::runtime::BoundaryTrigger::Exact(_) => None,
+            };
+            install_dynamic_direct_boundaries_for_recursive_crossing(overlay, recursive_candidates);
+        }
+
         if result.constraint.uses_compact_segmented_parser_runtime() {
             let recursive_layout_started_at = Instant::now();
             // Derive and cache the authoritative recursive leaf layout before
@@ -29423,7 +30150,7 @@ fn compose_constraints_owned_parent_impl(
 
     let parser_extract_started_at = Instant::now();
     let component_union_work = {
-        let union_component_constraints = std::iter::once(&parent)
+        let union_component_constraints = std::iter::once(&*parent)
             .chain(children.iter().map(|child| child.constraint))
             .collect::<Vec<_>>();
         let union_parser_components = union_component_constraints
@@ -29497,6 +30224,7 @@ fn compose_constraints_owned_parent_impl(
     result.constraint.composition_parser_templates_by_terminal =
         composition_parser_templates_by_terminal;
     result.constraint.composition_grammar_summary = composed_grammar_summary;
+    result.constraint.boundary_trigger = composed_boundary_trigger;
 
     if let Some(source_constraints) = segmented_source_constraints.take() {
         let global_state_count = result.constraint.table.num_states as usize;
@@ -33188,6 +33916,96 @@ constraint: &third,
         }
     }
 
+    #[test]
+    fn recursive_child_uses_finite_exact_parent_boundary_fallback() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"(".to_vec()),
+            (2, b"y".to_vec()),
+            (3, b")".to_vec()),
+            (4, b"z".to_vec()),
+            (5, b"x(y)z".to_vec()),
+            (6, b"(y)z".to_vec()),
+            (7, b")z".to_vec()),
+        ]);
+        let mid_parent = Constraint::from_glrm_grammar(
+            "start s; t SUB ::= @token(999); nt s ::= \"(\" SUB \")\";",
+            &vocab,
+        )
+        .unwrap();
+        let leaf = Arc::new(
+            Constraint::from_glrm_grammar("start s; nt s ::= \"y\";", &vocab).unwrap(),
+        );
+        let mid_slot = terminal(&mid_parent, "SUB");
+        let mid_input = [CompiledSubgrammarInput {
+            placeholder_terminal: mid_slot,
+            additional_placeholder_terminals: &[],
+            constraint: leaf.as_ref(),
+        }];
+        let mut mid_observer = |_prepared: PreparedConstraintComposition| {};
+        let mid = compose_constraints_owned_parent_segmented_shared_prepare_before_boundary(
+            mid_parent,
+            &mid_input,
+            &[Arc::clone(&leaf)],
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+            &mut mid_observer,
+        )
+        .unwrap()
+        .constraint;
+
+        let root_parent = Constraint::from_glrm_grammar(
+            "start s; t SUB ::= @token(999); nt s ::= \"x\" SUB \"z\";",
+            &vocab,
+        )
+        .unwrap();
+        let mid = Arc::new(mid);
+        let root_slot = terminal(&root_parent, "SUB");
+        let root_input = [CompiledSubgrammarInput {
+            placeholder_terminal: root_slot,
+            additional_placeholder_terminals: &[],
+            constraint: mid.as_ref(),
+        }];
+        let mut root_observer = |_prepared: PreparedConstraintComposition| {};
+        let composed = compose_constraints_owned_parent_segmented_shared_prepare_before_boundary(
+            root_parent,
+            &root_input,
+            &[Arc::clone(&mid)],
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+            &mut root_observer,
+        )
+        .unwrap()
+        .constraint;
+
+        for constraint in [&composed, &Constraint::load(&composed.save()).unwrap()] {
+            let overlay = constraint.static_dynamic_overlay.as_ref().unwrap();
+            let parent_shard = overlay.segmented_parser_components[0].boundary.as_ref().unwrap();
+            assert!(matches!(
+                parent_shard.backend,
+                crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+            ));
+            let candidates = parent_shard
+                .candidate_tokens
+                .as_deref()
+                .expect("recursive fallback should carry a finite conservative token trigger");
+            assert!(candidates.contains(&5), "whole nested crossing token must be probed");
+            assert!(candidates.contains(&6), "child-return fusion token must be probed");
+            assert!(candidates.contains(&7), "nested return suffix token must be probed");
+
+            let start = constraint.start().mask();
+            assert!(start.get(5 / 32).is_some_and(|word| word & (1u32 << (5 % 32)) != 0));
+
+            let mut state = constraint.start();
+            state.commit_token(0).unwrap();
+            let after_x = state.mask();
+            assert!(after_x.get(6 / 32).is_some_and(|word| word & (1u32 << (6 % 32)) != 0));
+            state.commit_token(1).unwrap();
+            state.commit_token(2).unwrap();
+            let after_y = state.mask();
+            assert!(after_y.get(7 / 32).is_some_and(|word| word & (1u32 << (7 % 32)) != 0));
+        }
+    }
     #[test]
     fn hybrid_boundary_policy_is_per_component_and_roundtrips() {
         let vocab = Vocab::new(vec![

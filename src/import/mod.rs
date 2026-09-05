@@ -713,13 +713,20 @@ impl Constraint {
                 condition_token_id,
             )?;
             prepare_json_schema_named(&mut named)?;
-            let parent = compile_from_named_grammar(
+            let mut parent = compile_from_named_grammar(
                 named,
                 vocab,
                 "json_schema_programmatic_value",
                 GlrTableConstruction::LegacyRowBisim,
                 &[],
             )?;
+            // This is the intact schema leaf that survives beneath the two
+            // programmatic child compositions. Build its reusable conservative
+            // boundary trigger while it is still owned, before it is wrapped in
+            // any recursive composition Arc.
+            parent
+                .build_boundary_trigger(crate::BoundaryTriggerDetail::Tokens)
+                .map_err(crate::GlrMaskError::Compilation)?;
             let terminal_for = |token_id: u32| -> crate::Result<u32> {
                 parent
                     .special_token_terminals

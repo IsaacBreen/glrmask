@@ -11,7 +11,7 @@ mod state;
 mod token_space;
 pub(crate) use glrmask_artifact::CommitTemplateDfas;
 #[allow(unused_imports)]
-pub(crate) use artifact::{    dynamic_mask_vocab_layout_class, BoundaryTrigger,
+pub(crate) use artifact::{    dynamic_mask_vocab_layout_class, BoundaryTokenTrigger, BoundaryTrigger,
     CompositionGrammarSummary, ConstraintRuntimeBackend, DynamicMaskTrie, DynamicMaskVocab,
     DynamicMaskVocabArtifact, FastCommitTemplateDfas, FastTokenizerTransitions, LateGrammarSlot,
     SegmentedBoundaryParser, SegmentedBoundaryShard, SegmentedBoundaryShardBackend,

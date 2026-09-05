@@ -3,8 +3,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::compiler::constraint_compose::{
-    CompiledSubgrammarInput, SegmentedBoundaryBackend,
+    CompiledSubgrammarInput, PreparedConstraintComposition, SegmentedBoundaryBackend,
     compose_constraints_owned_parent_segmented_shared,
+    compose_constraints_owned_parent_segmented_shared_prepare_before_boundary,
+    compose_constraints_shared_parent_segmented_shared_prepare_before_boundary,
 };
 use crate::runtime::Constraint as RuntimeConstraint;
 use crate::{BoundaryTriggerDetail, DynamicConstraint, Error, Result, Vocab};
@@ -374,8 +376,9 @@ impl<'a> ConstraintSpecBuilder<'a> {
     /// Request reusable dynamic-boundary trigger metadata for this component.
     ///
     /// The default is [`BoundaryTriggerDetail::None`], which adds no trigger
-    /// construction cost. This setting is independent of static vs dynamic
-    /// ordinary masking.
+    /// construction cost. [`BoundaryTriggerDetail::Tokens`] stores independent
+    /// conservative model-token and raw-tokenizer-state sets. This setting is
+    /// independent of static vs dynamic ordinary masking.
     pub fn boundary_trigger_detail(mut self, detail: BoundaryTriggerDetail) -> Self {
         self.boundary_trigger_detail = detail;
         self
@@ -518,6 +521,7 @@ enum ChildCompileMode {
 enum CompiledChild<'a> {
     StaticBorrowed(&'a RuntimeConstraint),
     StaticOwned(RuntimeConstraint),
+    StaticShared(Arc<RuntimeConstraint>),
     DynamicBorrowed(&'a DynamicConstraint),
     DynamicOwned(DynamicConstraint),
 }
@@ -527,6 +531,9 @@ impl CompiledChild<'_> {
         match self {
             Self::StaticBorrowed(constraint) => vec![constraint.clone()],
             Self::StaticOwned(constraint) => vec![constraint],
+            Self::StaticShared(constraint) => vec![
+                Arc::try_unwrap(constraint).unwrap_or_else(|shared| (*shared).clone()),
+            ],
             Self::DynamicBorrowed(constraint) => constraint.clone_constraints(),
             Self::DynamicOwned(constraint) => constraint.clone_constraints(),
         }
@@ -582,7 +589,9 @@ impl GrammarBinding<'_> {
                 }
             },
             Self::StaticBorrowed(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
-            Self::StaticOwned(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
+            Self::StaticOwned(constraint) => {
+                Ok(CompiledChild::StaticShared(Arc::clone(constraint)))
+            }
             Self::DynamicBorrowed(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
             Self::DynamicOwned(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
         }
@@ -620,9 +629,7 @@ impl GrammarBinding<'_> {
                 }
             },
             Self::StaticBorrowed(constraint) => Ok(CompiledChild::StaticBorrowed(constraint)),
-            Self::StaticOwned(constraint) => Ok(CompiledChild::StaticOwned(
-                Arc::try_unwrap(constraint).unwrap_or_else(|shared| (*shared).clone()),
-            )),
+            Self::StaticOwned(constraint) => Ok(CompiledChild::StaticShared(constraint)),
             Self::DynamicBorrowed(constraint) => Ok(CompiledChild::DynamicBorrowed(constraint)),
             Self::DynamicOwned(constraint) => Ok(CompiledChild::DynamicOwned(
                 Arc::try_unwrap(constraint).unwrap_or_else(|shared| (*shared).clone()),
@@ -639,6 +646,34 @@ fn prepare_compiled_children(
     children
         .into_iter()
         .map(|(name, child)| {
+            let child = match child {
+                CompiledChild::StaticShared(mut constraint) => {
+                    let metadata_ready = match boundary_backend {
+                        SegmentedBoundaryBackend::StaticParserDwa => {
+                            constraint.deferred_composition_metadata_blob.is_none()
+                        }
+                        SegmentedBoundaryBackend::Dynamic => {
+                            constraint.deferred_composition_metadata_blob.is_none()
+                                || constraint.composition_link_metadata_materialized
+                        }
+                    };
+                    if !metadata_ready {
+                        let mut owned = Arc::try_unwrap(constraint)
+                            .unwrap_or_else(|shared| (*shared).clone());
+                        match boundary_backend {
+                            SegmentedBoundaryBackend::StaticParserDwa => owned
+                                .materialize_composition_metadata_for_compilation()
+                                .map_err(Error::Compilation)?,
+                            SegmentedBoundaryBackend::Dynamic => owned
+                                .materialize_composition_link_metadata_for_compilation()
+                                .map_err(Error::Compilation)?,
+                        }
+                        constraint = Arc::new(owned);
+                    }
+                    return Ok((name, constraint));
+                }
+                child => child,
+            };
             let mut constraint = collapse_dynamic_alternatives(
                 child.into_constraints(),
                 vocab,
@@ -708,11 +743,44 @@ fn collapse_dynamic_alternatives(
     Ok(union)
 }
 
+fn install_composed_late_slots(
+    constraint: &mut RuntimeConstraint,
+    terminal_offsets: &[u32],
+    remaining_parent_slots: &[crate::runtime::LateGrammarSlot],
+    present: &[usize],
+    children: &[(String, Arc<RuntimeConstraint>)],
+) {
+    constraint.late_grammar_slots = remaining_parent_slots.to_vec();
+    for (component_index, &child_index) in present.iter().enumerate() {
+        let terminal_offset = terminal_offsets[component_index + 1];
+        let (binding_name, child) = &children[child_index];
+        constraint.late_grammar_slots.extend(
+            child.late_grammar_slots.iter().map(|slot| crate::runtime::LateGrammarSlot {
+                name: format!("{binding_name}.{}", slot.name),
+                terminal_id: terminal_offset + slot.terminal_id,
+            }),
+        );
+    }
+    if constraint.sanitize_late_grammar_placeholder_token_domain() {
+        constraint.rebuild_runtime_caches();
+    }
+}
 fn compose_named_children(
     parent: RuntimeConstraint,
     children: &[(String, Arc<RuntimeConstraint>)],
     vocab: &Vocab,
     boundary_backend: SegmentedBoundaryBackend,
+) -> Result<RuntimeConstraint> {
+    compose_named_children_impl(parent, children, vocab, boundary_backend, None)
+}
+
+
+fn compose_named_children_impl(
+    parent: RuntimeConstraint,
+    children: &[(String, Arc<RuntimeConstraint>)],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+    mut pending_observer: Option<&mut (dyn FnMut(RuntimeConstraint) + Send)>,
 ) -> Result<RuntimeConstraint> {
     let bound_names = children
         .iter()
@@ -755,34 +823,122 @@ fn compose_named_children(
         .iter()
         .map(|&child_index| Arc::clone(&children[child_index].1))
         .collect::<Vec<_>>();
-    let mut composition = compose_constraints_owned_parent_segmented_shared(
+    let mut composition = if let Some(observer) = pending_observer.as_deref_mut() {
+        let mut compiler_observer = |mut prepared: PreparedConstraintComposition| {
+            install_composed_late_slots(
+                &mut prepared.constraint,
+                &prepared.terminal_offsets,
+                &remaining_parent_slots,
+                &present,
+                children,
+            );
+            observer(prepared.constraint);
+        };
+        compose_constraints_owned_parent_segmented_shared_prepare_before_boundary(
+            parent,
+            &inputs,
+            &shared_children,
+            vocab,
+            boundary_backend,
+            &mut compiler_observer,
+        )    } else {
+        compose_constraints_owned_parent_segmented_shared(
+            parent,
+            &inputs,
+            &shared_children,
+            vocab,
+            boundary_backend,
+        )
+    }
+    .map_err(Error::Compilation)?;
+    install_composed_late_slots(
+        &mut composition.constraint,
+        &composition.terminal_offsets,
+        &remaining_parent_slots,
+        &present,
+        children,
+    );
+    Ok(composition.constraint)
+}
+
+fn compose_named_children_shared_parent_prepare(
+    parent: Arc<RuntimeConstraint>,
+    children: &[(String, Arc<RuntimeConstraint>)],
+    vocab: &Vocab,
+    boundary_backend: SegmentedBoundaryBackend,
+    observer: &mut (dyn FnMut(RuntimeConstraint) + Send),
+) -> Result<RuntimeConstraint> {
+    let bound_names = children
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut present = Vec::new();
+    let mut matching_terminals = Vec::new();
+    for (child_index, (name, _)) in children.iter().enumerate() {
+        let terminals = parent
+            .late_grammar_slots
+            .iter()
+            .filter(|slot| slot.name == *name)
+            .map(|slot| slot.terminal_id)
+            .collect::<Vec<_>>();
+        if !terminals.is_empty() {
+            present.push(child_index);
+            matching_terminals.push(terminals);
+        }
+    }
+    if present.is_empty() {
+        return Err(Error::Compilation(
+            "shared prepared composition found no matching external grammar slots".to_owned(),
+        ));
+    }
+
+    let remaining_parent_slots = parent
+        .late_grammar_slots
+        .iter()
+        .filter(|slot| !bound_names.contains(slot.name.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let inputs = present
+        .iter()
+        .zip(&matching_terminals)
+        .map(|(&child_index, terminals)| CompiledSubgrammarInput {
+            placeholder_terminal: terminals[0],
+            additional_placeholder_terminals: &terminals[1..],
+            constraint: children[child_index].1.as_ref(),
+        })
+        .collect::<Vec<_>>();
+    let shared_children = present
+        .iter()
+        .map(|&child_index| Arc::clone(&children[child_index].1))
+        .collect::<Vec<_>>();
+    let mut compiler_observer = |mut prepared: PreparedConstraintComposition| {
+        install_composed_late_slots(
+            &mut prepared.constraint,
+            &prepared.terminal_offsets,
+            &remaining_parent_slots,
+            &present,
+            children,
+        );
+        observer(prepared.constraint);
+    };
+    let mut composition = compose_constraints_shared_parent_segmented_shared_prepare_before_boundary(
         parent,
         &inputs,
         &shared_children,
         vocab,
         boundary_backend,
+        &mut compiler_observer,
     )
     .map_err(Error::Compilation)?;
-    composition.constraint.late_grammar_slots = remaining_parent_slots;
-    for (component_index, &child_index) in present.iter().enumerate() {
-        let terminal_offset = composition.terminal_offsets[component_index + 1];
-        let (binding_name, child) = &children[child_index];
-        composition.constraint.late_grammar_slots.extend(
-            child.late_grammar_slots.iter().map(|slot| crate::runtime::LateGrammarSlot {
-                name: format!("{binding_name}.{}", slot.name),
-                terminal_id: terminal_offset + slot.terminal_id,
-            }),
-        );
-    }
-    if composition
-        .constraint
-        .sanitize_late_grammar_placeholder_token_domain()
-    {
-        composition.constraint.rebuild_runtime_caches();
-    }
+    install_composed_late_slots(
+        &mut composition.constraint,
+        &composition.terminal_offsets,
+        &remaining_parent_slots,
+        &present,
+        children,
+    );
     Ok(composition.constraint)
 }
-
 fn compile_static_source(
     grammar: &Grammar<'_>,
     vocab: &Vocab,
@@ -930,6 +1086,472 @@ fn bind_static_parent_grammars_owned(
     compose_named_children(parent, &children, &vocab, boundary_backend)
 }
 
+pub struct PreparedStaticBinding {
+    prepared: Arc<RuntimeConstraint>,
+    completion: std::thread::JoinHandle<Result<RuntimeConstraint>>,
+    pending_children: Vec<(usize, PreparedStaticBinding)>,
+}
+
+impl PreparedStaticBinding {
+    #[doc(hidden)]
+    pub fn prepared(&self) -> Arc<RuntimeConstraint> {
+        Arc::clone(&self.prepared)
+    }
+
+    #[doc(hidden)]
+    pub fn finish(self) -> Result<RuntimeConstraint> {
+        // Every worker is already running. Join all recursive children even if
+        // one fails so an unsuccessful compilation never leaves detached work
+        // consuming CPU after the error has been returned to the caller.
+        let mut finished_children = Vec::with_capacity(self.pending_children.len());
+        let mut first_child_error = None;
+        for (component_index, child) in self.pending_children {
+            match child.finish() {
+                Ok(child) => finished_children.push((component_index, Arc::new(child))),
+                Err(error) => {
+                    if first_child_error.is_none() {
+                        first_child_error = Some(error);
+                    }
+                }
+            }
+        }
+
+        // Join the current-level publisher regardless of child outcome for the
+        // same reason. Child and parent publication still overlap because all
+        // workers were launched before finish() was entered.
+        let mut finished = self.completion.join().map_err(|_| {
+            Error::Compilation("prepared static composition worker panicked".to_owned())
+        })??;
+        if let Some(error) = first_child_error {
+            return Err(error);
+        }
+        for (component_index, child) in finished_children {
+            replace_segmented_component_runtime_for_composition(
+                &mut finished,
+                component_index,
+                child,
+            )?;
+        }
+        Ok(finished)
+    }
+}
+
+fn replace_segmented_component_runtime_for_composition(
+    constraint: &mut RuntimeConstraint,
+    component_index: usize,
+    replacement: Arc<RuntimeConstraint>,
+) -> Result<()> {
+    let current = constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .and_then(|overlay| overlay.segmented_parser_components.get(component_index))
+        .map(|component| Arc::clone(&component.constraint))
+        .ok_or_else(|| {
+            Error::Compilation(format!(
+                "prepared composition runtime join has no component {component_index}"
+            ))
+        })?;
+    if current.table.num_terminals != replacement.table.num_terminals
+        || current.internal_token_count() != replacement.internal_token_count()
+        || current.internal_tsid_count() != replacement.internal_tsid_count()
+    {
+        return Err(Error::Compilation(format!(
+            "prepared composition runtime join component {component_index} has incompatible token/terminal coordinates"
+        )));
+    }
+    let current_layout = current
+        .recursive_parser_layout_for_pending_root()
+        .map_err(Error::Compilation)?;
+    let replacement_layout = replacement
+        .recursive_parser_layout_for_pending_root()
+        .map_err(Error::Compilation)?;
+    match (current_layout.as_deref(), replacement_layout.as_deref()) {
+        (Some(current), Some(replacement))
+            if current.total_states == replacement.total_states
+                && current.total_tokenizer_states == replacement.total_tokenizer_states
+                && current.terminal_targets.len() == replacement.terminal_targets.len()
+                && current.links.len() == replacement.links.len() => {}
+        (None, None) => {}
+        _ => {
+            return Err(Error::Compilation(format!(
+                "prepared composition runtime join component {component_index} has incompatible recursive layout"
+            )));
+        }
+    }
+    constraint
+        .static_dynamic_overlay
+        .as_mut()
+        .and_then(|overlay| overlay.segmented_parser_components.get_mut(component_index))
+        .expect("validated prepared component must remain present")
+        .constraint = replacement;
+    Ok(())
+}
+
+fn prepare_owned_parent_for_prepared_binding(
+    parent: &mut RuntimeConstraint,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<()> {
+    if boundary_backend == SegmentedBoundaryBackend::StaticParserDwa
+        && matches!(parent.boundary_trigger, crate::runtime::BoundaryTrigger::None)
+        && !parent.has_recursive_segmented_parser_tree()
+    {
+        parent
+            .build_boundary_trigger(BoundaryTriggerDetail::Tokens)
+            .map_err(Error::Compilation)?;
+    }
+    Ok(())
+}
+pub(crate) fn bind_static_parent_shared_prepare_before_boundary(
+    mut parent: RuntimeConstraint,
+    children: Vec<(String, Arc<RuntimeConstraint>)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    if children.is_empty() {
+        return Err(Error::Compilation(
+            "prepared static composition requires at least one child".to_owned(),
+        ));
+    }
+    prepare_owned_parent_for_prepared_binding(&mut parent, boundary_backend)?;
+    let vocab = constraint_vocab(&parent);
+    for (name, child) in &children {
+        require_late_grammar_slot(std::slice::from_ref(&parent), name)?;
+        if !static_constraint_targets(child, &vocab) {
+            return Err(Error::Compilation(format!(
+                "external grammar {name:?} was built for an incompatible vocabulary"
+            )));
+        }
+    }
+    let compiled = children
+        .into_iter()
+        .map(|(name, constraint)| (name, CompiledChild::StaticShared(constraint)))
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: RuntimeConstraint| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared));
+            }
+        };
+        compose_named_children_impl(
+            parent,
+            &children,
+            &vocab,
+            boundary_backend,
+            Some(&mut observer),
+        )
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children: Vec::new(),
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "prepared static composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "prepared static composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
+
+pub(crate) fn bind_static_shared_parent_shared_prepare_before_boundary(
+    parent: Arc<RuntimeConstraint>,
+    children: Vec<(String, Arc<RuntimeConstraint>)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    if children.is_empty() {
+        return Err(Error::Compilation(
+            "shared-parent prepared static composition requires at least one child".to_owned(),
+        ));
+    }
+    let vocab = constraint_vocab(parent.as_ref());
+    for (name, child) in &children {
+        require_late_grammar_slot(std::slice::from_ref(parent.as_ref()), name)?;
+        if !static_constraint_targets(child, &vocab) {
+            return Err(Error::Compilation(format!(
+                "external grammar {name:?} was built for an incompatible vocabulary"
+            )));
+        }
+    }
+    let compiled = children
+        .into_iter()
+        .map(|(name, constraint)| (name, CompiledChild::StaticShared(constraint)))
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: RuntimeConstraint| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared));
+            }
+        };
+        compose_named_children_shared_parent_prepare(
+            parent,
+            &children,
+            &vocab,
+            boundary_backend,
+            &mut observer,
+        )
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children: Vec::new(),
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "shared-parent prepared static composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "shared-parent prepared static composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
+pub(crate) fn bind_static_parent_grammars_owned_prepare_before_boundary(
+    mut parent: RuntimeConstraint,
+    children: Vec<(String, RuntimeConstraint)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    if children.is_empty() {
+        return Err(Error::Compilation(
+            "prepared static composition requires at least one child".to_owned(),
+        ));
+    }
+    for (name, _) in &children {
+        require_late_grammar_slot(std::slice::from_ref(&parent), name)?;
+    }
+    prepare_owned_parent_for_prepared_binding(&mut parent, boundary_backend)?;
+    let vocab = constraint_vocab(&parent);
+    let compiled = children
+        .into_iter()
+        .map(|(name, constraint)| (name, CompiledChild::StaticOwned(constraint)))
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: RuntimeConstraint| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared));
+            }
+        };
+        compose_named_children_impl(
+            parent,
+            &children,
+            &vocab,
+            boundary_backend,
+            Some(&mut observer),
+        )
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children: Vec::new(),
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "prepared static composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "prepared static composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
+pub(crate) fn bind_static_parent_prepared_children(
+    mut parent: RuntimeConstraint,
+    children: Vec<(String, PreparedStaticBinding)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    if children.is_empty() {
+        return Err(Error::Compilation(
+            "prepared recursive composition requires at least one child".to_owned(),
+        ));
+    }
+    for (name, _) in &children {
+        require_late_grammar_slot(std::slice::from_ref(&parent), name)?;
+    }
+    prepare_owned_parent_for_prepared_binding(&mut parent, boundary_backend)?;
+    let vocab = constraint_vocab(&parent);
+    let mut pending_children = Vec::with_capacity(children.len());
+    let compiled = children
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, child))| {
+            let prepared = child.prepared();
+            pending_children.push((index + 1, child));
+            (name, CompiledChild::StaticShared(prepared))
+        })
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: RuntimeConstraint| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared));
+            }
+        };
+        compose_named_children_impl(
+            parent,
+            &children,
+            &vocab,
+            boundary_backend,
+            Some(&mut observer),
+        )
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children,
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "prepared recursive composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "prepared recursive composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
+pub(crate) fn bind_static_shared_parent_prepared_children(
+    parent: Arc<RuntimeConstraint>,
+    children: Vec<(String, PreparedStaticBinding)>,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    if children.is_empty() {
+        return Err(Error::Compilation(
+            "shared-parent prepared recursive composition requires at least one child".to_owned(),
+        ));
+    }
+    for (name, _) in &children {
+        require_late_grammar_slot(std::slice::from_ref(parent.as_ref()), name)?;
+    }
+    let vocab = constraint_vocab(parent.as_ref());
+    let mut pending_children = Vec::with_capacity(children.len());
+    let compiled = children
+        .into_iter()
+        .enumerate()
+        .map(|(index, (name, child))| {
+            let prepared = child.prepared();
+            pending_children.push((index + 1, child));
+            (name, CompiledChild::StaticShared(prepared))
+        })
+        .collect::<Vec<_>>();
+    let children = prepare_compiled_children(compiled, &vocab, boundary_backend)?;
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: RuntimeConstraint| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared));
+            }
+        };
+        compose_named_children_shared_parent_prepare(
+            parent,
+            &children,
+            &vocab,
+            boundary_backend,
+            &mut observer,
+        )
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children,
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "shared-parent prepared composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "shared-parent prepared composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
+pub(crate) fn compose_static_shared_parent_prepared_child_at_terminal(
+    parent: Arc<RuntimeConstraint>,
+    placeholder_terminal: u32,
+    child: PreparedStaticBinding,
+    boundary_backend: SegmentedBoundaryBackend,
+) -> Result<PreparedStaticBinding> {
+    let vocab = constraint_vocab(parent.as_ref());
+    let prepared_child = child.prepared();
+    let children = prepare_compiled_children(
+        vec![(
+            "prepared_child".to_owned(),
+            CompiledChild::StaticShared(prepared_child),
+        )],
+        &vocab,
+        boundary_backend,
+    )?;
+    let shared_child = Arc::clone(&children[0].1);
+    let (prepared_tx, prepared_rx) = std::sync::mpsc::sync_channel(1);
+    let completion = std::thread::spawn(move || {
+        let shared_children = [shared_child];
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: shared_children[0].as_ref(),
+        }];
+        let mut prepared_tx = Some(prepared_tx);
+        let mut observer = move |prepared: PreparedConstraintComposition| {
+            if let Some(tx) = prepared_tx.take() {
+                let _ = tx.send(Arc::new(prepared.constraint));
+            }
+        };
+        compose_constraints_shared_parent_segmented_shared_prepare_before_boundary(
+            parent,
+            &inputs,
+            &shared_children,
+            &vocab,
+            boundary_backend,
+            &mut observer,
+        )
+        .map(|composition| composition.constraint)
+        .map_err(Error::Compilation)
+    });
+    match prepared_rx.recv() {
+        Ok(prepared) => Ok(PreparedStaticBinding {
+            prepared,
+            completion,
+            pending_children: vec![(1, child)],
+        }),
+        Err(_) => match completion.join() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(_)) => Err(Error::Compilation(
+                "direct-terminal prepared composition completed without publishing a prepared child"
+                    .to_owned(),
+            )),
+            Err(_) => Err(Error::Compilation(
+                "direct-terminal prepared composition worker panicked before publication".to_owned(),
+            )),
+        },
+    }
+}
 impl DynamicConstraint {
     /// Compile `grammar` into a [`DynamicConstraint`] for `vocab`.
     pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
@@ -972,7 +1594,7 @@ impl DynamicConstraint {
     }
 }
 
-fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
+pub(crate) fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
     constraint
         .late_bind_vocab
         .get_or_init(|| {
@@ -1210,6 +1832,77 @@ mod tests {
             shard.backend,
             crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
         )));
+    }
+
+    #[test]
+    fn static_arc_binding_reuses_ready_compiled_child() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child;"),
+            &vocab,
+        )
+        .unwrap();
+        let child = Arc::new(
+            RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap(),
+        );
+        assert!(child.deferred_composition_metadata_blob.is_none());
+
+        let bound = parent.bind_grammar("child", Arc::clone(&child)).unwrap();
+        let overlay = bound
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("static late binding must publish segmented runtime metadata");
+        assert!(overlay
+            .segmented_parser_components
+            .iter()
+            .any(|component| Arc::ptr_eq(&component.constraint, &child)));
+    }
+
+    #[test]
+    fn prepared_static_binding_publishes_parent_return_trigger_before_boundary() {
+        let vocab = Vocab::new(vec![
+            (0, b"(".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b")".to_vec()),
+            (3, b")z".to_vec()),
+        ]);
+        let parent = RuntimeConstraint::compile(
+            Grammar::glrm(
+                "glrm 1; start start; extern grammar child; nt start = \"(\" child \")\";",
+            ),
+            &vocab,
+        )
+        .unwrap();
+        let child = Arc::new(
+            RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap(),
+        );
+
+        let prepared = bind_static_parent_shared_prepare_before_boundary(
+            parent,
+            vec![("child".to_owned(), child)],
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .unwrap();
+        let snapshot = prepared.prepared();
+        let snapshot_tokens = match &snapshot.boundary_trigger {
+            crate::runtime::BoundaryTrigger::Tokens(tokens) => tokens.token_summary(),
+            other => panic!("prepared parent should publish Tokens trigger, got {other:?}"),
+        };
+        assert!(
+            snapshot_tokens.contains(&3),
+            "proper-prefix completion of the parent root-last terminal must be visible before B finishes"
+        );
+
+        let finished = prepared.finish().unwrap();
+        let finished_tokens = match &finished.boundary_trigger {
+            crate::runtime::BoundaryTrigger::Tokens(tokens) => tokens.token_summary(),
+            other => panic!("finished parent should retain Tokens trigger, got {other:?}"),
+        };
+        assert!(finished_tokens.contains(&3));
     }
 
     #[test]
