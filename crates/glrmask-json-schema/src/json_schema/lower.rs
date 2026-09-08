@@ -213,6 +213,7 @@ pub struct Lowerer<'a> {
     pub fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     pub terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
     pub terminal_pattern_partition_keys: BTreeMap<String, JsonPatternPartitionKey>,
+    pub(crate) repeated_pattern_property_keys: BTreeSet<JsonPatternPartitionKey>,
     terminal_partition_class: JsonTerminalPartitionClass,
     definition_rules: BTreeMap<String, String>,
     definition_by_pointer: BTreeMap<String, &'a Schema>,
@@ -231,6 +232,52 @@ fn quoted_repeated_char_rule_expr(char_rule: &str) -> GrammarExpr {
         GrammarExpr::Quantified(Box::new(r(char_rule)), Quantifier::ZeroPlus),
         lit("\""),
     ])
+}
+
+fn collect_pattern_property_key_counts(
+    schema: &Schema,
+    counts: &mut BTreeMap<JsonPatternPartitionKey, usize>,
+) {
+    let SchemaKind::Assertions(assertions) = &schema.kind else {
+        return;
+    };
+    if let Some(object) = assertions.object.as_ref() {
+        for property in &object.properties {
+            if let SchemaKind::Assertions(property_assertions) = &property.schema.kind
+                && let Some(string_schema) = property_assertions.string.as_ref()
+                && string_schema.pattern.is_some()
+            {
+                *counts.entry(JsonPatternPartitionKey::from(string_schema)).or_default() += 1;
+            }
+            collect_pattern_property_key_counts(&property.schema, counts);
+        }
+        for property in &object.pattern_properties {
+            collect_pattern_property_key_counts(&property.schema, counts);
+        }
+        if let Some(property_names) = object.property_names.as_ref() {
+            collect_pattern_property_key_counts(property_names, counts);
+        }
+        if let AdditionalProperties::Schema(additional) = &object.additional_properties {
+            collect_pattern_property_key_counts(additional, counts);
+        }
+    }
+    if let Some(array) = assertions.array.as_ref() {
+        collect_pattern_property_key_counts(&array.items, counts);
+        for item in &array.prefix_items {
+            collect_pattern_property_key_counts(item, counts);
+        }
+    }
+    for child in assertions
+        .any_of
+        .iter()
+        .chain(assertions.one_of.iter())
+        .chain(assertions.all_of.iter())
+    {
+        collect_pattern_property_key_counts(child, counts);
+    }
+    if let Some(not) = assertions.not.as_ref() {
+        collect_pattern_property_key_counts(not, counts);
+    }
 }
 
 impl<'a> Lowerer<'a> {
@@ -294,6 +341,15 @@ impl<'a> Lowerer<'a> {
             definition_by_pointer.insert(target.pointer.clone(), &target.schema);
         }
         definition_by_pointer.insert("#".to_string(), &document.root);
+        let mut pattern_property_key_counts = BTreeMap::new();
+        collect_pattern_property_key_counts(&document.root, &mut pattern_property_key_counts);
+        for definition in &document.definitions {
+            collect_pattern_property_key_counts(&definition.schema, &mut pattern_property_key_counts);
+        }
+        let repeated_pattern_property_keys = pattern_property_key_counts
+            .into_iter()
+            .filter_map(|(key, count)| (count > 1).then_some(key))
+            .collect();
 
         let mut lowerer = Self {
             document,
@@ -322,6 +378,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
             terminal_pattern_partition_keys: BTreeMap::new(),
+            repeated_pattern_property_keys,
             terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer,
@@ -366,6 +423,7 @@ impl<'a> Lowerer<'a> {
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
             terminal_pattern_partition_keys: BTreeMap::new(),
+            repeated_pattern_property_keys: self.repeated_pattern_property_keys.clone(),
             terminal_partition_class: JsonTerminalPartitionClass::Other,
             definition_rules: BTreeMap::new(),
             definition_by_pointer: self.definition_by_pointer.clone(),
@@ -2583,4 +2641,155 @@ mod structural_schema_memo_tests {
         assert_eq!(lowerer.structural_schema_cache_misses, 1);
         assert_eq!(lowerer.structural_schema_expr_cache[&fingerprint].len(), 2);
     }
+    fn patterned_string(location: &str, pattern: &str, max_length: Option<usize>) -> Schema {
+        Schema::assertions(
+            location,
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                string: Some(StringSchema {
+                    min_length: 1,
+                    max_length,
+                    pattern: Some(pattern.to_string()),
+                    ..StringSchema::default()
+                }),
+                ..SchemaAssertions::default()
+            },
+        )
+    }
+
+    fn formatted_string(location: &str, format: &str) -> Schema {
+        Schema::assertions(
+            location,
+            SchemaAssertions {
+                types: Some(vec![SchemaType::String]),
+                string: Some(StringSchema {
+                    format: Some(format.to_string()),
+                    ..StringSchema::default()
+                }),
+                ..SchemaAssertions::default()
+            },
+        )
+    }
+
+    fn repeated_pattern_document() -> SchemaDocument {
+        let property = |name: &str, schema: Schema| super::super::ast::PropertySchema {
+            name: name.to_string(),
+            schema,
+        };
+        SchemaDocument {
+            root: Schema::assertions(
+                "#",
+                SchemaAssertions {
+                    types: Some(vec![SchemaType::Object]),
+                    object: Some(ObjectSchema {
+                        properties: vec![
+                            property(
+                                "a",
+                                patterned_string("#/properties/a", r"^(?:\\S+\\s+){0,49}\\S+$", Some(500)),
+                            ),
+                            property(
+                                "b",
+                                patterned_string("#/properties/b", r"^(?:\\S+\\s+){0,49}\\S+$", Some(500)),
+                            ),
+                            property(
+                                "singleton",
+                                patterned_string("#/properties/singleton", r"^[A-Z]+$", None),
+                            ),
+                            property(
+                                "date1",
+                                formatted_string("#/properties/date1", "date-time"),
+                            ),
+                            property(
+                                "date2",
+                                formatted_string("#/properties/date2", "date-time"),
+                            ),
+                        ],
+                        ..ObjectSchema::default()
+                    }),
+                    ..SchemaAssertions::default()
+                },
+            ),
+            definitions: Vec::new(),
+            ref_targets: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn repeated_pattern_selector_ignores_singletons_and_formats() {
+        let document = repeated_pattern_document();
+        let lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let repeated = StringSchema {
+            min_length: 1,
+            max_length: Some(500),
+            pattern: Some(r"^(?:\\S+\\s+){0,49}\\S+$".to_string()),
+            ..StringSchema::default()
+        };
+        let singleton = StringSchema {
+            min_length: 1,
+            pattern: Some(r"^[A-Z]+$".to_string()),
+            ..StringSchema::default()
+        };
+        let repeated_format = StringSchema {
+            format: Some("date-time".to_string()),
+            ..StringSchema::default()
+        };
+
+        assert!(
+            lowerer
+                .repeated_pattern_property_keys
+                .contains(&JsonPatternPartitionKey::from(&repeated))
+        );
+        assert!(
+            !lowerer
+                .repeated_pattern_property_keys
+                .contains(&JsonPatternPartitionKey::from(&singleton))
+        );
+        assert!(
+            !lowerer
+                .repeated_pattern_property_keys
+                .contains(&JsonPatternPartitionKey::from(&repeated_format))
+        );
+    }
+
+    #[test]
+    fn dynamic_pattern_prefix_split_applies_only_to_selected_family() {
+        let document = repeated_pattern_document();
+        let mut config = JsonSchemaConfig::default();
+        config.split_pattern_property_prefix = true;
+        let mut lowerer = Lowerer::new(&document, config);
+        let repeated = StringSchema {
+            min_length: 1,
+            max_length: Some(500),
+            pattern: Some(r"^(?:\\S+\\s+){0,49}\\S+$".to_string()),
+            ..StringSchema::default()
+        };
+        let singleton = StringSchema {
+            min_length: 1,
+            pattern: Some(r"^[A-Z]+$".to_string()),
+            ..StringSchema::default()
+        };
+        let repeated_format = StringSchema {
+            format: Some("date-time".to_string()),
+            ..StringSchema::default()
+        };
+
+        let split = lowerer
+            .lower_literal_key_colon_with_prefix_and_string_schema(b"", "a", &repeated)
+            .unwrap();
+        let fused_singleton = lowerer
+            .lower_literal_key_colon_with_prefix_and_string_schema(
+                b"",
+                "singleton",
+                &singleton,
+            )
+            .unwrap();
+        let fused_format = lowerer
+            .lower_literal_key_colon_with_prefix_and_string_schema(b"", "date1", &repeated_format)
+            .unwrap();
+
+        assert!(matches!(split, GrammarExpr::Sequence(_)));
+        assert!(matches!(fused_singleton, GrammarExpr::Ref(_)));
+        assert!(matches!(fused_format, GrammarExpr::Ref(_)));
+    }
+
 }

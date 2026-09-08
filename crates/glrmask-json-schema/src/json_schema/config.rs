@@ -14,6 +14,9 @@ pub struct JsonSchemaConfig {
     /// quoted terminal and let the lazy lexer own the bounded-repeat residual.
     /// Static compilation retains chunking to protect eager automaton builds.
     pub lazy_ordinary_bounded_strings: bool,
+    /// Dynamic lowering can keep fixed object-key syntax separate from patterned
+    /// string values, allowing repeated value languages to share one terminal.
+    pub split_pattern_property_prefix: bool,
     pub terminalize_bounded_string_max: usize,
     pub preserve_pattern_max_length: bool,
     pub pattern_max_length_complexity_limit: usize,
@@ -73,6 +76,7 @@ impl Default for JsonSchemaConfig {
             // string chunks removes that avoidable terminal-path depth.
             string_repeat_chunk_size: 64,
             lazy_ordinary_bounded_strings: false,
+            split_pattern_property_prefix: false,
             // Sticky: do not change this default to tune TBM. Broader bounded
             // string terminalization can look attractive on individual schemas
             // but creates severe build fallout. This warning itself should

@@ -1737,10 +1737,20 @@ impl<'a> Lowerer<'a> {
                 self.lower_string(schema)?,
             ]));
         }
-        if !split_literal_terminals_enabled()
-            && (schema.pattern.is_some()
-                || recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some())
+        let patterned_or_formatted = schema.pattern.is_some()
+            || recognized_string_format_body_regex_for_lowering(schema.format.as_deref()).is_some();
+        if self.config.split_pattern_property_prefix
+            && schema.pattern.is_some()
+            && self
+                .repeated_pattern_property_keys
+                .contains(&JsonPatternPartitionKey::from(schema))
         {
+            return Ok(seq(vec![
+                self.lower_literal_key_colon_with_prefix(prefix, key),
+                self.lower_string_property_value_expr(schema)?,
+            ]));
+        }
+        if !split_literal_terminals_enabled() && patterned_or_formatted {
             let encoded = serde_json::to_string(key).unwrap_or_else(|_| "\"\"".to_string());
             let mut literal_prefix = Vec::new();
             literal_prefix.extend_from_slice(prefix);

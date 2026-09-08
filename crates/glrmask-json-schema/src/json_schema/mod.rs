@@ -393,6 +393,7 @@ pub fn schema_to_named_grammar_for_dynamic(
 ) -> Result<NamedGrammar, GlrMaskError> {
     let mut config = JsonSchemaConfig::from_env();
     config.lazy_ordinary_bounded_strings = true;
+    config.split_pattern_property_prefix = true;
     schema_to_named_grammar_with_config(schema, config)
 }
 
