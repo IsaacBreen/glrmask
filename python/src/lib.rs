@@ -1740,6 +1740,7 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     internal.add_function(wrap_pyfunction!(clear_weight_caches, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compiler_cache_stats, &internal)?)?;
     internal.add_function(wrap_pyfunction!(prepare_vocab_for_compile, &internal)?)?;
+    internal.add_function(wrap_pyfunction!(prepare_vocab_for_dynamic_compile, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compile_grammar_def_json, &internal)?)?;
     internal.add_function(wrap_pyfunction!(dump_json_schema_grammar_glrm, &internal)?)?;
     internal.add_function(wrap_pyfunction!(compose_compiled_subgrammars, &internal)?)?;
@@ -1873,6 +1874,11 @@ fn compiler_cache_stats(vocab: Option<&PyVocab>) -> std::collections::BTreeMap<&
 #[pyfunction]
 fn prepare_vocab_for_compile(vocab: &PyVocab) {
     vocab.inner.prepare_for_compile();
+}
+
+#[pyfunction]
+fn prepare_vocab_for_dynamic_compile(vocab: &PyVocab) {
+    vocab.inner.prepare_for_dynamic_compile();
 }
 
 #[pyfunction]

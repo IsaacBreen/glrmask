@@ -37,6 +37,16 @@ pub(crate) fn vocab_packed_token_bytes(
     prepare_vocab_packed_token_bytes(vocab)
 }
 
+/// Populate only vocabulary artifacts used by DynamicConstraint compilation/runtime.
+///
+/// This deliberately excludes static terminal-DWA and static possible-match
+/// preparation so dynamic build benchmarks can prewarm pure-vocab state without
+/// doing work that DynamicConstraint never consumes.
+pub(crate) fn prepare_vocab_for_dynamic_compile(vocab: &crate::Vocab) {
+    let _ = prepare_vocab_packed_token_bytes(vocab);
+    super::constraint_possible_matches::prepare_vocab_for_dynamic_mask(vocab);
+}
+
 pub(crate) fn prepare_vocab_for_compile(vocab: &crate::Vocab) {
     let profile = std::env::var_os("GLRMASK_PROFILE_VOCAB_PREPARE").is_some();
     let run = |name: &str, f: &mut dyn FnMut()| {
