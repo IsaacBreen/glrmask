@@ -17,6 +17,12 @@ pub struct JsonSchemaConfig {
     /// Dynamic lowering can keep fixed object-key syntax separate from patterned
     /// string values, allowing repeated value languages to share one terminal.
     pub split_pattern_property_prefix: bool,
+    /// Dynamic lowering can retain a sparse epsilon NFA for very large fixed
+    /// objects with many optional properties. Determinizing those objects first
+    /// creates a quadratic skip-over-optional transition graph that is expensive
+    /// to materialize as parser rules, while the sparse NFA denotes the same
+    /// ordered-property language directly.
+    pub sparse_large_optional_objects: bool,
     pub terminalize_bounded_string_max: usize,
     pub preserve_pattern_max_length: bool,
     pub pattern_max_length_complexity_limit: usize,
@@ -77,6 +83,7 @@ impl Default for JsonSchemaConfig {
             string_repeat_chunk_size: 64,
             lazy_ordinary_bounded_strings: false,
             split_pattern_property_prefix: false,
+            sparse_large_optional_objects: false,
             // Sticky: do not change this default to tune TBM. Broader bounded
             // string terminalization can look attractive on individual schemas
             // but creates severe build fallout. This warning itself should

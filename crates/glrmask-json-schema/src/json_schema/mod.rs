@@ -394,7 +394,68 @@ pub fn schema_to_named_grammar_for_dynamic(
     let mut config = JsonSchemaConfig::from_env();
     config.lazy_ordinary_bounded_strings = true;
     config.split_pattern_property_prefix = true;
+    config.sparse_large_optional_objects = true;
     schema_to_named_grammar_with_config(schema, config)
+}
+
+#[cfg(test)]
+mod dynamic_fixed_object_policy_tests {
+    use super::{schema_to_named_grammar, schema_to_named_grammar_for_dynamic};
+    use crate::grammar::ast::GrammarExpr;
+    use serde_json::{Map, Value, json};
+
+    fn object_schema(property_count: usize, required_count: usize) -> Value {
+        let mut properties = Map::new();
+        let mut required = Vec::new();
+        for index in 0..property_count {
+            let name = format!("p{index:03}");
+            properties.insert(name.clone(), json!({"type": "boolean"}));
+            if index < required_count {
+                required.push(Value::String(name));
+            }
+        }
+        json!({
+            "type": "object",
+            "properties": properties,
+            "required": required,
+        })
+    }
+
+    fn sparse_object_rules(grammar: &crate::import::ast::NamedGrammar) -> usize {
+        grammar
+            .rules
+            .iter()
+            .filter(|rule| {
+                rule.name.starts_with("json_closed_object_body")
+                    && matches!(
+                        &rule.expr,
+                        GrammarExpr::ExprNFA(expr_nfa)
+                            if expr_nfa.prefer_direct_nfa_emission
+                    )
+            })
+            .count()
+    }
+
+    #[test]
+    fn dynamic_sparse_fixed_object_policy_uses_optional_count_threshold() {
+        let below = schema_to_named_grammar_for_dynamic(&object_schema(63, 0)).unwrap();
+        assert_eq!(sparse_object_rules(&below), 0);
+
+        let at_threshold = schema_to_named_grammar_for_dynamic(&object_schema(64, 0)).unwrap();
+        assert_eq!(sparse_object_rules(&at_threshold), 1);
+
+        let mostly_required = schema_to_named_grammar_for_dynamic(&object_schema(127, 64)).unwrap();
+        assert_eq!(sparse_object_rules(&mostly_required), 0);
+
+        let enough_optional = schema_to_named_grammar_for_dynamic(&object_schema(128, 64)).unwrap();
+        assert_eq!(sparse_object_rules(&enough_optional), 1);
+    }
+
+    #[test]
+    fn static_json_lowering_keeps_existing_fixed_object_representation() {
+        let grammar = schema_to_named_grammar(&object_schema(128, 0)).unwrap();
+        assert_eq!(sparse_object_rules(&grammar), 0);
+    }
 }
 
 /// Convert JSON Schema while allowing a caller-supplied dynamic-value

@@ -28,6 +28,7 @@ use super::lower::{
 };
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
+const SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES: usize = 64;
 
 struct ObjectItem {
     key: String,
@@ -2900,7 +2901,10 @@ impl<'a> Lowerer<'a> {
         }
         let graph_build_started_at = profile_started_at.map(|_| std::time::Instant::now());
         let mut builder = ExprNfaBuilder::new();
-        if tail_pair.is_none() {
+        let optional_count = items.iter().filter(|item| !item.required).count();
+        let sparse_direct_nfa = self.config.sparse_large_optional_objects
+            && optional_count >= SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES;
+        if tail_pair.is_none() && !sparse_direct_nfa {
             self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
         } else {
         let mut states = vec![[0u32; 2]; items.len() + 1];
@@ -3035,7 +3039,11 @@ impl<'a> Lowerer<'a> {
         let determinize_minimize_started_at =
             profile_started_at.map(|_| std::time::Instant::now());
         let rule_name = self.fresh_rule_name("json_closed_object_body");
-        let expr_nfa = builder.build().into_determinized_and_minimized();
+        let expr_nfa = if sparse_direct_nfa {
+            builder.build().with_embedded_direct_nfa_emission()
+        } else {
+            builder.build().into_determinized_and_minimized()
+        };
         if let Some((template_key, symbols)) = &template_symbols {
             debug_assert_eq!(expr_nfa.symbols, *symbols);
             self.fixed_object_nfa_templates
