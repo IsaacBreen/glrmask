@@ -1207,12 +1207,15 @@ fn factor_aligned_unit_repeat_intersection(left: &Expr, right: &Expr) -> Option<
     })
 }
 
-pub fn factor_regex_expr(expr: Expr) -> Expr {
+fn factor_regex_expr_impl(
+    expr: Expr,
+    shared_cache: Option<&FxHashMap<usize, Arc<Expr>>>,
+) -> Expr {
     match expr {
         Expr::Seq(parts) => {
             let mut out = Vec::new();
             for part in parts {
-                match factor_regex_expr(part) {
+                match factor_regex_expr_impl(part, shared_cache) {
                     Expr::Seq(inner) => out.extend(inner),
                     Expr::Epsilon => {}
                     other => out.push(other),
@@ -1237,7 +1240,10 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             {
                 return Expr::Choice(options);
             }
-            let mut factored_options = options.into_iter().map(factor_regex_expr).collect::<Vec<_>>();
+            let mut factored_options = options
+                .into_iter()
+                .map(|expr| factor_regex_expr_impl(expr, shared_cache))
+                .collect::<Vec<_>>();
 
             if factored_options.len() == 1 {
                 return factored_options.pop().unwrap();
@@ -1268,17 +1274,17 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
             Expr::Choice(factored_options)
         }
         Expr::Repeat { expr, min, max } => Expr::Repeat {
-            expr: Box::new(factor_regex_expr(*expr)),
+            expr: Box::new(factor_regex_expr_impl(*expr, shared_cache)),
             min,
             max,
         },
         Expr::Exclude { expr, exclude } => Expr::Exclude {
-            expr: Box::new(factor_regex_expr(*expr)),
-            exclude: Box::new(factor_regex_expr(*exclude)),
+            expr: Box::new(factor_regex_expr_impl(*expr, shared_cache)),
+            exclude: Box::new(factor_regex_expr_impl(*exclude, shared_cache)),
         },
         Expr::Intersect { expr, intersect } => {
-            let expr = factor_regex_expr(*expr);
-            let intersect = factor_regex_expr(*intersect);
+            let expr = factor_regex_expr_impl(*expr, shared_cache);
+            let intersect = factor_regex_expr_impl(*intersect, shared_cache);
             factor_same_body_delimited_literal_repeat_suffix_intersection(&expr, &intersect)
                 .or_else(|| factor_aligned_unit_repeat_intersection(&expr, &intersect))
                 .or_else(|| factor_same_body_nonzero_repeat_intersection(&expr, &intersect))
@@ -1287,9 +1293,31 @@ pub fn factor_regex_expr(expr: Expr) -> Expr {
                     intersect: Box::new(intersect),
                 })
         }
-        Expr::Shared(inner) => factor_regex_expr((*inner).clone()),
+        Expr::Shared(inner) => {
+            if let Some(cached) = shared_cache
+                .and_then(|cache| cache.get(&(Arc::as_ptr(&inner) as usize)))
+            {
+                // Preserve the reference boundary after factoring. Expanding a
+                // cached result back into each caller recreates the expression
+                // tree and makes downstream Boolean materialization repeat the
+                // same structural work that this cache was meant to avoid.
+                return Expr::Shared(Arc::clone(cached));
+            }
+            factor_regex_expr_impl((*inner).clone(), shared_cache)
+        }
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => expr,
     }
+}
+
+pub fn factor_regex_expr(expr: Expr) -> Expr {
+    factor_regex_expr_impl(expr, None)
+}
+
+pub fn factor_regex_expr_with_shared_cache(
+    expr: Expr,
+    shared_cache: &FxHashMap<usize, Arc<Expr>>,
+) -> Expr {
+    factor_regex_expr_impl(expr, Some(shared_cache))
 }
 
 fn common_prefix_factor(exprs: &[Expr]) -> Option<(Expr, Vec<Expr>)> {
@@ -16671,6 +16699,38 @@ mod tests {
                 "repeated exclusion-RHS factoring changed acceptance for {input:?}",
             );
         }
+    }
+
+    #[test]
+    fn shared_factoring_cache_preserves_factored_arc_identity() {
+        let shared = Arc::new(Expr::Choice(vec![
+            Expr::Seq(vec![Expr::U8Seq(b"pre".to_vec()), Expr::U8Seq(b"a".to_vec())]),
+            Expr::Seq(vec![Expr::U8Seq(b"pre".to_vec()), Expr::U8Seq(b"b".to_vec())]),
+        ]));
+        let factored_shared = Arc::new(factor_regex_expr((*shared).clone()));
+        let mut cache = rustc_hash::FxHashMap::default();
+        cache.insert(Arc::as_ptr(&shared) as usize, Arc::clone(&factored_shared));
+        let expression = Expr::Choice(vec![
+            Expr::Shared(Arc::clone(&shared)),
+            Expr::Seq(vec![Expr::U8Seq(b"x".to_vec()), Expr::Shared(shared)]),
+        ]);
+
+        let factored = super::factor_regex_expr_with_shared_cache(expression, &cache);
+        let Expr::Choice(arms) = factored else {
+            panic!("factoring should retain the outer choice");
+        };
+        let Expr::Shared(first) = &arms[0] else {
+            panic!("cached shared root should remain shared");
+        };
+        let Expr::Seq(second_parts) = &arms[1] else {
+            panic!("second arm should remain a sequence");
+        };
+        let Expr::Shared(second) = &second_parts[1] else {
+            panic!("nested cached root should remain shared");
+        };
+        assert!(Arc::ptr_eq(first, &factored_shared));
+        assert!(Arc::ptr_eq(second, &factored_shared));
+        assert!(Arc::ptr_eq(first, second));
     }
 
     #[test]

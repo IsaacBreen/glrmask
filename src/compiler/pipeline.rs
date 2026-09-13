@@ -6,6 +6,7 @@ use std::time::Instant;
 use once_cell::sync::Lazy;
 use range_set_blaze::RangeSetBlaze;
 use rayon::prelude::*;
+use rustc_hash::FxHashMap;
 
 use crate::Vocab;
 use crate::automata::lexer::compile::{
@@ -31,7 +32,7 @@ use crate::automata::lexer::compile::{
     expression_may_support_bounded_code_residual_runtime,
     expression_supports_bounded_code_residual_runtime,
     expression_supports_deferred_dense_runtime,
-    factor_regex_expr,
+    factor_regex_expr, factor_regex_expr_with_shared_cache,
     prepare_bounded_code_mask_component,
     prepare_partitioned_expression_pair_with_structural_map,
     prepare_partitioned_expression_pair_with_vocabulary_token_quotient,
@@ -668,21 +669,7 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some()
         || std::env::var_os("GLRMASK_PROFILE_TOKENIZER_TRACE").is_some();
     let factor_started_at = Instant::now();
-    let exprs: Vec<Expr> = if should_parallelize_terminal_factoring(grammar) {
-        grammar
-            .terminals
-            .par_iter()
-            .map(terminal_expr)
-            .map(factor_regex_expr)
-            .collect()
-    } else {
-        grammar
-            .terminals
-            .iter()
-            .map(terminal_expr)
-            .map(factor_regex_expr)
-            .collect()
-    };
+    let exprs = prepare_factored_terminal_expressions(grammar);
     if profile_timing {
         eprintln!(
             "[glrmask/profile][tokenizer] factor_terminals terminals={} elapsed_ms={:.3}",
@@ -748,19 +735,81 @@ pub(crate) fn build_tokenizer(grammar: &GrammarDef) -> Tokenizer {
 }
 
 fn prepare_factored_terminal_expressions(grammar: &GrammarDef) -> Vec<Expr> {
+    // `Expr::Shared` carries importer/compiler DAG structure. Historically the
+    // factoring walk dereferenced it and cloned the factored subtree into every
+    // use, turning a small DAG back into a large tree before lexer compilation.
+    // Factor repeated shared nodes once and keep the resulting Arc boundary.
+    // A kill switch makes the change easy to isolate in production diagnostics.
+    let shared_cache = if std::env::var_os("GLRMASK_DISABLE_SHARED_FACTORING").is_none() {
+        fn collect_shared(
+            expr: &Expr,
+            counts: &mut FxHashMap<usize, (usize, Arc<Expr>)>,
+        ) {
+            match expr {
+                Expr::Seq(parts) | Expr::Choice(parts) => {
+                    for part in parts {
+                        collect_shared(part, counts);
+                    }
+                }
+                Expr::Repeat { expr, .. } => collect_shared(expr, counts),
+                Expr::Exclude { expr, exclude } => {
+                    collect_shared(expr, counts);
+                    collect_shared(exclude, counts);
+                }
+                Expr::Intersect { expr, intersect } => {
+                    collect_shared(expr, counts);
+                    collect_shared(intersect, counts);
+                }
+                Expr::Shared(inner) => {
+                    let key = Arc::as_ptr(inner) as usize;
+                    counts
+                        .entry(key)
+                        .and_modify(|entry| entry.0 += 1)
+                        .or_insert((1, Arc::clone(inner)));
+                    collect_shared(inner, counts);
+                }
+                Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => {}
+            }
+        }
+
+        let mut counts = FxHashMap::<usize, (usize, Arc<Expr>)>::default();
+        for terminal in &grammar.terminals {
+            collect_shared(&terminal_expr(terminal), &mut counts);
+        }
+        let repeated = counts
+            .into_iter()
+            .filter_map(|(key, (count, expr))| (count > 1).then_some((key, expr)))
+            .collect::<Vec<_>>();
+        if repeated.is_empty() {
+            None
+        } else {
+            let entries = repeated
+                .into_par_iter()
+                .map(|(key, expr)| (key, Arc::new(factor_regex_expr((*expr).clone()))))
+                .collect::<Vec<_>>();
+            Some(entries.into_iter().collect::<FxHashMap<_, _>>())
+        }
+    } else {
+        None
+    };
+
+    let factor_one = |expr| match &shared_cache {
+        Some(cache) => factor_regex_expr_with_shared_cache(expr, cache),
+        None => factor_regex_expr(expr),
+    };
     if should_parallelize_terminal_factoring(grammar) {
         grammar
             .terminals
             .par_iter()
             .map(terminal_expr)
-            .map(factor_regex_expr)
+            .map(factor_one)
             .collect()
     } else {
         grammar
             .terminals
             .iter()
             .map(terminal_expr)
-            .map(factor_regex_expr)
+            .map(factor_one)
             .collect()
     }
 }
