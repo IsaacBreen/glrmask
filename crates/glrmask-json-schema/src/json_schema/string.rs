@@ -2611,6 +2611,30 @@ impl<'a> Lowerer<'a> {
         Ok(choice(vec![base, addback]))
     }
 
+    fn ensure_shared_additional_excluded_terminal(&mut self) -> ImportResult<()> {
+        if self
+            .rules
+            .iter()
+            .any(|rule| rule.name == JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)
+        {
+            return Ok(());
+        }
+        let mut terminal_excluded = self
+            .shared_ap_literal_keys
+            .clone()
+            .into_iter()
+            .map(|key| self.lower_literal_key_colon_exact_with_prefix(b"", &key))
+            .collect::<Vec<_>>();
+        for pattern in self.shared_ap_patterns.clone() {
+            terminal_excluded.push(self.pattern_key_colon_full_terminal_language(&pattern)?);
+        }
+        self.add_internal_terminal_rule(
+            JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+            choice(terminal_excluded),
+        );
+        Ok(())
+    }
+
     fn shared_additional_excluded_key_colon(&mut self) -> ImportResult<GrammarExpr> {
         if let Some(rule_name) = &self.shared_ap_excluded_rule {
             return Ok(r(rule_name));
@@ -2629,10 +2653,16 @@ impl<'a> Lowerer<'a> {
 
             let expr = choice(excluded);
             self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr);
-            self.add_internal_terminal_rule(
-                JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
-                choice(terminal_excluded),
-            );
+            if !self
+                .rules
+                .iter()
+                .any(|rule| rule.name == JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)
+            {
+                self.add_internal_terminal_rule(
+                    JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+                    choice(terminal_excluded),
+                );
+            }
             self.shared_ap_excluded_rule =
                 Some(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE.to_string());
             return Ok(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE));
@@ -2652,10 +2682,16 @@ impl<'a> Lowerer<'a> {
 
         let expr = choice(excluded);
         self.add_nonterminal_rule(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE, expr.clone());
-        self.add_internal_terminal_rule(
-            JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
-            choice(terminal_excluded),
-        );
+        if !self
+            .rules
+            .iter()
+            .any(|rule| rule.name == JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)
+        {
+            self.add_internal_terminal_rule(
+                JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE,
+                choice(terminal_excluded),
+            );
+        }
         self.shared_ap_excluded_rule =
             Some(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE.to_string());
         Ok(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_NT_RULE))
@@ -2669,6 +2705,23 @@ impl<'a> Lowerer<'a> {
         if self.shared_ap_patterns.is_empty() {
             self.shared_additional_excluded_key_colon()?;
             self.add_terminal_rule(
+                JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
+                GrammarExpr::Exclude {
+                    expr: Box::new(seq(vec![
+                        r(json_additional_key_string_rule()),
+                        self.key_separator_expr(),
+                    ])),
+                    exclude: Box::new(r(JSON_ADDITIONAL_EXCLUDED_KEY_COLON_SHARED_RULE)),
+                },
+            );
+            self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
+            self.record_shared_additional_key_provenance()?;
+            return Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE));
+        }
+
+        if !self.dynamic_value_enabled() {
+            self.ensure_shared_additional_excluded_terminal()?;
+            self.add_pattern_terminal_rule(
                 JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
                 GrammarExpr::Exclude {
                     expr: Box::new(seq(vec![
