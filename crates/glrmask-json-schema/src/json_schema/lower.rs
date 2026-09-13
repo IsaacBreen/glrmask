@@ -209,6 +209,7 @@ pub struct Lowerer<'a> {
     pub shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
     pub property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
+    pub pattern_key_colon_regex_cache: Arc<Mutex<HashMap<String, Result<String, String>>>>,
     pub fixed_object_profile: Option<FixedObjectLowerProfile>,
     pub fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     pub terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
@@ -375,6 +376,7 @@ impl<'a> Lowerer<'a> {
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),
             property_pattern_regex_cache: Arc::new(Mutex::new(HashMap::new())),
+            pattern_key_colon_regex_cache: Arc::new(Mutex::new(HashMap::new())),
             fixed_object_profile: (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
             .then(FixedObjectLowerProfile::default),
@@ -424,6 +426,7 @@ impl<'a> Lowerer<'a> {
             shared_pattern_overlap_literal_rules: BTreeMap::new(),
             shared_pattern_appearance_rules: BTreeMap::new(),
             property_pattern_regex_cache: Arc::clone(&self.property_pattern_regex_cache),
+            pattern_key_colon_regex_cache: Arc::clone(&self.pattern_key_colon_regex_cache),
             fixed_object_profile: None,
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
@@ -2541,6 +2544,24 @@ mod structural_schema_memo_tests {
                 &GrammarExpr::Literal(serde_json::to_string(&value).unwrap().into_bytes())
             );
         }
+    }
+
+    #[test]
+    fn repeated_pattern_key_regex_lowering_is_cached() {
+        let document = document();
+        let lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let pattern = r"^(?:description_)?[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$";
+
+        let first = lowerer.pattern_key_colon_regex_cached(pattern).unwrap();
+        let second = lowerer.pattern_key_colon_regex_cached(pattern).unwrap();
+
+        assert_eq!(first, second);
+        let cache = lowerer
+            .pattern_key_colon_regex_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get(pattern).and_then(|result| result.as_ref().ok()), Some(&first));
     }
 
     #[test]

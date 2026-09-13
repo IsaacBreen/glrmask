@@ -128,6 +128,20 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    pub(super) fn pattern_key_colon_regex_cached(&self, pattern: &str) -> ImportResult<String> {
+        let mut cache = self
+            .pattern_key_colon_regex_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lowered = cache.entry(pattern.to_string()).or_insert_with(|| {
+            pattern_key_colon_regex(pattern).map_err(|error| error.message().to_string())
+        });
+        match lowered {
+            Ok(regex) => Ok(regex.clone()),
+            Err(error) => Err(SchemaImportError::new(error.clone())),
+        }
+    }
+
     fn literal_quote_expr(&self) -> GrammarExpr {
         if split_literal_terminals_enabled() {
             r(JSON_QUOTE_RULE)
@@ -2033,7 +2047,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_pattern_key_colon_expr(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
-        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
+        Ok(GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(pattern)?))
     }
 
     fn pattern_key_colon_full_language(&mut self, pattern: &str) -> ImportResult<GrammarExpr> {
@@ -2047,7 +2061,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn pattern_key_colon_full_terminal_language(&self, pattern: &str) -> ImportResult<GrammarExpr> {
-        Ok(GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?))
+        Ok(GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(pattern)?))
     }
 
     fn pattern_key_colon_shared_addback_alternatives(
@@ -2055,7 +2069,7 @@ impl<'a> Lowerer<'a> {
         pattern: &str,
     ) -> ImportResult<Vec<GrammarExpr>> {
         let global_overlaps = self.pattern_overlapping_literal_keys(pattern)?;
-        let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
+        let key_colon = GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(pattern)?);
         let pattern_expr = if global_overlaps.is_empty() {
             key_colon
         } else {
@@ -2130,7 +2144,7 @@ impl<'a> Lowerer<'a> {
         let expr = if global_overlaps.is_empty() {
             self.lower_pattern_key_colon_expr(pattern)?
         } else {
-            let key_colon = GrammarExpr::RawRegex(pattern_key_colon_regex(pattern)?);
+            let key_colon = GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(pattern)?);
             let excluded = global_overlaps
                 .iter()
                 .map(|key| self.lower_literal_key_colon(key))
@@ -2581,7 +2595,7 @@ impl<'a> Lowerer<'a> {
             .map(|key| self.lower_literal_key_colon(&key))
             .collect::<Vec<_>>();
         for pattern in self.shared_ap_patterns.clone() {
-            excluded.push(GrammarExpr::RawRegex(pattern_key_colon_regex(&pattern)?));
+            excluded.push(GrammarExpr::RawRegex(self.pattern_key_colon_regex_cached(&pattern)?));
         }
 
         self.add_pattern_terminal_rule(
