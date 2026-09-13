@@ -265,6 +265,42 @@ impl<'a> FullWalkLazyUnion<'a> {
     }
 
     #[inline(always)]
+    fn checked_extension_index(&self, state: u32) -> Option<usize> {
+        if state < self.base_state_count {
+            return None;
+        }
+        let index = self.extension_index(state);
+        let valid = unsafe {
+            let cache = &*self.cache.get();
+            index < cache.subsets.len()
+                && index < cache.rows.len()
+                && index < cache.metadata.len()
+        };
+        if !valid {
+            if std::env::var_os("GLRMASK_PROFILE_INVALID_LAZY_UNION_STATE").is_some() {
+                let cache = unsafe { &*self.cache.get() };
+                eprintln!(
+                    "[glrmask/profile][invalid_lazy_union_state] state={} base={} index={} subsets={} rows={} metadata={} reserved={}",
+                    state,
+                    self.base_state_count,
+                    index,
+                    cache.subsets.len(),
+                    cache.rows.len(),
+                    cache.metadata.len(),
+                    Self::RESERVED_EXTENSION_STATES,
+                );
+            }
+            // Lazy-union execution is an optional bounded acceleration. An
+            // out-of-domain state must never become a correctness or memory
+            // safety boundary: flag the attempt so the caller discards this
+            // partial walk and reruns through the ordinary exact walker.
+            self.overflowed.set(true);
+            return None;
+        }
+        Some(index)
+    }
+
+    #[inline(always)]
     fn base_cell(&self, state: u32, byte: u8) -> u32 {
         if let Some(base_transitions) = self.base_transitions16 {
             let cell = unsafe {
@@ -329,7 +365,9 @@ impl<'a> FullWalkLazyUnion<'a> {
         if state < self.base_state_count {
             return self.base_cell(state, byte);
         }
-        let index = self.extension_index(state);
+        let Some(index) = self.checked_extension_index(state) else {
+            return u32::MAX;
+        };
         let cached = unsafe {
             let cache = &*self.cache.get();
             *cache.rows.get_unchecked(index).get_unchecked(byte as usize)
@@ -340,21 +378,22 @@ impl<'a> FullWalkLazyUnion<'a> {
 
         let mut targets = SmallVec::<[u32; 8]>::new();
         let mut finalizer_bits = 0u32;
-        {
-            // Keep the canonical subset borrowed only while reading base DFA
-            // cells.  The old code cloned the SmallVec on every first-seen
-            // (virtual-state, byte) transition just so it could later mutate
-            // the interner.  Gathering the derivative first makes that copy
-            // unnecessary while preserving the same borrow separation.
-            let cache = unsafe { &*self.cache.get() };
-            for &member in &cache.subsets[index] {
-                let cell = self.base_cell(member, byte);
-                if cell == u32::MAX {
-                    continue;
-                }
-                finalizer_bits |= cell & 0x8000_0000;
-                targets.push(cell & 0x7fff_ffff);
+        // `base_cell()` lazily fills `cache.base_rows`, so it mutates the same
+        // `DynamicLazyUnionCache`. Do not keep an immutable reference into
+        // `cache.subsets` alive across those calls: doing so through UnsafeCell
+        // violates Rust's aliasing rules even though the logical fields are
+        // disjoint, and can manifest as corrupted virtual-state IDs on later
+        // timing passes. The canonical subsets are deliberately tiny
+        // (`SmallVec<[u32; 8]>`), so copy the current one before touching the
+        // mutable base-row cache.
+        let members = unsafe { (&*self.cache.get()).subsets[index].clone() };
+        for member in members {
+            let cell = self.base_cell(member, byte);
+            if cell == u32::MAX {
+                continue;
             }
+            finalizer_bits |= cell & 0x8000_0000;
+            targets.push(cell & 0x7fff_ffff);
         }
         targets.sort_unstable();
         targets.dedup();
@@ -385,11 +424,13 @@ impl<'a> FullWalkLazyUnion<'a> {
     }
 
     #[inline]
-    fn ensure_virtual_metadata(&self, state: u32) {
+    fn ensure_virtual_metadata(&self, state: u32) -> bool {
         debug_assert!(state >= self.base_state_count);
-        let index = self.extension_index(state);
+        let Some(index) = self.checked_extension_index(state) else {
+            return false;
+        };
         if unsafe { (&*self.cache.get()).metadata[index].is_some() } {
-            return;
+            return true;
         }
         let tokenizer = unsafe { &*self.tokenizer };
         let mut matched = BitSet::new(tokenizer.num_terminals() as usize);
@@ -423,6 +464,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         if cache.metadata[index].is_none() {
             cache.metadata[index] = Some(metadata);
         }
+        true
     }
 }
 
@@ -456,7 +498,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
                 _ => u32::MAX - 1,
             };
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return u32::MAX;
+        }
         let cache = unsafe { &*self.cache.get() };
         cache.metadata[self.extension_index(state)]
             .as_ref().expect("virtual subset metadata missing").finalizer_code
@@ -476,7 +520,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
                 _ => false,
             };
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return false;
+        }
         let cache = unsafe { &*self.cache.get() };
         cache.metadata[self.extension_index(state)]
             .as_ref().expect("virtual subset metadata missing").single_finalizer_continues != 0
@@ -487,7 +533,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
         if state < self.base_state_count {
             return tokenizer.matched_terminals_slice(state).iter().copied().collect();
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return SmallVec::new();
+        }
         let cache = unsafe { &*self.cache.get() };
         cache.metadata[self.extension_index(state)]
             .as_ref().expect("virtual subset metadata missing").matched
@@ -500,7 +548,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
         if state < self.base_state_count {
             return tokenizer.possible_future_terminals(state).contains(terminal as usize);
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return false;
+        }
         let cache = unsafe { &*self.cache.get() };
         cache.metadata[self.extension_index(state)]
             .as_ref().expect("virtual subset metadata missing").futures.contains(terminal as usize)
@@ -511,7 +561,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
         if state < self.base_state_count {
             return !terminals.is_disjoint(tokenizer.possible_future_terminals(state));
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return false;
+        }
         let cache = unsafe { &*self.cache.get() };
         !terminals.is_disjoint(&cache.metadata[self.extension_index(state)]
             .as_ref().expect("virtual subset metadata missing").futures)
@@ -522,7 +574,9 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
         if state < self.base_state_count {
             return physical_sole_live_terminal(tokenizer, state);
         }
-        self.ensure_virtual_metadata(state);
+        if !self.ensure_virtual_metadata(state) {
+            return None;
+        }
         let cache = unsafe { &*self.cache.get() };
         let metadata = cache.metadata[self.extension_index(state)]
             .as_ref()
