@@ -81,6 +81,24 @@ pub struct JsonNameProvenanceSidecar {
 }
 
 impl JsonNameProvenanceSidecar {
+    /// Keep only provenance entries whose named terminal rules survive in this
+    /// `NamedGrammar`. Predicate IDs remain stable because rule metadata refers
+    /// into the immutable predicate table by ID. This is intended for dynamic
+    /// import paths that split/prune one source grammar into multiple reachable
+    /// alternatives before AST lowering.
+    pub fn projected_to_named_grammar(&self, grammar: &NamedGrammar) -> Self {
+        let terminal_names = grammar.terminal_names_set();
+        Self {
+            predicates: self.predicates.clone(),
+            named_rules: self
+                .named_rules
+                .iter()
+                .filter(|(name, _)| terminal_names.contains(name.as_str()))
+                .map(|(name, provenance)| (name.clone(), provenance.clone()))
+                .collect(),
+        }
+    }
+
     /// Resolve named-rule provenance after AST lowering, when concrete terminal
     /// IDs exist. Fails rather than guessing if a transform removed/renamed a
     /// provenance-bearing terminal or if two entries collapse incompatibly.
@@ -651,6 +669,23 @@ mod dynamic_fixed_object_policy_tests {
         assert!(excluded_predicate_ids.len() >= 5);
 
         let sidecar = lowered.name_provenance.clone();
+
+        // Dynamic import may prune source rules when it splits one grammar into
+        // alternatives. Projection must drop only the missing rule metadata;
+        // predicate IDs and the predicate table stay stable for the surviving
+        // rules.
+        let dropped_rule = sidecar
+            .named_rules
+            .keys()
+            .find(|name| name.starts_with("json_pattern_key_colon_"))
+            .expect("pattern provenance rule")
+            .clone();
+        let mut pruned_named = lowered.grammar.clone();
+        pruned_named.rules.retain(|rule| rule.name != dropped_rule);
+        let projected = sidecar.projected_to_named_grammar(&pruned_named);
+        assert_eq!(projected.predicates, sidecar.predicates);
+        assert_eq!(projected.named_rules.len() + 1, sidecar.named_rules.len());
+        assert!(!projected.named_rules.contains_key(&dropped_rule));
 
         // Match the ordinary O1 path exactly: factor, take the fast
         // prepare_named_grammar path when eligible, then perform ordinary AST
