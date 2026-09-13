@@ -773,11 +773,14 @@ impl<'a> Lowerer<'a> {
         id
     }
 
-    fn fresh_nonterminal(&mut self, hint: &str) -> (String, NonterminalID) {
-        let name = format!("__{}_{}", hint, self.generated_nonterminal_counter);
+    #[inline]
+    fn fresh_nonterminal(&mut self) -> NonterminalID {
+        // The old generated name was never consumed by any caller; only its
+        // counter increment mattered for keeping separately named generated
+        // terminals stable. Preserve that increment and allocate the parser
+        // helper directly by numeric ID.
         self.generated_nonterminal_counter += 1;
-        let id = self.nonterminal_id(&name);
-        (name, id)
+        self.fresh_anonymous_nonterminal()
     }
 
     fn expr_is_nullable(&self, expr: &GrammarExpr) -> bool {
@@ -1048,7 +1051,7 @@ impl<'a> Lowerer<'a> {
             return Ok(Symbol::Nonterminal(self.nonterminal_id(name)));
         }
 
-        let (_, nt) = self.fresh_nonterminal("nonnullable_rule");
+        let nt = self.fresh_nonterminal();
         self.nonnullable_named_rule_cache.insert(name.to_string(), nt);
 
         if is_terminal {
@@ -1101,7 +1104,7 @@ impl<'a> Lowerer<'a> {
             | GrammarExpr::AnyByte
             | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
             _ => {
-                let (_, nt) = self.fresh_nonterminal("nonnullable_expr");
+                let nt = self.fresh_nonterminal();
                 self.emit_nonnullable_expr(nt, expr)?;
                 Ok(Some(Symbol::Nonterminal(nt)))
             }
@@ -1303,7 +1306,7 @@ impl<'a> Lowerer<'a> {
             return nonterminal;
         }
 
-        let (_, nonterminal) = self.fresh_nonterminal("repeat_exact");
+        let nonterminal = self.fresh_nonterminal();
         self.repeat_exact_cache.insert(key, nonterminal);
         match count {
             0 => self.rules.push(Rule {
@@ -1343,7 +1346,7 @@ impl<'a> Lowerer<'a> {
         }
 
         if max == 0 {
-            let (_, nt) = self.fresh_nonterminal("repeat_max");
+            let nt = self.fresh_nonterminal();
             self.repeat_max_cache.insert(key, nt);
             self.rules.push(Rule {
                 lhs: nt,
@@ -1352,7 +1355,7 @@ impl<'a> Lowerer<'a> {
             return nt;
         }
 
-        let (_, nt) = self.fresh_nonterminal("repeat_max");
+        let nt = self.fresh_nonterminal();
         self.repeat_max_cache.insert(key, nt);
 
         if let Some(span) = max.checked_add(1).filter(|span| span.is_power_of_two()) {
@@ -1421,7 +1424,7 @@ impl<'a> Lowerer<'a> {
             return nt;
         }
 
-        let (_, nt) = self.fresh_nonterminal("repeat_min1_max");
+        let nt = self.fresh_nonterminal();
         self.repeat_min1_max_cache.insert(key, nt);
 
         if max == 1 {
@@ -1468,7 +1471,7 @@ impl<'a> Lowerer<'a> {
             _ => {}
         }
 
-        let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
+        let nonterminal = self.fresh_nonterminal();
         self.repeat_range_cache.insert(key, nonterminal);
 
         match shape {
@@ -1558,7 +1561,7 @@ impl<'a> Lowerer<'a> {
             return nonterminal;
         }
 
-        let (_, nonterminal) = self.fresh_nonterminal("repeat_range");
+        let nonterminal = self.fresh_nonterminal();
         self.repeat_range_cache.insert(key, nonterminal);
 
         if min == 0 {
@@ -1598,7 +1601,7 @@ impl<'a> Lowerer<'a> {
             max_nt
         } else {
             let exact_nt = self.repeat_exact_nonterminal(symbol, min, shape);
-            let (_, result_nt) = self.fresh_nonterminal("repeat_range");
+            let result_nt = self.fresh_nonterminal();
             self.rules.push(Rule {
                 lhs: result_nt,
                 rhs: vec![
@@ -2317,7 +2320,7 @@ impl<'a> Lowerer<'a> {
         let shared_nt = if let Some(&cached) = self.literal_choice_nonterminal_cache.get(&literal_key) {
             cached
         } else {
-            let (_, nt) = self.fresh_nonterminal("shared_literal_choice");
+            let nt = self.fresh_nonterminal();
             for bytes in &literal_key {
                 let terminal = self.literal_terminal_id(bytes);
                 self.rules.push(Rule {
@@ -2423,7 +2426,7 @@ impl<'a> Lowerer<'a> {
             Ok(())
         }
 
-        let (_, nonterminal) = self.fresh_nonterminal("expr");
+        let nonterminal = self.fresh_nonterminal();
         emit(self, nonterminal, expr)
             .expect("grammar lowering should not fail for internal expression emission");
         Symbol::Nonterminal(nonterminal)
@@ -2486,7 +2489,7 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::Epsilon => {
                 // Epsilon as an inline NT atom: create a nonterminal with an empty production.
-                let (_, nt) = self.fresh_nonterminal("eps");
+                let nt = self.fresh_nonterminal();
                 self.rules.push(Rule { lhs: nt, rhs: Vec::new() });
                 Symbol::Nonterminal(nt)
             }
@@ -2529,7 +2532,7 @@ impl<'a> Lowerer<'a> {
         };
 
         let sep_sym = self.lower_expr_terminalish(separator)?;
-        let (_, pair_nt) = self.fresh_nonterminal("sep_rep_pair");
+        let pair_nt = self.fresh_nonterminal();
         self.rules.push(Rule {
             lhs: pair_nt,
             rhs: vec![sep_sym, item_sym.clone()],
@@ -2542,7 +2545,7 @@ impl<'a> Lowerer<'a> {
             let prefix_sym = if min == 1 {
                 item_sym.clone()
             } else {
-                let (_, prefix_nt) = self.fresh_nonterminal("sep_rep_prefix");
+                let prefix_nt = self.fresh_nonterminal();
                 let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
                 self.rules.push(Rule {
                     lhs: prefix_nt,
@@ -2550,13 +2553,13 @@ impl<'a> Lowerer<'a> {
                 });
                 Symbol::Nonterminal(prefix_nt)
             };
-            let (_, tail_nt) = self.fresh_nonterminal("sep_rep_tail");
+            let tail_nt = self.fresh_nonterminal();
             self.rules.push(Rule { lhs: tail_nt, rhs: Vec::new() });
             self.rules.push(Rule {
                 lhs: tail_nt,
                 rhs: vec![Symbol::Nonterminal(tail_nt), pair_symbol],
             });
-            let (_, result_nt) = self.fresh_nonterminal("sep_rep_plus");
+            let result_nt = self.fresh_nonterminal();
             self.rules.push(Rule {
                 lhs: result_nt,
                 rhs: vec![prefix_sym, Symbol::Nonterminal(tail_nt)],
@@ -2577,7 +2580,7 @@ impl<'a> Lowerer<'a> {
         let prefix_sym = if min == 1 {
             item_sym.clone()
         } else {
-            let (_, prefix_nt) = self.fresh_nonterminal("sep_rep_prefix");
+            let prefix_nt = self.fresh_nonterminal();
             let prefix_tail_nt = self.repeat_exact_nonterminal(&pair_symbol, min - 1, shape);
             self.rules.push(Rule {
                 lhs: prefix_nt,
@@ -2591,7 +2594,7 @@ impl<'a> Lowerer<'a> {
         }
 
         let extra_nt = self.repeat_range_nonterminal(&pair_symbol, 0, max - min, shape);
-        let (_, result_nt) = self.fresh_nonterminal("sep_rep_range");
+        let result_nt = self.fresh_nonterminal();
         self.rules.push(Rule {
             lhs: result_nt,
             rhs: vec![prefix_sym, Symbol::Nonterminal(extra_nt)],
@@ -2675,7 +2678,7 @@ impl<'a> Lowerer<'a> {
         let (right_sym, right_can_be_empty) =
             self.lower_separated_sequence_inner(&items[mid..], separator, shape)?;
 
-        let (_, nt) = self.fresh_nonterminal("sep_seq");
+        let nt = self.fresh_nonterminal();
 
         // STICKY NOTE: DO NOT REMOVE THIS WARNING UNDER ANY CIRCUMSTANCES.
         // In generic SeparatedSequence lowering, "item derives empty" is NOT the
