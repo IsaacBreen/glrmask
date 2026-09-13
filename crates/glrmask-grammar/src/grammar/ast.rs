@@ -608,6 +608,7 @@ fn grammar_expr_to_lark_with_indent(
 struct Lowerer<'a> {
     rules: Vec<Rule>,
     terminal_map: FxHashMap<String, TerminalID>,
+    literal_terminal_ids: FxHashMap<Vec<u8>, (TerminalID, String)>,
     terminals: Vec<Terminal>,
     terminal_expr_hash_index: FxHashMap<u64, Vec<TerminalID>>,
     special_terminal_ids: FxHashMap<u32, TerminalID>,
@@ -729,6 +730,7 @@ impl<'a> Lowerer<'a> {
         Self {
             rules: Vec::new(),
             terminal_map: FxHashMap::default(),
+            literal_terminal_ids: FxHashMap::default(),
             terminals: Vec::new(),
             terminal_expr_hash_index: FxHashMap::default(),
             special_terminal_ids: FxHashMap::default(),
@@ -997,9 +999,7 @@ impl<'a> Lowerer<'a> {
                 if bytes.is_empty() {
                     return Ok(None);
                 }
-                let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
-                let tid = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
-                Ok(Some(Symbol::Terminal(tid)))
+                Ok(Some(Symbol::Terminal(self.literal_terminal_id(bytes))))
             }
             GrammarExpr::SpecialToken(token_id) => Ok(Some(Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
@@ -1232,6 +1232,24 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::Epsilon => {}
         }
         Ok(())
+    }
+
+    fn literal_terminal_id(&mut self, bytes: &[u8]) -> TerminalID {
+        if let Some((id, name)) = self.literal_terminal_ids.get(bytes) {
+            let id = *id;
+            if self.terminal_ids_by_name.get(name).copied() != Some(id) {
+                self.terminal_ids_by_name.insert(name.clone(), id);
+            }
+            return id;
+        }
+        let pattern = bytes
+            .iter()
+            .map(|&byte| regex_escape_byte(byte))
+            .collect::<String>();
+        let name = String::from_utf8_lossy(bytes).into_owned();
+        let id = self.terminal_id(&name, &pattern, false);
+        self.literal_terminal_ids.insert(bytes.to_vec(), (id, name));
+        id
     }
 
     fn terminal_id(&mut self, name: &str, pattern: &str, utf8: bool) -> TerminalID {
@@ -2301,11 +2319,7 @@ impl<'a> Lowerer<'a> {
         } else {
             let (_, nt) = self.fresh_nonterminal("shared_literal_choice");
             for bytes in &literal_key {
-                let pattern = bytes
-                    .iter()
-                    .map(|&byte| regex_escape_byte(byte))
-                    .collect::<String>();
-                let terminal = self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false);
+                let terminal = self.literal_terminal_id(bytes);
                 self.rules.push(Rule {
                     lhs: nt,
                     rhs: vec![Symbol::Terminal(terminal)],
@@ -2453,10 +2467,7 @@ impl<'a> Lowerer<'a> {
                 }
                 Symbol::Nonterminal(self.nonterminal_id(name))
             }
-            GrammarExpr::Literal(bytes) => {
-                let pattern = bytes.iter().map(|&b| regex_escape_byte(b)).collect::<String>();
-                Symbol::Terminal(self.terminal_id(&String::from_utf8_lossy(bytes), &pattern, false))
-            }
+            GrammarExpr::Literal(bytes) => Symbol::Terminal(self.literal_terminal_id(bytes)),
             GrammarExpr::SpecialToken(token_id) => Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
             ),
@@ -3699,8 +3710,8 @@ fn regex_escape_byte(b: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_terminal_rule_refs, grammar_expr_is_nullable, lower, GrammarExpr, NamedGrammar,
-        NamedRule, Quantifier,
+        collect_terminal_rule_refs, grammar_expr_is_nullable, lower, GrammarExpr, Lowerer,
+        NamedGrammar, NamedRule, Quantifier,
     };
     use crate::grammar::expr_nfa::ExprNfaBuilder;
     use rustc_hash::{FxHashMap, FxHashSet};
@@ -3910,6 +3921,25 @@ mod tests {
     #[test]
     fn canonical_expr_nfa_dfa_edges_reuse_compound_labels() {
         assert_repeated_compound_label_is_shared(true);
+    }
+
+    #[test]
+    fn literal_terminal_cache_preserves_lossy_name_updates() {
+        let mut lowerer = Lowerer::new();
+        let first_bytes = [0xff];
+        let second_bytes = [0xfe];
+        let lossy_name = String::from_utf8_lossy(&first_bytes).into_owned();
+        assert_eq!(lossy_name, String::from_utf8_lossy(&second_bytes));
+
+        let first_id = lowerer.literal_terminal_id(&first_bytes);
+        let second_id = lowerer.literal_terminal_id(&second_bytes);
+        assert_ne!(first_id, second_id);
+        assert_eq!(lowerer.terminal_ids_by_name.get(&lossy_name), Some(&second_id));
+
+        let repeated_first_id = lowerer.literal_terminal_id(&first_bytes);
+        assert_eq!(repeated_first_id, first_id);
+        assert_eq!(lowerer.terminal_ids_by_name.get(&lossy_name), Some(&first_id));
+        assert_eq!(lowerer.terminals.len(), 2);
     }
 
     #[test]
