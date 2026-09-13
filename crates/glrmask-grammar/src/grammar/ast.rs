@@ -629,6 +629,11 @@ struct Lowerer<'a> {
     /// globally instead of re-emitting hundreds of identical literal arms for
     /// every slightly-different surrounding Choice.
     literal_choice_nonterminal_cache: FxHashMap<Vec<Vec<u8>>, NonterminalID>,
+    cache_compound_exprs: bool,
+    /// Exact compound expressions recur heavily in generated JSON-Schema grammars.
+    /// Hash borrowed expressions on lookup and clone only first-seen structures so
+    /// repeated subtrees share one already-lowered parser symbol.
+    lowered_expr_cache: FxHashMap<u64, Vec<(GrammarExpr, Symbol)>>,
     /// Shared cache for repeat-exact nonterminals, keyed by (symbol, count).
     repeat_exact_cache: BTreeMap<(Symbol, usize), NonterminalID>,
     /// Shared cache for repeat-range nonterminals, keyed by (symbol, min, max).
@@ -747,6 +752,8 @@ impl<'a> Lowerer<'a> {
             terminal_expr_cache: FxHashMap::default(),
             nonnullable_named_rule_cache: FxHashMap::default(),
             literal_choice_nonterminal_cache: FxHashMap::default(),
+            cache_compound_exprs: false,
+            lowered_expr_cache: FxHashMap::default(),
             repeat_exact_cache: BTreeMap::new(),
             repeat_range_cache: BTreeMap::new(),
             repeat_max_cache: BTreeMap::new(),
@@ -2341,6 +2348,29 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_expr(&mut self, expr: &GrammarExpr) -> Symbol {
+        let cacheable = self.cache_compound_exprs
+            && matches!(
+                expr,
+                GrammarExpr::Grouped(_)
+                    | GrammarExpr::Sequence(_)
+                    | GrammarExpr::Choice(_)
+                    | GrammarExpr::Exclude { .. }
+                    | GrammarExpr::Intersect { .. }
+                    | GrammarExpr::Quantified(_, _)
+                    | GrammarExpr::SeparatedSequence { .. }
+            );
+        let cache_hash = cacheable.then(|| {
+            let mut hasher = FxHasher::default();
+            expr.hash(&mut hasher);
+            hasher.finish()
+        });
+        if let Some(hash) = cache_hash
+            && let Some(candidates) = self.lowered_expr_cache.get(&hash)
+            && let Some((_, symbol)) = candidates.iter().find(|(candidate, _)| candidate == expr)
+        {
+            return symbol.clone();
+        }
+
         fn emit(lowerer: &mut Lowerer, lhs: NonterminalID, expr: &GrammarExpr) -> Result<(), GlrMaskError> {
             match expr {
                 GrammarExpr::Grouped(inner) => emit(lowerer, lhs, inner)?,
@@ -2429,7 +2459,14 @@ impl<'a> Lowerer<'a> {
         let nonterminal = self.fresh_nonterminal();
         emit(self, nonterminal, expr)
             .expect("grammar lowering should not fail for internal expression emission");
-        Symbol::Nonterminal(nonterminal)
+        let symbol = Symbol::Nonterminal(nonterminal);
+        if let Some(hash) = cache_hash {
+            self.lowered_expr_cache
+                .entry(hash)
+                .or_default()
+                .push((expr.clone(), symbol.clone()));
+        }
+        symbol
     }
 
     /// Lowers an ExprNFA transition label to its grammar RHS.  Sequence labels
@@ -3279,6 +3316,34 @@ pub fn lower_with_resolved_terminal_exprs(
     lower_with_resolved_terminal_exprs_impl(grammar, Some(resolved_terminal_exprs))
 }
 
+fn grammar_expr_node_count(expr: &GrammarExpr) -> usize {
+    1 + match expr {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            grammar_expr_node_count(inner)
+        }
+        GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+            parts.iter().map(grammar_expr_node_count).sum()
+        }
+        GrammarExpr::Exclude { expr, exclude } => {
+            grammar_expr_node_count(expr) + grammar_expr_node_count(exclude)
+        }
+        GrammarExpr::Intersect { expr, intersect } => {
+            grammar_expr_node_count(expr) + grammar_expr_node_count(intersect)
+        }
+        GrammarExpr::SeparatedSequence { items, separator, .. } => {
+            items
+                .iter()
+                .map(|(item, _)| grammar_expr_node_count(item))
+                .sum::<usize>()
+                + grammar_expr_node_count(separator)
+        }
+        // ExprNFA transition labels are already compact shared structures and
+        // are lowered by their dedicated emitter, not the generic subtree cache.
+        GrammarExpr::ExprNFA(_) => 0,
+        _ => 0,
+    }
+}
+
 fn lower_with_resolved_terminal_exprs_impl(
     grammar: &NamedGrammar,
     resolved_terminal_exprs: Option<BTreeMap<String, Expr>>,
@@ -3292,6 +3357,13 @@ fn lower_with_resolved_terminal_exprs_impl(
 
     let setup_started_at = profile_enabled.then(std::time::Instant::now);
     let mut lowerer = Lowerer::new();
+    const COMPOUND_EXPR_CACHE_NODE_THRESHOLD: usize = 2048;
+    lowerer.cache_compound_exprs = grammar
+        .rules
+        .iter()
+        .map(|rule| grammar_expr_node_count(&rule.expr))
+        .sum::<usize>()
+        >= COMPOUND_EXPR_CACHE_NODE_THRESHOLD;
     if let Some(resolved_terminal_exprs) = resolved_terminal_exprs {
         lowerer.terminal_expr_cache.extend(
             resolved_terminal_exprs
