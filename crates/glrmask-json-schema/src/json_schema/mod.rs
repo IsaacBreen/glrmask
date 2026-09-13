@@ -28,7 +28,56 @@ use crate::import::ast::NamedGrammar;
 
 use self::config::JsonSchemaConfig;
 use self::load::{load_document_with_features, scan_document_features};
-use self::lower::lower_document;
+
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum JsonNameDomain {
+    KeyStrict,
+    KeyAdditional,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum JsonNamePredicateProvenance {
+    ExactName(String),
+    Pattern {
+        domain: JsonNameDomain,
+        /// Exact original JSON-Schema regex. This remains the authoritative
+        /// match semantics; the booleans below are only cheap common-anchor summaries.
+        source_pattern: String,
+        common_anchored_start: bool,
+        common_anchored_end: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonNameSuffix {
+    KeyColonSeparator,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonNameRuleProvenance {
+    Predicate {
+        predicate_id: u32,
+        suffix: JsonNameSuffix,
+    },
+    Difference {
+        base_domain: JsonNameDomain,
+        excluded_predicate_ids: Vec<u32>,
+        suffix: JsonNameSuffix,
+    },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct JsonNameProvenanceSidecar {
+    pub predicates: Vec<JsonNamePredicateProvenance>,
+    pub named_rules: BTreeMap<String, JsonNameRuleProvenance>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JsonSchemaNamedGrammar {
+    pub grammar: NamedGrammar,
+    pub name_provenance: JsonNameProvenanceSidecar,
+}
 
 const JSON_PATTERN_SINGLETONS_DEFAULT: bool = true;
 
@@ -398,6 +447,17 @@ pub fn schema_to_named_grammar_for_dynamic(
     schema_to_named_grammar_with_config(schema, config)
 }
 
+#[doc(hidden)]
+pub fn schema_to_named_grammar_for_dynamic_with_name_provenance(
+    schema: &Value,
+) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.lazy_ordinary_bounded_strings = true;
+    config.split_pattern_property_prefix = true;
+    config.sparse_large_optional_objects = true;
+    schema_to_named_grammar_with_config_and_name_provenance(schema, config)
+}
+
 /// Convert JSON Schema for the vocabulary-partitioned dynamic compiler.
 ///
 /// O2 deliberately keeps large optional objects on the ordinary dynamic
@@ -482,6 +542,72 @@ mod dynamic_fixed_object_policy_tests {
         let grammar = schema_to_named_grammar(&object_schema(128, 0)).unwrap();
         assert_eq!(sparse_object_rules(&grammar), 0);
     }
+
+
+    #[test]
+    fn property_name_provenance_preserves_domains_predicate_kind_and_anchors() {
+        use super::{
+            lower, schema_to_named_grammar_for_dynamic_with_name_provenance, JsonNameDomain,
+            JsonNamePredicateProvenance, JsonNameRuleProvenance,
+        };
+        use std::collections::BTreeMap;
+
+        let schema = json!({
+            "type": "object",
+            "properties": {"fixed": {"type": "boolean"}},
+            "patternProperties": {
+                "plain": {"type": "string"},
+                "^start": {"type": "string"},
+                "end$": {"type": "string"},
+                "^both$": {"type": "string"}
+            }
+        });
+        let baseline = schema_to_named_grammar_for_dynamic(&schema).unwrap();
+        let lowered = schema_to_named_grammar_for_dynamic_with_name_provenance(&schema).unwrap();
+        assert_eq!(baseline.rules, lowered.grammar.rules);
+        assert_eq!(baseline.start, lowered.grammar.start);
+        assert_eq!(baseline.ignore, lowered.grammar.ignore);
+        assert_eq!(baseline.lexer_partitions, lowered.grammar.lexer_partitions);
+        assert_eq!(baseline.lexer_literal_partitions, lowered.grammar.lexer_literal_partitions);
+        assert_eq!(baseline.default_lexer_partition, lowered.grammar.default_lexer_partition);
+        let mut patterns = BTreeMap::new();
+        let mut exact_names = Vec::new();
+        for (id, predicate) in lowered.name_provenance.predicates.iter().enumerate() {
+            match predicate {
+                JsonNamePredicateProvenance::ExactName(name) => exact_names.push((id as u32, name.clone())),
+                JsonNamePredicateProvenance::Pattern {
+                    domain,
+                    source_pattern,
+                    common_anchored_start,
+                    common_anchored_end,
+                } => {
+                    assert_eq!(*domain, JsonNameDomain::KeyStrict);
+                    patterns.insert(source_pattern.as_str(), (*common_anchored_start, *common_anchored_end));
+                }
+            }
+        }
+        assert!(exact_names.iter().any(|(_, name)| name == "fixed"));
+        assert_eq!(patterns["plain"], (false, false));
+        assert_eq!(patterns["^start"], (true, false));
+        assert_eq!(patterns["end$"], (false, true));
+        assert_eq!(patterns["^both$"], (true, true));
+
+        let shared = lowered
+            .name_provenance
+            .named_rules
+            .get(lower::JSON_ADDITIONAL_KEY_COLON_SHARED_RULE)
+            .expect("shared additional-key provenance");
+        let JsonNameRuleProvenance::Difference {
+            base_domain,
+            excluded_predicate_ids,
+            ..
+        } = shared
+        else {
+            panic!("expected shared additional-key difference provenance");
+        };
+        assert_eq!(*base_domain, JsonNameDomain::KeyAdditional);
+        assert!(excluded_predicate_ids.len() >= 5);
+    }
 }
 
 /// Convert JSON Schema while allowing a caller-supplied dynamic-value
@@ -514,6 +640,21 @@ fn schema_to_named_grammar_with_config(
     schema: &Value,
     config: JsonSchemaConfig,
 ) -> Result<NamedGrammar, GlrMaskError> {
+    Ok(schema_to_named_grammar_with_config_impl(schema, config, false)?.grammar)
+}
+
+fn schema_to_named_grammar_with_config_and_name_provenance(
+    schema: &Value,
+    config: JsonSchemaConfig,
+) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
+    schema_to_named_grammar_with_config_impl(schema, config, true)
+}
+
+fn schema_to_named_grammar_with_config_impl(
+    schema: &Value,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
@@ -541,7 +682,12 @@ fn schema_to_named_grammar_with_config(
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let lower_started_at = profile_enabled.then(std::time::Instant::now);
-    let grammar = lower_document(&document, config).map_err(GlrMaskError::from)?;
+    let lowered = if collect_name_provenance {
+        lower::lower_document_with_name_provenance(&document, config)
+    } else {
+        lower::lower_document_with_options(&document, config, false)
+    }
+    .map_err(GlrMaskError::from)?;
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][json_schema_import] preflight_ms={:.3} load_ms={:.3} lower_ms={:.3} total_ms={:.3}",
@@ -553,7 +699,7 @@ fn schema_to_named_grammar_with_config(
             total_started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok(grammar)
+    Ok(lowered)
 }
 
 

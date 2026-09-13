@@ -22,6 +22,10 @@ use super::ast::{
 use super::config::JsonSchemaConfig;
 use super::error::{ImportResult, SchemaImportError};
 use super::string::{property_name_matches_pattern, string_value_satisfies_schema};
+use super::{
+    JsonNamePredicateProvenance, JsonNameProvenanceSidecar, JsonNameRuleProvenance,
+    JsonSchemaNamedGrammar,
+};
 
 pub const JSON_VALUE_RULE: &str = "json_value";
 pub const JSON_OBJECT_RULE: &str = "json_object";
@@ -97,6 +101,24 @@ struct StructuralSchemaCacheEntry {
     expr: GrammarExpr,
 }
 
+#[derive(Default)]
+struct JsonNameProvenanceBuilder {
+    sidecar: JsonNameProvenanceSidecar,
+    predicate_ids: BTreeMap<JsonNamePredicateProvenance, u32>,
+}
+
+impl JsonNameProvenanceBuilder {
+    fn intern_predicate(&mut self, predicate: JsonNamePredicateProvenance) -> u32 {
+        if let Some(&id) = self.predicate_ids.get(&predicate) {
+            return id;
+        }
+        let id = self.sidecar.predicates.len() as u32;
+        self.sidecar.predicates.push(predicate.clone());
+        self.predicate_ids.insert(predicate, id);
+        id
+    }
+}
+
 fn structural_schema_memo_enabled() -> bool {
     std::env::var(DISABLE_STRUCTURAL_SCHEMA_MEMO_ENV)
         .map(|value| {
@@ -169,14 +191,29 @@ pub fn lower_document(
     document: &SchemaDocument,
     config: JsonSchemaConfig,
 ) -> ImportResult<NamedGrammar> {
+    Ok(lower_document_with_options(document, config, false)?.grammar)
+}
+
+pub(crate) fn lower_document_with_name_provenance(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+) -> ImportResult<JsonSchemaNamedGrammar> {
+    lower_document_with_options(document, config, true)
+}
+
+pub(crate) fn lower_document_with_options(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+) -> ImportResult<JsonSchemaNamedGrammar> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let started_at = profile_enabled.then(std::time::Instant::now);
-    let lowerer = Lowerer::new(document, config);
+    let lowerer = Lowerer::new_with_name_provenance(document, config, collect_name_provenance);
     let setup_ms = started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    let grammar = lowerer.finish()?;
+    let lowered = lowerer.finish()?;
     if let Some(started_at) = started_at {
         eprintln!(
             "[glrmask/profile][json_schema_lower_document] setup_ms={:.3} finish_ms={:.3} total_ms={:.3}",
@@ -185,7 +222,7 @@ pub fn lower_document(
             started_at.elapsed().as_secs_f64() * 1000.0,
         );
     }
-    Ok(grammar)
+    Ok(lowered)
 }
 
 pub struct Lowerer<'a> {
@@ -209,7 +246,8 @@ pub struct Lowerer<'a> {
     pub shared_pattern_overlap_literal_rules: BTreeMap<String, String>,
     pub shared_pattern_appearance_rules: BTreeMap<(String, Vec<String>), String>,
     pub property_pattern_regex_cache: Arc<Mutex<HashMap<String, Result<Regex, String>>>>,
-    pub pattern_key_colon_regex_cache: Arc<Mutex<HashMap<String, Result<String, String>>>>,
+    pub(crate) pattern_key_colon_regex_cache: Arc<Mutex<HashMap<String, Result<super::string::PatternKeyColonLowered, String>>>>,
+    json_name_provenance: Option<Arc<Mutex<JsonNameProvenanceBuilder>>>,
     pub fixed_object_profile: Option<FixedObjectLowerProfile>,
     pub fixed_object_nfa_templates: HashMap<FixedObjectTemplateKey, ExprNFA>,
     pub terminal_partition_classes: BTreeMap<String, JsonTerminalPartitionClass>,
@@ -335,6 +373,14 @@ impl<'a> Lowerer<'a> {
     }
 
     fn new(document: &'a SchemaDocument, config: JsonSchemaConfig) -> Self {
+        Self::new_with_name_provenance(document, config, false)
+    }
+
+    fn new_with_name_provenance(
+        document: &'a SchemaDocument,
+        config: JsonSchemaConfig,
+        collect_name_provenance: bool,
+    ) -> Self {
         let (shared_ap_literal_keys, shared_ap_patterns) = collect_shared_ap_exclusion_plan(document);
         let shared_integer_atoms = super::number::collect_shared_integer_atoms(document);
         let mut definition_by_pointer = BTreeMap::new();
@@ -377,6 +423,8 @@ impl<'a> Lowerer<'a> {
             shared_pattern_appearance_rules: BTreeMap::new(),
             property_pattern_regex_cache: Arc::new(Mutex::new(HashMap::new())),
             pattern_key_colon_regex_cache: Arc::new(Mutex::new(HashMap::new())),
+            json_name_provenance: collect_name_provenance
+                .then(|| Arc::new(Mutex::new(JsonNameProvenanceBuilder::default()))),
             fixed_object_profile: (std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
                 || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some())
             .then(FixedObjectLowerProfile::default),
@@ -427,6 +475,7 @@ impl<'a> Lowerer<'a> {
             shared_pattern_appearance_rules: BTreeMap::new(),
             property_pattern_regex_cache: Arc::clone(&self.property_pattern_regex_cache),
             pattern_key_colon_regex_cache: Arc::clone(&self.pattern_key_colon_regex_cache),
+            json_name_provenance: self.json_name_provenance.clone(),
             fixed_object_profile: None,
             fixed_object_nfa_templates: HashMap::new(),
             terminal_partition_classes: BTreeMap::new(),
@@ -448,6 +497,47 @@ impl<'a> Lowerer<'a> {
         lowerer.install_json_builtins();
         lowerer.next_rule_id = next_rule_id;
         lowerer
+    }
+
+    pub(super) fn json_name_provenance_enabled(&self) -> bool {
+        self.json_name_provenance.is_some()
+    }
+
+    pub(super) fn intern_json_name_predicate(
+        &self,
+        predicate: JsonNamePredicateProvenance,
+    ) -> Option<u32> {
+        let provenance = self.json_name_provenance.as_ref()?;
+        let mut provenance = provenance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(provenance.intern_predicate(predicate))
+    }
+
+    pub(super) fn record_json_name_rule(
+        &self,
+        rule_name: &str,
+        provenance_entry: JsonNameRuleProvenance,
+    ) -> ImportResult<()> {
+        let Some(provenance) = &self.json_name_provenance else {
+            return Ok(());
+        };
+        let mut provenance = provenance
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match provenance.sidecar.named_rules.entry(rule_name.to_string()) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(provenance_entry);
+            }
+            std::collections::btree_map::Entry::Occupied(entry) => {
+                if entry.get() != &provenance_entry {
+                    return Err(SchemaImportError::new(format!(
+                        "conflicting JSON name provenance for rule {rule_name:?}"
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Merges rules emitted by an isolated lowerer. Every isolated lowerer
@@ -502,7 +592,7 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    fn finish(mut self) -> ImportResult<NamedGrammar> {
+    fn finish(mut self) -> ImportResult<JsonSchemaNamedGrammar> {
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
         let root_started_at = profile_enabled.then(std::time::Instant::now);
@@ -617,7 +707,18 @@ impl<'a> Lowerer<'a> {
                 grammar.rules.len(),
             );
         }
-        Ok(grammar)
+        let name_provenance = self
+            .json_name_provenance
+            .as_ref()
+            .map(|provenance| {
+                provenance
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .sidecar
+                    .clone()
+            })
+            .unwrap_or_default();
+        Ok(JsonSchemaNamedGrammar { grammar, name_provenance })
     }
 
     fn install_json_builtins(&mut self) {
@@ -2561,7 +2662,13 @@ mod structural_schema_memo_tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.get(pattern).and_then(|result| result.as_ref().ok()), Some(&first));
+        assert_eq!(
+            cache
+                .get(pattern)
+                .and_then(|result| result.as_ref().ok())
+                .map(|lowered| lowered.regex.as_str()),
+            Some(first.as_str()),
+        );
     }
 
     #[test]

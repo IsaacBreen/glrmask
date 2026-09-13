@@ -10,6 +10,9 @@ use super::ast::StringSchema;
 use super::config::{JsonSchemaConfig, QuoteMerge};
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
+use super::{
+    JsonNameDomain, JsonNamePredicateProvenance, JsonNameRuleProvenance, JsonNameSuffix,
+};
 use super::lower::{
     choice, json_additional_key_string_rule, json_key_string_rule, lit, lit_bytes, never, r, seq, Lowerer,
     JsonPatternPartitionKey, JsonTerminalPartitionClass,
@@ -106,7 +109,67 @@ fn encoded_json_key_regex(encoded: &str) -> String {
     regex_escape(encoded)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PatternKeyColonLowered {
+    pub(crate) regex: String,
+    pub(crate) domain: JsonNameDomain,
+    pub(crate) common_anchored_start: bool,
+    pub(crate) common_anchored_end: bool,
+}
+
 impl<'a> Lowerer<'a> {
+    fn record_pattern_key_rule_provenance(
+        &self,
+        rule_name: &str,
+        pattern: &str,
+    ) -> ImportResult<()> {
+        if !self.json_name_provenance_enabled() {
+            return Ok(());
+        }
+        let predicate = self.pattern_key_predicate_provenance_cached(pattern)?;
+        let predicate_id = self
+            .intern_json_name_predicate(predicate)
+            .expect("provenance collection checked above");
+        self.record_json_name_rule(
+            rule_name,
+            JsonNameRuleProvenance::Predicate {
+                predicate_id,
+                suffix: JsonNameSuffix::KeyColonSeparator,
+            },
+        )
+    }
+
+    fn record_shared_additional_key_provenance(&self) -> ImportResult<()> {
+        if !self.json_name_provenance_enabled() {
+            return Ok(());
+        }
+        let mut excluded_predicate_ids = Vec::with_capacity(
+            self.shared_ap_literal_keys.len() + self.shared_ap_patterns.len(),
+        );
+        for key in &self.shared_ap_literal_keys {
+            excluded_predicate_ids.push(
+                self.intern_json_name_predicate(JsonNamePredicateProvenance::ExactName(key.clone()))
+                    .expect("provenance collection checked above"),
+            );
+        }
+        for pattern in &self.shared_ap_patterns {
+            excluded_predicate_ids.push(
+                self.intern_json_name_predicate(
+                    self.pattern_key_predicate_provenance_cached(pattern)?,
+                )
+                .expect("provenance collection checked above"),
+            );
+        }
+        self.record_json_name_rule(
+            JSON_ADDITIONAL_KEY_COLON_SHARED_RULE,
+            JsonNameRuleProvenance::Difference {
+                base_domain: JsonNameDomain::KeyAdditional,
+                excluded_predicate_ids,
+                suffix: JsonNameSuffix::KeyColonSeparator,
+            },
+        )
+    }
+
     pub fn property_name_matches_pattern_cached(
         &self,
         pattern: &str,
@@ -134,10 +197,32 @@ impl<'a> Lowerer<'a> {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let lowered = cache.entry(pattern.to_string()).or_insert_with(|| {
-            pattern_key_colon_regex(pattern).map_err(|error| error.message().to_string())
+            pattern_key_colon_lowered(pattern).map_err(|error| error.message().to_string())
         });
         match lowered {
-            Ok(regex) => Ok(regex.clone()),
+            Ok(lowered) => Ok(lowered.regex.clone()),
+            Err(error) => Err(SchemaImportError::new(error.clone())),
+        }
+    }
+
+    fn pattern_key_predicate_provenance_cached(
+        &self,
+        pattern: &str,
+    ) -> ImportResult<JsonNamePredicateProvenance> {
+        let mut cache = self
+            .pattern_key_colon_regex_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lowered = cache.entry(pattern.to_string()).or_insert_with(|| {
+            pattern_key_colon_lowered(pattern).map_err(|error| error.message().to_string())
+        });
+        match lowered {
+            Ok(lowered) => Ok(JsonNamePredicateProvenance::Pattern {
+                domain: lowered.domain,
+                source_pattern: pattern.to_string(),
+                common_anchored_start: lowered.common_anchored_start,
+                common_anchored_end: lowered.common_anchored_end,
+            }),
             Err(error) => Err(SchemaImportError::new(error.clone())),
         }
     }
@@ -2133,6 +2218,7 @@ impl<'a> Lowerer<'a> {
             };
             let name = self.fresh_rule_name("json_pattern_key_colon");
             self.add_nonterminal_rule(&name, expr);
+            self.record_pattern_key_rule_provenance(&name, pattern)?;
             self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
             return Ok(r(&name));
         }
@@ -2156,6 +2242,7 @@ impl<'a> Lowerer<'a> {
         };
         let name = self.fresh_rule_name("json_pattern_key_colon");
         self.add_pattern_terminal_rule(&name, expr);
+        self.record_pattern_key_rule_provenance(&name, pattern)?;
         self.shared_ap_pattern_rules.insert(pattern.to_string(), name.clone());
         Ok(r(&name))
     }
@@ -2585,6 +2672,7 @@ impl<'a> Lowerer<'a> {
                 },
             );
             self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
+            self.record_shared_additional_key_provenance()?;
             return Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE));
         }
 
@@ -2609,6 +2697,7 @@ impl<'a> Lowerer<'a> {
             },
         );
         self.shared_ap_base_rule = Some(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE.to_string());
+        self.record_shared_additional_key_provenance()?;
         Ok(r(JSON_ADDITIONAL_KEY_COLON_SHARED_RULE))
     }
 
@@ -2859,7 +2948,21 @@ fn lower_string_pattern_hir_branch_parts(hir: Hir, context: JsonStringContext) -
     }
 }
 
+#[derive(Debug)]
+struct StringPatternBodyLowered {
+    regex: String,
+    common_anchored_start: bool,
+    common_anchored_end: bool,
+}
+
 fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> ImportResult<String> {
+    Ok(string_pattern_hir_as_body_regex_with_anchors(hir, context)?.regex)
+}
+
+fn string_pattern_hir_as_body_regex_with_anchors(
+    hir: &Hir,
+    context: JsonStringContext,
+) -> ImportResult<StringPatternBodyLowered> {
     match hir.kind() {
         HirKind::Alternation(parts) => {
             let alternatives = parts
@@ -2867,22 +2970,31 @@ fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> Im
                 .cloned()
                 .map(|part| lower_string_pattern_branch_parts(part, context))
                 .collect::<ImportResult<Vec<_>>>()?;
+            let common_anchored_start = alternatives
+                .iter()
+                .all(|(_, anchored_start, _)| *anchored_start);
+            let common_anchored_end = alternatives
+                .iter()
+                .all(|(_, _, anchored_end)| *anchored_end);
             if let Some((_, anchored_start, anchored_end)) = alternatives.first() {
-                if alternatives
-                    .iter()
-                    .all(|(_, branch_start, branch_end)| branch_start == anchored_start && branch_end == anchored_end)
-                {
+                if alternatives.iter().all(|(_, branch_start, branch_end)| {
+                    branch_start == anchored_start && branch_end == anchored_end
+                }) {
                     let lowered = alternatives
                         .iter()
                         .map(|(lowered, _, _)| lowered.as_str())
                         .collect::<Vec<_>>();
                     let body = format!("(?:{})", lowered.join("|"));
-                    return Ok(wrap_lowered_string_pattern_branch(
-                        &body,
-                        *anchored_start,
-                        *anchored_end,
-                        context,
-                    ));
+                    return Ok(StringPatternBodyLowered {
+                        regex: wrap_lowered_string_pattern_branch(
+                            &body,
+                            *anchored_start,
+                            *anchored_end,
+                            context,
+                        ),
+                        common_anchored_start,
+                        common_anchored_end,
+                    });
                 }
             }
 
@@ -2892,23 +3004,30 @@ fn string_pattern_hir_as_body_regex(hir: &Hir, context: JsonStringContext) -> Im
                     wrap_lowered_string_pattern_branch(lowered, *anchored_start, *anchored_end, context)
                 })
                 .collect::<Vec<_>>();
-            Ok(format!("(?:{})", wrapped.join("|")))
+            Ok(StringPatternBodyLowered {
+                regex: format!("(?:{})", wrapped.join("|")),
+                common_anchored_start,
+                common_anchored_end,
+            })
         }
         HirKind::Capture(capture) => {
-            string_pattern_hir_as_body_regex(&capture.sub, context)
+            string_pattern_hir_as_body_regex_with_anchors(&capture.sub, context)
         }
-        _ => string_pattern_branch_as_body_regex(hir.clone(), context),
+        _ => {
+            let (lowered, anchored_start, anchored_end) =
+                lower_string_pattern_branch_parts(hir.clone(), context)?;
+            Ok(StringPatternBodyLowered {
+                regex: wrap_lowered_string_pattern_branch(
+                    &lowered,
+                    anchored_start,
+                    anchored_end,
+                    context,
+                ),
+                common_anchored_start: anchored_start,
+                common_anchored_end: anchored_end,
+            })
+        }
     }
-}
-
-fn string_pattern_branch_as_body_regex(hir: Hir, context: JsonStringContext) -> ImportResult<String> {
-    let (lowered, anchored_start, anchored_end) = lower_string_pattern_branch_parts(hir, context)?;
-    Ok(wrap_lowered_string_pattern_branch(
-        &lowered,
-        anchored_start,
-        anchored_end,
-        context,
-    ))
 }
 
 fn lower_string_pattern_branch_parts(hir: Hir, context: JsonStringContext) -> ImportResult<(String, bool, bool)> {
@@ -3446,14 +3565,25 @@ fn should_structurally_lower_large_ordinary_pattern(pattern: &str) -> bool {
         && preprocess_ascii_shorthand(pattern).len() >= LARGE_ORDINARY_PATTERN_STRUCTURAL_THRESHOLD
 }
 
-fn pattern_key_colon_regex(pattern: &str) -> ImportResult<String> {
-    let context = if preprocess_ascii_shorthand(pattern).is_empty() {
-        JsonStringContext::KeyAdditional
+fn pattern_key_colon_lowered(pattern: &str) -> ImportResult<PatternKeyColonLowered> {
+    let preprocessed = preprocess_ascii_shorthand(pattern);
+    let (context, domain) = if preprocessed.is_empty() {
+        (JsonStringContext::KeyAdditional, JsonNameDomain::KeyAdditional)
     } else {
-        JsonStringContext::KeyStrict
+        (JsonStringContext::KeyStrict, JsonNameDomain::KeyStrict)
     };
-    let body = string_pattern_as_body_regex(pattern, context)?;
-    Ok(format!(r#""{body}":{JSON_SEPARATOR_WS_REGEX}"#))
+    let hir = Parser::new()
+        .parse(&preprocessed)
+        .map_err(|error| SchemaImportError::new(format!(
+            "invalid string pattern {preprocessed:?}: {error}"
+        )))?;
+    let body = string_pattern_hir_as_body_regex_with_anchors(&hir, context)?;
+    Ok(PatternKeyColonLowered {
+        regex: format!(r#""{}":{JSON_SEPARATOR_WS_REGEX}"#, body.regex),
+        domain,
+        common_anchored_start: body.common_anchored_start,
+        common_anchored_end: body.common_anchored_end,
+    })
 }
 
 fn strip_outer_captures(mut hir: Hir) -> Hir {
