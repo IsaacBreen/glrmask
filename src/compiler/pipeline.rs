@@ -1463,6 +1463,13 @@ fn build_dynamic_tokenizer(
     let explicit_policy = std::env::var_os("GLRMASK_LEXER_SINGLETONS").is_some()
         || std::env::var_os("GLRMASK_LEXER_ADAPTIVE").is_some()
         || std::env::var_os("GLRMASK_ADAPTIVE_LEXER_MAX_DEPTH").is_some();
+    // O1 dynamic default: isolate complex terminals so one regex/Boolean
+    // language does not poison a large cross-terminal product. Source literal
+    // families keep prefix sharing only when they are wide enough for that
+    // runtime benefit to outweigh product-build cost. Static compilation is
+    // intentionally unaffected; this policy exists only here.
+    let singleton_nonliterals = !explicit_policy
+        && env_flag("GLRMASK_DYNAMIC_NONLITERAL_SINGLETONS", true);
     if !explicit_policy {
         let labels = grammar
             .terminals
@@ -1488,10 +1495,10 @@ fn build_dynamic_tokenizer(
             }
         }
         if deferred_terminals > 0 {
-            let partition_ids = lexer_partition_ids_with_residual_classes(
+            let partition_ids = lexer_partition_ids_dynamic_hybrid(
                 grammar,
-                false,
                 &residual_isolation_classes,
+                singleton_nonliterals,
             );
             let tokenizer = build_exact_partitioned_runtime_tokenizer(
                 &expressions,
@@ -1531,7 +1538,8 @@ fn build_dynamic_tokenizer(
             expressions,
             safe_slice_bytes,
         );
-        let use_direct = force_direct || (auto_direct && direct_candidates >= min_candidates);
+        let use_direct = force_direct
+            || (!singleton_nonliterals && auto_direct && direct_candidates >= min_candidates);
         if compile_profile_enabled()
             || std::env::var_os("GLRMASK_PROFILE_DIRECT_RESIDUAL_MASTER_PROVERS").is_some()
         {
@@ -1552,8 +1560,12 @@ fn build_dynamic_tokenizer(
             .enumerate()
             .map(|(index, _)| grammar.terminal_display_name(index as u32))
             .collect::<Vec<_>>();
-        let partition_ids = lexer_partition_ids_with_options(grammar, false);
         let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+        let partition_ids = lexer_partition_ids_dynamic_hybrid(
+            grammar,
+            &residual_isolation_classes,
+            singleton_nonliterals,
+        );
         Ok(build_tokenizer_from_exprs_partitioned_impl(
             expressions,
             Some(&labels),
@@ -1569,8 +1581,16 @@ fn build_dynamic_tokenizer(
             .enumerate()
             .map(|(index, _)| grammar.terminal_display_name(index as u32))
             .collect::<Vec<_>>();
-        let partition_ids = lexer_partition_ids(grammar);
         let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
+        let partition_ids = if explicit_policy {
+            lexer_partition_ids(grammar)
+        } else {
+            lexer_partition_ids_dynamic_hybrid(
+                grammar,
+                &residual_isolation_classes,
+                singleton_nonliterals,
+            )
+        };
         Ok(build_tokenizer_from_exprs_partitioned_impl(
             expressions,
             Some(&labels),
@@ -1593,6 +1613,98 @@ fn env_flag(name: &str, default: bool) -> bool {
         },
         Err(_) => default,
     }
+}
+
+
+fn lexer_partition_ids_dynamic_hybrid(
+    grammar: &GrammarDef,
+    residual_isolation_classes: &[Option<u32>],
+    singleton_nonliterals: bool,
+) -> Vec<u32> {
+    const DEFAULT_DYNAMIC_LITERAL_GROUP_MIN_SIZE: usize = 64;
+    let literal_group_min_size = std::env::var("GLRMASK_DYNAMIC_LITERAL_GROUP_MIN_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_DYNAMIC_LITERAL_GROUP_MIN_SIZE)
+        .max(1);
+    lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size(
+        grammar,
+        residual_isolation_classes,
+        singleton_nonliterals,
+        literal_group_min_size,
+    )
+}
+
+fn lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size(
+    grammar: &GrammarDef,
+    residual_isolation_classes: &[Option<u32>],
+    singleton_nonliterals: bool,
+    literal_group_min_size: usize,
+) -> Vec<u32> {
+    assert_eq!(grammar.terminals.len(), residual_isolation_classes.len());
+    if !singleton_nonliterals {
+        return lexer_partition_ids_with_residual_classes(
+            grammar,
+            false,
+            residual_isolation_classes,
+        );
+    }
+
+    // Combining a wide literal family shares long prefixes and is essential to
+    // runtime tails (the known pathological families are 96+ literals). Small
+    // literal products, however, cost more to build than independent DFAs. A
+    // conservative 64-member cutoff captures that measured separation while
+    // leaving substantial headroom below the first runtime-sensitive family.
+    let literal_group_min_size = literal_group_min_size.max(1);
+    let literal_partition_name = |terminal: usize| {
+        grammar
+            .lexer_partitions
+            .get(&(terminal as u32))
+            .map(String::as_str)
+    };
+    let mut literal_group_sizes = FxHashMap::<Option<&str>, usize>::default();
+    if literal_group_min_size > 1 {
+        for terminal in 0..grammar.terminals.len() {
+            if residual_isolation_classes[terminal].is_none()
+                && matches!(&grammar.terminals[terminal], Terminal::Literal { .. })
+            {
+                *literal_group_sizes
+                    .entry(literal_partition_name(terminal))
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    let mut ids_by_key = BTreeMap::<String, u32>::new();
+    let mut next_id = 0u32;
+    (0..grammar.terminals.len())
+        .map(|terminal| {
+            let terminal_id = terminal as u32;
+            let key = if let Some(class) = residual_isolation_classes[terminal] {
+                format!("residual-isolation:{class}")
+            } else if !matches!(&grammar.terminals[terminal], Terminal::Literal { .. }) {
+                format!("dynamic-nonliteral:{terminal_id}")
+            } else {
+                let partition_name = literal_partition_name(terminal);
+                let group_size = literal_group_sizes
+                    .get(&partition_name)
+                    .copied()
+                    .unwrap_or(usize::MAX);
+                if group_size < literal_group_min_size {
+                    format!("dynamic-small-literal:{terminal_id}")
+                } else if let Some(partition) = partition_name {
+                    format!("named:{partition}")
+                } else {
+                    "default".to_string()
+                }
+            };
+            *ids_by_key.entry(key).or_insert_with(|| {
+                let id = next_id;
+                next_id += 1;
+                id
+            })
+        })
+        .collect()
 }
 
 fn lexer_partition_ids_with_options(
@@ -1769,8 +1881,10 @@ mod lexer_partition_plan_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        compile_owned_profiled_with_table_construction, lexer_partition_ids_with_options,
-        prepare_structural_tokenizer_pair, plan_synthetic_tokenizer_enabled,
+        compile_owned_profiled_with_table_construction,
+        lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size,
+        lexer_partition_ids_with_options, prepare_structural_tokenizer_pair,
+        plan_synthetic_tokenizer_enabled,
         structural_state_reduction_is_profitable,
     };
     use crate::automata::lexer::Lexer;
@@ -1795,6 +1909,58 @@ mod lexer_partition_plan_tests {
     fn unspecified_terminals_are_monolithic_by_default() {
         let grammar = grammar_with_terminals(3);
         assert_eq!(lexer_partition_ids_with_options(&grammar, false), vec![0, 0, 0]);
+    }
+
+    #[test]
+    fn dynamic_hybrid_singletons_small_literal_groups_and_complex_terminals() {
+        let mut grammar = grammar_with_terminals(4);
+        let repeat = Expr::Repeat {
+            expr: Box::new(Expr::U8Class(crate::ds::u8set::U8Set::from_bytes(b"xy"))),
+            min: 1,
+            max: Some(4),
+        };
+        let choice = Expr::Choice(vec![Expr::U8Seq(b"d".to_vec()), Expr::U8Seq(b"e".to_vec())]);
+        grammar.terminals[2] = Terminal::Expr { id: 2, expr: repeat.clone() };
+        grammar.terminals[3] = Terminal::Expr { id: 3, expr: choice.clone() };
+        let residual = vec![None; 4];
+        let ids = lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size(
+            &grammar,
+            &residual,
+            true,
+            64,
+        );
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_ne!(ids[0], ids[3]);
+        assert_ne!(ids[2], ids[3]);
+    }
+
+    #[test]
+    fn dynamic_hybrid_groups_wide_source_literal_family() {
+        let grammar = grammar_with_terminals(64);
+        let residual = vec![None; 64];
+        let ids = lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size(
+            &grammar,
+            &residual,
+            true,
+            64,
+        );
+        assert_eq!(ids.iter().copied().collect::<BTreeSet<_>>().len(), 1);
+    }
+
+    #[test]
+    fn dynamic_hybrid_preserves_residual_isolation_before_literal_grouping() {
+        let grammar = grammar_with_terminals(3);
+        let residual = vec![Some(7), Some(8), None];
+        let ids = lexer_partition_ids_dynamic_hybrid_with_literal_group_min_size(
+            &grammar,
+            &residual,
+            true,
+            1,
+        );
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[0], ids[2]);
+        assert_ne!(ids[1], ids[2]);
     }
 
     #[test]
