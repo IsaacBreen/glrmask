@@ -651,6 +651,19 @@ mod dynamic_fixed_object_policy_tests {
         assert!(excluded_predicate_ids.len() >= 5);
 
         let sidecar = lowered.name_provenance.clone();
+
+        // Match the ordinary O1 path exactly: factor, take the fast
+        // prepare_named_grammar path when eligible, then perform ordinary AST
+        // lowering. Provenance-bearing terminal names must survive this path too.
+        let mut ordinary_prepared =
+            crate::grammar::factoring::factor_named_grammar(lowered.grammar.clone());
+        super::prepare_named_grammar(&mut ordinary_prepared).unwrap();
+        let ordinary_flat = crate::grammar::ast::lower(&ordinary_prepared).unwrap();
+        let ordinary_by_terminal_id = sidecar.resolve_terminal_ids(&ordinary_flat).unwrap();
+        assert_eq!(ordinary_by_terminal_id.len(), sidecar.named_rules.len());
+
+        // Also verify the seeded lowering path used where prepare returns the
+        // already-resolved terminal expressions.
         let mut prepared = crate::grammar::factoring::factor_named_grammar(lowered.grammar);
         let resolved_terminal_exprs = super::prepare_named_grammar_for_lowering(&mut prepared).unwrap();
         let flat = crate::grammar::ast::lower_with_resolved_terminal_exprs(
@@ -660,6 +673,7 @@ mod dynamic_fixed_object_policy_tests {
         .unwrap();
         let by_terminal_id = sidecar.resolve_terminal_ids(&flat).unwrap();
         assert_eq!(by_terminal_id.len(), sidecar.named_rules.len());
+        assert_eq!(ordinary_by_terminal_id, by_terminal_id);
     }
 }
 
