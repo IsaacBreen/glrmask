@@ -1528,13 +1528,48 @@ fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> E
 
             cache.cache_misses += 1;
             let started_at = Instant::now();
-            let compiled = Arc::new(compile_with_plan(
-                build_exclusion_compile_plan_with_labels_and_cache(
-                    std::slice::from_ref(&expr),
-                    None,
-                    cache,
-                ),
-            ));
+            let compiled = if let Expr::Exclude { expr: left, exclude: right } = &expr {
+                // Nested exclusions used to take the generic group-product path unless
+                // the exact same subtree appeared often enough to enter the shared
+                // prewarm cache.  Unique exclusions are just as amenable to the exact
+                // dense binary subtraction kernel: materialize each operand once, then
+                // keep a dead-RHS sentinel instead of hashing partial product tuples.
+                // Fall back to the generic planner if either operand cannot use that
+                // representation.
+                let left = materialize_nested_group_ops((**left).clone(), cache);
+                let right = materialize_nested_group_ops((**right).clone(), cache);
+                let left = match left {
+                    Expr::Dfa(dfa) => dfa,
+                    other => Arc::new(compile_single_expr_dfa(&other)),
+                };
+                let right = match right {
+                    Expr::Dfa(dfa) => dfa,
+                    other => Arc::new(compile_single_expr_dfa(&other)),
+                };
+                build_dense_binary_exclusion_dfa(
+                    left.as_ref(),
+                    right.as_ref(),
+                    expr_u8set(&expr),
+                )
+                .map(Arc::new)
+                .unwrap_or_else(|| {
+                    Arc::new(compile_with_plan(
+                        build_exclusion_compile_plan_with_labels_and_cache(
+                            std::slice::from_ref(&expr),
+                            None,
+                            cache,
+                        ),
+                    ))
+                })
+            } else {
+                Arc::new(compile_with_plan(
+                    build_exclusion_compile_plan_with_labels_and_cache(
+                        std::slice::from_ref(&expr),
+                        None,
+                        cache,
+                    ),
+                ))
+            };
             let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
             cache.compiled_ms += elapsed_ms;
             cache.max_compile_ms = cache.max_compile_ms.max(elapsed_ms);
