@@ -32,13 +32,20 @@ use self::load::{load_document_with_features, scan_document_features};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JsonNameDomain {
+    /// Canonical JSON spelling emitted for an exact fixed property name.
+    KeyCanonical,
+    /// Strict quoted-key codec used by non-empty patternProperties predicates.
     KeyStrict,
+    /// Generic unknown/additional-key codec.
     KeyAdditional,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum JsonNamePredicateProvenance {
-    ExactName(String),
+    ExactName {
+        domain: JsonNameDomain,
+        name: String,
+    },
     Pattern {
         domain: JsonNameDomain,
         /// Exact original JSON-Schema regex. This remains the authoritative
@@ -71,6 +78,38 @@ pub enum JsonNameRuleProvenance {
 pub struct JsonNameProvenanceSidecar {
     pub predicates: Vec<JsonNamePredicateProvenance>,
     pub named_rules: BTreeMap<String, JsonNameRuleProvenance>,
+}
+
+impl JsonNameProvenanceSidecar {
+    /// Resolve named-rule provenance after AST lowering, when concrete terminal
+    /// IDs exist. Fails rather than guessing if a transform removed/renamed a
+    /// provenance-bearing terminal or if two entries collapse incompatibly.
+    pub fn resolve_terminal_ids(
+        &self,
+        grammar: &crate::grammar::flat::GrammarDef,
+    ) -> Result<BTreeMap<crate::grammar::flat::TerminalID, JsonNameRuleProvenance>, String> {
+        let ids_by_name = grammar
+            .terminal_names
+            .iter()
+            .map(|(&id, name)| (name.as_str(), id))
+            .collect::<BTreeMap<_, _>>();
+        let mut resolved = BTreeMap::new();
+        for (name, provenance) in &self.named_rules {
+            let Some(&terminal_id) = ids_by_name.get(name.as_str()) else {
+                return Err(format!(
+                    "JSON name provenance rule {name:?} has no lowered terminal ID"
+                ));
+            };
+            if let Some(existing) = resolved.insert(terminal_id, provenance.clone())
+                && existing != *provenance
+            {
+                return Err(format!(
+                    "JSON name provenance rules collapse to terminal {terminal_id} with conflicting metadata"
+                ));
+            }
+        }
+        Ok(resolved)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -574,7 +613,10 @@ mod dynamic_fixed_object_policy_tests {
         let mut exact_names = Vec::new();
         for (id, predicate) in lowered.name_provenance.predicates.iter().enumerate() {
             match predicate {
-                JsonNamePredicateProvenance::ExactName(name) => exact_names.push((id as u32, name.clone())),
+                JsonNamePredicateProvenance::ExactName { domain, name } => {
+                    assert_eq!(*domain, JsonNameDomain::KeyCanonical);
+                    exact_names.push((id as u32, name.clone()));
+                }
                 JsonNamePredicateProvenance::Pattern {
                     domain,
                     source_pattern,
@@ -607,6 +649,17 @@ mod dynamic_fixed_object_policy_tests {
         };
         assert_eq!(*base_domain, JsonNameDomain::KeyAdditional);
         assert!(excluded_predicate_ids.len() >= 5);
+
+        let sidecar = lowered.name_provenance.clone();
+        let mut prepared = crate::grammar::factoring::factor_named_grammar(lowered.grammar);
+        let resolved_terminal_exprs = super::prepare_named_grammar_for_lowering(&mut prepared).unwrap();
+        let flat = crate::grammar::ast::lower_with_resolved_terminal_exprs(
+            &prepared,
+            resolved_terminal_exprs,
+        )
+        .unwrap();
+        let by_terminal_id = sidecar.resolve_terminal_ids(&flat).unwrap();
+        assert_eq!(by_terminal_id.len(), sidecar.named_rules.len());
     }
 }
 
