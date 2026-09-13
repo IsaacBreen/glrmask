@@ -51,7 +51,9 @@ use crate::compiler::constraint_possible_matches as cpm;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
 use crate::compiler::grammar::transforms::{
-    prepare_dynamic_glr_transforms_only, prepare_grammar_transforms_only,
+    prepare_dynamic_glr_transforms_only,
+    prepare_dynamic_parser_after_terminal_domain, prepare_dynamic_shared_terminal_domain,
+    prepare_grammar_transforms_only,
 };
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
     SharedClassifyCache,
@@ -646,6 +648,67 @@ fn expression_tree_reaches_budget(expr: &Expr, remaining: &mut usize) -> bool {
         Expr::Shared(expr) => expression_tree_reaches_budget(expr, remaining),
         Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
     }
+}
+
+fn consume_early_overlap_cost(expr: &Expr, remaining: &mut usize) -> bool {
+    let local_cost = match expr {
+        Expr::U8Seq(bytes) => 1usize.saturating_add(bytes.len()),
+        Expr::Dfa(dfa) => 1usize
+            .saturating_add(dfa.num_states())
+            .saturating_add(dfa.transition_count()),
+        Expr::U8Class(_) | Expr::Epsilon => 1,
+        Expr::Seq(_)
+        | Expr::Choice(_)
+        | Expr::Repeat { .. }
+        | Expr::Exclude { .. }
+        | Expr::Intersect { .. }
+        | Expr::Shared(_) => 1,
+    };
+    if local_cost >= *remaining {
+        *remaining = 0;
+        return true;
+    }
+    *remaining -= local_cost;
+    match expr {
+        Expr::Seq(parts) | Expr::Choice(parts) => parts
+            .iter()
+            .any(|part| consume_early_overlap_cost(part, remaining)),
+        Expr::Repeat { expr, .. } => consume_early_overlap_cost(expr, remaining),
+        Expr::Exclude { expr, exclude } => {
+            consume_early_overlap_cost(expr, remaining)
+                || consume_early_overlap_cost(exclude, remaining)
+        }
+        Expr::Intersect { expr, intersect } => {
+            consume_early_overlap_cost(expr, remaining)
+                || consume_early_overlap_cost(intersect, remaining)
+        }
+        Expr::Shared(expr) => consume_early_overlap_cost(expr, remaining),
+        Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon => false,
+    }
+}
+
+fn terminal_domain_too_large_for_early_overlap(grammar: &GrammarDef) -> bool {
+    // The early-overlap lane clones and hashes the stabilized terminal domain once.
+    // Bound that extra work by accounting for both expression nodes and the owned
+    // payload hidden inside leaf nodes. Large importer-generated expression forests
+    // remain on the established schedule, where factoring can parallelize internally.
+    const MAX_EARLY_OVERLAP_TERMINAL_COST: usize = 64 * 1024;
+    let mut remaining = MAX_EARLY_OVERLAP_TERMINAL_COST;
+    grammar.terminals.iter().any(|terminal| {
+        let local_cost = match terminal {
+            Terminal::Literal { bytes, .. } => 1usize.saturating_add(bytes.len()),
+            Terminal::Pattern { pattern, .. } => 1usize.saturating_add(pattern.len()),
+            Terminal::SpecialToken { .. } => 1,
+            Terminal::Expr { expr, .. } => return consume_early_overlap_cost(expr, &mut remaining),
+        };
+        if local_cost >= remaining {
+            remaining = 0;
+            true
+        } else {
+            remaining -= local_cost;
+            false
+        }
+    })
 }
 
 fn should_parallelize_terminal_factoring(grammar: &GrammarDef) -> bool {
@@ -6201,6 +6264,267 @@ pub(crate) fn compile_dynamic_owned_unfinalized_with_table_construction(
     compile_dynamic_owned_impl(grammar, vocab, default_table_construction, false)
 }
 
+
+
+type DynamicTokenizerLaneResult = (
+    Tokenizer,
+    Option<(Tokenizer, Vec<u32>)>,
+    Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)>,
+);
+
+fn build_dynamic_tokenizer_lane(
+    grammar: &GrammarDef,
+    prepared_expressions: &[Expr],
+    prepared_has_giant_repeat: bool,
+    vocab: &Vocab,
+    finalize_runtime: bool,
+    profile: bool,
+) -> crate::Result<(DynamicTokenizerLaneResult, f64)> {
+    let started_at = Instant::now();
+    let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT").is_some()
+        && !prepared_has_giant_repeat;
+    let virtual_tokenizer =
+        build_dynamic_virtual_tokenizer_from_exprs(grammar, prepared_expressions, false)?;
+    let quotient_pair = (virtual_tokenizer.is_none() && quotient_enabled)
+        .then(|| plan_synthetic_tokenizer(grammar, vocab))
+        .flatten()
+        .and_then(|plan| {
+            prepare_structural_tokenizer_pair(grammar, &plan, vocab, Some(false), true)
+        });
+    let has_virtual_runtime = virtual_tokenizer.is_some();
+    let (mut tokenizer, mask_tokenizer_quotient) =
+        if let Some((synthesized, full, certified)) = quotient_pair {
+            (
+                full.finish(),
+                Some((synthesized, certified.full_to_synthesized)),
+            )
+        } else {
+            let mut tokenizer = match virtual_tokenizer {
+                Some(tokenizer) => tokenizer,
+                None => build_dynamic_tokenizer(grammar, prepared_expressions, vocab)?,
+            };
+            tokenizer.isolate_start_state_and_drain_nullable_terminals();
+            (tokenizer, None)
+        };
+    let prebuilt_virtual_residual_projection = if !finalize_runtime
+        && has_virtual_runtime
+        && std::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
+            .ok()
+            .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
+        && std::env::var("GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION")
+            .ok()
+            .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
+    {
+        const DEFAULT_MAX_DENSE_STATES: usize = 1024 * 1024;
+        let max_dense_states = std::env::var(
+            "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION_MAX_DENSE_STATES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MAX_DENSE_STATES);
+        let max_token_len = vocab.max_token_byte_len();
+        (max_token_len > 0
+            && tokenizer
+                .virtual_residual_mask_projection_dense_state_work(max_token_len)
+                .is_some_and(|work| work <= max_dense_states))
+        .then(|| tokenizer.virtual_residuals_mask_tokenizer_with_vocab(max_token_len, None))
+        .flatten()
+    } else {
+        None
+    };
+    if !has_virtual_runtime && tokenizer.has_epsilon_transitions() {
+        let source_states = tokenizer.num_states();
+        let source_transitions = tokenizer.transition_count();
+        let source_state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok())
+            .filter(|&value| value > 0)
+            .unwrap_or(512);
+        if source_states <= source_state_limit {
+            let transition_limit = source_transitions.saturating_mul(6).max(1);
+            let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .filter(|&value| value > 0)
+                .unwrap_or(8_192);
+            if let Some(determinized) =
+                tokenizer.try_full_determinization(state_limit, transition_limit)
+            {
+                tokenizer = determinized.tokenizer;
+            }
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_lexer_determinization] source_states={} source_transitions={} source_state_limit={} attempted={} final_states={} final_transitions={}",
+                source_states,
+                source_transitions,
+                source_state_limit,
+                source_states <= source_state_limit,
+                tokenizer.num_states(),
+                tokenizer.transition_count(),
+            );
+        }
+    }
+    Ok((
+        (
+            tokenizer,
+            mask_tokenizer_quotient,
+            prebuilt_virtual_residual_projection,
+        ),
+        elapsed_ms(started_at),
+    ))
+}
+
+fn compile_dynamic_owned_early_overlap(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    finalize_runtime: bool,
+    start_nullable: bool,
+) -> crate::Result<DynamicConstraint> {
+    let profile = compile_profile_enabled();
+    let total_started = profile.then(Instant::now);
+    let shared_started = profile.then(Instant::now);
+    let shared_grammar = prepare_dynamic_shared_terminal_domain(grammar);
+    let shared_ms = shared_started.map_or(0.0, elapsed_ms);
+    let clone_started = profile.then(Instant::now);
+    let lexer_grammar = shared_grammar.clone();
+    let clone_ms = clone_started.map_or(0.0, elapsed_ms);
+
+    run_with_dynamic_compile_thread_pool(false, || -> crate::Result<DynamicConstraint> {
+        let (tokenizer_result, parser_result) = macro_join_if(
+            true,
+            "dynamic_early_tokenizer_and_parser",
+            || -> crate::Result<(DynamicTokenizerLaneResult, f64, f64)> {
+                let factor_started = profile.then(Instant::now);
+                let prepared_expressions = prepare_factored_terminal_expressions(&lexer_grammar);
+                let factor_ms = factor_started.map_or(0.0, elapsed_ms);
+                let prepared_has_giant_repeat = prepared_expressions
+                    .iter()
+                    .any(expression_contains_large_bounded_repeat);
+                let (result, tokenizer_ms) = build_dynamic_tokenizer_lane(
+                    &lexer_grammar,
+                    &prepared_expressions,
+                    prepared_has_giant_repeat,
+                    vocab,
+                    finalize_runtime,
+                    profile,
+                )?;
+                Ok((result, factor_ms, tokenizer_ms))
+            },
+            || -> crate::Result<(GrammarDef, GLRTable, bool, f64, f64, f64)> {
+                let prepare_started = profile.then(Instant::now);
+                let (prepared_grammar, terminal_domain_changed) =
+                    prepare_dynamic_parser_after_terminal_domain(shared_grammar);
+                let parser_prepare_ms = prepare_started.map_or(0.0, elapsed_ms);
+                let analysis_started = profile.then(Instant::now);
+                let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+                if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
+                    panic!("[glrmask] grammar precondition violations:\n{}", message);
+                }
+                let analysis_ms = analysis_started.map_or(0.0, elapsed_ms);
+                let table_started = Instant::now();
+                let table = GLRTable::build_with_default_construction(
+                    &analyzed,
+                    default_table_construction,
+                );
+                let table_ms = elapsed_ms(table_started);
+                Ok((
+                    prepared_grammar,
+                    table,
+                    terminal_domain_changed,
+                    parser_prepare_ms,
+                    analysis_ms,
+                    table_ms,
+                ))
+            },
+        );
+        let (
+            (mut tokenizer, mut mask_tokenizer_quotient, mut prebuilt_virtual_residual_projection),
+            mut factor_ms,
+            mut tokenizer_ms,
+        ) = tokenizer_result?;
+        let (
+            prepared_grammar,
+            table,
+            terminal_domain_changed,
+            parser_prepare_ms,
+            analysis_ms,
+            table_ms,
+        ) = parser_result?;
+        if terminal_domain_changed {
+            let factor_started = profile.then(Instant::now);
+            let prepared_expressions = prepare_factored_terminal_expressions(&prepared_grammar);
+            factor_ms += factor_started.map_or(0.0, elapsed_ms);
+            let prepared_has_giant_repeat = prepared_expressions
+                .iter()
+                .any(expression_contains_large_bounded_repeat);
+            let (rebuilt, rebuilt_ms) = build_dynamic_tokenizer_lane(
+                &prepared_grammar,
+                &prepared_expressions,
+                prepared_has_giant_repeat,
+                vocab,
+                finalize_runtime,
+                profile,
+            )?;
+            (tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection) = rebuilt;
+            tokenizer_ms += rebuilt_ms;
+        }
+        let dynamic_vocab_started = profile.then(Instant::now);
+        let dynamic_mask_vocab = if finalize_runtime {
+            crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
+        } else {
+            crate::runtime::DynamicMaskVocab::default()
+        };
+        let dynamic_vocab_ms = dynamic_vocab_started.map_or(0.0, elapsed_ms);
+        let terminal_display_names = (0..prepared_grammar.num_terminals())
+            .map(|terminal| prepared_grammar.terminal_display_name(terminal))
+            .collect::<Vec<_>>();
+        let finalize_started = profile.then(Instant::now);
+        let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
+            table,
+            terminal_display_names,
+            tokenizer,
+            None,
+            prepared_grammar.ignore_terminal,
+            collect_special_token_terminals(&prepared_grammar),
+            vocab,
+            dynamic_mask_vocab,
+        );
+        if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .set_mask_tokenizer_quotient(mask_tokenizer, full_to_mask_state);
+        }
+        if let Some((mask_tokenizer, projections)) = prebuilt_virtual_residual_projection {
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
+        }
+        if finalize_runtime {
+            constraint.inner.rebuild_dynamic_runtime_caches();
+        }
+        constraint
+            .inner
+            .table
+            .set_embedded_start_nullable(start_nullable);
+        constraint.set_composition_grammar(prepared_grammar);
+        if finalize_runtime {
+            constraint.cache_external_vocab_artifact_for_save();
+        }
+        if profile {
+            eprintln!(
+                "[glrmask/profile][dynamic_early_overlap] shared_ms={shared_ms:.3} clone_ms={clone_ms:.3} terminal_domain_changed={terminal_domain_changed} factor_ms={factor_ms:.3} parser_prepare_ms={parser_prepare_ms:.3} analysis_ms={analysis_ms:.3} tokenizer_ms={tokenizer_ms:.3} table_ms={table_ms:.3} dynamic_vocab_ms={dynamic_vocab_ms:.3} finalize_ms={:.3} total_ms={:.3}",
+                finalize_started.map_or(0.0, elapsed_ms),
+                total_started.map_or(0.0, elapsed_ms),
+            );
+        }
+        Ok(constraint)
+    })
+}
+
 fn compile_dynamic_owned_impl(
     grammar: GrammarDef,
     vocab: &Vocab,
@@ -6208,6 +6532,30 @@ fn compile_dynamic_owned_impl(
     finalize_runtime: bool,
 ) -> crate::Result<DynamicConstraint> {
     let start_nullable = grammar.start_is_nullable();
+    // Ordinary non-tiny grammars can start terminal factoring/tokenizer construction
+    // after a small shared terminal-domain prefix, while parser-only normalization,
+    // analysis, and table construction continue on the sibling lane. Very large
+    // pre-parsed expression forests stay on the established schedule: cloning and
+    // early terminal-domain stabilization is material for those grammars and their
+    // factoring already parallelizes internally.
+    let early_overlap_enabled = std::env::var("GLRMASK_DISABLE_DYNAMIC_EARLY_OVERLAP")
+        .ok()
+        .is_none_or(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+    if early_overlap_enabled
+        && !macro_parallelism_disabled()
+        && grammar.direct_regular_automaton.is_none()
+        && grammar.rules.len() > 64
+        && !terminal_domain_too_large_for_early_overlap(&grammar)
+        && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK_QUOTIENT").is_none()
+    {
+        return compile_dynamic_owned_early_overlap(
+            grammar,
+            vocab,
+            default_table_construction,
+            finalize_runtime,
+            start_nullable,
+        );
+    }
     let profile = compile_profile_enabled();
     let total_started_at = profile.then(Instant::now);
     let prepare_started_at = profile.then(Instant::now);
@@ -6413,133 +6761,15 @@ fn compile_dynamic_owned_impl(
         let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
             parallel_dynamic_core,
             "dynamic_tokenizer_and_table_vocab",
-            || -> crate::Result<((
-                Tokenizer,
-                Option<(Tokenizer, Vec<u32>)>,
-                Option<(Tokenizer, Vec<VirtualResidualMaskProjection>)>,
-            ), f64)> {
-                let started_at = Instant::now();
-                let quotient_enabled = std::env::var_os("GLRMASK_DYNAMIC_MASK_TOKEN_QUOTIENT")
-                    .is_some()
-                    && !prepared_has_giant_repeat;
-                let virtual_tokenizer = build_dynamic_virtual_tokenizer_from_exprs(
+            || {
+                build_dynamic_tokenizer_lane(
                     &prepared_grammar,
                     &prepared_expressions,
-                    false,
-                )?;
-                let quotient_pair = (virtual_tokenizer.is_none() && quotient_enabled)
-                    .then(|| plan_synthetic_tokenizer(&prepared_grammar, vocab))
-                    .flatten()
-                    .and_then(|plan| {
-                        prepare_structural_tokenizer_pair(
-                            &prepared_grammar,
-                            &plan,
-                            vocab,
-                            Some(false),
-                            true,
-                        )
-                    });
-                let has_virtual_runtime = virtual_tokenizer.is_some();
-                let (mut tokenizer, mask_tokenizer_quotient) = if let Some((
-                    synthesized,
-                    full,
-                    certified,
-                )) = quotient_pair
-                {
-                    (
-                        full.finish(),
-                        Some((synthesized, certified.full_to_synthesized)),
-                    )
-                } else {
-                    let mut tokenizer = match virtual_tokenizer {
-                        Some(tokenizer) => tokenizer,
-                        None => build_dynamic_tokenizer(
-                            &prepared_grammar,
-                            &prepared_expressions,
-                            vocab,
-                        )?,
-                    };
-                    tokenizer.isolate_start_state_and_drain_nullable_terminals();
-                    (tokenizer, None)
-                };
-                // A virtual tokenizer's exact state space is intentionally
-                // larger than its materialized DFA state array. The ordinary
-                // subset-construction helper is defined only over that
-                // materialized domain, so running it here would discard (or
-                // mis-handle) the arithmetic residual component. Keep the
-                // symbolic runtime authoritative and determinize only fully
-                // materialized tokenizers.
-                let prebuilt_virtual_residual_projection = if !finalize_runtime
-                    && has_virtual_runtime
-                    && std::env::var("GLRMASK_DYNAMIC_TRANSFER_VIRTUAL_RESIDUAL_PROJECTIONS")
-                        .ok()
-                        .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
-                    && std::env::var("GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION")
-                        .ok()
-                        .is_none_or(|value| !matches!(value.trim(), "0" | "false" | "no" | "off"))
-                {
-                    const DEFAULT_MAX_DENSE_STATES: usize = 1024 * 1024;
-                    let max_dense_states = std::env::var(
-                        "GLRMASK_DYNAMIC_VIRTUAL_RESIDUAL_MASK_PROJECTION_MAX_DENSE_STATES",
-                    )
-                    .ok()
-                    .and_then(|value| value.trim().parse::<usize>().ok())
-                    .unwrap_or(DEFAULT_MAX_DENSE_STATES);
-                    let max_token_len = vocab.max_token_byte_len();
-                    (max_token_len > 0
-                        && tokenizer
-                            .virtual_residual_mask_projection_dense_state_work(max_token_len)
-                            .is_some_and(|work| work <= max_dense_states))
-                    .then(|| {
-                        tokenizer.virtual_residuals_mask_tokenizer_with_vocab(
-                            max_token_len,
-                            None,
-                        )
-                    })
-                    .flatten()
-                } else {
-                    None
-                };
-                if !has_virtual_runtime && tokenizer.has_epsilon_transitions() {
-                    let source_states = tokenizer.num_states();
-                    let source_transitions = tokenizer.transition_count();
-                    let source_state_limit = std::env::var(
-                        "GLRMASK_DYNAMIC_LEXER_MAX_SOURCE_STATES",
-                    )
-                        .ok()
-                        .and_then(|value| value.trim().parse::<u32>().ok())
-                        .filter(|&value| value > 0)
-                        .unwrap_or(512);
-                    if source_states <= source_state_limit {
-                        let transition_limit = source_transitions.saturating_mul(6).max(1);
-                        let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
-                            .ok()
-                            .and_then(|value| value.trim().parse::<usize>().ok())
-                            .filter(|&value| value > 0)
-                            .unwrap_or(8_192);
-                        if let Some(determinized) =
-                            tokenizer.try_full_determinization(state_limit, transition_limit)
-                        {
-                            tokenizer = determinized.tokenizer;
-                        }
-                    }
-                    if profile {
-                        eprintln!(
-                            "[glrmask/profile][dynamic_lexer_determinization] source_states={} source_transitions={} source_state_limit={} attempted={} final_states={} final_transitions={}",
-                            source_states,
-                            source_transitions,
-                            source_state_limit,
-                            source_states <= source_state_limit,
-                            tokenizer.num_states(),
-                            tokenizer.transition_count(),
-                        );
-                    }
-                }
-                Ok(((
-                    tokenizer,
-                    mask_tokenizer_quotient,
-                    prebuilt_virtual_residual_projection,
-                ), elapsed_ms(started_at)))
+                    prepared_has_giant_repeat,
+                    vocab,
+                    finalize_runtime,
+                    profile,
+                )
             },
             || macro_join_if(
                 parallel_dynamic_core,

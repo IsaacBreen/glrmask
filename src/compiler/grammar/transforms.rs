@@ -204,7 +204,7 @@ fn terminal_identity_ref(terminal: &Terminal, is_ignore: bool) -> TerminalIdenti
 /// partition assignments are part of the compilation structure and must be
 /// preserved even when two terminals have identical languages. Mutates the
 /// grammar in place.
-pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
+pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) -> bool {
     let terminal_count = grammar.terminals.len();
     let mut used_flags = vec![false; terminal_count];
     for rule in grammar.rules.iter() {
@@ -264,7 +264,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
             })
         };
     if already_identity_compaction {
-        return;
+        return false;
     }
 
     let used = used_flags
@@ -353,6 +353,7 @@ pub(crate) fn compact_unused_terminals(grammar: &mut GrammarDef) {
     grammar.lexer_partitions = remap_lexer_partitions(&grammar.lexer_partitions, &remap);
     grammar.residual_isolation_classes =
         remap_residual_isolation_classes(&grammar.residual_isolation_classes, &remap);
+    true
 }
 
 fn remap_residual_isolation_classes(
@@ -1072,6 +1073,38 @@ pub(crate) fn prepare_dynamic_glr_transforms_only(grammar: GrammarDef) -> Gramma
     normalized
 }
 
+/// Dynamic-compile shared prefix: perform only the work needed to establish a
+/// stable terminal domain before parser-only normalization. This lets tokenizer
+/// construction overlap the parser normalization/analysis/table lane.
+pub(crate) fn prepare_dynamic_shared_terminal_domain(mut grammar: GrammarDef) -> GrammarDef {
+    let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+    expand_nullable_terminals(&mut grammar.rules, grammar.start, &nullable_terminals);
+    grammar.rules = prune_unreachable_rules(&grammar.rules, grammar.start);
+    compact_unused_terminals(&mut grammar);
+    grammar
+}
+
+/// Parser-only continuation after `prepare_dynamic_shared_terminal_domain`.
+pub(crate) fn prepare_dynamic_parser_after_terminal_domain(
+    mut normalized: GrammarDef,
+) -> (GrammarDef, bool) {
+    normalize_dynamic_glr_grammar(&mut normalized.rules, normalized.start);
+    let protected_nonterminals = collect_protected_nonterminals(&normalized);
+    inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals);
+    let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_RUNTIME_REDUCTION_LEN);
+    bound_runtime_reduction_length(&mut normalized, max_reduction_len);
+    inline_post_bound_single_use_nonterminals(
+        &mut normalized.rules,
+        &protected_nonterminals,
+        max_reduction_len,
+    );
+    let terminal_domain_changed = compact_unused_terminals(&mut normalized);
+    (normalized, terminal_domain_changed)
+}
+
 /// Prepare exactly the grammar structure needed by VocabPartition.
 ///
 /// Unlike full static compilation, VocabPartition does not build an LR table
@@ -1345,6 +1378,50 @@ mod tests {
 
     fn t(id: TerminalID) -> Symbol {
         Symbol::Terminal(id)
+    }
+
+    #[test]
+    fn dynamic_split_preparation_matches_monolithic_when_terminal_domain_stabilizes() {
+        let grammar = GrammarDef {
+            rules: vec![
+                Rule {
+                    lhs: 0,
+                    rhs: vec![nt(2), t(0)],
+                },
+                Rule {
+                    lhs: 2,
+                    rhs: vec![],
+                },
+                // Unreachable parser structure and terminal must disappear in both paths.
+                Rule {
+                    lhs: 1,
+                    rhs: vec![t(1)],
+                },
+            ],
+            start: 0,
+            terminals: vec![
+                Terminal::Literal {
+                    id: 0,
+                    bytes: b"live".to_vec(),
+                },
+                Terminal::Literal {
+                    id: 1,
+                    bytes: b"dead".to_vec(),
+                },
+            ],
+            ..GrammarDef::default()
+        };
+
+        let monolithic = prepare_dynamic_glr_transforms_only(grammar.clone());
+        let shared = prepare_dynamic_shared_terminal_domain(grammar);
+        let (split, terminal_domain_changed) =
+            prepare_dynamic_parser_after_terminal_domain(shared);
+
+        assert!(!terminal_domain_changed);
+        assert_eq!(
+            serde_json::to_vec(&split).unwrap(),
+            serde_json::to_vec(&monolithic).unwrap()
+        );
     }
 
     #[test]
