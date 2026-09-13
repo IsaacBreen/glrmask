@@ -1483,6 +1483,10 @@ struct SharedDuplicateNestedGroupOpCache {
     compiled: Mutex<FxHashMap<Expr, Arc<OnceLock<Arc<DFA>>>>>,
 }
 
+fn unique_dense_exclusion_rhs_is_compound(expr: &Expr) -> bool {
+    !matches!(expr, Expr::U8Seq(_) | Expr::U8Class(_) | Expr::Dfa(_) | Expr::Epsilon)
+}
+
 impl SharedDuplicateNestedGroupOpCache {
     fn cell_if_duplicated(&self, expr: &Expr) -> Option<Arc<OnceLock<Arc<DFA>>>> {
         if !self.duplicated.contains(expr) {
@@ -1556,12 +1560,17 @@ fn materialize_nested_group_ops(expr: Expr, cache: &mut NestedGroupOpCache) -> E
 
             cache.cache_misses += 1;
             let started_at = Instant::now();
-            let compiled = if let Expr::Exclude { expr: left, exclude: right } = &expr {
+            let compiled = if let Expr::Exclude { expr: left, exclude: right } = &expr
+                && unique_dense_exclusion_rhs_is_compound(right)
+            {
                 // Nested exclusions used to take the generic group-product path unless
                 // the exact same subtree appeared often enough to enter the shared
                 // prewarm cache.  Unique exclusions are just as amenable to the exact
                 // dense binary subtraction kernel: materialize each operand once, then
                 // keep a dead-RHS sentinel instead of hashing partial product tuples.
+                // Atomic RHS exclusions are intentionally left on the generic planner:
+                // recursively densifying long chains of exact literals repeatedly
+                // rebuilds a growing left DFA and can be several times slower.
                 // Fall back to the generic planner if either operand cannot use that
                 // representation.
                 let left = materialize_nested_group_ops((**left).clone(), cache);
@@ -15105,6 +15114,30 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn unique_dense_exclusion_skips_atomic_rhs_languages() {
+        assert!(!super::unique_dense_exclusion_rhs_is_compound(&Expr::U8Seq(
+            b"literal".to_vec()
+        )));
+        assert!(!super::unique_dense_exclusion_rhs_is_compound(&Expr::U8Class(
+            U8Set::from_bytes(b"ab")
+        )));
+        assert!(!super::unique_dense_exclusion_rhs_is_compound(&Expr::Epsilon));
+        let dfa = super::compile_expr_to_dfa(&Expr::U8Seq(b"dfa".to_vec()));
+        assert!(!super::unique_dense_exclusion_rhs_is_compound(&Expr::Dfa(
+            Arc::new(dfa)
+        )));
+
+        assert!(super::unique_dense_exclusion_rhs_is_compound(&Expr::Choice(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ])));
+        assert!(super::unique_dense_exclusion_rhs_is_compound(&Expr::Seq(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"b".to_vec()),
+        ])));
     }
 
     #[test]
