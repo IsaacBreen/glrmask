@@ -179,14 +179,19 @@ impl<'a> FullWalkLazyUnion<'a> {
             Self::clear_cache(&mut cache);
             cache.base_state_count = base_state_count;
         }
+        if cache.subsets.len() >= Self::SOFT_MAX_EXTENSION_STATES {
+            // `clear_cache()` also drops the sparse physical transition rows.
+            // Perform the soft-limit reset before sizing `base_rows`; doing
+            // this in the opposite order leaves `base_rows` empty and makes
+            // the unchecked hot-path lookup in `base_cell()` immediately
+            // out-of-bounds on the next physical transition.
+            Self::clear_cache(&mut cache);
+            cache.base_state_count = base_state_count;
+        }
         if cache.base_rows.len() != base_state_count as usize {
             cache
                 .base_rows
                 .resize_with(base_state_count as usize, || None);
-        }
-        if cache.subsets.len() >= Self::SOFT_MAX_EXTENSION_STATES {
-            Self::clear_cache(&mut cache);
-            cache.base_state_count = base_state_count;
         }
         let table = Self {
             base_transitions16,
@@ -5737,5 +5742,80 @@ mod wide_scalar_dispatch_tests {
         assert_eq!(table.transition(0, b'a'), 32_768);
         assert_eq!(table.transition(0, b'b'), u32::MAX);
         assert!(!overflowed.get());
+    }
+
+    #[test]
+    fn lazy_scalar_dispatch_soft_reset_reinitializes_physical_rows() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
+        let mut seeded = DynamicLazyUnionCache::default();
+        seeded.base_state_count = tokenizer.num_states();
+        seeded
+            .base_rows
+            .resize_with(tokenizer.num_states() as usize, || None);
+        seeded.subsets.resize_with(
+            FullWalkLazyUnion::SOFT_MAX_EXTENSION_STATES,
+            || SmallVec::from_slice(&[0, 32_768]),
+        );
+
+        let cache = std::sync::Mutex::new(seeded);
+        let guard = cache.lock().expect("lazy-union cache lock");
+        let overflowed = std::cell::Cell::new(false);
+        let (table, _root) = FullWalkLazyUnion::new(
+            &tokenizer,
+            None,
+            None,
+            guard,
+            &[0, 32_768],
+            &overflowed,
+        )
+        .expect("lazy table after soft-limit reset");
+
+        {
+            let cache = unsafe { &*table.cache.get() };
+            assert_eq!(cache.base_rows.len(), tokenizer.num_states() as usize);
+        }
+        assert_eq!(table.transition(0, b'a'), 32_768);
+        assert!(!overflowed.get());
+    }
+
+    #[test]
+    fn lazy_scalar_dispatch_repeated_soft_resets_keep_physical_rows_live() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_flat32_test_tokenizer();
+        let cache = std::sync::Mutex::new(DynamicLazyUnionCache::default());
+
+        for _ in 0..3 {
+            {
+                let mut seeded = cache.lock().expect("lazy-union cache lock");
+                seeded.base_state_count = tokenizer.num_states();
+                seeded
+                    .base_rows
+                    .resize_with(tokenizer.num_states() as usize, || None);
+                seeded.subsets.resize_with(
+                    FullWalkLazyUnion::SOFT_MAX_EXTENSION_STATES,
+                    || SmallVec::from_slice(&[0, 32_768]),
+                );
+            }
+
+            let guard = cache.lock().expect("lazy-union cache lock");
+            let overflowed = std::cell::Cell::new(false);
+            let (table, _root) = FullWalkLazyUnion::new(
+                &tokenizer,
+                None,
+                None,
+                guard,
+                &[0, 32_768],
+                &overflowed,
+            )
+            .expect("lazy table after repeated soft-limit reset");
+
+            {
+                let cache = unsafe { &*table.cache.get() };
+                assert_eq!(cache.base_rows.len(), tokenizer.num_states() as usize);
+            }
+            assert_eq!(table.transition(0, b'a'), 32_768);
+            assert!(!overflowed.get());
+        }
     }
 }

@@ -1695,14 +1695,7 @@ fn try_full_walk_mask(
         return Ok(true);
     }
 
-    // The grammar-quotiented O2 coordinate currently has a separate exact
-    // fallback walker. Its scalar-dispatch lazy-union accelerator is not safe
-    // to reuse across repeated warm timing traversals (DataConnector exposes a
-    // native crash after cache reuse), so keep O2 on the exact path until that
-    // cache is made projection-aware/reentrant. Ordinary dynamic constraints
-    // retain the scalar fast path.
     if std::env::var_os("GLRMASK_DISABLE_SCALAR_DISPATCH_FULL_WALK").is_none()
-        && !vocab.is_grammar_quotiented()
         && !lexer_scan_cache.deterministic
         && lexer_scan_cache.tokenizer().has_scalar_deterministic_dispatch()
         && trie.full_walk_max_parent_depth() < 255
