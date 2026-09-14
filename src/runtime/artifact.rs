@@ -2641,6 +2641,11 @@ pub(crate) enum DynamicMaskLexerStateKey {
     /// that distinction observable outside the projected coordinate itself.
     MaskProjection { state: u32, initial: bool },
     TerminalObservation { terminal: TerminalID, class: u32, initial: bool },
+    /// Sound pre-minimization coordinate of a virtual bounded-code residual's
+    /// finite one-model-token projection. This gives the dynamic cache the
+    /// useful count collapse of the finite projection without constructing its
+    /// potentially large DFA.
+    VirtualDenseProjection { runtime: u32, state: u32, initial: bool },
 }
 
 pub(crate) type DynamicMaskStateKey = Vec<(
