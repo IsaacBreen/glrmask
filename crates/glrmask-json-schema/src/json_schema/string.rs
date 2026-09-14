@@ -4626,24 +4626,50 @@ fn llguidance_compat_enabled_from_env() -> bool {
     })
 }
 
+fn executable_name_looks_like_test(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.contains("test") || name.contains("integration")
+}
+
 fn is_test_binary() -> bool {
+    if cfg!(test) {
+        return true;
+    }
     std::env::current_exe()
         .ok()
         .and_then(|path| {
             path.file_name()
-                .map(|name| {
-                    let name_str = name.to_string_lossy().to_lowercase();
-                    name_str.contains("test")
-                        || name_str.contains("integration")
-                        || name_str.contains("glrmask")
-                })
+                .map(|name| executable_name_looks_like_test(&name.to_string_lossy()))
         })
         .unwrap_or(false)
 }
 
 static INITIAL_COMPAT_MODE: std::sync::OnceLock<JsonStringCompatMode> = std::sync::OnceLock::new();
 
+fn explicit_compat_mode_from_value(value: Option<&str>) -> Option<JsonStringCompatMode> {
+    value.map(|value| {
+        if !value.is_empty() && value != "0" {
+            JsonStringCompatMode::LlGuidanceNative
+        } else {
+            JsonStringCompatMode::JsonSchema
+        }
+    })
+}
+
+fn explicit_compat_mode_from_env() -> Option<JsonStringCompatMode> {
+    let value = std::env::var_os(GLRMASK_LLGUIDANCE_COMPAT_ENV)?;
+    explicit_compat_mode_from_value(Some(value.to_string_lossy().as_ref()))
+}
+
 fn initial_compat_mode() -> JsonStringCompatMode {
+    // An explicit process-level policy must win even when the executable name
+    // happens to look like a test binary. Publication/benchmark executables may
+    // legitimately contain "glrmask" in their names (for example
+    // `final-jsb-glrmask`); treating the name heuristic as higher priority
+    // silently switches them to the much larger full-JSON lexical language.
+    if let Some(mode) = explicit_compat_mode_from_env() {
+        return mode;
+    }
     if is_test_binary() {
         JsonStringCompatMode::JsonSchema
     } else {
@@ -4945,6 +4971,29 @@ mod tests {
         JsonStringCompatMode, JsonStringContext, TEST_COMPAT_MODE,
     };
     use crate::json_schema::config::JsonSchemaConfig;
+
+    #[test]
+    fn publication_runner_name_is_not_misclassified_as_test_binary() {
+        assert!(!super::executable_name_looks_like_test("final-jsb-glrmask"));
+        assert!(super::executable_name_looks_like_test("integration-1234"));
+        assert!(super::executable_name_looks_like_test("json_schema_test-1234"));
+    }
+
+    #[test]
+    fn explicit_llguidance_compat_overrides_test_binary_default() {
+        // Cargo test binaries intentionally default to full JSON semantics, but
+        // an explicit process-level compatibility policy must remain authoritative.
+        // Test the parsing logic directly to avoid mutating process env in parallel.
+        assert_eq!(
+            super::explicit_compat_mode_from_value(Some("1")),
+            Some(JsonStringCompatMode::LlGuidanceNative),
+        );
+        assert_eq!(
+            super::explicit_compat_mode_from_value(Some("0")),
+            Some(JsonStringCompatMode::JsonSchema),
+        );
+        assert_eq!(super::explicit_compat_mode_from_value(None), None);
+    }
 
     #[test]
     fn lazy_ordinary_bounded_strings_are_enabled_independent_of_bound() {
