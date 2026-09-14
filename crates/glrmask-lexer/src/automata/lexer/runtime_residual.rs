@@ -4475,6 +4475,195 @@ impl VirtualResidualRuntime {
         )
     }
 
+    /// Return the sound pre-minimization finite-mask coordinate for one exact
+    /// bounded-code residual. This is the same count-collapse stencil used by
+    /// `build_finite_mask_projection`, but it does not materialize the DFA or
+    /// its minimized state mapping. Equal returned coordinates therefore imply
+    /// equal one-model-token behavior, although unequal coordinates may still
+    /// be equivalent after minimization.
+    pub(super) fn direct_coordinate_finite_mask_dense_key(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        max_token_len: usize,
+    ) -> Option<(u32, u32)> {
+        if source.runtime_index != self.runtime_index || max_token_len == 0 {
+            return None;
+        }
+        let store = self.store.lock().ok()?;
+        let oracle = store.liveness_oracle.as_ref()?;
+        let minimum_body_width = oracle.body.min_match_byte_len()?.max(1);
+        let crossed_boundaries = max_token_len
+            .div_ceil(minimum_body_width)
+            .saturating_add(1);
+        if oracle.min > crossed_boundaries.saturating_add(1) {
+            return None;
+        }
+        let desired_mask_max = oracle
+            .min
+            .checked_add(crossed_boundaries)?
+            .checked_add(1)?;
+        let mask_max = oracle.max.min(desired_mask_max);
+
+        let pattern_states = oracle.pattern.num_states();
+        let body_states = oracle.body.num_states();
+        let prefix_len = oracle.prefix.len();
+        let suffix_len = oracle.suffix.len();
+        let pattern = source.coordinate.pattern_state as usize;
+        if pattern >= pattern_states {
+            return None;
+        }
+        let prefix_block = prefix_len.checked_mul(pattern_states)?;
+        let body_layer = body_states.checked_mul(pattern_states)?;
+        let body_block = mask_max.checked_add(1)?.checked_mul(body_layer)?;
+        let suffix_slots = suffix_len.saturating_sub(1);
+        let suffix_block = suffix_slots.checked_mul(pattern_states)?;
+        let local = match source.coordinate.envelope {
+            BoundedCodeEnvelopeState::Prefix { next } => {
+                if next >= prefix_len {
+                    return None;
+                }
+                next.checked_mul(pattern_states)?.checked_add(pattern)?
+            }
+            BoundedCodeEnvelopeState::Body {
+                completed,
+                body_state,
+            } => {
+                let body_state = body_state as usize;
+                if body_state >= body_states || completed > oracle.max {
+                    return None;
+                }
+                let distance_to_upper = oracle.max - completed;
+                let mapped_completed = if completed < oracle.min {
+                    completed
+                } else if distance_to_upper <= crossed_boundaries {
+                    mask_max.checked_sub(distance_to_upper)?
+                } else {
+                    oracle.min
+                };
+                if mapped_completed > mask_max {
+                    return None;
+                }
+                prefix_block
+                    .checked_add(mapped_completed.checked_mul(body_layer)?)?
+                    .checked_add(body_state.checked_mul(pattern_states)?)?
+                    .checked_add(pattern)?
+            }
+            BoundedCodeEnvelopeState::Suffix { next } => {
+                if next == 0 || next >= suffix_len {
+                    return None;
+                }
+                prefix_block
+                    .checked_add(body_block)?
+                    .checked_add((next - 1).checked_mul(pattern_states)?)?
+                    .checked_add(pattern)?
+            }
+            BoundedCodeEnvelopeState::Done => prefix_block
+                .checked_add(body_block)?
+                .checked_add(suffix_block)?
+                .checked_add(pattern)?,
+        };
+        Some((self.runtime_index, u32::try_from(local).ok()?))
+    }
+
+    /// Prove that every live string in a finite byte-language slice can be
+    /// consumed from this exact residual without losing the current terminal.
+    /// The slice is supplied in byte-class form so the product explores only
+    /// distinct `(slice class, residual class)` transitions.
+    pub(super) fn direct_coordinate_parser_transparent_byte_dfa(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_can_reach_accepting: &[bool],
+        slice_language_finite: bool,
+        work_limit: usize,
+    ) -> Option<bool> {
+        let slice_state_count = slice_can_reach_accepting.len();
+        if source.runtime_index != self.runtime_index
+            || slice_state_count == 0
+            || slice_class_count == 0
+            || slice_class_count > 256
+            || slice_start as usize >= slice_state_count
+            || slice_transitions.len() != slice_state_count.checked_mul(slice_class_count)?
+            || slice_byte_to_class
+                .iter()
+                .any(|&class| class as usize >= slice_class_count)
+        {
+            return None;
+        }
+
+        let mut store = self.store.lock().ok()?;
+        if store.oracle_language_finite == Some(true) && !slice_language_finite {
+            return Some(false);
+        }
+        let oracle_byte_to_class = store.oracle_byte_to_class.as_ref()?;
+        let oracle_class_count = oracle_byte_to_class
+            .iter()
+            .copied()
+            .max()
+            .map_or(0usize, |class| class as usize + 1);
+        if oracle_class_count == 0 {
+            return None;
+        }
+        let mut pair_seen = vec![false; slice_class_count * oracle_class_count];
+        let mut representatives = Vec::<u8>::new();
+        for byte in 0u16..=255 {
+            let byte = byte as u8;
+            let pair = slice_byte_to_class[byte as usize] as usize * oracle_class_count
+                + oracle_byte_to_class[byte as usize] as usize;
+            if !pair_seen[pair] {
+                pair_seen[pair] = true;
+                representatives.push(byte);
+            }
+        }
+
+        let oracle = store.liveness_oracle.as_mut()?;
+        let mut future_cache = FxHashMap::<BoundedCodeOracleCoordinate, bool>::default();
+        let mut seen = FxHashSet::<(u32, BoundedCodeOracleCoordinate)>::default();
+        let mut queue = VecDeque::from([(slice_start, source.coordinate)]);
+        let mut work = 0usize;
+        while let Some((slice_state, coordinate)) = queue.pop_front() {
+            if !seen.insert((slice_state, coordinate)) {
+                continue;
+            }
+            let row = (slice_state as usize).checked_mul(slice_class_count)?;
+            for &byte in &representatives {
+                let class = slice_byte_to_class[byte as usize] as usize;
+                let slice_target = *slice_transitions.get(row + class)?;
+                if slice_target as usize >= slice_state_count
+                    || !slice_can_reach_accepting[slice_target as usize]
+                {
+                    continue;
+                }
+                work = work.saturating_add(1);
+                if work > work_limit {
+                    return None;
+                }
+                let Some(target) = oracle.step_coordinate(coordinate, byte) else {
+                    return Some(false);
+                };
+                let target_future = if oracle.coordinate_accepting(target) {
+                    true
+                } else if let Some(&future) = future_cache.get(&target) {
+                    future
+                } else {
+                    let future = oracle.has_future(target);
+                    future_cache.insert(target, future);
+                    future
+                };
+                if !target_future {
+                    return Some(false);
+                }
+                if !seen.contains(&(slice_target, target)) {
+                    queue.push_back((slice_target, target));
+                }
+            }
+        }
+        Some(true)
+    }
+
     pub(super) fn state_for_direct_coordinate(
         &self,
         source: VirtualResidualDirectCoordinate,
@@ -6346,6 +6535,68 @@ mod tests {
                 assert_eq!(runtime.state_for_direct_coordinate(direct), Some(next_state));
             }
         }
+    }
+
+    #[test]
+    fn direct_coordinate_dense_mask_key_refines_full_finite_projection() {
+        let unbounded = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(bounded_code_body()),
+                min: 0,
+                max: None,
+            },
+            bytes(b">")
+        ]);
+        let expr = Expr::Intersect {
+            expr: Box::new(unbounded),
+            intersect: Box::new(bounded_code_envelope_expr(0, 80)),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
+        let runtime = Arc::new(
+            VirtualResidualRuntime::new_dynamic(
+                &expr, 0, 0, 1, 2, 1, allocator, owners,
+            )
+            .expect("bounded-code dynamic runtime should certify a direct coordinate"),
+        );
+        let max_token_len = 8usize;
+        let (_, _, _, projection) = Arc::clone(&runtime)
+            .build_finite_mask_projection(max_token_len, 10_000)
+            .expect("fixture should admit a finite mask projection");
+
+        let mut coordinate = runtime
+            .direct_coordinate_for_state(1)
+            .expect("dynamic runtime root should expose a direct coordinate");
+        let mut by_dense = FxHashMap::<(u32, u32), u32>::default();
+        let mut exact_states = 0usize;
+        let mut alias_count = 0usize;
+        for &byte in std::iter::once(&b'<').chain(std::iter::repeat_n(&b'a', 70)) {
+            coordinate = runtime
+                .direct_coordinate_step(coordinate, byte)
+                .expect("long valid body prefix should remain live");
+            let state = runtime
+                .state_for_direct_coordinate(coordinate)
+                .expect("reachable direct coordinate should materialize");
+            let Some(key) = runtime
+                .direct_coordinate_finite_mask_dense_key(coordinate, max_token_len)
+            else {
+                continue;
+            };
+            exact_states += 1;
+            let projected = projection
+                .project(state)
+                .expect("reachable exact state must project");
+            if let Some(previous) = by_dense.insert(key, projected) {
+                alias_count += 1;
+                assert_eq!(
+                    previous, projected,
+                    "equal dense one-token coordinates must map to one minimized projection state",
+                );
+            }
+        }
+        assert!(exact_states > 40, "fixture should traverse the deep exact count interval");
+        assert!(alias_count > 20, "dense key should collapse many deep-interior exact counts");
     }
 
     #[test]

@@ -10873,6 +10873,43 @@ impl Tokenizer {
     }
 
     #[doc(hidden)]
+    pub fn virtual_residual_direct_coordinate_finite_mask_dense_key(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        max_token_len: usize,
+    ) -> Option<(u32, u32)> {
+        self.virtual_residuals
+            .get(source.runtime_index as usize)?
+            .direct_coordinate_finite_mask_dense_key(source, max_token_len)
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_residual_direct_coordinate_parser_transparent_byte_dfa(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_can_reach_accepting: &[bool],
+        slice_language_finite: bool,
+        work_limit: usize,
+    ) -> Option<bool> {
+        self.virtual_residuals
+            .get(source.runtime_index as usize)?
+            .direct_coordinate_parser_transparent_byte_dfa(
+                source,
+                slice_start,
+                slice_class_count,
+                slice_byte_to_class,
+                slice_transitions,
+                slice_can_reach_accepting,
+                slice_language_finite,
+                work_limit,
+            )
+    }
+
+    #[doc(hidden)]
     pub fn virtual_residual_state_for_direct_coordinate(
         &self,
         source: VirtualResidualDirectCoordinate,

@@ -2271,9 +2271,45 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             }
         }
     }
-    let trie = master_decision
-        .and_then(|_| vocab.llg_master_trie())
-        .map_or(trie, |slice| slice.trie());
+    const OPTIONAL_SPACE_NONSPACE_SLICE: u32 = 0x40;
+    let direct_residual_slice = if std::env::var_os(
+        "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE",
+    )
+    .is_some()
+    {
+        first_match_direct_root.and_then(|(coordinate, _, _)| {
+            let slice = vocab.llg_slice_by_cache_id(OPTIONAL_SPACE_NONSPACE_SLICE)?;
+            let work_limit = std::env::var(
+                "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_WORK_LIMIT",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(8 * 1024);
+            let result = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate_parser_transparent_byte_dfa(
+                    coordinate,
+                    slice.dfa().start_state(),
+                    slice.dfa().class_count(),
+                    slice.dfa().byte_to_class_map(),
+                    slice.dfa().transition_table(),
+                    slice.dfa().can_reach_accepting_map(),
+                    slice.dfa().has_finite_language(),
+                    work_limit,
+                );
+            (result == Some(true)).then_some(slice)
+        })
+    } else {
+        None
+    };
+    let trie = if let Some(slice) = direct_residual_slice {
+        slice.trie()
+    } else {
+        master_decision
+            .and_then(|_| vocab.llg_master_trie())
+            .map_or(trie, |slice| slice.trie())
+    };
     let deferred_output = vocab.is_grammar_quotiented()
         && master_decision.is_none()
         && state.constraint.ignore_terminal.is_none()
@@ -4850,6 +4886,11 @@ fn dynamic_mask_lookup_query(
         entries: SmallVec::new(),
     };
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+    let virtual_dense_cache_enabled = std::env::var_os(
+        "GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CACHE_KEY",
+    )
+    .is_some();
+    let max_token_byte_len = virtual_dense_cache_enabled.then(|| vocab.max_token_byte_len());
     let observation_cache_enabled =
         std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
             && vocab.has_terminal_observation_classes()
@@ -4899,7 +4940,25 @@ fn dynamic_mask_lookup_query(
         // `(matched, possible-future)` pair. Equal precomputed exact quotient
         // classes therefore have the same next-token mask; after a finalization
         // both executions enter the same parser child and common lexer reset.
-        let lexer_key = if observation_cache_enabled
+        let lexer_key = if virtual_dense_cache_enabled
+            && let Some(coordinate) = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate(tokenizer_state)
+            && let Some((runtime, projected_state)) = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate_finite_mask_dense_key(
+                    coordinate,
+                    max_token_byte_len.unwrap_or(0),
+                )
+        {
+            DynamicMaskLexerStateKey::VirtualDenseProjection {
+                runtime,
+                state: projected_state,
+                initial: tokenizer_state == state.constraint.tokenizer.initial_state(),
+            }
+        } else if observation_cache_enabled
             && exclusions_empty
             && state.constraint.ignore_terminal.is_none_or(|ignore| {
                 let ignore = ignore as usize;
