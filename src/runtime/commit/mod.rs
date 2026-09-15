@@ -421,6 +421,44 @@ impl FlatFrontierScratch {
         }
     }
 
+    fn replace_state_with_shared_uniform_stack_keys(
+        &mut self,
+        state: &mut ParserStateMap,
+        keys: &[u32],
+        stack: &[u32],
+        acc: &TerminalsDisallowed,
+    ) -> bool {
+        if keys.is_empty()
+            || keys.windows(2).any(|pair| pair[0] >= pair[1])
+            || !self.can_recycle_old_state(state, 1)
+        {
+            return false;
+        }
+        self.reclaim_retired_gss();
+        let Some(pool_index) = self
+            .gss_pool
+            .iter()
+            .rposition(|gss| gss.can_replace_single_path_state_in_place(stack))
+        else {
+            return false;
+        };
+        let mut shared = self.gss_pool.swap_remove(pool_index);
+        if !shared.try_replace_single_path_state_in_place(stack, acc.clone()) {
+            self.gss_pool.push(shared);
+            return false;
+        }
+
+        let mut new_entries = SmallVec::<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>::new();
+        new_entries.reserve(keys.len());
+        for &key in &keys[..keys.len() - 1] {
+            new_entries.push((key, shared.clone()));
+        }
+        new_entries.push((*keys.last().unwrap(), shared));
+        let old_entries = std::mem::replace(&mut state.entries, new_entries);
+        self.recycle_old_entries(old_entries);
+        true
+    }
+
     fn replace_state_with_uniform_stack_keys(
         &mut self,
         state: &mut ParserStateMap,
@@ -7098,19 +7136,17 @@ fn try_commit_direct_linear_in_place(
             &bytes[offset..],
             tokenizer_state,
             tokenizer_scratch,
-        ) || tokenizer_scratch.matches.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX
-        {
+        ) {
             return None;
         }
 
         let top = *work.last()?;
         let actionable = ActionableTerminals::SingleState(top);
-        let normalized_matches = collect_unique_actionable_matches(
+        let normalized_matches = collect_unique_actionable_reusable_matches(
             constraint,
             Some(&actionable),
             constraint.ignore_terminal,
             &tokenizer_scratch.matches,
-            None,
         );
         if debug_path {
             eprintln!(
@@ -7131,22 +7167,44 @@ fn try_commit_direct_linear_in_place(
         }
 
         let mut viable_end_states = SmallVec::<[u32; INLINE_PARSER_STATE_CAPACITY]>::new();
-        for &end_state in &tokenizer_scratch.states {
-            let viable = if end_state == initial_tokenizer_state {
-                true
-            } else {
-                flat_stack_may_advance_on_any(
+        if tokenizer_scratch.states.len() > SMALL_NORMALIZED_MATCH_LINEAR_SCAN_MAX {
+            // Wide lexer-only continuation after a parser action: reconstruct
+            // the one current parser stack once, compute exact admission over
+            // the union of all end-state futures, then classify each lexer
+            // state by a cheap bitset intersection. This is the same exact
+            // batching used by the authoritative queue path, but avoids one
+            // parser query per raw lexer state.
+            let probe_gss = ParserGSS::from_single_stack(work.to_vec(), acc.clone());
+            let admitted = batched_end_state_admitted_terminals(
+                constraint,
+                &probe_gss,
+                &tokenizer_scratch.states,
+            );
+            for &end_state in &tokenizer_scratch.states {
+                if end_state_may_advance_with_batch(
                     constraint,
-                    work,
-                    constraint.tokenizer.possible_future_terminals(end_state),
-                    &mut frontier.action,
-                )?
-            };
-            if viable {
-                if viable_end_states.len() == viable_end_states.capacity() {
-                    return None;
+                    &probe_gss,
+                    end_state,
+                    admitted.as_ref(),
+                ) {
+                    viable_end_states.push(end_state);
                 }
-                viable_end_states.push(end_state);
+            }
+        } else {
+            for &end_state in &tokenizer_scratch.states {
+                let viable = if end_state == initial_tokenizer_state {
+                    true
+                } else {
+                    flat_stack_may_advance_on_any(
+                        constraint,
+                        work,
+                        constraint.tokenizer.possible_future_terminals(end_state),
+                        &mut frontier.action,
+                    )?
+                };
+                if viable {
+                    viable_end_states.push(end_state);
+                }
             }
         }
 
@@ -7211,7 +7269,7 @@ fn try_commit_direct_linear_in_place(
     };
 
     frontier
-        .replace_state_with_uniform_stack_keys(state, &final_keys, work, &acc)
+        .replace_state_with_shared_uniform_stack_keys(state, &final_keys, work, &acc)
         .then_some(Ok(()))
 }
 

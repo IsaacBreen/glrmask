@@ -94,6 +94,38 @@ trait FullWalkTransitionTable {
     /// a singleton raw state. The direct first-match lane uses this only as a
     /// safety check before bypassing the generic subset/config representation.
     fn exact_raw_state(&self, state: u32) -> Option<u32>;
+
+    /// If `state` is a singleton virtual residual owned by `terminal`, return
+    /// its direct residual coordinate when that residual can still extend.
+    /// This is used only by the maximal-munch guard: it avoids materializing a
+    /// succession of exact virtual runtime states merely to ask whether the
+    /// previously matched terminal can keep consuming bytes.
+    #[inline(always)]
+    fn direct_prune_coordinates(
+        &self,
+        _state: u32,
+        _terminal: TerminalID,
+    ) -> Option<SmallVec<[VirtualResidualDirectCoordinate; 4]>> {
+        None
+    }
+
+    /// Advance a direct maximal-munch memory by one byte. Implementations only
+    /// receive coordinates previously returned by `direct_prune_coordinates`.
+    #[inline(always)]
+    fn direct_prune_step(
+        &self,
+        _coordinate: VirtualResidualDirectCoordinate,
+        _byte: u8,
+    ) -> DirectPruneStep {
+        DirectPruneStep::Dead
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectPruneStep {
+    Dead,
+    Matched,
+    Live(VirtualResidualDirectCoordinate),
 }
 
 #[derive(Clone, Copy)]
@@ -299,6 +331,11 @@ struct FullWalkConfigTransitions<'a, 'b> {
     cache: &'a mut DynamicNfaScanCache<'b>,
     error: Option<String>,
     raw_cell_rows: Vec<Option<Box<[u64; 256]>>>,
+    raw_target_cells: Vec<u64>,
+    virtual_dense_row_by_raw_state: Vec<u32>,
+    virtual_dense_row_ids: FxHashMap<(u32, u32), u32>,
+    virtual_dense_rows: Vec<Box<[u64; 256]>>,
+    virtual_dense_cell_cache_enabled: bool,
     profile: bool,
     cell_calls: usize,
     raw_cell_hits: usize,
@@ -310,6 +347,9 @@ struct FullWalkConfigTransitions<'a, 'b> {
     raw_config_for_start_ns: u64,
     raw_has_finalizer_ns: u64,
     future_contains_calls: usize,
+    future_contains_cache: FxHashMap<(u32, TerminalID), bool>,
+    future_contains_by_terminal: FxHashMap<TerminalID, usize>,
+    future_contains_by_state: FxHashMap<(u32, TerminalID), usize>,
     future_contains_ns: u64,
     future_intersects_calls: usize,
     future_intersects_ns: u64,
@@ -324,9 +364,58 @@ struct FullWalkConfigTransitions<'a, 'b> {
     intern_calls_start: usize,
     intern_hits_start: usize,
     intern_new_start: usize,
+    profile_max_token_len: usize,
+    profile_virtual_exact_sources: FxHashSet<u32>,
+    profile_virtual_dense_sources: FxHashSet<(u32, u32)>,
+    profile_virtual_exact_pairs: FxHashSet<(u32, u8)>,
+    profile_virtual_dense_pairs: FxHashSet<(u32, u32, u8)>,
 }
 
 impl FullWalkConfigTransitions<'_, '_> {
+    fn virtual_dense_row_for_raw_state(&mut self, raw_state: u32) -> Option<usize> {
+        const UNKNOWN: u32 = u32::MAX;
+        const NONE: u32 = u32::MAX - 1;
+        let raw_index = raw_state as usize;
+        if self.virtual_dense_row_by_raw_state.len() <= raw_index {
+            self.virtual_dense_row_by_raw_state
+                .resize(raw_index + 1, UNKNOWN);
+        }
+        let cached = self.virtual_dense_row_by_raw_state[raw_index];
+        if cached != UNKNOWN {
+            return (cached != NONE).then_some(cached as usize);
+        }
+        let Some(coordinate) = self
+            .cache
+            .tokenizer()
+            .virtual_residual_direct_coordinate(raw_state)
+        else {
+            self.virtual_dense_row_by_raw_state[raw_index] = NONE;
+            return None;
+        };
+        let Some(key) = self
+            .cache
+            .tokenizer()
+            .virtual_residual_direct_coordinate_finite_mask_dense_key(
+                coordinate,
+                self.profile_max_token_len,
+            )
+        else {
+            self.virtual_dense_row_by_raw_state[raw_index] = NONE;
+            return None;
+        };
+        let row = if let Some(&row) = self.virtual_dense_row_ids.get(&key) {
+            row
+        } else {
+            let row = u32::try_from(self.virtual_dense_rows.len()).ok()?;
+            self.virtual_dense_row_ids.insert(key, row);
+            self.virtual_dense_rows
+                .push(Box::new([u64::MAX; 256]));
+            row
+        };
+        self.virtual_dense_row_by_raw_state[raw_index] = row;
+        Some(row as usize)
+    }
+
     fn finish(self) -> Result<(), String> {
         if self.profile {
             eprintln!(
@@ -385,6 +474,36 @@ impl FullWalkConfigTransitions<'_, '_> {
                 self.single_finalizer_continues_calls,
                 self.single_finalizer_continues_ns as f64 / 1e6,
             );
+            if !self.future_contains_by_terminal.is_empty() {
+                let mut rows = self
+                    .future_contains_by_terminal
+                    .iter()
+                    .map(|(&terminal, &calls)| (terminal, calls))
+                    .collect::<Vec<_>>();
+                rows.sort_unstable_by_key(|&(terminal, _)| terminal);
+                eprintln!("[glrmask/profile][future_contains_by_terminal] {:?}", rows);
+            }
+            if !self.future_contains_by_state.is_empty() {
+                let mut rows = self
+                    .future_contains_by_state
+                    .iter()
+                    .map(|(&(state, terminal), &calls)| (calls, state, terminal))
+                    .collect::<Vec<_>>();
+                rows.sort_unstable_by(|a, b| b.cmp(a));
+                rows.truncate(12);
+                eprintln!(
+                    "[glrmask/profile][future_contains_states] distinct={} top={:?}",
+                    self.future_contains_by_state.len(),
+                    rows
+                );
+            }
+            eprintln!(
+                "[glrmask/profile][config_virtual_projection_work] exact_sources={} dense_sources={} exact_pairs={} dense_pairs={}",
+                self.profile_virtual_exact_sources.len(),
+                self.profile_virtual_dense_sources.len(),
+                self.profile_virtual_exact_pairs.len(),
+                self.profile_virtual_dense_pairs.len(),
+            );
         }
         self.error.map_or(Ok(()), Err)
     }
@@ -420,6 +539,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             self.cell_calls += 1;
         }
         let raw_state = self.cache.raw_state_for_config(state);
+        let mut virtual_dense_row = None;
         if let Some(raw_state) = raw_state {
             if self.profile {
                 self.max_raw_state_seen = self.max_raw_state_seen.max(raw_state);
@@ -439,12 +559,42 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                     };
                 }
             }
+            if self.virtual_dense_cell_cache_enabled
+                && raw_state >= self.cache.tokenizer().num_states()
+                && let Some(row_id) = self.virtual_dense_row_for_raw_state(raw_state)
+            {
+                let packed = self.virtual_dense_rows[row_id][byte as usize];
+                if packed != UNKNOWN {
+                    return FullWalkConfigCell {
+                        target: packed as u32,
+                        has_finalizer: (packed >> 32) & 1 != 0,
+                    };
+                }
+                virtual_dense_row = Some(row_id);
+            }
             if self.profile {
                 self.raw_cell_misses += 1;
                 if raw_state < self.cache.tokenizer().num_states() {
                     self.physical_raw_cell_misses += 1;
                 } else {
                     self.virtual_raw_cell_misses += 1;
+                    self.profile_virtual_exact_sources.insert(raw_state);
+                    self.profile_virtual_exact_pairs.insert((raw_state, byte));
+                    if let Some(coordinate) = self
+                        .cache
+                        .tokenizer()
+                        .virtual_residual_direct_coordinate(raw_state)
+                        && let Some((runtime, projected)) = self
+                            .cache
+                            .tokenizer()
+                            .virtual_residual_direct_coordinate_finite_mask_dense_key(
+                                coordinate,
+                                self.profile_max_token_len,
+                            )
+                    {
+                        self.profile_virtual_dense_sources.insert((runtime, projected));
+                        self.profile_virtual_dense_pairs.insert((runtime, projected, byte));
+                    }
                 }
             }
         } else if self.profile {
@@ -475,31 +625,50 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                     has_finalizer: false,
                 }
             } else {
-                let config_started = self.profile.then(std::time::Instant::now);
-                match self.cache.config_for_raw_start(raw_target) {
-                    Ok(target) => {
-                        if let Some(started) = config_started {
-                            self.raw_config_for_start_ns = self
-                                .raw_config_for_start_ns
-                                .saturating_add(started.elapsed().as_nanos() as u64);
-                        }
-                        let finalizer_started = self.profile.then(std::time::Instant::now);
-                        let has_finalizer = self.cache.config_has_finalizer(target);
-                        if let Some(started) = finalizer_started {
-                            self.raw_has_finalizer_ns = self
-                                .raw_has_finalizer_ns
-                                .saturating_add(started.elapsed().as_nanos() as u64);
-                        }
-                        FullWalkConfigCell {
-                            target,
-                            has_finalizer,
-                        }
-                    },
-                    Err(error) => {
-                        self.error = Some(error);
-                        FullWalkConfigCell {
-                            target: u32::MAX,
-                            has_finalizer: false,
+                let raw_target_index = raw_target as usize;
+                let cached_target = if raw_target_index < self.raw_target_cells.len() {
+                    let packed = self.raw_target_cells[raw_target_index];
+                    (packed != UNKNOWN).then_some(packed)
+                } else {
+                    None
+                };
+                if let Some(packed) = cached_target {
+                    FullWalkConfigCell {
+                        target: packed as u32,
+                        has_finalizer: (packed >> 32) & 1 != 0,
+                    }
+                } else {
+                    let config_started = self.profile.then(std::time::Instant::now);
+                    match self.cache.config_for_raw_start(raw_target) {
+                        Ok(target) => {
+                            if let Some(started) = config_started {
+                                self.raw_config_for_start_ns = self
+                                    .raw_config_for_start_ns
+                                    .saturating_add(started.elapsed().as_nanos() as u64);
+                            }
+                            let finalizer_started = self.profile.then(std::time::Instant::now);
+                            let has_finalizer = self.cache.config_has_finalizer(target);
+                            if let Some(started) = finalizer_started {
+                                self.raw_has_finalizer_ns = self
+                                    .raw_has_finalizer_ns
+                                    .saturating_add(started.elapsed().as_nanos() as u64);
+                            }
+                            if self.raw_target_cells.len() <= raw_target_index {
+                                self.raw_target_cells.resize(raw_target_index + 1, UNKNOWN);
+                            }
+                            self.raw_target_cells[raw_target_index] =
+                                u64::from(target) | ((has_finalizer as u64) << 32);
+                            FullWalkConfigCell {
+                                target,
+                                has_finalizer,
+                            }
+                        },
+                        Err(error) => {
+                            self.error = Some(error);
+                            FullWalkConfigCell {
+                                target: u32::MAX,
+                                has_finalizer: false,
+                            }
                         }
                     }
                 }
@@ -533,6 +702,14 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             let row = self.raw_cell_rows[raw_state]
                 .get_or_insert_with(|| Box::new([UNKNOWN; 256]));
             let slot = unsafe { row.get_unchecked_mut(byte as usize) };
+            if *slot == UNKNOWN {
+                *slot = u64::from(cell.target) | ((cell.has_finalizer as u64) << 32);
+            }
+        }
+        if self.error.is_none()
+            && let Some(row_id) = virtual_dense_row
+        {
+            let slot = &mut self.virtual_dense_rows[row_id][byte as usize];
             if *slot == UNKNOWN {
                 *slot = u64::from(cell.target) | ((cell.has_finalizer as u64) << 32);
             }
@@ -579,11 +756,17 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
+        if let Some(&cached) = self.future_contains_cache.get(&(state, terminal)) {
+            return cached;
+        }
         let started = self.profile.then(std::time::Instant::now);
         if self.profile {
             self.future_contains_calls += 1;
+            *self.future_contains_by_terminal.entry(terminal).or_default() += 1;
+            *self.future_contains_by_state.entry((state, terminal)).or_default() += 1;
         }
         let result = self.config_future_contains_exact(state, terminal);
+        self.future_contains_cache.insert((state, terminal), result);
         if let Some(started) = started {
             self.future_contains_ns = self
                 .future_contains_ns
@@ -638,12 +821,80 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     fn exact_raw_state(&self, state: u32) -> Option<u32> {
         self.cache.raw_state_for_config(state)
     }
+
+    #[inline(always)]
+    fn direct_prune_coordinates(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+    ) -> Option<SmallVec<[VirtualResidualDirectCoordinate; 4]>> {
+        let tokenizer = self.cache.tokenizer();
+        let mut direct = SmallVec::<[VirtualResidualDirectCoordinate; 4]>::new();
+        for index in 0..self.cache.config_len(state) {
+            let raw = self.cache.config_state(state, index);
+            if tokenizer.virtual_residual_terminal_for_state(raw) == Some(terminal) {
+                let coordinate = tokenizer.virtual_residual_direct_coordinate(raw)?;
+                if !tokenizer
+                    .virtual_residual_direct_coordinate_has_future(coordinate)?
+                {
+                    continue;
+                }
+                if !direct.contains(&coordinate) {
+                    direct.push(coordinate);
+                }
+                continue;
+            }
+            // A physical/other-runtime member that may still contribute the
+            // same terminal means a single direct residual coordinate is not
+            // a complete representation of this maximal-munch memory.
+            if tokenizer
+                .possible_future_terminals(raw)
+                .contains(terminal as usize)
+            {
+                return None;
+            }
+        }
+        Some(direct)
+    }
+
+    #[inline(always)]
+    fn direct_prune_step(
+        &self,
+        coordinate: VirtualResidualDirectCoordinate,
+        byte: u8,
+    ) -> DirectPruneStep {
+        let tokenizer = self.cache.tokenizer();
+        let Some(target) = tokenizer.virtual_residual_direct_coordinate_step(coordinate, byte)
+        else {
+            return DirectPruneStep::Dead;
+        };
+        if tokenizer
+            .virtual_residual_direct_coordinate_accepting(target)
+            .unwrap_or(false)
+        {
+            return DirectPruneStep::Matched;
+        }
+        if tokenizer
+            .virtual_residual_direct_coordinate_has_future(target)
+            .unwrap_or(false)
+        {
+            DirectPruneStep::Live(target)
+        } else {
+            DirectPruneStep::Dead
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
 enum FullWalkPruneGuard {
     Passed,
-    Pending(SmallVec<[(u32, TerminalID); 2]>),
+    Pending(SmallVec<[FullWalkPruneMemory; 2]>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FullWalkPruneMemory {
+    Exact(u32, TerminalID),
+    Direct(VirtualResidualDirectCoordinate, TerminalID),
 }
 
 impl FullWalkPruneGuard {
@@ -654,18 +905,30 @@ impl FullWalkPruneGuard {
         match guard {
             InitialPruneGuard::Passed => Ok(Self::Passed),
             InitialPruneGuard::Pending { memories } => {
-                let mut projected = SmallVec::<[(u32, TerminalID); 2]>::new();
+                let mut projected = SmallVec::<[FullWalkPruneMemory; 2]>::new();
                 for &(state, _, terminal) in memories.iter() {
-                    projected.push((
-                        // `InitialPruneGuard::new` already stores lexer states
-                        // in the mask-runtime tokenizer coordinate. Do not
-                        // project them a second time here: virtual projection
-                        // state IDs are not exact source-runtime state IDs.
-                        transitions.root_state(state)?,
-                        terminal,
-                    ));
+                    // `InitialPruneGuard::new` already stores lexer states in
+                    // the mask-runtime tokenizer coordinate. Do not project
+                    // them a second time here: virtual projection state IDs
+                    // are not exact source-runtime state IDs.
+                    let state = transitions.root_state(state)?;
+                    if let Some(coordinates) = transitions.direct_prune_coordinates(state, terminal)
+                    {
+                        for coordinate in coordinates {
+                            let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                            if !projected.contains(&memory) {
+                                projected.push(memory);
+                            }
+                        }
+                    } else {
+                        projected.push(FullWalkPruneMemory::Exact(state, terminal));
+                    }
                 }
-                Ok(Self::Pending(projected))
+                Ok(if projected.is_empty() {
+                    Self::Passed
+                } else {
+                    Self::Pending(projected)
+                })
             }
         }
     }
@@ -686,19 +949,44 @@ impl FullWalkPruneGuard {
         let Self::Pending(memories) = self else {
             return Some(Self::Passed);
         };
-        let mut next = SmallVec::<[(u32, TerminalID); 2]>::new();
-        for &(lexer_state, terminal) in memories {
-            let target = transitions.transition(lexer_state, byte);
-            if target == u32::MAX {
-                continue;
-            }
-            if transitions.matched_terminals(target).contains(&terminal) {
-                return None;
-            }
-            if transitions.future_contains(target, terminal)
-                && !next.contains(&(target, terminal))
-            {
-                next.push((target, terminal));
+        let mut next = SmallVec::<[FullWalkPruneMemory; 2]>::new();
+        for &memory in memories {
+            match memory {
+                FullWalkPruneMemory::Direct(coordinate, terminal) => {
+                    match transitions.direct_prune_step(coordinate, byte) {
+                        DirectPruneStep::Dead => {}
+                        DirectPruneStep::Matched => return None,
+                        DirectPruneStep::Live(target) => {
+                            let memory = FullWalkPruneMemory::Direct(target, terminal);
+                            if !next.contains(&memory) {
+                                next.push(memory);
+                            }
+                        }
+                    }
+                }
+                FullWalkPruneMemory::Exact(lexer_state, terminal) => {
+                    let target = transitions.transition(lexer_state, byte);
+                    if target == u32::MAX {
+                        continue;
+                    }
+                    if transitions.matched_terminals(target).contains(&terminal) {
+                        return None;
+                    }
+                    if let Some(coordinates) = transitions.direct_prune_coordinates(target, terminal)
+                    {
+                        for coordinate in coordinates {
+                            let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                            if !next.contains(&memory) {
+                                next.push(memory);
+                            }
+                        }
+                    } else if transitions.future_contains(target, terminal) {
+                        let memory = FullWalkPruneMemory::Exact(target, terminal);
+                        if !next.contains(&memory) {
+                            next.push(memory);
+                        }
+                    }
+                }
             }
         }
         if next.is_empty() {
@@ -714,6 +1002,22 @@ impl FullWalkPruneGuard {
         lexer_state: u32,
         terminal: TerminalID,
     ) -> Self {
+        if let Some(coordinates) = transitions.direct_prune_coordinates(lexer_state, terminal) {
+            if coordinates.is_empty() {
+                return self.clone();
+            }
+            let mut memories = match self {
+                Self::Passed => SmallVec::new(),
+                Self::Pending(memories) => memories.clone(),
+            };
+            for coordinate in coordinates {
+                let memory = FullWalkPruneMemory::Direct(coordinate, terminal);
+                if !memories.contains(&memory) {
+                    memories.push(memory);
+                }
+            }
+            return Self::Pending(memories);
+        }
         if !transitions.future_contains(lexer_state, terminal) {
             return self.clone();
         }
@@ -721,8 +1025,9 @@ impl FullWalkPruneGuard {
             Self::Passed => SmallVec::new(),
             Self::Pending(memories) => memories.clone(),
         };
-        if !memories.contains(&(lexer_state, terminal)) {
-            memories.push((lexer_state, terminal));
+        let memory = FullWalkPruneMemory::Exact(lexer_state, terminal);
+        if !memories.contains(&memory) {
+            memories.push(memory);
         }
         Self::Pending(memories)
     }
@@ -1178,7 +1483,8 @@ fn full_walk_scalar_finalizer(
                 prune_guard: if Some(code) == constraint.ignore_terminal {
                     FullWalkPruneGuard::Passed
                 } else if transitions.single_finalizer_continues(target) {
-                    FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
+                    FullWalkPruneGuard::Passed
+                        .remember_terminal_match(transitions, target, code)
                 } else {
                     FullWalkPruneGuard::Passed
                 },
@@ -1273,7 +1579,7 @@ fn full_walk_scalar_finalizer_hot_single(
             prune_guard: if Some(code) == constraint.ignore_terminal {
                 FullWalkPruneGuard::Passed
             } else if transitions.single_finalizer_continues(target) {
-                FullWalkPruneGuard::Pending(smallvec::smallvec![(target, code)])
+                FullWalkPruneGuard::Passed.remember_terminal_match(transitions, target, code)
             } else {
                 FullWalkPruneGuard::Passed
             },
@@ -1550,6 +1856,46 @@ fn full_walk_many_state_from_branches(branches: FullWalkBranches) -> FullWalkMan
     FullWalkManyState::Branches(branches)
 }
 
+#[inline]
+fn full_walk_many_state_is_empty(state: &FullWalkManyState) -> bool {
+    matches!(state, FullWalkManyState::Branches(branches) if branches.is_empty())
+}
+
+fn full_walk_many_state_push_branch(
+    state: &mut Option<FullWalkManyState>,
+    branch: FullWalkBranch,
+) {
+    match state.take() {
+        None => {
+            let mut branches = FullWalkBranches::new();
+            full_walk_push_unique(&mut branches, branch);
+            *state = Some(FullWalkManyState::Branches(branches));
+        }
+        Some(FullWalkManyState::Branches(mut branches)) => {
+            full_walk_push_unique(&mut branches, branch);
+            *state = Some(full_walk_many_state_from_branches(branches));
+        }
+        Some(FullWalkManyState::ThreeSameParser {
+            lexers,
+            parser_node,
+        }) => {
+            let mut branches = FullWalkBranches::new();
+            for lexer_state in [lexers.0, lexers.1, lexers.2] {
+                full_walk_push_unique(
+                    &mut branches,
+                    FullWalkBranch {
+                        lexer_state,
+                        parser_node,
+                        prune_guard: FullWalkPruneGuard::Passed,
+                    },
+                );
+            }
+            full_walk_push_unique(&mut branches, branch);
+            *state = Some(full_walk_many_state_from_branches(branches));
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn full_walk_step_many_state<T: FullWalkTransitionTable>(
@@ -1789,7 +2135,7 @@ fn try_full_walk_mask(
                 vocab,
             };
             if root_branches.len() == 1 {
-                try_full_walk_mask_with_table::<_, true>(
+                try_full_walk_mask_with_table_dispatch::<_, true>(
                     state,
                     vocab,
                     trie,
@@ -1798,7 +2144,7 @@ fn try_full_walk_mask(
                     &mut table,
                 )
             } else {
-                try_full_walk_mask_with_table::<_, false>(
+                try_full_walk_mask_with_table_dispatch::<_, false>(
                     state,
                     vocab,
                     trie,
@@ -1853,7 +2199,7 @@ fn try_full_walk_mask(
                 vocab,
             };
             if root_branches.len() == 1 {
-                try_full_walk_mask_with_table::<_, true>(
+                try_full_walk_mask_with_table_dispatch::<_, true>(
                     state,
                     vocab,
                     trie,
@@ -1862,7 +2208,7 @@ fn try_full_walk_mask(
                     &mut table,
                 )
             } else {
-                try_full_walk_mask_with_table::<_, false>(
+                try_full_walk_mask_with_table_dispatch::<_, false>(
                     state,
                     vocab,
                     trie,
@@ -1895,6 +2241,11 @@ fn try_full_walk_mask(
                 cache: lexer_scan_cache,
                 error: None,
                 raw_cell_rows: Vec::new(),
+                raw_target_cells: Vec::new(),
+                virtual_dense_row_by_raw_state: Vec::new(),
+                virtual_dense_row_ids: FxHashMap::default(),
+                virtual_dense_rows: Vec::new(),
+                virtual_dense_cell_cache_enabled: dynamic_virtual_dense_cell_cache_experiment_enabled(),
                 profile,
                 cell_calls: 0,
                 raw_cell_hits: 0,
@@ -1906,6 +2257,9 @@ fn try_full_walk_mask(
                 raw_config_for_start_ns: 0,
                 raw_has_finalizer_ns: 0,
                 future_contains_calls: 0,
+                future_contains_cache: FxHashMap::default(),
+                future_contains_by_terminal: FxHashMap::default(),
+                future_contains_by_state: FxHashMap::default(),
                 future_contains_ns: 0,
                 future_intersects_calls: 0,
                 future_intersects_ns: 0,
@@ -1920,9 +2274,14 @@ fn try_full_walk_mask(
                 intern_calls_start,
                 intern_hits_start,
                 intern_new_start,
+                profile_max_token_len: vocab.max_token_byte_len(),
+                profile_virtual_exact_sources: FxHashSet::default(),
+                profile_virtual_dense_sources: FxHashSet::default(),
+                profile_virtual_exact_pairs: FxHashSet::default(),
+                profile_virtual_dense_pairs: FxHashSet::default(),
             };
             let result = if root_branches.len() == 1 {
-                try_full_walk_mask_with_table::<_, true>(
+                try_full_walk_mask_with_table_dispatch::<_, true>(
                     state,
                     vocab,
                     trie,
@@ -1931,7 +2290,7 @@ fn try_full_walk_mask(
                     &mut table,
                 )
             } else {
-                try_full_walk_mask_with_table::<_, false>(
+                try_full_walk_mask_with_table_dispatch::<_, false>(
                     state,
                     vocab,
                     trie,
@@ -1999,7 +2358,44 @@ fn direct_slice_prefix_contained_config<T: FullWalkTransitionTable>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_ROOT: bool>(
+#[inline]
+fn try_full_walk_mask_with_table_dispatch<
+    T: FullWalkTransitionTable,
+    const HOT_SINGLE_ROOT: bool,
+>(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_branches: &DynamicBranches,
+    buf: &mut [u32],
+    transitions: &mut T,
+) -> Result<bool, String> {
+    if direct_residual_defer_finalizer_experiment_enabled() {
+        try_full_walk_mask_with_table::<T, HOT_SINGLE_ROOT, true>(
+            state,
+            vocab,
+            trie,
+            root_branches,
+            buf,
+            transitions,
+        )
+    } else {
+        try_full_walk_mask_with_table::<T, HOT_SINGLE_ROOT, false>(
+            state,
+            vocab,
+            trie,
+            root_branches,
+            buf,
+            transitions,
+        )
+    }
+}
+
+fn try_full_walk_mask_with_table<
+    T: FullWalkTransitionTable,
+    const HOT_SINGLE_ROOT: bool,
+    const DEFER_FIRST_MATCH_FINALIZER: bool,
+>(
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
     trie: &DynamicMaskTrie,
@@ -2271,9 +2667,42 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             }
         }
     }
-    let trie = master_decision
-        .and_then(|_| vocab.llg_master_trie())
-        .map_or(trie, |slice| slice.trie());
+    const OPTIONAL_SPACE_NONSPACE_SLICE: u32 = 0x40;
+    let direct_residual_slice = if direct_residual_ascii_word_slice_experiment_enabled()
+    {
+        first_match_direct_root.and_then(|(coordinate, _, _)| {
+            let slice = vocab.llg_slice_by_cache_id(OPTIONAL_SPACE_NONSPACE_SLICE)?;
+            let work_limit = std::env::var(
+                "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_WORK_LIMIT",
+            )
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(8 * 1024);
+            let result = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate_parser_transparent_byte_dfa(
+                    coordinate,
+                    slice.dfa().start_state(),
+                    slice.dfa().class_count(),
+                    slice.dfa().byte_to_class_map(),
+                    slice.dfa().transition_table(),
+                    slice.dfa().can_reach_accepting_map(),
+                    slice.dfa().has_finite_language(),
+                    work_limit,
+                );
+            (result == Some(true)).then_some(slice)
+        })
+    } else {
+        None
+    };
+    let trie = if let Some(slice) = direct_residual_slice {
+        slice.trie()
+    } else {
+        master_decision
+            .and_then(|_| vocab.llg_master_trie())
+            .map_or(trie, |slice| slice.trie())
+    };
     let deferred_output = vocab.is_grammar_quotiented()
         && master_decision.is_none()
         && state.constraint.ignore_terminal.is_none()
@@ -2317,6 +2746,23 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             heap_first_match_direct.resize(stack_len, None);
             heap_first_match_direct.as_mut_slice()
         };
+    let defer_first_match_finalizer = DEFER_FIRST_MATCH_FINALIZER;
+    // This lane is experimental and disabled in production. Do not eagerly
+    // construct hundreds of `Option<FullWalkManyState>` stack slots on every
+    // mask when it is off; the old inline storage was a measurable hot-path
+    // tax even though none of the slots could ever be read.
+    let mut first_match_accepting_storage = if defer_first_match_finalizer {
+        vec![false; stack_len]
+    } else {
+        Vec::new()
+    };
+    let stack_first_match_accepting = first_match_accepting_storage.as_mut_slice();
+    let mut first_match_side_storage = if defer_first_match_finalizer {
+        std::iter::repeat_with(|| None).take(stack_len).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let stack_first_match_side = first_match_side_storage.as_mut_slice();
     let mut inline_parser = [0u32; 256];
     let mut heap_parser = Vec::<u32>::new();
     let stack_parser: &mut [u32] = if stack_len <= inline_parser.len() {
@@ -2352,6 +2798,9 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         stack_parser[0] = root_parser_nodes[0];
         if let Some((coordinate, _, _)) = first_match_direct_root {
             stack_first_match_direct[0] = Some(coordinate);
+            if defer_first_match_finalizer {
+                stack_first_match_accepting[0] = false;
+            }
         }
     } else if root_branches.len() == 2
         && root_branches.iter().all(|root| root.initial_prune_guard.is_passed())
@@ -2407,6 +2856,8 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     let mut scalar_lexer = FULL_WALK_LEXER_DEAD;
     let mut scalar_parser = 0u32;
     let mut first_match_direct = None::<VirtualResidualDirectCoordinate>;
+    let mut first_match_direct_accepting = false;
+    let mut first_match_side = None::<FullWalkManyState>;
     let first_match_terminal = first_match_direct_root.map(|(_, _, terminal)| terminal);
     let mut first_match_direct_future_cache =
         FxHashMap::<VirtualResidualDirectCoordinate, bool>::default();
@@ -2470,6 +2921,19 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         if op.starts_edge() {
             scalar_lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
             first_match_direct = unsafe { *stack_first_match_direct.get_unchecked(parent_depth) };
+            if first_match_direct.is_some() && defer_first_match_finalizer {
+                first_match_direct_accepting =
+                    unsafe { *stack_first_match_accepting.get_unchecked(parent_depth) };
+                first_match_side = unsafe {
+                    stack_first_match_side
+                        .get_unchecked(parent_depth)
+                        .as_ref()
+                        .cloned()
+                };
+            } else {
+                first_match_direct_accepting = false;
+                first_match_side = None;
+            }
             if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
                 scalar_parser = unsafe { *stack_parser.get_unchecked(parent_depth) };
             } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
@@ -2526,6 +2990,76 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 if profile_generic_work {
                     profile_first_match_direct_byte_ops += 1;
                 }
+                if defer_first_match_finalizer {
+                    if let Some(side) = first_match_side.as_ref() {
+                        let advanced = full_walk_step_many_state(
+                            side,
+                            byte,
+                            initial_lexer_state,
+                            transitions,
+                            &mut parser_cache,
+                            state.constraint,
+                        );
+                        first_match_side =
+                            (!full_walk_many_state_is_empty(&advanced)).then_some(advanced);
+                    }
+
+                    let target_coordinate = state
+                        .constraint
+                        .tokenizer
+                        .virtual_residual_direct_coordinate_step(source_coordinate, byte);
+                    if let Some(target_coordinate) = target_coordinate {
+                        let accepting = state
+                            .constraint
+                            .tokenizer
+                            .virtual_residual_direct_coordinate_accepting(target_coordinate)
+                            .unwrap_or(false);
+                        first_match_direct = Some(target_coordinate);
+                        first_match_direct_accepting = accepting;
+                        first_match_consumed = true;
+                        if accepting {
+                            if profile_generic_work {
+                                profile_first_match_direct_finalizers += 1;
+                            }
+                            let terminal = first_match_terminal
+                                .expect("direct first-match terminal disappeared");
+                            if let Some(next_parser) =
+                                parser_cache.advance(state.constraint, scalar_parser, terminal)
+                            {
+                                let future = state
+                                    .constraint
+                                    .tokenizer
+                                    .virtual_residual_direct_coordinate_has_future(target_coordinate)
+                                    .unwrap_or(false);
+                                let prune_guard = if future {
+                                    FullWalkPruneGuard::Pending(smallvec::smallvec![
+                                        FullWalkPruneMemory::Direct(target_coordinate, terminal)
+                                    ])
+                                } else {
+                                    FullWalkPruneGuard::Passed
+                                };
+                                full_walk_many_state_push_branch(
+                                    &mut first_match_side,
+                                    FullWalkBranch {
+                                        lexer_state: initial_lexer_state,
+                                        parser_node: next_parser,
+                                        prune_guard,
+                                    },
+                                );
+                            }
+                        }
+                    } else {
+                        first_match_direct = None;
+                        first_match_direct_accepting = false;
+                        first_match_consumed = true;
+                        if let Some(side) = first_match_side.take() {
+                            scalar_lexer = FULL_WALK_LEXER_MULTI;
+                            current_many = side;
+                        } else {
+                            scalar_lexer = FULL_WALK_LEXER_DEAD;
+                        }
+                    }
+                } else {
                 let target_coordinate = state
                     .constraint
                     .tokenizer
@@ -2586,6 +3120,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         })?;
                     first_match_direct = None;
                     scalar_lexer = transitions.root_state(raw_source)?;
+                }
                 }
             }
             if first_match_consumed {
@@ -2996,7 +3531,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                         profile_first_match_direct_endpoints += 1;
                     }
                     debug_assert!(first_match_terminal.is_some());
-                    if let Some(&cached) = first_match_direct_future_cache.get(&coordinate) {
+                    let direct_allowed = if let Some(&cached) = first_match_direct_future_cache.get(&coordinate) {
                         cached
                     } else {
                         let future = state
@@ -3006,7 +3541,42 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                             .unwrap_or(false);
                         first_match_direct_future_cache.insert(coordinate, future);
                         future
-                    }
+                    };
+                    let side_allowed = defer_first_match_finalizer
+                        && first_match_side.as_ref().is_some_and(|side| match side {
+                            FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
+                                transitions.token_boundary_allowed(
+                                    &mut parser_cache,
+                                    state.constraint,
+                                    initial_lexer_state,
+                                    branch.lexer_state,
+                                    branch.parser_node,
+                                )
+                            }),
+                            FullWalkManyState::ThreeSameParser {
+                                lexers,
+                                parser_node,
+                            } => transitions.token_boundary_allowed(
+                                &mut parser_cache,
+                                state.constraint,
+                                initial_lexer_state,
+                                lexers.0,
+                                *parser_node,
+                            ) || transitions.token_boundary_allowed(
+                                &mut parser_cache,
+                                state.constraint,
+                                initial_lexer_state,
+                                lexers.1,
+                                *parser_node,
+                            ) || transitions.token_boundary_allowed(
+                                &mut parser_cache,
+                                state.constraint,
+                                initial_lexer_state,
+                                lexers.2,
+                                *parser_node,
+                            ),
+                        });
+                    direct_allowed || side_allowed
                 } else if scalar_lexer == FULL_WALK_LEXER_DEAD {
                     false
                 } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
@@ -3107,13 +3677,44 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                     first_match_direct;
                 *stack_lexer.get_unchecked_mut(parent_depth + 1) = scalar_lexer;
                 if first_match_direct.is_some() {
+                    if defer_first_match_finalizer {
+                        *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) =
+                            first_match_direct_accepting;
+                        let side_slot =
+                            stack_first_match_side.get_unchecked_mut(parent_depth + 1);
+                        if let Some(side) = first_match_side.as_ref() {
+                            if let Some(existing) = side_slot.as_mut() {
+                                existing.clone_from(side);
+                            } else {
+                                *side_slot = Some(side.clone());
+                            }
+                        } else {
+                            *side_slot = None;
+                        }
+                    }
                     *stack_parser.get_unchecked_mut(parent_depth + 1) = scalar_parser;
                 } else if scalar_lexer == FULL_WALK_LEXER_DEAD {
+                    if defer_first_match_finalizer {
+                        *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) = false;
+                        *stack_first_match_side.get_unchecked_mut(parent_depth + 1) = None;
+                    }
                 } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
+                    if defer_first_match_finalizer {
+                        *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) = false;
+                        *stack_first_match_side.get_unchecked_mut(parent_depth + 1) = None;
+                    }
                     *stack_parser.get_unchecked_mut(parent_depth + 1) = scalar_parser;
                 } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
+                    if defer_first_match_finalizer {
+                        *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) = false;
+                        *stack_first_match_side.get_unchecked_mut(parent_depth + 1) = None;
+                    }
                     *stack_two.get_unchecked_mut(parent_depth + 1) = current_two;
                 } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
+                    if defer_first_match_finalizer {
+                        *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) = false;
+                        *stack_first_match_side.get_unchecked_mut(parent_depth + 1) = None;
+                    }
                     let slot = stack_many.get_unchecked_mut(parent_depth + 1);
                     if let Some(existing) = slot.as_mut() {
                         existing.clone_from(&current_many);
@@ -4143,8 +4744,16 @@ fn flat16_mask_vocab_terminal_matches(
     const STATE_MATCHES: u8 = 1 << 0;
     const STATE_LIVE: u8 = 1 << 1;
     const STATE_ORDINARY: u8 = 1 << 2;
-    let mut state_flags = vec![0u8; tokenizer.num_states() as usize];
-    for state in 0..tokenizer.num_states() {
+    // Cold guard masks usually visit only a tiny fraction of a large tokenizer.
+    // Derive terminal flags lazily instead of scanning every tokenizer state
+    // before the vocabulary walk. Values 0..=7 are real flags; u8::MAX is
+    // the uncomputed sentinel.
+    let mut state_flags = vec![u8::MAX; tokenizer.num_states() as usize];
+    let mut state_flags_for = |state: u32| -> Option<u8> {
+        let slot = state_flags.get_mut(state as usize)?;
+        if *slot != u8::MAX {
+            return Some(*slot);
+        }
         let mut flags = 0u8;
         if tokenizer
             .matched_terminal_bitset(state)
@@ -4163,8 +4772,9 @@ fn flat16_mask_vocab_terminal_matches(
         {
             flags |= STATE_ORDINARY;
         }
-        state_flags[state as usize] = flags;
-    }
+        *slot = flags;
+        Some(flags)
+    };
 
     // The common case has the exact Flat16 projection already materialized.
     // Reuse the same pre-flattened strict vocabulary walk as dynamic masking:
@@ -4188,6 +4798,14 @@ fn flat16_mask_vocab_terminal_matches(
         let mut current_state = mask_state;
         let mut remaining_ops = walk_ops.iter();
         let mut any_match = false;
+        // O2 endpoints can each stand for many original model tokens. Record
+        // matched quotient endpoints first, then materialize the dense blocked
+        // mask in whichever polarity touches fewer canonical classes. This
+        // avoids expanding a near-universal blocked set token ID by token ID.
+        let adaptive_quotient_words = blocked_words.is_some() && vocab.is_grammar_quotiented();
+        let mut matched_canonical = adaptive_quotient_words
+            .then(|| vec![false; vocab.canonical_token_count()]);
+        let mut matched_canonical_count = 0usize;
         while let Some(&op) = remaining_ops.next() {
             let parent_depth = op.parent_depth() as usize;
             if op.starts_edge() {
@@ -4220,19 +4838,27 @@ fn flat16_mask_vocab_terminal_matches(
                     continue;
                 };
                 current_state = target;
-                let flags = *state_flags.get(current_state as usize)?;
+                let flags = state_flags_for(current_state)?;
                 if flags & STATE_MATCHES != 0 {
                     let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
                     let (child, subtree_end_op) = vocab.trie.full_walk_dead_subtree(op_index);
-                    let originals = vocab.subtree_original_tokens_for(&vocab.trie, child);
-                    if !originals.is_empty() {
+                    let canonicals = vocab.trie.subtree_tokens(child);
+                    if !canonicals.is_empty() {
                         any_match = true;
-                        if let Some(words) = blocked_words.as_deref_mut() {
-                            for &token_id in originals {
-                                let word = token_id as usize / 32;
-                                let bit = token_id % 32;
-                                if let Some(slot) = words.get_mut(word) {
-                                    *slot |= 1u32 << bit;
+                        if let Some(flags) = matched_canonical.as_mut() {
+                            for &canonical in canonicals {
+                                let slot = flags.get_mut(canonical as usize)?;
+                                if !*slot {
+                                    *slot = true;
+                                    matched_canonical_count += 1;
+                                }
+                            }
+                        } else if let Some(words) = blocked_words.as_deref_mut() {
+                            for &canonical in canonicals {
+                                for &(word, mask) in vocab.token_word_masks(canonical) {
+                                    if let Some(slot) = words.get_mut(word as usize) {
+                                        *slot |= mask;
+                                    }
                                 }
                             }
                         } else {
@@ -4254,6 +4880,38 @@ fn flat16_mask_vocab_terminal_matches(
             }
             if op.ends_edge() {
                 *stack_state.get_mut(parent_depth + 1)? = current_state;
+            }
+        }
+        if let (Some(words), Some(flags)) = (blocked_words.as_deref_mut(), matched_canonical) {
+            let canonical_count = flags.len();
+            if matched_canonical_count <= canonical_count.saturating_sub(matched_canonical_count) {
+                for (canonical, matched) in flags.into_iter().enumerate() {
+                    if !matched {
+                        continue;
+                    }
+                    for &(word, mask) in vocab.token_word_masks(canonical as u32) {
+                        if let Some(slot) = words.get_mut(word as usize) {
+                            *slot |= mask;
+                        }
+                    }
+                }
+            } else {
+                let all_words = vocab.all_original_token_words();
+                let copy_len = words.len().min(all_words.len());
+                words[..copy_len].copy_from_slice(&all_words[..copy_len]);
+                if copy_len < words.len() {
+                    words[copy_len..].fill(0);
+                }
+                for (canonical, matched) in flags.into_iter().enumerate() {
+                    if matched {
+                        continue;
+                    }
+                    for &(word, mask) in vocab.token_word_masks(canonical as u32) {
+                        if let Some(slot) = words.get_mut(word as usize) {
+                            *slot &= !mask;
+                        }
+                    }
+                }
             }
         }
         return Some(any_match);
@@ -4315,7 +4973,7 @@ fn flat16_mask_vocab_terminal_matches(
                     alive = false;
                     break;
                 };
-                let flags = *state_flags.get(state as usize)?;
+                let flags = state_flags_for(state)?;
                 if flags & STATE_MATCHES != 0 {
                     matched = true;
                     break;
@@ -4639,6 +5297,26 @@ pub(crate) fn dynamic_mask_flat16_profile_enabled() -> bool {
         .get_or_init(|| std::env::var_os("GLRMASK_PROFILE_DYNAMIC_FLAT16_PHASES").is_some())
 }
 
+#[inline]
+fn dynamic_virtual_dense_cell_cache_experiment_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CELL_CACHE").is_some()
+}
+
+#[inline]
+fn direct_residual_defer_finalizer_experiment_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_DEFER_FINALIZER").is_some()
+}
+
+#[inline]
+fn direct_residual_ascii_word_slice_experiment_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE").is_some()
+}
+
+#[inline]
+fn dynamic_virtual_dense_cache_key_experiment_enabled() -> bool {
+    std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CACHE_KEY").is_some()
+}
+
 pub(crate) fn dynamic_mask_cache_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("GLRMASK_DISABLE_DYNAMIC_MASK_CACHE").is_none())
@@ -4850,6 +5528,8 @@ fn dynamic_mask_lookup_query(
         entries: SmallVec::new(),
     };
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+    let virtual_dense_cache_enabled = dynamic_virtual_dense_cache_key_experiment_enabled();
+    let max_token_byte_len = virtual_dense_cache_enabled.then(|| vocab.max_token_byte_len());
     let observation_cache_enabled =
         std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
             && vocab.has_terminal_observation_classes()
@@ -4899,7 +5579,25 @@ fn dynamic_mask_lookup_query(
         // `(matched, possible-future)` pair. Equal precomputed exact quotient
         // classes therefore have the same next-token mask; after a finalization
         // both executions enter the same parser child and common lexer reset.
-        let lexer_key = if observation_cache_enabled
+        let lexer_key = if virtual_dense_cache_enabled
+            && let Some(coordinate) = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate(tokenizer_state)
+            && let Some((runtime, projected_state)) = state
+                .constraint
+                .tokenizer
+                .virtual_residual_direct_coordinate_finite_mask_dense_key(
+                    coordinate,
+                    max_token_byte_len.unwrap_or(0),
+                )
+        {
+            DynamicMaskLexerStateKey::VirtualDenseProjection {
+                runtime,
+                state: projected_state,
+                initial: tokenizer_state == state.constraint.tokenizer.initial_state(),
+            }
+        } else if observation_cache_enabled
             && exclusions_empty
             && state.constraint.ignore_terminal.is_none_or(|ignore| {
                 let ignore = ignore as usize;
@@ -5597,6 +6295,13 @@ mod tests {
                     }
                     DynamicMaskLexerStateKey::TerminalObservation { class, terminal, initial } => {
                         DynamicMaskLexerStateKey::TerminalObservation { class: class + 9999, terminal, initial }
+                    }
+                    DynamicMaskLexerStateKey::VirtualDenseProjection { runtime, state, initial } => {
+                        DynamicMaskLexerStateKey::VirtualDenseProjection {
+                            runtime,
+                            state: state + 9999,
+                            initial,
+                        }
                     }
                 };
                 assert!(!query.matches_state(&perturbed_key), "perturbed lexer key must not match");

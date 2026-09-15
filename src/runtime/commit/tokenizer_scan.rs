@@ -20,9 +20,9 @@ pub(crate) struct ReusableTokenizerExecScratch {
 impl Default for ReusableTokenizerExecScratch {
     fn default() -> Self {
         Self {
-            states: Vec::with_capacity(64),
-            next_states: Vec::with_capacity(64),
-            matches: Vec::with_capacity(64),
+            states: Vec::with_capacity(512),
+            next_states: Vec::with_capacity(512),
+            matches: Vec::with_capacity(512),
         }
     }
 }

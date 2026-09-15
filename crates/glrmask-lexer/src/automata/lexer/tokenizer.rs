@@ -1710,6 +1710,19 @@ impl PackedRuntimeTransitions {
     #[inline]
     fn transition(&self, state: u32, byte: u8) -> Option<u32> {
         let (bytes, targets) = self.row(state)?;
+        // Dense regex rows are frequently one contiguous byte interval. Avoid
+        // a ~7-step binary search on every member of a lazy union when the
+        // sorted row itself proves that direct indexing is exact.
+        if bytes.len() >= 32 {
+            let first = *bytes.first()?;
+            let last = *bytes.last()?;
+            if usize::from(last.wrapping_sub(first)) + 1 == bytes.len() {
+                if byte < first || byte > last {
+                    return None;
+                }
+                return targets.get(usize::from(byte - first));
+            }
+        }
         let index = bytes.binary_search(&byte).ok()?;
         targets.get(index)
     }
@@ -10730,6 +10743,42 @@ impl Tokenizer {
         self.get_transition(state, byte)
     }
 
+    /// Cheap outgoing-byte count for ordinary physical runtime states.
+    /// Returns `None` for virtual/compressed coordinates where answering this
+    /// exactly would itself require expanding transition classes.
+    #[doc(hidden)]
+    #[inline]
+    pub fn dynamic_direct_transition_count(&self, state: u32) -> Option<usize> {
+        if self.virtual_residual_runtime_for_state(state).is_some()
+            || self.virtual_repeat_runtime_for_state(state).is_some()
+            || self
+                .virtual_unit_repeat
+                .as_deref()
+                .is_some_and(|runtime| runtime.handles_state(state))
+        {
+            return None;
+        }
+        if let Some(packed) = &self.packed_runtime_transitions
+            && let Some((bytes, _)) = packed.row(state)
+        {
+            return Some(bytes.len());
+        }
+        if let Some(segment) = self.packed_runtime_transition_segment_for_state(state)
+            && let Some((bytes, _)) = segment.row(state)
+        {
+            return Some(bytes.len());
+        }
+        if self.compressed_segment_for_state(state).is_some()
+            || self.packed_compressed_segment_for_state(state).is_some()
+        {
+            return None;
+        }
+        self.dfa
+            .states()
+            .get(state as usize)
+            .map(|state| state.transitions.len())
+    }
+
     /// Parser-transparent finite-horizon byte-family proof for an exact
     /// bounded-code virtual residual state. This deliberately avoids building
     /// the finite mask projection; `None` means this state cannot be certified
@@ -10870,6 +10919,43 @@ impl Tokenizer {
         self.virtual_residuals
             .get(source.runtime_index as usize)?
             .direct_coordinate_has_future(source)
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_residual_direct_coordinate_finite_mask_dense_key(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        max_token_len: usize,
+    ) -> Option<(u32, u32)> {
+        self.virtual_residuals
+            .get(source.runtime_index as usize)?
+            .direct_coordinate_finite_mask_dense_key(source, max_token_len)
+    }
+
+    #[doc(hidden)]
+    pub fn virtual_residual_direct_coordinate_parser_transparent_byte_dfa(
+        &self,
+        source: VirtualResidualDirectCoordinate,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_can_reach_accepting: &[bool],
+        slice_language_finite: bool,
+        work_limit: usize,
+    ) -> Option<bool> {
+        self.virtual_residuals
+            .get(source.runtime_index as usize)?
+            .direct_coordinate_parser_transparent_byte_dfa(
+                source,
+                slice_start,
+                slice_class_count,
+                slice_byte_to_class,
+                slice_transitions,
+                slice_can_reach_accepting,
+                slice_language_finite,
+                work_limit,
+            )
     }
 
     #[doc(hidden)]

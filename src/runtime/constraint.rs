@@ -3651,6 +3651,7 @@ impl Constraint {
 
         const SAFE_PLUS_CACHE_ID: u32 = 0;
         const WHITESPACE_CACHE_ID: u32 = 3;
+        const ASCII_WORD_CACHE_ID: u32 = 0x40;
         let safe_plus = Arc::new(
             VocabPartitionDfa::compile_utf8_regex(
                 "llg-safe+",
@@ -3662,13 +3663,37 @@ impl Constraint {
             VocabPartitionDfa::compile_utf8_regex("llg-whitespace", r"[\x20\x0A\x0D\x09]+")
                 .expect("whitespace slice regex must compile"),
         );
+        let max_token_byte_len = vocab.max_token_byte_len();
+        let ascii_slice_max_token_byte_len = std::env::var(
+            "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_MAX_BYTES",
+        )
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&value| value != 0)
+        .map_or(max_token_byte_len, |value| value.min(max_token_byte_len));
+        let ascii_word = (max_token_byte_len != 0
+            && std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE").is_some())
+        .then(|| {
+            Arc::new(
+                VocabPartitionDfa::compile_utf8_regex(
+                    "dynamic-optional-space-nonspace-safe",
+                    &format!(r#" ?[^\s"\\\x00-\x1F\x7F]{{1,{ascii_slice_max_token_byte_len}}}"#),
+                )
+                .expect("bounded optional-space nonspace-safe slice regex must compile"),
+            )
+        });
         let word_len = vocab.all_original_token_words().len();
         let mut safe_words = vec![0u32; word_len];
         let mut whitespace_words = vec![0u32; word_len];
+        let mut ascii_word_words = vec![0u32; word_len];
         let mut safe_token_bytes = U8Set::empty();
         let mut whitespace_token_bytes = U8Set::empty();
+        let mut ascii_word_token_bytes = U8Set::empty();
         let mut safe_max_token_byte_len = 0u32;
         let mut whitespace_max_token_byte_len = 0u32;
+        let mut ascii_word_max_token_byte_len = 0u32;
+        let mut ascii_word_residual_entries =
+            Vec::<(u16, usize, &[u8])>::with_capacity(vocab.canonical_token_count());
         let mut entries = Vec::<(u16, usize, &[u8])>::with_capacity(vocab.canonical_token_count());
         let mut max_safe_chars = 0u16;
 
@@ -3687,6 +3712,7 @@ impl Constraint {
                 0
             };
             let is_whitespace = whitespace.is_match(bytes);
+            let is_ascii_word = ascii_word.as_ref().is_some_and(|slice| slice.is_match(bytes));
             max_safe_chars = max_safe_chars.max(safe_chars);
             entries.push((
                 crate::runtime::dynamic_mask_llg_master_layout_class(safe_chars, is_whitespace),
@@ -3705,6 +3731,14 @@ impl Constraint {
                     whitespace_token_bytes.insert(byte);
                 }
             }
+            if is_ascii_word {
+                ascii_word_max_token_byte_len = ascii_word_max_token_byte_len.max(bytes.len() as u32);
+                for &byte in bytes {
+                    ascii_word_token_bytes.insert(byte);
+                }
+            } else {
+                ascii_word_residual_entries.push((0, canonical as usize, bytes));
+            }
             for &token in originals {
                 let word = token as usize / 32;
                 if word >= word_len {
@@ -3716,6 +3750,9 @@ impl Constraint {
                 }
                 if is_whitespace {
                     whitespace_words[word] |= bit;
+                }
+                if is_ascii_word {
+                    ascii_word_words[word] |= bit;
                 }
             }
         }
@@ -3730,6 +3767,11 @@ impl Constraint {
                 .then_with(|| left.1.cmp(&right.1))
         });
         let master_trie = DynamicMaskTrie::from_partitioned_token_refs(&entries);
+        ascii_word_residual_entries.sort_unstable_by(|left, right| {
+            left.2.cmp(right.2).then_with(|| left.1.cmp(&right.1))
+        });
+        let ascii_word_residual_trie =
+            DynamicMaskTrie::from_partitioned_token_refs(&ascii_word_residual_entries);
         let mut exact_safe_words = vec![vec![0u32; word_len]; usize::from(max_safe_chars) + 1];
         for &(class, canonical, _) in &entries {
             let safe_chars = crate::runtime::dynamic_mask_llg_master_safe_chars(class);
@@ -3761,7 +3803,7 @@ impl Constraint {
             admitted_words.push(with_whitespace);
         }
         vocab.set_llg_master_admitted_words(max_safe_chars, admitted_words);
-        vocab.set_llg_slice_leftovers(vec![
+        let mut slices = vec![
             (
                 SAFE_PLUS_CACHE_ID,
                 Arc::clone(&safe_plus),
@@ -3786,7 +3828,18 @@ impl Constraint {
                 U8Set::empty(),
                 0,
             ),
-        ]);
+        ];
+        if let Some(ascii_word) = ascii_word {
+            slices.push((
+                ASCII_WORD_CACHE_ID,
+                ascii_word,
+                Arc::new(ascii_word_residual_trie),
+                Arc::new(ascii_word_words),
+                ascii_word_token_bytes,
+                ascii_word_max_token_byte_len,
+            ));
+        }
+        vocab.set_llg_slice_leftovers(slices);
     }
 
     fn dynamic_self_loop_projection_candidates(
