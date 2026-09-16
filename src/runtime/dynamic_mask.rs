@@ -40,6 +40,18 @@ thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_CONFIG_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+
+// Experimental one-byte coordinate for the overwhelmingly common scalar,
+// non-finalizing lexer states encountered by a full vocabulary walk.  Keep the
+// generic config executor as the exact fallback for finalizers / epsilon /
+// virtual states.
+const FULL_WALK_HOT_TAG: u32 = 0x7fff_ff00;
+const FULL_WALK_HOT_MASK: u32 = 0xff;
+const FULL_WALK_HOT_CAPACITY: usize = 253;
+const FULL_WALK_HOT_SLOW: u8 = 253;
+const FULL_WALK_HOT_DEAD: u8 = 254;
+const FULL_WALK_HOT_UNKNOWN: u8 = 255;
+
 trait FullWalkTransitionTable {
     type Cell: Copy;
 
@@ -94,6 +106,18 @@ trait FullWalkTransitionTable {
     /// a singleton raw state. The direct first-match lane uses this only as a
     /// safety check before bypassing the generic subset/config representation.
     fn exact_raw_state(&self, state: u32) -> Option<u32>;
+
+    #[inline(always)]
+    fn hot_state_id(&self, _state: u32) -> Option<u8> { None }
+
+    #[inline(always)]
+    fn hot_state_from_id(&self, _id: u8) -> u32 { u32::MAX }
+
+    #[inline(always)]
+    fn hot_step(&mut self, _state: u8, _byte: u8) -> u8 { FULL_WALK_HOT_SLOW }
+
+    #[inline(always)]
+    fn hot_scalar_lane_enabled(&self) -> bool { false }
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +314,56 @@ struct FullWalkConfigCell {
     has_finalizer: bool,
 }
 
+#[derive(Clone)]
+struct FullWalkHotScalarCache {
+    raw_to_hot: FxHashMap<u32, u8>,
+    hot_to_raw: Vec<u32>,
+    rows: Vec<[u8; 256]>,
+    misses: usize,
+    slow: usize,
+}
+
+impl FullWalkHotScalarCache {
+    fn new() -> Self {
+        Self {
+            raw_to_hot: FxHashMap::default(),
+            hot_to_raw: Vec::new(),
+            rows: Vec::new(),
+            misses: 0,
+            slow: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn tagged(id: u8) -> u32 { FULL_WALK_HOT_TAG | u32::from(id) }
+
+    #[inline(always)]
+    fn id(state: u32) -> Option<u8> {
+        ((state & 0xffff_ff00) == FULL_WALK_HOT_TAG)
+            .then_some((state & FULL_WALK_HOT_MASK) as u8)
+    }
+
+    #[inline(always)]
+    fn raw(&self, state: u32) -> Option<u32> {
+        self.hot_to_raw.get(Self::id(state)? as usize).copied()
+    }
+
+    #[inline]
+    fn intern(&mut self, raw: u32) -> Option<u8> {
+        if let Some(&id) = self.raw_to_hot.get(&raw) {
+            return Some(id);
+        }
+        if self.hot_to_raw.len() >= FULL_WALK_HOT_CAPACITY {
+            return None;
+        }
+        let id = self.hot_to_raw.len() as u8;
+        self.raw_to_hot.insert(raw, id);
+        self.hot_to_raw.push(raw);
+        self.rows.push([FULL_WALK_HOT_UNKNOWN; 256]);
+        Some(id)
+    }
+}
+
 /// Strict-walk transition backend for the lexer representation selected by the
 /// ordinary runtime. In a deterministic tokenizer the config id is simply the
 /// raw state id. In an epsilon-NFA tokenizer it is a `DynamicNfaScanCache`
@@ -299,6 +373,9 @@ struct FullWalkConfigTransitions<'a, 'b> {
     cache: &'a mut DynamicNfaScanCache<'b>,
     error: Option<String>,
     raw_cell_rows: Vec<Option<Box<[u64; 256]>>>,
+    hot_scalar: FullWalkHotScalarCache,
+    hot_enabled: bool,
+    hot_persist_key: Option<(usize, u64)>,
     profile: bool,
     cell_calls: usize,
     raw_cell_hits: usize,
@@ -326,8 +403,40 @@ struct FullWalkConfigTransitions<'a, 'b> {
     intern_new_start: usize,
 }
 
+thread_local! {
+    // Diagnostic persistence store for the hot-scalar oracle. Move the cache
+    // in/out rather than cloning it so a same-generation warm fill measures
+    // traversal rather than persistence bookkeeping. This is intentionally
+    // thread-scoped and is not yet a production cache-lifecycle design.
+    static FULL_WALK_HOT_PERSIST_CACHE: std::cell::RefCell<
+        FxHashMap<(usize, u64), FullWalkHotScalarCache>
+    > = std::cell::RefCell::new(FxHashMap::default());
+}
+
+#[inline]
+fn full_walk_hot_persist_take(key: (usize, u64)) -> Option<FullWalkHotScalarCache> {
+    FULL_WALK_HOT_PERSIST_CACHE.with(|cache| cache.borrow_mut().remove(&key))
+}
+
+#[inline]
+fn full_walk_hot_persist_put(key: (usize, u64), hot: FullWalkHotScalarCache) {
+    FULL_WALK_HOT_PERSIST_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, hot);
+    });
+}
+
 impl FullWalkConfigTransitions<'_, '_> {
-    fn finish(self) -> Result<(), String> {
+    fn finish(mut self) -> Result<(), String> {
+        if self.hot_enabled && std::env::var_os("GLRMASK_PROFILE_HOT_SCALAR_CACHE").is_some() {
+            let hot = &self.hot_scalar;
+            eprintln!(
+                "[glrmask/profile][hot_scalar_cache] states={} bytes={} misses={} slow={}",
+                hot.hot_to_raw.len(),
+                hot.rows.len() * 256,
+                hot.misses,
+                hot.slow,
+            );
+        }
         if self.profile {
             eprintln!(
                 "[glrmask/profile][config_transition_work] cell_calls={} raw_cell_hits={} raw_cell_misses={} config_cell_calls={} step_calls={} step_cache_hits={} step_cache_misses={} physical_states_scanned={} intern_calls={} intern_hits={} intern_new={} configs_total={}",
@@ -386,6 +495,12 @@ impl FullWalkConfigTransitions<'_, '_> {
                 self.single_finalizer_continues_ns as f64 / 1e6,
             );
         }
+        if let Some(key) = self.hot_persist_key
+            && self.hot_enabled
+        {
+            let hot = std::mem::replace(&mut self.hot_scalar, FullWalkHotScalarCache::new());
+            full_walk_hot_persist_put(key, hot);
+        }
         self.error.map_or(Ok(()), Err)
     }
 
@@ -408,6 +523,61 @@ impl FullWalkConfigTransitions<'_, '_> {
             }
         }
     }
+
+    #[cold]
+    #[inline(never)]
+    fn hot_cell_slow(&mut self, hot_id: u8, byte: u8) -> FullWalkConfigCell {
+        let Some(raw_source) = self.hot_scalar.hot_to_raw.get(hot_id as usize).copied()
+        else {
+            self.error = Some("invalid full-walk hot scalar state".to_owned());
+            return FullWalkConfigCell { target: u32::MAX, has_finalizer: false };
+        };
+        let raw_target = self.cache.transition(raw_source, byte);
+        if raw_target == u32::MAX {
+            self.hot_scalar.rows[hot_id as usize][byte as usize] = FULL_WALK_HOT_DEAD;
+            return FullWalkConfigCell { target: u32::MAX, has_finalizer: false };
+        }
+
+        let tokenizer = self.cache.tokenizer();
+        let simple = !tokenizer.state_has_epsilon_transitions(raw_target)
+            && !tokenizer.state_is_virtual_runtime(raw_target)
+            && tokenizer.matched_terminal_bitset(raw_target).is_empty();
+        if simple {
+            let target_hot = self.hot_scalar.intern(raw_target);
+            if let Some(target_hot) = target_hot {
+                self.hot_scalar.rows[hot_id as usize][byte as usize] = target_hot;
+                return FullWalkConfigCell {
+                    target: FullWalkHotScalarCache::tagged(target_hot),
+                    has_finalizer: false,
+                };
+            }
+        }
+
+        self.hot_scalar.rows[hot_id as usize][byte as usize] = FULL_WALK_HOT_SLOW;
+        self.hot_scalar.slow += 1;
+        match self.cache.config_for_raw_start(raw_target) {
+            Ok(target) => FullWalkConfigCell {
+                target,
+                has_finalizer: self.cache.config_has_finalizer(target),
+            },
+            Err(error) => {
+                self.error = Some(error);
+                FullWalkConfigCell { target: u32::MAX, has_finalizer: false }
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn hot_raw(&self, state: u32) -> Option<u32> {
+        self.hot_enabled.then(|| self.hot_scalar.raw(state)).flatten()
+    }
+
+    #[inline(always)]
+    fn generic_config_for_state(&self, state: u32) -> u32 {
+        self.hot_raw(state)
+            .map(DynamicNfaScanCache::raw_config)
+            .unwrap_or(state)
+    }
 }
 
 impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
@@ -416,6 +586,29 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     #[inline(always)]
     fn cell(&mut self, state: u32, byte: u8) -> Self::Cell {
         const UNKNOWN: u64 = u64::MAX;
+        if let Some(hot_id) = FullWalkHotScalarCache::id(state) {
+            let cached = unsafe {
+                *self
+                    .hot_scalar
+                    .rows
+                    .get_unchecked(hot_id as usize)
+                    .get_unchecked(byte as usize)
+            };
+            if cached < FULL_WALK_HOT_SLOW {
+                return FullWalkConfigCell {
+                    target: FullWalkHotScalarCache::tagged(cached),
+                    has_finalizer: false,
+                };
+            }
+            if cached == FULL_WALK_HOT_DEAD {
+                return FullWalkConfigCell { target: u32::MAX, has_finalizer: false };
+            }
+            if cached == FULL_WALK_HOT_SLOW {
+                return self.hot_cell_slow(hot_id, byte);
+            }
+            self.hot_scalar.misses += 1;
+            return self.hot_cell_slow(hot_id, byte);
+        }
         if self.profile {
             self.cell_calls += 1;
         }
@@ -523,6 +716,21 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                 }
             }
         };
+        let mut returned_cell = cell;
+        if !cell.has_finalizer
+            && cell.target != u32::MAX
+            && let Some(raw_target) = self.cache.raw_state_for_config(cell.target)
+            && self.hot_enabled
+            && !self.cache.tokenizer().state_has_epsilon_transitions(raw_target)
+            && !self.cache.tokenizer().state_is_virtual_runtime(raw_target)
+            && self.cache.tokenizer().matched_terminal_bitset(raw_target).is_empty()
+            && let Some(id) = self.hot_scalar.intern(raw_target)
+        {
+            returned_cell = FullWalkConfigCell {
+                target: FullWalkHotScalarCache::tagged(id),
+                has_finalizer: false,
+            };
+        }
         if self.error.is_none()
             && let Some(raw_state) = raw_state
         {
@@ -534,10 +742,11 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                 .get_or_insert_with(|| Box::new([UNKNOWN; 256]));
             let slot = unsafe { row.get_unchecked_mut(byte as usize) };
             if *slot == UNKNOWN {
-                *slot = u64::from(cell.target) | ((cell.has_finalizer as u64) << 32);
+                *slot = u64::from(returned_cell.target)
+                    | ((returned_cell.has_finalizer as u64) << 32);
             }
         }
-        cell
+        returned_cell
     }
 
     #[inline(always)]
@@ -554,7 +763,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 
     fn finalizer_code(&self, state: u32) -> u32 {
-        self.cache.config_finalizer_code(state)
+        self.cache.config_finalizer_code(self.generic_config_for_state(state))
     }
 
     fn single_finalizer_continues(&mut self, state: u32) -> bool {
@@ -562,6 +771,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         if self.profile {
             self.single_finalizer_continues_calls += 1;
         }
+        let state = self.generic_config_for_state(state);
         let code = self.cache.config_finalizer_code(state);
         let result = code != u32::MAX
             && code != u32::MAX - 1
@@ -575,7 +785,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 
     fn matched_terminals(&self, state: u32) -> SmallVec<[TerminalID; 4]> {
-        self.cache.config_matched_terminals(state)
+        self.cache.config_matched_terminals(self.generic_config_for_state(state))
     }
 
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
@@ -583,6 +793,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         if self.profile {
             self.future_contains_calls += 1;
         }
+        let state = self.generic_config_for_state(state);
         let result = self.config_future_contains_exact(state, terminal);
         if let Some(started) = started {
             self.future_contains_ns = self
@@ -597,6 +808,7 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         if self.profile {
             self.future_intersects_calls += 1;
         }
+        let state = self.generic_config_for_state(state);
         let result = self.config_future_intersects_exact(state, terminals);
         if let Some(started) = started {
             self.future_intersects_ns = self
@@ -607,7 +819,12 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 
     fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
-        match self.cache.union_configs(states) {
+        let normalized = states
+            .iter()
+            .copied()
+            .map(|state| self.generic_config_for_state(state))
+            .collect::<SmallVec<[u32; 4]>>();
+        match self.cache.union_configs(&normalized) {
             Ok(state) => state,
             Err(error) => {
                 if self.error.is_none() { self.error = Some(error); }
@@ -631,13 +848,56 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         if lexer_state == initial_lexer_state {
             return true;
         }
+        if let Some(hot_id) = FullWalkHotScalarCache::id(lexer_state) {
+            return parser_cache.token_boundary_allowed_hot(
+                constraint,
+                self,
+                lexer_state,
+                hot_id,
+                parser_node,
+            );
+        }
         parser_cache.token_boundary_allowed_sparse(constraint, self, lexer_state, parser_node)
     }
 
     #[inline(always)]
     fn exact_raw_state(&self, state: u32) -> Option<u32> {
-        self.cache.raw_state_for_config(state)
+        self.hot_raw(state).or_else(|| self.cache.raw_state_for_config(state))
     }
+
+    #[inline(always)]
+    fn hot_state_id(&self, state: u32) -> Option<u8> {
+        FullWalkHotScalarCache::id(state)
+    }
+
+    #[inline(always)]
+    fn hot_state_from_id(&self, id: u8) -> u32 { FullWalkHotScalarCache::tagged(id) }
+
+    #[inline(always)]
+    fn hot_step(&mut self, state: u8, byte: u8) -> u8 {
+        let cached = unsafe {
+            *self
+                .hot_scalar
+                .rows
+                .get_unchecked(state as usize)
+                .get_unchecked(byte as usize)
+        };
+        if cached != FULL_WALK_HOT_UNKNOWN {
+            return cached;
+        }
+        self.hot_scalar.misses += 1;
+        let cell = self.hot_cell_slow(state, byte);
+        if cell.target == u32::MAX {
+            FULL_WALK_HOT_DEAD
+        } else if let Some(id) = FullWalkHotScalarCache::id(cell.target) {
+            id
+        } else {
+            FULL_WALK_HOT_SLOW
+        }
+    }
+
+    #[inline(always)]
+    fn hot_scalar_lane_enabled(&self) -> bool { self.hot_enabled }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -759,6 +1019,7 @@ struct FullWalkParserCache {
     nodes: Vec<FullWalkParserNode>,
     dense_lexer_state_count: Option<usize>,
     sparse_token_boundary_allowed: Vec<FxHashMap<u32, u8>>,
+    hot_token_boundary_allowed: Vec<[u8; FULL_WALK_HOT_CAPACITY]>,
     profile: bool,
     profile_boundary_calls: usize,
     profile_boundary_hits: usize,
@@ -775,6 +1036,7 @@ impl FullWalkParserCache {
     ) -> (Self, SmallVec<[u32; 4]>) {
         let mut nodes = Vec::<FullWalkParserNode>::new();
         let mut sparse_token_boundary_allowed = Vec::<FxHashMap<u32, u8>>::new();
+        let mut hot_token_boundary_allowed = Vec::<[u8; FULL_WALK_HOT_CAPACITY]>::new();
         let mut root_nodes = SmallVec::<[u32; 4]>::new();
         for branch in root_branches {
             if let Some((index, _)) = nodes
@@ -796,6 +1058,7 @@ impl FullWalkParserCache {
                 last_child_target: Self::DEAD,
             });
             sparse_token_boundary_allowed.push(FxHashMap::default());
+            hot_token_boundary_allowed.push([0; FULL_WALK_HOT_CAPACITY]);
             root_nodes.push(id);
         }
         (
@@ -803,6 +1066,7 @@ impl FullWalkParserCache {
                 nodes,
                 dense_lexer_state_count,
                 sparse_token_boundary_allowed,
+                hot_token_boundary_allowed,
                 profile: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
                 profile_boundary_calls: 0,
                 profile_boundary_hits: 0,
@@ -874,6 +1138,7 @@ impl FullWalkParserCache {
                 last_child_target: Self::DEAD,
             });
             self.sparse_token_boundary_allowed.push(FxHashMap::default());
+            self.hot_token_boundary_allowed.push([0; FULL_WALK_HOT_CAPACITY]);
             id
         } else {
             Self::DEAD
@@ -966,6 +1231,49 @@ impl FullWalkParserCache {
                 parser_node,
                 lexer_state,
             )
+    }
+
+    #[inline(always)]
+    fn token_boundary_allowed_hot<T: FullWalkTransitionTable>(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut T,
+        lexer_state: u32,
+        hot_id: u8,
+        parser_node: u32,
+    ) -> bool {
+        if self.profile {
+            self.profile_boundary_calls += 1;
+        }
+        let node = parser_node as usize;
+        let cached = unsafe {
+            *self
+                .hot_token_boundary_allowed
+                .get_unchecked(node)
+                .get_unchecked(hot_id as usize)
+        };
+        if cached != 0 {
+            if self.profile {
+                self.profile_boundary_hits += 1;
+            }
+            return cached == 2;
+        }
+        if self.profile {
+            self.profile_boundary_misses += 1;
+        }
+        let allowed = constraint.ignore_terminal.is_some_and(|terminal| {
+            transitions.future_contains(lexer_state, terminal)
+        }) || transitions.future_intersects(
+            lexer_state,
+            self.admitted(constraint, parser_node),
+        );
+        unsafe {
+            *self
+                .hot_token_boundary_allowed
+                .get_unchecked_mut(node)
+                .get_unchecked_mut(hot_id as usize) = if allowed { 2 } else { 1 };
+        }
+        allowed
     }
 
     #[inline(always)]
@@ -1891,10 +2199,30 @@ fn try_full_walk_mask(
                 lexer_scan_cache.profile_intern_hits,
                 lexer_scan_cache.profile_intern_new,
             );
+            let hot_enabled =
+                std::env::var_os("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE").is_some();
+            let hot_persist_key = (hot_enabled
+                && std::env::var_os("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST").is_some())
+                .then(|| {
+                    (
+                        lexer_scan_cache.tokenizer() as *const Tokenizer as usize,
+                        state.generation,
+                    )
+                });
+            let hot_scalar = if hot_enabled {
+                hot_persist_key
+                    .and_then(full_walk_hot_persist_take)
+                    .unwrap_or_else(FullWalkHotScalarCache::new)
+            } else {
+                FullWalkHotScalarCache::new()
+            };
             let mut table = FullWalkConfigTransitions {
                 cache: lexer_scan_cache,
                 error: None,
                 raw_cell_rows: Vec::new(),
+                hot_scalar,
+                hot_enabled,
+                hot_persist_key,
                 profile,
                 cell_calls: 0,
                 raw_cell_hits: 0,
@@ -1996,6 +2324,398 @@ fn direct_slice_prefix_contained_config<T: FullWalkTransitionTable>(
         }
     }
     Some(true)
+}
+
+
+const HOT_EDGE_LEXER_TWO_DISTINCT: u32 = u32::MAX - 3;
+const HOT_EDGE_LEXER_TWO: u32 = u32::MAX - 2;
+const HOT_EDGE_LEXER_DEAD: u32 = u32::MAX;
+
+enum FullWalkHotLaneOutcome {
+    Dead,
+    Scalar(u32, u32),
+    Two((u32, u32), (u32, u32)),
+    Decline,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn full_walk_hot_lane_scalar_escape<T: FullWalkTransitionTable>(
+    source_lexer: u32,
+    byte: u8,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    transitions: &mut T,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+) -> FullWalkHotLaneOutcome {
+    let cell = transitions.cell(source_lexer, byte);
+    if T::cell_is_dead(cell) {
+        return FullWalkHotLaneOutcome::Dead;
+    }
+    let target = T::cell_target(cell);
+    if !T::cell_has_finalizer(cell) {
+        return FullWalkHotLaneOutcome::Scalar(target, parser_node);
+    }
+
+    let mut lexer = target;
+    let mut parser = parser_node;
+    let mut two = ((0u32, 0u32), (0u32, 0u32));
+    if full_walk_try_apply_plain_single_finalizer(
+        target,
+        parser_node,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+        HOT_EDGE_LEXER_TWO_DISTINCT,
+        &mut lexer,
+        &mut parser,
+        &mut two,
+    ) {
+        return if lexer == HOT_EDGE_LEXER_TWO_DISTINCT {
+            FullWalkHotLaneOutcome::Two(two.0, two.1)
+        } else {
+            FullWalkHotLaneOutcome::Scalar(lexer, parser)
+        };
+    }
+
+    match full_walk_scalar_finalizer_hot_single(
+        target,
+        parser_node,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+    ) {
+        FullWalkScalarFinalizerOutcome::Scalar(branch) if branch.prune_guard.is_passed() => {
+            FullWalkHotLaneOutcome::Scalar(branch.lexer_state, branch.parser_node)
+        }
+        FullWalkScalarFinalizerOutcome::Two(first, second)
+            if first.prune_guard.is_passed() && second.prune_guard.is_passed() =>
+        {
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                pair_union_cache,
+                (first.lexer_state, first.parser_node),
+                (second.lexer_state, second.parser_node),
+            ) {
+                FullWalkHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                FullWalkHotLaneOutcome::Two(
+                    (first.lexer_state, first.parser_node),
+                    (second.lexer_state, second.parser_node),
+                )
+            }
+        }
+        FullWalkScalarFinalizerOutcome::Many(mut branches)
+            if branches.len() == 2
+                && branches.iter().all(|branch| branch.prune_guard.is_passed()) =>
+        {
+            let second = branches.pop().expect("second hot-lane branch disappeared");
+            let first = branches.pop().expect("first hot-lane branch disappeared");
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                pair_union_cache,
+                (first.lexer_state, first.parser_node),
+                (second.lexer_state, second.parser_node),
+            ) {
+                FullWalkHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                FullWalkHotLaneOutcome::Two(
+                    (first.lexer_state, first.parser_node),
+                    (second.lexer_state, second.parser_node),
+                )
+            }
+        }
+        _ => FullWalkHotLaneOutcome::Decline,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn full_walk_hot_lane_two_escape<T: FullWalkTransitionTable>(
+    branches: ((u32, u32), (u32, u32)),
+    byte: u8,
+    initial_lexer_state: u32,
+    transitions: &mut T,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+) -> FullWalkHotLaneOutcome {
+    match full_walk_step_two(
+        branches,
+        byte,
+        initial_lexer_state,
+        transitions,
+        parser_cache,
+        constraint,
+    ) {
+        FullWalkTwoStepOutcome::Dead => FullWalkHotLaneOutcome::Dead,
+        FullWalkTwoStepOutcome::One((lexer_state, parser_node)) => {
+            FullWalkHotLaneOutcome::Scalar(lexer_state, parser_node)
+        }
+        FullWalkTwoStepOutcome::Two(first, second) => {
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                pair_union_cache,
+                first,
+                second,
+            ) {
+                FullWalkHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                FullWalkHotLaneOutcome::Two(first, second)
+            }
+        }
+        FullWalkTwoStepOutcome::Many(_) => FullWalkHotLaneOutcome::Decline,
+    }
+}
+
+/// Exact narrow lane for the overwhelmingly scalar config full-walk case.
+/// It keeps the existing compact sequential FullWalkOp stream, but compiles a
+/// much smaller scalar/two-only interpreter. Unsupported branch shapes decline
+/// and the caller recomputes through the general walker.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_lexer: u32,
+    root_parser: u32,
+    initial_lexer_state: u32,
+    parser_cache: &mut FullWalkParserCache,
+    transitions: &mut T,
+    buf: &mut [u32],
+) -> Result<Option<bool>, String> {
+    if !trie.full_walk_all_consume() {
+        return Ok(None);
+    }
+    let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
+    let mut inline_lexer = [HOT_EDGE_LEXER_DEAD; 256];
+    let mut heap_lexer = Vec::<u32>::new();
+    let stack_lexer: &mut [u32] = if stack_len <= inline_lexer.len() {
+        &mut inline_lexer[..stack_len]
+    } else {
+        heap_lexer.resize(stack_len, HOT_EDGE_LEXER_DEAD);
+        heap_lexer.as_mut_slice()
+    };
+    let mut inline_parser = [0u32; 256];
+    let mut heap_parser = Vec::<u32>::new();
+    let stack_parser: &mut [u32] = if stack_len <= inline_parser.len() {
+        &mut inline_parser[..stack_len]
+    } else {
+        heap_parser.resize(stack_len, 0);
+        heap_parser.as_mut_slice()
+    };
+    let mut inline_two = [((0u32, 0u32), (0u32, 0u32)); 256];
+    let mut heap_two = Vec::<((u32, u32), (u32, u32))>::new();
+    let stack_two: &mut [((u32, u32), (u32, u32))] = if stack_len <= inline_two.len() {
+        &mut inline_two[..stack_len]
+    } else {
+        heap_two.resize(stack_len, ((0, 0), (0, 0)));
+        heap_two.as_mut_slice()
+    };
+    stack_lexer[0] = root_lexer;
+    stack_parser[0] = root_parser;
+
+    let mut pair_union_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
+    let walk_ops = trie.full_walk_ops();
+    let token_markers = vocab.full_walk_token_markers_for(trie);
+    let mut token_marker_index = 0usize;
+    let mut remaining_ops = walk_ops.iter();
+    let mut lexer: u32;
+    let mut parser = root_parser;
+    let mut two = ((0u32, 0u32), (0u32, 0u32));
+
+    // Endpoint checks are deterministic for one mask and DFS order has very
+    // strong run locality in `(parser_node, lexer_state)`. Keep the two most
+    // recent exact scalar pairs locally so the common case avoids the nested
+    // parser-cache lookup entirely. Two-branch endpoints deliberately bypass
+    // this memo and retain the generic exact checks below.
+    let mut last_boundary_key = u64::MAX;
+    let mut last_boundary_allowed = false;
+    let mut second_boundary_key = u64::MAX;
+    let mut second_boundary_allowed = false;
+
+    // `full_walk_all_consume()` proves there are no synthetic empty-edge
+    // records. Each outer iteration therefore begins at a radix-edge START,
+    // and the inner loop can consume consecutive byte ops until END without
+    // retesting START/CONSUME on every byte.
+    'edge_walk: while let Some(&first_op) = remaining_ops.next() {
+        let parent_depth = first_op.parent_depth() as usize;
+        lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
+        if lexer < HOT_EDGE_LEXER_TWO_DISTINCT {
+            parser = unsafe { *stack_parser.get_unchecked(parent_depth) };
+        } else if lexer == HOT_EDGE_LEXER_TWO_DISTINCT || lexer == HOT_EDGE_LEXER_TWO {
+            two = unsafe { *stack_two.get_unchecked(parent_depth) };
+        } else {
+            return Ok(None);
+        }
+        let mut op = first_op;
+        loop {
+        {
+            let byte = op.byte();
+            if lexer == HOT_EDGE_LEXER_DEAD {
+                full_walk_skip_dead_subtree_generic(
+                    vocab,
+                    trie,
+                    walk_ops,
+                    &mut remaining_ops,
+                    &mut token_marker_index,
+                    buf,
+                );
+                continue 'edge_walk;
+            }
+
+            let outcome = if lexer < HOT_EDGE_LEXER_TWO_DISTINCT {
+                if let Some(hot_id) = transitions.hot_state_id(lexer) {
+                    let next = transitions.hot_step(hot_id, byte);
+                    if next < FULL_WALK_HOT_SLOW {
+                        lexer = transitions.hot_state_from_id(next);
+                        None
+                    } else if next == FULL_WALK_HOT_DEAD {
+                        Some(FullWalkHotLaneOutcome::Dead)
+                    } else {
+                        Some(full_walk_hot_lane_scalar_escape(
+                            lexer,
+                            byte,
+                            parser,
+                            initial_lexer_state,
+                            transitions,
+                            parser_cache,
+                            state.constraint,
+                            &mut pair_union_cache,
+                        ))
+                    }
+                } else {
+                    Some(full_walk_hot_lane_scalar_escape(
+                        lexer,
+                        byte,
+                        parser,
+                        initial_lexer_state,
+                        transitions,
+                        parser_cache,
+                        state.constraint,
+                        &mut pair_union_cache,
+                    ))
+                }
+            } else if lexer == HOT_EDGE_LEXER_TWO_DISTINCT || lexer == HOT_EDGE_LEXER_TWO {
+                Some(full_walk_hot_lane_two_escape(
+                    two,
+                    byte,
+                    initial_lexer_state,
+                    transitions,
+                    parser_cache,
+                    state.constraint,
+                    &mut pair_union_cache,
+                ))
+            } else {
+                return Ok(None);
+            };
+
+            if let Some(outcome) = outcome {
+                match outcome {
+                    FullWalkHotLaneOutcome::Dead => {
+                        full_walk_skip_dead_subtree_generic(
+                            vocab,
+                            trie,
+                            walk_ops,
+                            &mut remaining_ops,
+                            &mut token_marker_index,
+                            buf,
+                        );
+                        continue 'edge_walk;
+                    }
+                    FullWalkHotLaneOutcome::Scalar(next_lexer, next_parser) => {
+                        lexer = next_lexer;
+                        parser = next_parser;
+                    }
+                    FullWalkHotLaneOutcome::Two(first, second) => {
+                        lexer = if first.1 != second.1 {
+                            HOT_EDGE_LEXER_TWO_DISTINCT
+                        } else {
+                            HOT_EDGE_LEXER_TWO
+                        };
+                        two = (first, second);
+                    }
+                    FullWalkHotLaneOutcome::Decline => return Ok(None),
+                }
+            }
+        }
+
+        if op.ends_edge() {
+            if op.child_is_token() {
+                let token_marker = unsafe { *token_markers.get_unchecked(token_marker_index) };
+                token_marker_index += 1;
+                let allowed = if lexer == HOT_EDGE_LEXER_DEAD {
+                    false
+                } else if lexer < HOT_EDGE_LEXER_TWO_DISTINCT {
+                    let boundary_key = (u64::from(parser) << 32) | u64::from(lexer);
+                    if boundary_key == last_boundary_key {
+                        last_boundary_allowed
+                    } else if boundary_key == second_boundary_key {
+                        std::mem::swap(&mut last_boundary_key, &mut second_boundary_key);
+                        std::mem::swap(&mut last_boundary_allowed, &mut second_boundary_allowed);
+                        last_boundary_allowed
+                    } else {
+                        let value = transitions.token_boundary_allowed(
+                            parser_cache,
+                            state.constraint,
+                            initial_lexer_state,
+                            lexer,
+                            parser,
+                        );
+                        second_boundary_key = last_boundary_key;
+                        second_boundary_allowed = last_boundary_allowed;
+                        last_boundary_key = boundary_key;
+                        last_boundary_allowed = value;
+                        value
+                    }
+                } else if lexer == HOT_EDGE_LEXER_TWO_DISTINCT || lexer == HOT_EDGE_LEXER_TWO {
+                    transitions.token_boundary_allowed(
+                        parser_cache,
+                        state.constraint,
+                        initial_lexer_state,
+                        two.0.0,
+                        two.0.1,
+                    ) || transitions.token_boundary_allowed(
+                        parser_cache,
+                        state.constraint,
+                        initial_lexer_state,
+                        two.1.0,
+                        two.1.1,
+                    )
+                } else {
+                    return Ok(None);
+                };
+                if !allowed {
+                    clear_dynamic_token_marker(vocab, token_marker, buf);
+                }
+            }
+            unsafe {
+                *stack_lexer.get_unchecked_mut(parent_depth + 1) = lexer;
+                if lexer < HOT_EDGE_LEXER_TWO_DISTINCT {
+                    *stack_parser.get_unchecked_mut(parent_depth + 1) = parser;
+                } else if lexer == HOT_EDGE_LEXER_TWO_DISTINCT || lexer == HOT_EDGE_LEXER_TWO {
+                    *stack_two.get_unchecked_mut(parent_depth + 1) = two;
+                } else {
+                    return Ok(None);
+                }
+            }
+            break;
+        }
+        let Some(&next_op) = remaining_ops.next() else {
+            return Ok(None);
+        };
+        op = next_op;
+        }
+    }
+
+    Ok(Some(true))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2316,6 +3036,41 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         && root_branches
             .iter()
             .all(|branch| branch.initial_prune_guard.is_passed());
+    let hot_edge_lane_eligible = HOT_SINGLE_ROOT
+        && root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed()
+        && first_match_direct_root.is_none()
+        && direct_residual_slice.is_none()
+        && master_decision.is_none()
+        && !deferred_output
+        && transitions.hot_scalar_lane_enabled()
+        && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_none()
+        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED").is_none()
+        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP").is_none()
+        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_BUDGET").is_none();
+    if hot_edge_lane_eligible {
+        match try_full_walk_hot_scalar_edges(
+            state,
+            vocab,
+            trie,
+            root_branches[0].tokenizer_config,
+            root_parser_nodes[0],
+            initial_lexer_state,
+            &mut parser_cache,
+            transitions,
+            buf,
+        )? {
+            Some(used) => return Ok(used),
+            None => {
+                let all_words = vocab.all_original_token_words();
+                let copy_len = buf.len().min(all_words.len());
+                buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
+                if copy_len < buf.len() {
+                    buf[copy_len..].fill(0);
+                }
+            }
+        }
+    }
     let mut deferred_allowed_markers = Vec::<u64>::new();
     let mut deferred_rejected_markers = Vec::<u64>::new();
     let mut deferred_dead_subtrees = Vec::<u32>::new();
@@ -2629,7 +3384,18 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 // terminal finalization.
             } else if scalar_lexer == FULL_WALK_LEXER_DEAD {
             } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
-                let cell = transitions.cell(scalar_lexer, byte);
+                let cell = if let Some(hot_id) = transitions.hot_state_id(scalar_lexer) {
+                    let next = transitions.hot_step(hot_id, byte);
+                    if next < FULL_WALK_HOT_SLOW {
+                        scalar_lexer = transitions.hot_state_from_id(next);
+                        None
+                    } else {
+                        Some(transitions.cell(scalar_lexer, byte))
+                    }
+                } else {
+                    Some(transitions.cell(scalar_lexer, byte))
+                };
+                if let Some(cell) = cell {
                 if T::cell_is_dead(cell) {
                     scalar_lexer = FULL_WALK_LEXER_DEAD;
                     // A lexically dead scalar configuration cannot revive below
@@ -2831,6 +3597,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                             }
                         }
                     }
+                }
                 }
             } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT {
                 // The two branches carry distinct parser contexts, so lexical
@@ -5656,6 +6423,13 @@ mod tests {
                     }
                     DynamicMaskLexerStateKey::TerminalObservation { class, terminal, initial } => {
                         DynamicMaskLexerStateKey::TerminalObservation { class: class + 9999, terminal, initial }
+                    }
+                    DynamicMaskLexerStateKey::VirtualDenseProjection { runtime, state, initial } => {
+                        DynamicMaskLexerStateKey::VirtualDenseProjection {
+                            runtime,
+                            state: state + 9999,
+                            initial,
+                        }
                     }
                 };
                 assert!(!query.matches_state(&perturbed_key), "perturbed lexer key must not match");

@@ -1631,6 +1631,14 @@ impl DynamicMaskTrie {
         &self.full_walk_ops
     }
 
+    /// Every full-walk op consumes one byte iff there are no synthetic
+    /// empty-edge ops. Non-empty radix edges contribute exactly one op per
+    /// byte; empty edges contribute one op and zero bytes.
+    #[inline(always)]
+    pub(crate) fn full_walk_all_consume(&self) -> bool {
+        self.full_walk_ops.len() == self.edge_bytes.len()
+    }
+
     #[inline(always)]
     pub(crate) fn full_walk_dead_subtree(&self, op_index: usize) -> (u32, u32) {
         debug_assert!(op_index < self.full_walk_op_edges.len());
@@ -10483,6 +10491,35 @@ mod dynamic_mask_vocab_cache_boundary_tests {
         let loaded = DynamicMaskVocab::from_artifact(artifact).unwrap();
         assert_eq!(loaded.trie.root_layout_classes, expected_classes);
         assert_eq!(loaded.trie.root_layout_all_valid_utf8, expected_utf8);
+    }
+
+    #[test]
+    fn full_walk_all_consume_exactly_rejects_empty_edges() {
+        fn one_edge(bytes: &[u8]) -> DynamicMaskTrie {
+            let mut trie = DynamicMaskTrie::new();
+            trie.nodes.push(DynamicMaskTrieNode {
+                token_id: Some(0),
+                ..DynamicMaskTrieNode::default()
+            });
+            let (byte_start, byte_len) = trie.push_edge_bytes(bytes);
+            trie.edges.push(DynamicMaskTrieEdge {
+                byte_start,
+                byte_len,
+                child: 1,
+            });
+            trie.nodes[0].first_child = 0;
+            trie.nodes[0].child_len = 1;
+            trie.finalize_subtree_metadata();
+            trie
+        }
+
+        let nonempty = one_edge(b"abc");
+        assert_eq!(nonempty.full_walk_ops().len(), 3);
+        assert!(nonempty.full_walk_all_consume());
+
+        let empty = one_edge(b"");
+        assert_eq!(empty.full_walk_ops().len(), 1);
+        assert!(!empty.full_walk_all_consume());
     }
 
     #[test]
