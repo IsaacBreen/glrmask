@@ -839,20 +839,18 @@ mod tests {
         let recursive_table = match dynamic.recursive_control_eliminated_parser_table() {
             Ok(table) => table.expect("recursive table present"),
             Err(error) if control_elimination_budget_exhausted(&error) => {
-                // Convergence decline: static linking is unavailable for
-                // this composition; the dynamic shards stay authoritative
-                // and the differential below is vacuous by construction.
+                // Convergence decline: no exact static shard exists without
+                // elimination (characterization never closes over controls,
+                // so an un-eliminated table would be unsound). The gate
+                // requires a static install and fails loudly instead of
+                // passing vacuously on dynamic shards.
                 eprintln!(
                     "BOUNDARY_INSTALL fallback=dynamic decline_ms={:.3} error={error}",
                     recursive_started.elapsed().as_secs_f64() * 1000.0,
                 );
-                let mut static_comp = dynamic.clone();
-                assert!(
-                    static_comp.uses_compact_segmented_parser_runtime(),
-                    "fallback composition must stay on the compact runtime",
+                panic!(
+                    "outer link declined static install via convergence budget: {error}"
                 );
-                run_install_differential(&dynamic, &mut static_comp, true);
-                return;
             }
             Err(error) => panic!("recursive table hard failure: {error}"),
         };
@@ -1402,205 +1400,23 @@ mod tests {
             .map(|timing| timing.name.as_str())
             .collect();
         eprintln!("BOUNDARY_SWEEP links={} total_mismatches={total_mismatches} failing={failing:?}", timings.len());
-        assert_eq!(total_mismatches, 0, "walk-shard sweep must match DynamicDirect on every link");
-    }
-
-    /// Focused inner-link divergence repro (TEMPORARY diagnosis scaffold):
-    /// full inner link + install for schema `INNER_FOCUS` (default 6),
-    /// commit the known-divergent token path, and dump both masks plus
-    /// per-shard parser-DWA shape.
-    #[test]
-    #[ignore]
-    fn inner6_overadmit_focus() {
-        use std::path::Path;
-
-        let focus: usize = std::env::var("INNER_FOCUS")
-            .ok()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(6);
-        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
-            "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
-        });
-        let root = Path::new(&root).to_path_buf();
-        let vocab_path = std::env::var("PHASE1_VOCAB")
-            .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
-        let vocab = load_vocab(&vocab_path);
-        let parent =
-            Constraint::from_glrm_grammar(&dispatch_parent_source(), &vocab).expect("parent");
-        let mut schema_paths: Vec<_> = std::fs::read_dir(&root)
-            .expect("read cache dir")
-            .filter_map(|entry| {
-                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
-                name.starts_with("schema-").then_some(name)
-            })
+        let declined: Vec<&str> = timings
+            .iter()
+            .filter(|timing| timing.table_fallback)
+            .map(|timing| timing.name.as_str())
             .collect();
-        schema_paths.sort();
-        let mut schema = Constraint::load(
-            &std::fs::read(root.join(schema_paths[focus].clone())).expect("read schema"),
-        )
-        .expect("load schema");
-        restore_component(&mut schema, "schema-focus");
-        let inputs = [CompiledSubgrammarInput {
-            placeholder_terminal: terminal_id(&parent, &format!("TOOL_ARGS_SLOT_{focus}")),
-            additional_placeholder_terminals: &[],
-            constraint: &schema,
-        }];
-        let dynamic = compose_constraints_owned_parent_segmented(
-            parent.clone(),
-            &inputs,
-            &vocab,
-            SegmentedBoundaryBackend::Dynamic,
-        )
-        .expect("dynamic compose")
-        .constraint;
-        let composed = low_level_compose(&parent, &inputs);
-        let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
-        let disallowed = compute_disallowed_follows(&grammar);
-        let counts = vec![parent.tokenizer.num_states(), schema.tokenizer.num_states()];
-        let (built, _) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-            merged_tokenizer: &composed.tokenizer,
-            vocab: &vocab,
-            grammar: &grammar,
-            disallowed_follows: &disallowed,
-            ignore_terminal: composed.ignore_canonical,
-            terminal_offsets: &composed.table.terminal_offsets,
-            tokenizer_offsets: &composed.tokenizer_offsets,
-            component_state_counts: &counts,
-        })
-        .expect("walk shards");
-        let table = dynamic
-            .recursive_control_eliminated_parser_table()
-            .expect("recursive table")
-            .expect("recursive table present");
-        eprintln!("FOCUS table states={} terms={}", table.num_states, table.num_terminals);
-        eprintln!(
-            "FOCUS merged_tokenizer_states={} walk_tsids={}",
-            composed.tokenizer.num_states(),
-            built
-                .iter()
-                .map(|shard| shard.output.id_map.num_tsids())
-                .collect::<Vec<_>>()
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","),
+        assert!(
+            declined.is_empty(),
+            "sweep must install static shards on every link; convergence-declined (dynamic fallback, vacuous): {declined:?}"
         );
-        let merged_states = composed.tokenizer.num_states() as usize;
-        let mut published = Vec::with_capacity(built.len());
-        for shard in built {
-            eprintln!(
-                "FOCUS walk start={} dwa_states={} dwa_trans={} cands={} cand_set={:?}",
-                shard.start_component,
-                shard.output.dwa.num_states(),
-                shard.output.dwa.num_transitions(),
-                shard.candidate_tokens.len(),
-                shard.candidate_tokens.iter().copied().collect::<Vec<_>>(),
+        for timing in &timings {
+            assert_eq!(
+                timing.installed,
+                timing.shards_built,
+                "link {} must install every built shard",
+                timing.name,
             );
-            let work = WalkBoundaryShardWork {
-                start_component: shard.start_component as u32,
-                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
-                id_map: shard.output.id_map,
-                candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
-            };
-            let (one, profile) = publish_walk_boundary_shard_work(work, &table, merged_states)
-                .expect("publish walk shard");
-            let parser = one.boundary.recursive_parser_dwa.as_ref().expect("recursive parser");
-            let mut default_states = 0usize;
-            let mut label_min = i32::MAX;
-            let mut label_max = i32::MIN;
-            for state in parser.states() {
-                if state.transitions.contains_key(&crate::compiler::glr::labels::DEFAULT_LABEL) {
-                    default_states += 1;
-                }
-                for &label in state.transitions.keys() {
-                    label_min = label_min.min(label);
-                    label_max = label_max.max(label);
-                }
-            }
-            let mut distinct_tsids = BTreeSet::new();
-            for &tsid in &one.boundary.tokenizer_state_to_tsid {
-                distinct_tsids.insert(tsid);
-            }
-            let start_labels: Vec<i32> = parser
-                .states()
-                .first()
-                .map(|state| {
-                    let mut labels: Vec<i32> =
-                        state.transitions.keys().copied().collect();
-                    labels.sort_unstable();
-                    labels
-                })
-                .unwrap_or_default();
-            eprintln!(
-                "FOCUS shard start={} start_labels={start_labels:?}",
-                one.start_component,
-            );
-            if one.start_component == 0 {
-                let tsid15 = one.boundary.tokenizer_state_to_tsid[15];
-                eprintln!("FOCUS shard0 tsid15={tsid15}");
-                for (index, state) in parser.states().iter().enumerate() {
-                    let final_sets = state
-                        .final_weight
-                        .as_ref()
-                        .and_then(|weight| weight.token_set_for_tsid_ref(tsid15))
-                        .map(|set| {
-                            set.ranges().map(|range| range.collect::<Vec<_>>()).collect::<Vec<_>>()
-                        });
-                    eprintln!(
-                        "FOCUS shard0 state={index} final_ts15={final_sets:?} trans={:?}",
-                        state.transitions,
-                    );
-                }
-            }
-            eprintln!(
-                "FOCUS shard start={} parser_states={} parser_trans={} default_states={} label_range=[{},{}] tsid_entries={} distinct_tsids={} itok_maps={}",
-                one.start_component,
-                profile.parser_states,
-                profile.parser_trans,
-                default_states,
-                label_min,
-                label_max,
-                one.boundary.tokenizer_state_to_tsid.len(),
-                distinct_tsids.len(),
-                one.boundary.internal_token_to_originals.len(),
-            );
-            published.push(one);
         }
-        let mut static_comp = dynamic.clone();
-        install_published_static_boundary_shards(
-            static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
-            published,
-        )
-        .expect("install");
-        let path = [2446u32, 337, 62, 22];
-        let mut st_dyn = dynamic.start();
-        let mut st_static = static_comp.start();
-        for &token in &path {
-            st_dyn.commit_token(token).expect("dyn commit");
-            st_static.commit_token(token).expect("static commit");
-        }
-        let mask_dyn = st_dyn.mask();
-        let mask_static = st_static.mask();
-        let bits = |mask: &[u32]| {
-            let mut out = Vec::new();
-            for (word_index, &word) in mask.iter().enumerate() {
-                let mut live = word;
-                while live != 0 {
-                    let bit = live.trailing_zeros() as usize;
-                    out.push((word_index * 32 + bit) as u32);
-                    live &= live - 1;
-                }
-            }
-            out
-        };
-        let dyn_bits: BTreeSet<u32> = bits(&mask_dyn).into_iter().collect();
-        let static_bits: BTreeSet<u32> = bits(&mask_static).into_iter().collect();
-        eprintln!(
-            "FOCUS masks dyn_admits={} static_admits={} dyn_only={:?} static_only={:?}",
-            dyn_bits.len(),
-            static_bits.len(),
-            dyn_bits.difference(&static_bits).copied().take(12).collect::<Vec<_>>(),
-            static_bits.difference(&dyn_bits).copied().take(12).collect::<Vec<_>>(),
-        );
+        assert_eq!(total_mismatches, 0, "walk-shard sweep must match DynamicDirect on every link");
     }
 }
