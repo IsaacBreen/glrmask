@@ -2534,14 +2534,25 @@ pub(crate) struct WalkShardPublishProfile {
 /// discovery-built path applies via `set_parser_table_override`); the parser
 /// is built with the standard count-only constructor + runtime normalization.
 ///
-/// Precondition: live state keys stay within the merged tokenizer range (no
+/// Precondition: live state keys stay within the link-time union ranges (no
 /// lazily-allocated virtual-residual tokenizer states — the private map only
 /// covers link-time states). The caller falls back to dynamic shards when a
 /// component tokenizer has a virtual residual runtime.
+///
+/// Coordinate contract: the installing runtime is compact segmented, whose
+/// live tokenizer keys are leaf-packed scoped states (leaves back-to-back
+/// from 0 with NO reset state) — not merged-union states (which insert a
+/// fresh reset fan-out at 0). The private map is therefore indexed by the
+/// scoped coordinate: `scoped(leaf i, local l)` maps to the TSID of
+/// `merged[tokenizer_offsets[i] + l]`, with leaves in link-component order.
+/// Indexing it by merged states instead shifts every lookup by the reset
+/// state and silently misroutes queries (inner-6 over-admission +
+/// inner-7 under-admission were both this bug).
 pub(crate) fn publish_walk_boundary_shard_work(
     work: WalkBoundaryShardWork,
     boundary_table: &Arc<crate::compiler::glr::table::GLRTable>,
-    merged_tokenizer_states: usize,
+    tokenizer_offsets: &[u32],
+    component_state_counts: &[u32],
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     let num_terminals = boundary_table.num_terminals;
     let TerminalAutomaton::Dwa(ref crossing) = work.terminal_automaton else {
@@ -2594,20 +2605,44 @@ pub(crate) fn publish_walk_boundary_shard_work(
             parser_dwa.num_transitions(),
         );
     }
-    // The private TSID map must cover every merged link-time state exactly
-    // once; gaps would silently drop boundary contributions at runtime.
-    if id_map.tokenizer_states.original_to_internal.len() != merged_tokenizer_states {
+    // The private TSID map is indexed by the installing runtime's scoped
+    // tokenizer coordinate (leaves back-to-back from 0, no reset state) and
+    // must cover every scoped link-time state exactly once; gaps would
+    // silently drop boundary contributions at runtime.
+    if tokenizer_offsets.len() != component_state_counts.len() {
         return Err(format!(
-            "walk boundary shard {} TSID map covers {} states, merged tokenizer has {merged_tokenizer_states}",
+            "walk boundary shard {} tokenizer layout mismatch: {} offsets vs {} components",
             work.start_component,
-            id_map.tokenizer_states.original_to_internal.len(),
+            tokenizer_offsets.len(),
+            component_state_counts.len(),
         ));
     }
-    if id_map.tokenizer_states.original_to_internal.iter().any(|&tsid| tsid == u32::MAX) {
-        return Err(format!(
-            "walk boundary shard {} TSID map has unmapped merged states",
-            work.start_component,
-        ));
+    let total_scoped: usize =
+        component_state_counts.iter().map(|&count| count as usize).sum();
+    let mut tokenizer_state_to_tsid = Vec::with_capacity(total_scoped);
+    for (component, &count) in component_state_counts.iter().enumerate() {
+        let base = tokenizer_offsets[component] as usize;
+        for local in 0..count as usize {
+            let merged = base.checked_add(local).ok_or_else(|| {
+                format!(
+                    "walk boundary shard {} scoped state (component {component}, local {local}) overflows",
+                    work.start_component,
+                )
+            })?;
+            let tsid = id_map
+                .tokenizer_states
+                .original_to_internal
+                .get(merged)
+                .copied()
+                .unwrap_or(u32::MAX);
+            if tsid == u32::MAX {
+                return Err(format!(
+                    "walk boundary shard {} scoped state (component {component}, local {local}) has no TSID (merged {merged})",
+                    work.start_component,
+                ));
+            }
+            tokenizer_state_to_tsid.push(tsid);
+        }
     }
     let profile = WalkShardPublishProfile {
         templates_ms,
@@ -2626,7 +2661,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
                 compact_parser_dwa: None,
                 recursive_parser_dwa: Some(parser_dwa),
                 uses_composed_tsid_coordinate: false,
-                tokenizer_state_to_tsid: id_map.tokenizer_states.original_to_internal.clone(),
+                tokenizer_state_to_tsid,
                 internal_token_to_originals: id_map.vocab_tokens.internal_to_originals.clone(),
             }),
         },

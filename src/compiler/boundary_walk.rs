@@ -497,6 +497,35 @@ mod tests {
         (Arc::new(table), ms)
     }
 
+    /// Pin the installing runtime's scoped tokenizer packing: leaves packed
+    /// back-to-back from 0 in link-component order (parent first). The walk
+    /// shard's private TSID map is indexed by exactly this coordinate; a
+    /// layout change here must update `publish_walk_boundary_shard_work`.
+    fn assert_scoped_tokenizer_packing(
+        name: &str,
+        installed: &Constraint,
+        component_state_counts: &[u32],
+    ) {
+        let layout = installed
+            .recursive_parser_layout()
+            .expect("recursive layout")
+            .expect("recursive layout present");
+        let mut expected = Vec::with_capacity(component_state_counts.len());
+        let mut next = 0u32;
+        for &count in component_state_counts {
+            expected.push(next);
+            next = next.checked_add(count).expect("scoped total overflow");
+        }
+        assert_eq!(
+            layout.leaf_tokenizer_state_offsets, expected,
+            "{name}: runtime leaf packing must match link-component order",
+        );
+        assert_eq!(
+            layout.total_tokenizer_states, next,
+            "{name}: runtime scoped total must match link components",
+        );
+    }
+
     /// Component-local IDs of `TOOL_ARGS_SLOT_*` terminals in `constraint`
     /// except the bound ones. The sweep parents/children follow the
     /// `TOOL_ARGS_SLOT_{index}` slot convention; the shared `slot`-named
@@ -918,7 +947,6 @@ mod tests {
         let (boundary_table, table_ms) =
             prepare_spliced_boundary_table("outer", &fixture.composed, &unbound);
         eprintln!("BOUNDARY_INSTALL table_ms={table_ms:.3}");
-        let merged_states = fixture.composed.tokenizer.num_states() as usize;
         let mut published = Vec::with_capacity(built.len());
         for shard in built {
             let work = WalkBoundaryShardWork {
@@ -927,9 +955,13 @@ mod tests {
                 id_map: shard.output.id_map,
                 candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
             };
-            let (shard, profile) =
-                publish_walk_boundary_shard_work(work, &boundary_table, merged_states)
-                    .expect("publish walk shard");
+            let (shard, profile) = publish_walk_boundary_shard_work(
+                work,
+                &boundary_table,
+                &fixture.composed.tokenizer_offsets,
+                &component_state_counts,
+            )
+            .expect("publish walk shard");
             eprintln!(
                 "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} terms={} templates_ms={:.3} materialize_ms={:.3} normalize_ms={:.3}",
                 shard.start_component,
@@ -955,6 +987,7 @@ mod tests {
             static_comp.uses_compact_segmented_parser_runtime(),
             "installed composition must stay on the compact runtime",
         );
+        assert_scoped_tokenizer_packing("outer", &static_comp, &component_state_counts);
         run_install_differential(&dynamic, &mut static_comp, false);
     }
 
@@ -1275,7 +1308,6 @@ mod tests {
             prepare_spliced_boundary_table(name, &composed, &unbound);
         let (mut templates_ms, mut parser_ms, mut install_ms) = (0.0, 0.0, 0.0);
         let mut static_comp = dynamic.clone();
-        let merged_states = composed.tokenizer.num_states() as usize;
         let mut published = Vec::with_capacity(built.len());
         for shard in built {
             let work = WalkBoundaryShardWork {
@@ -1288,9 +1320,13 @@ mod tests {
                     .collect::<Vec<_>>()
                     .into(),
             };
-            let (one, publish_profile) =
-                publish_walk_boundary_shard_work(work, &boundary_table, merged_states)
-                    .expect("publish walk shard");
+            let (one, publish_profile) = publish_walk_boundary_shard_work(
+                work,
+                &boundary_table,
+                &composed.tokenizer_offsets,
+                &counts,
+            )
+            .expect("publish walk shard");
             templates_ms += publish_profile.templates_ms;
             parser_ms += publish_profile.materialize_ms + publish_profile.normalize_ms;
             published.push(one);
@@ -1309,6 +1345,7 @@ mod tests {
             static_comp.uses_compact_segmented_parser_runtime(),
             "{name}: installed composition must stay on the compact runtime",
         );
+        assert_scoped_tokenizer_packing(name, &static_comp, &counts);
         let diff_started = Instant::now();
         let (diff_positions, diff_mismatches, diff_checksum, diff_first) =
             rng_differential(&dynamic, &static_comp, diff_steps, 0x9e37_79b9_7f4a_7c15);
