@@ -1077,6 +1077,8 @@ fn llg_slice_first_bytes(
 /// lexer root still carries its exact source state. This must run before any
 /// same-parser lexer-root union, because the union coordinate intentionally
 /// discards the one-source provenance used by projected/symbolic proofs.
+#[cold]
+#[inline(never)]
 fn precollapse_master_decision(
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
@@ -1336,12 +1338,26 @@ fn precollapse_master_decision(
                 }
             }
 
+            let needs_quotient = eligible.iter().copied().any(|terminal| {
+                prepared_slice_slot
+                    .and_then(|slot| {
+                        vocab.prepared_master_proof_result(source, slot, terminal)
+                    })
+                    .is_none()
+            });
             // A grammar-quotiented dynamic vocabulary has already paid to
             // reduce the model vocabulary to grammar-equivalence representatives.
             // Building a second terminal-projection quotient lazily here can cost
             // orders of magnitude more than simply walking that small trie. Keep
             // consuming explicitly/prepared quotients when present, but do not
             // synthesize them online for the O2 runtime.
+            if needs_quotient && !eligible.is_empty() && !vocab.is_grammar_quotiented() {
+                vocab.prepare_runtime_projected_terminal_quotients(
+                    &state.constraint.tokenizer,
+                    &safe_plus_slice.slice_token_bytes(),
+                );
+            }
+
             for &terminal in &eligible {
                 if prepared_slice_slot
                     .and_then(|slot| {
@@ -1350,12 +1366,6 @@ fn precollapse_master_decision(
                     .is_some()
                 {
                     continue;
-                }
-                if !vocab.is_grammar_quotiented() {
-                    vocab.prepare_runtime_projected_terminal_quotient(
-                        &state.constraint.tokenizer,
-                        terminal,
-                    );
                 }
                 let proof_started = profile_proof.then(std::time::Instant::now);
                 let quotient_proof = vocab.projected_terminal_slice_contained(
@@ -1600,8 +1610,24 @@ pub(super) fn try_scalar_dispatch(
     // provenance is about to be lost, and the later single-root master path can
     // prove the same slice directly (including the cheap virtual bounded-radius
     // fast path). Reserve the expensive pre-collapse prover for actual unions.
+    let skip_single_virtual_precollapse = master_may_apply
+        && root_branches.len() == 1
+        && root_branches[0].exact_tokenizer_state.is_some_and(|source| {
+            state
+                .constraint
+                .tokenizer
+                .singleton_epsilon_closure(source)
+                .into_iter()
+                .any(|residual_state| {
+                    state
+                        .constraint
+                        .tokenizer
+                        .virtual_residual_terminal_for_state(residual_state)
+                        .is_some()
+                })
+        });
     let precollapse_master_decision = (master_may_apply
-        && root_branches.len() >= 2
+        && !skip_single_virtual_precollapse
         && std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none())
         .then(|| {
             precollapse_master_decision(
