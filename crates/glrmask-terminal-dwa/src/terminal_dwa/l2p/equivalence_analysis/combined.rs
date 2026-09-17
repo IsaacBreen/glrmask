@@ -661,6 +661,7 @@ struct CombinedEquivalenceResult {
     state_classes: BTreeSet<BTreeSet<usize>>,
 }
 
+#[derive(Debug, Clone)]
 pub struct CombinedEquivalenceProfile {
     pub initial_states_considered: usize,
     pub max_length_skipped: bool,

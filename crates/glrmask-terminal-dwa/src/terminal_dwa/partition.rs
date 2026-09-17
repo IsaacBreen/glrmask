@@ -1192,6 +1192,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         initial_state_map,
                         id_map_only,
                         None,
+                        None,
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -1317,6 +1318,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     None,
                                     id_map_only,
                                     None,
+                                    None,
                                 );
                                 if let Some(part) = result.as_mut() {
                                     part.id_map.tokenizer_states = materialized
@@ -1353,6 +1355,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     shared_l1_token_trie.as_deref(),
                                     branch_initial_state_map,
                                     id_map_only,
+                                    None,
                                     None,
                                 )
                             };

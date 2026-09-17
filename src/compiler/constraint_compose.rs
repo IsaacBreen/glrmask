@@ -29826,6 +29826,39 @@ table: &dispatch.table,
                 keep.iter().filter(|&&selected| selected).count()
             });
             let started = Instant::now();
+            // Phase 2 step 1 verification knob: route Step 1 through the
+            // shared-equivalence path (computed fresh here for exactness
+            // comparison; production code computes it once per link).
+            let use_shared =
+                std::env::var("PHASE1_SHARED").map(|value| value != "0").unwrap_or(false);
+            let shared = use_shared.then(|| {
+                tdwa::l2p::compute_shared_l2p_equivalence(
+                    "phase1_probe",
+                    tokenizer,
+                    vocab,
+                    ignore_terminal,
+                    grammar,
+                    &active,
+                    disallowed,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&flat),
+                    None,
+                    initial_state_map,
+                )
+                .expect("shared equivalence must compute")
+            });
+            let shard_options = shared.as_ref().map(|shared| {
+                tdwa::l2p::L2pShardBuildOptions {
+                    shared_equivalence: Some(shared),
+                    skip_ti_discovery: true,
+                    crossing_filter: None,
+                }
+            });
             let result = tdwa::l2p::build_l2p_id_map_and_terminal_dwa_mode(
                 "phase1_probe",
                 tokenizer,
@@ -29849,14 +29882,17 @@ table: &dispatch.table,
                 initial_state_map,
                 false,
                 seed_filter,
+                shard_options.as_ref(),
             )
             .expect("restricted walk must produce a DWA");
             eprintln!(
-                "PHASE1 walk_{tag} vocab={} seeded={} wall_ms={:.3} id_map_ms={:.3} dwa_ms={:.3} compact_ms={:.3} dwa_states={} dwa_trans={} tsids={} itokens={} acyclic={}",
+                "PHASE1 walk_{tag} vocab={} seeded={} shared={} wall_ms={:.3} id_map_ms={:.3} shared_id_map_ms={:.3} dwa_ms={:.3} compact_ms={:.3} dwa_states={} dwa_trans={} tsids={} itokens={} acyclic={}",
                 vocab.entries_map().len(),
                 seeded,
+                shared.is_some(),
                 started.elapsed().as_secs_f64() * 1000.0,
                 result.profile.id_map_ms,
+                shared.as_ref().map_or(0.0, |shared| shared.id_map_ms),
                 result.profile.terminal_dwa_ms,
                 result.profile.compact_ms,
                 result.dwa.num_states(),
