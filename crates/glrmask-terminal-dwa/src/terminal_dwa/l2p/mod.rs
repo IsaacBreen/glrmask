@@ -53,7 +53,9 @@ use crate::Vocab;
 use super::types::{
     compile_profile_enabled, TerminalColoring, TerminalDwaBuildProfile, TerminalDwaPhaseProfile,
 };
-use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use nwa_builder::{
+    build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes, seed_root_nodes_filtered,
+};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
@@ -636,6 +638,7 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         prebuilt_token_trie,
         initial_state_map,
         false,
+        None,
     )
 }
 
@@ -664,6 +667,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     >,
     initial_state_map: Option<&ManyToOneIdMap>,
     id_map_only: bool,
+    seed_state_filter: Option<&[bool]>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
@@ -1177,7 +1181,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
+            let roots = match seed_state_filter {
+                Some(keep) => {
+                    seed_root_nodes_filtered(tokenizer, &mut nwa, start_state, &simplified_id_map, keep)
+                }
+                None => seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map),
+            };
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
             let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
