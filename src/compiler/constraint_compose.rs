@@ -2500,11 +2500,11 @@ fn publish_static_boundary_shard_work(
 }
 
 /// Walk-built boundary shard work: a crossing terminal DWA over shard-local
-/// TSIDs, published late (after the overlay exists) against the recursive
-/// provider table. Produced by `boundary_walk` (link-shared equivalence +
-/// seeded standard walks + NWA crossing filter), one per start component with
-/// a nonempty crossing set. Components with empty crossings get no shard
-/// (the runtime skips missing shards).
+/// TSIDs, published late (after the overlay exists) against the spliced
+/// control-free boundary table. Produced by `boundary_walk` (link-shared
+/// equivalence + seeded standard walks + NWA crossing filter), one per start
+/// component with a nonempty crossing set. Components with empty crossings
+/// get no shard (the runtime skips missing shards).
 pub(crate) struct WalkBoundaryShardWork {
     pub(crate) start_component: u32,
     pub(crate) terminal_automaton: TerminalAutomaton,
@@ -2527,7 +2527,9 @@ pub(crate) struct WalkShardPublishProfile {
 /// shard-local TSIDs (`uses_composed_tsid_coordinate = false` + the walk
 /// id_map's private raw-state and token maps).
 ///
-/// Templates are characterized fresh over the recursive provider table for
+/// Templates are characterized fresh over the spliced control-free
+/// boundary table (the `compose_subgrammar_tables` object with unbound slots
+/// emptied — never the dynamic path's control-bearing recursive table) for
 /// exactly the terminals the crossing DWA emits (the same construction the
 /// discovery-built path applies via `set_parser_table_override`); the parser
 /// is built with the standard count-only constructor + runtime normalization.
@@ -2538,10 +2540,10 @@ pub(crate) struct WalkShardPublishProfile {
 /// component tokenizer has a virtual residual runtime.
 pub(crate) fn publish_walk_boundary_shard_work(
     work: WalkBoundaryShardWork,
-    recursive_table: &Arc<crate::compiler::glr::table::GLRTable>,
+    boundary_table: &Arc<crate::compiler::glr::table::GLRTable>,
     merged_tokenizer_states: usize,
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
-    let num_terminals = recursive_table.num_terminals;
+    let num_terminals = boundary_table.num_terminals;
     let TerminalAutomaton::Dwa(ref crossing) = work.terminal_automaton else {
         return Err(format!(
             "walk boundary shard {} must carry a DWA terminal automaton",
@@ -2560,7 +2562,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
     }
     let templates_started_at = Instant::now();
     let characterizations = characterize_selected_terminals_for_terminal_count(
-        recursive_table,
+        boundary_table,
         num_terminals,
         &selected,
     );
@@ -2572,15 +2574,15 @@ pub(crate) fn publish_walk_boundary_shard_work(
         num_terminals,
         templates,
         prebuilt_bundle_cache: None,
-        parser_table_override: Some(Arc::clone(recursive_table)),
+        parser_table_override: Some(Arc::clone(boundary_table)),
     };
     let materialize_started_at = Instant::now();
     let (positive, id_map, _template_cache) =
-        parser_work.materialize_positive_parser(recursive_table)?;
+        parser_work.materialize_positive_parser(boundary_table)?;
     let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
     positive.ensure_positive()?;
     let normalize_started_at = Instant::now();
-    let parser_dwa = positive.into_runtime_dwa(recursive_table);
+    let parser_dwa = positive.into_runtime_dwa(boundary_table);
     let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
     ensure_positive_runtime_parser_dwa(&parser_dwa)?;
     if compose_profile_enabled() {

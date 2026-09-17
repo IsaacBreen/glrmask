@@ -1,7 +1,7 @@
 //! Production boundary-shard terminal-DWA construction (static-link redesign).
 //!
-//! For a composition with a merged tokenizer and a spliced (control-eliminated)
-//! LR table, the boundary shard for start component `i` is built by running the
+//! For a composition with a merged tokenizer and a spliced control-free LR
+//! table, the boundary shard for start component `i` is built by running the
 //! STANDARD terminal-DWA trie walk on the merged tokenizer from `Commit_i`
 //! (component `i`'s token-start states), keeping only crossing paths at the NWA
 //! level, then standard templates + parser-DWA construction (see
@@ -346,6 +346,7 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
         GLRTable, SubgrammarTableInput, compose_subgrammar_tables, control_elimination_budget_exhausted,
+        empty_terminals_in_composed_table,
     };
     use crate::compiler::pipeline::compute_disallowed_follows;
     use crate::grammar::flat::TerminalID;
@@ -444,6 +445,75 @@ mod tests {
             table.nonterminal_display_names.clone(),
             augmented_start,
         )
+    }
+
+    /// Step-4c boundary parser table: the control-free spliced composed table
+    /// (the Phase-1 object — never the dynamic path's control-bearing
+    /// recursive table) with every unbound slot terminal emptied. Controls
+    /// are a runtime device of the dynamic path; they must not appear in the
+    /// static boundary parser's table at all, so a nonzero control count is
+    /// a hard error, not a fallback. `unbound_slots` holds
+    /// (component_index, component-local terminal) pairs; they are resolved
+    /// to composed IDs through the composed terminal offsets.
+    fn prepare_spliced_boundary_table(
+        name: &str,
+        composed: &LowLevelComposed,
+        unbound_slots: &[(usize, TerminalID)],
+    ) -> (Arc<GLRTable>, f64) {
+        assert!(
+            composed.table.table.control_terminals.is_empty(),
+            "{name}: spliced composed table must be control-free, has {:?}",
+            composed.table.table.control_terminals,
+        );
+        assert!(
+            composed.table.control_terminals.is_empty(),
+            "{name}: composed control set must be empty",
+        );
+        let started = Instant::now();
+        let mut table = composed.table.table.clone();
+        let emptied: Vec<TerminalID> = unbound_slots
+            .iter()
+            .map(|(component, local)| {
+                composed.table.terminal_offsets[*component]
+                    .checked_add(*local)
+                    .expect("slot terminal offset overflow")
+            })
+            .collect();
+        for &terminal in &emptied {
+            assert!(
+                (terminal as usize) < table.num_terminals as usize,
+                "{name}: unbound slot terminal {terminal} out of range",
+            );
+        }
+        empty_terminals_in_composed_table(&mut table, &emptied);
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "BOUNDARY_TABLE name={name} states={} terms={} controls={} emptied={} prep_ms={ms:.3}",
+            table.num_states,
+            table.num_terminals,
+            table.control_terminals.len(),
+            emptied.len(),
+        );
+        (Arc::new(table), ms)
+    }
+
+    /// Component-local IDs of `TOOL_ARGS_SLOT_*` terminals in `constraint`
+    /// except the bound ones. The sweep parents/children follow the
+    /// `TOOL_ARGS_SLOT_{index}` slot convention; the shared `slot`-named
+    /// JSON-string terminals (`subgrammar2::"..."`) never match the prefix.
+    fn unbound_slot_terminals(
+        constraint: &Constraint,
+        bound_names: &[&str],
+    ) -> Vec<TerminalID> {
+        constraint
+            .terminal_display_names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| {
+                name.starts_with("TOOL_ARGS_SLOT_") && !bound_names.contains(&name.as_str())
+            })
+            .map(|(id, _)| id as TerminalID)
+            .collect()
     }
 
     fn shared_equivalence_for(
@@ -775,11 +845,11 @@ mod tests {
     }
 
     /// Step-4 install gate: build walk shards through the link orchestration,
-    /// publish against a dynamic composition's recursive table, install by
-    /// replacing its dynamic shards, and require mask-for-mask equality with
-    /// the dynamic backend over a byte-prefix corpus. When the recursive
-    /// table declines via the convergence budget, the dynamic shards stay
-    /// (fallback) and the differential is vacuous by construction.
+    /// publish against the spliced control-free boundary table (unbound
+    /// slots emptied), install by replacing the dynamic composition's
+    /// dynamic shards, and require mask-for-mask equality with the dynamic
+    /// backend over a byte-prefix corpus. No fallback: a nonzero control
+    /// count or a publish failure is a hard gate failure.
     #[test]
     #[ignore]
     fn selected10_walk_shard_install_matches_dynamic() {
@@ -835,31 +905,19 @@ mod tests {
         assert_eq!(built[0].start_component, 1);
         assert_eq!(built[0].candidate_tokens.len(), 143);
 
-        let recursive_started = Instant::now();
-        let recursive_table = match dynamic.recursive_control_eliminated_parser_table() {
-            Ok(table) => table.expect("recursive table present"),
-            Err(error) if control_elimination_budget_exhausted(&error) => {
-                // Convergence decline: no exact static shard exists without
-                // elimination (characterization never closes over controls,
-                // so an un-eliminated table would be unsound). The gate
-                // requires a static install and fails loudly instead of
-                // passing vacuously on dynamic shards.
-                eprintln!(
-                    "BOUNDARY_INSTALL fallback=dynamic decline_ms={:.3} error={error}",
-                    recursive_started.elapsed().as_secs_f64() * 1000.0,
-                );
-                panic!(
-                    "outer link declined static install via convergence budget: {error}"
-                );
-            }
-            Err(error) => panic!("recursive table hard failure: {error}"),
-        };
-        eprintln!(
-            "BOUNDARY_INSTALL recursive_table_ms={:.3} states={} terms={}",
-            recursive_started.elapsed().as_secs_f64() * 1000.0,
-            recursive_table.num_states,
-            recursive_table.num_terminals,
+        // Outer unbound slots: dispatch's TOOL_ARGS_SLOT_* (component 1, none
+        // bound — the 10-way segmented dispatch link is unavailable) plus any
+        // unbound parent slots (core binds its only slot; expect none).
+        let mut unbound: Vec<(usize, TerminalID)> = unbound_slot_terminals(&fixture.core, &[])
+            .into_iter()
+            .map(|local| (0usize, local))
+            .collect();
+        unbound.extend(
+            unbound_slot_terminals(&fixture.dispatch, &[]).into_iter().map(|local| (1usize, local)),
         );
+        let (boundary_table, table_ms) =
+            prepare_spliced_boundary_table("outer", &fixture.composed, &unbound);
+        eprintln!("BOUNDARY_INSTALL table_ms={table_ms:.3}");
         let merged_states = fixture.composed.tokenizer.num_states() as usize;
         let mut published = Vec::with_capacity(built.len());
         for shard in built {
@@ -870,7 +928,7 @@ mod tests {
                 candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
             };
             let (shard, profile) =
-                publish_walk_boundary_shard_work(work, &recursive_table, merged_states)
+                publish_walk_boundary_shard_work(work, &boundary_table, merged_states)
                     .expect("publish walk shard");
             eprintln!(
                 "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} terms={} templates_ms={:.3} materialize_ms={:.3} normalize_ms={:.3}",
@@ -1007,7 +1065,6 @@ mod tests {
         min_ms: f64,
         shards_built: usize,
         table_ms: f64,
-        table_fallback: bool,
         templates_ms: f64,
         parser_ms: f64,
         install_ms: f64,
@@ -1198,54 +1255,60 @@ mod tests {
             det_ms += shard_profile.determinize_ms;
             min_ms += shard_profile.minimize_ms;
         }
-        let table_started = Instant::now();
-        let table_result = dynamic.recursive_control_eliminated_parser_table();
-        let table_ms = table_started.elapsed().as_secs_f64() * 1000.0;
+        // Unbound slots (parent's minus the bound ones, plus every child's —
+        // children are leaves here): emptied in the boundary table copy.
+        let bound_names: Vec<&str> =
+            slots.iter().map(|(slot, _)| slot.as_str()).collect();
+        let mut unbound: Vec<(usize, TerminalID)> =
+            unbound_slot_terminals(parent, &bound_names)
+                .into_iter()
+                .map(|local| (0usize, local))
+                .collect();
+        for (child_index, (_, child)) in slots.iter().enumerate() {
+            unbound.extend(
+                unbound_slot_terminals(child, &[])
+                    .into_iter()
+                    .map(|local| (child_index + 1, local)),
+            );
+        }
+        let (boundary_table, table_ms) =
+            prepare_spliced_boundary_table(name, &composed, &unbound);
         let (mut templates_ms, mut parser_ms, mut install_ms) = (0.0, 0.0, 0.0);
         let mut static_comp = dynamic.clone();
-        let mut installed = 0usize;
-        let table_fallback = match table_result {
-            Ok(table) => {
-                let table = table.expect("recursive table present");
-                let merged_states = composed.tokenizer.num_states() as usize;
-                let mut published = Vec::with_capacity(built.len());
-                for shard in built {
-                    let work = WalkBoundaryShardWork {
-                        start_component: shard.start_component as u32,
-                        terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
-                        id_map: shard.output.id_map,
-                        candidate_tokens: shard
-                            .candidate_tokens
-                            .into_iter()
-                            .collect::<Vec<_>>()
-                            .into(),
-                    };
-                    let (one, publish_profile) =
-                        publish_walk_boundary_shard_work(work, &table, merged_states)
-                            .expect("publish walk shard");
-                    templates_ms += publish_profile.templates_ms;
-                    parser_ms += publish_profile.materialize_ms + publish_profile.normalize_ms;
-                    published.push(one);
-                }
-                installed = published.len();
-                if !published.is_empty() {
-                    let install_started = Instant::now();
-                    install_published_static_boundary_shards(
-                        static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
-                        published,
-                    )
-                    .expect("install");
-                    install_ms = install_started.elapsed().as_secs_f64() * 1000.0;
-                }
-                assert!(
-                    static_comp.uses_compact_segmented_parser_runtime(),
-                    "{name}: installed composition must stay on the compact runtime",
-                );
-                false
-            }
-            Err(error) if control_elimination_budget_exhausted(&error) => true,
-            Err(error) => panic!("{name}: recursive table hard failure: {error}"),
-        };
+        let merged_states = composed.tokenizer.num_states() as usize;
+        let mut published = Vec::with_capacity(built.len());
+        for shard in built {
+            let work = WalkBoundaryShardWork {
+                start_component: shard.start_component as u32,
+                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
+                id_map: shard.output.id_map,
+                candidate_tokens: shard
+                    .candidate_tokens
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .into(),
+            };
+            let (one, publish_profile) =
+                publish_walk_boundary_shard_work(work, &boundary_table, merged_states)
+                    .expect("publish walk shard");
+            templates_ms += publish_profile.templates_ms;
+            parser_ms += publish_profile.materialize_ms + publish_profile.normalize_ms;
+            published.push(one);
+        }
+        let installed = published.len();
+        if !published.is_empty() {
+            let install_started = Instant::now();
+            install_published_static_boundary_shards(
+                static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
+                published,
+            )
+            .expect("install");
+            install_ms = install_started.elapsed().as_secs_f64() * 1000.0;
+        }
+        assert!(
+            static_comp.uses_compact_segmented_parser_runtime(),
+            "{name}: installed composition must stay on the compact runtime",
+        );
         let diff_started = Instant::now();
         let (diff_positions, diff_mismatches, diff_checksum, diff_first) =
             rng_differential(&dynamic, &static_comp, diff_steps, 0x9e37_79b9_7f4a_7c15);
@@ -1261,7 +1324,6 @@ mod tests {
             min_ms,
             shards_built,
             table_ms,
-            table_fallback,
             templates_ms,
             parser_ms,
             install_ms,
@@ -1272,7 +1334,7 @@ mod tests {
             diff_ms,
         };
         eprintln!(
-            "BOUNDARY_LINK name={} dyn={:.1} low={:.1} shared={:.1} flat={:.1} walk={:.1} det={:.1} min={:.1} shards={} table={:.1} fallback={} templates={:.1} parser={:.1} install={:.1} installed={} diff_pos={} diff_mm={} diffck={:016x} diff_ms={:.0} total_link={:.1}",
+            "BOUNDARY_LINK name={} dyn={:.1} low={:.1} shared={:.1} flat={:.1} walk={:.1} det={:.1} min={:.1} shards={} table={:.1} templates={:.1} parser={:.1} install={:.1} installed={} diff_pos={} diff_mm={} diffck={:016x} diff_ms={:.0} total_link={:.1}",
             timing.name,
             timing.dyn_compose_ms,
             timing.low_level_ms,
@@ -1283,7 +1345,6 @@ mod tests {
             timing.min_ms,
             timing.shards_built,
             timing.table_ms,
-            timing.table_fallback,
             timing.templates_ms,
             timing.parser_ms,
             timing.install_ms,
@@ -1374,7 +1435,7 @@ mod tests {
             ("min", |t| t.min_ms),
             ("templates", |t| t.templates_ms),
             ("parser", |t| t.parser_ms),
-            ("eliminate", |t| t.table_ms),
+            ("table", |t| t.table_ms),
             ("install", |t| t.install_ms),
             ("total_link", |t| t.total_link_ms()),
         ];
@@ -1400,15 +1461,6 @@ mod tests {
             .map(|timing| timing.name.as_str())
             .collect();
         eprintln!("BOUNDARY_SWEEP links={} total_mismatches={total_mismatches} failing={failing:?}", timings.len());
-        let declined: Vec<&str> = timings
-            .iter()
-            .filter(|timing| timing.table_fallback)
-            .map(|timing| timing.name.as_str())
-            .collect();
-        assert!(
-            declined.is_empty(),
-            "sweep must install static shards on every link; convergence-declined (dynamic fallback, vacuous): {declined:?}"
-        );
         for timing in &timings {
             assert_eq!(
                 timing.installed,
