@@ -107,6 +107,14 @@ trait FullWalkTransitionTable {
     fn union_states(&self, _states: &[u32]) -> Option<u32> {
         None
     }
+
+    #[inline(always)]
+    fn dense_output_hint(&self, _state: u32) -> Option<bool> {
+        None
+    }
+
+    #[inline(always)]
+    fn cache_dense_output_hint(&self, _state: u32, _dense: bool) {}
 }
 
 #[derive(Clone, Copy)]
@@ -212,6 +220,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         cache.subsets.clear();
         cache.rows.clear();
         cache.metadata.clear();
+        cache.dense_output_hints.clear();
     }
 
     fn intern_states(&self, states: &[u32]) -> Option<u32> {
@@ -592,6 +601,22 @@ impl FullWalkTransitionTable for FullWalkLazyUnion<'_> {
     #[inline]
     fn union_states(&self, states: &[u32]) -> Option<u32> {
         self.intern_states(states)
+    }
+
+    #[inline(always)]
+    fn dense_output_hint(&self, state: u32) -> Option<bool> {
+        let cache = unsafe { &*self.cache.get() };
+        match cache.dense_output_hints.get(&state).copied() {
+            Some(2) => Some(true),
+            Some(1) => Some(false),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    fn cache_dense_output_hint(&self, state: u32, dense: bool) {
+        let cache = unsafe { &mut *self.cache.get() };
+        cache.dense_output_hints.insert(state, if dense { 2 } else { 1 });
     }
 }
 
@@ -1063,7 +1088,7 @@ fn precollapse_master_decision(
     // enabled dynamically by diagnostic harnesses, so unlike ordinary feature
     // flags they should not be process-cached.
     let profile_mask = dynamic_mask_profile_enabled(state.generation);
-    let profile_proof = dynamic_mask_proof_profile_enabled();
+    let profile_proof = dynamic_mask_proof_profile_enabled() && profile_mask;
     let proof_definitions_available = vocab.llg_master_trie().is_some()
         && vocab.llg_slice_by_cache_id(LLG_SAFE_PLUS_SLICE as u32).is_some()
         && vocab.llg_slice_by_cache_id(LLG_WHITESPACE_SLICE as u32).is_some();
@@ -1311,26 +1336,12 @@ fn precollapse_master_decision(
                 }
             }
 
-            let needs_quotient = eligible.iter().copied().any(|terminal| {
-                prepared_slice_slot
-                    .and_then(|slot| {
-                        vocab.prepared_master_proof_result(source, slot, terminal)
-                    })
-                    .is_none()
-            });
             // A grammar-quotiented dynamic vocabulary has already paid to
             // reduce the model vocabulary to grammar-equivalence representatives.
             // Building a second terminal-projection quotient lazily here can cost
             // orders of magnitude more than simply walking that small trie. Keep
             // consuming explicitly/prepared quotients when present, but do not
             // synthesize them online for the O2 runtime.
-            if needs_quotient && !eligible.is_empty() && !vocab.is_grammar_quotiented() {
-                vocab.prepare_runtime_projected_terminal_quotients(
-                    &state.constraint.tokenizer,
-                    &safe_plus_slice.slice_token_bytes(),
-                );
-            }
-
             for &terminal in &eligible {
                 if prepared_slice_slot
                     .and_then(|slot| {
@@ -1339,6 +1350,12 @@ fn precollapse_master_decision(
                     .is_some()
                 {
                     continue;
+                }
+                if !vocab.is_grammar_quotiented() {
+                    vocab.prepare_runtime_projected_terminal_quotient(
+                        &state.constraint.tokenizer,
+                        terminal,
+                    );
                 }
                 let proof_started = profile_proof.then(std::time::Instant::now);
                 let quotient_proof = vocab.projected_terminal_slice_contained(
@@ -1579,7 +1596,13 @@ pub(super) fn try_scalar_dispatch(
         false
     };
     let master_started = profile.then(std::time::Instant::now);
-    let precollapse_master_decision = master_may_apply
+    // A single exact root does not need a pre-collapse certificate: no lexer
+    // provenance is about to be lost, and the later single-root master path can
+    // prove the same slice directly (including the cheap virtual bounded-radius
+    // fast path). Reserve the expensive pre-collapse prover for actual unions.
+    let precollapse_master_decision = (master_may_apply
+        && root_branches.len() >= 2
+        && std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none())
         .then(|| {
             precollapse_master_decision(
                 state,
@@ -1924,7 +1947,8 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
     // transition table directly before considering the heavier projected
     // quotient. Pre-collapse is only needed when multiple roots may be merged
     // into a coordinate that no longer identifies one exact source state.
-    let precollapse_master_decision = (root_branches.len() >= 2).then(|| {
+    let precollapse_master_decision = (root_branches.len() >= 2
+        && std::env::var_os("GLRMASK_EXPERIMENT_DISABLE_PRECOLLAPSE_MASTER").is_none()).then(|| {
         precollapse_master_decision(
             state,
             vocab,
@@ -2578,6 +2602,22 @@ impl FullWalkParserCache {
                 .get_unchecked_mut(lexer) = if allowed { 2 } else { 1 };
         }
         allowed
+    }
+
+    /// Stable pointer to the fixed-size parser/lexer liveness row for one
+    /// parser-cache node.  The node vector may move when parser children are
+    /// appended, but each row owns a separate allocation whose length never
+    /// changes, so the row buffer itself remains stable for the lifetime of
+    /// this cache.  The dense hot walker keeps this pointer alongside its
+    /// scalar state so a cached liveness hit is one byte load.
+    #[inline(always)]
+    fn physical_boundary_row_ptr(&self, parser_node: u32) -> *const u8 {
+        unsafe {
+            self.nodes
+                .get_unchecked(parser_node as usize)
+                .token_boundary_allowed
+                .as_ptr()
+        }
     }
 
     #[inline(always)]
@@ -4011,6 +4051,683 @@ fn bounded_string_chunk_slice_contained<T: FullWalkTransitionTable>(
     }
     Some(true)
 }
+
+const DENSE_HOT_LEXER_TWO_DISTINCT: u32 = u32::MAX - 3;
+const DENSE_HOT_LEXER_TWO: u32 = u32::MAX - 2;
+const DENSE_HOT_LEXER_DEAD: u32 = u32::MAX;
+
+enum DenseHotLaneOutcome {
+    Dead,
+    Scalar(u32, u32),
+    Two((u32, u32), (u32, u32)),
+    Decline,
+}
+
+/// Populate one entry in the tiny scalar transition cache.  The cache sits
+/// above `FullWalkTransitionTable`, so every scalar lexer coordinate -- raw
+/// Flat16/Flat32, config, or a synthetic lazy-union state -- gets the same
+/// `u8 state x byte -> u8 state` hot path.  Finalizing transitions stay cold.
+#[cold]
+#[inline(never)]
+fn dense_hot_transition_miss<T: FullWalkTransitionTable>(
+    hot: &mut FullWalkHotScalarCache,
+    transitions: &T,
+    hot_id: u8,
+    byte: u8,
+) -> u8 {
+    let Some(&source) = hot.hot_to_raw.get(hot_id as usize) else {
+        return FULL_WALK_HOT_SLOW;
+    };
+    let cell = transitions.cell(source, byte);
+    let value = if T::cell_is_dead(cell) {
+        FULL_WALK_HOT_DEAD
+    } else if T::cell_has_finalizer(cell) {
+        FULL_WALK_HOT_SLOW
+    } else {
+        let target = T::cell_target(cell);
+        hot.intern(target).unwrap_or(FULL_WALK_HOT_SLOW)
+    };
+    if value == FULL_WALK_HOT_SLOW {
+        hot.slow += 1;
+    }
+    hot.misses += 1;
+    unsafe {
+        *hot.rows
+            .get_unchecked_mut(hot_id as usize)
+            .get_unchecked_mut(byte as usize) = value;
+    }
+    value
+}
+
+/// The active parser node changes rarely.  When it does, refresh the tiny
+/// liveness view for every lexer coordinate already interned in the hot cache.
+/// The byte-hot loop can then test parser-conditioned liveness by hot id rather
+/// than mapping the id back to a wide lexer coordinate on every transition.
+#[inline(never)]
+fn dense_hot_refresh_liveness(
+    hot: &FullWalkHotScalarCache,
+    boundary_row: *const u8,
+    hot_liveness: &mut [u8; FULL_WALK_HOT_CAPACITY],
+) {
+    for (id, &lexer_state) in hot.hot_to_raw.iter().enumerate() {
+        hot_liveness[id] = unsafe { *boundary_row.add(lexer_state as usize) };
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn dense_hot_scalar_escape<T: FullWalkTransitionTable>(
+    source_lexer: u32,
+    byte: u8,
+    parser_node: u32,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+    tokenizer: &Tokenizer,
+    transitions: &T,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    vocab: &DynamicMaskVocab,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+) -> DenseHotLaneOutcome {
+    let cell = transitions.cell(source_lexer, byte);
+    if T::cell_is_dead(cell) {
+        return DenseHotLaneOutcome::Dead;
+    }
+    let target = T::cell_target(cell);
+    if !T::cell_has_finalizer(cell) {
+        return DenseHotLaneOutcome::Scalar(target, parser_node);
+    }
+
+    let mut lexer = target;
+    let mut parser = parser_node;
+    let mut two = ((0u32, 0u32), (0u32, 0u32));
+    if full_walk_try_apply_plain_single_finalizer(
+        target,
+        parser_node,
+        initial_lexer_state,
+        finalizer_code,
+        single_finalizer_continues,
+        transitions,
+        parser_cache,
+        constraint,
+        DENSE_HOT_LEXER_TWO_DISTINCT,
+        &mut lexer,
+        &mut parser,
+        &mut two,
+    ) {
+        return if lexer == DENSE_HOT_LEXER_TWO_DISTINCT {
+            DenseHotLaneOutcome::Two(two.0, two.1)
+        } else {
+            DenseHotLaneOutcome::Scalar(lexer, parser)
+        };
+    }
+
+    match full_walk_scalar_finalizer_hot_single(
+        target,
+        parser_node,
+        initial_lexer_state,
+        finalizer_code,
+        single_finalizer_continues,
+        tokenizer,
+        transitions,
+        parser_cache,
+        constraint,
+    ) {
+        FullWalkScalarFinalizerOutcome::Scalar(branch) if branch.prune_guard.is_passed() => {
+            DenseHotLaneOutcome::Scalar(branch.lexer_state, branch.parser_node)
+        }
+        FullWalkScalarFinalizerOutcome::Two(first, second)
+            if first.prune_guard.is_passed() && second.prune_guard.is_passed() =>
+        {
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                vocab,
+                pair_union_cache,
+                (first.lexer_state, first.parser_node),
+                (second.lexer_state, second.parser_node),
+            ) {
+                DenseHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                DenseHotLaneOutcome::Two(
+                    (first.lexer_state, first.parser_node),
+                    (second.lexer_state, second.parser_node),
+                )
+            }
+        }
+        FullWalkScalarFinalizerOutcome::Many(mut branches)
+            if branches.len() == 2
+                && branches.iter().all(|branch| branch.prune_guard.is_passed()) =>
+        {
+            let second = branches.pop().expect("second dense hot branch disappeared");
+            let first = branches.pop().expect("first dense hot branch disappeared");
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                vocab,
+                pair_union_cache,
+                (first.lexer_state, first.parser_node),
+                (second.lexer_state, second.parser_node),
+            ) {
+                DenseHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                DenseHotLaneOutcome::Two(
+                    (first.lexer_state, first.parser_node),
+                    (second.lexer_state, second.parser_node),
+                )
+            }
+        }
+        _ => DenseHotLaneOutcome::Decline,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn dense_hot_two_escape<T: FullWalkTransitionTable>(
+    branches: ((u32, u32), (u32, u32)),
+    byte: u8,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+    tokenizer: &Tokenizer,
+    transitions: &T,
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    vocab: &DynamicMaskVocab,
+    pair_union_cache: &mut FxHashMap<(u32, u32), Option<u32>>,
+) -> DenseHotLaneOutcome {
+    match full_walk_step_two(
+        branches,
+        byte,
+        initial_lexer_state,
+        finalizer_code,
+        single_finalizer_continues,
+        tokenizer,
+        transitions,
+        parser_cache,
+        constraint,
+    ) {
+        FullWalkTwoStepOutcome::Dead => DenseHotLaneOutcome::Dead,
+        FullWalkTwoStepOutcome::One((lexer_state, parser_node)) => {
+            DenseHotLaneOutcome::Scalar(lexer_state, parser_node)
+        }
+        FullWalkTwoStepOutcome::Two(first, second) => {
+            if let Some((lexer_state, parser_node)) = full_walk_merge_two_same_parser(
+                transitions,
+                vocab,
+                pair_union_cache,
+                first,
+                second,
+            ) {
+                DenseHotLaneOutcome::Scalar(lexer_state, parser_node)
+            } else {
+                DenseHotLaneOutcome::Two(first, second)
+            }
+        }
+        FullWalkTwoStepOutcome::Many(_) => DenseHotLaneOutcome::Decline,
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn dense_hot_physical_boundary_miss<T: FullWalkTransitionTable>(
+    parser_cache: &mut FullWalkParserCache,
+    constraint: &Constraint,
+    tokenizer: &Tokenizer,
+    transitions: &T,
+    parser_node: u32,
+    lexer_state: u32,
+) -> bool {
+    parser_cache.physical_token_boundary_allowed(
+        constraint,
+        tokenizer,
+        transitions,
+        parser_node,
+        lexer_state,
+    )
+}
+
+#[inline(always)]
+fn dense_hot_skip_dead_subtree<'a, const POSITIVE: bool, const OBSERVE_DENSITY: bool>(
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    walk_ops: &'a [DynamicMaskTrieFullWalkOp],
+    remaining_ops: &mut std::slice::Iter<'a, DynamicMaskTrieFullWalkOp>,
+    token_marker_index: &mut usize,
+    skipped_original_tokens: &mut usize,
+    buf: &mut [u32],
+) {
+    let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
+    let (child, subtree_end_op) = trie.full_walk_dead_subtree(op_index);
+    if OBSERVE_DENSITY {
+        *skipped_original_tokens = skipped_original_tokens
+            .saturating_add(vocab.subtree_original_tokens_for(trie, child).len());
+    }
+    if !POSITIVE {
+        for &token_id in vocab.subtree_original_tokens_for(trie, child) {
+            clear_mask_bit_known_in_range(buf, token_id);
+        }
+    }
+    let root_token_offset = usize::from(trie.node(0).token_id.is_some());
+    *token_marker_index = trie
+        .subtree_token_index_range(child)
+        .end
+        .saturating_sub(root_token_offset);
+    *remaining_ops = walk_ops[subtree_end_op as usize..].iter();
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct DenseHotRootProbe {
+    prefer_pruning: bool,
+    known_live_original_tokens: usize,
+    known_dead_original_tokens: usize,
+    total_root_original_tokens: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cold]
+#[inline(never)]
+fn dense_hot_root_probe<T: FullWalkTransitionTable>(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_lexer: u32,
+    root_parser: u32,
+    tokenizer: &Tokenizer,
+    transitions: &T,
+    parser_cache: &mut FullWalkParserCache,
+    hot_scalar: &mut FullWalkHotScalarCache,
+) -> DenseHotRootProbe {
+    if !trie.has_full_walk_root_byte_index() {
+        return DenseHotRootProbe {
+            prefer_pruning: true,
+            ..DenseHotRootProbe::default()
+        };
+    }
+
+    // Routing only: all selected kernels are logically exact. Parser-dead mass
+    // decides whether interior pruning is worth paying for. If pruning is not
+    // needed, the same complete root scan also gives a cheap density signal for
+    // output polarity: overwhelmingly parser-live root mass predicts a dense
+    // final mask without putting any policy branch into the byte-hot loop.
+    const DEAD_ORIGINAL_TOKENS_TRIGGER: usize = 256;
+    let mut probe = DenseHotRootProbe::default();
+    let Some(root_hot_id) = hot_scalar.intern(root_lexer) else {
+        probe.prefer_pruning = true;
+        return probe;
+    };
+
+    for raw_byte in 0u16..=255 {
+        let byte = raw_byte as u8;
+        let Some((start_op, _, _)) = trie.full_walk_root_byte_range(byte) else {
+            continue;
+        };
+        let (child, _) = trie.full_walk_dead_subtree(start_op as usize);
+        let represented = vocab.subtree_original_tokens_for(trie, child).len();
+        probe.total_root_original_tokens =
+            probe.total_root_original_tokens.saturating_add(represented);
+
+        let mut next = unsafe {
+            *hot_scalar
+                .rows
+                .get_unchecked(root_hot_id as usize)
+                .get_unchecked(byte as usize)
+        };
+        if next == FULL_WALK_HOT_UNKNOWN {
+            next = dense_hot_transition_miss(hot_scalar, transitions, root_hot_id, byte);
+        }
+        if next == FULL_WALK_HOT_DEAD {
+            // Lexical death is already encoded in the universal hot transition
+            // cache in every kernel, so it is not evidence for parser pruning
+            // and it cannot contribute to a dense output mask.
+            continue;
+        }
+        if next == FULL_WALK_HOT_SLOW {
+            // Finalizer/complex root transitions are inconclusive for routing.
+            // The cached SLOW result is still reused by the actual walk.
+            continue;
+        }
+
+        let target = unsafe { *hot_scalar.hot_to_raw.get_unchecked(next as usize) };
+        if parser_cache.physical_token_boundary_allowed(
+            state.constraint,
+            tokenizer,
+            transitions,
+            root_parser,
+            target,
+        ) {
+            probe.known_live_original_tokens =
+                probe.known_live_original_tokens.saturating_add(represented);
+        } else {
+            probe.known_dead_original_tokens =
+                probe.known_dead_original_tokens.saturating_add(represented);
+            if probe.known_dead_original_tokens >= DEAD_ORIGINAL_TOKENS_TRIGGER {
+                probe.prefer_pruning = true;
+                return probe;
+            }
+        }
+    }
+    probe
+}
+
+/// Narrow scalar/two-state lane for scalar-dispatch masks. Every scalar lexer
+/// coordinate is interned into the same tiny u8 transition cache regardless of
+/// the underlying transition provider. PRUNE_INTERIOR is compile-time selected
+/// so the genuine dense lane pays no parser-liveness branch in its byte loop.
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn try_dense_hot_scalar_edges<
+    T: FullWalkTransitionTable,
+    const POSITIVE: bool,
+    const PRUNE_INTERIOR: bool,
+    const OBSERVE_DENSITY: bool,
+>(
+    state: &ConstraintState<'_>,
+    vocab: &DynamicMaskVocab,
+    trie: &DynamicMaskTrie,
+    root_lexer: u32,
+    root_parser: u32,
+    initial_lexer_state: u32,
+    finalizer_code: &[u32],
+    single_finalizer_continues: &[u8],
+    tokenizer: &Tokenizer,
+    transitions: &T,
+    parser_cache: &mut FullWalkParserCache,
+    mut hot_scalar: FullWalkHotScalarCache,
+    buf: &mut [u32],
+) -> Result<Option<bool>, String> {
+    if !trie.full_walk_all_consume() || trie.full_walk_max_parent_depth() >= 255 {
+        return Ok(None);
+    }
+
+    let Some(initial_hot_id) = hot_scalar.intern(initial_lexer_state) else {
+        return Ok(None);
+    };
+    let Some(root_hot_id) = hot_scalar.intern(root_lexer) else {
+        return Ok(None);
+    };
+    // Dedicated hot-walker coordinate: 0..252 are scalar hot IDs; the top
+    // three byte values are local two-branch/dead sentinels.  Keep the wide
+    // underlying lexer coordinate entirely out of the common byte loop.
+    const HOT_TWO_DISTINCT: u8 = FULL_WALK_HOT_SLOW;
+    const HOT_TWO: u8 = FULL_WALK_HOT_DEAD;
+    const HOT_DEAD: u8 = FULL_WALK_HOT_UNKNOWN;
+    let mut stack_lexer = [HOT_DEAD; 256];
+    let mut stack_parser = [0u32; 256];
+    let mut stack_two = [((0u32, 0u32), (0u32, 0u32)); 256];
+    stack_lexer[0] = root_hot_id;
+    stack_parser[0] = root_parser;
+
+    let mut pair_union_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
+    let walk_ops = trie.full_walk_ops();
+    let token_markers = vocab.full_walk_token_markers_for(trie);
+    let mut token_marker_index = 0usize;
+    let mut skipped_original_tokens = 0usize;
+    let mut remaining_ops = walk_ops.iter();
+    let mut lexer: u8;
+    let mut parser = root_parser;
+    let mut boundary_parser = root_parser;
+    let mut boundary_row = parser_cache.physical_boundary_row_ptr(root_parser);
+    let mut hot_liveness = [0u8; FULL_WALK_HOT_CAPACITY];
+    dense_hot_refresh_liveness(&hot_scalar, boundary_row, &mut hot_liveness);
+    let mut two = ((0u32, 0u32), (0u32, 0u32));
+
+    'edge_walk: while let Some(&first_op) = remaining_ops.next() {
+        if !first_op.starts_edge() || !first_op.consumes_byte() {
+            return Ok(None);
+        }
+        let parent_depth = first_op.parent_depth() as usize;
+        lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
+        if lexer < HOT_TWO_DISTINCT {
+            parser = unsafe { *stack_parser.get_unchecked(parent_depth) };
+            if parser != boundary_parser {
+                boundary_parser = parser;
+                boundary_row = parser_cache.physical_boundary_row_ptr(parser);
+                dense_hot_refresh_liveness(&hot_scalar, boundary_row, &mut hot_liveness);
+            }
+        } else if lexer == HOT_TWO_DISTINCT || lexer == HOT_TWO {
+            two = unsafe { *stack_two.get_unchecked(parent_depth) };
+        } else {
+            return Ok(None);
+        }
+
+        let mut op = first_op;
+        loop {
+            let byte = op.byte();
+            if lexer == HOT_DEAD {
+                dense_hot_skip_dead_subtree::<POSITIVE, OBSERVE_DENSITY>(
+                    vocab,
+                    trie,
+                    walk_ops,
+                    &mut remaining_ops,
+                    &mut token_marker_index,
+                    &mut skipped_original_tokens,
+                    buf,
+                );
+                continue 'edge_walk;
+            }
+
+            let outcome = if lexer < HOT_TWO_DISTINCT {
+                let hot_id = lexer;
+                let mut next = unsafe {
+                    *hot_scalar
+                        .rows
+                        .get_unchecked(hot_id as usize)
+                        .get_unchecked(byte as usize)
+                };
+                if next == FULL_WALK_HOT_UNKNOWN {
+                    next = dense_hot_transition_miss(&mut hot_scalar, transitions, hot_id, byte);
+                }
+                if next < FULL_WALK_HOT_SLOW {
+                    if !PRUNE_INTERIOR {
+                        lexer = next;
+                        None
+                    } else {
+                        let live = unsafe { *hot_liveness.get_unchecked(next as usize) };
+                        if live == 2 {
+                            lexer = next;
+                            None
+                        } else {
+                            let target =
+                                unsafe { *hot_scalar.hot_to_raw.get_unchecked(next as usize) };
+                            if live == 0
+                                && dense_hot_physical_boundary_miss(
+                                    parser_cache,
+                                    state.constraint,
+                                    tokenizer,
+                                    transitions,
+                                    parser,
+                                    target,
+                                )
+                            {
+                                unsafe { *hot_liveness.get_unchecked_mut(next as usize) = 2 };
+                                lexer = next;
+                                None
+                            } else {
+                                unsafe { *hot_liveness.get_unchecked_mut(next as usize) = 1 };
+                                Some(DenseHotLaneOutcome::Dead)
+                            }
+                        }
+                    }
+                } else if next == FULL_WALK_HOT_DEAD {
+                    Some(DenseHotLaneOutcome::Dead)
+                } else {
+                    let source = unsafe { *hot_scalar.hot_to_raw.get_unchecked(hot_id as usize) };
+                    Some(dense_hot_scalar_escape(
+                        source,
+                        byte,
+                        parser,
+                        initial_lexer_state,
+                        finalizer_code,
+                        single_finalizer_continues,
+                        tokenizer,
+                        transitions,
+                        parser_cache,
+                        state.constraint,
+                        vocab,
+                        &mut pair_union_cache,
+                    ))
+                }
+            } else if lexer == HOT_TWO_DISTINCT || lexer == HOT_TWO {
+                Some(dense_hot_two_escape(
+                    two,
+                    byte,
+                    initial_lexer_state,
+                    finalizer_code,
+                    single_finalizer_continues,
+                    tokenizer,
+                    transitions,
+                    parser_cache,
+                    state.constraint,
+                    vocab,
+                    &mut pair_union_cache,
+                ))
+            } else {
+                return Ok(None);
+            };
+
+            if let Some(outcome) = outcome {
+                match outcome {
+                    DenseHotLaneOutcome::Dead => {
+                        dense_hot_skip_dead_subtree::<POSITIVE, OBSERVE_DENSITY>(
+                            vocab,
+                            trie,
+                            walk_ops,
+                            &mut remaining_ops,
+                            &mut token_marker_index,
+                            &mut skipped_original_tokens,
+                            buf,
+                        );
+                        continue 'edge_walk;
+                    }
+                    DenseHotLaneOutcome::Scalar(next_lexer, next_parser) => {
+                        let Some(next_hot_id) = hot_scalar.intern(next_lexer) else {
+                            return Ok(None);
+                        };
+                        lexer = next_hot_id;
+                        parser = next_parser;
+                        if parser != boundary_parser {
+                            boundary_parser = parser;
+                            boundary_row = parser_cache.physical_boundary_row_ptr(parser);
+                            dense_hot_refresh_liveness(
+                                &hot_scalar,
+                                boundary_row,
+                                &mut hot_liveness,
+                            );
+                        } else {
+                            hot_liveness[next_hot_id as usize] =
+                                unsafe { *boundary_row.add(next_lexer as usize) };
+                        }
+                    }
+                    DenseHotLaneOutcome::Two(first, second) => {
+                        lexer = if first.1 != second.1 {
+                            HOT_TWO_DISTINCT
+                        } else {
+                            HOT_TWO
+                        };
+                        two = (first, second);
+                    }
+                    DenseHotLaneOutcome::Decline => return Ok(None),
+                }
+            }
+
+            if op.ends_edge() {
+                if op.child_is_token() {
+                    let token_marker = unsafe { *token_markers.get_unchecked(token_marker_index) };
+                    token_marker_index += 1;
+                    let allowed = if lexer == HOT_DEAD {
+                        false
+                    } else if lexer < HOT_TWO_DISTINCT {
+                        if lexer == initial_hot_id {
+                            true
+                        } else {
+                            let live = unsafe { *hot_liveness.get_unchecked(lexer as usize) };
+                            if live == 2 {
+                                true
+                            } else if live == 1 {
+                                false
+                            } else {
+                                let endpoint_lexer = unsafe {
+                                    *hot_scalar.hot_to_raw.get_unchecked(lexer as usize)
+                                };
+                                let allowed = dense_hot_physical_boundary_miss(
+                                    parser_cache,
+                                    state.constraint,
+                                    tokenizer,
+                                    transitions,
+                                    parser,
+                                    endpoint_lexer,
+                                );
+                                unsafe {
+                                    *hot_liveness.get_unchecked_mut(lexer as usize) =
+                                        if allowed { 2 } else { 1 };
+                                }
+                                allowed
+                            }
+                        }
+                    } else if lexer == HOT_TWO_DISTINCT || lexer == HOT_TWO {
+                        parser_cache.token_boundary_allowed_raw(
+                            state.constraint,
+                            tokenizer,
+                            transitions,
+                            initial_lexer_state,
+                            two.0.0,
+                            two.0.1,
+                        ) || parser_cache.token_boundary_allowed_raw(
+                            state.constraint,
+                            tokenizer,
+                            transitions,
+                            initial_lexer_state,
+                            two.1.0,
+                            two.1.1,
+                        )
+                    } else {
+                        return Ok(None);
+                    };
+                    if POSITIVE {
+                        if allowed {
+                            mark_dynamic_token_marker(vocab, token_marker, buf);
+                        }
+                    } else if !allowed {
+                        clear_dynamic_token_marker(vocab, token_marker, buf);
+                    }
+                }
+                unsafe {
+                    *stack_lexer.get_unchecked_mut(parent_depth + 1) = lexer;
+                    if lexer < HOT_TWO_DISTINCT {
+                        *stack_parser.get_unchecked_mut(parent_depth + 1) = parser;
+                    } else if lexer == HOT_TWO_DISTINCT || lexer == HOT_TWO {
+                        *stack_two.get_unchecked_mut(parent_depth + 1) = two;
+                    } else {
+                        return Ok(None);
+                    }
+                }
+                break;
+            }
+            let Some(&next_op) = remaining_ops.next() else {
+                return Ok(None);
+            };
+            if next_op.starts_edge() || !next_op.consumes_byte() {
+                return Ok(None);
+            }
+            op = next_op;
+        }
+    }
+
+    if OBSERVE_DENSITY {
+        let total_original_tokens = vocab.subtree_original_tokens_for(trie, 0).len();
+        // Deliberately conservative: only states that lost at most 5% of the
+        // represented vocabulary to exact dead-subtree jumps are classified
+        // dense. Endpoint-only parser rejection is not credited as dense.
+        let dense = total_original_tokens != 0
+            && skipped_original_tokens.saturating_mul(100)
+                <= total_original_tokens.saturating_mul(5);
+        transitions.cache_dense_output_hint(root_lexer, dense);
+    }
+    Ok(Some(true))
+}
+
 #[inline(never)]
 fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_ROOT: bool>(
     state: &ConstraintState<'_>,
@@ -4391,46 +5108,78 @@ fn try_full_walk_mask_with_table_from_initial<
             })
         };
 
-        let safe_plus_proved = prove_slice(safe_plus, safe_plus_candidates.as_slice());
+        let compute_safe_radius = || -> Option<u16> {
+            let source = exact_source?;
+            let max_vocab_safe_chars = u32::from(vocab.llg_master_max_safe_chars());
+            Some(
+                safe_plus_candidates
+                    .iter()
+                    .copied()
+                    .filter_map(|terminal| {
+                        let projected = vocab
+                            .prepared_safe_radius(source, terminal)
+                            .map(u32::from)
+                            .or_else(|| {
+                                vocab.projected_terminal_slice_repeat_radius(
+                                    terminal,
+                                    source,
+                                    safe_plus.cache_id(),
+                                    safe_plus.dfa(),
+                                    max_vocab_safe_chars,
+                                    16 * 1024,
+                                )
+                            });
+                        let symbolic = virtual_residual_safe_repeat_radius(
+                            &state.constraint.tokenizer,
+                            source,
+                            terminal,
+                            safe_plus.dfa(),
+                            max_vocab_safe_chars,
+                            16 * 1024,
+                        );
+                        match (projected, symbolic) {
+                            (Some(left), Some(right)) => Some(left.max(right)),
+                            (left, right) => left.or(right),
+                        }
+                    })
+                    .filter_map(|radius| u16::try_from(radius).ok())
+                    .max()
+                    .unwrap_or(0),
+            )
+        };
+        let prefer_bounded_radius = std::env::var_os("GLRMASK_DISABLE_VIRTUAL_RADIUS_FIRST").is_none()
+            && exact_source.is_some_and(|source| {
+            safe_plus_candidates.iter().copied().any(|terminal| {
+                state
+                    .constraint
+                    .tokenizer
+                    .singleton_epsilon_closure(source)
+                    .into_iter()
+                    .any(|residual_state| {
+                        state
+                            .constraint
+                            .tokenizer
+                            .virtual_residual_terminal_for_state(residual_state)
+                            == Some(terminal)
+                    })
+            })
+        });
+        let radius_before_unbounded = prefer_bounded_radius.then(compute_safe_radius).flatten();
+        // For vocabulary masking an exact positive bounded radius is already a
+        // complete certificate for every precomputed safe-slice token within
+        // that radius. Do not first pay to prove the strictly stronger
+        // unbounded safe+ language when the bounded certificate is available.
+        let safe_plus_proved = if radius_before_unbounded.is_some_and(|radius| radius != 0) {
+            false
+        } else {
+            prove_slice(safe_plus, safe_plus_candidates.as_slice())
+        };
         let safe_radius = if safe_plus_proved {
             u16::MAX
-        } else if let Some(source) = exact_source {
-            let max_vocab_safe_chars = u32::from(vocab.llg_master_max_safe_chars());
-            safe_plus_candidates
-                .iter()
-                .copied()
-                .filter_map(|terminal| {
-                    let projected = vocab
-                        .prepared_safe_radius(source, terminal)
-                        .map(u32::from)
-                        .or_else(|| {
-                            vocab.projected_terminal_slice_repeat_radius(
-                                terminal,
-                                source,
-                                safe_plus.cache_id(),
-                                safe_plus.dfa(),
-                                max_vocab_safe_chars,
-                                16 * 1024,
-                            )
-                        });
-                    let symbolic = virtual_residual_safe_repeat_radius(
-                        &state.constraint.tokenizer,
-                        source,
-                        terminal,
-                        safe_plus.dfa(),
-                        max_vocab_safe_chars,
-                        16 * 1024,
-                    );
-                    match (projected, symbolic) {
-                        (Some(left), Some(right)) => Some(left.max(right)),
-                        (left, right) => left.or(right),
-                    }
-                })
-                .filter_map(|radius| u16::try_from(radius).ok())
-                .max()
-                .unwrap_or(0)
         } else {
-            0
+            radius_before_unbounded
+                .or_else(compute_safe_radius)
+                .unwrap_or(0)
         };
         let whitespace_proved = prove_slice(whitespace, whitespace_candidates.as_slice());
         let decision = LlgMasterDecision {
@@ -4439,6 +5188,27 @@ fn try_full_walk_mask_with_table_from_initial<
         };
         if !decision.is_empty() {
             llg_master_decision = Some(decision);
+        }
+    }
+    // Exact master proofs are not automatically profitable. Selecting the
+    // partitioned master trie also abandons the optimized ordinary-trie hot
+    // lane; for small bounded radii the residual master walk can be comparable
+    // to, or even larger than, the ordinary vocabulary walk. Gate the route on
+    // exact precomputed strict-walk volume without changing proof semantics.
+    if let Some(decision) = llg_master_decision {
+        let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1000);
+        let ordinary_ops = trie.full_walk_ops().len();
+        let profitable = vocab
+            .llg_master_residual_ops(decision.safe_radius, decision.whitespace)
+            .is_some_and(|residual_ops| {
+                residual_ops.saturating_mul(1000)
+                    <= ordinary_ops.saturating_mul(max_permille)
+            });
+        if !profitable {
+            llg_master_decision = None;
         }
     }
     let trie = llg_master_decision
@@ -4528,6 +5298,176 @@ fn try_full_walk_mask_with_table_from_initial<
             false
         }
     };
+
+    let dense_hot_negative_proof =
+        std::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_NEGATIVE").is_some()
+            && std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+            && !profile_walk
+            && !profile_kernel
+            && HOT_SINGLE_ROOT
+            && root_branches.len() == 1
+            && root_branches[0].initial_prune_guard.is_passed()
+            && llg_master_decision.is_none()
+            && positive_rebuild
+            && !deferred_output;
+    if dense_hot_negative_proof {
+        let all_words = vocab.all_original_token_words();
+        let copy_len = buf.len().min(all_words.len());
+        buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
+        if copy_len < buf.len() {
+            buf[copy_len..].fill(0);
+        }
+        match try_dense_hot_scalar_edges::<_, false, true, false>(
+            state,
+            vocab,
+            trie,
+            root_branches[0].tokenizer_config,
+            root_parser_nodes[0],
+            initial_lexer_state,
+            finalizer_code,
+            single_finalizer_continues,
+            lexer_scan_cache.tokenizer(),
+            &transitions,
+            &mut parser_cache,
+            FullWalkHotScalarCache::new(),
+            buf,
+        )? {
+            Some(true) => {
+                update_special_token_mask(state, buf);
+                state.clear_late_grammar_placeholder_mask(buf);
+                return Ok(true);
+            }
+            Some(false) | None => {
+                // Proof lane is allowed only where the normal lane is a
+                // positive rebuild; restore that exact baseline before retry.
+                buf.fill(0);
+            }
+        }
+    }
+
+    let dense_hot_lane_eligible = std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+        && !profile_walk
+        && !profile_kernel
+        && HOT_SINGLE_ROOT
+        && root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed()
+        && llg_master_decision.is_none()
+        && positive_rebuild
+        && !deferred_output;
+    if dense_hot_lane_eligible {
+        let root_lexer = root_branches[0].tokenizer_config;
+        let root_parser = root_parser_nodes[0];
+        let mut hot_scalar = FullWalkHotScalarCache::new();
+        // Preserve the dense walker's original hot-ID ordering: the initial
+        // lexer state remains ID 0 even though the root probe now seeds root
+        // transitions before traversal.
+        if hot_scalar.intern(initial_lexer_state).is_none() {
+            return Ok(false);
+        }
+        let probe = dense_hot_root_probe(
+            state,
+            vocab,
+            trie,
+            root_lexer,
+            root_parser,
+            lexer_scan_cache.tokenizer(),
+            &transitions,
+            &mut parser_cache,
+            &mut hot_scalar,
+        );
+        let learned_dense = if probe.prefer_pruning {
+            None
+        } else {
+            transitions.dense_output_hint(root_lexer)
+        };
+
+        let mut hot_scalar = Some(hot_scalar);
+        let dense_result = if probe.prefer_pruning {
+            try_dense_hot_scalar_edges::<_, true, true, false>(
+                state,
+                vocab,
+                trie,
+                root_lexer,
+                root_parser,
+                initial_lexer_state,
+                finalizer_code,
+                single_finalizer_continues,
+                lexer_scan_cache.tokenizer(),
+                &transitions,
+                &mut parser_cache,
+                hot_scalar.take().unwrap(),
+                buf,
+            )?
+        } else if learned_dense == Some(true) {
+            let all_words = vocab.all_original_token_words();
+            let copy_len = buf.len().min(all_words.len());
+            buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
+            if copy_len < buf.len() {
+                buf[copy_len..].fill(0);
+            }
+            try_dense_hot_scalar_edges::<_, false, false, false>(
+                state,
+                vocab,
+                trie,
+                root_lexer,
+                root_parser,
+                initial_lexer_state,
+                finalizer_code,
+                single_finalizer_continues,
+                lexer_scan_cache.tokenizer(),
+                &transitions,
+                &mut parser_cache,
+                hot_scalar.take().unwrap(),
+                buf,
+            )?
+        } else if learned_dense == Some(false) {
+            try_dense_hot_scalar_edges::<_, true, false, false>(
+                state,
+                vocab,
+                trie,
+                root_lexer,
+                root_parser,
+                initial_lexer_state,
+                finalizer_code,
+                single_finalizer_continues,
+                lexer_scan_cache.tokenizer(),
+                &transitions,
+                &mut parser_cache,
+                hot_scalar.take().unwrap(),
+                buf,
+            )?
+        } else {
+            try_dense_hot_scalar_edges::<_, true, false, true>(
+                state,
+                vocab,
+                trie,
+                root_lexer,
+                root_parser,
+                initial_lexer_state,
+                finalizer_code,
+                single_finalizer_continues,
+                lexer_scan_cache.tokenizer(),
+                &transitions,
+                &mut parser_cache,
+                hot_scalar.take().unwrap(),
+                buf,
+            )?
+        };
+        match dense_result {
+            Some(true) => {
+                update_special_token_mask(state, buf);
+                state.clear_late_grammar_placeholder_mask(buf);
+                return Ok(true);
+            }
+            Some(false) | None => {
+                // The narrow lane may have mutated either output polarity
+                // before discovering an unsupported correlated state. The
+                // general positive-rebuild walker recomputes the exact mask.
+                buf.fill(0);
+            }
+        }
+    }
+
     // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
     // lexer-state coordinate so the common DFS path needs no separate kind
     // load/store. Full-walk lexer states are bounded far below these u32
@@ -4889,10 +5829,10 @@ fn try_full_walk_mask_with_table_from_initial<
                         // A globally live lexer state can still be impossible
                         // for this correlated parser branch when every terminal
                         // it could eventually produce is parser-inadmissible.
-                        // The multi-branch walker already performs this exact
-                        // check on every non-finalizing byte; doing the same in
-                        // the dominant scalar path lets sparse masks kill whole
-                        // vocabulary subtrees at the first impossible prefix.
+                        // Kill that entire vocabulary subtree at the first
+                        // impossible prefix. Genuine near-full walks use the
+                        // dedicated dense hot lane above instead, where paying
+                        // this parser-conditioned check on every byte loses.
                         if parser_cache.physical_token_boundary_allowed(
                             state.constraint,
                             tokenizer,

@@ -1631,6 +1631,32 @@ impl DynamicMaskTrie {
         &self.full_walk_ops
     }
 
+    /// Exact strict-walk operation count after skipping structural root classes
+    /// accepted by `admitted`.  Each admitted class still costs its one
+    /// zero-byte structural root op; the remainder of that root subtree is
+    /// skipped in O(1) by the runtime walker.
+    pub(crate) fn full_walk_ops_after_root_class_skips(
+        &self,
+        mut admitted: impl FnMut(u16) -> bool,
+    ) -> Option<usize> {
+        if self.root_layout_classes.is_empty() {
+            return None;
+        }
+        let mut root_slot = 0usize;
+        let mut work = 0usize;
+        for (edge_index, edge) in self.walk_edges.iter().copied().enumerate() {
+            if edge.parent_depth != 0 {
+                continue;
+            }
+            let class = *self.root_layout_classes.get(root_slot)?;
+            root_slot += 1;
+            let start = *self.full_walk_edge_op_starts.get(edge_index)? as usize;
+            let end = *self.full_walk_edge_op_starts.get(edge.subtree_end as usize)? as usize;
+            work = work.saturating_add(if admitted(class) { 1 } else { end.saturating_sub(start) });
+        }
+        (root_slot == self.root_layout_classes.len()).then_some(work)
+    }
+
     /// Every full-walk op consumes one byte iff there are no synthetic
     /// empty-edge ops. Non-empty radix edges contribute exactly one op per
     /// byte; empty edges contribute one op and zero bytes.
@@ -3078,6 +3104,10 @@ pub(crate) struct DynamicLazyUnionCache {
     pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
     pub(crate) rows: Vec<[u32; 256]>,
     pub(crate) metadata: Vec<Option<DynamicLazyUnionMetadata>>,
+    /// Learned output-polarity hint for exact lazy-union/physical root states.
+    /// 1 = observed non-dense, 2 = observed lexically dense. Runtime-only and
+    /// cleared whenever the lazy-union coordinate space is reset.
+    pub(crate) dense_output_hints: FxHashMap<u32, u8>,
 }
 
 /// Runtime-only exact deterministic extension for a parser-filtered union of
@@ -3184,6 +3214,11 @@ pub(crate) struct DynamicMaskVocab {
     /// the whole tokens that can be accepted without walking the trie. Shared by
     /// every constraint using the same model vocabulary.
     llg_master_admitted_words: Arc<Vec<Vec<u32>>>,
+    /// Exact strict-walk operation count remaining after admitting each master
+    /// `(safe_radius, whitespace)` class combination. Indexed identically to
+    /// `llg_master_admitted_words`. This is runtime-only derived metadata and
+    /// is rebuilt from the master trie after construction/load.
+    llg_master_residual_ops: Arc<Vec<u32>>,
     llg_master_max_safe_chars: u16,
     /// Positive-only parser-independent proof rows for the two overlapping
     /// master slice languages. Row = `source_tsid * 2 + slice_slot`, where
@@ -3244,6 +3279,13 @@ pub(crate) struct DynamicMaskVocab {
     /// precedence when present.
     runtime_projected_terminal_quotients:
         Arc<OnceLock<Arc<[(TerminalID, Arc<TerminalProjectedQuotient>)]>>>,
+    /// Incremental runtime-only quotient cache used by hot-path containment
+    /// proofs. Unlike `runtime_projected_terminal_quotients`, this can prepare
+    /// only the terminal actually requested by the current proof instead of
+    /// materializing every safe-alphabet candidate at once. `None` is a cached
+    /// exact "no quotient available" result for that terminal.
+    runtime_projected_terminal_quotient_cache:
+        Arc<Mutex<FxHashMap<TerminalID, Option<Arc<TerminalProjectedQuotient>>>>>,
     /// True once the exact projected-terminal analysis has run, including
     /// when it proved that no quotient is worth retaining.  This distinguishes
     /// a legitimate empty result from an unprepared legacy/runtime value.
@@ -3573,6 +3615,7 @@ impl DynamicMaskVocab {
             all_original_token_words,
             llg_slice_leftovers: Arc::new(Vec::new()),
             llg_master_admitted_words: Arc::new(Vec::new()),
+            llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: 0,
             prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
             prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
@@ -3602,6 +3645,7 @@ impl DynamicMaskVocab {
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
             runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
+            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3665,6 +3709,7 @@ impl DynamicMaskVocab {
             all_original_token_words: Arc::clone(&self.all_original_token_words),
             llg_slice_leftovers: Arc::clone(&self.llg_slice_leftovers),
             llg_master_admitted_words: Arc::clone(&self.llg_master_admitted_words),
+            llg_master_residual_ops: Arc::clone(&self.llg_master_residual_ops),
             llg_master_max_safe_chars: self.llg_master_max_safe_chars,
             prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
             prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
@@ -3698,6 +3743,7 @@ impl DynamicMaskVocab {
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
             runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
+            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3731,6 +3777,7 @@ impl DynamicMaskVocab {
             all_original_token_words: Arc::new(Vec::new()),
             llg_slice_leftovers: Arc::new(Vec::new()),
             llg_master_admitted_words: Arc::new(Vec::new()),
+            llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: 0,
             prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
             prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
@@ -3760,6 +3807,7 @@ impl DynamicMaskVocab {
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
             runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
+            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3866,6 +3914,7 @@ impl DynamicMaskVocab {
             llg_master_admitted_words: fused_master_admission
                 .as_ref()
                 .map_or_else(|| Arc::new(Vec::new()), |(_, words)| Arc::clone(words)),
+            llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: fused_master_admission.map_or(0, |(max_safe_chars, _)| max_safe_chars),
             prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
             prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
@@ -3895,6 +3944,7 @@ impl DynamicMaskVocab {
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
             runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
+            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -4230,6 +4280,7 @@ impl DynamicMaskVocab {
                 .collect(),
         );
         self.llg_master_admitted_words = Arc::clone(&source.llg_master_admitted_words);
+        self.llg_master_residual_ops = Arc::new(Vec::new());
         self.llg_master_max_safe_chars = source.llg_master_max_safe_chars;
     }
 
@@ -4280,6 +4331,7 @@ impl DynamicMaskVocab {
             }));
         }
         self.llg_slice_leftovers = Arc::new(built);
+        self.rebuild_llg_master_residual_ops_from_master_trie();
     }
 
     pub(crate) fn set_llg_master_admitted_words(
@@ -4308,8 +4360,55 @@ impl DynamicMaskVocab {
     }
 
     #[inline(always)]
+    pub(crate) fn llg_master_residual_ops(
+        &self,
+        safe_radius: u16,
+        whitespace: bool,
+    ) -> Option<usize> {
+        if self.llg_master_residual_ops.is_empty() {
+            return None;
+        }
+        let radius = safe_radius.min(self.llg_master_max_safe_chars) as usize;
+        self.llg_master_residual_ops
+            .get(radius * 2 + usize::from(whitespace))
+            .copied()
+            .map(|ops| ops as usize)
+    }
+
+    #[inline(always)]
     pub(crate) fn llg_master_max_safe_chars(&self) -> u16 {
         self.llg_master_max_safe_chars
+    }
+
+    fn rebuild_llg_master_residual_ops_from_master_trie(&mut self) {
+        let Some(master) = self.llg_master_trie() else {
+            self.llg_master_residual_ops = Arc::new(Vec::new());
+            return;
+        };
+        let max_safe_chars = master
+            .trie()
+            .children(0)
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, _)| master.trie().root_layout_class(slot))
+            .map(dynamic_mask_llg_master_safe_chars)
+            .max()
+            .unwrap_or(0);
+        let mut rows = Vec::with_capacity((usize::from(max_safe_chars) + 1) * 2);
+        for radius in 0..=max_safe_chars {
+            for whitespace in [false, true] {
+                let work = master
+                    .trie()
+                    .full_walk_ops_after_root_class_skips(|class| {
+                        let safe_chars = dynamic_mask_llg_master_safe_chars(class);
+                        (safe_chars != 0 && safe_chars <= radius)
+                            || (whitespace && dynamic_mask_llg_master_is_whitespace(class))
+                    })
+                    .unwrap_or_else(|| master.trie().full_walk_ops().len());
+                rows.push(u32::try_from(work).unwrap_or(u32::MAX));
+            }
+        }
+        self.llg_master_residual_ops = Arc::new(rows);
     }
 
     /// Reconstruct cumulative admitted-token bitsets from the already-transferred
@@ -4319,6 +4418,7 @@ impl DynamicMaskVocab {
     fn rebuild_llg_master_admitted_words_from_master_trie(&mut self) {
         let Some(master) = self.llg_master_trie() else {
             self.llg_master_admitted_words = Arc::new(Vec::new());
+            self.llg_master_residual_ops = Arc::new(Vec::new());
             self.llg_master_max_safe_chars = 0;
             return;
         };
@@ -4375,6 +4475,7 @@ impl DynamicMaskVocab {
         }
         self.llg_master_max_safe_chars = max_safe_chars;
         self.llg_master_admitted_words = Arc::new(admitted_words);
+        self.rebuild_llg_master_residual_ops_from_master_trie();
     }
 
     #[inline(always)]
@@ -6319,6 +6420,8 @@ impl DynamicMaskVocab {
         self.projected_terminal_quotients = Arc::clone(&source.projected_terminal_quotients);
         self.runtime_projected_terminal_quotients =
             Arc::clone(&source.runtime_projected_terminal_quotients);
+        self.runtime_projected_terminal_quotient_cache =
+            Arc::clone(&source.runtime_projected_terminal_quotient_cache);
         self.projected_terminal_quotients_prepared =
             source.projected_terminal_quotients_prepared;
         self.prepared_master_prover_row_ids =
@@ -6719,6 +6822,8 @@ impl DynamicMaskVocab {
                 .collect::<Vec<_>>(),
         );
         self.runtime_projected_terminal_quotients = Arc::new(OnceLock::new());
+        self.runtime_projected_terminal_quotient_cache =
+            Arc::new(Mutex::new(FxHashMap::default()));
         self.projected_terminal_quotients_prepared = true;
         self.projected_terminal_text_cache
             .lock()
@@ -6748,13 +6853,65 @@ impl DynamicMaskVocab {
         &self,
         terminal: TerminalID,
         source: u32,
-    ) -> Option<&TerminalProjectedQuotient> {
+    ) -> Option<Arc<TerminalProjectedQuotient>> {
         let quotients = self.active_projected_terminal_quotients();
-        let index = quotients
+        if let Ok(index) = quotients
             .binary_search_by_key(&terminal, |(candidate, _)| *candidate)
-            .ok()?;
-        let quotient = quotients[index].1.as_ref();
+        {
+            let quotient = Arc::clone(&quotients[index].1);
+            return quotient.contains_source(source).then_some(quotient);
+        }
+        if self.projected_terminal_quotients_prepared
+            || self.runtime_projected_terminal_quotients.get().is_some()
+        {
+            return None;
+        }
+        let quotient = self
+            .runtime_projected_terminal_quotient_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&terminal)
+            .cloned()
+            .flatten()?;
         quotient.contains_source(source).then_some(quotient)
+    }
+
+    /// Prepare exactly one runtime containment quotient. This is the hot-path
+    /// counterpart to `prepare_runtime_projected_terminal_quotients`: callers
+    /// that already know the parser/lexer-admitted terminal should not pay to
+    /// materialize every terminal whose byte support happens to cover the
+    /// generic safe-string alphabet.
+    pub(crate) fn prepare_runtime_projected_terminal_quotient(
+        &self,
+        source: &Tokenizer,
+        terminal: TerminalID,
+    ) {
+        if self.projected_terminal_quotients_prepared
+            || self.runtime_projected_terminal_quotients.get().is_some()
+        {
+            return;
+        }
+        {
+            let cache = self
+                .runtime_projected_terminal_quotient_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if cache.contains_key(&terminal) {
+                return;
+            }
+        }
+
+        let built = source
+            .build_terminal_projected_quotients_for_containment_candidates(&[terminal])
+            .into_iter()
+            .find_map(|(candidate, quotient)| {
+                (candidate == terminal).then(|| Arc::new(quotient))
+            });
+        self.runtime_projected_terminal_quotient_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(terminal)
+            .or_insert(built);
     }
 
     pub(crate) fn prepare_runtime_projected_terminal_quotients(
@@ -6796,6 +6953,12 @@ impl DynamicMaskVocab {
             self.runtime_projected_terminal_quotients
                 .get()
                 .is_some_and(|quotients| !quotients.is_empty())
+                || self
+                    .runtime_projected_terminal_quotient_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .values()
+                    .any(Option::is_some)
         }
     }
 
@@ -6854,7 +7017,7 @@ impl DynamicMaskVocab {
         }
         let quotient = self.projected_terminal_quotient(terminal, source)?;
         let certified = Self::terminal_partition_product_is_transparent(
-            quotient, slice_dfa, source, 200_000,
+            quotient.as_ref(), slice_dfa, source, 200_000,
         )
         .unwrap_or(false);
         self.projected_terminal_partition_cache
@@ -7590,6 +7753,8 @@ impl DynamicMaskVocab {
             result.llg_slice_leftovers = Arc::new(llg_slice_leftovers);
             if result.llg_master_admitted_words.is_empty() {
                 result.rebuild_llg_master_admitted_words_from_master_trie();
+            } else {
+                result.rebuild_llg_master_residual_ops_from_master_trie();
             }
         }
         result.grammar_quotiented = artifact.grammar_quotiented;
@@ -7869,6 +8034,7 @@ impl Default for DynamicMaskVocab {
             all_original_token_words: Arc::new(Vec::new()),
             llg_slice_leftovers: Arc::new(Vec::new()),
             llg_master_admitted_words: Arc::new(Vec::new()),
+            llg_master_residual_ops: Arc::new(Vec::new()),
             llg_master_max_safe_chars: 0,
             prepared_master_prover_row_ids: Arc::from(Vec::<u32>::new()),
             prepared_master_prover_offsets: Arc::from(Vec::<u32>::new()),
@@ -7898,6 +8064,7 @@ impl Default for DynamicMaskVocab {
             terminal_observation_classes: Arc::from(Vec::<(TerminalID, Arc<[u32]>)>::new()),
             projected_terminal_quotients: Arc::from(Vec::<(TerminalID, Arc<TerminalProjectedQuotient>)>::new()),
             runtime_projected_terminal_quotients: Arc::new(OnceLock::new()),
+            runtime_projected_terminal_quotient_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_quotients_prepared: false,
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),

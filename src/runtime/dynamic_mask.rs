@@ -2783,7 +2783,8 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     // language-defined master slicer as the dense walker when one exact source
     // root is available. Failure to prove a language simply declines slicing.
     let mut master_decision = None::<(u16, bool)>;
-    if HOT_SINGLE_ROOT
+    if std::env::var_os("GLRMASK_DISABLE_CONFIG_MASTER").is_none()
+        && HOT_SINGLE_ROOT
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
         && vocab.llg_master_trie().is_some()
@@ -2987,7 +2988,42 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             let whitespace_proved = !whitespace_candidates.is_empty()
                 && prove(transitions, whitespace, &whitespace_candidates);
             if safe_radius != 0 || whitespace_proved {
-                master_decision = Some((safe_radius, whitespace_proved));
+                let master = vocab.llg_master_trie().expect("master trie checked above").trie();
+                let residual_ops = vocab.llg_master_residual_ops(safe_radius, whitespace_proved);
+                let ordinary_ops = trie.full_walk_ops().len();
+                // A master certificate is semantically exact but not automatically
+                // profitable: selecting the partitioned master trie also gives up
+                // the config walker's specialized hot-edge lane.  Route through
+                // the master trie only when its exact residual strict-walk volume
+                // is sufficiently smaller than the ordinary trie.  Keep the
+                // threshold runtime-configurable while we stabilize it across the
+                // canonical population; 1000 means residual <= ordinary.
+                let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(1000);
+                let profitable = residual_ops.is_some_and(|residual| {
+                    residual.saturating_mul(1000)
+                        <= ordinary_ops.saturating_mul(max_permille)
+                });
+                if std::env::var_os("GLRMASK_PROFILE_MASTER_PROFITABILITY").is_some() {
+                    eprintln!(
+                        "[glrmask/profile][config_master_profitability] generation={} source={} config={} safe_radius={} whitespace={} ordinary_ops={} master_ops={} residual_ops={:?} max_permille={} profitable={}",
+                        state.generation,
+                        source,
+                        lexer_state,
+                        safe_radius,
+                        whitespace_proved,
+                        ordinary_ops,
+                        master.full_walk_ops().len(),
+                        residual_ops,
+                        max_permille,
+                        profitable,
+                    );
+                }
+                if profitable {
+                    master_decision = Some((safe_radius, whitespace_proved));
+                }
             }
         }
     }

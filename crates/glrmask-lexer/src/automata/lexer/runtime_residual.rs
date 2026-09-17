@@ -4216,6 +4216,22 @@ impl VirtualResidualRuntime {
         }
     }
 
+    #[inline]
+    fn oracle_coordinate_for_state_locked(
+        &self,
+        store: &ResidualRuntimeStore,
+        state: u32,
+    ) -> Option<BoundedCodeOracleCoordinate> {
+        if self.coordinate_runtime || self.preserve_oracle_coordinate {
+            return store.coordinate_by_state.get(&state).copied();
+        }
+        let residual = Self::residual_for_state(store, self.root_state, state)?;
+        match store.oracle_coordinates.get(residual as usize).copied()? {
+            BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
+            BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => None,
+        }
+    }
+
     fn intern_locked(
         &self,
         store: &mut ResidualRuntimeStore,
@@ -5006,15 +5022,7 @@ impl VirtualResidualRuntime {
         }
 
         let mut store = self.store.lock().unwrap();
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let coordinate = if self.preserve_oracle_coordinate {
-            store.coordinate_by_state.get(&state).copied()?
-        } else {
-            match store.oracle_coordinates.get(residual as usize).copied()? {
-                BoundedCodeOracleSlot::Exact(coordinate) => coordinate,
-                BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => return None,
-            }
-        };
+        let coordinate = self.oracle_coordinate_for_state_locked(&store, state)?;
         if store.oracle_language_finite == Some(true) && !slice_language_finite {
             return Some(false);
         }
@@ -5303,15 +5311,7 @@ impl VirtualResidualRuntime {
         }
 
         let mut store = self.store.lock().unwrap();
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let coordinate = if self.preserve_oracle_coordinate {
-            store.coordinate_by_state.get(&state).copied()?
-        } else {
-            match store.oracle_coordinates.get(residual as usize).copied()? {
-                BoundedCodeOracleSlot::Exact(coordinate) => coordinate,
-                BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => return None,
-            }
-        };
+        let coordinate = self.oracle_coordinate_for_state_locked(&store, state)?;
 
         let slice_atom_fingerprint = {
             let mut hasher = rustc_hash::FxHasher::default();
@@ -5637,15 +5637,7 @@ impl VirtualResidualRuntime {
         if store.parser_transparent_byte_family_cache.contains(&key) {
             return Some(true);
         }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        let coordinate = if self.preserve_oracle_coordinate {
-            store.coordinate_by_state.get(&state).copied()?
-        } else {
-            match store.oracle_coordinates.get(residual as usize).copied()? {
-                BoundedCodeOracleSlot::Exact(coordinate) => coordinate,
-                BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => return None,
-            }
-        };
+        let coordinate = self.oracle_coordinate_for_state_locked(&store, state)?;
         let result = 'proof: {
             let oracle = store.liveness_oracle.as_mut()?;
             if oracle.coordinate_accepting(coordinate) || !oracle.has_future(coordinate) {
@@ -5749,17 +5741,7 @@ impl VirtualResidualRuntime {
 
     fn oracle_coordinate(&self, state: u32) -> Option<BoundedCodeOracleCoordinate> {
         let store = self.store.lock().unwrap();
-        if self.coordinate_runtime {
-            return store.coordinate_by_state.get(&state).copied();
-        }
-        if self.preserve_oracle_coordinate {
-            return store.coordinate_by_state.get(&state).copied();
-        }
-        let residual = Self::residual_for_state(&store, self.root_state, state)?;
-        match store.oracle_coordinates.get(residual as usize).copied()? {
-            BoundedCodeOracleSlot::Exact(coordinate) => Some(coordinate),
-            BoundedCodeOracleSlot::Unknown | BoundedCodeOracleSlot::Ambiguous => None,
-        }
+        self.oracle_coordinate_for_state_locked(&store, state)
     }
 
     pub(super) fn restore_compiled_finite_mask_projection(
@@ -6535,6 +6517,53 @@ mod tests {
                 assert_eq!(runtime.state_for_direct_coordinate(direct), Some(next_state));
             }
         }
+    }
+
+    #[test]
+    fn coordinate_runtime_retains_bounded_slice_radius_after_prefix() {
+        let unbounded = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat {
+                expr: Box::new(bounded_code_body()),
+                min: 0,
+                max: None,
+            },
+            bytes(b">")
+        ]);
+        let expr = Expr::Intersect {
+            expr: Box::new(unbounded),
+            intersect: Box::new(bounded_code_envelope_expr(0, 4)),
+        };
+        let allocator = Arc::new(VirtualStateAllocator::new(2).unwrap());
+        let owners = Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap());
+        let runtime = VirtualResidualRuntime::new_dynamic(
+            &expr, 0, 0, 1, 2, 1, allocator, owners,
+        )
+        .expect("bounded-code dynamic runtime should certify a direct coordinate");
+
+        let mut byte_to_class = [1u8; 256];
+        byte_to_class[b'a' as usize] = 0;
+        let class_count = 2usize;
+        let transitions = [1u32, 2, 1, 2, 2, 2];
+        let accepting = [false, true, false];
+        let productive = [true, true, false];
+
+        let after_open = runtime.step(1, b'<').expect("opening delimiter should be live");
+        assert_eq!(
+            runtime.parser_transparent_byte_dfa_repeat_radius(
+                after_open, 0, class_count, &byte_to_class, &transitions,
+                &accepting, &productive, 8, 16 * 1024,
+            ),
+            Some(4),
+        );
+        let after_one = runtime.step(after_open, b'a').expect("first body atom should be live");
+        assert_eq!(
+            runtime.parser_transparent_byte_dfa_repeat_radius(
+                after_one, 0, class_count, &byte_to_class, &transitions,
+                &accepting, &productive, 8, 16 * 1024,
+            ),
+            Some(3),
+        );
     }
 
     #[test]
