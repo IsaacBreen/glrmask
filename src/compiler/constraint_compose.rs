@@ -29809,6 +29809,7 @@ table: &dispatch.table,
             ignore_terminal: Option<u32>,
             seed_filter: Option<&[bool]>,
             initial_state_map: Option<&ManyToOneIdMap>,
+            nwa_crossing: Option<(&[u32], usize)>,
         ) -> Option<
             crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa,
         > {
@@ -29852,13 +29853,25 @@ table: &dispatch.table,
                 )
                 .expect("shared equivalence must compute")
             });
-            let shard_options = shared.as_ref().map(|shared| {
-                tdwa::l2p::L2pShardBuildOptions {
-                    shared_equivalence: Some(shared),
-                    skip_ti_discovery: true,
-                    crossing_filter: None,
-                }
-            });
+            // Phase 2 step 2 verification knob: NWA-level crossing filter
+            // inside the entry point (before determinize/minimize).
+            let nwa_filter = std::env::var("PHASE1_NWAFILT")
+                .map(|value| value != "0")
+                .unwrap_or(false)
+                .then_some(nwa_crossing)
+                .flatten()
+                .map(|(terminal_offsets, start_component)| {
+                    tdwa::l2p::L2pCrossingFilter { terminal_offsets, start_component }
+                });
+            let shard_options = if shared.is_some() || nwa_filter.is_some() {
+                Some(tdwa::l2p::L2pShardBuildOptions {
+                    shared_equivalence: shared.as_ref(),
+                    skip_ti_discovery: shared.is_some(),
+                    crossing_filter: nwa_filter,
+                })
+            } else {
+                None
+            };
             let result = tdwa::l2p::build_l2p_id_map_and_terminal_dwa_mode(
                 "phase1_probe",
                 tokenizer,
@@ -29886,10 +29899,11 @@ table: &dispatch.table,
             )
             .expect("restricted walk must produce a DWA");
             eprintln!(
-                "PHASE1 walk_{tag} vocab={} seeded={} shared={} wall_ms={:.3} id_map_ms={:.3} shared_id_map_ms={:.3} dwa_ms={:.3} compact_ms={:.3} dwa_states={} dwa_trans={} tsids={} itokens={} acyclic={}",
+                "PHASE1 walk_{tag} vocab={} seeded={} shared={} nwafilt={} wall_ms={:.3} id_map_ms={:.3} shared_id_map_ms={:.3} dwa_ms={:.3} compact_ms={:.3} dwa_states={} dwa_trans={} tsids={} itokens={} acyclic={}",
                 vocab.entries_map().len(),
                 seeded,
                 shared.is_some(),
+                nwa_filter.is_some(),
                 started.elapsed().as_secs_f64() * 1000.0,
                 result.profile.id_map_ms,
                 shared.as_ref().map_or(0.0, |shared| shared.id_map_ms),
@@ -29904,14 +29918,15 @@ table: &dispatch.table,
             Some(result)
         }
 
-        // Keep only paths that emit a terminal owned by a component != i.
-        fn phase1_crossing_from(
-            tag: &str,
+        // Raw seen-flag product: keep only paths that emit a terminal
+        // owned by a component != i. Shared by the DWA-level filter and the
+        // NWA-vs-DWA equivalence check (which minimizes with `minimize_owned`
+        // instead of the acyclic minimizer).
+        fn phase1_crossing_product(
             dwa: &DWA,
             terminal_offsets: &[u32],
             start_component: usize,
         ) -> DWA {
-            let started = Instant::now();
             let mut states = vec![DWAState::default()];
             let mut ids = FxHashMap::<(u32, bool), u32>::default();
             let mut payloads = vec![(dwa.start_state(), false)];
@@ -29946,7 +29961,56 @@ table: &dispatch.table,
                     states[out as usize].transitions.insert(label, (next, weight.clone()));
                 }
             }
-            let raw = DWA::from_parts(states, 0);
+            DWA::from_parts(states, 0)
+        }
+
+        // Structural id-map equality (Step-1 coordinates must be identical
+        // across walks for same-coordinate DWA comparison).
+        fn phase1_assert_same_id_map(tag: &str, a: &InternalIdMap, b: &InternalIdMap) {
+            assert_eq!(
+                a.tokenizer_states.original_to_internal,
+                b.tokenizer_states.original_to_internal,
+                "{tag}: tokenizer_states.original_to_internal differs",
+            );
+            assert_eq!(
+                a.tokenizer_states.internal_to_originals,
+                b.tokenizer_states.internal_to_originals,
+                "{tag}: tokenizer_states.internal_to_originals differs",
+            );
+            assert_eq!(
+                a.tokenizer_states.representative_original_ids,
+                b.tokenizer_states.representative_original_ids,
+                "{tag}: tokenizer_states.representative_original_ids differs",
+            );
+            assert_eq!(
+                a.vocab_tokens.original_to_internal, b.vocab_tokens.original_to_internal,
+                "{tag}: vocab_tokens.original_to_internal differs",
+            );
+            assert_eq!(
+                a.vocab_tokens.internal_to_originals, b.vocab_tokens.internal_to_originals,
+                "{tag}: vocab_tokens.internal_to_originals differs",
+            );
+            assert_eq!(
+                a.vocab_tokens.representative_original_ids,
+                b.vocab_tokens.representative_original_ids,
+                "{tag}: vocab_tokens.representative_original_ids differs",
+            );
+            assert_eq!(
+                a.deferred_vocab_singleton_original_ids,
+                b.deferred_vocab_singleton_original_ids,
+                "{tag}: deferred_vocab_singleton_original_ids differs",
+            );
+        }
+
+        // Keep only paths that emit a terminal owned by a component != i.
+        fn phase1_crossing_from(
+            tag: &str,
+            dwa: &DWA,
+            terminal_offsets: &[u32],
+            start_component: usize,
+        ) -> DWA {
+            let started = Instant::now();
+            let raw = phase1_crossing_product(dwa, terminal_offsets, start_component);
             let raw_states = raw.num_states();
             let raw_trans = raw.num_transitions();
             let acyclic = raw.is_acyclic();
@@ -30755,7 +30819,7 @@ table: &dispatch.table,
             );
 
             if let Some(w0) =
-                phase1_run_walk("outer_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None)
+                phase1_run_walk("outer_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None, None)
                 && let Some(b) = b_mapped.as_ref()
             {
                 phase1_validate_unified_walk("outer", &w0.dwa, &w0.id_map, b);
@@ -30769,6 +30833,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_core),
             None,
+                Some((&composed.table.terminal_offsets, 0))
             )
             .expect("core full-vocab walk");
             let wb = phase1_run_walk(
@@ -30780,6 +30845,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_core),
             None,
+                Some((&composed.table.terminal_offsets, 0))
             );
             let xa = phase1_crossing_from("outer_core_full", &wa.dwa, &composed.table.terminal_offsets, 0);
             let wa_total = phase1_accepted_tokens(&wa.dwa, &wa.id_map, None);
@@ -30882,6 +30948,7 @@ table: &dispatch.table,
                     composed.ignore_canonical,
                     Some(&commit_core),
                     None,
+                    Some((&composed.table.terminal_offsets, 0))
                 ) {
                     let x_nd = phase1_crossing_from(
                         "outer_core_nodisallow_std",
@@ -30941,6 +31008,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_dispatch),
             None,
+                Some((&composed.table.terminal_offsets, 1))
             )
             .expect("dispatch full-vocab walk");
             let wb_dispatch = phase1_run_walk(
@@ -30952,6 +31020,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_dispatch),
             None,
+                Some((&composed.table.terminal_offsets, 1))
             );
             let xa_dispatch = phase1_crossing_from(
                 "outer_dispatch_full",
@@ -30972,6 +31041,85 @@ table: &dispatch.table,
                 "PHASE1 ticheck_outer_dispatch crossing_not_in_T={}",
                 ta_dispatch.difference(&ti_dispatch).count(),
             );
+            // NWA-vs-DWA filter proof (Phase 2 step 2): the DWA-level
+            // product minimized with the full minimizer must be
+            // weighted-language-equal to the acyclic-minimized form. In a
+            // non-NWAFILT run this proves the 41-vs-26 size delta is a
+            // minimizer artifact, not a language difference; under NWAFILT
+            // it additionally proves the walk DWA is a re-filter fixpoint
+            // (no non-crossing accepting paths survived the NWA filter).
+            let owned_min = minimize_owned(xa_dispatch.clone());
+            let fwd = find_difference(&xa_dispatch, &owned_min)
+                .expect("crossing minimizer-equivalence check failed");
+            let bwd = find_difference(&owned_min, &xa_dispatch)
+                .expect("crossing minimizer-equivalence check failed");
+            eprintln!(
+                "PHASE1 nwaequiv_outer_dispatch walk_states={} walk_trans={} acyclic_states={} acyclic_trans={} owned_states={} owned_trans={} fwd_none={} bwd_none={}",
+                wa_dispatch.dwa.num_states(),
+                wa_dispatch.dwa.num_transitions(),
+                xa_dispatch.num_states(),
+                xa_dispatch.num_transitions(),
+                owned_min.num_states(),
+                owned_min.num_transitions(),
+                fwd.is_none(),
+                bwd.is_none(),
+            );
+            assert!(
+                fwd.is_none() && bwd.is_none(),
+                "DWA-filtered crossing language differs across minimizers",
+            );
+            // Decisive same-coordinate NWA-vs-DWA proof (Phase 2 step 2).
+            // Requires GLRMASK_L2P_SKIP_CORE_COMPACT=1 (both walks in Step-1
+            // coordinates) and PHASE1_NWAFILT=1 (wa_dispatch is NWA-filtered):
+            // the NWA-filtered walk DWA must be weighted-language-equal to
+            // the DWA-level product (minimized with `minimize_owned`) of a
+            // separately-run unfiltered walk over the identical id_map.
+            let run_nwa_equiv =
+                std::env::var("PHASE1_NWA_EQUIV").map(|value| value != "0").unwrap_or(false);
+            let nwafilt_on =
+                std::env::var("PHASE1_NWAFILT").map(|value| value != "0").unwrap_or(false);
+            if run_nwa_equiv && nwafilt_on {
+                let w_unfilt = phase1_run_walk(
+                    "outer_dispatch_full_unfilt",
+                    &composed.tokenizer,
+                    &vocab,
+                    &grammar,
+                    &disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_dispatch),
+                    None,
+                    None,
+                )
+                .expect("unfiltered dispatch walk for NWA equivalence");
+                phase1_assert_same_id_map(
+                    "outer_dispatch_nwaequiv",
+                    &wa_dispatch.id_map,
+                    &w_unfilt.id_map,
+                );
+                let raw_unfilt = phase1_crossing_product(
+                    &w_unfilt.dwa,
+                    &composed.table.terminal_offsets,
+                    1,
+                );
+                let dwa_owned = minimize_owned(raw_unfilt);
+                let fwd_eq = find_difference(&wa_dispatch.dwa, &dwa_owned)
+                    .expect("NWA-vs-DWA equivalence check failed");
+                let bwd_eq = find_difference(&dwa_owned, &wa_dispatch.dwa)
+                    .expect("NWA-vs-DWA equivalence check failed");
+                eprintln!(
+                    "PHASE1 nwaequiv_proof_outer_dispatch nwa_states={} nwa_trans={} dwa_states={} dwa_trans={} fwd_none={} bwd_none={}",
+                    wa_dispatch.dwa.num_states(),
+                    wa_dispatch.dwa.num_transitions(),
+                    dwa_owned.num_states(),
+                    dwa_owned.num_transitions(),
+                    fwd_eq.is_none(),
+                    bwd_eq.is_none(),
+                );
+                assert!(
+                    fwd_eq.is_none() && bwd_eq.is_none(),
+                    "NWA-filtered crossing language differs from DWA-filtered crossing language",
+                );
+            }
             let mut ti_full_outer = BTreeSet::new();
             let mut ti_cross_outer = BTreeSet::new();
             if let Some(wb) = wb_dispatch {
@@ -31153,6 +31301,7 @@ table: &dispatch.table,
                     composed.ignore_canonical,
                     Some(&commit_dispatch),
                     Some(&state_map_dispatch),
+                    Some((&composed.table.terminal_offsets, 1))
                 ) {
                     let x_b3 = phase1_crossing_from(
                         "outer_dispatch_b3restr",
@@ -31197,6 +31346,7 @@ table: &dispatch.table,
                     composed.ignore_canonical,
                     Some(&commit_core),
                     Some(&state_map_core),
+                    Some((&composed.table.terminal_offsets, 0))
                 ) {
                     let x_b3c = phase1_crossing_from(
                         "outer_core_b3restr",
@@ -31392,7 +31542,7 @@ table: &dispatch.table,
             );
 
             if let Some(w0) =
-                phase1_run_walk("dispatch_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None)
+                phase1_run_walk("dispatch_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None, None)
                 && let Some(b) = b_mapped.as_ref()
             {
                 phase1_validate_unified_walk("dispatch", &w0.dwa, &w0.id_map, b);
@@ -31406,6 +31556,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_schema0),
             None,
+                Some((&composed.table.terminal_offsets, 1))
             )
             .expect("schema0 full-vocab walk");
             let wb = phase1_run_walk(
@@ -31417,6 +31568,7 @@ table: &dispatch.table,
                 composed.ignore_canonical,
                 Some(&commit_schema0),
             None,
+                Some((&composed.table.terminal_offsets, 1))
             );
             let xa =
                 phase1_crossing_from("dispatch_schema0_full", &wa.dwa, &composed.table.terminal_offsets, 1);
@@ -31431,6 +31583,27 @@ table: &dispatch.table,
             eprintln!(
                 "PHASE1 ticheck_dispatch crossing_not_in_T={}",
                 ta.difference(&ti_schema0).count(),
+            );
+            // Same minimizer-artifact proof as the outer section, for schema0.
+            let owned_min_schema = minimize_owned(xa.clone());
+            let fwd_schema = find_difference(&xa, &owned_min_schema)
+                .expect("schema crossing minimizer-equivalence check failed");
+            let bwd_schema = find_difference(&owned_min_schema, &xa)
+                .expect("schema crossing minimizer-equivalence check failed");
+            eprintln!(
+                "PHASE1 nwaequiv_dispatch_schema0 walk_states={} walk_trans={} acyclic_states={} acyclic_trans={} owned_states={} owned_trans={} fwd_none={} bwd_none={}",
+                wa.dwa.num_states(),
+                wa.dwa.num_transitions(),
+                xa.num_states(),
+                xa.num_transitions(),
+                owned_min_schema.num_states(),
+                owned_min_schema.num_transitions(),
+                fwd_schema.is_none(),
+                bwd_schema.is_none(),
+            );
+            assert!(
+                fwd_schema.is_none() && bwd_schema.is_none(),
+                "schema DWA-filtered crossing language differs across minimizers",
             );
             let mut ti_full_schema = BTreeSet::new();
             let mut ti_cross_schema = BTreeSet::new();
@@ -31567,6 +31740,7 @@ table: &dispatch.table,
                     composed.ignore_canonical,
                     Some(&commit_schema0),
                     Some(&state_map_schema0),
+                    Some((&composed.table.terminal_offsets, 1))
                 ) {
                     let x_b3 = phase1_crossing_from(
                         "dispatch_schema0_b3restr",

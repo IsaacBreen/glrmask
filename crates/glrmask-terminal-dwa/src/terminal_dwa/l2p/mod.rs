@@ -68,7 +68,7 @@ use terminal_interchangeability::{
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    max_structural_label_depth_to_final, prune_non_coreachable_states,
+    filter_nwa_to_crossing_paths, max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -1269,6 +1269,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         disallowed_ms,
         prune_ms,
         canonicalize_ms,
+        crossing_filter_ms,
         determinize_ms,
         minimize_ms,
         internal_vocab_count,
@@ -1299,6 +1300,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 0.0, // disallowed_ms
                 0.0, // prune_ms
                 0.0, // canonicalize_ms
+                0.0, // crossing_filter_ms
                 0.0, // determinize_ms
                 0.0, // minimize_ms
                 0usize, // internal_vocab_count
@@ -1409,6 +1411,37 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
 
+            // Boundary-shard crossing filter (static-link redesign step 2):
+            // keep only paths through foreign-owned terminals so
+            // determinize/minimize see the crossing sub-NWA instead of the
+            // full walk output. Same predicate as the DWA-level filter, hence
+            // the same minimized crossing DWA downstream.
+            let crossing_filter_ms = match shard_options.and_then(|options| options.crossing_filter) {
+                Some(filter) => {
+                    let started_at = Instant::now();
+                    let nwa_states_before = nwa.states().len();
+                    nwa = filter_nwa_to_crossing_paths(
+                        &nwa,
+                        filter.terminal_offsets,
+                        filter.start_component,
+                    );
+                    prune_non_coreachable_states(&mut nwa);
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    if l2p_timing_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][l2p_crossing_filter] partition={} start_component={} nwa_states_before={} nwa_states_after={} total_ms={:.3}",
+                            partition_label,
+                            filter.start_component,
+                            nwa_states_before,
+                            nwa.states().len(),
+                            elapsed_ms,
+                        );
+                    }
+                    elapsed_ms
+                }
+                None => 0.0,
+            };
+
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             // Generic weighted subset construction becomes expensive in the broad p0
             // regime, but the epsilon-free token-conditional NWA often quotients to
@@ -1512,6 +1545,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 disallowed_ms,
                 prune_ms,
                 canonicalize_ms,
+                crossing_filter_ms,
                 determinize_ms,
                 minimize_ms,
                 internal_vocab_count,
@@ -1529,8 +1563,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         return None;
     }
     let composed_id_map = simplified_id_map.clone();
-    let postprocess_ms =
-        always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
+    let postprocess_ms = always_allowed_ms
+        + collapse_ms
+        + disallowed_ms
+        + prune_ms
+        + canonicalize_ms
+        + crossing_filter_ms;
     let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
         0.0
     } else {
@@ -1567,7 +1605,19 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 "GLRMASK_L2P_CORE_COMPACT_MERGE_ONLY",
                 partition_label,
             ));
-    if profiling && merge_only_core_compact {
+    // Validation-only escape hatch: skip the core TSID/token compaction so
+    // the returned DWA stays in Step-1 (equivalence-analysis) coordinates.
+    // Same-coordinate DWA comparisons (e.g. NWA-level vs DWA-level crossing
+    // filters from separate walks) are only meaningful uncompacted.
+    let skip_core_compact = std::env::var("GLRMASK_L2P_SKIP_CORE_COMPACT")
+        .map(|value| {
+            let trimmed = value.trim();
+            trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+        })
+        .unwrap_or(false);
+    if skip_core_compact {
+        // No compaction: keep the Step-1 coordinate exactly.
+    } else if profiling && merge_only_core_compact {
         mapped_dwa.compact_dimensions_merge_only_fast_with_stats();
     } else if profiling {
         mapped_dwa.compact_dimensions_fast_with_stats();
@@ -1576,7 +1626,11 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         mapped_dwa.compact_dimensions_fast();
     }
-    let core_compact_ms = core_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let core_compact_ms = if skip_core_compact {
+        0.0
+    } else {
+        core_compact_started_at.elapsed().as_secs_f64() * 1000.0
+    };
     let core_dwa_stats_after_compact = mapped_dwa.artifact().stats();
     let (core_dwa, core_id_map) = mapped_dwa.into_parts();
     let core_tsid_count = core_id_map.num_tsids();
