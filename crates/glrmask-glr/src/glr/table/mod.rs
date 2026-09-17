@@ -24,6 +24,8 @@ pub use compose::{
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
 #[allow(unused_imports)]
 pub use optimize::ControlEliminationReport;
+#[allow(unused_imports)]
+pub use optimize::control_elimination_budget_exhausted;
 use optimize::merge_same_core_lr1_states;
 
 use row::{ActionRow, GotoRow};

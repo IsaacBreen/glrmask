@@ -616,6 +616,12 @@ pub struct L2pShardBuildOptions<'a> {
     pub skip_ti_discovery: bool,
     /// Apply the NWA-level crossing filter before determinize/minimize.
     pub crossing_filter: Option<L2pCrossingFilter<'a>>,
+    /// Skip the core TSID/token compaction and keep the Step-1 coordinate
+    /// exactly. Required when the consumer indexes (parser-stack x tsid):
+    /// compaction is terminal-behavior-exact but merges states whose
+    /// stack-indexed crossing viability differs, which makes a parser DWA
+    /// compiled over the compacted tsids over-admit.
+    pub skip_core_compact: bool,
 }
 
 /// Run only the Step 1 equivalence analysis for a shard build, with the exact
@@ -1608,13 +1614,16 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // Validation-only escape hatch: skip the core TSID/token compaction so
     // the returned DWA stays in Step-1 (equivalence-analysis) coordinates.
     // Same-coordinate DWA comparisons (e.g. NWA-level vs DWA-level crossing
-    // filters from separate walks) are only meaningful uncompacted.
-    let skip_core_compact = std::env::var("GLRMASK_L2P_SKIP_CORE_COMPACT")
-        .map(|value| {
-            let trimmed = value.trim();
-            trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
-        })
-        .unwrap_or(false);
+    // filters from separate walks) are only meaningful uncompacted. Shard
+    // builds that feed a (parser-stack x tsid)-indexed parser DWA request
+    // the same via options (compaction is parser-behavior-lossy).
+    let skip_core_compact = shard_options.is_some_and(|options| options.skip_core_compact)
+        || std::env::var("GLRMASK_L2P_SKIP_CORE_COMPACT")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
     if skip_core_compact {
         // No compaction: keep the Step-1 coordinate exactly.
     } else if profiling && merge_only_core_compact {

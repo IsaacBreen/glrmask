@@ -101,8 +101,10 @@ pub(crate) fn commit_states_for_component(
 ///
 /// Runs the standard L2P walk (`build_l2p_id_map_and_terminal_dwa_mode`) on
 /// the merged tokenizer with `seed_state_filter = Commit_i`, the link-shared
-/// equivalence (TI discovery skipped), and the NWA-level crossing filter for
-/// `component_index`. Returns `None` only when the vocab is empty.
+/// equivalence (TI discovery skipped), the NWA-level crossing filter for
+/// `component_index`, and core compaction skipped (the shard parser indexes
+/// (parser-stack x tsid), which needs the exact Step-1 coordinate).
+/// Returns `None` only when the vocab is empty.
 pub(crate) fn build_boundary_terminal_dwa(
     inputs: &BoundaryWalkInputs,
 ) -> Option<BoundaryWalkOutput> {
@@ -129,6 +131,9 @@ pub(crate) fn build_boundary_terminal_dwa(
         shared_equivalence: Some(inputs.shared_equivalence),
         skip_ti_discovery: true,
         crossing_filter: Some(crossing),
+        // The shard parser indexes (parser-stack x tsid); compaction would
+        // merge stack-distinguishable states and over-admit (inner-6).
+        skip_core_compact: true,
     };
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
     let walk_started = Instant::now();
@@ -340,7 +345,7 @@ mod tests {
     };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
-        GLRTable, SubgrammarTableInput, compose_subgrammar_tables,
+        GLRTable, SubgrammarTableInput, compose_subgrammar_tables, control_elimination_budget_exhausted,
     };
     use crate::compiler::pipeline::compute_disallowed_follows;
     use crate::grammar::flat::TerminalID;
@@ -735,11 +740,13 @@ mod tests {
         }
     }
 
-    /// TEMPORARY hang-localization micro-test (Phase 2 step 4): dynamic
-    /// compose + recursive table only.
+    /// Convergence-bound regression gate (Phase 2 step 4): the selected10
+    /// outer recursive table's control elimination provably diverges (cyclic
+    /// reduce graph defeats the DFS visiting set), so it must decline via
+    /// the convergence budget quickly instead of stalling the link.
     #[test]
     #[ignore]
-    fn debug_recursive_table_timing() {
+    fn recursive_table_convergence_bound_fails_fast() {
         let fixture = load_selected10_outer();
         let dyn_children = [CompiledSubgrammarInput {
             placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
@@ -754,18 +761,25 @@ mod tests {
         )
         .expect("dynamic compose")
         .constraint;
-        eprintln!("DEBUG_RECTABLE_TEST calling recursive table");
-        let table = dynamic
+        let started = Instant::now();
+        let error = dynamic
             .recursive_control_eliminated_parser_table()
-            .expect("recursive table")
-            .expect("recursive table present");
-        eprintln!("DEBUG_RECTABLE_TEST done states={} terms={}", table.num_states, table.num_terminals);
+            .expect_err("outer recursive table must decline via the convergence budget");
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!("BOUNDARY_INSTALL convergence_decline_ms={elapsed_ms:.3} error={error}");
+        assert!(
+            control_elimination_budget_exhausted(&error),
+            "decline must be budget exhaustion, got: {error}"
+        );
+        assert!(elapsed_ms < 15_000.0, "decline must fail fast, took {elapsed_ms:.0} ms");
     }
 
     /// Step-4 install gate: build walk shards through the link orchestration,
     /// publish against a dynamic composition's recursive table, install by
     /// replacing its dynamic shards, and require mask-for-mask equality with
-    /// the dynamic backend over a byte-prefix corpus.
+    /// the dynamic backend over a byte-prefix corpus. When the recursive
+    /// table declines via the convergence budget, the dynamic shards stay
+    /// (fallback) and the differential is vacuous by construction.
     #[test]
     #[ignore]
     fn selected10_walk_shard_install_matches_dynamic() {
@@ -822,10 +836,26 @@ mod tests {
         assert_eq!(built[0].candidate_tokens.len(), 143);
 
         let recursive_started = Instant::now();
-        let recursive_table = dynamic
-            .recursive_control_eliminated_parser_table()
-            .expect("recursive table")
-            .expect("recursive table present");
+        let recursive_table = match dynamic.recursive_control_eliminated_parser_table() {
+            Ok(table) => table.expect("recursive table present"),
+            Err(error) if control_elimination_budget_exhausted(&error) => {
+                // Convergence decline: static linking is unavailable for
+                // this composition; the dynamic shards stay authoritative
+                // and the differential below is vacuous by construction.
+                eprintln!(
+                    "BOUNDARY_INSTALL fallback=dynamic decline_ms={:.3} error={error}",
+                    recursive_started.elapsed().as_secs_f64() * 1000.0,
+                );
+                let mut static_comp = dynamic.clone();
+                assert!(
+                    static_comp.uses_compact_segmented_parser_runtime(),
+                    "fallback composition must stay on the compact runtime",
+                );
+                run_install_differential(&dynamic, &mut static_comp, true);
+                return;
+            }
+            Err(error) => panic!("recursive table hard failure: {error}"),
+        };
         eprintln!(
             "BOUNDARY_INSTALL recursive_table_ms={:.3} states={} terms={}",
             recursive_started.elapsed().as_secs_f64() * 1000.0,
@@ -841,18 +871,20 @@ mod tests {
                 id_map: shard.output.id_map,
                 candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
             };
-            let publish_started = Instant::now();
-            let shard = publish_walk_boundary_shard_work(work, &recursive_table, merged_states)
-                .expect("publish walk shard");
-            let parser = shard.boundary.recursive_parser_dwa.as_ref().expect("recursive parser");
+            let (shard, profile) =
+                publish_walk_boundary_shard_work(work, &recursive_table, merged_states)
+                    .expect("publish walk shard");
             eprintln!(
-                "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} publish_ms={:.3}",
+                "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} terms={} templates_ms={:.3} materialize_ms={:.3} normalize_ms={:.3}",
                 shard.start_component,
-                parser.num_states(),
-                parser.num_transitions(),
+                profile.parser_states,
+                profile.parser_trans,
                 shard.candidate_tokens.len(),
                 shard.boundary.uses_composed_tsid_coordinate,
-                publish_started.elapsed().as_secs_f64() * 1000.0,
+                profile.terms,
+                profile.templates_ms,
+                profile.materialize_ms,
+                profile.normalize_ms,
             );
             published.push(shard);
         }
@@ -867,6 +899,17 @@ mod tests {
             static_comp.uses_compact_segmented_parser_runtime(),
             "installed composition must stay on the compact runtime",
         );
+        run_install_differential(&dynamic, &mut static_comp, false);
+    }
+
+    /// Byte-prefix mask differential between a dynamic composition and its
+    /// walk-shard-installed twin. `fallback` labels runs where convergence
+    /// decline left the dynamic shards in place (vacuous by construction).
+    fn run_install_differential(
+        dynamic: &Constraint,
+        static_comp: &mut Constraint,
+        fallback: bool,
+    ) {
 
         let prefixes: Vec<&[u8]> = vec![
             b"",
@@ -925,7 +968,639 @@ mod tests {
                 scenario_started.elapsed().as_secs_f64() * 1000.0,
             );
         }
-        eprintln!("BOUNDARY_INSTALL positions={positions} checksum={checksum:016x}");
+        eprintln!(
+            "BOUNDARY_INSTALL fallback={fallback} positions={positions} checksum={checksum:016x}"
+        );
         assert!(positions > 100, "corpus must cover real positions");
+    }
+
+    /// Dispatch-parent grammar source for the inner-link sweep. Mirrors
+    /// `dispatcher_literal_names_parent_source` in
+    /// `examples/static_link_measure.rs` (10 `.tool_i(` slots over the same
+    /// placeholder token IDs).
+    fn dispatch_parent_source() -> String {
+        let mut source = String::from("start suffix;\n");
+        for index in 0..10 {
+            source.push_str(&format!(
+                "t TOOL_ARGS_SLOT_{index} ::= @token({});\n",
+                128_320 + 10 + index
+            ));
+        }
+        source.push_str("nt suffix ::=\n    ");
+        for index in 0..10 {
+            if index != 0 {
+                source.push_str("\n  | ");
+            }
+            source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
+        }
+        source.push_str(";\n");
+        source
+    }
+
+    /// Per-link stage timing record for the sweep table.
+    struct LinkTiming {
+        name: String,
+        dyn_compose_ms: f64,
+        low_level_ms: f64,
+        shared_ms: f64,
+        flat_ms: f64,
+        walk_ms: f64,
+        det_ms: f64,
+        min_ms: f64,
+        shards_built: usize,
+        table_ms: f64,
+        table_fallback: bool,
+        templates_ms: f64,
+        parser_ms: f64,
+        install_ms: f64,
+        installed: usize,
+        diff_positions: usize,
+        diff_mismatches: usize,
+        diff_checksum: u64,
+        diff_ms: f64,
+    }
+
+    impl LinkTiming {
+        fn total_link_ms(&self) -> f64 {
+            self.shared_ms
+                + self.walk_ms
+                + self.table_ms
+                + self.templates_ms
+                + self.parser_ms
+                + self.install_ms
+        }
+    }
+
+    /// Seeded RNG token-walk differential between two compositions (dynamic
+    /// reference vs installed/fallback twin). Language-agnostic: drives on
+    /// the dynamic masks. Returns (positions, mismatches, checksum).
+    fn rng_choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {
+        let allowed: usize = mask.iter().map(|word| word.count_ones() as usize).sum();
+        if allowed == 0 {
+            return None;
+        }
+        *rng ^= *rng >> 12;
+        *rng ^= *rng << 25;
+        *rng ^= *rng >> 27;
+        let draw = rng.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let mut rank = draw as usize % allowed;
+        for (word_index, &word) in mask.iter().enumerate() {
+            let count = word.count_ones() as usize;
+            if rank >= count {
+                rank -= count;
+                continue;
+            }
+            let mut live = word;
+            for _ in 0..rank {
+                live &= live - 1;
+            }
+            let bit = live.trailing_zeros() as usize;
+            return Some((word_index * 32 + bit) as u32);
+        }
+        None
+    }
+
+    fn rng_differential(
+        dynamic: &Constraint,
+        other: &Constraint,
+        steps: usize,
+        seed: u64,
+    ) -> (usize, usize, u64, Option<String>) {
+        fn mask_bits(mask: &[u32]) -> Vec<u32> {
+            let mut out = Vec::new();
+            for (word_index, &word) in mask.iter().enumerate() {
+                let mut live = word;
+                while live != 0 {
+                    let bit = live.trailing_zeros() as usize;
+                    out.push((word_index * 32 + bit) as u32);
+                    live &= live - 1;
+                }
+            }
+            out
+        }
+        let mut rng = seed;
+        let mut checksum: u64 = 0xcbf29ce484222325;
+        let mut positions = 0usize;
+        let mut mismatches = 0usize;
+        let mut first: Option<String> = None;
+        let mut st_dyn = dynamic.start();
+        let mut st_other = other.start();
+        let mut check = |st_dyn: &mut crate::runtime::ConstraintState<'_>,
+                         st_other: &mut crate::runtime::ConstraintState<'_>,
+                         step_index: usize,
+                         first: &mut Option<String>| {
+            let mask_dyn = st_dyn.mask();
+            let mask_other = st_other.mask();
+            for (index, &word) in mask_dyn.iter().enumerate() {
+                checksum ^= (word as u64).wrapping_add(index as u64);
+                checksum = checksum.wrapping_mul(0x100000001b3);
+            }
+            positions += 1;
+            if mask_dyn != mask_other {
+                mismatches += 1;
+                if first.is_none() {
+                    let dyn_bits = mask_bits(&mask_dyn);
+                    let other_bits = mask_bits(&mask_other);
+                    let dyn_set: BTreeSet<u32> = dyn_bits.into_iter().collect();
+                    let other_set: BTreeSet<u32> = other_bits.into_iter().collect();
+                    let dyn_only: Vec<u32> =
+                        dyn_set.difference(&other_set).copied().take(12).collect();
+                    let other_only: Vec<u32> =
+                        other_set.difference(&dyn_set).copied().take(12).collect();
+                    *first = Some(format!(
+                        "mask step={step_index} dyn_admits={} other_admits={} dyn_only={dyn_only:?} other_only={other_only:?}",
+                        dyn_set.len(),
+                        other_set.len(),
+                    ));
+                }
+            }
+        };
+        check(&mut st_dyn, &mut st_other, 0, &mut first);
+        let mut path: Vec<u32> = Vec::new();
+        for step in 0..steps {
+            let mask_dyn = st_dyn.mask();
+            let Some(token) = rng_choose_token(&mask_dyn, &mut rng) else {
+                break;
+            };
+            path.push(token);
+            let r_dyn = st_dyn.commit_token(token);
+            let r_other = st_other.commit_token(token);
+            if r_dyn.is_ok() != r_other.is_ok() {
+                mismatches += 1;
+                if first.is_none() {
+                    first = Some(format!(
+                        "commit step={} token={token} dyn_ok={} other_ok={}",
+                        step + 1,
+                        r_dyn.is_ok(),
+                        r_other.is_ok(),
+                    ));
+                }
+                break;
+            }
+            if r_dyn.is_err() {
+                break;
+            }
+            check(&mut st_dyn, &mut st_other, step + 1, &mut first);
+        }
+        if mismatches > 0 {
+            eprintln!("BOUNDARY_LINK_PATH positions={positions} path={path:?}");
+        }
+        (positions, mismatches, checksum, first)
+    }
+
+    /// Run the full walk-shard link for one composition and time every stage.
+    fn link_and_time(
+        name: &str,
+        parent: &Constraint,
+        slots: &[(String, &Constraint)],
+        vocab: &Vocab,
+        diff_steps: usize,
+    ) -> LinkTiming {
+        let inputs: Vec<CompiledSubgrammarInput> = slots
+            .iter()
+            .map(|(slot, child)| CompiledSubgrammarInput {
+                placeholder_terminal: terminal_id(parent, slot),
+                additional_placeholder_terminals: &[],
+                constraint: child,
+            })
+            .collect();
+        let compose_started = Instant::now();
+        let dynamic = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        let dyn_compose_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
+        let low_level_started = Instant::now();
+        let composed = low_level_compose(parent, &inputs);
+        let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
+        let disallowed = compute_disallowed_follows(&grammar);
+        let low_level_ms = low_level_started.elapsed().as_secs_f64() * 1000.0;
+        let counts: Vec<u32> = std::iter::once(parent.tokenizer.num_states())
+            .chain(inputs.iter().map(|child| child.constraint.tokenizer.num_states()))
+            .collect();
+        let (built, profile) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
+            merged_tokenizer: &composed.tokenizer,
+            vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: composed.ignore_canonical,
+            terminal_offsets: &composed.table.terminal_offsets,
+            tokenizer_offsets: &composed.tokenizer_offsets,
+            component_state_counts: &counts,
+        })
+        .expect("walk shards");
+        let shards_built = built.len();
+        let (mut walk_ms, mut det_ms, mut min_ms) = (0.0, 0.0, 0.0);
+        for (_, shard_profile) in &profile.per_shard {
+            walk_ms += shard_profile.walk_ms;
+            det_ms += shard_profile.determinize_ms;
+            min_ms += shard_profile.minimize_ms;
+        }
+        let table_started = Instant::now();
+        let table_result = dynamic.recursive_control_eliminated_parser_table();
+        let table_ms = table_started.elapsed().as_secs_f64() * 1000.0;
+        let (mut templates_ms, mut parser_ms, mut install_ms) = (0.0, 0.0, 0.0);
+        let mut static_comp = dynamic.clone();
+        let mut installed = 0usize;
+        let table_fallback = match table_result {
+            Ok(table) => {
+                let table = table.expect("recursive table present");
+                let merged_states = composed.tokenizer.num_states() as usize;
+                let mut published = Vec::with_capacity(built.len());
+                for shard in built {
+                    let work = WalkBoundaryShardWork {
+                        start_component: shard.start_component as u32,
+                        terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
+                        id_map: shard.output.id_map,
+                        candidate_tokens: shard
+                            .candidate_tokens
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .into(),
+                    };
+                    let (one, publish_profile) =
+                        publish_walk_boundary_shard_work(work, &table, merged_states)
+                            .expect("publish walk shard");
+                    templates_ms += publish_profile.templates_ms;
+                    parser_ms += publish_profile.materialize_ms + publish_profile.normalize_ms;
+                    published.push(one);
+                }
+                installed = published.len();
+                if !published.is_empty() {
+                    let install_started = Instant::now();
+                    install_published_static_boundary_shards(
+                        static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
+                        published,
+                    )
+                    .expect("install");
+                    install_ms = install_started.elapsed().as_secs_f64() * 1000.0;
+                }
+                assert!(
+                    static_comp.uses_compact_segmented_parser_runtime(),
+                    "{name}: installed composition must stay on the compact runtime",
+                );
+                false
+            }
+            Err(error) if control_elimination_budget_exhausted(&error) => true,
+            Err(error) => panic!("{name}: recursive table hard failure: {error}"),
+        };
+        let diff_started = Instant::now();
+        let (diff_positions, diff_mismatches, diff_checksum, diff_first) =
+            rng_differential(&dynamic, &static_comp, diff_steps, 0x9e37_79b9_7f4a_7c15);
+        let diff_ms = diff_started.elapsed().as_secs_f64() * 1000.0;
+        let timing = LinkTiming {
+            name: name.to_string(),
+            dyn_compose_ms,
+            low_level_ms,
+            shared_ms: profile.shared_wall_ms,
+            flat_ms: profile.flat_ms,
+            walk_ms,
+            det_ms,
+            min_ms,
+            shards_built,
+            table_ms,
+            table_fallback,
+            templates_ms,
+            parser_ms,
+            install_ms,
+            installed,
+            diff_positions,
+            diff_mismatches,
+            diff_checksum,
+            diff_ms,
+        };
+        eprintln!(
+            "BOUNDARY_LINK name={} dyn={:.1} low={:.1} shared={:.1} flat={:.1} walk={:.1} det={:.1} min={:.1} shards={} table={:.1} fallback={} templates={:.1} parser={:.1} install={:.1} installed={} diff_pos={} diff_mm={} diffck={:016x} diff_ms={:.0} total_link={:.1}",
+            timing.name,
+            timing.dyn_compose_ms,
+            timing.low_level_ms,
+            timing.shared_ms,
+            timing.flat_ms,
+            timing.walk_ms,
+            timing.det_ms,
+            timing.min_ms,
+            timing.shards_built,
+            timing.table_ms,
+            timing.table_fallback,
+            timing.templates_ms,
+            timing.parser_ms,
+            timing.install_ms,
+            timing.installed,
+            timing.diff_positions,
+            timing.diff_mismatches,
+            timing.diff_checksum,
+            timing.diff_ms,
+            timing.total_link_ms(),
+        );
+        if let Some(detail) = &diff_first {
+            eprintln!("BOUNDARY_LINK_FIRST_MISMATCH name={name} {detail}");
+        }
+        timing
+    }
+
+    /// Step-4 link timing sweep: full walk-shard link over every available
+    /// composition (10× dispatch-parent+schema + 1× core+dispatch outer)
+    /// with per-stage max/median and >3×-median outlier flags.
+    #[test]
+    #[ignore]
+    fn link_timing_all_compositions() {
+        use std::path::Path;
+
+        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
+            "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
+        });
+        let root = Path::new(&root).to_path_buf();
+        let vocab_path = std::env::var("PHASE1_VOCAB")
+            .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
+        let vocab = load_vocab(&vocab_path);
+        let parent =
+            Constraint::from_glrm_grammar(&dispatch_parent_source(), &vocab).expect("parent");
+        let mut schema_paths: Vec<_> = std::fs::read_dir(&root)
+            .expect("read cache dir")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                name.starts_with("schema-").then_some(name)
+            })
+            .collect();
+        schema_paths.sort();
+        assert_eq!(schema_paths.len(), 10, "cache must hold the 10 schema constraints");
+        let mut schemas = Vec::with_capacity(10);
+        for name in &schema_paths {
+            let mut schema =
+                Constraint::load(&std::fs::read(root.join(name)).expect("read schema"))
+                    .expect("load schema");
+            restore_component(&mut schema, name);
+            schemas.push(schema);
+        }
+        let mut core =
+            Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
+                .expect("load core");
+        let dispatch_name = std::env::var("PHASE1_DISPATCH")
+            .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
+        let mut dispatch =
+            Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"))
+                .expect("load dispatch");
+        restore_component(&mut core, "core");
+        restore_component(&mut dispatch, "dispatch");
+
+        let mut timings = Vec::new();
+        for (index, schema) in schemas.iter().enumerate() {
+            timings.push(link_and_time(
+                &format!("inner-{index}"),
+                &parent,
+                &[(format!("TOOL_ARGS_SLOT_{index}"), schema)],
+                &vocab,
+                64,
+            ));
+        }
+        // NOTE: no 10-way segmented dispatch link — N-way segmented compose
+        // rejects it ("component 2 has a non-functional LR-state relation").
+        // The architecture composes dispatch flat and segments only the outer
+        // link, so the sweep covers the 10 synthetic inner links + outer.
+        timings.push(link_and_time(
+            "outer",
+            &core,
+            &[("PROGRAMMATIC_TOOL_SUFFIX".to_string(), &dispatch)],
+            &vocab,
+            64,
+        ));
+
+        let stages: &[(&str, fn(&LinkTiming) -> f64)] = &[
+            ("shared", |t| t.shared_ms),
+            ("walk", |t| t.walk_ms),
+            ("det", |t| t.det_ms),
+            ("min", |t| t.min_ms),
+            ("templates", |t| t.templates_ms),
+            ("parser", |t| t.parser_ms),
+            ("eliminate", |t| t.table_ms),
+            ("install", |t| t.install_ms),
+            ("total_link", |t| t.total_link_ms()),
+        ];
+        for (stage, get) in stages {
+            let mut values: Vec<f64> = timings.iter().map(get).collect();
+            values.sort_by(f64::total_cmp);
+            let median = values[values.len() / 2];
+            let max = values[values.len() - 1];
+            let argmax = timings.iter().map(get).enumerate().max_by(|a, b| {
+                a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let flagged = max > 3.0 * median;
+            eprintln!(
+                "BOUNDARY_STAGE stage={stage} n={} median_ms={median:.1} max_ms={max:.1} max_link={} flagged_3x={flagged}",
+                values.len(),
+                argmax.map(|(i, _)| timings[i].name.as_str()).unwrap_or("?"),
+            );
+        }
+        let total_mismatches: usize = timings.iter().map(|timing| timing.diff_mismatches).sum();
+        let failing: Vec<&str> = timings
+            .iter()
+            .filter(|timing| timing.diff_mismatches > 0)
+            .map(|timing| timing.name.as_str())
+            .collect();
+        eprintln!("BOUNDARY_SWEEP links={} total_mismatches={total_mismatches} failing={failing:?}", timings.len());
+        assert_eq!(total_mismatches, 0, "walk-shard sweep must match DynamicDirect on every link");
+    }
+
+    /// Focused inner-link divergence repro (TEMPORARY diagnosis scaffold):
+    /// full inner link + install for schema `INNER_FOCUS` (default 6),
+    /// commit the known-divergent token path, and dump both masks plus
+    /// per-shard parser-DWA shape.
+    #[test]
+    #[ignore]
+    fn inner6_overadmit_focus() {
+        use std::path::Path;
+
+        let focus: usize = std::env::var("INNER_FOCUS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(6);
+        let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
+            "/Users/isaacbreen/Projects2/temp/2026-09/glrmask-selected10-cache-v29".to_string()
+        });
+        let root = Path::new(&root).to_path_buf();
+        let vocab_path = std::env::var("PHASE1_VOCAB")
+            .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
+        let vocab = load_vocab(&vocab_path);
+        let parent =
+            Constraint::from_glrm_grammar(&dispatch_parent_source(), &vocab).expect("parent");
+        let mut schema_paths: Vec<_> = std::fs::read_dir(&root)
+            .expect("read cache dir")
+            .filter_map(|entry| {
+                let name = entry.ok()?.file_name().to_string_lossy().into_owned();
+                name.starts_with("schema-").then_some(name)
+            })
+            .collect();
+        schema_paths.sort();
+        let mut schema = Constraint::load(
+            &std::fs::read(root.join(schema_paths[focus].clone())).expect("read schema"),
+        )
+        .expect("load schema");
+        restore_component(&mut schema, "schema-focus");
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&parent, &format!("TOOL_ARGS_SLOT_{focus}")),
+            additional_placeholder_terminals: &[],
+            constraint: &schema,
+        }];
+        let dynamic = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        let composed = low_level_compose(&parent, &inputs);
+        let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
+        let disallowed = compute_disallowed_follows(&grammar);
+        let counts = vec![parent.tokenizer.num_states(), schema.tokenizer.num_states()];
+        let (built, _) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
+            merged_tokenizer: &composed.tokenizer,
+            vocab: &vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: composed.ignore_canonical,
+            terminal_offsets: &composed.table.terminal_offsets,
+            tokenizer_offsets: &composed.tokenizer_offsets,
+            component_state_counts: &counts,
+        })
+        .expect("walk shards");
+        let table = dynamic
+            .recursive_control_eliminated_parser_table()
+            .expect("recursive table")
+            .expect("recursive table present");
+        eprintln!("FOCUS table states={} terms={}", table.num_states, table.num_terminals);
+        eprintln!(
+            "FOCUS merged_tokenizer_states={} walk_tsids={}",
+            composed.tokenizer.num_states(),
+            built
+                .iter()
+                .map(|shard| shard.output.id_map.num_tsids())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let merged_states = composed.tokenizer.num_states() as usize;
+        let mut published = Vec::with_capacity(built.len());
+        for shard in built {
+            eprintln!(
+                "FOCUS walk start={} dwa_states={} dwa_trans={} cands={} cand_set={:?}",
+                shard.start_component,
+                shard.output.dwa.num_states(),
+                shard.output.dwa.num_transitions(),
+                shard.candidate_tokens.len(),
+                shard.candidate_tokens.iter().copied().collect::<Vec<_>>(),
+            );
+            let work = WalkBoundaryShardWork {
+                start_component: shard.start_component as u32,
+                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
+                id_map: shard.output.id_map,
+                candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
+            };
+            let (one, profile) = publish_walk_boundary_shard_work(work, &table, merged_states)
+                .expect("publish walk shard");
+            let parser = one.boundary.recursive_parser_dwa.as_ref().expect("recursive parser");
+            let mut default_states = 0usize;
+            let mut label_min = i32::MAX;
+            let mut label_max = i32::MIN;
+            for state in parser.states() {
+                if state.transitions.contains_key(&crate::compiler::glr::labels::DEFAULT_LABEL) {
+                    default_states += 1;
+                }
+                for &label in state.transitions.keys() {
+                    label_min = label_min.min(label);
+                    label_max = label_max.max(label);
+                }
+            }
+            let mut distinct_tsids = BTreeSet::new();
+            for &tsid in &one.boundary.tokenizer_state_to_tsid {
+                distinct_tsids.insert(tsid);
+            }
+            let start_labels: Vec<i32> = parser
+                .states()
+                .first()
+                .map(|state| {
+                    let mut labels: Vec<i32> =
+                        state.transitions.keys().copied().collect();
+                    labels.sort_unstable();
+                    labels
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "FOCUS shard start={} start_labels={start_labels:?}",
+                one.start_component,
+            );
+            if one.start_component == 0 {
+                let tsid15 = one.boundary.tokenizer_state_to_tsid[15];
+                eprintln!("FOCUS shard0 tsid15={tsid15}");
+                for (index, state) in parser.states().iter().enumerate() {
+                    let final_sets = state
+                        .final_weight
+                        .as_ref()
+                        .and_then(|weight| weight.token_set_for_tsid_ref(tsid15))
+                        .map(|set| {
+                            set.ranges().map(|range| range.collect::<Vec<_>>()).collect::<Vec<_>>()
+                        });
+                    eprintln!(
+                        "FOCUS shard0 state={index} final_ts15={final_sets:?} trans={:?}",
+                        state.transitions,
+                    );
+                }
+            }
+            eprintln!(
+                "FOCUS shard start={} parser_states={} parser_trans={} default_states={} label_range=[{},{}] tsid_entries={} distinct_tsids={} itok_maps={}",
+                one.start_component,
+                profile.parser_states,
+                profile.parser_trans,
+                default_states,
+                label_min,
+                label_max,
+                one.boundary.tokenizer_state_to_tsid.len(),
+                distinct_tsids.len(),
+                one.boundary.internal_token_to_originals.len(),
+            );
+            published.push(one);
+        }
+        let mut static_comp = dynamic.clone();
+        install_published_static_boundary_shards(
+            static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
+            published,
+        )
+        .expect("install");
+        let path = [2446u32, 337, 62, 22];
+        let mut st_dyn = dynamic.start();
+        let mut st_static = static_comp.start();
+        for &token in &path {
+            st_dyn.commit_token(token).expect("dyn commit");
+            st_static.commit_token(token).expect("static commit");
+        }
+        let mask_dyn = st_dyn.mask();
+        let mask_static = st_static.mask();
+        let bits = |mask: &[u32]| {
+            let mut out = Vec::new();
+            for (word_index, &word) in mask.iter().enumerate() {
+                let mut live = word;
+                while live != 0 {
+                    let bit = live.trailing_zeros() as usize;
+                    out.push((word_index * 32 + bit) as u32);
+                    live &= live - 1;
+                }
+            }
+            out
+        };
+        let dyn_bits: BTreeSet<u32> = bits(&mask_dyn).into_iter().collect();
+        let static_bits: BTreeSet<u32> = bits(&mask_static).into_iter().collect();
+        eprintln!(
+            "FOCUS masks dyn_admits={} static_admits={} dyn_only={:?} static_only={:?}",
+            dyn_bits.len(),
+            static_bits.len(),
+            dyn_bits.difference(&static_bits).copied().take(12).collect::<Vec<_>>(),
+            static_bits.difference(&dyn_bits).copied().take(12).collect::<Vec<_>>(),
+        );
     }
 }

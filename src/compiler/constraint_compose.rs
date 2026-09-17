@@ -2512,6 +2512,17 @@ pub(crate) struct WalkBoundaryShardWork {
     pub(crate) candidate_tokens: Arc<[u32]>,
 }
 
+/// Per-shard publish profile: template characterization + parser-DWA
+/// materialization + runtime normalization, with output sizes.
+pub(crate) struct WalkShardPublishProfile {
+    pub(crate) templates_ms: f64,
+    pub(crate) materialize_ms: f64,
+    pub(crate) normalize_ms: f64,
+    pub(crate) terms: usize,
+    pub(crate) parser_states: usize,
+    pub(crate) parser_trans: usize,
+}
+
 /// Publish one walk-built shard as a `StaticParser` boundary shard with
 /// shard-local TSIDs (`uses_composed_tsid_coordinate = false` + the walk
 /// id_map's private raw-state and token maps).
@@ -2529,7 +2540,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
     work: WalkBoundaryShardWork,
     recursive_table: &Arc<crate::compiler::glr::table::GLRTable>,
     merged_tokenizer_states: usize,
-) -> Result<PublishedStaticBoundaryShard, String> {
+) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     let num_terminals = recursive_table.num_terminals;
     let TerminalAutomaton::Dwa(ref crossing) = work.terminal_automaton else {
         return Err(format!(
@@ -2596,18 +2607,29 @@ pub(crate) fn publish_walk_boundary_shard_work(
             work.start_component,
         ));
     }
-    Ok(PublishedStaticBoundaryShard {
-        start_component: work.start_component,
-        candidate_tokens: work.candidate_tokens,
-        boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
-            parser_dwa: DWA::new(0, 0),
-            compact_parser_dwa: None,
-            recursive_parser_dwa: Some(parser_dwa),
-            uses_composed_tsid_coordinate: false,
-            tokenizer_state_to_tsid: id_map.tokenizer_states.original_to_internal.clone(),
-            internal_token_to_originals: id_map.vocab_tokens.internal_to_originals.clone(),
-        }),
-    })
+    let profile = WalkShardPublishProfile {
+        templates_ms,
+        materialize_ms,
+        normalize_ms,
+        terms: selected.iter().filter(|slot| **slot).count(),
+        parser_states: parser_dwa.num_states() as usize,
+        parser_trans: parser_dwa.num_transitions() as usize,
+    };
+    Ok((
+        PublishedStaticBoundaryShard {
+            start_component: work.start_component,
+            candidate_tokens: work.candidate_tokens,
+            boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
+                parser_dwa: DWA::new(0, 0),
+                compact_parser_dwa: None,
+                recursive_parser_dwa: Some(parser_dwa),
+                uses_composed_tsid_coordinate: false,
+                tokenizer_state_to_tsid: id_map.tokenizer_states.original_to_internal.clone(),
+                internal_token_to_originals: id_map.vocab_tokens.internal_to_originals.clone(),
+            }),
+        },
+        profile,
+    ))
 }
 
 
@@ -29987,6 +30009,7 @@ table: &dispatch.table,
                     shared_equivalence: shared.as_ref(),
                     skip_ti_discovery: shared.is_some(),
                     crossing_filter: nwa_filter,
+                    skip_core_compact: false,
                 })
             } else {
                 None
