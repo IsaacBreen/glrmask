@@ -2859,9 +2859,18 @@ impl Constraint {
     pub(crate) fn recursive_control_eliminated_parser_table(
         &self,
     ) -> Result<Option<Arc<GLRTable>>, String> {
+        // TEMPORARY hang-localization breadcrumbs (Phase 2 step 4).
+        eprintln!("DEBUG_RECTABLE enter");
         let Some(layout) = self.recursive_parser_layout_for_pending_root()? else {
+            eprintln!("DEBUG_RECTABLE no-layout");
             return Ok(None);
         };
+        eprintln!(
+            "DEBUG_RECTABLE layout leaves={} total_states={} total_tokenizer_states={}",
+            layout.leaves.len(),
+            layout.total_states,
+            layout.total_tokenizer_states,
+        );
         let tables = RecursiveSegmentedParserTables {
             root: self,
             layout: &layout,
@@ -2884,10 +2893,18 @@ impl Constraint {
                     .collect::<SmallVec<[ScopedParserSymbol; 4]>>()
             })
             .collect::<Vec<_>>();
+        eprintln!(
+            "DEBUG_RECTABLE provider built symbols={}",
+            terminal_symbols.len(),
+        );
         let table = materialize_control_eliminated_scoped_provider_table(
             &provider,
             &terminal_symbols,
         )?;
+        eprintln!(
+            "DEBUG_RECTABLE materialized states={} terms={}",
+            table.num_states, table.num_terminals,
+        );
         Ok(Some(Arc::new(table)))
     }
 

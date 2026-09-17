@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::automata::lexer::tokenizer::Tokenizer;
+use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::constraint_compose::accepted_original_tokens;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
@@ -200,14 +200,143 @@ pub(crate) fn composed_terminal_offsets(composed_table: &ComposedTable) -> &[u32
     composed_table.terminal_offsets.as_slice()
 }
 
+/// Link-level inputs for building every boundary shard.
+pub(crate) struct BoundaryShardLinkInputs<'a> {
+    pub merged_tokenizer: &'a Tokenizer,
+    pub vocab: &'a Vocab,
+    pub grammar: &'a AnalyzedGrammar,
+    pub disallowed_follows: &'a BTreeMap<u32, BitSet>,
+    pub ignore_terminal: Option<u32>,
+    pub terminal_offsets: &'a [u32],
+    pub tokenizer_offsets: &'a [u32],
+    pub component_state_counts: &'a [u32],
+}
+
+/// One built shard walk with a nonempty crossing set.
+pub(crate) struct BuiltBoundaryShardWalk {
+    pub start_component: usize,
+    pub output: BoundaryWalkOutput,
+    pub candidate_tokens: BTreeSet<u32>,
+}
+
+/// Link-level shard profile: shared-once cost + per-shard profiles.
+pub(crate) struct BoundaryShardLinkProfile {
+    pub shared_id_map_ms: f64,
+    pub shared_wall_ms: f64,
+    pub shared_tsids: usize,
+    pub shared_itokens: usize,
+    pub flat_ms: f64,
+    pub per_shard: Vec<(usize, BoundaryWalkProfile)>,
+}
+
+/// Build every boundary shard walk for a link: one shared equivalence, then
+/// one standard walk per component (in parallel unless macro parallelism is
+/// disabled). Components with empty crossing sets are skipped (the runtime
+/// skips missing shards). Returns `None` only when the vocab is empty.
+pub(crate) fn build_boundary_shard_walks(
+    inputs: &BoundaryShardLinkInputs,
+) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
+    use rayon::prelude::*;
+
+    let flat_started = Instant::now();
+    let flat: Arc<[u32]> =
+        Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer));
+    let flat_ms = flat_started.elapsed().as_secs_f64() * 1000.0;
+    let num_terms = inputs.grammar.num_terminals as usize;
+    let active = vec![true; num_terms];
+    let shared_started = Instant::now();
+    let shared = tdwa::l2p::compute_shared_l2p_equivalence(
+        "boundary_shard",
+        inputs.merged_tokenizer,
+        inputs.vocab,
+        inputs.ignore_terminal,
+        inputs.grammar,
+        &active,
+        inputs.disallowed_follows,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(&flat),
+        None,
+        None,
+    )?;
+    let shared_wall_ms = shared_started.elapsed().as_secs_f64() * 1000.0;
+    let link_profile = BoundaryShardLinkProfile {
+        shared_id_map_ms: shared.id_map_ms,
+        shared_wall_ms,
+        shared_tsids: shared.id_map.num_tsids() as usize,
+        shared_itokens: shared.id_map.num_internal_tokens() as usize,
+        flat_ms,
+        per_shard: Vec::new(),
+    };
+    let num_components = inputs.component_state_counts.len();
+    // `None` means "empty crossing set, skip"; walk failure is impossible
+    // (the shared equivalence above proves the vocab is nonempty).
+    let build_one = |index: usize| -> Option<BuiltBoundaryShardWalk> {
+        let commit = commit_states_for_component(
+            inputs.tokenizer_offsets,
+            inputs.component_state_counts[index],
+            index,
+            inputs.merged_tokenizer.num_states() as usize,
+        );
+        let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
+            merged_tokenizer: inputs.merged_tokenizer,
+            vocab: inputs.vocab,
+            grammar: inputs.grammar,
+            disallowed_follows: inputs.disallowed_follows,
+            ignore_terminal: inputs.ignore_terminal,
+            terminal_offsets: inputs.terminal_offsets,
+            component_index: index,
+            commit_states: &commit,
+            shared_equivalence: &shared,
+            flat_trans: Some(&flat),
+        })
+        .expect("nonempty-vocab shard walks must produce a DWA");
+        let candidate_tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
+        if candidate_tokens.is_empty() {
+            return None;
+        }
+        Some(BuiltBoundaryShardWalk { start_component: index, output, candidate_tokens })
+    };
+    let indices: Vec<usize> = (0..num_components).collect();
+    let mut built: Vec<BuiltBoundaryShardWalk> = if crate::compiler::macro_parallelism_disabled()
+    {
+        let mut timings = Vec::with_capacity(num_components);
+        let built: Vec<Option<BuiltBoundaryShardWalk>> = indices
+            .into_iter()
+            .map(|index| {
+                let started = Instant::now();
+                let result = build_one(index);
+                timings.push(started.elapsed().as_secs_f64() * 1000.0);
+                result
+            })
+            .collect();
+        crate::compiler::report_macro_item_timings("boundary_walk_shard_walks", &timings);
+        built.into_iter().flatten().collect()
+    } else {
+        indices.into_par_iter().map(build_one).collect::<Vec<_>>().into_iter().flatten().collect()
+    };
+    built.sort_by_key(|shard| shard.start_component);
+    let mut link_profile = link_profile;
+    for shard in &built {
+        link_profile.per_shard.push((shard.start_component, shard.output.profile.clone()));
+    }
+    Some((built, link_profile))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::automata::lexer::tokenizer::Lexer;
+    use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
     use crate::compiler::constraint_compose::{
-        CompiledSubgrammarInput, component_ignores_are_globally_erasable,
-        eliminate_composed_runtime_controls, load_vocab, merged_ignore_terminals,
-        merged_retained_terminal_exprs, merged_terminal_display_names,
+        CompiledSubgrammarInput, SegmentedBoundaryBackend,
+        component_ignores_are_globally_erasable, compose_constraints_owned_parent_segmented,
+        eliminate_composed_runtime_controls, install_published_static_boundary_shards,
+        load_vocab, merged_ignore_terminals, merged_retained_terminal_exprs,
+        merged_terminal_display_names, publish_walk_boundary_shard_work, WalkBoundaryShardWork,
     };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
@@ -462,13 +591,16 @@ mod tests {
         eprintln!("BOUNDARY_WALK restore {label} inline_rules={inline_rules} retained_rules={retained}");
     }
 
-    /// Production-path selected10 crossing gate: one shared equivalence, one
-    /// standard walk per component, NWA-level crossing filter. Asserts the
-    /// 143-token dispatch crossing set (MINBOUND oracle dump) and the
-    /// 26-state true-minimal crossing DWA, plus the empty core shard.
-    #[test]
-    #[ignore]
-    fn selected10_boundary_walk_crossing() {
+    struct Selected10Outer {
+        vocab: Vocab,
+        core: Constraint,
+        dispatch: Constraint,
+        composed: LowLevelComposed,
+        grammar: AnalyzedGrammar,
+        disallowed: BTreeMap<u32, BitSet>,
+    }
+
+    fn load_selected10_outer() -> Selected10Outer {
         use std::path::Path;
 
         let root = std::env::var("PHASE1_DIR").unwrap_or_else(|_| {
@@ -477,8 +609,6 @@ mod tests {
         let root = Path::new(&root).to_path_buf();
         let vocab_path = std::env::var("PHASE1_VOCAB")
             .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
-        let dump_dir = std::env::var("PHASE1_DUMP_DIR")
-            .unwrap_or_else(|_| "/tmp/grammars25-redesign".to_string());
         let vocab = load_vocab(&vocab_path);
         let mut core =
             Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
@@ -498,17 +628,36 @@ mod tests {
         let composed = low_level_compose(&core, &children);
         let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
         let disallowed = compute_disallowed_follows(&grammar);
+        Selected10Outer { vocab, core, dispatch, composed, grammar, disallowed }
+    }
+
+    /// Production-path selected10 crossing gate: one shared equivalence, one
+    /// standard walk per component, NWA-level crossing filter. Asserts the
+    /// 143-token dispatch crossing set (MINBOUND oracle dump) and the
+    /// 26-state true-minimal crossing DWA, plus the empty core shard.
+    #[test]
+    #[ignore]
+    fn selected10_boundary_walk_crossing() {
+        let fixture = load_selected10_outer();
+        let vocab = &fixture.vocab;
+        let core = &fixture.core;
+        let dispatch = &fixture.dispatch;
+        let composed = &fixture.composed;
+        let grammar = &fixture.grammar;
+        let disallowed = &fixture.disallowed;
+        let dump_dir = std::env::var("PHASE1_DUMP_DIR")
+            .unwrap_or_else(|_| "/tmp/grammars25-redesign".to_string());
         let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
         let shared_started = Instant::now();
         let shared = shared_equivalence_for(
             &composed.tokenizer,
-            &vocab,
+            vocab,
             composed.ignore_canonical,
-            &grammar,
+            grammar,
             &active,
-            &disallowed,
+            disallowed,
             &flat,
         );
         let shared_wall_ms = shared_started.elapsed().as_secs_f64() * 1000.0;
@@ -539,9 +688,9 @@ mod tests {
             );
             let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &composed.tokenizer,
-                vocab: &vocab,
-                grammar: &grammar,
-                disallowed_follows: &disallowed,
+                vocab,
+                grammar,
+                disallowed_follows: disallowed,
                 ignore_terminal: composed.ignore_canonical,
                 terminal_offsets: &composed.table.terminal_offsets,
                 component_index: index,
@@ -584,5 +733,199 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// TEMPORARY hang-localization micro-test (Phase 2 step 4): dynamic
+    /// compose + recursive table only.
+    #[test]
+    #[ignore]
+    fn debug_recursive_table_timing() {
+        let fixture = load_selected10_outer();
+        let dyn_children = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
+            additional_placeholder_terminals: &[],
+            constraint: &fixture.dispatch,
+        }];
+        let dynamic = compose_constraints_owned_parent_segmented(
+            fixture.core.clone(),
+            &dyn_children,
+            &fixture.vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        eprintln!("DEBUG_RECTABLE_TEST calling recursive table");
+        let table = dynamic
+            .recursive_control_eliminated_parser_table()
+            .expect("recursive table")
+            .expect("recursive table present");
+        eprintln!("DEBUG_RECTABLE_TEST done states={} terms={}", table.num_states, table.num_terminals);
+    }
+
+    /// Step-4 install gate: build walk shards through the link orchestration,
+    /// publish against a dynamic composition's recursive table, install by
+    /// replacing its dynamic shards, and require mask-for-mask equality with
+    /// the dynamic backend over a byte-prefix corpus.
+    #[test]
+    #[ignore]
+    fn selected10_walk_shard_install_matches_dynamic() {
+        let fixture = load_selected10_outer();
+        let dyn_children = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
+            additional_placeholder_terminals: &[],
+            constraint: &fixture.dispatch,
+        }];
+        let compose_started = Instant::now();
+        let dynamic = compose_constraints_owned_parent_segmented(
+            fixture.core.clone(),
+            &dyn_children,
+            &fixture.vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        eprintln!(
+            "BOUNDARY_INSTALL dynamic_compose_ms={:.3}",
+            compose_started.elapsed().as_secs_f64() * 1000.0,
+        );
+
+        let component_state_counts =
+            [fixture.core.tokenizer.num_states(), fixture.dispatch.tokenizer.num_states()];
+        let link_started = Instant::now();
+        let (built, link_profile) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
+            merged_tokenizer: &fixture.composed.tokenizer,
+            vocab: &fixture.vocab,
+            grammar: &fixture.grammar,
+            disallowed_follows: &fixture.disallowed,
+            ignore_terminal: fixture.composed.ignore_canonical,
+            terminal_offsets: &fixture.composed.table.terminal_offsets,
+            tokenizer_offsets: &fixture.composed.tokenizer_offsets,
+            component_state_counts: &component_state_counts,
+        })
+        .expect("walk shards");
+        eprintln!(
+            "BOUNDARY_INSTALL walks shared_ms={:.3} flat_ms={:.3} shards={:?} link_ms={:.3}",
+            link_profile.shared_wall_ms,
+            link_profile.flat_ms,
+            built
+                .iter()
+                .map(|shard| (
+                    shard.start_component,
+                    shard.candidate_tokens.len(),
+                    shard.output.profile.walk_ms,
+                ))
+                .collect::<Vec<_>>(),
+            link_started.elapsed().as_secs_f64() * 1000.0,
+        );
+        assert_eq!(built.len(), 1, "only the dispatch shard is nonempty");
+        assert_eq!(built[0].start_component, 1);
+        assert_eq!(built[0].candidate_tokens.len(), 143);
+
+        let recursive_started = Instant::now();
+        let recursive_table = dynamic
+            .recursive_control_eliminated_parser_table()
+            .expect("recursive table")
+            .expect("recursive table present");
+        eprintln!(
+            "BOUNDARY_INSTALL recursive_table_ms={:.3} states={} terms={}",
+            recursive_started.elapsed().as_secs_f64() * 1000.0,
+            recursive_table.num_states,
+            recursive_table.num_terminals,
+        );
+        let merged_states = fixture.composed.tokenizer.num_states() as usize;
+        let mut published = Vec::with_capacity(built.len());
+        for shard in built {
+            let work = WalkBoundaryShardWork {
+                start_component: shard.start_component as u32,
+                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
+                id_map: shard.output.id_map,
+                candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
+            };
+            let publish_started = Instant::now();
+            let shard = publish_walk_boundary_shard_work(work, &recursive_table, merged_states)
+                .expect("publish walk shard");
+            let parser = shard.boundary.recursive_parser_dwa.as_ref().expect("recursive parser");
+            eprintln!(
+                "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} publish_ms={:.3}",
+                shard.start_component,
+                parser.num_states(),
+                parser.num_transitions(),
+                shard.candidate_tokens.len(),
+                shard.boundary.uses_composed_tsid_coordinate,
+                publish_started.elapsed().as_secs_f64() * 1000.0,
+            );
+            published.push(shard);
+        }
+
+        let mut static_comp = dynamic.clone();
+        install_published_static_boundary_shards(
+            static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
+            published,
+        )
+        .expect("install");
+        assert!(
+            static_comp.uses_compact_segmented_parser_runtime(),
+            "installed composition must stay on the compact runtime",
+        );
+
+        let prefixes: Vec<&[u8]> = vec![
+            b"",
+            b"const x = tools",
+            b"const x = tools.tool_0(",
+            b"const x = tools.tool_3({",
+            b"const x = tools.tool_3({\"p\": ",
+            b"const x = tools.tool_9({\"outer\": {\"inner\": [1, ",
+            b"function f(a, b) { return ",
+            b"for (let i = 0; i < ",
+            b"const s = \"hello",
+            b"const x = { a: ",
+            b"const x = tools.",
+            b"tools",
+        ];
+        let mut positions = 0usize;
+        let mut checksum: u64 = 0xcbf29ce484222325;
+        for (scenario, prefix) in prefixes.iter().enumerate() {
+            let scenario_started = Instant::now();
+            let mut st_dyn = dynamic.start();
+            let mut st_static = static_comp.start();
+            let mut check = |st_dyn: &mut crate::runtime::ConstraintState<'_>,
+                             st_static: &mut crate::runtime::ConstraintState<'_>,
+                             scenario: usize,
+                             consumed: usize| {
+                let mask_dyn = st_dyn.mask();
+                let mask_static = st_static.mask();
+                assert_eq!(
+                    mask_static,
+                    mask_dyn,
+                    "mask mismatch scenario={scenario} consumed={consumed}",
+                );
+                for (index, &word) in mask_dyn.iter().enumerate() {
+                    checksum ^= (word as u64).wrapping_add(index as u64);
+                    checksum = checksum.wrapping_mul(0x100000001b3);
+                }
+                positions += 1;
+            };
+            check(&mut st_dyn, &mut st_static, scenario, 0);
+            for (consumed, &byte) in prefix.iter().enumerate() {
+                let r_dyn = st_dyn.commit_bytes(&[byte]);
+                let r_static = st_static.commit_bytes(&[byte]);
+                assert_eq!(
+                    r_dyn.is_ok(),
+                    r_static.is_ok(),
+                    "commit divergence scenario={scenario} consumed={consumed}",
+                );
+                if r_dyn.is_err() {
+                    break;
+                }
+                check(&mut st_dyn, &mut st_static, scenario, consumed + 1);
+            }
+            eprintln!(
+                "BOUNDARY_INSTALL scenario={scenario} len={} ms={:.3}",
+                prefix.len(),
+                scenario_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
+        eprintln!("BOUNDARY_INSTALL positions={positions} checksum={checksum:016x}");
+        assert!(positions > 100, "corpus must cover real positions");
     }
 }

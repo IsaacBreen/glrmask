@@ -906,7 +906,7 @@ fn install_segmented_boundary_shards(
     }
 }
 
-fn install_published_static_boundary_shards(
+pub(crate) fn install_published_static_boundary_shards(
     overlay: &mut crate::runtime::StaticDynamicOverlayMetadata,
     shards: Vec<PublishedStaticBoundaryShard>,
 ) -> Result<(), String> {
@@ -2456,10 +2456,10 @@ enum PublishedBoundaryRuntime {
     },
 }
 
-struct PublishedStaticBoundaryShard {
-    start_component: u32,
-    candidate_tokens: Arc<[u32]>,
-    boundary: Arc<crate::runtime::SegmentedBoundaryParser>,
+pub(crate) struct PublishedStaticBoundaryShard {
+    pub(crate) start_component: u32,
+    pub(crate) candidate_tokens: Arc<[u32]>,
+    pub(crate) boundary: Arc<crate::runtime::SegmentedBoundaryParser>,
 }
 
 fn publish_static_boundary_shard_work(
@@ -2495,6 +2495,117 @@ fn publish_static_boundary_shard_work(
             uses_composed_tsid_coordinate: true,
             tokenizer_state_to_tsid: Vec::new(),
             internal_token_to_originals: id_map.vocab_tokens.internal_to_originals,
+        }),
+    })
+}
+
+/// Walk-built boundary shard work: a crossing terminal DWA over shard-local
+/// TSIDs, published late (after the overlay exists) against the recursive
+/// provider table. Produced by `boundary_walk` (link-shared equivalence +
+/// seeded standard walks + NWA crossing filter), one per start component with
+/// a nonempty crossing set. Components with empty crossings get no shard
+/// (the runtime skips missing shards).
+pub(crate) struct WalkBoundaryShardWork {
+    pub(crate) start_component: u32,
+    pub(crate) terminal_automaton: TerminalAutomaton,
+    pub(crate) id_map: InternalIdMap,
+    pub(crate) candidate_tokens: Arc<[u32]>,
+}
+
+/// Publish one walk-built shard as a `StaticParser` boundary shard with
+/// shard-local TSIDs (`uses_composed_tsid_coordinate = false` + the walk
+/// id_map's private raw-state and token maps).
+///
+/// Templates are characterized fresh over the recursive provider table for
+/// exactly the terminals the crossing DWA emits (the same construction the
+/// discovery-built path applies via `set_parser_table_override`); the parser
+/// is built with the standard count-only constructor + runtime normalization.
+///
+/// Precondition: live state keys stay within the merged tokenizer range (no
+/// lazily-allocated virtual-residual tokenizer states — the private map only
+/// covers link-time states). The caller falls back to dynamic shards when a
+/// component tokenizer has a virtual residual runtime.
+pub(crate) fn publish_walk_boundary_shard_work(
+    work: WalkBoundaryShardWork,
+    recursive_table: &Arc<crate::compiler::glr::table::GLRTable>,
+    merged_tokenizer_states: usize,
+) -> Result<PublishedStaticBoundaryShard, String> {
+    let num_terminals = recursive_table.num_terminals;
+    let TerminalAutomaton::Dwa(ref crossing) = work.terminal_automaton else {
+        return Err(format!(
+            "walk boundary shard {} must carry a DWA terminal automaton",
+            work.start_component,
+        ));
+    };
+    let mut selected = vec![false; num_terminals as usize];
+    for state in crossing.states() {
+        for &label in state.transitions.keys() {
+            if label >= 0
+                && let Some(slot) = selected.get_mut(label as usize)
+            {
+                *slot = true;
+            }
+        }
+    }
+    let templates_started_at = Instant::now();
+    let characterizations = characterize_selected_terminals_for_terminal_count(
+        recursive_table,
+        num_terminals,
+        &selected,
+    );
+    let templates = Templates::from_characterizations(&characterizations);
+    let templates_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
+    let parser_work = BoundaryParserWork::DeferredTerminalCount {
+        terminal_automaton: work.terminal_automaton,
+        id_map: work.id_map,
+        num_terminals,
+        templates,
+        prebuilt_bundle_cache: None,
+        parser_table_override: Some(Arc::clone(recursive_table)),
+    };
+    let materialize_started_at = Instant::now();
+    let (positive, id_map, _template_cache) =
+        parser_work.materialize_positive_parser(recursive_table)?;
+    let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+    positive.ensure_positive()?;
+    let normalize_started_at = Instant::now();
+    let parser_dwa = positive.into_runtime_dwa(recursive_table);
+    let normalize_ms = normalize_started_at.elapsed().as_secs_f64() * 1000.0;
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_walk_shard_publish] start_component={} terms={} parser_states={} parser_trans={} templates_ms={templates_ms:.3} materialize_ms={materialize_ms:.3} normalize_ms={normalize_ms:.3}",
+            work.start_component,
+            selected.iter().filter(|slot| **slot).count(),
+            parser_dwa.num_states(),
+            parser_dwa.num_transitions(),
+        );
+    }
+    // The private TSID map must cover every merged link-time state exactly
+    // once; gaps would silently drop boundary contributions at runtime.
+    if id_map.tokenizer_states.original_to_internal.len() != merged_tokenizer_states {
+        return Err(format!(
+            "walk boundary shard {} TSID map covers {} states, merged tokenizer has {merged_tokenizer_states}",
+            work.start_component,
+            id_map.tokenizer_states.original_to_internal.len(),
+        ));
+    }
+    if id_map.tokenizer_states.original_to_internal.iter().any(|&tsid| tsid == u32::MAX) {
+        return Err(format!(
+            "walk boundary shard {} TSID map has unmapped merged states",
+            work.start_component,
+        ));
+    }
+    Ok(PublishedStaticBoundaryShard {
+        start_component: work.start_component,
+        candidate_tokens: work.candidate_tokens,
+        boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
+            parser_dwa: DWA::new(0, 0),
+            compact_parser_dwa: None,
+            recursive_parser_dwa: Some(parser_dwa),
+            uses_composed_tsid_coordinate: false,
+            tokenizer_state_to_tsid: id_map.tokenizer_states.original_to_internal.clone(),
+            internal_token_to_originals: id_map.vocab_tokens.internal_to_originals.clone(),
         }),
     })
 }

@@ -263,7 +263,16 @@ where
     let mut nonterminals = BTreeMap::<(u32, u32), u32>::new();
     let mut skip_terminals = BTreeSet::<TerminalID>::new();
 
+    // TEMPORARY hang-localization breadcrumb (Phase 2 step 4).
+    let debug_started = std::time::Instant::now();
+    let mut debug_hits: u64 = 0;
     for state in 0..num_states {
+        if state % 1000 == 0 {
+            eprintln!(
+                "DEBUG_RECTABLE rows state={state}/{num_states} elapsed_ms={:.0} hits={debug_hits}",
+                debug_started.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
         for (terminal, symbols) in terminal_symbols.iter().enumerate() {
             let terminal = terminal as u32;
             let mut materialized = None::<Action>;
@@ -276,6 +285,7 @@ where
                         "ordinary provider symbol {symbol:?} unexpectedly carries extra control stack shifts"
                     ));
                 }
+                debug_hits += 1;
                 let action =
                     materialize_scoped_provided_action(provider, &provided, &mut nonterminals)?;
                 if let Some(existing) = materialized.as_ref() {
@@ -374,10 +384,16 @@ where
         guarded_shift_index: Vec::new(),
         direct_regular_wide_frontiers: Vec::new(),
     };
+    // TEMPORARY hang-localization breadcrumbs (Phase 2 step 4).
+    eprintln!("DEBUG_RECTABLE phases: built rows, goto done");
     table.rebuild_advance_rows_from_actions();
+    eprintln!("DEBUG_RECTABLE phases: advance1 done");
     table.rebuild_unconditional_advance_rows();
+    eprintln!("DEBUG_RECTABLE phases: unconditional1 done");
     table.rebuild_guarded_shift_index();
+    eprintln!("DEBUG_RECTABLE phases: guarded1 done");
     table.eliminate_control_terminals_exact()?;
+    eprintln!("DEBUG_RECTABLE phases: eliminate done");
     // Private controls are gone from every action row. Shrink the externally
     // visible terminal domain back to the real composed terminal coordinate so
     // downstream parser-DWA compilation sees exactly its existing alphabet.

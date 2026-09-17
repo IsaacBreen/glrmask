@@ -1980,6 +1980,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 + minimize_ms
                 + ti_post_dwa_total_ms,
             compact_ms,
+            determinize_ms,
+            minimize_ms,
             ..TerminalDwaPhaseProfile::default()
         },
     };
