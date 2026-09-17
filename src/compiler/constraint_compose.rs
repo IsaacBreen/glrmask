@@ -29780,6 +29780,24 @@ table: &dispatch.table,
             ti
         }
 
+        // Restricted-equivalence state map (§2.4.3 vehicle): singleton classes
+        // over exactly the kept raw states; the analysis then partitions only
+        // this universe (token side still comes from the passed vocab).
+        fn phase1_restricted_state_map(num_states: usize, keep: &[bool]) -> ManyToOneIdMap {
+            let mut original_to_internal = vec![u32::MAX; num_states];
+            let mut representatives = Vec::new();
+            for (raw, &selected) in keep.iter().enumerate() {
+                if selected {
+                    original_to_internal[raw] = representatives.len() as u32;
+                    representatives.push(raw as u32);
+                }
+            }
+            ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+                original_to_internal,
+                representatives,
+            )
+        }
+
         // The standard construction: unified L2P trie walk on the merged
         // tokenizer, all terminals active, optional start-state subset.
         fn phase1_run_walk(
@@ -29790,6 +29808,7 @@ table: &dispatch.table,
             disallowed: &BTreeMap<u32, BitSet>,
             ignore_terminal: Option<u32>,
             seed_filter: Option<&[bool]>,
+            initial_state_map: Option<&ManyToOneIdMap>,
         ) -> Option<
             crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa,
         > {
@@ -29827,7 +29846,7 @@ table: &dispatch.table,
                 None,
                 Some(&flat),
                 None,
-                None,
+                initial_state_map,
                 false,
                 seed_filter,
             )
@@ -30700,7 +30719,7 @@ table: &dispatch.table,
             );
 
             if let Some(w0) =
-                phase1_run_walk("outer_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None)
+                phase1_run_walk("outer_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None)
                 && let Some(b) = b_mapped.as_ref()
             {
                 phase1_validate_unified_walk("outer", &w0.dwa, &w0.id_map, b);
@@ -30713,6 +30732,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_core),
+            None,
             )
             .expect("core full-vocab walk");
             let wb = phase1_run_walk(
@@ -30723,6 +30743,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_core),
+            None,
             );
             let xa = phase1_crossing_from("outer_core_full", &wa.dwa, &composed.table.terminal_offsets, 0);
             let wa_total = phase1_accepted_tokens(&wa.dwa, &wa.id_map, None);
@@ -30737,6 +30758,8 @@ table: &dispatch.table,
                 "PHASE1 ticheck_outer crossing_not_in_T={}",
                 ta.difference(&ti_core).count(),
             );
+            let mut ti_full_core = BTreeSet::new();
+            let mut ti_cross_core = BTreeSet::new();
             if let Some(wb) = wb {
                 let xb = phase1_crossing_from(
                     "outer_core_ti",
@@ -30751,6 +30774,8 @@ table: &dispatch.table,
                     phase1_count_paths(&xb),
                 );
                 phase1_token_diff_report("outer_a_vs_b", &ta, &tb, &vocab);
+                ti_full_core = phase1_accepted_tokens(&wb.dwa, &wb.id_map, None);
+                ti_cross_core = tb;
             }
             if let Some(restricted) = oracle_core.as_ref() {
                 phase1_token_diff_report("outer_core_vs_oracle_i", &ta, restricted, &vocab);
@@ -30820,6 +30845,7 @@ table: &dispatch.table,
                     &empty_disallowed,
                     composed.ignore_canonical,
                     Some(&commit_core),
+                    None,
                 ) {
                     let x_nd = phase1_crossing_from(
                         "outer_core_nodisallow_std",
@@ -30878,6 +30904,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_dispatch),
+            None,
             )
             .expect("dispatch full-vocab walk");
             let wb_dispatch = phase1_run_walk(
@@ -30888,6 +30915,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_dispatch),
+            None,
             );
             let xa_dispatch = phase1_crossing_from(
                 "outer_dispatch_full",
@@ -30908,6 +30936,8 @@ table: &dispatch.table,
                 "PHASE1 ticheck_outer_dispatch crossing_not_in_T={}",
                 ta_dispatch.difference(&ti_dispatch).count(),
             );
+            let mut ti_full_outer = BTreeSet::new();
+            let mut ti_cross_outer = BTreeSet::new();
             if let Some(wb) = wb_dispatch {
                 let xb = phase1_crossing_from(
                     "outer_dispatch_ti",
@@ -30922,6 +30952,8 @@ table: &dispatch.table,
                     phase1_count_paths(&xb),
                 );
                 phase1_token_diff_report("outer_dispatch_a_vs_b", &ta_dispatch, &tb, &vocab);
+                ti_full_outer = phase1_accepted_tokens(&wb.dwa, &wb.id_map, None);
+                ti_cross_outer = tb;
                 // TI determinization anatomy: same inputs through the replica to
                 // expose the determinized (pre-minimize) size.
                 if std::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true) {
@@ -30998,6 +31030,13 @@ table: &dispatch.table,
                     );
                     let t_b2 = phase1_accepted_tokens(&x_b2, &id_b2, None);
                     phase1_token_diff_report("outer_dispatch_b2_vs_a", &t_b2, &ta_dispatch, &vocab);
+                    let f_b2 = phase1_accepted_tokens(&dwa_b2, &id_b2, None);
+                    phase1_token_diff_report(
+                        "outer_dispatch_b2_full_vs_a",
+                        &f_b2,
+                        &wa_dispatch_total,
+                        &vocab,
+                    );
                     eprintln!(
                         "PHASE1 b2check_outer_dispatch dwa_states={} vs_a={} dwa_trans={} vs_a={}",
                         dwa_b2.num_states(),
@@ -31040,6 +31079,13 @@ table: &dispatch.table,
                             &ta_dispatch,
                             &vocab,
                         );
+                        let f_b1 = phase1_accepted_tokens(&dwa_b1, &id_b1c, None);
+                        phase1_token_diff_report(
+                            "outer_dispatch_b1_full_vs_a",
+                            &f_b1,
+                            &wa_dispatch_total,
+                            &vocab,
+                        );
                         phase1_parser_from_crossing(
                             "outer_dispatch_b1ident",
                             &x_b1,
@@ -31052,7 +31098,97 @@ table: &dispatch.table,
                 }
             }
 
+            // b3: equivalence restricted to Commit_i states × TI vocab (the
+            // §2.4.3 vehicle): same standard walk entry point, subset
+            // initial_state_map; must reproduce the TI walk exactly.
+            let run_b3 =
+                std::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
+            if run_b3 {
+                let state_map_dispatch = phase1_restricted_state_map(
+                    composed.tokenizer.num_states() as usize,
+                    &commit_dispatch,
+                );
+                if let Some(w_b3) = phase1_run_walk(
+                    "outer_dispatch_b3restr",
+                    &composed.tokenizer,
+                    &ti_vocab_dispatch,
+                    &grammar,
+                    &disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_dispatch),
+                    Some(&state_map_dispatch),
+                ) {
+                    let x_b3 = phase1_crossing_from(
+                        "outer_dispatch_b3restr",
+                        &w_b3.dwa,
+                        &composed.table.terminal_offsets,
+                        1,
+                    );
+                    let t_b3 = phase1_accepted_tokens(&x_b3, &w_b3.id_map, None);
+                    phase1_token_diff_report(
+                        "outer_dispatch_b3_vs_ti",
+                        &t_b3,
+                        &ti_cross_outer,
+                        &vocab,
+                    );
+                    let f_b3 = phase1_accepted_tokens(&w_b3.dwa, &w_b3.id_map, None);
+                    phase1_token_diff_report(
+                        "outer_dispatch_b3_full_vs_ti",
+                        &f_b3,
+                        &ti_full_outer,
+                        &vocab,
+                    );
+                    phase1_parser_from_crossing(
+                        "outer_dispatch_b3restr",
+                        &x_b3,
+                        &composed.table.table,
+                        &grammar,
+                        &vocab,
+                        &w_b3.id_map,
+                    );
+                }
+                // b3 for the small component: equivalence over 1286 core states.
+                let state_map_core = phase1_restricted_state_map(
+                    composed.tokenizer.num_states() as usize,
+                    &commit_core,
+                );
+                if let Some(w_b3c) = phase1_run_walk(
+                    "outer_core_b3restr",
+                    &composed.tokenizer,
+                    &ti_vocab,
+                    &grammar,
+                    &disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_core),
+                    Some(&state_map_core),
+                ) {
+                    let x_b3c = phase1_crossing_from(
+                        "outer_core_b3restr",
+                        &w_b3c.dwa,
+                        &composed.table.terminal_offsets,
+                        0,
+                    );
+                    let t_b3c = phase1_accepted_tokens(&x_b3c, &w_b3c.id_map, None);
+                    phase1_token_diff_report(
+                        "outer_core_b3_vs_ti",
+                        &t_b3c,
+                        &ti_cross_core,
+                        &vocab,
+                    );
+                    let f_b3c = phase1_accepted_tokens(&w_b3c.dwa, &w_b3c.id_map, None);
+                    phase1_token_diff_report(
+                        "outer_core_b3_full_vs_ti",
+                        &f_b3c,
+                        &ti_full_core,
+                        &vocab,
+                    );
+                }
+            }
+
             // DynamicDirect cross-checks at a core position and a dispatch position.
+            let run_dyn =
+                std::env::var("PHASE1_DYNCHECK").map(|value| value != "0").unwrap_or(true);
+            if run_dyn {
             let dyn_started = Instant::now();
             let dyn_placeholder = terminal(&core, "PROGRAMMATIC_TOOL_SUFFIX");
             let dyn_composed = compose_constraints_owned_parent_segmented(
@@ -31104,6 +31240,7 @@ table: &dispatch.table,
                 dyn_spots,
                 &nd_crossing_std,
             );
+            }
         }
 
         // ---------- dispatch composition: parent + 10 schemas, i = schema 0 ----------
@@ -31219,7 +31356,7 @@ table: &dispatch.table,
             );
 
             if let Some(w0) =
-                phase1_run_walk("dispatch_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None)
+                phase1_run_walk("dispatch_all_full", &composed.tokenizer, &vocab, &grammar, &disallowed, composed.ignore_canonical, None, None)
                 && let Some(b) = b_mapped.as_ref()
             {
                 phase1_validate_unified_walk("dispatch", &w0.dwa, &w0.id_map, b);
@@ -31232,6 +31369,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_schema0),
+            None,
             )
             .expect("schema0 full-vocab walk");
             let wb = phase1_run_walk(
@@ -31242,6 +31380,7 @@ table: &dispatch.table,
                 &disallowed,
                 composed.ignore_canonical,
                 Some(&commit_schema0),
+            None,
             );
             let xa =
                 phase1_crossing_from("dispatch_schema0_full", &wa.dwa, &composed.table.terminal_offsets, 1);
@@ -31257,6 +31396,8 @@ table: &dispatch.table,
                 "PHASE1 ticheck_dispatch crossing_not_in_T={}",
                 ta.difference(&ti_schema0).count(),
             );
+            let mut ti_full_schema = BTreeSet::new();
+            let mut ti_cross_schema = BTreeSet::new();
             if let Some(wb) = wb {
                 let xb = phase1_crossing_from(
                     "dispatch_schema0_ti",
@@ -31271,6 +31412,8 @@ table: &dispatch.table,
                     phase1_count_paths(&xb),
                 );
                 phase1_token_diff_report("dispatch_a_vs_b", &ta, &tb, &vocab);
+                ti_full_schema = phase1_accepted_tokens(&wb.dwa, &wb.id_map, None);
+                ti_cross_schema = tb;
             }
             if let Some(restricted) = oracle_schema0.as_ref() {
                 phase1_token_diff_report("dispatch_schema0_vs_oracle_i", &ta, restricted, &vocab);
@@ -31308,6 +31451,13 @@ table: &dispatch.table,
                     );
                     let t_b2 = phase1_accepted_tokens(&x_b2, &id_b2, None);
                     phase1_token_diff_report("dispatch_schema0_b2_vs_a", &t_b2, &ta, &vocab);
+                    let f_b2 = phase1_accepted_tokens(&dwa_b2, &id_b2, None);
+                    phase1_token_diff_report(
+                        "dispatch_schema0_b2_full_vs_a",
+                        &f_b2,
+                        &wa_total,
+                        &vocab,
+                    );
                     eprintln!(
                         "PHASE1 b2check_dispatch_schema0 dwa_states={} vs_a={} dwa_trans={} vs_a={}",
                         dwa_b2.num_states(),
@@ -31344,6 +31494,13 @@ table: &dispatch.table,
                         );
                         let t_b1 = phase1_accepted_tokens(&x_b1, &id_b1c, None);
                         phase1_token_diff_report("dispatch_schema0_b1_vs_a", &t_b1, &ta, &vocab);
+                        let f_b1 = phase1_accepted_tokens(&dwa_b1, &id_b1c, None);
+                        phase1_token_diff_report(
+                            "dispatch_schema0_b1_full_vs_a",
+                            &f_b1,
+                            &wa_total,
+                            &vocab,
+                        );
                         phase1_parser_from_crossing(
                             "dispatch_schema0_b1ident",
                             &x_b1,
@@ -31353,6 +31510,56 @@ table: &dispatch.table,
                             &id_b1c,
                         );
                     }
+                }
+            }
+
+            // b3: equivalence restricted to Commit_i states × TI vocab (the
+            // §2.4.3 vehicle); must reproduce the TI walk exactly.
+            let run_b3_schema =
+                std::env::var("PHASE1_B3").map(|value| value != "0").unwrap_or(true);
+            if run_b3_schema {
+                let state_map_schema0 = phase1_restricted_state_map(
+                    composed.tokenizer.num_states() as usize,
+                    &commit_schema0,
+                );
+                if let Some(w_b3) = phase1_run_walk(
+                    "dispatch_schema0_b3restr",
+                    &composed.tokenizer,
+                    &ti_vocab,
+                    &grammar,
+                    &disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_schema0),
+                    Some(&state_map_schema0),
+                ) {
+                    let x_b3 = phase1_crossing_from(
+                        "dispatch_schema0_b3restr",
+                        &w_b3.dwa,
+                        &composed.table.terminal_offsets,
+                        1,
+                    );
+                    let t_b3 = phase1_accepted_tokens(&x_b3, &w_b3.id_map, None);
+                    phase1_token_diff_report(
+                        "dispatch_schema0_b3_vs_ti",
+                        &t_b3,
+                        &ti_cross_schema,
+                        &vocab,
+                    );
+                    let f_b3 = phase1_accepted_tokens(&w_b3.dwa, &w_b3.id_map, None);
+                    phase1_token_diff_report(
+                        "dispatch_schema0_b3_full_vs_ti",
+                        &f_b3,
+                        &ti_full_schema,
+                        &vocab,
+                    );
+                    phase1_parser_from_crossing(
+                        "dispatch_schema0_b3restr",
+                        &x_b3,
+                        &composed.table.table,
+                        &grammar,
+                        &vocab,
+                        &w_b3.id_map,
+                    );
                 }
             }
         }
