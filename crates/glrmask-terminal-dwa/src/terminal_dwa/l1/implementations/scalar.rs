@@ -173,6 +173,8 @@ pub(super) fn build(input: BuildInput<'_>) -> Option<LocalIdMapTerminalDwa> {
             compact_ms,
             split_terminal_dwa_total_ms: total_ms,
             global_merge_ms: 0.0,
+            determinize_ms: 0.0,
+            minimize_ms: 0.0,
         },
     })
 }

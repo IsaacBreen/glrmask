@@ -130,7 +130,7 @@ fn boundary_parser_minimize_min_states() -> u32 {
         .unwrap_or(64)
 }
 
-fn eliminate_composed_runtime_controls(
+pub(crate) fn eliminate_composed_runtime_controls(
     composed: &mut ComposedTable,
 ) -> Result<Option<ControlEliminationReport>, String> {
     if composed.control_terminals.is_empty() {
@@ -4380,7 +4380,7 @@ fn component_tokenizer_state_layout(components: &[&Constraint]) -> (Vec<u32>, us
 /// components kept source expressions deferred outside their tokenizers.
 /// Fresh components normally let `Tokenizer` merge these directly, so callers
 /// only need this when the merged tokenizer otherwise has no expression list.
-fn merged_retained_terminal_exprs(
+pub(crate) fn merged_retained_terminal_exprs(
     components: &[&Constraint],
     terminal_offsets: &[u32],
     total_terminals: u32,
@@ -18150,7 +18150,7 @@ fn build_boundary_repair(
     }))
 }
 
-fn merged_terminal_display_names(
+pub(crate) fn merged_terminal_display_names(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
 ) -> Vec<String> {
@@ -18246,18 +18246,18 @@ fn merged_special_token_terminals(
 }
 
 #[derive(Debug, Clone)]
-struct MergedIgnoreTerminals {
-    canonical: Option<u32>,
-    canonical_expr: Option<crate::automata::regex::Expr>,
-    all: BitSet,
+pub(crate) struct MergedIgnoreTerminals {
+    pub(crate) canonical: Option<u32>,
+    pub(crate) canonical_expr: Option<crate::automata::regex::Expr>,
+    pub(crate) all: BitSet,
     /// Ignore terminals whose identity effect depends on the active parser
     /// scope. These remain visible to the boundary terminal/parser DWA.
-    scoped: BitSet,
+    pub(crate) scoped: BitSet,
     /// Equivalent component-local ignore terminals which can be erased before
     /// parser interpretation. They are canonicalized to `canonical` in the
     /// final composed tokenizer/artifacts.
-    global: BitSet,
-    aliases: Vec<u32>,
+    pub(crate) global: BitSet,
+    pub(crate) aliases: Vec<u32>,
 }
 
 
@@ -18397,7 +18397,7 @@ fn constraint_ignore_expr(constraint: &Constraint) -> Option<&crate::automata::r
 /// to match another component. Explicit control terminals themselves are not a
 /// problem: adjacent/nested children can retain explicit calls while sharing a
 /// single globally erased ignore.
-fn component_ignores_are_globally_erasable(
+pub(crate) fn component_ignores_are_globally_erasable(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
 ) -> bool {
@@ -18519,7 +18519,7 @@ fn legacy_splice_has_only_byte_terminal_continuations(
     true
 }
 
-fn merged_ignore_terminals(
+pub(crate) fn merged_ignore_terminals(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     terminal_offsets: &[u32],
@@ -22181,6 +22181,105 @@ fn compose_constraints_owned_parent_impl(
     }
     Ok(result)
 }
+
+/// Original model tokens accepted anywhere in an acyclic terminal DWA.
+///
+/// Fixpoint-free single topological pass; matches the fixpoint propagation
+/// on acyclic inputs. Used for shard candidate-token triggers and gates.
+pub(crate) fn accepted_original_tokens(
+    dwa: &DWA,
+    id_map: &InternalIdMap,
+) -> BTreeSet<u32> {
+    assert!(dwa.is_acyclic(), "accepted-token summary expects acyclic DWA");
+    let n = dwa.num_states() as usize;
+    let mut indegree = vec![0usize; n];
+    for state in dwa.states() {
+        for &(target, _) in state.transitions.values() {
+            indegree[target as usize] += 1;
+        }
+    }
+    let mut queue = VecDeque::new();
+    for (state, &degree) in indegree.iter().enumerate() {
+        if degree == 0 {
+            queue.push_back(state as u32);
+        }
+    }
+    let mut topo = Vec::with_capacity(n);
+    while let Some(source) = queue.pop_front() {
+        topo.push(source);
+        for &(target, _) in dwa.states()[source as usize].transitions.values() {
+            indegree[target as usize] -= 1;
+            if indegree[target as usize] == 0 {
+                queue.push_back(target);
+            }
+        }
+    }
+    assert_eq!(topo.len(), n);
+
+    let mut reach = vec![Weight::empty(); n];
+    reach[dwa.start_state() as usize] = Weight::all();
+    let mut accepted = Weight::empty();
+    let mut ops = ScopedWeightOpCache::default();
+    for source in topo {
+        let source_support = reach[source as usize].clone();
+        if source_support.is_empty() {
+            continue;
+        }
+        let state = &dwa.states()[source as usize];
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            let support = ops.intersection(&source_support, final_weight);
+            accepted = ops.union(&accepted, &support);
+        }
+        for &(target, ref edge_weight) in state.transitions.values() {
+            let support = ops.intersection(&source_support, edge_weight);
+            if support.is_empty() {
+                continue;
+            }
+            reach[target as usize] = ops.union(&reach[target as usize], &support);
+        }
+    }
+
+    let mut originals = BTreeSet::new();
+    for (_, internal_tokens) in accepted.raw_range_values() {
+        for range in internal_tokens.ranges() {
+            for internal_token in range {
+                if let Some(ids) = id_map
+                    .vocab_tokens
+                    .internal_to_originals
+                    .get(internal_token as usize)
+                {
+                    originals.extend(ids.iter().copied());
+                }
+            }
+        }
+    }
+    originals
+}
+
+/// Load a `vocab_dump.bin` cache file (test/bench helper).
+pub(crate) fn load_vocab(path: &str) -> Vocab {
+    use std::fs;
+    let bytes = fs::read(path).expect("read vocab dump");
+    fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
+        let end = *offset + 4;
+        let value = u32::from_le_bytes(bytes[*offset..end].try_into().unwrap());
+        *offset = end;
+        value
+    }
+    let mut offset = 0usize;
+    let count = read_u32(&bytes, &mut offset) as usize;
+    let mut entries = Vec::with_capacity(count);
+    for _ in 0..count {
+        let id = read_u32(&bytes, &mut offset);
+        let len = read_u32(&bytes, &mut offset) as usize;
+        let end = offset + len;
+        entries.push((id, bytes[offset..end].to_vec()));
+        offset = end;
+    }
+    assert_eq!(offset, bytes.len());
+    Vocab::new(entries)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -26356,29 +26455,6 @@ constraint: &middle,
 
     // MINBOUND/oracle helpers hoisted to module scope so the Phase 1 probe
     // (phase1_restricted_walk_selected10) can reuse them. Bodies unchanged.
-    fn load_vocab(path: &str) -> Vocab {
-        use std::fs;
-        let bytes = fs::read(path).expect("read vocab dump");
-        fn read_u32(bytes: &[u8], offset: &mut usize) -> u32 {
-            let end = *offset + 4;
-            let value = u32::from_le_bytes(bytes[*offset..end].try_into().unwrap());
-            *offset = end;
-            value
-        }
-        let mut offset = 0usize;
-        let count = read_u32(&bytes, &mut offset) as usize;
-        let mut entries = Vec::with_capacity(count);
-        for _ in 0..count {
-            let id = read_u32(&bytes, &mut offset);
-            let len = read_u32(&bytes, &mut offset) as usize;
-            let end = offset + len;
-            entries.push((id, bytes[offset..end].to_vec()));
-            offset = end;
-        }
-        assert_eq!(offset, bytes.len());
-        Vocab::new(entries)
-    }
-
     fn build_terminal_dwa_parts(
         name: &str,
         tokenizer: &Tokenizer,
@@ -26754,76 +26830,6 @@ constraint: &middle,
             started.elapsed().as_secs_f64() * 1000.0,
         );
         minimized
-    }
-
-    fn accepted_original_tokens(
-        dwa: &DWA,
-        id_map: &InternalIdMap,
-    ) -> BTreeSet<u32> {
-        assert!(dwa.is_acyclic(), "accepted-token summary expects acyclic DWA");
-        let n = dwa.num_states() as usize;
-        let mut indegree = vec![0usize; n];
-        for state in dwa.states() {
-            for &(target, _) in state.transitions.values() {
-                indegree[target as usize] += 1;
-            }
-        }
-        let mut queue = VecDeque::new();
-        for (state, &degree) in indegree.iter().enumerate() {
-            if degree == 0 {
-                queue.push_back(state as u32);
-            }
-        }
-        let mut topo = Vec::with_capacity(n);
-        while let Some(source) = queue.pop_front() {
-            topo.push(source);
-            for &(target, _) in dwa.states()[source as usize].transitions.values() {
-                indegree[target as usize] -= 1;
-                if indegree[target as usize] == 0 {
-                    queue.push_back(target);
-                }
-            }
-        }
-        assert_eq!(topo.len(), n);
-
-        let mut reach = vec![Weight::empty(); n];
-        reach[dwa.start_state() as usize] = Weight::all();
-        let mut accepted = Weight::empty();
-        let mut ops = ScopedWeightOpCache::default();
-        for source in topo {
-            let source_support = reach[source as usize].clone();
-            if source_support.is_empty() {
-                continue;
-            }
-            let state = &dwa.states()[source as usize];
-            if let Some(final_weight) = state.final_weight.as_ref() {
-                let support = ops.intersection(&source_support, final_weight);
-                accepted = ops.union(&accepted, &support);
-            }
-            for &(target, ref edge_weight) in state.transitions.values() {
-                let support = ops.intersection(&source_support, edge_weight);
-                if support.is_empty() {
-                    continue;
-                }
-                reach[target as usize] = ops.union(&reach[target as usize], &support);
-            }
-        }
-
-        let mut originals = BTreeSet::new();
-        for (_, internal_tokens) in accepted.raw_range_values() {
-            for range in internal_tokens.ranges() {
-                for internal_token in range {
-                    if let Some(ids) = id_map
-                        .vocab_tokens
-                        .internal_to_originals
-                        .get(internal_token as usize)
-                    {
-                        originals.extend(ids.iter().copied());
-                    }
-                }
-            }
-        }
-        originals
     }
 
     #[test]
@@ -29559,6 +29565,7 @@ table: &dispatch.table,
         terminal_names: Vec<String>,
         ignore_canonical: Option<u32>,
         global_ignores: bool,
+        scoped_ignores: BitSet,
     }
 
     // Existing composition code only: table splice + control elimination +
@@ -29640,6 +29647,7 @@ table: &dispatch.table,
             terminal_names,
             ignore_canonical: ignores.canonical,
             global_ignores,
+            scoped_ignores: ignores.scoped,
         }
     }
 
@@ -31068,6 +31076,46 @@ table: &dispatch.table,
                 fwd.is_none() && bwd.is_none(),
                 "DWA-filtered crossing language differs across minimizers",
             );
+            // Grammar-factor filter measurement (Phase 2 step 3): apply the
+            // exact factor oracle to the dispatch crossing DWA and report
+            // terminal/token counts + time. Production does NOT wire this in
+            // (see F report); this is measurement only.
+            if std::env::var("PHASE1_FACTOR").map(|value| value != "0").unwrap_or(false) {
+                let mut factor_zero_width = composed.table.table.control_terminals.clone();
+                factor_zero_width
+                    .extend(composed.table.table.skip_terminals.iter().copied());
+                factor_zero_width
+                    .extend(composed.scoped_ignores.iter().map(|terminal| terminal as u32));
+                let count_terms = |dwa: &DWA| {
+                    let mut selected =
+                        vec![false; composed.table.table.num_terminals as usize];
+                    for state in dwa.states() {
+                        for &label in state.transitions.keys() {
+                            if label >= 0 && (label as usize) < selected.len() {
+                                selected[label as usize] = true;
+                            }
+                        }
+                    }
+                    selected.iter().filter(|slot| **slot).count()
+                };
+                let terms_before = count_terms(&xa_dispatch);
+                let started = Instant::now();
+                let filtered =
+                    mb_filter_exact_factor_lazy(&xa_dispatch, &grammar, &factor_zero_width);
+                let filter_ms = started.elapsed().as_secs_f64() * 1000.0;
+                let terms_after = count_terms(&filtered);
+                let tokens_after =
+                    phase1_accepted_tokens(&filtered, &wa_dispatch.id_map, None);
+                let dropped: Vec<u32> =
+                    ta_dispatch.difference(&tokens_after).copied().collect();
+                eprintln!(
+                    "PHASE1 factor_outer_dispatch states_before={} states_after={} terms_before={terms_before} terms_after={terms_after} tokens_before={} tokens_after={} dropped={dropped:?} ms={filter_ms:.3}",
+                    xa_dispatch.num_states(),
+                    filtered.num_states(),
+                    ta_dispatch.len(),
+                    tokens_after.len(),
+                );
+            }
             // Decisive same-coordinate NWA-vs-DWA proof (Phase 2 step 2).
             // Requires GLRMASK_L2P_SKIP_CORE_COMPACT=1 (both walks in Step-1
             // coordinates) and PHASE1_NWAFILT=1 (wa_dispatch is NWA-filtered):

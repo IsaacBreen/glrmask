@@ -8,6 +8,8 @@ pub struct TerminalDwaPhaseProfile {
     pub compact_ms: f64,
     pub split_terminal_dwa_total_ms: f64,
     pub global_merge_ms: f64,
+    pub determinize_ms: f64,
+    pub minimize_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -28,6 +30,8 @@ impl TerminalDwaPhaseProfile {
         self.compact_ms += other.compact_ms;
         self.split_terminal_dwa_total_ms += other.split_terminal_dwa_total_ms;
         self.global_merge_ms += other.global_merge_ms;
+        self.determinize_ms += other.determinize_ms;
+        self.minimize_ms += other.minimize_ms;
     }
 }
 
