@@ -30180,6 +30180,8 @@ table: &dispatch.table,
             tokenizer_offsets: &[u32],
             crossing_tokens: &BTreeSet<u32>,
             ti_tokens: &BTreeSet<u32>,
+            spot_tokens: &[u32],
+            nd_crossing: &BTreeSet<u32>,
         ) {
             let started = Instant::now();
             let mut dyn_state = dyn_constraint.start();
@@ -30215,6 +30217,19 @@ table: &dispatch.table,
             let live_disp = live_for(dispatch, disp_prefix, tokenizer_offsets[1], commit_disp);
             let live_core_count = live_core.iter().filter(|&&selected| selected).count();
             let live_disp_count = live_disp.iter().filter(|&&selected| selected).count();
+            let live_core_states: Vec<usize> = live_core
+                .iter()
+                .enumerate()
+                .filter_map(|(state, &selected)| selected.then_some(state))
+                .collect();
+            let live_disp_states: Vec<usize> = live_disp
+                .iter()
+                .enumerate()
+                .filter_map(|(state, &selected)| selected.then_some(state))
+                .collect();
+            eprintln!(
+                "PHASE1 dyncheck_{tag} solo_live_core={live_core_states:?} solo_live_disp={live_disp_states:?}"
+            );
             let keep_core = phase1_commit_internal(core_id_map, &live_core);
             let keep_disp = phase1_commit_internal(disp_id_map, &live_disp);
             let acc_core = phase1_accepted_tokens(core_dwa, core_id_map, Some(&keep_core));
@@ -30238,14 +30253,110 @@ table: &dispatch.table,
                 violations.iter().filter(|token| crossing_tokens.contains(token)).count();
             let viol_in_ti =
                 violations.iter().filter(|token| ti_tokens.contains(token)).count();
+            let viol_in_nd =
+                violations.iter().filter(|token| nd_crossing.contains(token)).count();
             eprintln!(
-                "PHASE1 dyncheck_{tag} viol_in_crossing={viol_in_crossing} viol_in_ti={viol_in_ti}"
+                "PHASE1 dyncheck_{tag} viol_in_crossing={viol_in_crossing} viol_in_ti={viol_in_ti} viol_in_ndcrossing={viol_in_nd}"
             );
             for token in violations.iter().take(8) {
                 let bytes =
                     vocab.entries_map().get(token).map(Vec::as_slice).unwrap_or(&[]);
                 eprintln!(
                     "PHASE1 dyncheck_{tag} VIOLATION t{token}={:?}",
+                    String::from_utf8_lossy(bytes),
+                );
+            }
+            for token in spot_tokens {
+                let bytes =
+                    vocab.entries_map().get(token).map(Vec::as_slice).unwrap_or(&[]);
+                eprintln!(
+                    "PHASE1 dynspot_{tag} t{token}={:?} dyn={} core_walk={} disp_walk={}",
+                    String::from_utf8_lossy(bytes),
+                    dyn_tokens.contains(token),
+                    acc_core.contains(token),
+                    acc_disp.contains(token),
+                );
+            }
+            // True composed live keys (vs the solo-model live_core/live_disp).
+            let mut dyn_keys: Vec<u32> =
+                dyn_state.state.entries.iter().map(|(key, _)| *key).collect();
+            dyn_keys.sort();
+            dyn_keys.dedup();
+            eprintln!(
+                "PHASE1 dyncheck_{tag} dyn_live_keys={} first={:?}",
+                dyn_keys.len(),
+                dyn_keys.iter().take(40).collect::<Vec<_>>(),
+            );
+            // Discriminator: are violations missed even UNRESTRICTED (= walk
+            // modeling gap) or only under the live-state restriction (= live
+            // model / solo-vs-composed artifact)?
+            let acc_core_all = phase1_accepted_tokens(core_dwa, core_id_map, None);
+            let acc_disp_all = phase1_accepted_tokens(disp_dwa, disp_id_map, None);
+            let viol_unrestr: Vec<u32> = violations
+                .iter()
+                .copied()
+                .filter(|token| {
+                    !acc_core_all.contains(token) && !acc_disp_all.contains(token)
+                })
+                .collect();
+            eprintln!(
+                "PHASE1 dyncheck_{tag} viol_unrestricted_miss={} of_violations={}",
+                viol_unrestr.len(),
+                violations.len(),
+            );
+            let viol_in_core_all =
+                violations.iter().filter(|token| acc_core_all.contains(token)).count();
+            let viol_in_disp_all =
+                violations.iter().filter(|token| acc_disp_all.contains(token)).count();
+            eprintln!(
+                "PHASE1 dyncheck_{tag} viol_in_core_all={viol_in_core_all} viol_in_disp_all={viol_in_disp_all}"
+            );
+            // Solo-mask attribution: can each violation be admitted WITHOUT any
+            // crossing (core-solo or disp-solo alone)? Both-no = composed-only
+            // admission = TRUE crossing missed by the walk (blocker candidate).
+            let mut core_solo_state = core.start();
+            let core_solo_ok = core_solo_state.commit_bytes(core_prefix).is_ok()
+                && !core_solo_state.is_rejected();
+            let core_solo_mask =
+                core_solo_ok.then(|| core_solo_state.mask()).unwrap_or_default();
+            let mut disp_solo_state = dispatch.start();
+            let disp_solo_ok = disp_solo_state.commit_bytes(disp_prefix).is_ok()
+                && !disp_solo_state.is_rejected();
+            let disp_solo_mask =
+                disp_solo_ok.then(|| disp_solo_state.mask()).unwrap_or_default();
+            let solo_admits = |mask: &[u32], token: u32| -> bool {
+                mask.get((token / 32) as usize)
+                    .is_some_and(|word| word & (1 << (token % 32)) != 0)
+            };
+            let mut viol_core_solo = 0usize;
+            let mut viol_disp_solo = 0usize;
+            let mut viol_neither_solo = Vec::new();
+            for token in &violations {
+                let in_core = solo_admits(&core_solo_mask, *token);
+                let in_disp = solo_admits(&disp_solo_mask, *token);
+                viol_core_solo += in_core as usize;
+                viol_disp_solo += in_disp as usize;
+                if !in_core && !in_disp {
+                    viol_neither_solo.push(*token);
+                }
+            }
+            eprintln!(
+                "PHASE1 dyncheck_{tag} core_solo_ok={core_solo_ok} disp_solo_ok={disp_solo_ok} viol_core_solo={viol_core_solo} viol_disp_solo={viol_disp_solo} viol_neither_solo={}",
+                viol_neither_solo.len(),
+            );
+            for token in viol_neither_solo.iter().take(8) {
+                let bytes =
+                    vocab.entries_map().get(token).map(Vec::as_slice).unwrap_or(&[]);
+                eprintln!(
+                    "PHASE1 dyncheck_{tag} NEITHER_SOLO t{token}={:?}",
+                    String::from_utf8_lossy(bytes),
+                );
+            }
+            for token in viol_unrestr.iter().take(8) {
+                let bytes =
+                    vocab.entries_map().get(token).map(Vec::as_slice).unwrap_or(&[]);
+                eprintln!(
+                    "PHASE1 dyncheck_{tag} UNRESTR_MISS t{token}={:?}",
                     String::from_utf8_lossy(bytes),
                 );
             }
@@ -30366,6 +30477,8 @@ table: &dispatch.table,
             let step_started = Instant::now();
             let det = determinize(&nwa).expect("replica determinization");
             let det_ms = step_started.elapsed().as_secs_f64() * 1000.0;
+            let det_states = det.num_states();
+            let det_trans = det.num_transitions();
             let step_started = Instant::now();
             let dwa = minimize_owned(det);
             let min_ms = step_started.elapsed().as_secs_f64() * 1000.0;
@@ -30375,7 +30488,7 @@ table: &dispatch.table,
             let (dwa, new_id_map) = mapped.into_parts();
             let compact_ms = step_started.elapsed().as_secs_f64() * 1000.0;
             eprintln!(
-                "PHASE1 replica_{tag} vocab={} tsids={} itokens={} trie_ms={trie_ms:.3} seed_ms={seed_ms:.3} walk_ms={:.3} flush_ms={:.3} exec_calls={} matches={} match_adds={} nwa={nwa_after_build}->{nwa_after_canon} collapse_ms={collapse_ms:.3} disallowed_ms={disallowed_ms:.3} prune_ms={prune_ms:.3} canon_ms={canon_ms:.3} det_ms={det_ms:.3} min_ms={min_ms:.3} compact_ms={compact_ms:.3} dwa_states={} dwa_trans={} wall_ms={:.3}",
+                "PHASE1 replica_{tag} vocab={} tsids={} itokens={} trie_ms={trie_ms:.3} seed_ms={seed_ms:.3} walk_ms={:.3} flush_ms={:.3} exec_calls={} matches={} match_adds={} nwa={nwa_after_build}->{nwa_after_canon} collapse_ms={collapse_ms:.3} disallowed_ms={disallowed_ms:.3} prune_ms={prune_ms:.3} canon_ms={canon_ms:.3} det_ms={det_ms:.3} det_states={det_states} det_trans={det_trans} min_ms={min_ms:.3} compact_ms={compact_ms:.3} dwa_states={} dwa_trans={} wall_ms={:.3}",
                 vocab.entries_map().len(),
                 id_map.num_tsids(),
                 id_map.num_internal_tokens(),
@@ -30652,6 +30765,91 @@ table: &dispatch.table,
                 &wa.id_map,
             );
 
+            // Causality: the same seeded walk WITHOUT table disallowed-follows
+            // must expose the raw lexer crossings (proves X_core emptiness comes
+            // from the composed table, not from the merged reset/fan-out).
+            let nodisallow =
+                std::env::var("PHASE1_NODISALLOW").map(|value| value != "0").unwrap_or(true);
+            let mut nd_crossing_std = BTreeSet::new();
+            if nodisallow {
+                let empty_disallowed = BTreeMap::new();
+                if let Some((dwa_nd, id_nd)) = phase1_run_walk_replica(
+                    "outer_core_nodisallow",
+                    &composed.tokenizer,
+                    &vocab,
+                    &grammar,
+                    &empty_disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_core),
+                    &wa.id_map,
+                ) {
+                    let x_nd = phase1_crossing_from(
+                        "outer_core_nodisallow",
+                        &dwa_nd,
+                        &composed.table.terminal_offsets,
+                        0,
+                    );
+                    let t_nd = phase1_accepted_tokens(&x_nd, &id_nd, None);
+                    eprintln!(
+                        "PHASE1 tokens_outer_core_nodisallow={} paths={}",
+                        t_nd.len(),
+                        phase1_count_paths(&x_nd),
+                    );
+                    for spot in [2358u32, 2313, 6226, 1287, 28937, 17289, 22715] {
+                        if t_nd.contains(&spot) {
+                            let bytes = vocab
+                                .entries_map()
+                                .get(&spot)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            eprintln!(
+                                "PHASE1 nodisallow_contains t{spot}={:?}",
+                                String::from_utf8_lossy(bytes),
+                            );
+                        }
+                    }
+                }
+                // Faithful version through the STANDARD walk entry point (the
+                // replica over-accepts; see b2 gate): same seeds, empty table.
+                let empty_disallowed = BTreeMap::new();
+                if let Some(w_nd) = phase1_run_walk(
+                    "outer_core_nodisallow_std",
+                    &composed.tokenizer,
+                    &vocab,
+                    &grammar,
+                    &empty_disallowed,
+                    composed.ignore_canonical,
+                    Some(&commit_core),
+                ) {
+                    let x_nd = phase1_crossing_from(
+                        "outer_core_nodisallow_std",
+                        &w_nd.dwa,
+                        &composed.table.terminal_offsets,
+                        0,
+                    );
+                    let t_nd = phase1_accepted_tokens(&x_nd, &w_nd.id_map, None);
+                    eprintln!(
+                        "PHASE1 tokens_outer_core_nodisallow_std={} paths={}",
+                        t_nd.len(),
+                        phase1_count_paths(&x_nd),
+                    );
+                    nd_crossing_std = t_nd.clone();
+                    for spot in [2358u32, 2313, 6226, 1287, 28937, 17289, 22715] {
+                        if t_nd.contains(&spot) {
+                            let bytes = vocab
+                                .entries_map()
+                                .get(&spot)
+                                .map(Vec::as_slice)
+                                .unwrap_or(&[]);
+                            eprintln!(
+                                "PHASE1 nodisallow_std_contains t{spot}={:?}",
+                                String::from_utf8_lossy(bytes),
+                            );
+                        }
+                    }
+                }
+            }
+
             // Same outer composition, i = dispatch (the nonempty direction).
             let ti_dispatch_path = format!("{dump_dir}/phase1-ti-outer-dispatch.txt");
             let ti_dispatch = if skip_oracle {
@@ -30724,6 +30922,34 @@ table: &dispatch.table,
                     phase1_count_paths(&xb),
                 );
                 phase1_token_diff_report("outer_dispatch_a_vs_b", &ta_dispatch, &tb, &vocab);
+                // TI determinization anatomy: same inputs through the replica to
+                // expose the determinized (pre-minimize) size.
+                if std::env::var("PHASE1_TIB2").map(|value| value != "0").unwrap_or(true) {
+                    if let Some((dwa_tib2, id_tib2)) = phase1_run_walk_replica(
+                        "outer_dispatch_ti_b2reuse",
+                        &composed.tokenizer,
+                        &ti_vocab_dispatch,
+                        &grammar,
+                        &disallowed,
+                        composed.ignore_canonical,
+                        Some(&commit_dispatch),
+                        &wb.id_map,
+                    ) {
+                        let x_tib2 = phase1_crossing_from(
+                            "outer_dispatch_ti_b2reuse",
+                            &dwa_tib2,
+                            &composed.table.terminal_offsets,
+                            1,
+                        );
+                        let t_tib2 = phase1_accepted_tokens(&x_tib2, &id_tib2, None);
+                        phase1_token_diff_report(
+                            "outer_dispatch_tib2_vs_a",
+                            &t_tib2,
+                            &ta_dispatch,
+                            &vocab,
+                        );
+                    }
+                }
             }
             if let Some(restricted) = oracle_dispatch.as_ref() {
                 phase1_token_diff_report(
@@ -30750,6 +30976,8 @@ table: &dispatch.table,
 
             let bypass =
                 std::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
+            let run_b1 =
+                std::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
             if bypass {
                 // b2: standard id_map reused (analysis amortized) — must reproduce.
                 if let Some((dwa_b2, id_b2)) = phase1_run_walk_replica(
@@ -30777,27 +31005,50 @@ table: &dispatch.table,
                         dwa_b2.num_transitions(),
                         wa_dispatch.dwa.num_transitions(),
                     );
+                    phase1_parser_from_crossing(
+                        "outer_dispatch_b2reuse",
+                        &x_b2,
+                        &composed.table.table,
+                        &grammar,
+                        &vocab,
+                        &id_b2,
+                    );
                 }
                 // b1: identity id_map — no equivalence analysis at all.
-                let id_b1 = phase1_identity_id_map(&composed.tokenizer, &vocab);
-                if let Some((dwa_b1, id_b1c)) = phase1_run_walk_replica(
-                    "outer_dispatch_b1ident",
-                    &composed.tokenizer,
-                    &vocab,
-                    &grammar,
-                    &disallowed,
-                    composed.ignore_canonical,
-                    Some(&commit_dispatch),
-                    &id_b1,
-                ) {
-                    let x_b1 = phase1_crossing_from(
+                if run_b1 {
+                    let id_b1 = phase1_identity_id_map(&composed.tokenizer, &vocab);
+                    if let Some((dwa_b1, id_b1c)) = phase1_run_walk_replica(
                         "outer_dispatch_b1ident",
-                        &dwa_b1,
-                        &composed.table.terminal_offsets,
-                        1,
-                    );
-                    let t_b1 = phase1_accepted_tokens(&x_b1, &id_b1c, None);
-                    phase1_token_diff_report("outer_dispatch_b1_vs_a", &t_b1, &ta_dispatch, &vocab);
+                        &composed.tokenizer,
+                        &vocab,
+                        &grammar,
+                        &disallowed,
+                        composed.ignore_canonical,
+                        Some(&commit_dispatch),
+                        &id_b1,
+                    ) {
+                        let x_b1 = phase1_crossing_from(
+                            "outer_dispatch_b1ident",
+                            &dwa_b1,
+                            &composed.table.terminal_offsets,
+                            1,
+                        );
+                        let t_b1 = phase1_accepted_tokens(&x_b1, &id_b1c, None);
+                        phase1_token_diff_report(
+                            "outer_dispatch_b1_vs_a",
+                            &t_b1,
+                            &ta_dispatch,
+                            &vocab,
+                        );
+                        phase1_parser_from_crossing(
+                            "outer_dispatch_b1ident",
+                            &x_b1,
+                            &composed.table.table,
+                            &grammar,
+                            &vocab,
+                            &id_b1c,
+                        );
+                    }
                 }
             }
 
@@ -30820,6 +31071,7 @@ table: &dispatch.table,
                 "PHASE1 dyn_compose_ms={:.3}",
                 dyn_started.elapsed().as_secs_f64() * 1000.0,
             );
+            let dyn_spots: &[u32] = &[2358, 2313, 6226, 1287, 28937, 17289, 22715, 1237, 340, 16297];
             phase1_dynamic_crosscheck(
                 "outer_core_pos",
                 b"const x = tools",
@@ -30833,6 +31085,8 @@ table: &dispatch.table,
                 &composed.tokenizer_offsets,
                 &ta_dispatch,
                 &ti_core,
+                dyn_spots,
+                &nd_crossing_std,
             );
             phase1_dynamic_crosscheck(
                 "outer_disp_pos",
@@ -30847,6 +31101,8 @@ table: &dispatch.table,
                 &composed.tokenizer_offsets,
                 &ta_dispatch,
                 &ti_dispatch,
+                dyn_spots,
+                &nd_crossing_std,
             );
         }
 
@@ -31031,6 +31287,8 @@ table: &dispatch.table,
 
             let bypass =
                 std::env::var("PHASE1_BYPASS").map(|value| value != "0").unwrap_or(true);
+            let run_b1 =
+                std::env::var("PHASE1_B1").map(|value| value != "0").unwrap_or(true);
             if bypass {
                 if let Some((dwa_b2, id_b2)) = phase1_run_walk_replica(
                     "dispatch_schema0_b2reuse",
@@ -31057,26 +31315,44 @@ table: &dispatch.table,
                         dwa_b2.num_transitions(),
                         wa.dwa.num_transitions(),
                     );
-                }
-                let id_b1 = phase1_identity_id_map(&composed.tokenizer, &vocab);
-                if let Some((dwa_b1, id_b1c)) = phase1_run_walk_replica(
-                    "dispatch_schema0_b1ident",
-                    &composed.tokenizer,
-                    &vocab,
-                    &grammar,
-                    &disallowed,
-                    composed.ignore_canonical,
-                    Some(&commit_schema0),
-                    &id_b1,
-                ) {
-                    let x_b1 = phase1_crossing_from(
-                        "dispatch_schema0_b1ident",
-                        &dwa_b1,
-                        &composed.table.terminal_offsets,
-                        1,
+                    phase1_parser_from_crossing(
+                        "dispatch_schema0_b2reuse",
+                        &x_b2,
+                        &composed.table.table,
+                        &grammar,
+                        &vocab,
+                        &id_b2,
                     );
-                    let t_b1 = phase1_accepted_tokens(&x_b1, &id_b1c, None);
-                    phase1_token_diff_report("dispatch_schema0_b1_vs_a", &t_b1, &ta, &vocab);
+                }
+                if run_b1 {
+                    let id_b1 = phase1_identity_id_map(&composed.tokenizer, &vocab);
+                    if let Some((dwa_b1, id_b1c)) = phase1_run_walk_replica(
+                        "dispatch_schema0_b1ident",
+                        &composed.tokenizer,
+                        &vocab,
+                        &grammar,
+                        &disallowed,
+                        composed.ignore_canonical,
+                        Some(&commit_schema0),
+                        &id_b1,
+                    ) {
+                        let x_b1 = phase1_crossing_from(
+                            "dispatch_schema0_b1ident",
+                            &dwa_b1,
+                            &composed.table.terminal_offsets,
+                            1,
+                        );
+                        let t_b1 = phase1_accepted_tokens(&x_b1, &id_b1c, None);
+                        phase1_token_diff_report("dispatch_schema0_b1_vs_a", &t_b1, &ta, &vocab);
+                        phase1_parser_from_crossing(
+                            "dispatch_schema0_b1ident",
+                            &x_b1,
+                            &composed.table.table,
+                            &grammar,
+                            &vocab,
+                            &id_b1c,
+                        );
+                    }
                 }
             }
         }
@@ -31231,6 +31507,37 @@ table: &dispatch.table,
             eprintln!("RST closure_member state={state} owner={}", owner(&composed.tokenizer_offsets, *state));
         }
 
+        // (a2) Concrete single-byte transition targets from the merged reset:
+        // where a post-reset byte lands, per owning component.
+        for byte in [b'{', b';', b'.', b'(', b')', b',', b' ', b'"', b'\n', b'\t', b'\r'] {
+            let stepped = composed.tokenizer.execute_from_state(&[byte], 0);
+            let mut ends: Vec<u32> = stepped.end_state.iter().copied().collect();
+            ends.sort();
+            let end_text: Vec<String> = ends
+                .iter()
+                .map(|state| format!("{state}[{}]", owner(&composed.tokenizer_offsets, *state)))
+                .collect();
+            let mut stepped_matches: Vec<String> = stepped
+                .matches
+                .iter()
+                .map(|matched| {
+                    format!(
+                        "t{}[c{}]@{}",
+                        matched.id,
+                        term_owner(&composed.table.terminal_offsets, matched.id),
+                        matched.width,
+                    )
+                })
+                .collect();
+            stepped_matches.sort();
+            eprintln!(
+                "RST fanout byte={:?} live=[{}] matches=[{}]",
+                byte as char,
+                end_text.join(" "),
+                stepped_matches.join(" "),
+            );
+        }
+
         // (b) CALL-able core state: live lexer states of a core-alone commit
         // of `const x = tools` (runtime resets included), relabelled to merged.
         let prefix = b"const x = tools";
@@ -31328,6 +31635,22 @@ table: &dispatch.table,
             }
             traced += 1;
         }
+        // Union-violation tokens for contrast: t280 `;\n`, t2313 `({\n`.
+        for token in [280u32, 2313] {
+            if let Some(bytes) = vocab.entries_map().get(&token) {
+                for (index, &state) in call_states.iter().enumerate() {
+                    trace(
+                        &format!("viol_t{token}_s{index}"),
+                        &composed.tokenizer,
+                        bytes,
+                        state,
+                        &composed.tokenizer_offsets,
+                        &composed.table.terminal_offsets,
+                        &composed.terminal_names,
+                    );
+                }
+            }
+        }
         // The dispatch→core direction for contrast: oracle token 1237 `");`.
         if let Some(bytes) = vocab.entries_map().get(&1237) {
             trace(
@@ -31401,6 +31724,40 @@ table: &dispatch.table,
                     short_name(&composed.terminal_names, *first),
                     short_name(&composed.terminal_names, *second),
                     allowed(*first, *second),
+                );
+            }
+        }
+
+        // (f) DynamicDirect verdicts on crossing-shaped candidates at a
+        // CALL-capable core position and inside dispatch.
+        let dyn_composed = compose_constraints_owned_parent_segmented(
+            core.clone(),
+            &[CompiledSubgrammarInput {
+                placeholder_terminal: placeholder,
+                additional_placeholder_terminals: &[],
+                constraint: &dispatch,
+            }],
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        for prefix in [b"const x = tools".as_slice(), b"const x = tools.tool_5({".as_slice()] {
+            let mut dyn_state = dyn_composed.start();
+            dyn_state.commit_bytes(prefix).expect("dynamic commit prefix");
+            let mask = dyn_state.mask();
+            let admits = |token: u32| -> bool {
+                mask.get((token / 32) as usize)
+                    .is_some_and(|word| word & (1 << (token % 32)) != 0)
+            };
+            for token in [2358u32, 2313, 6226, 1287, 28937, 17289, 22715, 1237, 340, 16297] {
+                let bytes =
+                    vocab.entries_map().get(&token).map(Vec::as_slice).unwrap_or(&[]);
+                eprintln!(
+                    "RST dynmask prefix={:?} t{token}={:?} admits={}",
+                    String::from_utf8_lossy(prefix),
+                    String::from_utf8_lossy(bytes),
+                    admits(token),
                 );
             }
         }
