@@ -345,7 +345,8 @@ pub mod __private {
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
-                CompiledSubgrammarInput, compose_constraints_owned_parent,
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented,
             };
             use std::collections::BTreeSet;
 
@@ -372,9 +373,14 @@ pub mod __private {
                     constraint: child,
                 });
             }
-            compose_constraints_owned_parent(self, &inputs, vocab)
-                .map(|composition| composition.constraint)
-                .map_err(Error::Compilation)
+            compose_constraints_owned_parent_segmented(
+                self,
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
         }
 
         fn compose_compiled_subgrammars_shared(
@@ -383,7 +389,8 @@ pub mod __private {
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
-                CompiledSubgrammarInput, compose_constraints_owned_parent_shared,
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented_shared,
             };
             use std::collections::BTreeSet;
             use std::sync::Arc;
@@ -413,9 +420,15 @@ pub mod __private {
                 });
                 shared.push(Arc::clone(child));
             }
-            compose_constraints_owned_parent_shared(self, &inputs, &shared, vocab)
-                .map(|composition| composition.constraint)
-                .map_err(Error::Compilation)
+            compose_constraints_owned_parent_segmented_shared(
+                self,
+                &inputs,
+                &shared,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
         }
 
         fn compose_compiled_subgrammars_dynamic(

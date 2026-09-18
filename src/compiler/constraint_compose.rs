@@ -91,6 +91,10 @@ use crate::runtime::{
     CompositionGrammarSummary, Constraint, ConstraintRuntimeBackend, SpecialTokenTerminal,
 };
 use crate::Vocab;
+use super::boundary_walk::{
+    WalkStaticLinkInputs, build_walk_static_boundary_link,
+    dynamic_fallback_walk_link_output, walk_static_link_needs_dynamic_fallback,
+};
 use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
 
 mod structural_sharing;
@@ -2456,6 +2460,7 @@ enum PublishedBoundaryRuntime {
     },
 }
 
+#[derive(Clone)]
 pub(crate) struct PublishedStaticBoundaryShard {
     pub(crate) start_component: u32,
     pub(crate) candidate_tokens: Arc<[u32]>,
@@ -20439,7 +20444,13 @@ fn compose_constraints_owned_parent_impl(
             }
         },
         || {
-            if direct_dynamic_boundary {
+            if direct_dynamic_boundary
+                || explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+            {
+                // Dynamic links and walk-static links never consume pre-table
+                // discovery: dynamic links skip boundary repair, and the walk
+                // link derives its own shards. The component lane falls back
+                // to the direct coordinate builder (the dynamic-tested path).
                 None
             } else {
                 try_prepare_pre_table_boundary_base_discovery(
@@ -20677,6 +20688,9 @@ fn compose_constraints_owned_parent_impl(
     let state_map_cell = OnceLock::<Result<ManyToOneIdMap, String>>::new();
     let selected_boundary_tokens_cell =
         OnceLock::<Result<Option<Vec<u32>>, String>>::new();
+    let walk_static_boundary_cell = OnceLock::<
+        Result<Option<super::boundary_walk::WalkStaticLinkOutput>, String>,
+    >::new();
     let skip_boundary_for_floor =
         std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
@@ -20901,6 +20915,53 @@ fn compose_constraints_owned_parent_impl(
                 if skip_boundary_for_floor || direct_dynamic_boundary {
                     let _ = selected_boundary_tokens_cell.set(Ok(None));
                     return (Ok(None), 0.0);
+                }
+                if explicit_segmented_boundary == Some(SegmentedBoundaryBackend::StaticParserDwa)
+                {
+                    // Production static backend (Phase 2b): boundary shards
+                    // come from the standard crossing-filtered walk, not from
+                    // witness discovery. No global B is built; component
+                    // coordinates stay unrefined exactly as in dynamic links.
+                    let started_at = Instant::now();
+                    let num_components = children.len() + 1;
+                    let link = if std::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS")
+                        .is_some()
+                        || walk_static_link_needs_dynamic_fallback(&parent, children)
+                    {
+                        Ok(dynamic_fallback_walk_link_output(num_components))
+                    } else {
+                        build_walk_static_boundary_link(&WalkStaticLinkInputs {
+                            parent: &parent,
+                            children,
+                            vocab,
+                            static_components: static_boundary_components,
+                            expected_terminal_offsets: &composed_table.terminal_offsets,
+                        })
+                    };
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    if compose_profile_enabled() {
+                        match &link {
+                            Ok(output) => eprintln!(
+                                "[glrmask/profile][constraint_walk_static_link] shards={} dynamic={} ms={elapsed_ms:.3}",
+                                output.published_shards.len(),
+                                output.all_dynamic,
+                            ),
+                            Err(error) => eprintln!(
+                                "[glrmask/profile][constraint_walk_static_link] error={error} ms={elapsed_ms:.3}",
+                            ),
+                        }
+                    }
+                    return match link {
+                        Err(error) => {
+                            let _ = selected_boundary_tokens_cell.set(Err(error.clone()));
+                            (Err(error), elapsed_ms)
+                        }
+                        Ok(output) => {
+                            let _ = selected_boundary_tokens_cell.set(Ok(None));
+                            let _ = walk_static_boundary_cell.set(Ok(Some(output)));
+                            (Ok(None), elapsed_ms)
+                        }
+                    };
                 }
                 let started_at = Instant::now();
                 let result = build_boundary_repair(
@@ -21796,6 +21857,36 @@ fn compose_constraints_owned_parent_impl(
             }
         }
 
+        if let Some(walk_result) = walk_static_boundary_cell.get() {
+            let walk = walk_result.as_ref().map_err(Clone::clone)?;
+            if let Some(walk) = walk {
+                let overlay = result.constraint.static_dynamic_overlay.as_mut().expect(
+                    "segmented component metadata must exist before walk boundary shards",
+                );
+                overlay.segmented_boundary_parser = None;
+                overlay.segmented_boundary_terminal_trie = None;
+                if walk.all_dynamic {
+                    // Exact dynamic link (nested composition or static shards
+                    // disabled): identical shard shape to a dynamic link.
+                    install_dynamic_direct_boundary_shards(overlay, None);
+                } else {
+                    install_published_static_boundary_shards(
+                        overlay,
+                        walk.published_shards.clone(),
+                    )?;
+                    if walk.effective_static_components.iter().count()
+                        != overlay.segmented_parser_components.len()
+                    {
+                        append_dynamic_direct_boundary_shards_for_unselected(
+                            overlay,
+                            &walk.effective_static_components,
+                            Some(&walk.boundary_tokens_by_start_component),
+                        );
+                    }
+                }
+            }
+        }
+
         if result.constraint.uses_compact_segmented_parser_runtime() {
             // Derive and cache the authoritative recursive leaf layout before
             // discarding historical per-component projections. This is needed
@@ -21805,6 +21896,38 @@ fn compose_constraints_owned_parent_impl(
                 .constraint
                 .recursive_parser_layout_for_pending_root()?
                 .expect("compact segmented runtime must have a recursive parser layout");
+            // Pin a walk-static install against the authoritative leaf layout:
+            // the walk's private TSID maps assume direct-component leaves
+            // packed back-to-back. On any mismatch, swap the whole link to
+            // exact dynamic shards rather than misrouting queries. This must
+            // never fire for flat links; if it does, it is LOUD on purpose.
+            if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
+                if !walk.all_dynamic && !walk.published_shards.is_empty() {
+                    let layout = result
+                        .constraint
+                        .recursive_parser_layout()?
+                        .expect("walk-static link requires a recursive parser layout");
+                    if layout.leaf_tokenizer_state_offsets
+                        != walk.expected_leaf_tokenizer_offsets
+                        || layout.total_tokenizer_states
+                            != walk.expected_total_tokenizer_states
+                    {
+                        eprintln!(
+                            "[glrmask/profile][constraint_walk_static_link_layout_mismatch] expected_offsets={:?} actual_offsets={:?} expected_total={} actual_total={} action=swap_to_dynamic",
+                            walk.expected_leaf_tokenizer_offsets,
+                            layout.leaf_tokenizer_state_offsets,
+                            walk.expected_total_tokenizer_states,
+                            layout.total_tokenizer_states,
+                        );
+                        let overlay = result
+                            .constraint
+                            .static_dynamic_overlay
+                            .as_mut()
+                            .expect("walk-static link requires overlay for dynamic swap");
+                        install_dynamic_direct_boundary_shards(overlay, None);
+                    }
+                }
+            }
             let recursive_tokenizer_tsids = build_recursive_tokenizer_internal_tsid_relation(
                 &result.constraint,
                 &automata_maps,
