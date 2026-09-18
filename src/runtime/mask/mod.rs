@@ -3485,6 +3485,19 @@ impl<'a> ConstraintState<'a> {
                         if !self.segmented_boundary_shard_may_be_active(shard) {
                             continue;
                         }
+                        // Strict-static trap (milestone H): a claimed static
+                        // path must never silently evaluate DynamicDirect
+                        // masks. Env-gated so exact dynamic compositions are
+                        // unaffected; strict-static tests set
+                        // GLRMASK_STRICT_STATIC_TRAP_DYNAMIC=1 and any firing
+                        // DynamicDirect shard panics loudly here instead of
+                        // contributing hidden dynamic admissions.
+                        if crate::compiler::boundary_transfer::strict_static_dynamic_trap_enabled()
+                        {
+                            panic!(
+                                "GLRMASK_STRICT_STATIC_TRAP_DYNAMIC: DynamicDirect boundary shard fired on a strict-static path"
+                            );
+                        }
                         needs_direct_dynamic = true;
                         true
                     }

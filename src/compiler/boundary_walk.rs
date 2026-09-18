@@ -2234,4 +2234,285 @@ mod tests {
             }
         }
     }
+
+    /// Prepared-transfer diagnostic for the selected10 outer blocker
+    /// (advisor v3 Prototype 1, milestone F).
+    ///
+    /// Links only LOCAL tables: the ordinary core terminal-3 transfer plus
+    /// the dispatch Finish export under this link's child-start/return-pop
+    /// policy, with the slot Entry shape validated. Records local
+    /// characterization cycle status / read bound / push bound / sizes for
+    /// both transfers. This path never calls `exact_control_elimination` by
+    /// construction; there is no global table object here at all.
+    #[test]
+    #[ignore]
+    fn prepared_transfer_row918_no_global_elimination() {
+        use crate::compiler::boundary_transfer::{
+            StateInjection, diagnose_transfer, instantiate_entry, instantiate_finish,
+            scope_characterization, validate_shared_child_links, validate_slot_entry_shape,
+        };
+        use crate::compiler::constraint_compose::build_segmented_parser_links;
+        use crate::compiler::stages::templates::characterize::characterize_selected_terminals_for_terminal_count;
+
+        let fixture = load_selected10_outer();
+        let children = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
+            additional_placeholder_terminals: &[],
+            constraint: &fixture.dispatch,
+        }];
+        let links = build_segmented_parser_links(&children).expect("segmented links");
+        validate_shared_child_links(&links).expect("incoming links agree");
+        assert_eq!(links.len(), 1, "outer link has one child link");
+        let link = &links[0];
+        let parent_injection = StateInjection { offset: 0 };
+        let child_injection = StateInjection {
+            offset: fixture.core.table.num_states,
+        };
+        // Ordinary local transfer for core terminal 3 (the row-918 terminal).
+        let mut selected = vec![false; fixture.core.table.num_terminals as usize];
+        selected[3] = true;
+        let characterized = characterize_selected_terminals_for_terminal_count(
+            &fixture.core.table,
+            fixture.core.table.num_terminals,
+            &selected,
+        );
+        let local_t3 = characterized.get(&3).expect("core terminal 3 characterizes");
+        let scoped_t3 =
+            scope_characterization(local_t3, &parent_injection).expect("scope core terminal 3");
+        let diag_t3 = diagnose_transfer(&scoped_t3);
+        eprintln!(
+            "BOUNDARY_TRANSFER t3 escapes={} reduces={} nt_escapes={} nt_rereduces={} read={} push={} cycle={:?} kinds={:?}",
+            diag_t3.num_escapes,
+            diag_t3.num_reduces,
+            diag_t3.num_nt_escapes,
+            diag_t3.num_nt_rereduces,
+            diag_t3.max_input_read,
+            diag_t3.max_push_len,
+            diag_t3.cycle_status,
+            diag_t3.endpoint_kinds,
+        );
+        assert!(
+            diag_t3.cycle_status.is_none(),
+            "core terminal-3 local transfer must be finite",
+        );
+        // Slot Entry: validate the provider-supported shape, then instantiate.
+        validate_slot_entry_shape(&fixture.core.table, link.slot_terminal)
+            .expect("outer slot supports static Entry");
+        let mut slot_selected = vec![false; fixture.core.table.num_terminals as usize];
+        slot_selected[link.slot_terminal as usize] = true;
+        let slot_characterized = characterize_selected_terminals_for_terminal_count(
+            &fixture.core.table,
+            fixture.core.table.num_terminals,
+            &slot_selected,
+        );
+        let local_slot = slot_characterized
+            .get(&link.slot_terminal)
+            .expect("slot terminal characterizes");
+        let scoped_slot =
+            scope_characterization(local_slot, &parent_injection).expect("scope slot");
+        let scoped_child_start = child_injection
+            .scope_state(link.child_start)
+            .expect("scope child start");
+        let entry = instantiate_entry(scoped_slot, scoped_child_start, 0);
+        eprintln!(
+            "BOUNDARY_TRANSFER entry escapes={} reduces={} read={} push={} cycle={:?} kinds={:?}",
+            entry.diagnostics.num_escapes,
+            entry.diagnostics.num_reduces,
+            entry.diagnostics.max_input_read,
+            entry.diagnostics.max_push_len,
+            entry.diagnostics.cycle_status,
+            entry.diagnostics.endpoint_kinds,
+        );
+        assert!(
+            entry.diagnostics.cycle_status.is_none(),
+            "slot Entry transfer must be finite",
+        );
+        assert!(
+            entry
+                .characterization
+                .escapes
+                .iter()
+                .all(|escape| escape.pushes.last() == Some(&scoped_child_start)),
+            "every Entry escape must carry the scoped child-start push",
+        );
+        // Finish export for the dispatch child under this link's policy.
+        let (finish, has_local_eof_effects) =
+            instantiate_finish(&fixture.dispatch.table, link, &child_injection)
+                .expect("dispatch finish transfer");
+        eprintln!(
+            "BOUNDARY_TRANSFER finish return_pop={} nullable={} escapes={} reduces={} nt_escapes={} nt_rereduces={} read={} push={} cycle={:?} kinds={:?} local_eof={has_local_eof_effects}",
+            link.return_pop,
+            link.child_start_nullable,
+            finish.diagnostics.num_escapes,
+            finish.diagnostics.num_reduces,
+            finish.diagnostics.num_nt_escapes,
+            finish.diagnostics.num_nt_rereduces,
+            finish.diagnostics.max_input_read,
+            finish.diagnostics.max_push_len,
+            finish.diagnostics.cycle_status,
+            finish.diagnostics.endpoint_kinds,
+        );
+        assert!(
+            finish.diagnostics.cycle_status.is_none(),
+            "dispatch finish transfer must be finite",
+        );
+        assert!(
+            !has_local_eof_effects,
+            "bounded flat prototype requires canonical EOF completion (reductions + pure Accept); local EOF work needs outer control-choice points",
+        );
+    }
+
+    /// Divergent called-frame fixture through the PRODUCTION static link
+    /// (milestones E/G/H at fixture scale).
+    ///
+    /// `build_walk_static_boundary_link` must install a real static shard that
+    /// matches DynamicDirect at both call sites (caller-sensitive fused
+    /// tokens), with no `DynamicDirect` backend anywhere in the installed
+    /// overlay. Removing the child shard (ablation) must lose the fused
+    /// tokens — a nonempty shard that never fires is not evidence. With
+    /// `GLRMASK_STRICT_STATIC_TRAP_DYNAMIC=1`, masking the installed static
+    /// composition must not trip the DynamicDirect trap.
+    #[test]
+    #[ignore]
+    fn walk_static_link_divergent_fixture_matches_dynamic_and_ablates() {
+        fn admits(mask: &[u32], token: u32) -> bool {
+            mask.get(token as usize / 32)
+                .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+        }
+
+        let vocab = Vocab::new(vec![
+            (0, b"ax".to_vec()),
+            (1, b"ay".to_vec()),
+            (2, b"L".to_vec()),
+            (3, b"R".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"x".to_vec()),
+            (6, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB "x" | "R" SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+        let composed = low_level_compose(&parent, &inputs);
+        let link_output = build_walk_static_boundary_link(&WalkStaticLinkInputs {
+            parent: &parent,
+            children: &inputs,
+            vocab: &vocab,
+            static_components: None,
+            expected_terminal_offsets: &composed.table.terminal_offsets,
+        })
+        .expect("production static link on the divergent fixture");
+        assert!(
+            !link_output.all_dynamic,
+            "fixture link must be static, not all-dynamic",
+        );
+        assert_eq!(
+            link_output.published_shards.len(),
+            1,
+            "only the child shard crosses here",
+        );
+        assert_eq!(link_output.published_shards[0].start_component, 1);
+
+        let dynamic = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        let mut installed = dynamic.clone();
+        install_published_static_boundary_shards(
+            installed.static_dynamic_overlay.as_mut().expect("overlay"),
+            link_output
+                .published_shards
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .expect("install");
+        // No DynamicDirect backend anywhere in the installed overlay.
+        for (index, component) in installed
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("overlay")
+            .segmented_parser_components
+            .iter()
+            .enumerate()
+        {
+            if let Some(shard) = component.boundary.as_ref() {
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+        }
+        // Call-site-exact admission at both sites.
+        for (commit, fused, sibling, site) in [(2u32, 0u32, 1u32, "L"), (3u32, 1u32, 0u32, "R")] {
+            let mut st_dyn = dynamic.start();
+            let mut st_static = installed.start();
+            st_dyn.commit_token(commit).unwrap();
+            st_static.commit_token(commit).unwrap();
+            let mask_dyn = st_dyn.mask();
+            let mask_static = st_static.mask();
+            assert!(admits(&mask_dyn, fused), "dynamic admits fused {fused} after {site}");
+            assert!(!admits(&mask_dyn, sibling), "dynamic rejects sibling {sibling} after {site}");
+            assert_eq!(mask_static, mask_dyn, "static matches dynamic after {site}");
+        }
+        // Strict-static trap: no DynamicDirect evaluation on this path.
+        // Masks are collected under the env lock, then the var is removed
+        // before asserting, so a failure cannot leak the trap into other tests.
+        let trapped: Vec<(u32, Vec<u32>)> = {
+            let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+            std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+            let mut trapped = Vec::new();
+            for (commit, fused, _) in [(2u32, 0u32, "L"), (3u32, 1u32, "R")] {
+                let mut st = installed.start();
+                st.commit_token(commit).unwrap();
+                trapped.push((fused, st.mask()));
+            }
+            std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+            trapped
+        };
+        for (fused, mask) in &trapped {
+            assert!(admits(mask, *fused), "static admits fused {fused} under the trap");
+        }
+        // Ablation: with the child shard removed, the fused tokens must go
+        // missing (the shard is load-bearing, not redundant).
+        let mut ablated = dynamic.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("install empty");
+        for (commit, fused, site) in [(2u32, 0u32, "L"), (3u32, 1u32, "R")] {
+            let mut st = ablated.start();
+            st.commit_token(commit).unwrap();
+            assert!(
+                !admits(&st.mask(), fused),
+                "ablated composition must lose fused token {fused} after {site}",
+            );
+        }
+    }
 }
