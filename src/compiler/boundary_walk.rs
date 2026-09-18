@@ -1,13 +1,14 @@
 //! Production boundary-shard terminal-DWA construction (static-link redesign).
 //!
-//! For a composition with a merged tokenizer and a spliced control-free LR
-//! table, the boundary shard for start component `i` is built by running the
-//! STANDARD terminal-DWA trie walk on the merged tokenizer from `Commit_i`
-//! (component `i`'s token-start states), keeping only crossing paths at the NWA
-//! level, then standard templates + parser-DWA construction (see
-//! `build_boundary_shard` in step 4). Exact by construction: the walk is what a
-//! monolithic compile would run on the same merged DFA, restricted to `i`
-//! starts; non-crossing paths are already covered at runtime by `A_i`.
+//! For a composition with a merged tokenizer and a provider-materialized
+//! exact boundary table (live leaf coordinate), the boundary shard for start
+//! component `i` is built by running the STANDARD terminal-DWA trie walk on
+//! the merged tokenizer from `Commit_i` (component `i`'s token-start states),
+//! keeping only crossing paths at the NWA level, then standard templates +
+//! parser-DWA construction (see `build_boundary_shard` in step 4). Exact by
+//! construction: the walk is what a monolithic compile would run on the same
+//! merged DFA, restricted to `i` starts; non-crossing paths are already
+//! covered at runtime by `A_i`.
 //!
 //! Plan note: `prepared-static-linker-architecture-2026-09-17.md` §2 (rev 4).
 
@@ -15,19 +16,25 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use smallvec::SmallVec;
+
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
-    accepted_original_tokens, component_ignores_are_globally_erasable,
-    eliminate_composed_runtime_controls, merged_ignore_terminals,
-    merged_retained_terminal_exprs, merged_terminal_display_names,
-    publish_walk_boundary_shard_work,
+    accepted_original_tokens, build_segmented_parser_links,
+    component_ignores_are_globally_erasable, eliminate_composed_runtime_controls,
+    merged_ignore_terminals, merged_retained_terminal_exprs,
+    merged_terminal_display_names, publish_walk_boundary_shard_work,
 };
 use crate::compiler::glr::analysis::AnalyzedGrammar;
+use crate::compiler::glr::parser::{
+    DisjointComponentActionProvider, ParserComponentTableSource, ScopedParserSymbol,
+    materialize_control_eliminated_scoped_provider_table,
+};
 use crate::compiler::glr::table::{
-    ComposedTable, SubgrammarTableInput, compose_subgrammar_tables_with_rules,
+    ComposedTable, GLRTable, SubgrammarTableInput, compose_subgrammar_tables_with_rules,
     empty_terminals_in_composed_table,
 };
 use crate::compiler::pipeline::compute_disallowed_follows;
@@ -62,6 +69,14 @@ pub(crate) struct BoundaryWalkInputs<'a> {
     /// `commit_states_for_component`): a sound superset of the true runtime
     /// commit states.
     pub commit_states: &'a [bool],
+    /// Retain non-crossing paths (bypass the NWA-level crossing filter).
+    /// The link sets this only for the parent shard when a child can be
+    /// traversed zero-width (nullable start): the composed parser then
+    /// accepts parent-internal paths the parent alone rejects, and only the
+    /// unfiltered walk covers them. Child shards always filter (their
+    /// component mask covers every dropped path); see
+    /// `BoundaryShardLinkInputs::retain_parent_non_crossing_paths`.
+    pub retain_non_crossing_paths: bool,
     /// Link-once shared equivalence for the merged tokenizer (step 1).
     pub shared_equivalence: &'a tdwa::l2p::SharedL2pEquivalence,
     /// Prebuilt flat transition table for the merged tokenizer, shared across
@@ -83,7 +98,8 @@ pub(crate) struct BoundaryWalkProfile {
 
 /// Output of one boundary-shard terminal-DWA build.
 pub(crate) struct BoundaryWalkOutput {
-    /// Minimized crossing-only terminal DWA (empty language iff `X_i` is empty).
+    /// Minimized terminal DWA: crossing-only by default (empty language iff
+    /// `X_i` is empty), full walk output when non-crossing paths are retained.
     pub dwa: DWA,
     /// Shard-local id_map (compacted; TSIDs are shard-private per plan §2.4.4).
     pub id_map: InternalIdMap,
@@ -115,8 +131,9 @@ pub(crate) fn commit_states_for_component(
 /// Runs the standard L2P walk (`build_l2p_id_map_and_terminal_dwa_mode`) on
 /// the merged tokenizer with `seed_state_filter = Commit_i`, the link-shared
 /// equivalence (TI discovery skipped), the NWA-level crossing filter for
-/// `component_index`, and core compaction skipped (the shard parser indexes
-/// (parser-stack x tsid), which needs the exact Step-1 coordinate).
+/// `component_index` (bypassed when `retain_non_crossing_paths` is set), and
+/// core compaction skipped (the shard parser indexes (parser-stack x tsid),
+/// which needs the exact Step-1 coordinate).
 /// Returns `None` only when the vocab is empty.
 pub(crate) fn build_boundary_terminal_dwa(
     inputs: &BoundaryWalkInputs,
@@ -143,7 +160,11 @@ pub(crate) fn build_boundary_terminal_dwa(
     let shard_options = tdwa::l2p::L2pShardBuildOptions {
         shared_equivalence: Some(inputs.shared_equivalence),
         skip_ti_discovery: true,
-        crossing_filter: Some(crossing),
+        crossing_filter: if inputs.retain_non_crossing_paths {
+            None
+        } else {
+            Some(crossing)
+        },
         // The shard parser indexes (parser-stack x tsid); compaction would
         // merge stack-distinguishable states and over-admit (inner-6).
         skip_core_compact: true,
@@ -228,6 +249,19 @@ pub(crate) struct BoundaryShardLinkInputs<'a> {
     pub terminal_offsets: &'a [u32],
     pub tokenizer_offsets: &'a [u32],
     pub component_state_counts: &'a [u32],
+    /// Retain non-crossing paths in the PARENT shard (component 0). Child
+    /// shards always filter. Sound for flat links (nested compositions
+    /// decline to dynamic before the walk): the filter drops exactly the
+    /// single-component paths, and a dropped path gaps the mask only if the
+    /// composed table accepts its terminal sequence while no component mask
+    /// admits the token. For a child-C-internal sequence at a C-topped stack,
+    /// the boundary table's C rows are C's own rows, so composed acceptance
+    /// implies C acceptance and C's mask covers it. For a parent-internal
+    /// sequence, the parent mask covers it unless a zero-width empty-child
+    /// derivation enables a parent-alone rejection — possible only when a
+    /// linked child is start-nullable. Multi-component paths are crossing
+    /// from every seed's view and are always kept.
+    pub retain_parent_non_crossing_paths: bool,
 }
 
 /// One built shard walk with a nonempty crossing set.
@@ -311,6 +345,7 @@ pub(crate) fn build_boundary_shard_walks(
             commit_states: &commit,
             shared_equivalence: &shared,
             flat_trans: Some(&flat),
+            retain_non_crossing_paths: inputs.retain_parent_non_crossing_paths && index == 0,
         })
         .expect("nonempty-vocab shard walks must produce a DWA");
         let candidate_tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
@@ -374,16 +409,17 @@ pub(crate) struct WalkStaticLinkOutput {
     /// Expected runtime scoped leaf packing (link-component order) and total.
     /// The caller pins the installing runtime's layout against these after
     /// install; a mismatch (nesting the up-front check missed, a layout
-    /// change) swaps the link to exact dynamic shards.
+    /// change) is a loud decline, never a silent dynamic swap.
     pub expected_leaf_tokenizer_offsets: Vec<u32>,
     pub expected_total_tokenizer_states: u32,
 }
 
-/// Whether the composition needs whole-link exact dynamic boundary shards:
-/// any direct component that is itself a segmented composition. The walk's
-/// scoped TSID map assumes direct-component leaves packed back-to-back, but a
-/// nested component expands into several runtime leaves, so the coordinates
-/// cannot match. Nested static linking is Phase 4; dynamic shards are exact.
+/// Whether the composition contains a nested segmented component: any direct
+/// component that is itself a segmented composition. The walk's scoped TSID
+/// map assumes direct-component leaves packed back-to-back, but a nested
+/// component expands into several runtime leaves, so the coordinates cannot
+/// match. Nested static linking is Phase 4; the dispatcher declines such
+/// static requests loudly (callers needing nesting use Dynamic).
 pub(crate) fn walk_static_link_needs_dynamic_fallback(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
@@ -482,10 +518,104 @@ fn unbound_link_slot_terminals(
     Ok(unbound)
 }
 
-/// Build every static boundary shard for one production link: a control-free
-/// spliced composed table, a merged tokenizer, one shared equivalence, one
-/// standard crossing-filtered walk per component, then per-shard parsers over
-/// the spliced table with unbound slots emptied. This mirrors the gate's
+/// Intact component tables for one flat link, with per-component standalone
+/// ignore terminals (mirroring the splice inputs).
+struct LinkComponentTables<'a> {
+    tables: Vec<&'a GLRTable>,
+    ignores: Vec<Option<TerminalID>>,
+}
+
+impl ParserComponentTableSource for LinkComponentTables<'_> {
+    fn component_count(&self) -> usize {
+        self.tables.len()
+    }
+
+    fn component_table(&self, component: u32) -> Option<&GLRTable> {
+        self.tables.get(component as usize).copied()
+    }
+
+    fn component_ignore_terminal(&self, component: u32) -> Option<TerminalID> {
+        self.ignores.get(component as usize).copied().flatten()
+    }
+}
+
+/// Exact boundary table for one flat link: the disjoint-component provider
+/// over the intact component tables (per-link Call/Return with call-specific
+/// parent targets), materialized and control-eliminated. This is the same
+/// object the discovery path publishes against via
+/// `recursive_control_eliminated_parser_table`, built directly from link
+/// inputs. Its state alphabet is the live leaf coordinate (components
+/// back-to-back, local ids intact), and call-site provenance survives
+/// elimination by construction (Call pushes the call-specific parent target
+/// beneath the shared child start; Finish exposes it), so divergent
+/// multi-site placeholders are exact. A single flattened shared start row
+/// cannot express that provenance and must not be used here.
+fn link_provider_boundary_table(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    terminal_offsets: &[u32],
+    num_terminals: u32,
+    global_ignores: bool,
+) -> Result<GLRTable, String> {
+    let mut tables = Vec::with_capacity(children.len() + 1);
+    let mut ignores = Vec::with_capacity(children.len() + 1);
+    tables.push(&parent.table);
+    ignores.push((!global_ignores).then_some(parent.ignore_terminal).flatten());
+    for child in children {
+        tables.push(&child.constraint.table);
+        ignores.push(
+            (!global_ignores)
+                .then_some(child.constraint.ignore_terminal)
+                .flatten(),
+        );
+    }
+    for (index, table) in tables.iter().enumerate() {
+        if !table.control_terminals.is_empty() {
+            return Err(format!(
+                "walk static link component {index} carries linker controls; control-bearing components need dynamic shards",
+            ));
+        }
+    }
+    let source = LinkComponentTables { tables, ignores };
+    let links = build_segmented_parser_links(children)?;
+    let provider = DisjointComponentActionProvider::new(&source, &links)?;
+    let mut terminal_symbols = Vec::with_capacity(num_terminals as usize);
+    for global in 0..num_terminals {
+        let owner = terminal_offsets
+            .iter()
+            .rposition(|&offset| offset <= global)
+            .ok_or_else(|| {
+                format!("composed terminal {global} has no owning component")
+            })?;
+        let local = global.checked_sub(terminal_offsets[owner]).ok_or_else(|| {
+            format!("composed terminal {global} underflows its component offset")
+        })?;
+        let mut symbols = SmallVec::<[ScopedParserSymbol; 4]>::new();
+        symbols.push(ScopedParserSymbol::Terminal {
+            component: owner as u32,
+            terminal: local,
+        });
+        terminal_symbols.push(symbols);
+    }
+    let table =
+        materialize_control_eliminated_scoped_provider_table(&provider, &terminal_symbols)?;
+    if table.num_terminals != num_terminals {
+        return Err(format!(
+            "provider boundary table terminal domain {} differs from composed {num_terminals}",
+            table.num_terminals,
+        ));
+    }
+    if !table.control_terminals.is_empty() {
+        return Err("provider boundary table unexpectedly retains controls".to_string());
+    }
+    Ok(table)
+}
+
+/// Build every static boundary shard for one production link: a packed splice
+/// (rules + terminal layout only), a provider-materialized exact boundary
+/// table, a merged tokenizer, one shared equivalence, one standard
+/// crossing-filtered walk per component, then per-shard parsers over the
+/// provider table with unbound slots emptied. This mirrors the gate's
 /// `link_and_time` exactly (same walks, same publish); the gate and this
 /// function share `build_boundary_shard_walks` and
 /// `publish_walk_boundary_shard_work` so they cannot drift.
@@ -499,8 +629,11 @@ pub(crate) fn build_walk_static_boundary_link(
     let effective =
         effective_static_selection(parent, children, inputs.static_components);
 
-    // Control-free splice. Mirrors the coordinator's table inputs exactly,
-    // but with the plain spliced construction — never explicit controls.
+    // Packed splice: rules + terminal layout only. The packed shape is the
+    // exact production construction (per-caller overlays); it feeds the
+    // grammar/follows analysis and the coordinator-layout pin, never the
+    // boundary parser. The boundary parser runs on the provider table below,
+    // whose state alphabet is the live leaf coordinate.
     let global_ignores = component_ignores_are_globally_erasable(parent, children);
     let parent_rules = parent.retained_table_rules()?;
     let child_rules = children
@@ -538,6 +671,14 @@ pub(crate) fn build_walk_static_boundary_link(
             "walk static link terminal layout differs from coordinator table".to_string(),
         );
     }
+    // Exact boundary table: provider semantics in the live leaf coordinate.
+    let provider_table = link_provider_boundary_table(
+        parent,
+        children,
+        &composed.terminal_offsets,
+        composed.table.num_terminals,
+        global_ignores,
+    )?;
 
     // Merged tokenizer + ignores (mirror the gate's low_level_compose).
     let terminal_names = merged_terminal_display_names(parent, children);
@@ -608,6 +749,9 @@ pub(crate) fn build_walk_static_boundary_link(
         expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
         expected_total_tokenizer_states: expected_total,
     };
+    let retain_parent_non_crossing_paths = children
+        .iter()
+        .any(|child| child.constraint.table.embedded_start_nullable());
     let Some((built, _link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
         merged_tokenizer: &merged,
         vocab,
@@ -617,13 +761,14 @@ pub(crate) fn build_walk_static_boundary_link(
         terminal_offsets: &composed.terminal_offsets,
         tokenizer_offsets: &tokenizer_offsets,
         component_state_counts: &component_state_counts,
+        retain_parent_non_crossing_paths,
     }) else {
         // Empty vocab: nothing can cross; pure component masks, no shards.
         return Ok(empty_output());
     };
 
-    // Boundary table: private control-free copy with unbound slots emptied.
-    let mut boundary_table = composed.table.clone();
+    // Boundary table: the provider table with unbound slots emptied.
+    let mut boundary_table = provider_table;
     let unbound = unbound_link_slot_terminals(parent, children, &composed.terminal_offsets)?;
     for &terminal in &unbound {
         if terminal as usize >= boundary_table.num_terminals as usize {
@@ -1002,6 +1147,7 @@ mod tests {
                 commit_states: &commit,
                 shared_equivalence: &shared,
                 flat_trans: Some(&flat),
+                retain_non_crossing_paths: false,
             })
             .expect("toy shard walk must produce a DWA");
             assert!(output.dwa.is_acyclic(), "toy shard {index} DWA must be acyclic");
@@ -1141,6 +1287,7 @@ mod tests {
                 commit_states: &commit,
                 shared_equivalence: &shared,
                 flat_trans: Some(&flat),
+                retain_non_crossing_paths: false,
             })
             .expect("selected10 shard walk must produce a DWA");
             assert!(output.dwa.is_acyclic(), "shard {index} DWA must be acyclic");
@@ -1254,6 +1401,8 @@ mod tests {
             terminal_offsets: &fixture.composed.table.terminal_offsets,
             tokenizer_offsets: &fixture.composed.tokenizer_offsets,
             component_state_counts: &component_state_counts,
+            // Core and dispatch schemas are never start-nullable.
+            retain_parent_non_crossing_paths: false,
         })
         .expect("walk shards");
         eprintln!(
@@ -1610,6 +1759,9 @@ mod tests {
         let counts: Vec<u32> = std::iter::once(parent.tokenizer.num_states())
             .chain(inputs.iter().map(|child| child.constraint.tokenizer.num_states()))
             .collect();
+        let retain_parent_non_crossing_paths = inputs
+            .iter()
+            .any(|child| child.constraint.table.embedded_start_nullable());
         let (built, profile) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
             merged_tokenizer: &composed.tokenizer,
             vocab,
@@ -1619,6 +1771,7 @@ mod tests {
             terminal_offsets: &composed.table.terminal_offsets,
             tokenizer_offsets: &composed.tokenizer_offsets,
             component_state_counts: &counts,
+            retain_parent_non_crossing_paths,
         })
         .expect("walk shards");
         let shards_built = built.len();

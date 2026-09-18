@@ -2969,7 +2969,15 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let bound = parent.bind_grammar("payload", child).unwrap();
+        // A virtual-residual child cannot take a static shard: requesting
+        // static must decline loudly, never silently succeed as dynamic.
+        assert!(
+            parent.bind_grammar("payload", &child).is_err(),
+            "static bind of a virtual-residual child must decline loudly",
+        );
+        let bound = parent
+            .bind_grammar_dynamic_boundary("payload", child)
+            .unwrap();
         let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
 
         let token_allowed = |mask: &[u32], token: u32| {
@@ -2999,7 +3007,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_static_boundaries_use_recursive_parser_coordinate_live_and_loaded() {
+    fn nested_boundaries_use_recursive_parser_coordinate_live_and_loaded() {
         let vocab = Vocab::new(vec![
             (0, b"X".to_vec()),
             (1, b"[".to_vec()),
@@ -3032,7 +3040,9 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let bound = outer_parent.bind_grammar("middle", middle).unwrap();
+        let bound = outer_parent
+            .bind_grammar_dynamic_boundary("middle", middle)
+            .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
         assert!(
             bound
@@ -4252,12 +4262,12 @@ mod cached_parent_main_tests {
             &vocab,
         )
         .unwrap();
-        let half = parent.bind_grammar("left", &a).unwrap();
+        let half = parent.bind_grammar_dynamic_boundary("left", &a).unwrap();
         assert!(half
             .late_grammar_slots
             .iter()
             .any(|slot| slot.name == "right"));
-        let full = half.bind_grammar("right", &b).unwrap();
+        let full = half.bind_grammar_dynamic_boundary("right", &b).unwrap();
         assert!(full.late_grammar_slots.is_empty());
         assert!(accepts(&full, b"<ab>"));
 
@@ -4272,13 +4282,15 @@ mod cached_parent_main_tests {
         // children could collide in the private placeholder-token namespace.
         // The successor architecture transports those slots by qualified name
         // and sanitizes the private linker token from the public token domain.
-        let open_left = parent.bind_grammar("left", &unresolved_child).unwrap();
+        let open_left = parent
+            .bind_grammar_dynamic_boundary("left", &unresolved_child)
+            .unwrap();
         assert!(open_left
             .late_grammar_slots
             .iter()
             .any(|slot| slot.name == "left.leaf"));
-        let left = open_left.bind_grammar("left.leaf", &a).unwrap();
-        let nested_full = left.bind_grammar("right", &b).unwrap();
+        let left = open_left.bind_grammar_dynamic_boundary("left.leaf", &a).unwrap();
+        let nested_full = left.bind_grammar_dynamic_boundary("right", &b).unwrap();
         assert!(nested_full.late_grammar_slots.is_empty());
         assert!(accepts(&nested_full, b"<ab>"));
     }

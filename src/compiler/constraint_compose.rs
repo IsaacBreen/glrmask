@@ -478,7 +478,7 @@ impl<'a> CompiledSubgrammarInput<'a> {
     }
 }
 
-fn build_segmented_parser_links(
+pub(crate) fn build_segmented_parser_links(
     children: &[CompiledSubgrammarInput<'_>],
 ) -> Result<Vec<crate::runtime::SegmentedParserLink>, String> {
     let link_count = children
@@ -2532,12 +2532,12 @@ pub(crate) struct WalkShardPublishProfile {
 /// shard-local TSIDs (`uses_composed_tsid_coordinate = false` + the walk
 /// id_map's private raw-state and token maps).
 ///
-/// Templates are characterized fresh over the spliced control-free
-/// boundary table (the `compose_subgrammar_tables` object with unbound slots
-/// emptied — never the dynamic path's control-bearing recursive table) for
-/// exactly the terminals the crossing DWA emits (the same construction the
-/// discovery-built path applies via `set_parser_table_override`); the parser
-/// is built with the standard count-only constructor + runtime normalization.
+/// Templates are characterized fresh over the provider-materialized exact
+/// boundary table (live leaf coordinate, unbound slots emptied — never the
+/// dynamic path's control-bearing recursive table) for exactly the terminals
+/// the crossing DWA emits (the same construction the discovery-built path
+/// applies via `set_parser_table_override`); the parser is built with the
+/// standard count-only constructor + runtime normalization.
 ///
 /// Precondition: live state keys stay within the link-time union ranges (no
 /// lazily-allocated virtual-residual tokenizer states — the private map only
@@ -20466,7 +20466,14 @@ fn compose_constraints_owned_parent_impl(
     let mut composed_table = composed_table_result?;
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
-    let attempt_structural_sharing = structural_sharing_enabled() && children.len() > 1;
+    // The quotient merges duplicate child LR regions, which can break the
+    // functional global-to-local parser-state relations the segmented runtime
+    // requires (observed as "non-functional LR-state relation" on multi-child
+    // links). It is only a table-size optimization, so static segmented links
+    // skip it; dynamic and flattened links keep the existing behavior.
+    let attempt_structural_sharing = structural_sharing_enabled()
+        && children.len() > 1
+        && explicit_segmented_boundary != Some(SegmentedBoundaryBackend::StaticParserDwa);
     let structural_report = if attempt_structural_sharing {
         let terminal_analysis = composition_terminal_classes(&parent, children, &composed_table);
         let nonterminal_classes = structural_nonterminal_classes(
@@ -20920,23 +20927,56 @@ fn compose_constraints_owned_parent_impl(
                 {
                     // Production static backend (Phase 2b): boundary shards
                     // come from the standard crossing-filtered walk, not from
-                    // witness discovery. No global B is built; component
-                    // coordinates stay unrefined exactly as in dynamic links.
+                    // witness discovery. The walk publishes its crossing
+                    // candidates as the selected boundary tokens so the
+                    // component lane refines the shared token coordinate to
+                    // cover them (like discovery publication). A
+                    // static-requested link never silently succeeds as
+                    // dynamic: the explicit env kill-switch is the only quiet
+                    // all-dynamic route; nested and virtual-residual cases a
+                    // static shard cannot serve are loud errors.
                     let started_at = Instant::now();
                     let num_components = children.len() + 1;
+                    let requested_static = |index: usize| {
+                        static_boundary_components.is_none_or(|bits| bits.contains(index))
+                    };
                     let link = if std::env::var_os("GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS")
                         .is_some()
-                        || walk_static_link_needs_dynamic_fallback(&parent, children)
                     {
                         Ok(dynamic_fallback_walk_link_output(num_components))
+                    } else if (0..num_components).any(&requested_static)
+                        && walk_static_link_needs_dynamic_fallback(&parent, children)
+                    {
+                        Err("walk static link does not support nested segmented components; nested static linking is Phase 4, use the Dynamic boundary backend".to_string())
                     } else {
-                        build_walk_static_boundary_link(&WalkStaticLinkInputs {
-                            parent: &parent,
-                            children,
-                            vocab,
-                            static_components: static_boundary_components,
-                            expected_terminal_offsets: &composed_table.terminal_offsets,
-                        })
+                        let mut unsupported = None;
+                        for index in 0..num_components {
+                            if !requested_static(index) {
+                                continue;
+                            }
+                            let component: &Constraint = if index == 0 {
+                                &parent
+                            } else {
+                                children[index - 1].constraint
+                            };
+                            if component.tokenizer.has_virtual_residual_runtime() {
+                                unsupported = Some(index);
+                                break;
+                            }
+                        }
+                        if let Some(index) = unsupported {
+                            Err(format!(
+                                "walk static link component {index} requested a static shard but has a virtual residual runtime; leave it unselected (hybrid) or use the Dynamic boundary backend",
+                            ))
+                        } else {
+                            build_walk_static_boundary_link(&WalkStaticLinkInputs {
+                                parent: &parent,
+                                children,
+                                vocab,
+                                static_components: static_boundary_components,
+                                expected_terminal_offsets: &composed_table.terminal_offsets,
+                            })
+                        }
                     };
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     if compose_profile_enabled() {
@@ -20957,7 +20997,29 @@ fn compose_constraints_owned_parent_impl(
                             (Err(error), elapsed_ms)
                         }
                         Ok(output) => {
-                            let _ = selected_boundary_tokens_cell.set(Ok(None));
+                            // Publish the walk's crossing candidates as the
+                            // selected boundary tokens so the component lane
+                            // refines the shared token coordinate to cover
+                            // them (exactly like discovery publication). The
+                            // runtime shard gate consults the outer token map;
+                            // without refinement, crossing-only tokens have no
+                            // outer internal id and shard-accepted tokens are
+                            // silently dropped from masks. Empty/all-dynamic
+                            // links publish None (nothing to cover).
+                            let mut selected: Vec<u32> = output
+                                .boundary_tokens_by_start_component
+                                .iter()
+                                .flatten()
+                                .copied()
+                                .collect();
+                            selected.sort_unstable();
+                            selected.dedup();
+                            let publication = if output.all_dynamic || selected.is_empty() {
+                                None
+                            } else {
+                                Some(selected)
+                            };
+                            let _ = selected_boundary_tokens_cell.set(Ok(publication));
                             let _ = walk_static_boundary_cell.set(Ok(Some(output)));
                             (Ok(None), elapsed_ms)
                         }
@@ -21173,9 +21235,13 @@ fn compose_constraints_owned_parent_impl(
     };
     let id_num_tsids = id_map.num_tsids();
     let id_max_internal_token = id_map.max_internal_token_id();
+    let walk_link_ran = walk_static_boundary_cell
+        .get()
+        .is_some_and(|result| result.as_ref().is_ok_and(|output| output.is_some()));
     if boundary_work.is_none()
         && early_boundary_positive.is_none()
         && (boundary_tsid_map.is_some() || boundary_token_map.is_some())
+        && !walk_link_ran
     {
         return Err(
             "prepared component artifacts retained boundary maps without a boundary repair"
@@ -21866,8 +21932,8 @@ fn compose_constraints_owned_parent_impl(
                 overlay.segmented_boundary_parser = None;
                 overlay.segmented_boundary_terminal_trie = None;
                 if walk.all_dynamic {
-                    // Exact dynamic link (nested composition or static shards
-                    // disabled): identical shard shape to a dynamic link.
+                    // Exact dynamic link (explicit static-shards kill-switch):
+                    // identical shard shape to a dynamic link.
                     install_dynamic_direct_boundary_shards(overlay, None);
                 } else {
                     install_published_static_boundary_shards(
@@ -21887,6 +21953,45 @@ fn compose_constraints_owned_parent_impl(
             }
         }
 
+        // Production gate: every requested static component must actually
+        // hold a StaticParser shard (or no shard when nothing crosses from
+        // it). A requested-static component silently installed as dynamic
+        // is a loud error, never a green link.
+        if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
+            if !walk.all_dynamic {
+                let overlay = result
+                    .constraint
+                    .static_dynamic_overlay
+                    .as_ref()
+                    .expect("walk-static link requires overlay for backend gate");
+                for index in 0..overlay.segmented_parser_components.len() {
+                    let requested = static_boundary_components
+                        .is_none_or(|bits| bits.contains(index));
+                    if !requested {
+                        continue;
+                    }
+                    let has_candidates = walk
+                        .boundary_tokens_by_start_component
+                        .get(index)
+                        .is_some_and(|tokens| !tokens.is_empty());
+                    let backend = overlay.segmented_parser_components[index]
+                        .boundary
+                        .as_ref()
+                        .map(|shard| &shard.backend);
+                    let satisfied = match backend {
+                        Some(crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)) => true,
+                        None => !has_candidates,
+                        _ => false,
+                    };
+                    if !satisfied {
+                        return Err(format!(
+                            "walk static link component {index} requested a static shard but has no StaticParser backend (candidates={has_candidates}); declining",
+                        ));
+                    }
+                }
+            }
+        }
+
         if result.constraint.uses_compact_segmented_parser_runtime() {
             // Derive and cache the authoritative recursive leaf layout before
             // discarding historical per-component projections. This is needed
@@ -21898,9 +22003,10 @@ fn compose_constraints_owned_parent_impl(
                 .expect("compact segmented runtime must have a recursive parser layout");
             // Pin a walk-static install against the authoritative leaf layout:
             // the walk's private TSID maps assume direct-component leaves
-            // packed back-to-back. On any mismatch, swap the whole link to
-            // exact dynamic shards rather than misrouting queries. This must
-            // never fire for flat links; if it does, it is LOUD on purpose.
+            // packed back-to-back. On any mismatch, decline loudly rather
+            // than misrouting queries or silently succeeding as dynamic.
+            // This must never fire for flat links; if it does, it is LOUD
+            // on purpose.
             if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
                 if !walk.all_dynamic && !walk.published_shards.is_empty() {
                     let layout = result
@@ -21913,18 +22019,19 @@ fn compose_constraints_owned_parent_impl(
                             != walk.expected_total_tokenizer_states
                     {
                         eprintln!(
-                            "[glrmask/profile][constraint_walk_static_link_layout_mismatch] expected_offsets={:?} actual_offsets={:?} expected_total={} actual_total={} action=swap_to_dynamic",
+                            "[glrmask/profile][constraint_walk_static_link_layout_mismatch] expected_offsets={:?} actual_offsets={:?} expected_total={} actual_total={} action=decline",
                             walk.expected_leaf_tokenizer_offsets,
                             layout.leaf_tokenizer_state_offsets,
                             walk.expected_total_tokenizer_states,
                             layout.total_tokenizer_states,
                         );
-                        let overlay = result
-                            .constraint
-                            .static_dynamic_overlay
-                            .as_mut()
-                            .expect("walk-static link requires overlay for dynamic swap");
-                        install_dynamic_direct_boundary_shards(overlay, None);
+                        return Err(format!(
+                            "walk static link leaf layout mismatch: expected offsets {:?} total {}, runtime has offsets {:?} total {}; declining static shards",
+                            walk.expected_leaf_tokenizer_offsets,
+                            walk.expected_total_tokenizer_states,
+                            layout.leaf_tokenizer_state_offsets,
+                            layout.total_tokenizer_states,
+                        ));
                     }
                 }
             }
@@ -22576,8 +22683,6 @@ pub(crate) fn load_vocab(path: &str) -> Vocab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::glr::accumulator::TerminalsDisallowed;
-    use crate::compiler::glr::parser::{ParserGSS, advance_stacks, stacks_finished};
     use crate::compiler::glr::table::{
         SubgrammarTableInput, compose_subgrammar_tables,
     };
@@ -22613,10 +22718,88 @@ mod tests {
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> crate::Result<Constraint>;
+
+        /// Flattened composition (baseline backend). For tests whose subject
+        /// is flattened-table behavior (skip-terminal materialization,
+        /// runtime-product selection, control-edge sequencing) or pre-existing
+        /// static gaps (scoped ignores) that Phase 2b preserves as-is.
+        fn compose_linked_children_for_test_flattened(
+            &self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint>;
+
+        /// Exact dynamic segmented composition. For nested links (nested
+        /// static linking is Phase 4; static requests decline loudly).
+        fn compose_linked_children_for_test_dynamic(
+            &self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint>;
     }
 
     impl ComposeLinkedChildrenForTest for Constraint {
         fn compose_linked_children_for_test(
+            &self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint> {
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = terminal(self, name);
+                if !seen.insert(placeholder_terminal) {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent_segmented(
+                self.clone(),
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
+        }
+
+        fn compose_linked_children_for_test_owned(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> crate::Result<Constraint> {
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = terminal(&self, name);
+                if !seen.insert(placeholder_terminal) {
+                    return Err(crate::GlrMaskError::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent_segmented(
+                self,
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
+        }
+
+        fn compose_linked_children_for_test_flattened(
             &self,
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
@@ -22641,15 +22824,15 @@ mod tests {
                 .map_err(crate::GlrMaskError::Compilation)
         }
 
-        fn compose_linked_children_for_test_owned(
-            self,
+        fn compose_linked_children_for_test_dynamic(
+            &self,
             children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> crate::Result<Constraint> {
             let mut inputs = Vec::with_capacity(children.len());
             let mut seen = BTreeSet::new();
             for &(name, child) in children {
-                let placeholder_terminal = terminal(&self, name);
+                let placeholder_terminal = terminal(self, name);
                 if !seen.insert(placeholder_terminal) {
                     return Err(crate::GlrMaskError::Compilation(format!(
                         "parent placeholder terminal {name:?} was supplied more than once",
@@ -22661,9 +22844,14 @@ mod tests {
                     constraint: child,
                 });
             }
-            compose_constraints_owned_parent(self, &inputs, vocab)
-                .map(|composition| composition.constraint)
-                .map_err(crate::GlrMaskError::Compilation)
+            compose_constraints_owned_parent_segmented(
+                self.clone(),
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::Dynamic,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(crate::GlrMaskError::Compilation)
         }
     }
 
@@ -22907,7 +23095,7 @@ table: &child.constraint.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("LEFT", &child), ("RIGHT", &child)], &vocab)
             .unwrap();
 
         let mut state = composed.start();
@@ -22988,7 +23176,7 @@ table: &child.constraint.table,
         )
         .unwrap();
         let middle = middle_parent
-            .compose_linked_children_for_test(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("LEFT", &left), ("RIGHT", &right)], &vocab)
             .unwrap();
 
         let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
@@ -23019,7 +23207,7 @@ table: &child.constraint.table,
         )
         .unwrap();
         let outer = outer_parent
-            .compose_linked_children_for_test(&[("CALL", &middle)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("CALL", &middle)], &vocab)
             .unwrap();
         let loaded_middle = Constraint::load(&middle.save()).unwrap();
         let outer_loaded = Constraint::from_glrm_grammar(
@@ -23031,7 +23219,7 @@ table: &child.constraint.table,
             &vocab,
         )
         .unwrap()
-        .compose_linked_children_for_test(&[("CALL", &loaded_middle)], &vocab)
+        .compose_linked_children_for_test_flattened(&[("CALL", &loaded_middle)], &vocab)
         .unwrap();
 
         for bytes in [b"<abc>".as_slice(), b"<abd>", b"<z>"] {
@@ -23943,7 +24131,7 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -24100,7 +24288,7 @@ table: &child.table,
         }));
 
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
         let mut prepared_parent = parent.clone();
         let mut prepared_child = child.clone();
@@ -24123,7 +24311,7 @@ table: &child.table,
             prepared_child.tokenizer.num_terminals() as usize,
         );
         let cached_composed = prepared_parent
-            .compose_linked_children_for_test(&[("SUB", &prepared_child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &prepared_child)], &vocab)
             .unwrap();
         for sequence in [[0u32, 1, 2].as_slice(), [3u32, 4, 5].as_slice()] {
             let mut actual = composed.start();
@@ -24225,7 +24413,7 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert!(composed.ignore_terminal.is_none());
@@ -24390,7 +24578,7 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -24502,7 +24690,7 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -24592,7 +24780,7 @@ table: &child.table,
         )
         .unwrap();
         let outer = outer_parent
-            .compose_linked_children_for_test(&[("INNER", &loaded)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("INNER", &loaded)], &vocab)
             .unwrap();
         let outer_monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -24697,10 +24885,10 @@ table: &child.table,
         // edge.  The direct continuation row therefore exposes a control
         // terminal, not lexical terminal "b".
         let parent_with_right = parent
-            .compose_linked_children_for_test(&[("RIGHT", &right)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("RIGHT", &right)], &vocab)
             .unwrap();
         let composed = parent_with_right
-            .compose_linked_children_for_test(&[("LEFT", &left)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("LEFT", &left)], &vocab)
             .unwrap();
 
         let monolithic = Constraint::from_glrm_grammar(
@@ -24886,7 +25074,7 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -25158,54 +25346,30 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
-        let composition = compose_constraints(
-            &parent,
+        let composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
             &[
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "FIRST"),
                     additional_placeholder_terminals: &[],
-constraint: &first,
+                    constraint: &first,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "SECOND"),
                     additional_placeholder_terminals: &[],
-constraint: &second,
+                    constraint: &second,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "THIRD"),
                     additional_placeholder_terminals: &[],
-constraint: &third,
+                    constraint: &third,
                 },
             ],
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
-        .unwrap();
-        let terminal_offsets = composition.terminal_offsets.clone();
-        let composed = composition.constraint;
-
-        let mut parser = ParserGSS::from_stacks(&[(
-            vec![0],
-            TerminalsDisallowed::new(),
-        )]);
-        for (name, terminal) in [
-            ("[", terminal(&parent, "[")),
-            ("first:a", terminal_offsets[1] + terminal(&first, "a")),
-            ("|1", terminal(&parent, "|")),
-            ("second:b", terminal_offsets[2] + terminal(&second, "b")),
-            ("|2", terminal(&parent, "|")),
-            ("third:c", terminal_offsets[3] + terminal(&third, "c")),
-            ("]", terminal(&parent, "]")),
-        ] {
-            parser = advance_stacks(&composed.table, &parser, terminal);
-            assert!(
-                !parser.to_stacks(64).unwrap().is_empty(),
-                "three-child table lost every stack after {name}",
-            );
-        }
-        assert!(
-            stacks_finished(&composed.table, &parser),
-            "three-child composed table must accept the terminal sequence",
-        );
+        .unwrap()
+        .constraint;
 
         let mut composed_bytes = composed.start();
         composed_bytes.commit_bytes(b"[a|b|c]").unwrap();
@@ -25565,7 +25729,7 @@ constraint: &third,
         )
         .unwrap();
         let composed = outer_parent
-            .compose_linked_children_for_test(&[("MIDDLE", &middle)], &vocab)
+            .compose_linked_children_for_test_dynamic(&[("MIDDLE", &middle)], &vocab)
             .unwrap();
         let monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -25617,14 +25781,15 @@ constraint: &third,
             &vocab,
         )
         .unwrap();
-        let composed = compose_constraints(
-            &parent,
+        let composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
             &[CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
                 additional_placeholder_terminals: &[],
                 constraint: &child,
             }],
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
         .unwrap()
         .constraint;
@@ -25698,14 +25863,15 @@ constraint: &third,
         .unwrap();
         let left = terminal(&parent, "LEFT");
         let right = terminal(&parent, "RIGHT");
-        let composed = compose_constraints(
-            &parent,
+        let composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
             &[CompiledSubgrammarInput {
                 placeholder_terminal: left,
                 additional_placeholder_terminals: &[right],
                 constraint: &child,
             }],
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
         .unwrap()
         .constraint;
@@ -25995,14 +26161,15 @@ constraint: &third,
             &vocab,
         )
         .unwrap();
-        let composed = compose_constraints(
-            &parent,
+        let composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
             &[CompiledSubgrammarInput {
                 placeholder_terminal: terminal(&parent, "SUB"),
                 additional_placeholder_terminals: &[],
-constraint: &child,
+                constraint: &child,
             }],
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
         .unwrap()
         .constraint;
@@ -26075,21 +26242,22 @@ constraint: &child,
             &vocab,
         )
         .unwrap();
-        let composed = compose_constraints(
-            &parent,
+        let composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
             &[
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "LEFT"),
                     additional_placeholder_terminals: &[],
-constraint: &left,
+                    constraint: &left,
                 },
                 CompiledSubgrammarInput {
                     placeholder_terminal: terminal(&parent, "RIGHT"),
                     additional_placeholder_terminals: &[],
-constraint: &right,
+                    constraint: &right,
                 },
             ],
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
         )
         .unwrap()
         .constraint;
@@ -26117,6 +26285,124 @@ constraint: &right,
         }
         assert_eq!(actual.is_accepting(), expected.is_accepting());
         assert!(actual.is_accepting());
+    }
+
+    #[test]
+    fn same_child_divergent_continuations_match_dynamic_and_monolithic() {
+        // One placeholder called from two parent states with divergent
+        // continuations (L SUB x | R SUB y). The fused exit tokens ax/ay
+        // discriminate the return linkage: after L only ax (not ay) may
+        // complete the child, and after R only ay (not ax). A shared
+        // child-start row that resolves the return to a single call site
+        // under-admits the other site's fused token here.
+        let vocab = Vocab::new(vec![
+            (0, b"ax".to_vec()),
+            (1, b"ay".to_vec()),
+            (2, b"L".to_vec()),
+            (3, b"R".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"x".to_vec()),
+            (6, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB "x" | "R" SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt inner ::= "a";
+                nt document ::= "L" inner "x" | "R" inner "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let sub = terminal(&parent, "SUB");
+        assert!(
+            (0..parent.table.num_states)
+                .filter(|&state| parent.table.action(state, sub).is_some())
+                .count()
+                >= 2,
+            "parent must shift SUB from two divergent call-site states",
+        );
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: sub,
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+        let static_composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .unwrap()
+        .constraint;
+        let dynamic_composed = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .unwrap()
+        .constraint;
+
+        for sequence in [vec![2, 0], vec![3, 1], vec![2, 4, 5], vec![3, 4, 6]] {
+            let mut mono = monolithic.start();
+            let mut static_state = static_composed.start();
+            let mut dynamic_state = dynamic_composed.start();
+            for token in sequence.clone() {
+                assert_eq!(
+                    static_state.mask(),
+                    mono.mask(),
+                    "static mask mismatch before token {token} in {sequence:?}",
+                );
+                assert_eq!(
+                    dynamic_state.mask(),
+                    mono.mask(),
+                    "dynamic mask mismatch before token {token} in {sequence:?}",
+                );
+                static_state.commit_token(token).unwrap();
+                dynamic_state.commit_token(token).unwrap();
+                mono.commit_token(token).unwrap();
+            }
+            assert_eq!(static_state.is_accepting(), mono.is_accepting());
+            assert!(static_state.is_accepting());
+            assert_eq!(dynamic_state.is_accepting(), mono.is_accepting());
+        }
+        for sequence in [vec![2, 1], vec![3, 0]] {
+            for (name, constraint) in [
+                ("monolithic", &monolithic),
+                ("static", &static_composed),
+                ("dynamic", &dynamic_composed),
+            ] {
+                let mut state = constraint.start();
+                let mut committed = true;
+                for token in &sequence {
+                    if state.commit_token(*token).is_err() {
+                        committed = false;
+                        break;
+                    }
+                }
+                assert!(
+                    !(committed && state.is_accepting()),
+                    "{name} wrongly accepts cross-site {sequence:?}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -26204,7 +26490,7 @@ constraint: &right,
         )
         .unwrap();
         let arg_a = arg_a_parent
-            .compose_linked_children_for_test(&[("EXPR", &expr)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
         let arg_b_parent = Constraint::from_glrm_grammar(
@@ -26217,7 +26503,7 @@ constraint: &right,
         )
         .unwrap();
         let arg_b = arg_b_parent
-            .compose_linked_children_for_test(&[("EXPR", &expr)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
         let dispatch_parent = Constraint::from_glrm_grammar(
@@ -26232,7 +26518,7 @@ constraint: &right,
         )
         .unwrap();
         let dispatch = dispatch_parent
-            .compose_linked_children_for_test(&[("ARGA", &arg_a), ("ARGB", &arg_b)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("ARGA", &arg_a), ("ARGB", &arg_b)], &vocab)
             .unwrap();
 
         // The two argument children both expose the same nested `expr` as a
@@ -26250,11 +26536,11 @@ constraint: &right,
         .unwrap();
         let composed = outer_parent
             .clone()
-            .compose_linked_children_for_test(&[("CALL", &dispatch)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("CALL", &dispatch)], &vocab)
             .unwrap();
         let loaded_dispatch = Constraint::load(&dispatch.save()).unwrap();
         let composed_from_loaded = outer_parent
-            .compose_linked_children_for_test(&[("CALL", &loaded_dispatch)], &vocab)
+            .compose_linked_children_for_test_flattened(&[("CALL", &loaded_dispatch)], &vocab)
             .unwrap();
 
         let monolithic = Constraint::from_glrm_grammar(
@@ -26330,7 +26616,7 @@ constraint: &right,
         )
         .unwrap();
         let composed = outer_parent
-            .compose_linked_children_for_test(&[("MIDDLE", &middle)], &vocab)
+            .compose_linked_children_for_test_dynamic(&[("MIDDLE", &middle)], &vocab)
             .unwrap();
         let monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -26396,18 +26682,36 @@ constraint: &right,
             &vocab,
         )
         .unwrap();
-        let composition = compose_constraints(
-            &outer_parent,
-            &[CompiledSubgrammarInput {
-                placeholder_terminal: terminal(&outer_parent, "MIDDLE"),
-                additional_placeholder_terminals: &[],
-constraint: &middle,
-            }],
+        // Nested link: the middle component is itself a segmented
+        // composition, so the outer link uses the exact Dynamic boundary
+        // backend (nested static linking is Phase 4). Behavior must still
+        // match the monolithic constraint exactly, including through
+        // save/load.
+        let nested_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&outer_parent, "MIDDLE"),
+            additional_placeholder_terminals: &[],
+            constraint: &middle,
+        }];
+        // Requesting static shards for a nested link must decline loudly,
+        // never silently succeed as dynamic.
+        let declined = compose_constraints_owned_parent_segmented(
+            outer_parent.clone(),
+            &nested_inputs,
             &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        );
+        assert!(
+            declined.is_err(),
+            "nested static link must decline loudly, got success",
+        );
+        let composed = compose_constraints_owned_parent_segmented(
+            outer_parent.clone(),
+            &nested_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
         )
-        .unwrap();
-        let middle_terminal_offset = composition.terminal_offsets[1];
-        let composed = composition.constraint;
+        .unwrap()
+        .constraint;
         let monolithic = Constraint::from_glrm_grammar(
             r#"
                 start document;
@@ -26417,22 +26721,6 @@ constraint: &middle,
             &vocab,
         )
         .unwrap();
-
-        let mut parser = ParserGSS::from_stacks(&[(
-            vec![0],
-            TerminalsDisallowed::new(),
-        )]);
-        parser = advance_stacks(&composed.table, &parser, terminal(&outer_parent, "X"));
-        parser = advance_stacks(
-            &composed.table,
-            &parser,
-            middle_terminal_offset + terminal(&middle, "subgrammar0::a"),
-        );
-        parser = advance_stacks(&composed.table, &parser, terminal(&outer_parent, "!"));
-        assert!(
-            stacks_finished(&composed.table, &parser),
-            "nested nullable composed table must accept the nonempty child path",
-        );
 
         for sequence in [vec![0], vec![1], vec![2, 4], vec![2, 3, 4]] {
             let mut expected = monolithic.start();
