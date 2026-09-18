@@ -2547,14 +2547,16 @@ mod tests {
             constraint: &child,
         }];
         let composed = low_level_compose(&parent, &inputs);
-        let error = build_walk_static_boundary_link(&WalkStaticLinkInputs {
+        let error = match build_walk_static_boundary_link(&WalkStaticLinkInputs {
             parent: &parent,
             children: &inputs,
             vocab: &vocab,
             static_components: None,
             expected_terminal_offsets: &composed.table.terminal_offsets,
-        })
-        .expect_err("nullable static links must decline loudly (general C* is future work)");
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("nullable static links must decline loudly (general C* is future work)"),
+        };
         assert!(
             error.contains("nullable"),
             "decline must name nullability, got: {error}",
