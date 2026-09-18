@@ -2001,4 +2001,237 @@ mod tests {
         }
         assert_eq!(total_mismatches, 0, "walk-shard sweep must match DynamicDirect on every link");
     }
+
+    /// Called-frame non-equivalence pin (Phase 2b reconciliation audit).
+    ///
+    /// The compact segmented runtime evaluates boundary shards against live
+    /// GSS stacks in the leaf/provider coordinate, where an in-progress call
+    /// appears as Call-pushed frames `[.., parent_target, child_start, ..]`.
+    /// The spliced composed table speaks a different calling convention (child
+    /// start overlaid on callers, returns via reduce+goto through caller
+    /// states, fresh appended child-state identities), so its template labels
+    /// never match called frames: a splice-published shard systematically
+    /// under-admits wherever the live stack holds an active call. The
+    /// provider-materialized table speaks the live coordinate with call-site
+    /// guards and is exact here. The Phase 2 sweep stayed green only because
+    /// no corpus position needed a child-shard admission (the full sweep
+    /// passes with every child shard removed, outer with zero shards).
+    ///
+    /// Fixture: one placeholder called from two states with divergent
+    /// continuations (`L SUB x | R SUB y`, child `a`), fused exit tokens
+    /// `ax`/`ay` discriminated by call-site guards. Asserts DynamicDirect
+    /// admits each fused token at its own call site, the provider-published
+    /// shard matches DynamicDirect exactly, and the splice-published shard
+    /// misses both fused tokens. If the splice side ever starts admitting
+    /// them, the coordinate story changed: revisit this pin and the audit.
+    #[test]
+    fn splice_boundary_shard_underadmits_called_frames_divergent() {
+        fn admits(mask: &[u32], token: u32) -> bool {
+            mask.get(token as usize / 32)
+                .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+        }
+
+        let vocab = Vocab::new(vec![
+            (0, b"ax".to_vec()),
+            (1, b"ay".to_vec()),
+            (2, b"L".to_vec()),
+            (3, b"R".to_vec()),
+            (4, b"a".to_vec()),
+            (5, b"x".to_vec()),
+            (6, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB "x" | "R" SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+        let dynamic = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+
+        let composed = low_level_compose(&parent, &inputs);
+        let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
+        let disallowed = compute_disallowed_follows(&grammar);
+        let counts: Vec<u32> = vec![
+            parent.tokenizer.num_states(),
+            child.tokenizer.num_states(),
+        ];
+        let (built, _) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
+            merged_tokenizer: &composed.tokenizer,
+            vocab: &vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: composed.ignore_canonical,
+            terminal_offsets: &composed.table.terminal_offsets,
+            tokenizer_offsets: &composed.tokenizer_offsets,
+            component_state_counts: &counts,
+            retain_parent_non_crossing_paths: inputs
+                .iter()
+                .any(|child| child.constraint.table.embedded_start_nullable()),
+        })
+        .expect("walk shards");
+        assert_eq!(built.len(), 1, "only the child shard crosses here");
+        assert_eq!(built[0].start_component, 1);
+        assert!(
+            unbound_slot_terminals(&parent, &["SUB"]).is_empty()
+                && unbound_slot_terminals(&child, &[]).is_empty(),
+            "fixture has no unbound slots; emptying must not be involved",
+        );
+        let (splice_table, _) =
+            prepare_spliced_boundary_table("divergent", &composed, &[]);
+        let global_ignores = component_ignores_are_globally_erasable(&parent, &inputs);
+        let provider_table = Arc::new(
+            link_provider_boundary_table(
+                &parent,
+                &inputs,
+                &composed.table.terminal_offsets,
+                composed.table.table.num_terminals,
+                global_ignores,
+            )
+            .expect("provider boundary table"),
+        );
+
+        let publish_against = |table: &Arc<GLRTable>| {
+            let shard = &built[0];
+            let work = WalkBoundaryShardWork {
+                start_component: shard.start_component as u32,
+                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa.clone()),
+                id_map: shard.output.id_map.clone(),
+                candidate_tokens: shard
+                    .candidate_tokens
+                    .iter()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .into(),
+            };
+            let (one, _) =
+                publish_walk_boundary_shard_work(work, table, &composed.tokenizer_offsets, &counts)
+                    .expect("publish walk shard");
+            let mut installed = dynamic.clone();
+            install_published_static_boundary_shards(
+                installed.static_dynamic_overlay.as_mut().expect("overlay"),
+                vec![one],
+            )
+            .expect("install");
+            assert!(
+                installed.uses_compact_segmented_parser_runtime(),
+                "installed composition must stay on the compact runtime",
+            );
+            installed
+        };
+        let splice_static = publish_against(&splice_table);
+        let provider_static = publish_against(&provider_table);
+
+        // After L: fused `ax` (token 0) must be admitted; after R: `ay` (1).
+        for (commit, fused, sibling, site) in [(2u32, 0u32, 1u32, "L"), (3u32, 1u32, 0u32, "R")] {
+            let mut st_dyn = dynamic.start();
+            let mut st_splice = splice_static.start();
+            let mut st_provider = provider_static.start();
+            st_dyn.commit_token(commit).unwrap();
+            st_splice.commit_token(commit).unwrap();
+            st_provider.commit_token(commit).unwrap();
+            let mask_dyn = st_dyn.mask();
+            let mask_splice = st_splice.mask();
+            let mask_provider = st_provider.mask();
+            assert!(
+                admits(&mask_dyn, fused),
+                "dynamic must admit fused token {fused} after {site}",
+            );
+            assert!(
+                !admits(&mask_dyn, sibling),
+                "dynamic must reject sibling fused token {sibling} after {site}",
+            );
+            assert_eq!(
+                mask_provider, mask_dyn,
+                "provider shard must match DynamicDirect after {site}",
+            );
+            assert!(
+                !admits(&mask_splice, fused),
+                "splice shard under-admits fused token {fused} after {site} \
+                 (called-frame labels unmatched); if this now admits, revisit the audit pin",
+            );
+        }
+    }
+
+    /// Production-outer decline pin (Phase 2b reconciliation audit).
+    ///
+    /// The provider-materialized boundary table's `exact_control_elimination`
+    /// diverges on the selected10 outer (core+dispatch) link at the known
+    /// row-918 / terminal-3 cell (`state=918 terminal=3`, guard-differentiated
+    /// cyclic fan-out over a ~10-state reduce cycle — the identical cell the
+    /// old segmented-static path hung on), so current production static
+    /// composition DECLINES the outer link loudly via the convergence cap
+    /// instead of linking it. Phase 2 linked outer exactly via the splice in
+    /// ~7.6 s; that object is inexact on called frames (see the divergent pin
+    /// above), so neither table object currently serves outer statically.
+    ///
+    /// If this test observes convergence (Ok), the elimination pathology is
+    /// fixed and the production contract can be revisited; the panic message
+    /// says so. Fast decline (well under the 10 s wall cap) is part of the
+    /// pin: the budget must fail fast, never hang.
+    #[test]
+    #[ignore]
+    fn provider_boundary_table_diverges_on_selected10_outer() {
+        let fixture = load_selected10_outer();
+        let children = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
+            additional_placeholder_terminals: &[],
+            constraint: &fixture.dispatch,
+        }];
+        let global_ignores = component_ignores_are_globally_erasable(&fixture.core, &children);
+        let started = Instant::now();
+        let result = link_provider_boundary_table(
+            &fixture.core,
+            &children,
+            &fixture.composed.table.terminal_offsets,
+            fixture.composed.table.table.num_terminals,
+            global_ignores,
+        );
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        match result {
+            Ok(table) => panic!(
+                "provider boundary table unexpectedly converged on outer: states={} terms={} \
+                 controls={} ms={ms:.1}; the elimination pathology is fixed — update this pin \
+                 and revisit the production static-link contract",
+                table.num_states,
+                table.num_terminals,
+                table.control_terminals.len(),
+            ),
+            Err(error) => {
+                eprintln!("BOUNDARY_PROVIDER_DIVERGENCE ms={ms:.1} error={error}");
+                assert!(
+                    error.contains("state=918")
+                        && error.contains("terminal=3")
+                        && error.contains("stack_effect_visits"),
+                    "outer decline must be the row-918 convergence cap, got: {error}",
+                );
+                assert!(
+                    ms < 60_000.0,
+                    "convergence cap must fail fast, took {ms:.1} ms",
+                );
+            }
+        }
+    }
 }
