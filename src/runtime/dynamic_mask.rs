@@ -5693,6 +5693,7 @@ pub(crate) fn dynamic_mask_state_has_cached_result(state: &ConstraintState<'_>) 
 
 
 pub(crate) fn fill_mask_dynamic(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    crate::compiler::boundary_transfer::strict_static_trap_dynamic("fill_mask_dynamic");
     assert!(
         !state.constraint.uses_compact_segmented_parser_runtime(),
         "unified dynamic walker cannot consume recursive provider coordinates",
@@ -5706,6 +5707,7 @@ pub(crate) fn fill_mask_dynamic_bounded(
     buf: &mut [u32],
     timeout_ms: u64,
 ) -> Result<(), String> {
+    crate::compiler::boundary_transfer::strict_static_trap_dynamic("fill_mask_dynamic_bounded");
     if state.constraint.uses_compact_segmented_parser_runtime() {
         return Err(
             "bounded unified dynamic walker cannot consume recursive provider coordinates"
@@ -5726,6 +5728,7 @@ pub(crate) fn fill_mask_dynamic_bounded(
 /// baseline. The baseline does not prune traversal: the strict walker still
 /// visits the complete vocabulary and combines the exact result afterward.
 pub(crate) fn or_mask_dynamic_additions(state: &ConstraintState<'_>, buf: &mut [u32]) {
+    crate::compiler::boundary_transfer::strict_static_trap_dynamic("or_mask_dynamic_additions");
     assert!(
         !state.constraint.uses_compact_segmented_parser_runtime(),
         "unified dynamic additions cannot consume recursive provider coordinates",
@@ -5742,6 +5745,9 @@ pub(crate) fn or_mask_dynamic_candidate_additions(
     buf: &mut [u32],
     candidate_mask: &[u32],
 ) {
+    crate::compiler::boundary_transfer::strict_static_trap_dynamic(
+        "or_mask_dynamic_candidate_additions",
+    );
     assert!(
         !state.constraint.uses_compact_segmented_parser_runtime(),
         "unified dynamic candidate additions cannot consume recursive provider coordinates",

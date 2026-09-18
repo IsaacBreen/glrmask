@@ -1319,6 +1319,22 @@ pub(crate) fn strict_static_dynamic_trap_enabled() -> bool {
     std::env::var_os("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC").is_some()
 }
 
+/// Strict-static trap for every dynamic mask fallback reachable from a
+/// claimed supported static path. Call at the top of each dynamic mask
+/// entry point (`or_recursive_dynamic_full_walk_exact`,
+/// `fill_recursive_mask_by_exact_full_walk`, unified `fill_mask_dynamic` /
+/// `or_mask_dynamic_additions` / candidate additions, bounded variants).
+/// Env-gated so exact dynamic compositions are unaffected; strict-static
+/// tests set the var and any firing fallback panics loudly with its caller
+/// name instead of contributing hidden dynamic admissions.
+pub(crate) fn strict_static_trap_dynamic(caller: &str) {
+    if strict_static_dynamic_trap_enabled() {
+        panic!(
+            "GLRMASK_STRICT_STATIC_TRAP_DYNAMIC: dynamic mask fallback '{caller}' fired on a strict-static path"
+        );
+    }
+}
+
 pub(crate) fn eof_terminal() -> TerminalID {
     EOF
 }
@@ -1508,6 +1524,25 @@ mod tests {
         assert!(validate_shared_child_links(&links).is_err());
         let agreeing = vec![links[0]];
         assert!(validate_shared_child_links(&agreeing).is_ok());
+    }
+
+    #[test]
+    fn strict_static_trap_fires_on_every_dynamic_fallback_entry() {
+        // The trap itself is env-gated so genuine dynamic compositions are
+        // unaffected; strict-static tests set the var and every dynamic mask
+        // fallback panics loudly instead of contributing hidden admissions.
+        // Serialized with all other process-env mutation in the test build.
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        unsafe { std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1") };
+        assert!(strict_static_dynamic_trap_enabled());
+        let fired = std::panic::catch_unwind(|| strict_static_trap_dynamic("test_caller"));
+        unsafe { std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC") };
+        assert!(
+            fired.is_err(),
+            "strict-static trap must panic on a dynamic fallback entry point"
+        );
+        assert!(!strict_static_dynamic_trap_enabled());
+        strict_static_trap_dynamic("test_caller");
     }
 
     #[test]
