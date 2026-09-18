@@ -980,6 +980,10 @@ pub(crate) fn compile_signed_shard_parser(
         ));
     }
     arena.set_start_states(vec![start_port]);
+    // Exact per-part contribution counters: appended template states from
+    // ordinary edges vs control fragments (log-only size attribution).
+    let mut ordinary_appended_states: usize = 0;
+    let mut control_appended_states: usize = 0;
     // Ordinary terminal edges: one fragment clone per edge, entered from every
     // depth (shared body, single exit — sound: entries converge, the exit
     // continuation is identical, so no cross-continuation leakage), exiting to
@@ -1023,10 +1027,6 @@ pub(crate) fn compile_signed_shard_parser(
     // against the full build isolates the control-closure contribution. The
     // result is not a valid shard (controls required for exactness).
     let no_controls_diagnostic = std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
-    // Exact per-part contribution counters: appended template states from
-    // ordinary edges vs control fragments (log-only size attribution).
-    let mut ordinary_appended_states: usize = 0;
-    let mut control_appended_states: usize = 0;
     if !no_controls_diagnostic {
         for (index, _) in shard_dwa.states().iter().enumerate() {
             for depth in 0..depths - 1 {
