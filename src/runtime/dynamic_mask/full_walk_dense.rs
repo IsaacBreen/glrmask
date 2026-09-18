@@ -5225,7 +5225,7 @@ fn try_full_walk_mask_with_table_from_initial<
         let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(1000);
+            .unwrap_or(500);
         let ordinary_ops = trie.full_walk_ops().len();
         let profitable = vocab
             .llg_master_residual_ops(decision.safe_radius, decision.whitespace)

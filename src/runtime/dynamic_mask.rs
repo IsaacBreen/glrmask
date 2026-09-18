@@ -52,6 +52,16 @@ const FULL_WALK_HOT_SLOW: u8 = 253;
 const FULL_WALK_HOT_DEAD: u8 = 254;
 const FULL_WALK_HOT_UNKNOWN: u8 = 255;
 
+#[inline]
+fn env_flag(name: &str, default: bool) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            !matches!(normalized.as_str(), "" | "0" | "false" | "no" | "off")
+        })
+        .unwrap_or(default)
+}
+
 /// Bound parser-conditioned scalar liveness checks during exact config walks.
 ///
 /// Four consecutive non-pruning checks was neutral in the first 1k corpus and
@@ -2229,10 +2239,9 @@ fn try_full_walk_mask(
                 lexer_scan_cache.profile_intern_hits,
                 lexer_scan_cache.profile_intern_new,
             );
-            let hot_enabled =
-                std::env::var_os("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE").is_some();
+            let hot_enabled = env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE", true);
             let hot_persist_key = (hot_enabled
-                && std::env::var_os("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST").is_some())
+                && env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST", false))
                 .then(|| {
                     (
                         lexer_scan_cache.tokenizer() as *const Tokenizer as usize,
@@ -3027,11 +3036,11 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 // the master trie only when its exact residual strict-walk volume
                 // is sufficiently smaller than the ordinary trie.  Keep the
                 // threshold runtime-configurable while we stabilize it across the
-                // canonical population; 1000 means residual <= ordinary.
+                // canonical population; 500 means residual <= half ordinary.
                 let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(1000);
+                    .unwrap_or(500);
                 let profitable = residual_ops.is_some_and(|residual| {
                     residual.saturating_mul(1000)
                         <= ordinary_ops.saturating_mul(max_permille)
@@ -5704,10 +5713,10 @@ fn dynamic_mask_lookup_query(
         entries: SmallVec::new(),
     };
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-    let virtual_dense_cache_enabled = std::env::var_os(
+    let virtual_dense_cache_enabled = env_flag(
         "GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CACHE_KEY",
-    )
-    .is_some();
+        true,
+    );
     let max_token_byte_len = virtual_dense_cache_enabled.then(|| vocab.max_token_byte_len());
     let observation_cache_enabled =
         std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
