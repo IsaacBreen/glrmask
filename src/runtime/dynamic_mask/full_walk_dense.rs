@@ -1052,27 +1052,6 @@ impl LlgMasterDecision {
     }
 }
 
-/// Exact first-byte language of a proof slice. Only bytes whose one-byte
-/// derivative can still reach an accepting slice word are relevant here.
-/// This is deliberately computed from the DFA rather than from the bytes that
-/// occur anywhere inside whole slice tokens (UTF-8 continuation bytes, for
-/// example, are not valid first bytes).
-#[inline]
-fn llg_slice_first_bytes(
-    slice: &crate::runtime::artifact::DynamicMaskSliceTrie,
-) -> U8Set {
-    let dfa = slice.dfa();
-    let start = dfa.start_state();
-    let mut result = U8Set::empty();
-    for byte in 0u16..=255 {
-        let byte = byte as u8;
-        if dfa.can_reach_accepting(dfa.step(start, byte)) {
-            result.insert(byte);
-        }
-    }
-    result
-}
-
 /// Prove the exact master safe+/whitespace certificate while every original
 /// lexer root still carries its exact source state. This must run before any
 /// same-parser lexer-root union, because the union coordinate intentionally
@@ -1170,8 +1149,8 @@ fn precollapse_master_decision(
     // per surviving decision rather than rescanning all 256 bytes for every
     // root and again for the radius fallback. Keep them after the cheap lexical
     // gate above so proof-ineligible states pay none of this work.
-    let safe_plus_first_bytes = llg_slice_first_bytes(safe_plus_slice);
-    let whitespace_first_bytes = llg_slice_first_bytes(whitespace_slice);
+    let safe_plus_first_bytes = safe_plus_slice.first_bytes();
+    let whitespace_first_bytes = whitespace_slice.first_bytes();
 
     let (mut parser_cache, root_parser_nodes) =
         FullWalkParserCache::from_roots(root_branches, lexer_state_count, profile_mask);
@@ -1594,14 +1573,14 @@ pub(super) fn try_scalar_dispatch(
                         }
                     }
                 } else {
-                    for (byte, _) in tokenizer.transitions_from(raw_state) {
-                        root_first_bytes.insert(byte);
-                    }
+                    root_first_bytes |= tokenizer.state_first_bytes(raw_state);
                 }
             }
         }
-        llg_slice_first_bytes(safe_plus).is_subset(&root_first_bytes)
-            || llg_slice_first_bytes(whitespace).is_subset(&root_first_bytes)
+        safe_plus
+            .first_bytes()
+            .is_subset(&root_first_bytes)
+            || whitespace.first_bytes().is_subset(&root_first_bytes)
     } else {
         false
     };
@@ -1651,12 +1630,9 @@ pub(super) fn try_scalar_dispatch(
     } else {
         trie
     };
-    let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots() else {
+    let Some(reset_states) = tokenizer.sorted_deterministic_dispatch_roots() else {
         return Ok(false);
     };
-    let mut reset_states = dispatch_roots.to_vec();
-    reset_states.sort_unstable();
-    reset_states.dedup();
     let extension = if transitions16.is_some()
         && let Some(cached) = vocab.cached_dense_subset16(&reset_states)
     {

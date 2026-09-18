@@ -1159,6 +1159,17 @@ pub struct Tokenizer {
     /// vocabulary node or build stage.
     #[serde(default, skip)]
     pub(super) scalar_deterministic_dispatch_cache: OnceLock<bool>,
+    /// Sorted/deduplicated reset-dispatch roots. The dynamic scalar-dispatch
+    /// mask path needs this order on every mask; cache the pure function of
+    /// the immutable reset structure instead of reallocating/sorting per mask.
+    #[serde(default, skip)]
+    pub(super) sorted_dispatch_roots_cache: OnceLock<Arc<Vec<u32>>>,
+    /// Per-state first-byte sets (union of `transitions_from` bytes). The
+    /// dynamic pre-collapse gate unions these over root physical states on
+    /// every scalar mask; per-state lazy cells avoid both per-mask transition
+    /// rescans and a first-mask full-table build spike.
+    #[serde(default, skip)]
+    pub(super) state_first_bytes_cache: OnceLock<Arc<[OnceLock<U8Set>]>>,
 }
 
 /// Exact dynamic residual component whose bounded-code liveness proof has
@@ -1943,6 +1954,8 @@ pub mod artifact_serde {
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
                 scalar_deterministic_dispatch_cache: OnceLock::new(),
+                sorted_dispatch_roots_cache: OnceLock::new(),
+                state_first_bytes_cache: OnceLock::new(),
             });
         }
         if compact_artifact_serde_enabled() {
@@ -1972,6 +1985,8 @@ pub mod artifact_serde {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 
@@ -2816,6 +2831,8 @@ pub mod artifact_serde {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 
@@ -4236,6 +4253,8 @@ pub mod artifact_serde {
             transition_count_cache,
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache,
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         };
         if let Some(started) = huge_started {
             eprintln!("[glrmask/profile][tks3] total_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0);
@@ -4621,6 +4640,8 @@ pub mod artifact_serde {
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
                 scalar_deterministic_dispatch_cache,
+                sorted_dispatch_roots_cache: OnceLock::new(),
+                state_first_bytes_cache: OnceLock::new(),
             });
         }
 
@@ -4782,6 +4803,8 @@ pub mod artifact_serde {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 }
@@ -5065,6 +5088,8 @@ pub mod compact_artifact_serde {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 }
@@ -5607,6 +5632,8 @@ mod packed_artifact_serde {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 }
@@ -7079,6 +7106,8 @@ impl Tokenizer {
         let _ = self.transition_count_cache.take();
         let _ = self.forced_minimized_state_count_cache.take();
         let _ = self.scalar_deterministic_dispatch_cache.take();
+        let _ = self.sorted_dispatch_roots_cache.take();
+        let _ = self.state_first_bytes_cache.take();
     }
 
     /// Exact byte successors of one epsilon-closed subset, grouped sparsely
@@ -7397,6 +7426,8 @@ impl Tokenizer {
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
                 scalar_deterministic_dispatch_cache: OnceLock::new(),
+                sorted_dispatch_roots_cache: OnceLock::new(),
+                state_first_bytes_cache: OnceLock::new(),
             },
             source_subsets,
             source_state_offset: u32::MAX,
@@ -7910,6 +7941,8 @@ impl Tokenizer {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         };
         tokenizer.invalidate_derived_caches();
         Some((
@@ -8067,6 +8100,8 @@ impl Tokenizer {
                 transition_count_cache: OnceLock::new(),
                 forced_minimized_state_count_cache: OnceLock::new(),
                 scalar_deterministic_dispatch_cache: OnceLock::new(),
+                sorted_dispatch_roots_cache: OnceLock::new(),
+                state_first_bytes_cache: OnceLock::new(),
             },
             old_to_new,
         ))
@@ -8219,6 +8254,8 @@ impl Tokenizer {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         })
     }
 
@@ -8468,6 +8505,8 @@ impl Tokenizer {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         }
     }
 
@@ -8501,6 +8540,8 @@ impl Tokenizer {
             transition_count_cache: OnceLock::new(),
             forced_minimized_state_count_cache: OnceLock::new(),
             scalar_deterministic_dispatch_cache: OnceLock::new(),
+            sorted_dispatch_roots_cache: OnceLock::new(),
+            state_first_bytes_cache: OnceLock::new(),
         }
     }
 
@@ -12774,6 +12815,45 @@ impl Tokenizer {
     #[inline]
     pub fn has_deterministic_dispatch(&self) -> bool {
         self.deterministic_dispatch_roots().is_some()
+    }
+
+    /// Sorted/deduplicated reset-dispatch roots, cached. Pure function of the
+    /// immutable reset structure; the dynamic scalar-dispatch mask path needs
+    /// this order on every mask.
+    pub fn sorted_deterministic_dispatch_roots(&self) -> Option<Arc<Vec<u32>>> {
+        let roots = self.deterministic_dispatch_roots()?;
+        Some(Arc::clone(self.sorted_dispatch_roots_cache.get_or_init(|| {
+            let mut sorted = roots.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            Arc::new(sorted)
+        })))
+    }
+
+    /// First-byte set of one physical tokenizer state (union of
+    /// `transitions_from` bytes), cached per state on first touch. Used by the
+    /// dynamic pre-collapse gate instead of rescanning transitions per mask.
+    /// States with epsilon transitions are included as ordinary rows; callers
+    /// that must skip epsilon states keep their own filter.
+    pub fn state_first_bytes(&self, state: u32) -> U8Set {
+        let table = self.state_first_bytes_cache.get_or_init(|| {
+            Arc::from(
+                (0..self.num_states())
+                    .map(|_| OnceLock::new())
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            )
+        });
+        let Some(cell) = table.get(state as usize) else {
+            return U8Set::empty();
+        };
+        *cell.get_or_init(|| {
+            let mut bytes = U8Set::empty();
+            for (byte, _) in self.transitions_from(state) {
+                bytes.insert(byte);
+            }
+            bytes
+        })
     }
 
     /// Return whether selecting one reset-dispatch root leaves a genuinely

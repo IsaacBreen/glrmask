@@ -3143,6 +3143,10 @@ pub(crate) struct DynamicMaskSliceTrie {
     /// `slice_max_token_byte_len` is sufficient to skip every slice token.
     slice_token_bytes: U8Set,
     slice_max_token_byte_len: u32,
+    /// First-byte set of the slice DFA start state. Immutable per slice;
+    /// cached because the dynamic pre-collapse gate needs it on every mask.
+    #[serde(default, skip)]
+    first_bytes: OnceLock<U8Set>,
 }
 
 impl DynamicMaskSliceTrie {
@@ -3154,6 +3158,29 @@ impl DynamicMaskSliceTrie {
     #[inline(always)]
     pub(crate) fn dfa(&self) -> &VocabPartitionDfa {
         self.dfa.as_ref()
+    }
+
+    /// First-byte set of the slice DFA start state: the exact first-byte
+    /// language of this proof slice. Only bytes whose one-byte derivative
+    /// can still reach an accepting slice word are relevant here. This is
+    /// deliberately computed from the DFA rather than from the bytes that
+    /// occur anywhere inside whole slice tokens (UTF-8 continuation bytes,
+    /// for example, are not valid first bytes). Immutable per slice;
+    /// computed once because the dynamic pre-collapse gate needs it on
+    /// every mask.
+    pub(crate) fn first_bytes(&self) -> U8Set {
+        *self.first_bytes.get_or_init(|| {
+            let dfa = self.dfa.as_ref();
+            let start = dfa.start_state();
+            let mut result = U8Set::empty();
+            for byte in 0u16..=255 {
+                let byte = byte as u8;
+                if dfa.can_reach_accepting(dfa.step(start, byte)) {
+                    result.insert(byte);
+                }
+            }
+            result
+        })
     }
 
     #[inline(always)]
@@ -4328,6 +4355,7 @@ impl DynamicMaskVocab {
                 slice_original_token_words,
                 slice_token_bytes,
                 slice_max_token_byte_len,
+                first_bytes: OnceLock::new(),
             }));
         }
         self.llg_slice_leftovers = Arc::new(built);
