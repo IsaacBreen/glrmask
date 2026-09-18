@@ -260,7 +260,9 @@ fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u
     }
 
     let mut dynamic_mask = vec![0u32; state.constraint.mask_len()];
-    state.fill_mask_dynamic(&mut dynamic_mask);
+    crate::compiler::boundary_transfer::permit_strict_static_dynamic(|| {
+        state.fill_mask_dynamic(&mut dynamic_mask)
+    });
     if static_mask == dynamic_mask {
         return;
     }
@@ -4266,6 +4268,14 @@ impl<'a> ConstraintState<'a> {
                 }
             }
             if needs_direct_dynamic {
+                // A DynamicDirect shard owned a live stack on a path that also
+                // evaluated static shards. The per-shard arm above already
+                // traps loudly under the strict flag; this second trap names
+                // the unified/recursive walker fallback itself so a missed arm
+                // cannot silently contribute exact dynamic admissions.
+                crate::compiler::boundary_transfer::strict_static_trap_dynamic(
+                    "segmented_boundary_needs_direct_dynamic",
+                );
                 if self.constraint.uses_compact_segmented_parser_runtime() {
                     self.or_recursive_dynamic_full_walk_exact(buf);
                 } else {
@@ -4302,8 +4312,9 @@ impl<'a> ConstraintState<'a> {
     /// determined by their byte spelling. The result is the complete exact
     /// recursive language and can either fill a mask or be ORed into a baseline.
     fn or_recursive_dynamic_full_walk_exact(&self, buf: &mut [u32]) {
-        crate::compiler::boundary_transfer::strict_static_trap_dynamic(
+        crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
             "or_recursive_dynamic_full_walk_exact",
+            self.constraint.uses_dynamic_runtime(),
         );
         let mut buffers = CommitBuffers::default();
         let vocab = self.constraint.dynamic_mask_vocab_for_runtime();
@@ -4386,8 +4397,9 @@ impl<'a> ConstraintState<'a> {
     /// project a recursive GSS; it stays entirely in scoped provider
     /// coordinates and does not use the transitional outer tokenizer/table.
     pub(crate) fn fill_recursive_mask_by_exact_full_walk(&self, buf: &mut [u32]) {
-        crate::compiler::boundary_transfer::strict_static_trap_dynamic(
+        crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
             "fill_recursive_mask_by_exact_full_walk",
+            self.constraint.uses_dynamic_runtime(),
         );
         buf.fill(0);
         self.or_recursive_dynamic_full_walk_exact(buf);
@@ -5105,7 +5117,22 @@ impl<'a> ConstraintState<'a> {
             // evaluator so >128 / shared-tail path counts stay exact with no
             // decline and no hidden dynamic fallback.
             let traversal_complete = if gss.is_single_path() {
-                gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                // Isolated static-boundary profiling (Priority 4): single-path
+                // evaluations dominate ordinary states; time them separately
+                // from DynamicDirect and commits.
+                let single_started =
+                    std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
+                let mut single_paths = 0usize;
+                // Phase breakdown for hotspot attribution on slow evaluations
+                // (allowed = exclusion accumulator projection, walk = DWA
+                // product walk, admit = internal->original mapping/filter).
+                let mut phase_allowed_ns: u64 = 0;
+                let mut phase_walk_ns: u64 = 0;
+                let mut phase_admit_ns: u64 = 0;
+                let mut single_depth = 0usize;
+                let complete_single = gss.for_each_stack_top_first_bounded(128, |top_first, acc| {
+                    single_paths += 1;
+                    single_depth = single_depth.max(top_first.len());
                 if recursive_parser {
                     if let Some(start_component) = start_component {
                         match top_first.first().copied() {
@@ -5128,6 +5155,7 @@ impl<'a> ConstraintState<'a> {
                         _ => {}
                     }
                 }
+                let phase_mark = single_started.is_some().then(Instant::now);
                 let Some(allowed) =
                     self.terminals_disallowed_to_dense_acc(acc, global_tokenizer_state)
                 else {
@@ -5138,11 +5166,18 @@ impl<'a> ConstraintState<'a> {
                     complete = false;
                     return;
                 };
+                if let Some(mark) = phase_mark {
+                    phase_allowed_ns += elapsed_ns(mark);
+                }
                 if !recursive_parser
                     && let Some(compact) = boundary.compact_parser_dwa.as_ref()
                 {
                     let boundary_tsid = boundary_tsids[0];
+                    let walk_mark = single_started.is_some().then(Instant::now);
                     let mut accepted = accepted_mask_for_stack(compact, boundary_tsid, top_first);
+                    if let Some(mark) = walk_mark {
+                        phase_walk_ns += elapsed_ns(mark);
+                    }
                     if debug_boundary {
                         let internal = (0..compact.token_count as u32)
                             .filter(|&token| accepted & (1u64 << token) != 0)
@@ -5159,6 +5194,7 @@ impl<'a> ConstraintState<'a> {
                             originals,
                         );
                     }
+                    let admit_mark = single_started.is_some().then(Instant::now);
                     while accepted != 0 {
                         let internal_token = accepted.trailing_zeros();
                         accepted &= accepted - 1;
@@ -5179,8 +5215,16 @@ impl<'a> ConstraintState<'a> {
                             }
                         }
                     }
+                    if let Some(mark) = admit_mark {
+                        phase_admit_ns += elapsed_ns(mark);
+                    }
                 } else {
+                    let walk_mark = single_started.is_some().then(Instant::now);
                     let accepted = accepted_for_stack(parser_dwa, top_first);
+                    if let Some(mark) = walk_mark {
+                        phase_walk_ns += elapsed_ns(mark);
+                    }
+                    let admit_mark = single_started.is_some().then(Instant::now);
                     let mut debug_internal = Vec::new();
                     let mut debug_originals = Vec::new();
                     for &boundary_tsid in &boundary_tsids {
@@ -5214,6 +5258,9 @@ impl<'a> ConstraintState<'a> {
                             }
                         }
                     }
+                    if let Some(mark) = admit_mark {
+                        phase_admit_ns += elapsed_ns(mark);
+                    }
                     if debug_boundary {
                         debug_internal.sort_unstable();
                         debug_internal.dedup();
@@ -5228,7 +5275,14 @@ impl<'a> ConstraintState<'a> {
                         );
                     }
                 }
-                })
+                });
+                if let Some(single_started) = single_started {
+                    let total_ns = elapsed_ns(single_started);
+                    eprintln!(
+                        "[glrmask/profile][static_boundary_dag] gss_nodes=0 upper_memo=0 lower_memo=0 groups=0 dwa_steps=0 weight_unions=0 weight_intersections=0 total_ns={total_ns} complete={complete} compact=single paths={single_paths} depth={single_depth} allowed_ns={phase_allowed_ns} walk_ns={phase_walk_ns} admit_ns={phase_admit_ns}",
+                    );
+                }
+                complete_single
             } else {
                 // Exact memoized DAG x DWA product evaluation (no path cap).
                 // Groups preserve the per-path eligibility correlation:
@@ -7714,8 +7768,13 @@ impl<'a> ConstraintState<'a> {
         if authoritative_dynamic_direct {
             // DynamicDirect already computes the complete exact composed
             // language. Do not first construct component A masks only to OR the
-            // same full language over them again.
-            self.fill_mask_dynamic(mask);
+            // same full language over them again. This is explicitly dynamic
+            // evaluation (e.g. a differential reference side), so it runs
+            // with a strict-static permit; static-side fallbacks below must
+            // never be wrapped.
+            crate::compiler::boundary_transfer::permit_strict_static_dynamic(|| {
+                self.fill_mask_dynamic(mask)
+            });
             self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
@@ -7730,7 +7789,13 @@ impl<'a> ConstraintState<'a> {
             // coordinate, so fall back to the complete-vocabulary recursive
             // radix walk rather than escaping to the transitional outer
             // parser/tokenizer. Historical materialized segmented runtimes use
-            // the ordinary strict dynamic full walker.
+            // the ordinary strict dynamic full walker. Either fallback is a
+            // hidden dynamic mask on a claimed static path: trap loudly under
+            // the strict-static flag instead of silently contributing exact
+            // dynamic admissions.
+            crate::compiler::boundary_transfer::strict_static_trap_dynamic(
+                "authoritative_segmented_projection_decline",
+            );
             if self.constraint.uses_compact_segmented_parser_runtime() {
                 self.fill_recursive_mask_by_exact_full_walk(mask);
             } else {

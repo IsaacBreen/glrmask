@@ -1327,12 +1327,67 @@ pub(crate) fn strict_static_dynamic_trap_enabled() -> bool {
 /// Env-gated so exact dynamic compositions are unaffected; strict-static
 /// tests set the var and any firing fallback panics loudly with its caller
 /// name instead of contributing hidden dynamic admissions.
+///
+/// Genuinely dynamic constraints (`uses_dynamic_runtime`, e.g. the
+/// DynamicDirect reference side of a differential running in the same
+/// process) are exempt: the trap targets hidden fallbacks on claimed-static
+/// paths, not legitimate dynamic evaluation. The `DynamicDirect` shard-arm
+/// trap in `or_segmented_boundary_shards_mask` stays absolute: evaluating a
+/// `DynamicDirect` shard while a strict-static composition is installed is
+/// never legitimate.
 pub(crate) fn strict_static_trap_dynamic(caller: &str) {
     if strict_static_dynamic_trap_enabled() {
         panic!(
             "GLRMASK_STRICT_STATIC_TRAP_DYNAMIC: dynamic mask fallback '{caller}' fired on a strict-static path"
         );
     }
+}
+
+/// Backend-aware trap: skips genuinely dynamic constraints, fires otherwise.
+/// Prefer this at dynamic mask entry points that receive the masked state.
+pub(crate) fn strict_static_trap_dynamic_for_state(caller: &str, uses_dynamic_runtime: bool) {
+    if uses_dynamic_runtime {
+        return;
+    }
+    if strict_static_dynamic_permitted() {
+        return;
+    }
+    strict_static_trap_dynamic(caller);
+}
+
+use std::cell::Cell;
+
+thread_local! {
+    static STRICT_STATIC_PERMIT_DYNAMIC_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+fn strict_static_dynamic_permitted() -> bool {
+    STRICT_STATIC_PERMIT_DYNAMIC_DEPTH.with(|depth| depth.get() > 0)
+}
+
+struct StrictStaticPermitGuard;
+
+impl StrictStaticPermitGuard {
+    fn enter() -> Self {
+        STRICT_STATIC_PERMIT_DYNAMIC_DEPTH.with(|depth| depth.set(depth.get() + 1));
+        Self
+    }
+}
+
+impl Drop for StrictStaticPermitGuard {
+    fn drop(&mut self) {
+        STRICT_STATIC_PERMIT_DYNAMIC_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Run `run` with legitimate dynamic evaluation permitted under the
+/// strict-static trap. Use only for explicitly dynamic reference paths that
+/// share a process with strict-static assertions: the authoritative
+/// DynamicDirect mask branch and the env-gated dynamic/static equivalence
+/// cross-check. Static-side fallbacks must never be wrapped.
+pub(crate) fn permit_strict_static_dynamic<R>(run: impl FnOnce() -> R) -> R {
+    let _guard = StrictStaticPermitGuard::enter();
+    run()
 }
 
 pub(crate) fn eof_terminal() -> TerminalID {
