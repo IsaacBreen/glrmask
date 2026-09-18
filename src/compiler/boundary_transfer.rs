@@ -1601,6 +1601,40 @@ mod tests {
     }
 
     #[test]
+    fn nested_links_decline_loudly_at_link_time() {
+        use crate::compiler::glr::parser::ScopedSubgrammarLink;
+        // A child that is itself a parent (nested composition) is outside
+        // the bounded flat closure certificate: general C* support is future
+        // work, so the link declines loudly instead of composing silently.
+        let nested = vec![
+            ScopedSubgrammarLink {
+                parent_component: 0,
+                slot_terminal: 3,
+                child_component: 1,
+                child_start: 0,
+                return_pop: 1,
+                child_start_nullable: false,
+            },
+            ScopedSubgrammarLink {
+                parent_component: 1,
+                slot_terminal: 4,
+                child_component: 2,
+                child_start: 0,
+                return_pop: 1,
+                child_start_nullable: false,
+            },
+        ];
+        let error = certify_bounded_flat_closure(&nested)
+            .expect_err("nested composition must decline loudly");
+        assert!(
+            error.contains("nested"),
+            "decline must name nesting, got: {error}",
+        );
+        let flat = vec![nested[0]];
+        assert!(certify_bounded_flat_closure(&flat).is_ok());
+    }
+
+    #[test]
     #[ignore]
     fn composer_scaffold_declines_loudly_without_hidden_fallback() {
         assert!(assemble_boundary_transfer_query().is_err());
