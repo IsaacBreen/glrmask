@@ -36,7 +36,7 @@ use std::time::Instant;
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::automata::weighted_u32::minimize::minimize;
+use crate::automata::weighted_u32::minimize::{minimize, reverse_hashcons_owned};
 use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
@@ -1004,6 +1004,7 @@ pub(crate) fn compile_signed_shard_parser(
                 format!("signed link shard {start_component} edge targets unknown state {target}")
             })?;
             let body = append_weighted_fragment(&mut arena, fragment, weight, target_port)?;
+            ordinary_appended_states += fragment.states().len();
             for depth in 0..depths {
                 for start in &body.start_states {
                     arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
@@ -1016,40 +1017,54 @@ pub(crate) fn compile_signed_shard_parser(
     // strictly increases, so with acyclic lexical edges and acyclic fragments
     // the assembled program is acyclic by construction (asserted below).
     let all_weight = Weight::all();
-    for (index, _) in shard_dwa.states().iter().enumerate() {
-        for depth in 0..depths - 1 {
-            for (link_index, _) in context.links.iter().enumerate() {
-                let entry_fragment = library
-                    .templates
-                    .by_terminal_nwa
-                    .get(&library.entry_keys[link_index])
-                    .ok_or_else(|| {
-                        format!("signed link entry fragment {link_index} missing from library")
-                    })?;
-                let entry_body = append_weighted_fragment(
-                    &mut arena,
-                    entry_fragment,
-                    &all_weight,
-                    port(&ready, index, depth + 1),
-                )?;
-                for start in &entry_body.start_states {
-                    arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
-                }
-                let finish_fragment = library
-                    .templates
-                    .by_terminal_nwa
-                    .get(&library.finish_keys[link_index])
-                    .ok_or_else(|| {
-                        format!("signed link finish fragment {link_index} missing from library")
-                    })?;
-                let finish_body = append_weighted_fragment(
-                    &mut arena,
-                    finish_fragment,
-                    &all_weight,
-                    port(&ready, index, depth + 1),
-                )?;
-                for start in &finish_body.start_states {
-                    arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+    // Diagnostic size oracle (NOT production): with
+    // GLRMASK_SIGNED_SHARD_NO_CONTROLS=1 set, control fragments are omitted
+    // and only ordinary transfers compose. Comparing the minimized size
+    // against the full build isolates the control-closure contribution. The
+    // result is not a valid shard (controls required for exactness).
+    let no_controls_diagnostic = std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
+    // Exact per-part contribution counters: appended template states from
+    // ordinary edges vs control fragments (log-only size attribution).
+    let mut ordinary_appended_states: usize = 0;
+    let mut control_appended_states: usize = 0;
+    if !no_controls_diagnostic {
+        for (index, _) in shard_dwa.states().iter().enumerate() {
+            for depth in 0..depths - 1 {
+                for (link_index, _) in context.links.iter().enumerate() {
+                    let entry_fragment = library
+                        .templates
+                        .by_terminal_nwa
+                        .get(&library.entry_keys[link_index])
+                        .ok_or_else(|| {
+                            format!("signed link entry fragment {link_index} missing from library")
+                        })?;
+                    let entry_body = append_weighted_fragment(
+                        &mut arena,
+                        entry_fragment,
+                        &all_weight,
+                        port(&ready, index, depth + 1),
+                    )?;
+                    control_appended_states += entry_fragment.states().len();
+                    for start in &entry_body.start_states {
+                        arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+                    }
+                    let finish_fragment = library
+                        .templates
+                        .by_terminal_nwa
+                        .get(&library.finish_keys[link_index])
+                        .ok_or_else(|| {
+                            format!("signed link finish fragment {link_index} missing from library")
+                        })?;
+                    let finish_body = append_weighted_fragment(
+                        &mut arena,
+                        finish_fragment,
+                        &all_weight,
+                        port(&ready, index, depth + 1),
+                    )?;
+                    control_appended_states += finish_fragment.states().len();
+                    for start in &finish_body.start_states {
+                        arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+                    }
                 }
             }
         }
@@ -1091,16 +1106,20 @@ pub(crate) fn compile_signed_shard_parser(
         &arena,
     );
     let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0;
-    // Exact post-normalization minimization. The established normalize impl
-    // skips its internal minimization by default, and the old boundary parser
-    // sizes (~800-1000 states) were obtained by minimizing explicitly: the
-    // determinized stack-prefix recognizer is highly redundant (per-edge
-    // fragment clones collapse once the language is fixed). This is the same
-    // `minimize` the established normalize stage calls, so DEFAULT/wildcard/
-    // final-weight semantics match exactly. It is acyclic-only by construction
-    // (cyclic inputs are returned unchanged) — safe here because the bounded
-    // program above is asserted acyclic. The publish step re-validates
-    // positivity afterwards regardless.
+    // Exact post-normalization reduction, staged cheap-first:
+    // 1. reverse structural hash-cons: merges only states with identical
+    //    (final weight, ordered label->(target,weight) rows) bottom-up. A pure
+    //    DAG quotient, exact for the weighted language including DEFAULT
+    //    labels (a label like any other in the row signature). Near-linear.
+    // 2. full acyclic partition-refinement minimization on the hash-consed
+    //    input (much smaller => much cheaper than on the raw determinized
+    //    graph). This is the same `minimize` the established normalize stage
+    //    calls, so DEFAULT/wildcard/final-weight semantics match exactly.
+    // Both stages are acyclic-only by construction (cyclic inputs return
+    // unchanged), safe here because the bounded program above is asserted
+    // acyclic. Both run AFTER resolution on the positive deterministic DWA,
+    // so caller provenance and cancellation semantics are untouched; publish
+    // re-validates positivity afterwards regardless.
     //
     // On counts: the shard's emitted *grammar terminals* (559 on selected10
     // outer) are the template-substitution granularity; the 143 *tokens* are
@@ -1108,15 +1127,20 @@ pub(crate) fn compile_signed_shard_parser(
     // neither is a duplication bug. Per-edge fragment clones cannot be shared
     // across different target continuations without cross-continuation leakage
     // (exits are contextual), and cross-source sharing rarely hits on a
-    // deterministic terminal DWA — minimization is the exact collapse.
-    let pre_min_states = parser_dwa.num_states();
-    let pre_min_trans = parser_dwa.num_transitions();
-    let pre_min_acyclic = parser_dwa.is_acyclic();
+    // deterministic terminal DWA — reduction is the exact collapse.
+    let pre_hash_states = parser_dwa.num_states();
+    let pre_hash_trans = parser_dwa.num_transitions();
+    let pre_hash_acyclic = parser_dwa.is_acyclic();
+    let hashcons_started = Instant::now();
+    let parser_dwa = reverse_hashcons_owned(parser_dwa);
+    let hashcons_ms = hashcons_started.elapsed().as_secs_f64() * 1000.0;
+    let post_hash_states = parser_dwa.num_states();
+    let post_hash_trans = parser_dwa.num_transitions();
     let minimize_started = Instant::now();
     let parser_dwa = minimize(&parser_dwa);
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
-        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} pre_min_states={pre_min_states} pre_min_trans={pre_min_trans} pre_min_acyclic={pre_min_acyclic} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
+        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
         library.ordinary_terms,
         arena.states().len(),
         arena.num_transitions(),
@@ -1129,7 +1153,7 @@ pub(crate) fn compile_signed_shard_parser(
         templates_ms: library.templates_ms,
         compose_ms,
         resolve_ms,
-        normalize_ms: normalize_ms + minimize_ms,
+        normalize_ms: normalize_ms + hashcons_ms + minimize_ms,
         signed_states,
         signed_transitions,
         terms: library.ordinary_terms,
