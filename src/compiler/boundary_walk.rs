@@ -812,6 +812,7 @@ pub(crate) fn build_walk_static_boundary_link(
             &signed_context,
             &library,
             &shard.output.dwa,
+            &shard.output.id_map,
             shard.start_component as u32,
         )?;
         let work = WalkBoundaryShardWork {
@@ -1856,6 +1857,7 @@ mod tests {
                 &signed_context,
                 &library,
                 &shard.output.dwa,
+                &shard.output.id_map,
                 shard.start_component as u32,
             )
             .expect("signed shard compile");

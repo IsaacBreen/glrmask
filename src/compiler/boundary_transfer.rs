@@ -35,8 +35,13 @@ use std::time::Instant;
 
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 
+use range_set_blaze::RangeSetBlaze;
+
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::automata::weighted_u32::minimize::{minimize, reverse_hashcons_owned};
+use crate::automata::weighted_u32::minimize_acyclic::{
+    PointwiseClassOrder, minimize_acyclic_owned_with_pointwise_class_order,
+};
 use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
@@ -53,7 +58,9 @@ use crate::compiler::stages::templates::characterize::{
     StackMatcher, TerminalCharacterization, characterize_finish_transfer,
     characterize_selected_terminals_for_terminal_count,
 };
-use crate::ds::weight::Weight;
+use super::boundary_walk::boundary_accepted_tokens;
+use crate::compiler::stages::equiv_types::InternalIdMap;
+use crate::ds::weight::{Weight, shared_rangeset};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::Constraint;
 
@@ -914,6 +921,61 @@ pub(crate) struct SignedShardOutput {
     pub terms: usize,
 }
 
+/// Internal token ids carrying at least one accepted original token, as a
+/// membership bitmap over the shard id_map's internal-token domain.
+fn candidate_kept_internal_tokens(
+    id_map: &InternalIdMap,
+    candidates: &BTreeSet<u32>,
+) -> Vec<bool> {
+    let mut kept = vec![false; id_map.vocab_tokens.internal_to_originals.len()];
+    for (internal, originals) in id_map
+        .vocab_tokens
+        .internal_to_originals
+        .iter()
+        .enumerate()
+    {
+        if originals.iter().any(|original| candidates.contains(original)) {
+            kept[internal] = true;
+        }
+    }
+    kept
+}
+
+/// Count weight cells (outer TSID ranges + inner token ranges) for profile.
+fn weight_cell_count(weight: &Weight) -> (usize, usize) {
+    let mut outer = 0usize;
+    let mut inner = 0usize;
+    for (_, tokens) in weight.raw_range_values() {
+        outer += 1;
+        inner += tokens.ranges().count();
+    }
+    (outer, inner)
+}
+
+/// Project one weight onto the shard's accepted original-token universe by
+/// dropping internal tokens whose originals are all outside it. Outer TSID
+/// ranges are preserved exactly (emptied ranges are dropped, adjacent equal
+/// ranges merged by the remap primitive).
+fn project_weight_to_kept(weight: &Weight, kept: &[bool]) -> Weight {
+    weight.remap_token_sets_preserving_tsid_ranges(|tokens| {
+        let mut dropped = false;
+        for token in tokens.iter() {
+            if !kept.get(token as usize).copied().unwrap_or(true) {
+                dropped = true;
+                break;
+            }
+        }
+        if !dropped {
+            return tokens.clone();
+        }
+        let filtered: RangeSetBlaze<u32> = tokens
+            .iter()
+            .filter(|token| kept.get(*token as usize).copied().unwrap_or(true))
+            .collect();
+        shared_rangeset(filtered)
+    })
+}
+
 /// Compile one shard: bounded-DAG assembly, single exact negative resolution,
 /// table-free positive normalization, exact minimization.
 ///
@@ -941,6 +1003,7 @@ pub(crate) fn compile_signed_shard_parser(
     context: &SignedLinkContext,
     library: &FragmentLibrary,
     shard_dwa: &DWA,
+    id_map: &InternalIdMap,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
     if context.closure.max_controls_per_gap != 2 {
@@ -1101,11 +1164,49 @@ pub(crate) fn compile_signed_shard_parser(
         }
     }
     let normalize_started = Instant::now();
-    let parser_dwa = normalize_weighted_parser_stack_nwa_for_parser_state_count(
+    let mut parser_dwa = normalize_weighted_parser_stack_nwa_for_parser_state_count(
         context.total_scoped_states,
         &arena,
     );
     let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0;
+    // Exact shard-local weight projection. Every mask bit the shard can ever
+    // set corresponds to an original token carried by some accepting terminal
+    // path to a lexical final: parser paths substitute terminal paths and
+    // stamp the same lexical weights (control fragments stamp the identity),
+    // so a parser accept for t implies t is in `candidates` as computed by
+    // accepted_original_tokens over the same dwa/id_map. Internal tokens whose
+    // originals are all outside the candidate set therefore never contribute
+    // to any (stack, tsid) query; dropping them from every edge/final weight
+    // preserves all masks exactly while collapsing provably-dead distinctions
+    // that otherwise bloat grouping and defeat minimization. Outer TSID ranges
+    // are preserved (only emptied ranges drop); unknown internal ids default
+    // to kept, so the projection can only remove proven-dead content.
+    let project_started = Instant::now();
+    let candidates = boundary_accepted_tokens(shard_dwa, id_map);
+    let kept = candidate_kept_internal_tokens(id_map, &candidates);
+    let kept_count = kept.iter().filter(|&&keep| keep).count();
+    let (mut cells_outer_before, mut cells_inner_before) = (0usize, 0usize);
+    for state in parser_dwa.states() {
+        for (_, edge_weight) in state.transitions.values() {
+            let (outer, inner) = weight_cell_count(edge_weight);
+            cells_outer_before += outer;
+            cells_inner_before += inner;
+        }
+        if let Some(final_weight) = state.final_weight.as_ref() {
+            let (outer, inner) = weight_cell_count(final_weight);
+            cells_outer_before += outer;
+            cells_inner_before += inner;
+        }
+    }
+    for state in parser_dwa.states_mut() {
+        for (_, edge_weight) in state.transitions.values_mut() {
+            *edge_weight = project_weight_to_kept(edge_weight, &kept);
+        }
+        if let Some(final_weight) = state.final_weight.as_mut() {
+            *final_weight = project_weight_to_kept(final_weight, &kept);
+        }
+    }
+    let project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
     // Exact post-normalization reduction, staged cheap-first:
     // 1. reverse structural hash-cons: merges only states with identical
     //    (final weight, ordered label->(target,weight) rows) bottom-up. A pure
@@ -1136,15 +1237,43 @@ pub(crate) fn compile_signed_shard_parser(
     let hashcons_ms = hashcons_started.elapsed().as_secs_f64() * 1000.0;
     let post_hash_states = parser_dwa.num_states();
     let post_hash_trans = parser_dwa.num_transitions();
+    // Exact grouping-order diagnostic: DescendingDomain places denser partial
+    // behavior functions first for greedy absorption. The order policy affects
+    // only representation choices among already compatible classes, never the
+    // accepted weighted language (documented on the enum); the DynamicDirect
+    // differential remains the arbiter. Env-gated; default is Stable.
+    // Path-conditioned minimization is deliberately NOT used: its precondition
+    // (edge weights already encoding cumulative live-path domains from a
+    // backward-pushed construction) is unproven for determinize_with_supports
+    // output — indeed the default minimize path runs push_weights first, which
+    // would be unnecessary if determinize output satisfied it.
+    let minimize_descending = std::env::var("GLRMASK_SIGNED_SHARD_MINIMIZE_ORDER")
+        .ok()
+        .is_some_and(|value| value.eq_ignore_ascii_case("descending"));
     let minimize_started = Instant::now();
-    let parser_dwa = minimize(&parser_dwa);
+    let (parser_dwa, minimize_order) = if minimize_descending {
+        (
+            minimize_acyclic_owned_with_pointwise_class_order(
+                parser_dwa,
+                PointwiseClassOrder::DescendingDomain,
+            ),
+            "descending",
+        )
+    } else {
+        (minimize(&parser_dwa), "stable")
+    };
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
-        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
+        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} candidates={} kept_internals={} cells_outer_before={} cells_inner_before={} project_ms={project_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_order={minimize_order} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
         library.ordinary_terms,
         arena.states().len(),
         arena.num_transitions(),
         resolved_reverse_topo.map(|layers| layers.len()).unwrap_or(usize::MAX),
+        candidates.len(),
+        kept_count,
+        cells_outer_before,
+        cells_inner_before,
+        project_ms,
         parser_dwa.num_states(),
         parser_dwa.num_transitions(),
     );
@@ -1153,7 +1282,7 @@ pub(crate) fn compile_signed_shard_parser(
         templates_ms: library.templates_ms,
         compose_ms,
         resolve_ms,
-        normalize_ms: normalize_ms + hashcons_ms + minimize_ms,
+        normalize_ms: normalize_ms + project_ms + hashcons_ms + minimize_ms,
         signed_states,
         signed_transitions,
         terms: library.ordinary_terms,
