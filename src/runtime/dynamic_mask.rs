@@ -52,6 +52,36 @@ const FULL_WALK_HOT_SLOW: u8 = 253;
 const FULL_WALK_HOT_DEAD: u8 = 254;
 const FULL_WALK_HOT_UNKNOWN: u8 = 255;
 
+/// Bound parser-conditioned scalar liveness checks during exact config walks.
+///
+/// Four consecutive non-pruning checks was neutral in the first 1k corpus and
+/// substantially reduced later JSON-schema tails.  Keep the historical env
+/// knob as an override: `0`/`false` disables the bounded checks, `1`/`true`
+/// retains the old experimental 32-check interpretation, and an integer sets
+/// an explicit budget.
+#[inline]
+fn config_scalar_conditioned_budget() -> Option<u32> {
+    static BUDGET: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        match std::env::var("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_BUDGET") {
+            Ok(value) => {
+                let trimmed = value.trim();
+                if trimmed.is_empty()
+                    || trimmed == "0"
+                    || trimmed.eq_ignore_ascii_case("false")
+                {
+                    None
+                } else if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
+                    Some(32)
+                } else {
+                    Some(trimmed.parse::<u32>().unwrap_or(32))
+                }
+            }
+            Err(_) => Some(4),
+        }
+    })
+}
+
 trait FullWalkTransitionTable {
     type Cell: Copy;
 
@@ -3083,7 +3113,7 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_none()
         && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED").is_none()
         && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP").is_none()
-        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_BUDGET").is_none();
+        && config_scalar_conditioned_budget().is_none();
     if hot_edge_lane_eligible {
         match try_full_walk_hot_scalar_edges(
             state,
@@ -3262,24 +3292,9 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         std::sync::OnceLock::new();
     static CONDITION_CONFIG_SCALAR_DEAD_SKIP: std::sync::OnceLock<bool> =
         std::sync::OnceLock::new();
-    static CONDITION_CONFIG_SCALAR_BUDGET: std::sync::OnceLock<Option<u32>> =
-        std::sync::OnceLock::new();
     static CONDITION_CONFIG_SCALAR_INITIAL_ONLY: std::sync::OnceLock<bool> =
         std::sync::OnceLock::new();
-    let condition_budget = *CONDITION_CONFIG_SCALAR_BUDGET.get_or_init(|| {
-        std::env::var("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_BUDGET")
-            .ok()
-            .and_then(|v| {
-                let trimmed = v.trim();
-                if trimmed.is_empty() || trimmed == "0" {
-                    None
-                } else if trimmed == "1" || trimmed.eq_ignore_ascii_case("true") {
-                    Some(32)
-                } else {
-                    Some(trimmed.parse::<u32>().unwrap_or(32))
-                }
-            })
-    });
+    let condition_budget = config_scalar_conditioned_budget();
     let condition_dead_skip = *CONDITION_CONFIG_SCALAR_DEAD_SKIP.get_or_init(|| {
         std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP")
             .is_some()
