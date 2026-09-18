@@ -453,16 +453,24 @@ pub(crate) fn assemble_boundary_transfer_query() -> Result<(), String> {
 //
 // For the supported flat prototype (flat component-instance DAG, effectively
 // nonnullable bound children, no retained local controls, canonical EOF
-// completion), the boundary parser is a signed action-word program:
+// completion), the boundary parser is a finite DAG-shaped signed action-word
+// program transcribed from the closure certificate K = Id ∪ C ∪ C²:
 //
-// - one Ready(k) port per crossing-terminal-automaton vertex k;
+// - control-depth ports Ready(k,d) per crossing-terminal-automaton vertex k
+//   and depth d in 0..=2;
 // - each real terminal-DWA edge k -t-> k' substitutes t's scoped signed local
-//   transfer fragment from Ready(k) to Ready(k'), stamping the lexical weight;
-// - zero-width Entry/Finish transfer fragments loop at every Ready port
-//   (the C* over-approximation; infeasible interleavings denote the empty
-//   relation and cancel out exactly);
+//   transfer fragment once, entered from any depth and exiting to the
+//   destination depth 0 with the stamped lexical weight;
+// - zero-width Entry/Finish transfer fragments go from Ready(k,d) to
+//   Ready(k,d+1) for d < 2; nothing is added after the maximum depth;
+// - final weights live only on depth-0 ports (no trailing closure for
+//   unrestricted admission endpoints);
 // - existing resolve_negative_codes_in_nwa runs ONCE over the assembled query;
 //   output pushes are preserved until then (never resolve Entry alone).
+//
+// General C* loops are future support for nullable/unbounded-certified cases
+// and must not be used for this class: they make the program cyclic, defeat
+// exact minimization, and hide unbounded silent behavior.
 //
 // Controls are never fake terminal-DWA labels and never connect inside another
 // selected symbol's reduction continuation: fragments are cloned per use and
@@ -489,6 +497,9 @@ pub(crate) struct SignedLinkContext<'a> {
     /// Composed-id unbound slot terminals with empty-language semantics: the
     /// live placeholder shifts in the component tables are NOT characterized.
     pub unbound_slots: BTreeSet<TerminalID>,
+    /// Bounded-closure certificate for the supported flat class. The composer
+    /// transcribes exactly this bound as depth-indexed Ready ports.
+    pub closure: ClosureCertificate,
 }
 
 impl<'a> SignedLinkContext<'a> {
@@ -522,12 +533,67 @@ impl<'a> SignedLinkContext<'a> {
     }
 }
 
+/// Bounded control-closure certificate for the supported flat prototype.
+///
+/// The advisor's sufficient theorem (§7.2): a flat component-instance DAG with
+/// effectively nonnullable bound children, no retained controls, and canonical
+/// EOF completion has K = Id ∪ C ∪ C² on well-formed stacks — at most two
+/// cross-component Entry/Return events per zero-visible-terminal gap. The
+/// compiler transcribes this directly as depth-indexed Ready ports instead of
+/// cyclic C* loops. General C* remains future support for
+/// nullable/unbounded-certified cases; it must not be used for this class.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ClosureCertificate {
+    /// Maximum feasible control advancements per gap (2 for H=1 flat links).
+    pub max_controls_per_gap: u32,
+}
+
+/// Check the supported-class contract for bounded flat closure. Loud decline
+/// (never silent truncation) on: nested links (a child that is itself a
+/// parent — Phase 4), nullable bound children (unbounded silent episodes per
+/// §7.3/§7.4 can require arbitrarily many Entry/Return events in one gap;
+/// single nullable words like EF would fit depth 2, but the certificate cannot
+/// cheaply distinguish them from unbounded unwinding or silent push growth),
+/// and anything but the single flat level. No-retained-controls and canonical
+/// Finish are enforced by context construction and Finish instantiation.
+pub(crate) fn certify_bounded_flat_closure(
+    links: &[ScopedSubgrammarLink],
+) -> Result<ClosureCertificate, String> {
+    for link in links {
+        if link.parent_component != 0 {
+            return Err(format!(
+                "bounded flat closure unsupported: link targets parent component {} (nested composition is Phase 4)",
+                link.parent_component,
+            ));
+        }
+        if links
+            .iter()
+            .any(|other| other.parent_component == link.child_component)
+        {
+            return Err(format!(
+                "bounded flat closure unsupported: child component {} is itself a parent (nested composition is Phase 4)",
+                link.child_component,
+            ));
+        }
+        if link.child_start_nullable {
+            return Err(format!(
+                "bounded flat closure unsupported: child component {} is effectively nullable; silent Entry/Return episodes have no uniform bound (general C* support is future work; use the Dynamic backend)",
+                link.child_component,
+            ));
+        }
+    }
+    Ok(ClosureCertificate {
+        max_controls_per_gap: 2,
+    })
+}
+
 /// Build and validate the signed-link context for one flat composition.
 ///
 /// Loud declines (never silent): nested or control-bearing components,
 /// disagreeing incoming links to a shared child, noncanonical
 /// child-start/return-pop, provider-unsupported slot shapes, forwarded shifts
-/// involving slots. The packed splice (rules + terminal layout) is still built
+/// involving slots, and nullable bound children (bounded-closure certificate).
+/// The packed splice (rules + terminal layout) is still built
 /// by the caller for grammar/follows analysis and layout pins, but no parser
 /// behavior is ever derived from it.
 pub(crate) fn build_signed_link_context<'a>(
@@ -566,6 +632,7 @@ pub(crate) fn build_signed_link_context<'a>(
         ignore_terminals.push(child.constraint.ignore_terminal);
     }
     let child_tables = tables[1..].to_vec();
+    let closure = certify_bounded_flat_closure(&links)?;
     let context = SignedLinkContext {
         parent_table: tables[0],
         child_tables,
@@ -577,6 +644,7 @@ pub(crate) fn build_signed_link_context<'a>(
         global_ignores,
         ignore_terminals,
         unbound_slots,
+        closure,
     };
     // Fail fast on provider-unsupported slot shapes and noncanonical children.
     for link in &context.links {
@@ -770,6 +838,17 @@ pub(crate) fn build_fragment_library(
     }
     let templates = Templates::from_characterizations(&combined);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
+    // The bounded-DAG composer requires acyclic fragments (the engine already
+    // guarantees acyclic nt re-reduction graphs by loud decline/panic; this
+    // checks the compiled template NWAs themselves). A cyclic fragment would
+    // reintroduce unbounded control words through the back door.
+    for (&key, fragment) in &templates.by_terminal_nwa {
+        if !fragment.is_acyclic() {
+            return Err(format!(
+                "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
+            ));
+        }
+    }
     Ok(FragmentLibrary {
         templates,
         entry_keys,
@@ -835,35 +914,64 @@ pub(crate) struct SignedShardOutput {
     pub terms: usize,
 }
 
-/// Compile one shard: Ready-port assembly, single exact negative resolution,
-/// table-free positive normalization.
+/// Compile one shard: bounded-DAG assembly, single exact negative resolution,
+/// table-free positive normalization, exact minimization.
 ///
-/// Every real terminal-DWA edge substitutes its scoped transfer fragment;
-/// Entry/Finish fragments loop zero-width at every Ready port (the bounded
-/// flat-class control program). Negative labels are resolved exactly once over
-/// the whole query; a surviving negative label afterwards is a loud error.
-/// Normalization takes only the scoped parser-state count — no table, hence
-/// no table-dependent optimization can consult a mismatched object.
+/// Control-depth ports Ready(k,d): every real terminal-DWA edge k -t-> k'
+/// substitutes its scoped transfer fragment once, entered from ANY depth
+/// (zero/one/two preceding controls) and exiting to the destination depth 0.
+/// Entry/Finish fragments go zero-width from Ready(k,d) to Ready(k,d+1) for
+/// d < max_controls_per_gap; nothing is added after the maximum depth. This
+/// transcribes the closure certificate exactly: on well-formed stacks of the
+/// supported flat class, every feasible control word in a gap has length at
+/// most max_controls_per_gap, so the DAG denotes the same relation as C*.
+///
+/// Final weights live ONLY on depth-0 ports: admission needs no trailing
+/// closure (K is reflexive — every C* accepting path's prefix through its
+/// last terminal exit is already an accepting bounded path), so dropping the
+/// trailing loop is clean for unrestricted admission endpoints. The fused
+/// ax/ay pattern (Finish between child `a` and parent `x`) is handled by the
+/// next vertex's bounded pre-terminal closure, not by trailing loops.
+///
+/// Negative labels are resolved exactly once over the whole query; a surviving
+/// negative label afterwards is a loud error. Normalization takes only the
+/// scoped parser-state count — no table, hence no table-dependent optimization
+/// can consult a mismatched object.
 pub(crate) fn compile_signed_shard_parser(
     context: &SignedLinkContext,
     library: &FragmentLibrary,
     shard_dwa: &DWA,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
+    if context.closure.max_controls_per_gap != 2 {
+        return Err(format!(
+            "signed link shard {start_component} supports only max_controls_per_gap=2, got {}",
+            context.closure.max_controls_per_gap,
+        ));
+    }
+    if !shard_dwa.is_acyclic() {
+        return Err(format!(
+            "signed link shard {start_component} lexical terminal DWA is cyclic; bounded-DAG composition needs an acyclic candidate automaton",
+        ));
+    }
+    let depths = context.closure.max_controls_per_gap as usize + 1;
     let compose_started = Instant::now();
     let mut arena = NWA::new(0, 0);
-    let mut ready = vec![u32::MAX; shard_dwa.states().len()];
+    let mut ready = vec![u32::MAX; shard_dwa.states().len() * depths];
+    let port = |ports: &[u32], vertex: usize, depth: usize| ports[vertex * depths + depth];
     for (index, state) in shard_dwa.states().iter().enumerate() {
-        let port = arena.add_state();
-        ready[index] = port;
+        for depth in 0..depths {
+            ready[index * depths + depth] = arena.add_state();
+        }
+        // Depth-0 finals only (no trailing closure for admission endpoints).
         if let Some(weight) = state.final_weight.as_ref() {
             if !weight.is_empty() {
-                arena.set_final_weight(port, weight.clone());
+                arena.set_final_weight(port(&ready, index, 0), weight.clone());
             }
         }
     }
     let start_index = shard_dwa.start_state() as usize;
-    let start_port = ready.get(start_index).copied().ok_or_else(|| {
+    let start_port = ready.get(start_index * depths).copied().ok_or_else(|| {
         format!("signed link shard {start_component} has no lexical start state")
     })?;
     if start_port == u32::MAX {
@@ -872,7 +980,10 @@ pub(crate) fn compile_signed_shard_parser(
         ));
     }
     arena.set_start_states(vec![start_port]);
-    // Ordinary terminal edges: substitute the scoped transfer fragment.
+    // Ordinary terminal edges: one fragment clone per edge, entered from every
+    // depth (shared body, single exit — sound: entries converge, the exit
+    // continuation is identical, so no cross-continuation leakage), exiting to
+    // the destination depth 0 with the stamped lexical weight.
     for (index, state) in shard_dwa.states().iter().enumerate() {
         for (label, target, weight) in state.transitions.entries() {
             if label < 0 {
@@ -889,51 +1000,75 @@ pub(crate) fn compile_signed_shard_parser(
                     "signed link shard {start_component} emits terminal {terminal} with no scoped transfer"
                 )
             })?;
-            let target_port = ready.get(target as usize).copied().ok_or_else(|| {
+            let target_port = ready.get(target as usize * depths).copied().ok_or_else(|| {
                 format!("signed link shard {start_component} edge targets unknown state {target}")
             })?;
             let body = append_weighted_fragment(&mut arena, fragment, weight, target_port)?;
-            for start in body.start_states {
-                arena.add_epsilon(ready[index], start, Weight::all());
+            for depth in 0..depths {
+                for start in &body.start_states {
+                    arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+                }
             }
         }
     }
-    // Zero-width control loops at every Ready port. Entry/Finish fragments
-    // carry the full scoped stack relation, so infeasible interleavings
-    // (e.g. Entry on a child-topped stack) denote the empty relation and
-    // cancel out exactly; feasible ones realize K before each terminal.
+    // Bounded zero-width control program: Entry/Finish fragments cloned per
+    // (port, depth), from Ready(k,d) to Ready(k,d+1). No C* self-loops: depth
+    // strictly increases, so with acyclic lexical edges and acyclic fragments
+    // the assembled program is acyclic by construction (asserted below).
     let all_weight = Weight::all();
     for (index, _) in shard_dwa.states().iter().enumerate() {
-        for (link_index, _) in context.links.iter().enumerate() {
-            let entry_fragment = library
-                .templates
-                .by_terminal_nwa
-                .get(&library.entry_keys[link_index])
-                .ok_or_else(|| {
-                    format!("signed link entry fragment {link_index} missing from library")
-                })?;
-            let entry_body =
-                append_weighted_fragment(&mut arena, entry_fragment, &all_weight, ready[index])?;
-            for start in entry_body.start_states {
-                arena.add_epsilon(ready[index], start, Weight::all());
-            }
-            let finish_fragment = library
-                .templates
-                .by_terminal_nwa
-                .get(&library.finish_keys[link_index])
-                .ok_or_else(|| {
-                    format!("signed link finish fragment {link_index} missing from library")
-                })?;
-            let finish_body =
-                append_weighted_fragment(&mut arena, finish_fragment, &all_weight, ready[index])?;
-            for start in finish_body.start_states {
-                arena.add_epsilon(ready[index], start, Weight::all());
+        for depth in 0..depths - 1 {
+            for (link_index, _) in context.links.iter().enumerate() {
+                let entry_fragment = library
+                    .templates
+                    .by_terminal_nwa
+                    .get(&library.entry_keys[link_index])
+                    .ok_or_else(|| {
+                        format!("signed link entry fragment {link_index} missing from library")
+                    })?;
+                let entry_body = append_weighted_fragment(
+                    &mut arena,
+                    entry_fragment,
+                    &all_weight,
+                    port(&ready, index, depth + 1),
+                )?;
+                for start in &entry_body.start_states {
+                    arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+                }
+                let finish_fragment = library
+                    .templates
+                    .by_terminal_nwa
+                    .get(&library.finish_keys[link_index])
+                    .ok_or_else(|| {
+                        format!("signed link finish fragment {link_index} missing from library")
+                    })?;
+                let finish_body = append_weighted_fragment(
+                    &mut arena,
+                    finish_fragment,
+                    &all_weight,
+                    port(&ready, index, depth + 1),
+                )?;
+                for start in &finish_body.start_states {
+                    arena.add_epsilon(port(&ready, index, depth), *start, Weight::all());
+                }
             }
         }
     }
     let signed_states = arena.states().len();
     let signed_transitions = arena.num_transitions();
     let compose_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
+    // The bounded program must be acyclic: lexical edges strictly follow the
+    // acyclic candidate automaton into depth 0, controls strictly increase
+    // depth, fragments were checked acyclic at library build. A cycle here
+    // means the certificate's premises were wrong — decline loudly rather
+    // than feeding a cyclic program to cancellation and an unminimizable
+    // cyclic DWA to the runtime.
+    let program_acyclic = arena.is_acyclic();
+    if !program_acyclic {
+        return Err(format!(
+            "signed link shard {start_component} assembled a cyclic control program; bounded flat certificate violated",
+        ));
+    }
     // Single exact negative resolution over the whole assembled query.
     // `false` is deliberate: grouped cancellation is a performance variant
     // (additionally env-gated), and no table-construction tag exists here to
@@ -960,12 +1095,12 @@ pub(crate) fn compile_signed_shard_parser(
     // skips its internal minimization by default, and the old boundary parser
     // sizes (~800-1000 states) were obtained by minimizing explicitly: the
     // determinized stack-prefix recognizer is highly redundant (per-edge
-    // fragment clones + control loops collapse once the language is fixed).
-    // This is the same `minimize` the established normalize stage calls, so
-    // DEFAULT/wildcard/final-weight semantics match exactly. It is acyclic-only
-    // by construction (cyclic inputs are returned unchanged), which is safe:
-    // a cyclic result simply keeps its size and is logged as such. The
-    // publish step re-validates positivity afterwards regardless.
+    // fragment clones collapse once the language is fixed). This is the same
+    // `minimize` the established normalize stage calls, so DEFAULT/wildcard/
+    // final-weight semantics match exactly. It is acyclic-only by construction
+    // (cyclic inputs are returned unchanged) — safe here because the bounded
+    // program above is asserted acyclic. The publish step re-validates
+    // positivity afterwards regardless.
     //
     // On counts: the shard's emitted *grammar terminals* (559 on selected10
     // outer) are the template-substitution granularity; the 143 *tokens* are

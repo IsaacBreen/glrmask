@@ -2508,6 +2508,62 @@ mod tests {
     /// Divergent called-frame fixture through the PRODUCTION static link
     /// (milestones E/G/H at fixture scale).
     ///
+    /// Nullable bound children are OUTSIDE the signed-transfer static
+    /// linker's supported class (bounded flat closure certificate): silent
+    /// Entry/Return episodes have no uniform bound, so the link declines
+    /// loudly here instead of under-admitting. This pins that decline.
+    #[test]
+    fn nullable_static_link_declines_loudly() {
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"x".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(
+            child.table.embedded_start_nullable(),
+            "pin fixture must stay effectively nullable",
+        );
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+        let composed = low_level_compose(&parent, &inputs);
+        let error = build_walk_static_boundary_link(&WalkStaticLinkInputs {
+            parent: &parent,
+            children: &inputs,
+            vocab: &vocab,
+            static_components: None,
+            expected_terminal_offsets: &composed.table.terminal_offsets,
+        })
+        .expect_err("nullable static links must decline loudly (general C* is future work)");
+        assert!(
+            error.contains("nullable"),
+            "decline must name nullability, got: {error}",
+        );
+    }
+
+    /// Divergent called-frame fixture through the PRODUCTION static link
+    /// (milestones E/G/H at fixture scale).
+    ///
     /// `build_walk_static_boundary_link` must install a real static shard that
     /// matches DynamicDirect at both call sites (caller-sensitive fused
     /// tokens), with no `DynamicDirect` backend anywhere in the installed

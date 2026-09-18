@@ -25577,7 +25577,7 @@ table: &child.table,
     }
 
     #[test]
-    fn nullable_child_to_named_special_is_static_masked() {
+    fn nullable_child_to_named_special_is_masked() {
         const SPECIAL_TOKEN: u32 = 1000;
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let parent = Constraint::from_glrm_grammar(
@@ -25609,8 +25609,12 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
+        // Nullable bound children are outside the signed-transfer static
+        // linker's supported class (unbounded silent Entry/Return episodes);
+        // static links decline them loudly, so this differential runs on the
+        // exact dynamic backend.
         let composed = parent
-            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
 
         assert!(composed.table.control_terminals.is_empty());
@@ -25769,8 +25773,11 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
+        // Nullable bound children are outside the signed-transfer static
+        // linker's supported class; compose the nullable middle dynamically.
+        // Table nullability metadata is backend-independent.
         let middle = nullable_parent
-            .compose_linked_children_for_test(&[("CHILD", &nullable_child)], &vocab)
+            .compose_linked_children_for_test_dynamic(&[("CHILD", &nullable_child)], &vocab)
             .unwrap();
         assert!(middle.table.embedded_start_nullable());
         let middle = Constraint::load(&middle.save()).unwrap();
@@ -26502,9 +26509,13 @@ table: &child.table,
         let loaded_child = Constraint::load(&child.save()).unwrap();
         assert!(loaded_child.table.embedded_start_nullable());
 
+        // Nullable bound children are outside the signed-transfer static
+        // linker's supported class (unbounded silent Entry/Return episodes);
+        // static links decline them loudly, so this X! differential runs on
+        // the exact dynamic backend.
         for child in [&child, &loaded_child] {
             let composed = parent
-                .compose_linked_children_for_test(&[("SUB", child)], &vocab)
+                .compose_linked_children_for_test_dynamic(&[("SUB", child)], &vocab)
                 .unwrap();
             for sequence in [vec![0], vec![1], vec![2, 4], vec![2, 3, 4]] {
                 let mut expected = monolithic.start();
