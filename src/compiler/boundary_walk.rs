@@ -26,7 +26,7 @@ use crate::compiler::constraint_compose::{
     accepted_original_tokens, build_segmented_parser_links,
     component_ignores_are_globally_erasable, eliminate_composed_runtime_controls,
     merged_ignore_terminals, merged_retained_terminal_exprs,
-    merged_terminal_display_names, publish_walk_boundary_shard_work,
+    merged_terminal_display_names,
 };
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::parser::{
@@ -35,7 +35,6 @@ use crate::compiler::glr::parser::{
 };
 use crate::compiler::glr::table::{
     ComposedTable, GLRTable, SubgrammarTableInput, compose_subgrammar_tables_with_rules,
-    empty_terminals_in_composed_table,
 };
 use crate::compiler::pipeline::compute_disallowed_follows;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -470,7 +469,7 @@ fn effective_static_selection(
 /// slots keep live placeholder shifts that would admit phantom terminal paths
 /// through grammars that contribute nothing, so the caller empties them in
 /// its private boundary-table copy.
-fn unbound_link_slot_terminals(
+pub(crate) fn unbound_link_slot_terminals(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     terminal_offsets: &[u32],
@@ -539,12 +538,13 @@ impl ParserComponentTableSource for LinkComponentTables<'_> {
     }
 }
 
-/// Exact boundary table for one flat link: the disjoint-component provider
-/// over the intact component tables (per-link Call/Return with call-specific
-/// parent targets), materialized and control-eliminated. This is the same
-/// object the discovery path publishes against via
-/// `recursive_control_eliminated_parser_table`, built directly from link
-/// inputs. Its state alphabet is the live leaf coordinate (components
+/// Exact boundary table for one flat link (AUDIT/PIN ROUTE ONLY): the
+/// disjoint-component provider over the intact component tables (per-link
+/// Call/Return with call-specific parent targets), materialized and
+/// control-eliminated. Production static linking no longer uses this object
+/// (see `build_walk_static_boundary_link`); it remains for the called-frame
+/// regression pins that compare provider-exact against splice-inexact
+/// publication. Its state alphabet is the live leaf coordinate (components
 /// back-to-back, local ids intact), and call-site provenance survives
 /// elimination by construction (Call pushes the call-specific parent target
 /// beneath the shared child start; Finish exposes it), so divergent
@@ -612,13 +612,13 @@ fn link_provider_boundary_table(
 }
 
 /// Build every static boundary shard for one production link: a packed splice
-/// (rules + terminal layout only), a provider-materialized exact boundary
-/// table, a merged tokenizer, one shared equivalence, one standard
-/// crossing-filtered walk per component, then per-shard parsers over the
-/// provider table with unbound slots emptied. This mirrors the gate's
-/// `link_and_time` exactly (same walks, same publish); the gate and this
-/// function share `build_boundary_shard_walks` and
-/// `publish_walk_boundary_shard_work` so they cannot drift.
+/// (rules + terminal layout only), the signed-transfer link context over
+/// intact local tables, a merged tokenizer, one shared equivalence, one
+/// standard crossing-filtered walk per component, then per-shard signed-NWA
+/// compilation (scoped ordinary transfers + Entry/Finish exports, exact
+/// negative resolution, table-free normalization) and publication. This
+/// mirrors the gate's `link_and_time` walks; no provider-materialized table
+/// and no exact_control_elimination exists on this route.
 pub(crate) fn build_walk_static_boundary_link(
     inputs: &WalkStaticLinkInputs,
 ) -> Result<WalkStaticLinkOutput, String> {
@@ -629,11 +629,23 @@ pub(crate) fn build_walk_static_boundary_link(
     let effective =
         effective_static_selection(parent, children, inputs.static_components);
 
+    // The signed-transfer route links intact local tables and never invokes
+    // control elimination. Reject control-bearing components first, before any
+    // elimination-adjacent call, so even declined inputs cannot trigger it.
+    for component in std::iter::once(parent).chain(children.iter().map(|child| child.constraint)) {
+        if !component.table.control_terminals.is_empty() {
+            return Err(
+                "walk static link requires control-free component tables".to_string(),
+            );
+        }
+    }
+
     // Packed splice: rules + terminal layout only. The packed shape is the
     // exact production construction (per-caller overlays); it feeds the
     // grammar/follows analysis and the coordinator-layout pin, never the
-    // boundary parser. The boundary parser runs on the provider table below,
-    // whose state alphabet is the live leaf coordinate.
+    // boundary parser. The boundary parser is compiled by the signed-transfer
+    // compiler below from intact local tables; no provider-materialized table
+    // and no exact_control_elimination exists on this route.
     let global_ignores = component_ignores_are_globally_erasable(parent, children);
     let parent_rules = parent.retained_table_rules()?;
     let child_rules = children
@@ -671,13 +683,23 @@ pub(crate) fn build_walk_static_boundary_link(
             "walk static link terminal layout differs from coordinator table".to_string(),
         );
     }
-    // Exact boundary table: provider semantics in the live leaf coordinate.
-    let provider_table = link_provider_boundary_table(
+    // Signed-transfer link context: intact local tables, provider-layout
+    // injections, validated Entry/Finish contracts.
+    let unbound = unbound_link_slot_terminals(parent, children, &composed.terminal_offsets)?;
+    for &terminal in &unbound {
+        if terminal as usize >= composed.table.num_terminals as usize {
+            return Err(format!(
+                "unbound slot terminal {terminal} lies outside the composed terminal domain",
+            ));
+        }
+    }
+    let signed_context = crate::compiler::boundary_transfer::build_signed_link_context(
         parent,
         children,
         &composed.terminal_offsets,
         composed.table.num_terminals,
         global_ignores,
+        unbound.into_iter().collect(),
     )?;
 
     // Merged tokenizer + ignores (mirror the gate's low_level_compose).
@@ -767,19 +789,11 @@ pub(crate) fn build_walk_static_boundary_link(
         return Ok(empty_output());
     };
 
-    // Boundary table: the provider table with unbound slots emptied.
-    let mut boundary_table = provider_table;
-    let unbound = unbound_link_slot_terminals(parent, children, &composed.terminal_offsets)?;
-    for &terminal in &unbound {
-        if terminal as usize >= boundary_table.num_terminals as usize {
-            return Err(format!(
-                "unbound slot terminal {terminal} lies outside the boundary table",
-            ));
-        }
-    }
-    empty_terminals_in_composed_table(&mut boundary_table, &unbound);
-    let boundary_table = Arc::new(boundary_table);
-
+    // Signed-transfer shard publication: scoped ordinary transfers +
+    // Entry/Finish exports composed in the control-aware signed NWA, exact
+    // negative resolution, table-free normalization. No provider table, no
+    // elimination; unbound slots carry empty-language semantics inside the
+    // fragment library.
     let mut published = Vec::new();
     let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
     for shard in built {
@@ -788,6 +802,18 @@ pub(crate) fn build_walk_static_boundary_link(
         if !effective.contains(shard.start_component) {
             continue;
         }
+        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
+        let library = crate::compiler::boundary_transfer::build_fragment_library(
+            &signed_context,
+            &emitted,
+            shard.start_component as u32,
+        )?;
+        let compiled = crate::compiler::boundary_transfer::compile_signed_shard_parser(
+            &signed_context,
+            &library,
+            &shard.output.dwa,
+            shard.start_component as u32,
+        )?;
         let work = WalkBoundaryShardWork {
             start_component: shard.start_component as u32,
             terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
@@ -798,9 +824,9 @@ pub(crate) fn build_walk_static_boundary_link(
                 .collect::<Vec<_>>()
                 .into(),
         };
-        let (one, _publish_profile) = publish_walk_boundary_shard_work(
+        let (one, _publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
             work,
-            &boundary_table,
+            compiled,
             &tokenizer_offsets,
             &component_state_counts,
         )?;
@@ -831,7 +857,7 @@ mod tests {
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
         GLRTable, SubgrammarTableInput, compose_subgrammar_tables, control_elimination_budget_exhausted,
-        empty_terminals_in_composed_table,
+        control_elimination_run_count, empty_terminals_in_composed_table,
     };
     use crate::compiler::pipeline::compute_disallowed_follows;
     use crate::grammar::flat::TerminalID;
@@ -1726,6 +1752,10 @@ mod tests {
     }
 
     /// Run the full walk-shard link for one composition and time every stage.
+    /// Publication uses the production signed-transfer route (same fragment
+    /// library, composer, and publisher as `build_walk_static_boundary_link`),
+    /// so this sweep validates what production installs. There is no table
+    /// stage on this route (`table_ms` is exactly 0).
     fn link_and_time(
         name: &str,
         parent: &Constraint,
@@ -1781,28 +1811,55 @@ mod tests {
             det_ms += shard_profile.determinize_ms;
             min_ms += shard_profile.minimize_ms;
         }
-        // Unbound slots (parent's minus the bound ones, plus every child's —
-        // children are leaves here): emptied in the boundary table copy.
-        let bound_names: Vec<&str> =
-            slots.iter().map(|(slot, _)| slot.as_str()).collect();
-        let mut unbound: Vec<(usize, TerminalID)> =
-            unbound_slot_terminals(parent, &bound_names)
+        // Signed-transfer shard publication (production route): scoped ordinary
+        // transfers + Entry/Finish exports, exact resolution, table-free
+        // normalization. No composed/provider table exists here; unbound slots
+        // use the same empty-language definition as production
+        // (`unbound_link_slot_terminals`). There is no table stage anymore, so
+        // `table_ms` below is exactly 0.
+        use crate::compiler::boundary_transfer::{
+            build_fragment_library, build_signed_link_context, compile_signed_shard_parser,
+            publish_signed_shard,
+        };
+        let global_ignores = component_ignores_are_globally_erasable(parent, &inputs);
+        let unbound_set: std::collections::BTreeSet<TerminalID> =
+            unbound_link_slot_terminals(parent, &inputs, &composed.table.terminal_offsets)
+                .expect("unbound slots")
                 .into_iter()
-                .map(|local| (0usize, local))
                 .collect();
-        for (child_index, (_, child)) in slots.iter().enumerate() {
-            unbound.extend(
-                unbound_slot_terminals(child, &[])
-                    .into_iter()
-                    .map(|local| (child_index + 1, local)),
-            );
-        }
-        let (boundary_table, table_ms) =
-            prepare_spliced_boundary_table(name, &composed, &unbound);
+        let signed_context = build_signed_link_context(
+            parent,
+            &inputs,
+            &composed.table.terminal_offsets,
+            composed.table.table.num_terminals,
+            global_ignores,
+            unbound_set,
+        )
+        .expect("signed link context");
+        let table_ms = 0.0;
         let (mut templates_ms, mut parser_ms, mut install_ms) = (0.0, 0.0, 0.0);
         let mut static_comp = dynamic.clone();
         let mut published = Vec::with_capacity(built.len());
         for shard in built {
+            let emitted = boundary_emitted_terminals(
+                &shard.output.dwa,
+                composed.table.table.num_terminals as usize,
+            );
+            let library = build_fragment_library(
+                &signed_context,
+                &emitted,
+                shard.start_component as u32,
+            )
+            .expect("fragment library");
+            templates_ms += library.templates_ms;
+            let compiled = compile_signed_shard_parser(
+                &signed_context,
+                &library,
+                &shard.output.dwa,
+                shard.start_component as u32,
+            )
+            .expect("signed shard compile");
+            parser_ms += compiled.compose_ms + compiled.resolve_ms + compiled.normalize_ms;
             let work = WalkBoundaryShardWork {
                 start_component: shard.start_component as u32,
                 terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
@@ -1813,15 +1870,13 @@ mod tests {
                     .collect::<Vec<_>>()
                     .into(),
             };
-            let (one, publish_profile) = publish_walk_boundary_shard_work(
+            let (one, _publish_profile) = publish_signed_shard(
                 work,
-                &boundary_table,
+                compiled,
                 &composed.tokenizer_offsets,
                 &counts,
             )
-            .expect("publish walk shard");
-            templates_ms += publish_profile.templates_ms;
-            parser_ms += publish_profile.materialize_ms + publish_profile.normalize_ms;
+            .expect("publish signed shard");
             published.push(one);
         }
         let installed = published.len();
@@ -2235,15 +2290,17 @@ mod tests {
         }
     }
 
-    /// Prepared-transfer diagnostic for the selected10 outer blocker
-    /// (advisor v3 Prototype 1, milestone F).
+    /// Prepared-transfer outer link through the NEW signed-transfer production
+    /// route (advisor v3 Prototype 1, milestones F + 9).
     ///
     /// Links only LOCAL tables: the ordinary core terminal-3 transfer plus
     /// the dispatch Finish export under this link's child-start/return-pop
     /// policy, with the slot Entry shape validated. Records local
     /// characterization cycle status / read bound / push bound / sizes for
-    /// both transfers. This path never calls `exact_control_elimination` by
-    /// construction; there is no global table object here at all.
+    /// both transfers, then compiles, installs, and differentially validates
+    /// the full outer link. This path never calls `exact_control_elimination`
+    /// by construction (proven by the run counter); there is no global table
+    /// object here at all.
     #[test]
     #[ignore]
     fn prepared_transfer_row918_no_global_elimination() {
@@ -2360,6 +2417,92 @@ mod tests {
             !has_local_eof_effects,
             "bounded flat prototype requires canonical EOF completion (reductions + pure Accept); local EOF work needs outer control-choice points",
         );
+        // Full outer link through the NEW signed-transfer production route
+        // (milestone 9): local transfers, Ready-port composition, exact
+        // resolution, table-free normalization — and no control elimination.
+        let elim_before = control_elimination_run_count();
+        let link_output = build_walk_static_boundary_link(&WalkStaticLinkInputs {
+            parent: &fixture.core,
+            children: &children,
+            vocab: &fixture.vocab,
+            static_components: None,
+            expected_terminal_offsets: &fixture.composed.table.terminal_offsets,
+        })
+        .expect("outer link compiles through the signed-transfer route");
+        assert_eq!(
+            control_elimination_run_count(),
+            elim_before,
+            "signed-transfer outer link must not invoke control elimination",
+        );
+        assert!(
+            !link_output.all_dynamic,
+            "outer link must take the static route",
+        );
+        for shard in &link_output.published_shards {
+            assert!(
+                link_output
+                    .effective_static_components
+                    .contains(shard.start_component as usize),
+                "published shard {} must be effectively static",
+                shard.start_component,
+            );
+        }
+        eprintln!(
+            "BOUNDARY_TRANSFER outer published={:?} tokens={:?}",
+            link_output
+                .published_shards
+                .iter()
+                .map(|shard| shard.start_component)
+                .collect::<Vec<_>>(),
+            link_output.boundary_tokens_by_start_component,
+        );
+        // Install the new-route shards over a dynamic composition and require
+        // mask-for-mask equality: the outer shard must WORK, not just compile.
+        let dyn_children = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
+            additional_placeholder_terminals: &[],
+            constraint: &fixture.dispatch,
+        }];
+        let dynamic = compose_constraints_owned_parent_segmented(
+            fixture.core.clone(),
+            &dyn_children,
+            &fixture.vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose")
+        .constraint;
+        let mut static_comp = dynamic.clone();
+        install_published_static_boundary_shards(
+            static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
+            link_output.published_shards,
+        )
+        .expect("install");
+        assert!(
+            static_comp.uses_compact_segmented_parser_runtime(),
+            "installed composition must stay on the compact runtime",
+        );
+        for (index, component) in static_comp
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("overlay")
+            .segmented_parser_components
+            .iter()
+            .enumerate()
+        {
+            if let Some(shard) = component.boundary.as_ref() {
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed outer component {index} must be a StaticParser shard",
+                );
+            }
+        }
+        let component_state_counts =
+            [fixture.core.tokenizer.num_states(), fixture.dispatch.tokenizer.num_states()];
+        assert_scoped_tokenizer_packing("outer-signed", &static_comp, &component_state_counts);
+        run_install_differential(&dynamic, &mut static_comp, false);
     }
 
     /// Divergent called-frame fixture through the PRODUCTION static link
@@ -2378,6 +2521,27 @@ mod tests {
         fn admits(mask: &[u32], token: u32) -> bool {
             mask.get(token as usize / 32)
                 .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+        }
+
+        // Panic-safe env restore: Drop removes the trap var even if an assert
+        // below fails, so the trap cannot leak into other tests. The unsafe
+        // blocks are sound because the caller holds TEST_ENV_LOCK, serializing
+        // all process-env mutation in the test build.
+        struct TrapGuard;
+        impl TrapGuard {
+            fn set() -> Self {
+                unsafe {
+                    std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                }
+                Self
+            }
+        }
+        impl Drop for TrapGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                }
+            }
         }
 
         let vocab = Vocab::new(vec![
@@ -2412,6 +2576,9 @@ mod tests {
             constraint: &child,
         }];
         let composed = low_level_compose(&parent, &inputs);
+        // No control elimination anywhere on the new parser-side path: the
+        // signed-transfer compiler links local tables only.
+        let elim_before = control_elimination_run_count();
         let link_output = build_walk_static_boundary_link(&WalkStaticLinkInputs {
             parent: &parent,
             children: &inputs,
@@ -2420,6 +2587,11 @@ mod tests {
             expected_terminal_offsets: &composed.table.terminal_offsets,
         })
         .expect("production static link on the divergent fixture");
+        assert_eq!(
+            control_elimination_run_count(),
+            elim_before,
+            "signed-transfer link must not invoke control elimination",
+        );
         assert!(
             !link_output.all_dynamic,
             "fixture link must be static, not all-dynamic",
@@ -2481,18 +2653,18 @@ mod tests {
             assert_eq!(mask_static, mask_dyn, "static matches dynamic after {site}");
         }
         // Strict-static trap: no DynamicDirect evaluation on this path.
-        // Masks are collected under the env lock, then the var is removed
-        // before asserting, so a failure cannot leak the trap into other tests.
+        // Masks are collected under the env lock, then the guard is dropped
+        // (removing the var) before asserting, so a failure cannot leak the
+        // trap into other tests.
         let trapped: Vec<(u32, Vec<u32>)> = {
             let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-            std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+            let _trap = TrapGuard::set();
             let mut trapped = Vec::new();
             for (commit, fused, _) in [(2u32, 0u32, "L"), (3u32, 1u32, "R")] {
                 let mut st = installed.start();
                 st.commit_token(commit).unwrap();
                 trapped.push((fused, st.mask()));
             }
-            std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
             trapped
         };
         for (fused, mask) in &trapped {

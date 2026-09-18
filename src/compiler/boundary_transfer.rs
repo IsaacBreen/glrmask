@@ -30,16 +30,31 @@
 //!   child-start/return-pop/nullability (the provider dispatches Finish by
 //!   first-incoming-link, which must not define semantics accidentally).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
+use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
+
+use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
+use crate::compiler::constraint_compose::{
+    CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
+    WalkShardPublishProfile, build_segmented_parser_links, publish_signed_boundary_shard_work,
+};
 use crate::compiler::glr::analysis::EOF;
+use crate::compiler::glr::labels::is_negative_label;
 use crate::compiler::glr::parser::ScopedSubgrammarLink;
 use crate::compiler::glr::table::{Action, GLRTable};
+use crate::compiler::stages::parser_dwa::normalize_weighted_parser_stack_nwa_for_parser_state_count;
+use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::{
     FinishEndpointPolicy, FinishTransfer, InitialEscape, InitialReduce, NtEscape, NtRereduce,
     StackMatcher, TerminalCharacterization, characterize_finish_transfer,
+    characterize_selected_terminals_for_terminal_count,
 };
+use crate::ds::weight::Weight;
 use crate::grammar::flat::TerminalID;
+use crate::runtime::Constraint;
 
 /// Disjoint-union injection of one component's local parser states into the
 /// scoped provider coordinate. Must agree with the runtime provider offsets
@@ -429,6 +444,560 @@ pub(crate) fn assemble_boundary_transfer_query() -> Result<(), String> {
          (scoped Entry/Finish exports are ready; splice templates and global \
          exact_control_elimination must not be used as substitutes)"
         .to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Milestones C/D: control-aware signed parser-NWA compiler.
+// ---------------------------------------------------------------------------
+//
+// For the supported flat prototype (flat component-instance DAG, effectively
+// nonnullable bound children, no retained local controls, canonical EOF
+// completion), the boundary parser is a signed action-word program:
+//
+// - one Ready(k) port per crossing-terminal-automaton vertex k;
+// - each real terminal-DWA edge k -t-> k' substitutes t's scoped signed local
+//   transfer fragment from Ready(k) to Ready(k'), stamping the lexical weight;
+// - zero-width Entry/Finish transfer fragments loop at every Ready port
+//   (the C* over-approximation; infeasible interleavings denote the empty
+//   relation and cancel out exactly);
+// - existing resolve_negative_codes_in_nwa runs ONCE over the assembled query;
+//   output pushes are preserved until then (never resolve Entry alone).
+//
+// Controls are never fake terminal-DWA labels and never connect inside another
+// selected symbol's reduction continuation: fragments are cloned per use and
+// linked only at Ready ports and fragment exits. Downstream, the exact same
+// resolver + table-free normalizer as the established path is reused, so no
+// new DEFAULT/wildcard semantics is introduced. The one table-construction tag
+// the old path consulted (`ExperimentalCoreMerged` driving grouped
+// cancellation) is replaced by an explicit `false`: grouped cancellation is a
+// performance variant (additionally env-gated), never a semantic requirement.
+
+/// Link-time context for the signed-transfer boundary compiler: intact local
+/// tables, provider-layout injections, and validated control contracts. No
+/// composed or provider-level table exists anywhere in this object.
+pub(crate) struct SignedLinkContext<'a> {
+    pub parent_table: &'a GLRTable,
+    pub child_tables: Vec<&'a GLRTable>,
+    pub links: Vec<ScopedSubgrammarLink>,
+    pub terminal_offsets: Vec<u32>,
+    pub num_terminals: u32,
+    pub state_offsets: Vec<u32>,
+    pub total_scoped_states: u32,
+    pub global_ignores: bool,
+    pub ignore_terminals: Vec<Option<TerminalID>>,
+    /// Composed-id unbound slot terminals with empty-language semantics: the
+    /// live placeholder shifts in the component tables are NOT characterized.
+    pub unbound_slots: BTreeSet<TerminalID>,
+}
+
+impl<'a> SignedLinkContext<'a> {
+    fn component_table(&self, component: u32) -> Result<&'a GLRTable, String> {
+        if component == 0 {
+            return Ok(self.parent_table);
+        }
+        self.child_tables.get(component as usize - 1).copied().ok_or_else(|| {
+            format!("signed link references unknown component {component}")
+        })
+    }
+
+    pub(crate) fn injection(&self, component: u32) -> Result<StateInjection, String> {
+        let offset = self.state_offsets.get(component as usize).copied().ok_or_else(|| {
+            format!("signed link has no state offset for component {component}")
+        })?;
+        Ok(StateInjection { offset })
+    }
+
+    /// Composed terminal id -> (owning component, component-local terminal id).
+    pub(crate) fn terminal_owner(&self, terminal: TerminalID) -> Result<(u32, TerminalID), String> {
+        let owner = self
+            .terminal_offsets
+            .iter()
+            .rposition(|&offset| offset <= terminal)
+            .ok_or_else(|| format!("signed link terminal {terminal} has no owning component"))?;
+        let local = terminal.checked_sub(self.terminal_offsets[owner]).ok_or_else(|| {
+            format!("signed link terminal {terminal} underflows its component offset")
+        })?;
+        Ok((owner as u32, local))
+    }
+}
+
+/// Build and validate the signed-link context for one flat composition.
+///
+/// Loud declines (never silent): nested or control-bearing components,
+/// disagreeing incoming links to a shared child, noncanonical
+/// child-start/return-pop, provider-unsupported slot shapes, forwarded shifts
+/// involving slots. The packed splice (rules + terminal layout) is still built
+/// by the caller for grammar/follows analysis and layout pins, but no parser
+/// behavior is ever derived from it.
+pub(crate) fn build_signed_link_context<'a>(
+    parent: &'a Constraint,
+    children: &'a [CompiledSubgrammarInput<'a>],
+    terminal_offsets: &[u32],
+    num_terminals: u32,
+    global_ignores: bool,
+    unbound_slots: BTreeSet<TerminalID>,
+) -> Result<SignedLinkContext<'a>, String> {
+    let mut tables = Vec::with_capacity(children.len() + 1);
+    tables.push(&parent.table);
+    for child in children {
+        tables.push(&child.constraint.table);
+    }
+    for (index, table) in tables.iter().enumerate() {
+        if !table.control_terminals.is_empty() {
+            return Err(format!(
+                "signed static link unsupported: component {index} carries retained linker controls; classify them as controls before static reuse",
+            ));
+        }
+    }
+    let links = build_segmented_parser_links(children)?;
+    validate_shared_child_links(&links)?;
+    let mut state_offsets = Vec::with_capacity(tables.len());
+    let mut total = 0u32;
+    for table in &tables {
+        state_offsets.push(total);
+        total = total.checked_add(table.num_states).ok_or_else(|| {
+            "signed link scoped parser-state coordinate overflow".to_string()
+        })?;
+    }
+    let mut ignore_terminals = Vec::with_capacity(tables.len());
+    ignore_terminals.push(parent.ignore_terminal);
+    for child in children {
+        ignore_terminals.push(child.constraint.ignore_terminal);
+    }
+    let child_tables = tables[1..].to_vec();
+    let context = SignedLinkContext {
+        parent_table: tables[0],
+        child_tables,
+        links,
+        terminal_offsets: terminal_offsets.to_vec(),
+        num_terminals,
+        state_offsets,
+        total_scoped_states: total,
+        global_ignores,
+        ignore_terminals,
+        unbound_slots,
+    };
+    // Fail fast on provider-unsupported slot shapes and noncanonical children.
+    for link in &context.links {
+        validate_slot_entry_shape(
+            context.component_table(link.parent_component)?,
+            link.slot_terminal,
+        )?;
+        let child_table = context.component_table(link.child_component)?;
+        validate_canonical_child_start(child_table, link)?;
+    }
+    Ok(context)
+}
+
+/// The provider's standalone-ignore semantics as a reusable transfer:
+/// Identity on every local state (R_I P_I), scoped by the caller.
+fn identity_transfer(num_states: u32) -> TerminalCharacterization {
+    TerminalCharacterization {
+        escapes: (0..num_states)
+            .map(|state| InitialEscape {
+                pop: vec![StackMatcher::State(state)],
+                pushes: vec![state],
+            })
+            .collect(),
+        reduces: Vec::new(),
+        nt_escapes: Vec::new(),
+        nt_rereduces: Vec::new(),
+        all_nts: BTreeSet::new(),
+    }
+}
+
+/// The exact empty relation (for unbound slot terminals): no escapes, no
+/// reductions, no continuations. Equivalent to emptying the terminal in a
+/// private table copy, without building any composed table.
+fn empty_transfer() -> TerminalCharacterization {
+    TerminalCharacterization {
+        escapes: Vec::new(),
+        reduces: Vec::new(),
+        nt_escapes: Vec::new(),
+        nt_rereduces: Vec::new(),
+        all_nts: BTreeSet::new(),
+    }
+}
+
+/// Fragment library for one shard: scoped ordinary transfers for the shard's
+/// emitted terminals plus per-link Entry/Finish exports, compiled once
+/// through the standard template compiler. Entry/Finish fragments are keyed by
+/// synthetic terminal ids above the composed domain (never emitted by the
+/// lexical DWA, never confused with real terminals).
+pub(crate) struct FragmentLibrary {
+    pub templates: Templates,
+    /// Synthetic fragment key per link index for Entry / Finish exports.
+    pub entry_keys: Vec<TerminalID>,
+    pub finish_keys: Vec<TerminalID>,
+    pub ordinary_terms: usize,
+    pub templates_ms: f64,
+}
+
+fn entry_fragment_key(num_terminals: u32, link_index: usize) -> Result<TerminalID, String> {
+    (num_terminals as usize)
+        .checked_add(2 * link_index)
+        .and_then(|key| u32::try_from(key).ok())
+        .ok_or_else(|| "signed link entry fragment key overflow".to_string())
+}
+
+fn finish_fragment_key(num_terminals: u32, link_index: usize) -> Result<TerminalID, String> {
+    (num_terminals as usize)
+        .checked_add(2 * link_index + 1)
+        .and_then(|key| u32::try_from(key).ok())
+        .ok_or_else(|| "signed link finish fragment key overflow".to_string())
+}
+
+/// Build the scoped fragment library for one shard's emitted terminal set.
+///
+/// Every emitted composed terminal resolves to exactly one scoped transfer:
+/// the owner's local characterization (empty relation when the terminal has
+/// no parser action anywhere — verified by scan, never assumed), the Identity
+/// transfer for a component-standalone ignore terminal (the provider applies
+/// Identity before consulting table rows), or the empty relation for unbound
+/// slots. A resolvable-but-missing characterization is a loud error.
+pub(crate) fn build_fragment_library(
+    context: &SignedLinkContext,
+    emitted: &[bool],
+    start_component: u32,
+) -> Result<FragmentLibrary, String> {
+    let templates_started = Instant::now();
+    let mut combined: BTreeMap<TerminalID, TerminalCharacterization> = BTreeMap::new();
+    let mut ordinary_terms = 0usize;
+    for (terminal, demanded) in emitted.iter().enumerate() {
+        if !demanded {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        if (terminal as usize) >= context.num_terminals as usize {
+            return Err(format!(
+                "signed link shard {start_component} emits terminal {terminal} outside the composed domain {}",
+                context.num_terminals,
+            ));
+        }
+        if context.unbound_slots.contains(&terminal) {
+            combined.insert(terminal, empty_transfer());
+            ordinary_terms += 1;
+            continue;
+        }
+        let (owner, local) = context.terminal_owner(terminal)?;
+        let table = context.component_table(owner)?;
+        if !context.global_ignores
+            && context.ignore_terminals.get(owner as usize).copied().flatten() == Some(local)
+        {
+            let injection = context.injection(owner)?;
+            combined.insert(
+                terminal,
+                scope_characterization(&identity_transfer(table.num_states), &injection)?,
+            );
+            ordinary_terms += 1;
+            continue;
+        }
+        if local >= table.num_terminals {
+            return Err(format!(
+                "signed link terminal {terminal} resolves to local {local} outside component {owner} domain {}",
+                table.num_terminals,
+            ));
+        }
+        let mut local_selected = vec![false; table.num_terminals as usize];
+        local_selected[local as usize] = true;
+        let characterized = characterize_selected_terminals_for_terminal_count(
+            table,
+            table.num_terminals,
+            &local_selected,
+        );
+        let local_characterization = characterized.get(&local);
+        let scoped = match local_characterization {
+            Some(characterization) => {
+                let injection = context.injection(owner)?;
+                scope_characterization(characterization, &injection)?
+            }
+            None => {
+                // No characterization entry: exact only when the terminal has
+                // no parser action anywhere in the local table.
+                let has_action = (0..table.num_states)
+                    .any(|state| table.action(state, local).is_some());
+                if has_action {
+                    return Err(format!(
+                        "signed link terminal {terminal} (component {owner} local {local}) has parser actions but no characterization",
+                    ));
+                }
+                empty_transfer()
+            }
+        };
+        combined.insert(terminal, scoped);
+        ordinary_terms += 1;
+    }
+    let mut entry_keys = Vec::with_capacity(context.links.len());
+    let mut finish_keys = Vec::with_capacity(context.links.len());
+    for (link_index, link) in context.links.iter().enumerate() {
+        // Slot Entry: local slot characterization, scoped, plus child start.
+        let parent_table = context.component_table(link.parent_component)?;
+        let mut slot_selected = vec![false; parent_table.num_terminals as usize];
+        slot_selected[link.slot_terminal as usize] = true;
+        let slot_characterized = characterize_selected_terminals_for_terminal_count(
+            parent_table,
+            parent_table.num_terminals,
+            &slot_selected,
+        );
+        let local_slot = slot_characterized.get(&link.slot_terminal).ok_or_else(|| {
+            format!(
+                "signed link slot terminal {} has no characterization in parent component {}",
+                link.slot_terminal, link.parent_component,
+            )
+        })?;
+        let parent_injection = context.injection(link.parent_component)?;
+        let scoped_slot = scope_characterization(local_slot, &parent_injection)?;
+        let child_injection = context.injection(link.child_component)?;
+        let scoped_child_start = child_injection.scope_state(link.child_start)?;
+        let entry = instantiate_entry(scoped_slot, scoped_child_start, link.parent_component);
+        let entry_key = entry_fragment_key(context.num_terminals, link_index)?;
+        combined.insert(entry_key, entry.characterization);
+        entry_keys.push(entry_key);
+        // Child Finish under this link's endpoint policy.
+        let child_table = context.component_table(link.child_component)?;
+        let (finish, has_local_eof_effects) =
+            instantiate_finish(child_table, link, &child_injection)?;
+        if has_local_eof_effects {
+            return Err(format!(
+                "signed static link unsupported: child component {} performs ordinary local EOF stack work; composing through it needs outer control-choice points",
+                link.child_component,
+            ));
+        }
+        let finish_key = finish_fragment_key(context.num_terminals, link_index)?;
+        combined.insert(finish_key, finish.characterization);
+        finish_keys.push(finish_key);
+    }
+    let templates = Templates::from_characterizations(&combined);
+    let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
+    Ok(FragmentLibrary {
+        templates,
+        entry_keys,
+        finish_keys,
+        ordinary_terms,
+        templates_ms,
+    })
+}
+
+/// Clone a template fragment into the arena, stamp every edge/epsilon with
+/// `weight`, and redirect accepting finals to `continuation`. Mirrors the
+/// established bundle-substitution primitive exactly (same weight stamping,
+/// same final redirection); the only difference is the caller chooses
+/// Ready-port endpoints instead of a table-driven bundle walk.
+fn append_weighted_fragment(
+    arena: &mut NWA,
+    template: &NWA,
+    weight: &Weight,
+    continuation: u32,
+) -> Result<NwaBody, String> {
+    let offset = u32::try_from(arena.states().len())
+        .map_err(|_| "signed parser NWA arena overflow".to_string())?;
+    let body = arena.append_with_body(template);
+    let appended_len = template.states().len();
+    for state_id in offset as usize..offset as usize + appended_len {
+        let state = arena
+            .states_mut()
+            .get_mut(state_id)
+            .ok_or_else(|| "signed parser NWA fragment range overflow".to_string())?;
+        for targets in state.transitions.values_mut() {
+            for (_, edge_weight) in targets {
+                *edge_weight = weight.clone();
+            }
+        }
+        for (_, epsilon_weight) in &mut state.epsilons {
+            *epsilon_weight = weight.clone();
+        }
+    }
+    for state_id in offset as usize..offset as usize + appended_len {
+        let takes_final = arena
+            .states_mut()
+            .get_mut(state_id)
+            .ok_or_else(|| "signed parser NWA fragment range overflow".to_string())?
+            .final_weight
+            .take()
+            .is_some();
+        if takes_final {
+            arena.add_epsilon(state_id as u32, continuation, weight.clone());
+        }
+    }
+    Ok(body)
+}
+
+/// Output of one signed-shard compilation.
+pub(crate) struct SignedShardOutput {
+    pub parser_dwa: DWA,
+    pub templates_ms: f64,
+    pub compose_ms: f64,
+    pub resolve_ms: f64,
+    pub normalize_ms: f64,
+    pub signed_states: usize,
+    pub signed_transitions: usize,
+    pub terms: usize,
+}
+
+/// Compile one shard: Ready-port assembly, single exact negative resolution,
+/// table-free positive normalization.
+///
+/// Every real terminal-DWA edge substitutes its scoped transfer fragment;
+/// Entry/Finish fragments loop zero-width at every Ready port (the bounded
+/// flat-class control program). Negative labels are resolved exactly once over
+/// the whole query; a surviving negative label afterwards is a loud error.
+/// Normalization takes only the scoped parser-state count — no table, hence
+/// no table-dependent optimization can consult a mismatched object.
+pub(crate) fn compile_signed_shard_parser(
+    context: &SignedLinkContext,
+    library: &FragmentLibrary,
+    shard_dwa: &DWA,
+    start_component: u32,
+) -> Result<SignedShardOutput, String> {
+    let compose_started = Instant::now();
+    let mut arena = NWA::new(0, 0);
+    let mut ready = vec![u32::MAX; shard_dwa.states().len()];
+    for (index, state) in shard_dwa.states().iter().enumerate() {
+        let port = arena.add_state();
+        ready[index] = port;
+        if let Some(weight) = state.final_weight.as_ref() {
+            if !weight.is_empty() {
+                arena.set_final_weight(port, weight.clone());
+            }
+        }
+    }
+    let start_index = shard_dwa.start_state() as usize;
+    let start_port = ready.get(start_index).copied().ok_or_else(|| {
+        format!("signed link shard {start_component} has no lexical start state")
+    })?;
+    if start_port == u32::MAX {
+        return Err(format!(
+            "signed link shard {start_component} never allocated its start port"
+        ));
+    }
+    arena.set_start_states(vec![start_port]);
+    // Ordinary terminal edges: substitute the scoped transfer fragment.
+    for (index, state) in shard_dwa.states().iter().enumerate() {
+        for (label, target, weight) in state.transitions.entries() {
+            if label < 0 {
+                return Err(format!(
+                    "signed link shard {start_component} carries negative terminal-DWA label {label}; controls must not be lexical labels",
+                ));
+            }
+            if weight.is_empty() {
+                continue;
+            }
+            let terminal = label as TerminalID;
+            let fragment = library.templates.by_terminal_nwa.get(&terminal).ok_or_else(|| {
+                format!(
+                    "signed link shard {start_component} emits terminal {terminal} with no scoped transfer"
+                )
+            })?;
+            let target_port = ready.get(target as usize).copied().ok_or_else(|| {
+                format!("signed link shard {start_component} edge targets unknown state {target}")
+            })?;
+            let body = append_weighted_fragment(&mut arena, fragment, weight, target_port)?;
+            for start in body.start_states {
+                arena.add_epsilon(ready[index], start, Weight::all());
+            }
+        }
+    }
+    // Zero-width control loops at every Ready port. Entry/Finish fragments
+    // carry the full scoped stack relation, so infeasible interleavings
+    // (e.g. Entry on a child-topped stack) denote the empty relation and
+    // cancel out exactly; feasible ones realize K before each terminal.
+    let all_weight = Weight::all();
+    for (index, _) in shard_dwa.states().iter().enumerate() {
+        for (link_index, _) in context.links.iter().enumerate() {
+            let entry_fragment = library
+                .templates
+                .by_terminal_nwa
+                .get(&library.entry_keys[link_index])
+                .ok_or_else(|| {
+                    format!("signed link entry fragment {link_index} missing from library")
+                })?;
+            let entry_body =
+                append_weighted_fragment(&mut arena, entry_fragment, &all_weight, ready[index])?;
+            for start in entry_body.start_states {
+                arena.add_epsilon(ready[index], start, Weight::all());
+            }
+            let finish_fragment = library
+                .templates
+                .by_terminal_nwa
+                .get(&library.finish_keys[link_index])
+                .ok_or_else(|| {
+                    format!("signed link finish fragment {link_index} missing from library")
+                })?;
+            let finish_body =
+                append_weighted_fragment(&mut arena, finish_fragment, &all_weight, ready[index])?;
+            for start in finish_body.start_states {
+                arena.add_epsilon(ready[index], start, Weight::all());
+            }
+        }
+    }
+    let signed_states = arena.states().len();
+    let signed_transitions = arena.num_transitions();
+    let compose_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
+    // Single exact negative resolution over the whole assembled query.
+    // `false` is deliberate: grouped cancellation is a performance variant
+    // (additionally env-gated), and no table-construction tag exists here to
+    // consult — correctness-first exact cancellation always.
+    let resolve_started = Instant::now();
+    let resolved_reverse_topo = resolve_negative_codes_in_nwa(&mut arena, false);
+    let resolve_ms = resolve_started.elapsed().as_secs_f64() * 1000.0;
+    for state in arena.states() {
+        for (&label, _) in state.transitions.iter() {
+            if is_negative_label(label) {
+                return Err(format!(
+                    "signed link shard {start_component} retains negative stack label {label} after exact resolution",
+                ));
+            }
+        }
+    }
+    let normalize_started = Instant::now();
+    let parser_dwa = normalize_weighted_parser_stack_nwa_for_parser_state_count(
+        context.total_scoped_states,
+        &arena,
+    );
+    let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} parser_states={} parser_trans={}",
+        library.ordinary_terms,
+        arena.states().len(),
+        arena.num_transitions(),
+        resolved_reverse_topo.map(|layers| layers.len()).unwrap_or(usize::MAX),
+        parser_dwa.num_states(),
+        parser_dwa.num_transitions(),
+    );
+    Ok(SignedShardOutput {
+        parser_dwa,
+        templates_ms: library.templates_ms,
+        compose_ms,
+        resolve_ms,
+        normalize_ms,
+        signed_states,
+        signed_transitions,
+        terms: library.ordinary_terms,
+    })
+}
+
+/// Publish one signed-compiled shard through the shared `StaticParser`
+/// publication (shard-local TSID map in the scoped tokenizer coordinate).
+pub(crate) fn publish_signed_shard(
+    work: WalkBoundaryShardWork,
+    output: SignedShardOutput,
+    tokenizer_offsets: &[u32],
+    component_state_counts: &[u32],
+) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
+    publish_signed_boundary_shard_work(
+        work,
+        output.parser_dwa,
+        WalkShardPublishProfile {
+            templates_ms: output.templates_ms,
+            materialize_ms: output.compose_ms + output.resolve_ms,
+            normalize_ms: output.normalize_ms,
+            terms: output.terms,
+            parser_states: 0,
+            parser_trans: 0,
+        },
+        tokenizer_offsets,
+        component_state_counts,
+    )
 }
 
 /// Strict-static trap flag: when `GLRMASK_STRICT_STATIC_TRAP_DYNAMIC=1`,

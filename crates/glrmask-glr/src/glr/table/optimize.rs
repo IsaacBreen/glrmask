@@ -117,6 +117,17 @@ pub(super) struct UnitReductionInliningReport {
     pub(super) changed_original_states: Vec<u32>,
 }
 
+/// Number of real control-elimination runs process-wide. No-op calls on
+/// control-free tables do not count. The prepared static linker's
+/// signed-transfer boundary compiler asserts this does not move across a link.
+static CONTROL_ELIMINATION_RUNS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide count of real `eliminate_control_terminals_exact` runs.
+pub fn control_elimination_run_count() -> u64 {
+    CONTROL_ELIMINATION_RUNS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlEliminationReport {
     pub states: usize,
@@ -1877,6 +1888,11 @@ impl GLRTable {
                 elapsed_ms: 0.0,
             });
         }
+        // Proof invariant for the prepared static linker: the new signed-transfer
+        // boundary compiler must never invoke control elimination. Count every
+        // real elimination run (no-op calls on control-free tables do not count)
+        // so link tests can assert the counter does not move across the link.
+        CONTROL_ELIMINATION_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let started_at = std::time::Instant::now();
         let source = self.clone();

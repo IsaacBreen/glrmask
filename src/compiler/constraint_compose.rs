@@ -2610,14 +2610,79 @@ pub(crate) fn publish_walk_boundary_shard_work(
             parser_dwa.num_transitions(),
         );
     }
+    finish_walk_shard_publication(
+        work.start_component,
+        work.candidate_tokens,
+        parser_dwa,
+        &id_map,
+        WalkShardPublishProfile {
+            templates_ms,
+            materialize_ms,
+            normalize_ms,
+            terms: selected.iter().filter(|slot| **slot).count(),
+            parser_states: 0,
+            parser_trans: 0,
+        },
+        tokenizer_offsets,
+        component_state_counts,
+    )
+}
+
+/// Publish one signed-transfer boundary shard built WITHOUT any composed or
+/// provider table: the caller supplies the already positively-normalized
+/// parser DWA (control-aware signed-NWA composition + exact negative
+/// resolution + table-free normalization). Publication into the runtime
+/// `StaticParser` format (shard-local TSID map in the scoped tokenizer
+/// coordinate) is shared with the table-built path.
+pub(crate) fn publish_signed_boundary_shard_work(
+    work: WalkBoundaryShardWork,
+    parser_dwa: DWA,
+    profile: WalkShardPublishProfile,
+    tokenizer_offsets: &[u32],
+    component_state_counts: &[u32],
+) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
+    ensure_positive_runtime_parser_dwa(&parser_dwa)?;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_signed_shard_publish] start_component={} terms={} parser_states={} parser_trans={} templates_ms={:.3} materialize_ms={:.3} normalize_ms={:.3}",
+            work.start_component,
+            profile.terms,
+            parser_dwa.num_states(),
+            parser_dwa.num_transitions(),
+            profile.templates_ms,
+            profile.materialize_ms,
+            profile.normalize_ms,
+        );
+    }
+    finish_walk_shard_publication(
+        work.start_component,
+        work.candidate_tokens,
+        parser_dwa,
+        &work.id_map,
+        profile,
+        tokenizer_offsets,
+        component_state_counts,
+    )
+}
+
+/// Shared tail of walk-shard publication: builds the scoped-coordinate TSID
+/// map and wraps the parser DWA as a `StaticParser` boundary shard.
+fn finish_walk_shard_publication(
+    start_component: u32,
+    candidate_tokens: Arc<[u32]>,
+    parser_dwa: DWA,
+    id_map: &InternalIdMap,
+    mut profile: WalkShardPublishProfile,
+    tokenizer_offsets: &[u32],
+    component_state_counts: &[u32],
+) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
     // The private TSID map is indexed by the installing runtime's scoped
     // tokenizer coordinate (leaves back-to-back from 0, no reset state) and
     // must cover every scoped link-time state exactly once; gaps would
     // silently drop boundary contributions at runtime.
     if tokenizer_offsets.len() != component_state_counts.len() {
         return Err(format!(
-            "walk boundary shard {} tokenizer layout mismatch: {} offsets vs {} components",
-            work.start_component,
+            "walk boundary shard {start_component} tokenizer layout mismatch: {} offsets vs {} components",
             tokenizer_offsets.len(),
             component_state_counts.len(),
         ));
@@ -2630,8 +2695,7 @@ pub(crate) fn publish_walk_boundary_shard_work(
         for local in 0..count as usize {
             let merged = base.checked_add(local).ok_or_else(|| {
                 format!(
-                    "walk boundary shard {} scoped state (component {component}, local {local}) overflows",
-                    work.start_component,
+                    "walk boundary shard {start_component} scoped state (component {component}, local {local}) overflows",
                 )
             })?;
             let tsid = id_map
@@ -2642,25 +2706,18 @@ pub(crate) fn publish_walk_boundary_shard_work(
                 .unwrap_or(u32::MAX);
             if tsid == u32::MAX {
                 return Err(format!(
-                    "walk boundary shard {} scoped state (component {component}, local {local}) has no TSID (merged {merged})",
-                    work.start_component,
+                    "walk boundary shard {start_component} scoped state (component {component}, local {local}) has no TSID (merged {merged})",
                 ));
             }
             tokenizer_state_to_tsid.push(tsid);
         }
     }
-    let profile = WalkShardPublishProfile {
-        templates_ms,
-        materialize_ms,
-        normalize_ms,
-        terms: selected.iter().filter(|slot| **slot).count(),
-        parser_states: parser_dwa.num_states() as usize,
-        parser_trans: parser_dwa.num_transitions() as usize,
-    };
+    profile.parser_states = parser_dwa.num_states() as usize;
+    profile.parser_trans = parser_dwa.num_transitions() as usize;
     Ok((
         PublishedStaticBoundaryShard {
-            start_component: work.start_component,
-            candidate_tokens: work.candidate_tokens,
+            start_component,
+            candidate_tokens,
             boundary: Arc::new(crate::runtime::SegmentedBoundaryParser {
                 parser_dwa: DWA::new(0, 0),
                 compact_parser_dwa: None,
