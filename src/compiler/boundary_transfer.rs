@@ -36,6 +36,7 @@ use std::time::Instant;
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::weighted_u32::minimize::minimize;
 use crate::automata::weighted_u32::nwa::{NWA, NwaBody};
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
@@ -955,8 +956,32 @@ pub(crate) fn compile_signed_shard_parser(
         &arena,
     );
     let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0;
+    // Exact post-normalization minimization. The established normalize impl
+    // skips its internal minimization by default, and the old boundary parser
+    // sizes (~800-1000 states) were obtained by minimizing explicitly: the
+    // determinized stack-prefix recognizer is highly redundant (per-edge
+    // fragment clones + control loops collapse once the language is fixed).
+    // This is the same `minimize` the established normalize stage calls, so
+    // DEFAULT/wildcard/final-weight semantics match exactly. It is acyclic-only
+    // by construction (cyclic inputs are returned unchanged), which is safe:
+    // a cyclic result simply keeps its size and is logged as such. The
+    // publish step re-validates positivity afterwards regardless.
+    //
+    // On counts: the shard's emitted *grammar terminals* (559 on selected10
+    // outer) are the template-substitution granularity; the 143 *tokens* are
+    // the candidate vocabulary set carried on edge weights. Both are expected;
+    // neither is a duplication bug. Per-edge fragment clones cannot be shared
+    // across different target continuations without cross-continuation leakage
+    // (exits are contextual), and cross-source sharing rarely hits on a
+    // deterministic terminal DWA — minimization is the exact collapse.
+    let pre_min_states = parser_dwa.num_states();
+    let pre_min_trans = parser_dwa.num_transitions();
+    let pre_min_acyclic = parser_dwa.is_acyclic();
+    let minimize_started = Instant::now();
+    let parser_dwa = minimize(&parser_dwa);
+    let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
-        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} parser_states={} parser_trans={}",
+        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} pre_min_states={pre_min_states} pre_min_trans={pre_min_trans} pre_min_acyclic={pre_min_acyclic} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
         library.ordinary_terms,
         arena.states().len(),
         arena.num_transitions(),
@@ -969,7 +994,7 @@ pub(crate) fn compile_signed_shard_parser(
         templates_ms: library.templates_ms,
         compose_ms,
         resolve_ms,
-        normalize_ms,
+        normalize_ms: normalize_ms + minimize_ms,
         signed_states,
         signed_transitions,
         terms: library.ordinary_terms,
