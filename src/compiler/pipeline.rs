@@ -1025,6 +1025,9 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
         for &terminal in general_residual_terminals {
             proxy_expressions[terminal as usize] = Expr::U8Class(U8Set::empty());
         }
+        let retain_exclusion_coordinates = proxy_expressions
+            .iter()
+            .any(|expression| matches!(expression, Expr::Exclude { .. }));
         let terminal_labels = grammar
             .terminals
             .iter()
@@ -1040,9 +1043,11 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
         let prepare_bounded_code_in_parallel = !preserve_residual_oracle_coordinates
             && (prefer_general_bounded || giant_terminals.is_empty());
         // The hybrid physical proxy feeds exact source-state IDs to dynamic
-        // masking. Retain product residual coordinates, but do not collapse
-        // traced duplicate coordinates: collapsing changes those hot runtime
-        // states and was measurably worse on the multi-root exclusion tail.
+        // masking. Retain product residual coordinates only when a physical
+        // proxy terminal is itself a top-level exclusion; unrelated hybrid
+        // grammars keep the historical tokenizer path. When retained, do not
+        // collapse traced duplicate coordinates: that changes hot runtime states
+        // and was measurably worse on the multi-root exclusion tail.
         let (mut tokenizer, prepared_components) = if prepare_bounded_code_in_parallel {
             let components_to_prepare = residual_components.clone();
             let (tokenizer, prepared) = rayon::join(
@@ -1053,7 +1058,7 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
                         &partition_ids,
                         Some(&residual_isolation_classes),
                         None,
-                        true,
+                        retain_exclusion_coordinates,
                         false,
                     )
                 },
@@ -1068,7 +1073,7 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
                     &partition_ids,
                     Some(&residual_isolation_classes),
                     None,
-                    true,
+                    retain_exclusion_coordinates,
                     false,
                 ),
                 None,
@@ -1118,6 +1123,9 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
     for (terminal, _) in &virtual_candidates {
         proxy_expressions[*terminal as usize] = Expr::U8Class(U8Set::empty());
     }
+    let retain_exclusion_coordinates = proxy_expressions
+        .iter()
+        .any(|expression| matches!(expression, Expr::Exclude { .. }));
     let terminal_labels = grammar
         .terminals
         .iter()
@@ -1132,7 +1140,7 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
         &partition_ids,
         Some(&residual_isolation_classes),
         None,
-        true,
+        retain_exclusion_coordinates,
         false,
     );
     // Drain ordinary nullable terminals before reserving the arithmetic state
