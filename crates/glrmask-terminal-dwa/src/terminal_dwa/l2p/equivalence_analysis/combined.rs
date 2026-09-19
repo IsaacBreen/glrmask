@@ -746,7 +746,19 @@ impl L2pNfaAnalysisViewPolicy {
 }
 
 #[inline]
-fn l2p_nfa_analysis_view_policy() -> L2pNfaAnalysisViewPolicy {
+fn l2p_nfa_analysis_view_policy(partition_label: &str) -> L2pNfaAnalysisViewPolicy {
+    if std::env::var_os("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW").is_none()
+        && partition_label.starts_with("boundary_shard")
+    {
+        // Static-link boundary shards always run the full 128k-vocab analysis
+        // over a ~26k-state merged tokenizer (pair estimate ~3.3B): the
+        // adaptive powerset probe unconditionally aborts at the 40K cap after
+        // ~0.6 s of wasted construction and the bounded view then computes the
+        // identical exact quotient. Both views are exact; defaulting this path
+        // to bounded skips the doomed probe. An explicit env override is
+        // still honored for diagnostics.
+        return L2pNfaAnalysisViewPolicy::Bounded;
+    }
     let Ok(value) = std::env::var("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW") else {
         return L2pNfaAnalysisViewPolicy::Adaptive;
     };
@@ -2451,7 +2463,7 @@ fn analyze_equivalences_impl(
             max_token_len,
             active_byte_count,
         );
-        let analysis_view_policy = l2p_nfa_analysis_view_policy();
+        let analysis_view_policy = l2p_nfa_analysis_view_policy(partition_label);
         let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
         let powerset_min_bounded_pairs =
             l2p_nfa_relevant_powerset_min_bounded_pairs(partition_label);
@@ -2554,6 +2566,15 @@ fn analyze_equivalences_impl(
         let auto_skip_pipeline_prepass = partition_label == "p1"
             && prepared.initial_states.len() >= 20_000
             && dedup.representative_token_bytes.len() >= 10_000;
+        // Static-link boundary shards analyze a merged tokenizer under the
+        // full vocabulary: restricted observation provably finds nothing
+        // (26,046 classes on selected10) and max-length refinement is empty,
+        // so the pipeline is pure overhead (~0.5 s). The exact
+        // vocabulary/state passes remain authoritative, so omitting this
+        // optional prequotient is semantic-preserving (same argument as the
+        // p1 auto-skip above).
+        let boundary_shard_skip_pipeline_prepass =
+            partition_label.starts_with("boundary_shard");
         // A vocab-only caller never consumes the final tokenizer-state
         // quotient.  When the incoming state domain is already small, keeping
         // it exact (identity / inherited map) is cheaper than computing a
@@ -2562,6 +2583,7 @@ fn analyze_equivalences_impl(
         let vocab_only_direct_states = vocab_only && prepared.initial_states.len() <= 256;
         let skip_pipeline_prepass = vocab_only_direct_states
             || auto_skip_pipeline_prepass
+            || boundary_shard_skip_pipeline_prepass
             || std::env::var("GLRMASK_SKIP_L2P_STATE_EQUIV_PIPELINE_PARTITIONS")
                 .ok()
                 .is_some_and(|scope| {

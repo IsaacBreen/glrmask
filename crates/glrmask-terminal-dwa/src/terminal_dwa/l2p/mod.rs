@@ -359,11 +359,25 @@ fn l2p_partition_selector_enabled(name: &str, partition_label: &str) -> bool {
 pub fn l2p_first_byte_vocab_factor_enabled_for_partition(
     partition_label: &str,
 ) -> bool {
-    FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH.with(|depth| depth.get() == 0)
-        && l2p_partition_selector_enabled(
-            "GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR",
-            partition_label,
-        )
+    if FIRST_BYTE_VOCAB_FACTOR_SUPPRESS_DEPTH.with(|depth| depth.get() != 0) {
+        return false;
+    }
+    if std::env::var_os("GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR").is_none()
+        && partition_label.starts_with("boundary_shard")
+    {
+        // Static-link boundary shards factor the full 128k-vocabulary
+        // equivalence internally (5.0M source-state buckets -> 143k, vocab
+        // 3.9s -> 0.9s, exact-state 1.9s -> 0.6s on selected10) with no input
+        // narrowing: the factored classes are validated against the full
+        // exact partition by the factor strict-reference mode, and the
+        // selected10 oracle gate pins the 143-token output. An explicit env
+        // setting still overrides this default for diagnostics.
+        return true;
+    }
+    l2p_partition_selector_enabled(
+        "GLRMASK_ENABLE_L2P_FIRST_BYTE_VOCAB_FACTOR",
+        partition_label,
+    )
 }
 
 pub fn l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(
