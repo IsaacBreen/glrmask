@@ -1910,6 +1910,9 @@ pub(super) fn try_scalar_dispatch(
             transformed.push(DynamicBranch {
                 tokenizer_config,
                 exact_tokenizer_state: branch.exact_tokenizer_state,
+                parser_filtered_root: branch.parser_filtered_root,
+                parser_filtered_transparent: branch.parser_filtered_transparent,
+                residual_continuation_terminal: branch.residual_continuation_terminal,
                 gss: branch.gss.clone(),
                 initial_prune_guard: branch.initial_prune_guard.clone(),
             });
@@ -2012,6 +2015,9 @@ pub(super) fn try_scalar_dispatch(
         transformed.push(DynamicBranch {
             tokenizer_config,
             exact_tokenizer_state: branch.exact_tokenizer_state,
+            parser_filtered_root: branch.parser_filtered_root,
+            parser_filtered_transparent: branch.parser_filtered_transparent,
+            residual_continuation_terminal: branch.residual_continuation_terminal,
             gss: branch.gss.clone(),
             initial_prune_guard: branch.initial_prune_guard.clone(),
         });
@@ -2206,6 +2212,9 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
             collapsed.push(DynamicBranch {
                 tokenizer_config: root_state,
                 exact_tokenizer_state: None,
+                parser_filtered_root: false,
+                parser_filtered_transparent: false,
+                residual_continuation_terminal: None,
                 gss: root_branches[0].gss.clone(),
                 initial_prune_guard: InitialPruneGuard::Passed,
             });
@@ -2246,6 +2255,9 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 collapsed.push(DynamicBranch {
                     tokenizer_config: root_state,
                     exact_tokenizer_state: None,
+                    parser_filtered_root: false,
+                    parser_filtered_transparent: false,
+                    residual_continuation_terminal: None,
                     gss: root_branches[0].gss.clone(),
                     initial_prune_guard: InitialPruneGuard::Passed,
                 });
@@ -2328,6 +2340,9 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
             collapsed.push(DynamicBranch {
                 tokenizer_config: root_state,
                 exact_tokenizer_state: None,
+                parser_filtered_root: false,
+                parser_filtered_transparent: false,
+                residual_continuation_terminal: None,
                 gss: root_branches[0].gss.clone(),
                 initial_prune_guard: InitialPruneGuard::Passed,
             });
