@@ -1849,6 +1849,13 @@ mod tests {
         Selected10Outer { vocab, core, dispatch, composed, grammar, disallowed }
     }
 
+    fn require_release_selected10_gate(name: &str) {
+        assert!(
+            !cfg!(debug_assertions),
+            "{name} is a selected10 integration/performance gate and must be run with an optimized test binary; rerun with `cargo test --release ...`"
+        );
+    }
+
     /// Production-path selected10 crossing gate: one shared equivalence, one
     /// standard walk per component, NWA-level crossing filter. Asserts the
     /// 143-token dispatch crossing set (MINBOUND oracle dump) and the
@@ -1856,6 +1863,7 @@ mod tests {
     #[test]
     #[ignore]
     fn selected10_boundary_walk_crossing() {
+        require_release_selected10_gate("selected10_boundary_walk_crossing");
         let fixture = load_selected10_outer();
         let vocab = &fixture.vocab;
         let core = &fixture.core;
@@ -1863,8 +1871,6 @@ mod tests {
         let composed = &fixture.composed;
         let grammar = &fixture.grammar;
         let disallowed = &fixture.disallowed;
-        let dump_dir = std::env::var("PHASE1_DUMP_DIR")
-            .unwrap_or_else(|_| "/tmp/grammars25-redesign".to_string());
         let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
@@ -1887,11 +1893,13 @@ mod tests {
             shared.id_map.num_internal_tokens(),
         );
 
-        let oracle_text = std::fs::read_to_string(format!("{dump_dir}/minbound-tokens.txt"))
-            .expect(
-                "oracle dump missing; regenerate with the MINBOUND driver \
-                 (see E-phase1-walk.md §2.1) or run without PHASE1_SKIP_ORACLE via the probe",
-            );
+        // Frozen output of the independent Phase-1 MINBOUND B-A oracle for
+        // this exact selected10 fixture. The original artifact is preserved
+        // in the 2026-09-18 linker compaction with SHA-256
+        // 689820493b69f3a603c1c38235a74b4b91aa2a6449f22cddbdbc5a5e3d60bf6d.
+        // Keep the oracle in-repo so this regression never depends on
+        // historical /tmp state or a machine-local PHASE1_DUMP_DIR.
+        let oracle_text = include_str!("testdata/selected10_minbound_tokens.txt");
         let oracle: BTreeSet<u32> =
             oracle_text.split_whitespace().map(|value| value.parse::<u32>().unwrap()).collect();
         assert_eq!(oracle.len(), 143, "oracle dump must hold the 143 MINBOUND tokens");
@@ -1997,6 +2005,7 @@ mod tests {
     #[test]
     #[ignore]
     fn selected10_walk_shard_install_matches_dynamic() {
+        require_release_selected10_gate("selected10_walk_shard_install_matches_dynamic");
         let fixture = load_selected10_outer();
         let dyn_children = [CompiledSubgrammarInput {
             placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
