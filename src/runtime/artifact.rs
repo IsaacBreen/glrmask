@@ -3217,6 +3217,22 @@ impl DynamicMaskSliceTrie {
     }
 }
 
+/// Cache key for one fused small-union subproof node: certification of
+/// `terminal` from slice state `slice_state` over the exact physical union
+/// `physical` holds for every mask sharing this tokenizer and slice.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SmallUnionProofCacheKey {
+    pub(crate) slice_id: u32,
+    pub(crate) slice_state: u32,
+    pub(crate) terminal: u32,
+    pub(crate) physical: SmallVec<[u32; 8]>,
+}
+
+/// Maximum entries in the cross-mask small-union proof cache. The converged
+/// product core is small; the cap bounds pathological growth. Insertion
+/// simply stops at the cap (no eviction churn).
+pub(crate) const SMALL_UNION_PROOF_CACHE_MAX: usize = 8192;
+
 /// Runtime-only vocabulary data for direct dynamic mask generation.
 #[derive(Debug, Clone)]
 pub(crate) struct DynamicMaskVocab {
@@ -3288,6 +3304,13 @@ pub(crate) struct DynamicMaskVocab {
     source_vocab_digest: Option<[u8; 32]>,
     mask_cache: Arc<Mutex<DynamicMaskCache>>,
     dense_subset16_cache: Arc<Mutex<FxHashMap<Vec<u32>, Arc<DynamicDenseSubset16>>>>,
+    /// Cross-mask memo of fused small-union slice subproofs. Keyed by
+    /// immutable lexical content (slice id, slice state, sorted physical
+    /// tokenizer states, terminal): entries are pure lexical facts, so
+    /// parser admission is still checked per use outside the cache.
+    /// Schema-run scoped (lives in the constraint-owned vocab): no
+    /// cross-schema identity is possible.
+    small_union_proof_cache: Arc<Mutex<FxHashMap<SmallUnionProofCacheKey, bool>>>,
     lazy_union_cache: Arc<Mutex<DynamicLazyUnionCache>>,
     direct_regular_frontier_cache:
         Arc<Mutex<FxHashMap<usize, DirectRegularDynamicFrontierCacheEntry>>>,
@@ -3659,6 +3682,7 @@ impl DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
+            small_union_proof_cache: Arc::new(Mutex::new(FxHashMap::default())),
             dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3753,6 +3777,7 @@ impl DynamicMaskVocab {
             grammar_quotiented: self.grammar_quotiented,
             source_vocab_digest: self.source_vocab_digest,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
+            small_union_proof_cache: Arc::new(Mutex::new(FxHashMap::default())),
             dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3821,6 +3846,7 @@ impl DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
+            small_union_proof_cache: Arc::new(Mutex::new(FxHashMap::default())),
             dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -3958,6 +3984,7 @@ impl DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
+            small_union_proof_cache: Arc::new(Mutex::new(FxHashMap::default())),
             dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),
@@ -7431,6 +7458,37 @@ impl DynamicMaskVocab {
         }
     }
 
+    /// Look up a memoized fused small-union subproof result. Entries are
+    /// pure lexical facts over immutable tokenizer/slice content; parser
+    /// admission is always checked per use outside this cache.
+    pub(crate) fn small_union_proof_lookup(
+        &self,
+        key: &SmallUnionProofCacheKey,
+    ) -> Option<bool> {
+        self.small_union_proof_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(key)
+            .copied()
+    }
+
+    /// Memoize one fused small-union subproof result. Silently stops
+    /// inserting at capacity (no eviction churn); fuel-incomplete results
+    /// must never be inserted by callers.
+    pub(crate) fn small_union_proof_insert(
+        &self,
+        key: SmallUnionProofCacheKey,
+        certified: bool,
+    ) {
+        let mut cache = self
+            .small_union_proof_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.len() < SMALL_UNION_PROOF_CACHE_MAX {
+            cache.insert(key, certified);
+        }
+    }
+
     pub(crate) fn cached_dense_subset16(
         &self,
         root_states: &[u32],
@@ -8079,6 +8137,7 @@ impl Default for DynamicMaskVocab {
             grammar_quotiented: false,
             source_vocab_digest: None,
             mask_cache: Arc::new(Mutex::new(DynamicMaskCache::default())),
+            small_union_proof_cache: Arc::new(Mutex::new(FxHashMap::default())),
             dense_subset16_cache: Arc::new(Mutex::new(FxHashMap::default())),
             lazy_union_cache: Arc::new(Mutex::new(DynamicLazyUnionCache::default())),
             direct_regular_frontier_cache: Arc::new(Mutex::new(FxHashMap::default())),

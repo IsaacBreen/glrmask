@@ -26,7 +26,7 @@ use crate::grammar::flat::TerminalID;
 use super::artifact::{
     Constraint, DynamicDenseSubset16, DynamicLazyUnionCache, DynamicLazyUnionMetadata, DynamicMaskLexerStateKey,
     DynamicMaskStateKey, DynamicMaskTrie, DynamicMaskTrieFullWalkOp, DynamicMaskVocab,
-    FastTokenizerTransitions, dynamic_mask_llg_master_is_whitespace,
+    FastTokenizerTransitions, SmallUnionProofCacheKey, dynamic_mask_llg_master_is_whitespace,
     dynamic_mask_llg_master_safe_chars,
 };
 use super::state::ConstraintState;
@@ -120,6 +120,17 @@ trait FullWalkTransitionTable {
     fn single_finalizer_continues(&mut self, state: u32) -> bool;
 
     fn matched_terminals(&self, state: u32) -> SmallVec<[TerminalID; 4]>;
+
+    /// Expand a small union of walk configs into exact physical tokenizer
+    /// states for proof-cache keying. Defaults to unsupported; the Config
+    /// table implements it through its scan cache. Pure query, no interning.
+    fn physical_states_for_union(
+        &mut self,
+        _union: &[u32],
+        _out: &mut SmallVec<[u32; 8]>,
+    ) -> bool {
+        false
+    }
 
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool;
 
@@ -856,6 +867,35 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
                 .saturating_add(started.elapsed().as_nanos() as u64);
         }
         result
+    }
+
+    fn physical_states_for_union(
+        &mut self,
+        union: &[u32],
+        out: &mut SmallVec<[u32; 8]>,
+    ) -> bool {
+        out.clear();
+        let mut scratch = SmallVec::<[u32; 8]>::new();
+        for &state in union {
+            scratch.clear();
+            if self
+                .cache
+                .physical_states_for_config(state, &mut scratch)
+                .is_err()
+            {
+                return false;
+            }
+            for &physical in scratch.iter() {
+                if !out.contains(&physical) {
+                    out.push(physical);
+                }
+            }
+            if out.len() > 32 {
+                return false;
+            }
+        }
+        out.sort_unstable();
+        true
     }
 
     fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
@@ -1988,6 +2028,21 @@ fn try_full_walk_mask(
     lexer_scan_cache: &mut DynamicNfaScanCache<'_>,
     buf: &mut [u32],
 ) -> Result<bool, String> {
+    // TEMP-DIAG(mr): attribution. Remove before production.
+    let mr_diag = std::env::var_os("GLRMASK_MR_DIAG").is_some();
+    if mr_diag {
+        let exact = root_branches
+            .iter()
+            .map(|b| b.exact_tokenizer_state.is_some() as u8)
+            .collect::<Vec<_>>();
+        eprintln!(
+            "[mr/diag] gen={} roots={} det={} exact={:?}",
+            state.generation,
+            root_branches.len(),
+            lexer_scan_cache.deterministic,
+            exact,
+        );
+    }
     if root_branches.is_empty() {
         buf.fill(0);
         update_special_token_mask(state, buf);
@@ -2363,6 +2418,278 @@ fn direct_slice_prefix_contained_config<T: FullWalkTransitionTable>(
         }
     }
     Some(true)
+}
+
+
+/// Outcome of the fused small-union slice proof.
+///
+/// Only `Certified` authorizes bulk mask coverage. Every other outcome falls
+/// back to the existing exact walker; none of them rejects any token.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SmallUnionProofOutcome {
+    Certified,
+    /// A slice word escapes union coverage: not bulk-acceptable.
+    NotCertified,
+    /// Fuel exhausted before the reachable product closed.
+    OutOfFuel,
+    /// Shape outside the small-union domain (cannot happen for 2-3 roots
+    /// through the current nomination, retained for safety).
+    Unsupported,
+}
+
+/// Aggregate proof-work counters for the multi-root lane. Updated once per
+/// proof (a few relaxed atomics), never per step, so ordinary masks pay
+/// nothing for this instrumentation.
+struct SmallUnionProofCounters {
+    attempts: std::sync::atomic::AtomicU64,
+    certified: std::sync::atomic::AtomicU64,
+    not_certified: std::sync::atomic::AtomicU64,
+    out_of_fuel: std::sync::atomic::AtomicU64,
+    work_units: std::sync::atomic::AtomicU64,
+}
+
+static SMALL_UNION_PROOF_COUNTERS: SmallUnionProofCounters = SmallUnionProofCounters {
+    attempts: std::sync::atomic::AtomicU64::new(0),
+    certified: std::sync::atomic::AtomicU64::new(0),
+    not_certified: std::sync::atomic::AtomicU64::new(0),
+    out_of_fuel: std::sync::atomic::AtomicU64::new(0),
+    work_units: std::sync::atomic::AtomicU64::new(0),
+};
+
+static MULTIROOT_MASTER_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+// TEMP-DIAG(mr): last fused-proof record for per-mask diagnostics.
+thread_local! {
+    static MR_LAST_PROOF: std::cell::Cell<(u8, u64)> = std::cell::Cell::new((255, 0));
+}
+
+/// Canonical member cap for a small-union proof config. `cell` maps one
+/// state to one target, so a stepped union never outgrows its initial
+/// membership; the cap is a safety bound only.
+const SMALL_UNION_MAX_MEMBERS: usize = 8;
+
+/// Default fuel for one fused union proof (slice-live byte steps). Sized
+/// above the single-root direct budget because one product step covers up
+/// to three roots; calibrated by measured product sizes, not by raising
+/// blind budgets.
+const SMALL_UNION_PROOF_WORK_LIMIT: usize = 128 * 1024;
+
+/// Fused small-union transparency proof for 2-3 same-parser Config roots.
+///
+/// Mask-only coverage proof: certifies that every word of `slice` reachable
+/// from the union keeps `terminal` live in at least one member. This mirrors
+/// `direct_slice_prefix_contained_config` with the singleton lexer state
+/// replaced by a canonical sorted union, so it can succeed exactly where
+/// per-root transparency fails while the union still covers the slice.
+/// Positive coverage only: disproof, fuel exhaustion, oversize unions, and
+/// transition errors all decline to the exact residual walker.
+///
+/// The parser is frozen by construction: only lexical liveness
+/// (`future_contains` / `matched_terminals`) is queried, exactly as in the
+/// single-root proof, and `terminal` must already be parser-admitted by the
+/// caller. No parser state is advanced, merged, or cached.
+/// Physical content key for one proof union: exact physical tokenizer
+/// states, sorted. Returns false when a member is unknown to the scan cache
+/// (caller skips caching that node) or the key would be unbounded.
+fn small_union_physical_key<T: FullWalkTransitionTable>(
+    transitions: &mut T,
+    union: &[u32],
+    out: &mut SmallVec<[u32; 8]>,
+) -> bool {
+    transitions.physical_states_for_union(union, out)
+}
+
+fn prove_small_union_slice_contained<T: FullWalkTransitionTable>(
+    transitions: &mut T,
+    vocab: &DynamicMaskVocab,
+    initial: &[u32],
+    terminal: TerminalID,
+    slice_id: u32,
+    slice: &crate::compiler::stages::id_map_and_terminal_dwa::classify::VocabPartitionDfa,
+    work_limit: usize,
+) -> SmallUnionProofOutcome {
+    use std::sync::atomic::Ordering::Relaxed;
+    SMALL_UNION_PROOF_COUNTERS
+        .attempts
+        .fetch_add(1, Relaxed);
+    // TEMP-DIAG(mr): cross-mask cache hit/miss observation.
+    let mr_cache_hit = || {
+        MR_CACHE_STATS.with(|c| {
+            let (h, m) = c.get();
+            c.set((h + 1, m));
+        });
+    };
+    let mr_cache_miss = || {
+        MR_CACHE_STATS.with(|c| {
+            let (h, m) = c.get();
+            c.set((h, m + 1));
+        });
+    };
+    let mut members: SmallVec<[u32; 8]> = SmallVec::new();
+    for &state in initial {
+        if !members.contains(&state) {
+            members.push(state);
+        }
+    }
+    if members.is_empty() || members.len() > SMALL_UNION_MAX_MEMBERS {
+        SMALL_UNION_PROOF_COUNTERS
+            .not_certified
+            .fetch_add(1, Relaxed);
+        // TEMP-DIAG(mr)
+        MR_LAST_PROOF.with(|c| c.set((3, 0)));
+        return SmallUnionProofOutcome::Unsupported;
+    }
+    members.sort_unstable();
+    let mut seen = rustc_hash::FxHashSet::<(u32, SmallVec<[u32; 8]>)>::default();
+    let mut queue = std::collections::VecDeque::from([(
+        slice.start_state(),
+        members,
+    )]);
+    let mut work = 0usize;
+    // Certified-true inserts are only valid after global success; collect
+    // visited keys and publish them then. Disproofs publish their single
+    // failing node immediately (deterministic escape, fuel-independent).
+    let mut certified_keys: Vec<SmallUnionProofCacheKey> = Vec::new();
+    let mut physical = SmallVec::<[u32; 8]>::new();
+    while let Some((slice_state, union)) = queue.pop_front() {
+        // Cross-mask memo: identical (slice, physical union, terminal)
+        // subproofs recur across the severe family (converged closures).
+        // Entries are pure lexical facts; parser admission stays per use.
+        let mut keyed = false;
+        if small_union_physical_key(transitions, &union, &mut physical) {
+            let key = SmallUnionProofCacheKey {
+                slice_id,
+                slice_state,
+                terminal,
+                physical: physical.clone(),
+            };
+            if let Some(certified) = vocab.small_union_proof_lookup(&key) {
+                mr_cache_hit();
+                if !certified {
+                    SMALL_UNION_PROOF_COUNTERS
+                        .not_certified
+                        .fetch_add(1, Relaxed);
+                    SMALL_UNION_PROOF_COUNTERS
+                        .work_units
+                        .fetch_add(work as u64, Relaxed);
+                    // TEMP-DIAG(mr)
+                    MR_LAST_PROOF.with(|c| c.set((1, work as u64)));
+                    return SmallUnionProofOutcome::NotCertified;
+                }
+                continue;
+            }
+            mr_cache_miss();
+            certified_keys.push(key);
+            keyed = true;
+        }
+        let _ = keyed;
+        for byte in 0u16..=255 {
+            let byte = byte as u8;
+            let slice_target = slice.step(slice_state, byte);
+            if !slice.can_reach_accepting(slice_target) {
+                continue;
+            }
+            work += 1;
+            if work > work_limit {
+                SMALL_UNION_PROOF_COUNTERS
+                    .out_of_fuel
+                    .fetch_add(1, Relaxed);
+                SMALL_UNION_PROOF_COUNTERS
+                    .work_units
+                    .fetch_add(work as u64, Relaxed);
+                // TEMP-DIAG(mr)
+                MR_LAST_PROOF.with(|c| c.set((2, work as u64)));
+                return SmallUnionProofOutcome::OutOfFuel;
+            }
+            let mut next: SmallVec<[u32; 8]> = SmallVec::new();
+            let mut errored = false;
+            for &state in union.iter() {
+                let cell = transitions.cell(state, byte);
+                if T::cell_is_dead(cell) {
+                    continue;
+                }
+                let target = T::cell_target(cell);
+                if target == u32::MAX {
+                    errored = true;
+                    break;
+                }
+                if !next.contains(&target) {
+                    next.push(target);
+                }
+            }
+            if errored || next.is_empty() {
+                SMALL_UNION_PROOF_COUNTERS
+                    .not_certified
+                    .fetch_add(1, Relaxed);
+                SMALL_UNION_PROOF_COUNTERS
+                    .work_units
+                    .fetch_add(work as u64, Relaxed);
+                // TEMP-DIAG(mr)
+                MR_LAST_PROOF.with(|c| c.set((1, work as u64)));
+                return SmallUnionProofOutcome::NotCertified;
+            }
+            next.sort_unstable();
+            let live = next.iter().any(|&target| {
+                transitions.future_contains(target, terminal)
+                    || transitions.matched_terminals(target).contains(&terminal)
+            });
+            if !live {
+                SMALL_UNION_PROOF_COUNTERS
+                    .not_certified
+                    .fetch_add(1, Relaxed);
+                SMALL_UNION_PROOF_COUNTERS
+                    .work_units
+                    .fetch_add(work as u64, Relaxed);
+                // TEMP-DIAG(mr)
+                MR_LAST_PROOF.with(|c| c.set((1, work as u64)));
+                // Publish the failing node: deterministic escape for this key.
+                let mut physical = SmallVec::<[u32; 8]>::new();
+                if small_union_physical_key(transitions, &next, &mut physical) {
+                    vocab.small_union_proof_insert(
+                        SmallUnionProofCacheKey {
+                            slice_id,
+                            slice_state: slice_target,
+                            terminal,
+                            physical,
+                        },
+                        false,
+                    );
+                }
+                return SmallUnionProofOutcome::NotCertified;
+            }
+            if next.len() > SMALL_UNION_MAX_MEMBERS {
+                SMALL_UNION_PROOF_COUNTERS
+                    .not_certified
+                    .fetch_add(1, Relaxed);
+                SMALL_UNION_PROOF_COUNTERS
+                    .work_units
+                    .fetch_add(work as u64, Relaxed);
+                // TEMP-DIAG(mr)
+                MR_LAST_PROOF.with(|c| c.set((3, work as u64)));
+                return SmallUnionProofOutcome::Unsupported;
+            }
+            if seen.insert((slice_target, next.clone())) {
+                queue.push_back((slice_target, next));
+            }
+        }
+    }
+    for key in certified_keys {
+        vocab.small_union_proof_insert(key, true);
+    }
+    SMALL_UNION_PROOF_COUNTERS
+        .certified
+        .fetch_add(1, Relaxed);
+    SMALL_UNION_PROOF_COUNTERS
+        .work_units
+        .fetch_add(work as u64, Relaxed);
+    // TEMP-DIAG(mr)
+    MR_LAST_PROOF.with(|c| c.set((0, work as u64)));
+    SmallUnionProofOutcome::Certified
+}
+
+// TEMP-DIAG(mr): cross-mask cache hit/miss totals.
+thread_local! {
+    static MR_CACHE_STATS: std::cell::Cell<(u64, u64)> = std::cell::Cell::new((0, 0));
 }
 
 
@@ -2779,6 +3106,20 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
         root_branches,
         transitions.dense_state_count(),
     );
+    // TEMP-DIAG(mr): root structure. Remove before production.
+    let mr_t0 = std::env::var_os("GLRMASK_MR_DIAG").is_some().then(std::time::Instant::now);
+    if mr_t0.is_some() {
+        let cfgs: Vec<u32> = root_branches.iter().map(|b| b.tokenizer_config).collect();
+        let nodes: Vec<u32> = root_parser_nodes.iter().copied().collect();
+        let adm: Vec<usize> = nodes
+            .iter()
+            .map(|&n| parser_cache.admitted(state.constraint, n).count_ones())
+            .collect();
+        eprintln!(
+            "[mr/roots] gen={} cfgs={:?} pnodes={:?} admitted_sizes={:?}",
+            state.generation, cfgs, nodes, adm,
+        );
+    }
     let first_match_root_candidate = if HOT_SINGLE_ROOT
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
@@ -3066,6 +3407,193 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
             }
         }
     }
+    // Multi-root small-union master lane (experimental).
+    //
+    // For 2-3 roots sharing one exact parser context, per-root transparency
+    // usually fails even when the UNION covers the slice: different roots
+    // accept different slice words. The fused product proof above certifies
+    // union coverage directly (mask-only: no parser state is merged,
+    // advanced, or cached). On success it feeds the identical downstream
+    // pipeline: admitted-words seeding, profitability gate, master-trie
+    // residual walk from the original unmodified branches. Any failure
+    // declines to the existing exact path.
+    // Experiment flag first: unset costs one cached branch, keeping the
+    // ordinary path tax at ~ns per mask.
+    if master_decision.is_none()
+        && *MULTIROOT_MASTER_ENABLED.get_or_init(|| {
+            std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_MULTIROOT_MASTER").is_some()
+        })
+        && std::env::var_os("GLRMASK_DISABLE_CONFIG_MASTER").is_none()
+        && !HOT_SINGLE_ROOT
+        && (2..=3).contains(&root_branches.len())
+        && root_branches
+            .iter()
+            .all(|branch| branch.initial_prune_guard.is_passed())
+        && root_branches
+            .iter()
+            .all(|branch| branch.exact_tokenizer_state.is_some())
+        && root_parser_nodes
+            .iter()
+            .all(|&node| node == root_parser_nodes[0])
+        && {
+            // Nomination gate (historical crude selector): one nearly
+            // determined root plus one broad root. Counts physical futures
+            // per exact source state; a few bitset words each.
+            let mut min_futures = usize::MAX;
+            let mut max_futures = 0usize;
+            for branch in root_branches.iter() {
+                let source = branch
+                    .exact_tokenizer_state
+                    .expect("exact tokenizer states checked above");
+                let count = state
+                    .constraint
+                    .tokenizer
+                    .possible_future_terminals(source)
+                    .count_ones();
+                min_futures = min_futures.min(count);
+                max_futures = max_futures.max(count);
+            }
+            // TEMP-DIAG(mr): nomination facts.
+            if std::env::var_os("GLRMASK_MR_DIAG").is_some() {
+                eprintln!(
+                    "[mr/nominate] gen={} roots={} min_fut={} max_fut={}",
+                    state.generation,
+                    root_branches.len(),
+                    min_futures,
+                    max_futures,
+                );
+            }
+            min_futures == 1 && max_futures >= 32
+        }
+        && vocab.llg_master_trie().is_some()
+        && let Some(safe_plus) = vocab.llg_slice_by_cache_id(0)
+        && let Some(whitespace) = vocab.llg_slice_by_cache_id(3)
+    {
+        let parser_node = root_parser_nodes[0];
+        let admitted = parser_cache.admitted(state.constraint, parser_node).clone();
+        let mut initial: SmallVec<[u32; 4]> = SmallVec::new();
+        for branch in root_branches.iter() {
+            initial.push(branch.tokenizer_config);
+        }
+        let mut union_safe_radius = 0u16;
+        let mut union_whitespace = false;
+        // Candidate prefilter mirrors the single-root lane: parser-admitted
+        // terminals whose byte support covers the slice alphabet. No
+        // candidates means no proof attempt (cheap decline).
+        let candidates_for = |slice: &crate::runtime::artifact::DynamicMaskSliceTrie| {
+            admitted
+                .iter_ones()
+                .filter_map(|terminal| TerminalID::try_from(terminal).ok())
+                .filter(|&terminal| {
+                    state
+                        .constraint
+                        .tokenizer
+                        .terminal_byte_support(terminal)
+                        .is_some_and(|support| {
+                            slice.slice_token_bytes().is_subset(&support)
+                        })
+                })
+                .collect::<SmallVec<[TerminalID; 4]>>()
+        };
+        let safe_candidates = candidates_for(safe_plus);
+        // TEMP-DIAG(mr): per-proof timing.
+        let mr_pt0 = std::env::var_os("GLRMASK_MR_DIAG").is_some().then(std::time::Instant::now);
+        if !safe_candidates.is_empty()
+            && safe_candidates.iter().any(|&terminal| {
+                prove_small_union_slice_contained(
+                    transitions,
+                    vocab,
+                    &initial,
+                    terminal,
+                    safe_plus.cache_id(),
+                    safe_plus.dfa(),
+                    SMALL_UNION_PROOF_WORK_LIMIT,
+                ) == SmallUnionProofOutcome::Certified
+            })
+        {
+            union_safe_radius = u16::MAX;
+        }
+        // TEMP-DIAG(mr)
+        if let Some(t0) = mr_pt0 {
+            let (oc, ow) = MR_LAST_PROOF.with(|c| c.get());
+            eprintln!(
+                "[mr/prooftime] gen={} us={:.0} oc={} ow={}",
+                state.generation,
+                t0.elapsed().as_secs_f64() * 1e6,
+                oc,
+                ow,
+            );
+        }
+        let whitespace_candidates = candidates_for(whitespace);
+        if !whitespace_candidates.is_empty()
+            && whitespace_candidates.iter().any(|&terminal| {
+                prove_small_union_slice_contained(
+                    transitions,
+                    vocab,
+                    &initial,
+                    terminal,
+                    whitespace.cache_id(),
+                    whitespace.dfa(),
+                    SMALL_UNION_PROOF_WORK_LIMIT,
+                ) == SmallUnionProofOutcome::Certified
+            })
+        {
+            union_whitespace = true;
+        }
+        if union_safe_radius != 0 || union_whitespace {
+            let master = vocab.llg_master_trie().expect("master trie checked above").trie();
+            let residual_ops =
+                vocab.llg_master_residual_ops(union_safe_radius, union_whitespace);
+            let ordinary_ops = trie.full_walk_ops().len();
+            let max_permille = std::env::var(
+                "GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE",
+            )
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(500);
+            let profitable = residual_ops.is_some_and(|residual| {
+                residual.saturating_mul(1000)
+                    <= ordinary_ops.saturating_mul(max_permille)
+            });
+            // TEMP-DIAG(mr)
+            if std::env::var_os("GLRMASK_MR_DIAG").is_some() {
+                let (oc, ow) = MR_LAST_PROOF.with(|c| c.get());
+                eprintln!(
+                    "[mr/lane] gen={} roots={} oc={} ow={} radius={} ws={} prof={} decision={}",
+                    state.generation,
+                    root_branches.len(),
+                    oc,
+                    ow,
+                    union_safe_radius,
+                    union_whitespace,
+                    profitable,
+                    master_decision.is_some(),
+                );
+            }
+            if profitable {
+                master_decision = Some((union_safe_radius, union_whitespace));
+            }
+        }
+        // TEMP-DIAG(mr): attempt record (all multi-lane entries).
+        if std::env::var_os("GLRMASK_MR_DIAG").is_some() {
+            let (ch, cm) = MR_CACHE_STATS.with(|c| c.get());
+            eprintln!(
+                "[mr/cache] gen={} hits={} misses={}",
+                state.generation, ch, cm,
+            );
+            let (oc, ow) = MR_LAST_PROOF.with(|c| c.get());
+            eprintln!(
+                "[mr/attempt] gen={} roots={} oc={} ow={} radius={} ws={} decision={}",
+                state.generation,
+                root_branches.len(),
+                oc,
+                ow,
+                union_safe_radius,
+                union_whitespace,
+                master_decision.is_some(),
+            );
+        }
+    }
     const OPTIONAL_SPACE_NONSPACE_SLICE: u32 = 0x40;
     let direct_residual_slice = if std::env::var_os(
         "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE",
@@ -3224,8 +3752,17 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
     {
         let first = (root_branches[0].tokenizer_config, root_parser_nodes[0]);
         let second = (root_branches[1].tokenizer_config, root_parser_nodes[1]);
-        if let Some((lexer_state, parser_node)) =
-            full_walk_merge_two_same_parser(transitions, &mut pair_union_cache, first, second)
+        // TEMP-DIAG(mr): merge outcome.
+        let mr_merged = full_walk_merge_two_same_parser(transitions, &mut pair_union_cache, first, second);
+        if std::env::var_os("GLRMASK_MR_DIAG").is_some() {
+            eprintln!(
+                "[mr/merge] gen={} kind=two merged={} parsers={:?}",
+                state.generation,
+                mr_merged.is_some(),
+                (first.1, second.1),
+            );
+        }
+        if let Some((lexer_state, parser_node)) = mr_merged
         {
             stack_lexer[0] = lexer_state;
             stack_parser[0] = parser_node;
@@ -3253,12 +3790,22 @@ fn try_full_walk_mask_with_table<T: FullWalkTransitionTable, const HOT_SINGLE_RO
                 },
             );
         }
-        if let Some((lexer_state, parser_node)) = full_walk_merge_branches_same_parser(
+        // TEMP-DIAG(mr): merge outcome.
+        let mr_merged = full_walk_merge_branches_same_parser(
             transitions,
             &mut pair_union_cache,
             &mut triple_union_cache,
             &roots,
-        )
+        );
+        if std::env::var_os("GLRMASK_MR_DIAG").is_some() {
+            eprintln!(
+                "[mr/merge] gen={} kind=multi n={} merged={}",
+                state.generation,
+                roots.len(),
+                mr_merged.is_some(),
+            );
+        }
+        if let Some((lexer_state, parser_node)) = mr_merged
         {
             stack_lexer[0] = lexer_state;
             stack_parser[0] = parser_node;
