@@ -25,13 +25,14 @@ use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
     accepted_original_tokens, build_segmented_parser_links,
     component_ignores_are_globally_erasable, eliminate_composed_runtime_controls,
-    merged_ignore_terminals, merged_retained_terminal_exprs,
-    merged_terminal_display_names,
+    leaf_ignores_are_globally_erasable, merged_ignore_terminals,
+    merged_leaf_ignore_terminals, merged_leaf_terminal_display_names,
+    merged_retained_terminal_exprs, merged_terminal_display_names,
 };
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::glr::parser::{
     DisjointComponentActionProvider, ParserComponentTableSource, ScopedParserSymbol,
-    materialize_control_eliminated_scoped_provider_table,
+    ScopedSubgrammarLink, materialize_control_eliminated_scoped_provider_table,
 };
 use crate::compiler::glr::table::{
     ComposedTable, GLRTable, SubgrammarTableInput, compose_subgrammar_tables_with_rules,
@@ -249,18 +250,23 @@ pub(crate) struct BoundaryShardLinkInputs<'a> {
     pub tokenizer_offsets: &'a [u32],
     pub component_state_counts: &'a [u32],
     /// Retain non-crossing paths in the PARENT shard (component 0). Child
-    /// shards always filter. Sound for flat links (nested compositions
-    /// decline to dynamic before the walk): the filter drops exactly the
-    /// single-component paths, and a dropped path gaps the mask only if the
-    /// composed table accepts its terminal sequence while no component mask
-    /// admits the token. For a child-C-internal sequence at a C-topped stack,
-    /// the boundary table's C rows are C's own rows, so composed acceptance
+    /// shards always filter. The filter drops exactly the single-component
+    /// paths, and a dropped path gaps the mask only if the composed table
+    /// accepts its terminal sequence while no component mask admits the
+    /// token. For a child-C-internal sequence at a C-topped stack, the
+    /// boundary table's C rows are C's own rows, so composed acceptance
     /// implies C acceptance and C's mask covers it. For a parent-internal
     /// sequence, the parent mask covers it unless a zero-width empty-child
     /// derivation enables a parent-alone rejection — possible only when a
     /// linked child is start-nullable. Multi-component paths are crossing
-    /// from every seed's view and are always kept.
+    /// from every seed's view and are always kept. Nullable bound children
+    /// decline loudly at signed-context certification, so retention only
+    /// fires on embedded-nullable-but-effectively-nonnullable links.
     pub retain_parent_non_crossing_paths: bool,
+    /// Explicit per-start-component walk plans (nested links). When `None`,
+    /// one plan per component is derived from `component_state_counts` /
+    /// `tokenizer_offsets` exactly as before (flat behavior unchanged).
+    pub walk_plans: Option<Vec<BoundaryShardWalkPlan>>,
 }
 
 /// One built shard walk with a nonempty crossing set.
@@ -268,6 +274,21 @@ pub(crate) struct BuiltBoundaryShardWalk {
     pub start_component: usize,
     pub output: BoundaryWalkOutput,
     pub candidate_tokens: BTreeSet<u32>,
+}
+
+/// Walk plan for one start component: which leaf index the crossing filter
+/// views from, the full merged-tokenizer commit set, and whether non-crossing
+/// paths are retained. Flat links use one plan per direct component with the
+/// component's own commit states; nested links use one plan per top-level
+/// component where a block plan views from the block-root leaf with the union
+/// of the block leaves' commit states (every block-internal crossing touches
+/// a leaf outside the block root, so the filter keeps exactly the
+/// block-crossing gaps, mirroring the proven nested fixture).
+pub(crate) struct BoundaryShardWalkPlan {
+    pub start_component: usize,
+    pub filter_component: usize,
+    pub commit_states: Vec<bool>,
+    pub retain_non_crossing_paths: bool,
 }
 
 /// Link-level shard profile: shared-once cost + per-shard profiles.
@@ -324,15 +345,35 @@ pub(crate) fn build_boundary_shard_walks(
         per_shard: Vec::new(),
     };
     let num_components = inputs.component_state_counts.len();
+    // Walk plans: explicit (nested) or derived per component (flat, unchanged).
+    let plans: Vec<BoundaryShardWalkPlan> = match &inputs.walk_plans {
+        Some(plans) => plans
+            .iter()
+            .map(|plan| BoundaryShardWalkPlan {
+                start_component: plan.start_component,
+                filter_component: plan.filter_component,
+                commit_states: plan.commit_states.clone(),
+                retain_non_crossing_paths: plan.retain_non_crossing_paths,
+            })
+            .collect(),
+        None => (0..num_components)
+            .map(|index| BoundaryShardWalkPlan {
+                start_component: index,
+                filter_component: index,
+                commit_states: commit_states_for_component(
+                    inputs.tokenizer_offsets,
+                    inputs.component_state_counts[index],
+                    index,
+                    inputs.merged_tokenizer.num_states() as usize,
+                ),
+                retain_non_crossing_paths: inputs.retain_parent_non_crossing_paths
+                    && index == 0,
+            })
+            .collect(),
+    };
     // `None` means "empty crossing set, skip"; walk failure is impossible
     // (the shared equivalence above proves the vocab is nonempty).
-    let build_one = |index: usize| -> Option<BuiltBoundaryShardWalk> {
-        let commit = commit_states_for_component(
-            inputs.tokenizer_offsets,
-            inputs.component_state_counts[index],
-            index,
-            inputs.merged_tokenizer.num_states() as usize,
-        );
+    let build_one = |plan: &BoundaryShardWalkPlan| -> Option<BuiltBoundaryShardWalk> {
         let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
             merged_tokenizer: inputs.merged_tokenizer,
             vocab: inputs.vocab,
@@ -340,28 +381,31 @@ pub(crate) fn build_boundary_shard_walks(
             disallowed_follows: inputs.disallowed_follows,
             ignore_terminal: inputs.ignore_terminal,
             terminal_offsets: inputs.terminal_offsets,
-            component_index: index,
-            commit_states: &commit,
+            component_index: plan.filter_component,
+            commit_states: &plan.commit_states,
             shared_equivalence: &shared,
             flat_trans: Some(&flat),
-            retain_non_crossing_paths: inputs.retain_parent_non_crossing_paths && index == 0,
+            retain_non_crossing_paths: plan.retain_non_crossing_paths,
         })
         .expect("nonempty-vocab shard walks must produce a DWA");
         let candidate_tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
         if candidate_tokens.is_empty() {
             return None;
         }
-        Some(BuiltBoundaryShardWalk { start_component: index, output, candidate_tokens })
+        Some(BuiltBoundaryShardWalk {
+            start_component: plan.start_component,
+            output,
+            candidate_tokens,
+        })
     };
-    let indices: Vec<usize> = (0..num_components).collect();
     let mut built: Vec<BuiltBoundaryShardWalk> = if crate::compiler::macro_parallelism_disabled()
     {
-        let mut timings = Vec::with_capacity(num_components);
-        let built: Vec<Option<BuiltBoundaryShardWalk>> = indices
-            .into_iter()
-            .map(|index| {
+        let mut timings = Vec::with_capacity(plans.len());
+        let built: Vec<Option<BuiltBoundaryShardWalk>> = plans
+            .iter()
+            .map(|plan| {
                 let started = Instant::now();
-                let result = build_one(index);
+                let result = build_one(plan);
                 timings.push(started.elapsed().as_secs_f64() * 1000.0);
                 result
             })
@@ -369,7 +413,7 @@ pub(crate) fn build_boundary_shard_walks(
         crate::compiler::report_macro_item_timings("boundary_walk_shard_walks", &timings);
         built.into_iter().flatten().collect()
     } else {
-        indices.into_par_iter().map(build_one).collect::<Vec<_>>().into_iter().flatten().collect()
+        plans.par_iter().map(build_one).collect::<Vec<_>>().into_iter().flatten().collect()
     };
     built.sort_by_key(|shard| shard.start_component);
     let mut link_profile = link_profile;
@@ -411,6 +455,10 @@ pub(crate) struct WalkStaticLinkOutput {
     /// change) is a loud decline, never a silent dynamic swap.
     pub expected_leaf_tokenizer_offsets: Vec<u32>,
     pub expected_total_tokenizer_states: u32,
+    /// True when the link expanded nested children to leaves. The install
+    /// site recursively clears inner-overlay shards in this case (the outer
+    /// block shards cover block-inner crossings).
+    pub has_nested_components: bool,
 }
 
 /// Whether the composition contains a nested segmented component: any direct
@@ -419,13 +467,167 @@ pub(crate) struct WalkStaticLinkOutput {
 /// component expands into several runtime leaves, so the coordinates cannot
 /// match. Nested static linking is Phase 4; the dispatcher declines such
 /// static requests loudly (callers needing nesting use Dynamic).
-pub(crate) fn walk_static_link_needs_dynamic_fallback(
-    parent: &Constraint,
-    children: &[CompiledSubgrammarInput<'_>],
-) -> bool {
-    std::iter::once(parent)
-        .chain(children.iter().map(|child| child.constraint))
-        .any(|component| component.has_recursive_segmented_parser_tree())
+/// Whether the link's parent is itself a segmented composition. The walk
+/// expands nested *children* into intact leaves, but an already-composed
+/// parent has no intact local table (its table is a composed table with
+/// linker controls), so a static link with a nested parent declines loudly.
+pub(crate) fn walk_static_link_parent_needs_dynamic_fallback(parent: &Constraint) -> bool {
+    parent.has_recursive_segmented_parser_tree()
+}
+
+/// A link expanded to intact leaves: the parent (leaf 0) plus every direct
+/// child, where nested children (themselves segmented compositions) recurse
+/// into their overlays' intact component constraints. Links are remapped to
+/// leaf coordinates: outer links target block-root leaves, inner-overlay
+/// links are translated through each subtree's wrapper-to-leaf map. The
+/// runtime recursive layout visits leaves in this same pre-order, so the
+/// walk's leaf packing matches the installing runtime's.
+pub(crate) struct NestedLinkExpansion<'a> {
+    /// Intact leaf constraints in link-component order (leaf 0 is the parent).
+    pub leaves: Vec<&'a Constraint>,
+    /// Full link set in leaf coordinates (outer + remapped inner links).
+    pub links: Vec<ScopedSubgrammarLink>,
+    /// Back-to-back leaf terminal offsets plus total.
+    pub leaf_terminal_offsets: Vec<u32>,
+    pub num_terminals: u32,
+    /// Leaf index of each top-level component's root (top 0 -> leaf 0).
+    pub top_root_leaves: Vec<u32>,
+    /// Leaf indices per top-level component (for block commit unions and
+    /// virtual-residual checks).
+    pub top_leaf_ranges: Vec<Vec<usize>>,
+    /// Top-level terminal offsets/sizes (coordinator layout pin).
+    pub top_terminal_offsets: Vec<u32>,
+    pub top_terminal_sizes: Vec<u32>,
+    /// True when any direct child expanded to more than one leaf.
+    pub nested: bool,
+}
+
+fn expand_subtree_leaves<'a>(
+    constraint: &'a Constraint,
+    leaves: &mut Vec<&'a Constraint>,
+    links: &mut Vec<ScopedSubgrammarLink>,
+) -> Result<u32, String> {
+    if !constraint.has_recursive_segmented_parser_tree() {
+        leaves.push(constraint);
+        return u32::try_from(leaves.len() - 1)
+            .map_err(|_| "nested link leaf index overflow".to_string());
+    }
+    let overlay = constraint.static_dynamic_overlay.as_ref().ok_or_else(|| {
+        "nested link subtree reports a segmented tree but has no overlay".to_string()
+    })?;
+    if overlay.segmented_parser_components.is_empty() {
+        return Err("nested link subtree has no segmented components".to_string());
+    }
+    let mut roots = Vec::with_capacity(overlay.segmented_parser_components.len());
+    for component in &overlay.segmented_parser_components {
+        roots.push(expand_subtree_leaves(&component.constraint, leaves, links)?);
+    }
+    for link in &overlay.segmented_parser_links {
+        let parent = *roots.get(link.parent_component as usize).ok_or_else(|| {
+            format!(
+                "nested link references unknown inner parent {}",
+                link.parent_component
+            )
+        })?;
+        let child = *roots.get(link.child_component as usize).ok_or_else(|| {
+            format!(
+                "nested link references unknown inner child {}",
+                link.child_component
+            )
+        })?;
+        links.push(ScopedSubgrammarLink {
+            parent_component: parent,
+            slot_terminal: link.slot_terminal,
+            child_component: child,
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        });
+    }
+    Ok(roots[0])
+}
+
+/// Expand one production link to intact leaves with leaf-coordinate links.
+pub(crate) fn expand_nested_link_leaves<'a>(
+    parent: &'a Constraint,
+    children: &'a [CompiledSubgrammarInput<'a>],
+) -> Result<NestedLinkExpansion<'a>, String> {
+    if walk_static_link_parent_needs_dynamic_fallback(parent) {
+        return Err(
+            "walk static link does not support an already-composed parent; use the Dynamic boundary backend"
+                .to_string(),
+        );
+    }
+    let mut leaves: Vec<&'a Constraint> = Vec::new();
+    let mut links: Vec<ScopedSubgrammarLink> = Vec::new();
+    leaves.push(parent);
+    let mut top_root_leaves = vec![0u32];
+    let mut top_leaf_ranges = vec![vec![0usize]];
+    // Outer links over direct children (block-root remap happens below).
+    let outer_links = build_segmented_parser_links(children)?;
+    let mut nested = false;
+    for child in children.iter() {
+        let first_leaf = leaves.len();
+        let root = expand_subtree_leaves(child.constraint, &mut leaves, &mut links)?;
+        let range: Vec<usize> = (first_leaf..leaves.len()).collect();
+        if range.len() != 1 {
+            nested = true;
+        }
+        let root_leaf = u32::try_from(root)
+            .map_err(|_| "nested link root leaf index overflow".to_string())?;
+        top_root_leaves.push(root_leaf);
+        top_leaf_ranges.push(range);
+    }
+    // Remap outer links (parent 0, child i+1) to leaf coordinates.
+    for link in outer_links {
+        let child_top = link.child_component as usize;
+        if child_top == 0 || child_top > children.len() {
+            return Err(format!(
+                "nested link outer reference targets unknown top component {child_top}"
+            ));
+        }
+        links.push(ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: link.slot_terminal,
+            child_component: top_root_leaves[child_top],
+            child_start: link.child_start,
+            return_pop: link.return_pop,
+            child_start_nullable: link.child_start_nullable,
+        });
+    }
+    let mut leaf_terminal_offsets = Vec::with_capacity(leaves.len());
+    let mut total = 0u32;
+    for leaf in &leaves {
+        leaf_terminal_offsets.push(total);
+        total = total
+            .checked_add(leaf.table.num_terminals)
+            .ok_or_else(|| "nested link terminal domain overflow".to_string())?;
+    }
+    let mut top_terminal_offsets = Vec::with_capacity(children.len() + 1);
+    let mut top_terminal_sizes = Vec::with_capacity(children.len() + 1);
+    for range in &top_leaf_ranges {
+        let start = leaf_terminal_offsets[range[0]];
+        let size: u32 = range
+            .iter()
+            .map(|&leaf| leaves[leaf].table.num_terminals)
+            .try_fold(0u32, |acc, size| {
+                acc.checked_add(size)
+                    .ok_or_else(|| "nested link block size overflow".to_string())
+            })?;
+        top_terminal_offsets.push(start);
+        top_terminal_sizes.push(size);
+    }
+    Ok(NestedLinkExpansion {
+        leaves,
+        links,
+        leaf_terminal_offsets,
+        num_terminals: total,
+        top_root_leaves,
+        top_leaf_ranges,
+        top_terminal_offsets,
+        top_terminal_sizes,
+        nested,
+    })
 }
 
 /// Whole-link exact-dynamic output: no static shards, every component dynamic.
@@ -437,6 +639,7 @@ pub(crate) fn dynamic_fallback_walk_link_output(num_components: usize) -> WalkSt
         all_dynamic: true,
         expected_leaf_tokenizer_offsets: Vec::new(),
         expected_total_tokenizer_states: 0,
+        has_nested_components: false,
     }
 }
 
@@ -624,6 +827,12 @@ pub(crate) fn build_walk_static_boundary_link(
 ) -> Result<WalkStaticLinkOutput, String> {
     let parent = inputs.parent;
     let children = inputs.children;
+    // Expand nested children to intact leaves (flat links: leaves are exactly
+    // the direct components, so the flat path below is unchanged).
+    let expansion = expand_nested_link_leaves(parent, children)?;
+    if expansion.nested {
+        return build_walk_static_boundary_link_nested(inputs, &expansion);
+    }
     let vocab = inputs.vocab;
     let num_components = children.len() + 1;
     let effective =
@@ -770,6 +979,7 @@ pub(crate) fn build_walk_static_boundary_link(
         all_dynamic: false,
         expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
         expected_total_tokenizer_states: expected_total,
+        has_nested_components: false,
     };
     let retain_parent_non_crossing_paths = children
         .iter()
@@ -784,6 +994,7 @@ pub(crate) fn build_walk_static_boundary_link(
         tokenizer_offsets: &tokenizer_offsets,
         component_state_counts: &component_state_counts,
         retain_parent_non_crossing_paths,
+        walk_plans: None,
     }) else {
         // Empty vocab: nothing can cross; pure component masks, no shards.
         return Ok(empty_output());
@@ -841,6 +1052,400 @@ pub(crate) fn build_walk_static_boundary_link(
         all_dynamic: false,
         expected_leaf_tokenizer_offsets,
         expected_total_tokenizer_states: expected_total,
+        has_nested_components: false,
+    })
+}
+
+/// Recursive packed splice for one nested block: inner blocks first, then
+/// this level (rules + terminal layout only, mirroring the proven nested
+/// fixture). Only the returned rules/offsets feed grammar analysis; no parser
+/// behavior is ever derived from the packed shape.
+fn splice_nested_block(
+    root_leaf: usize,
+    expansion: &NestedLinkExpansion<'_>,
+    global_ignores: bool,
+) -> Result<ComposedTable, String> {
+    let root = expansion.leaves[root_leaf];
+    let mut child_roots: Vec<u32> = expansion
+        .links
+        .iter()
+        .filter(|link| link.parent_component as usize == root_leaf)
+        .map(|link| link.child_component)
+        .collect();
+    child_roots.sort_unstable();
+    child_roots.dedup();
+    let mut child_tables = Vec::with_capacity(child_roots.len());
+    let mut slot_lists: Vec<Vec<u32>> = Vec::with_capacity(child_roots.len());
+    let mut nullables = Vec::with_capacity(child_roots.len());
+    for &child_root in &child_roots {
+        child_tables.push(splice_nested_block(
+            child_root as usize,
+            expansion,
+            global_ignores,
+        )?);
+        let mut slots: Vec<u32> = expansion
+            .links
+            .iter()
+            .filter(|link| {
+                link.parent_component as usize == root_leaf
+                    && link.child_component == child_root
+            })
+            .map(|link| link.slot_terminal)
+            .collect();
+        slots.sort_unstable();
+        slots.dedup();
+        if slots.is_empty() {
+            return Err(format!(
+                "nested link block {root_leaf} has a child block with no slot terminal"
+            ));
+        }
+        let nullable = expansion
+            .links
+            .iter()
+            .find(|link| {
+                link.parent_component as usize == root_leaf
+                    && link.child_component == child_root
+            })
+            .map(|link| link.child_start_nullable)
+            .unwrap_or(false);
+        slot_lists.push(slots);
+        nullables.push(nullable);
+    }
+    let child_rules: Vec<&[crate::grammar::flat::Rule]> = child_tables
+        .iter()
+        .map(|tabled: &ComposedTable| tabled.table.rules.as_slice())
+        .collect();
+    let table_inputs: Vec<SubgrammarTableInput> = child_roots
+        .iter()
+        .zip(child_tables.iter())
+        .zip(slot_lists.iter())
+        .zip(nullables.iter())
+        .map(|(((&child_root, table), slots), &nullable)| {
+            let (placeholder, additionals) = slots
+                .split_first()
+                .expect("nested slot list is nonempty");
+            let child_leaf = expansion.leaves[child_root as usize];
+            SubgrammarTableInput {
+                placeholder_terminal: *placeholder,
+                additional_placeholder_terminals: additionals,
+                table: &table.table,
+                ignore_terminal: (!global_ignores)
+                    .then_some(child_leaf.ignore_terminal)
+                    .flatten(),
+                start_nullable: nullable,
+            }
+        })
+        .collect();
+    let mut composed = compose_subgrammar_tables_with_rules(
+        &root.table,
+        root.retained_table_rules()?,
+        (!global_ignores).then_some(root.ignore_terminal).flatten(),
+        &table_inputs,
+        child_rules.as_slice(),
+    )?;
+    eliminate_composed_runtime_controls(&mut composed)?;
+    if !composed.table.control_terminals.is_empty() || !composed.control_terminals.is_empty() {
+        return Err(
+            "walk static link requires a control-free spliced table".to_string(),
+        );
+    }
+    Ok(composed)
+}
+
+/// Unbound subgrammar slots in leaf coordinates: a slot is bound iff some
+/// link fills it; the rest follows the flat helper's rule per leaf
+/// (late-grammar placeholders or out-of-vocab linker sentinels).
+fn nested_unbound_slot_terminals(
+    expansion: &NestedLinkExpansion<'_>,
+) -> Result<Vec<TerminalID>, String> {
+    let bound: BTreeSet<u32> = expansion
+        .links
+        .iter()
+        .map(|link| {
+            expansion.leaf_terminal_offsets[link.parent_component as usize]
+                .checked_add(link.slot_terminal)
+                .ok_or_else(|| "bound slot terminal offset overflow".to_string())
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+    let mut unbound = Vec::new();
+    for (leaf_index, leaf) in expansion.leaves.iter().enumerate() {
+        for special in &leaf.special_token_terminals {
+            let global = expansion.leaf_terminal_offsets[leaf_index]
+                .checked_add(special.terminal_id)
+                .ok_or_else(|| {
+                    format!("slot terminal offset overflow for leaf {leaf_index}")
+                })?;
+            if bound.contains(&global) {
+                continue;
+            }
+            if leaf.is_late_grammar_placeholder_terminal(special.terminal_id)
+                || leaf.token_bytes_for_id(special.token_id).is_none()
+            {
+                unbound.push(global);
+            }
+        }
+    }
+    unbound.sort_unstable();
+    unbound.dedup();
+    Ok(unbound)
+}
+
+/// Nested production static link: the flat pipeline over recursively expanded
+/// intact leaves with the full multi-level link set (see the flat function
+/// for the pipeline stages). One walk per top-level component; publication
+/// per top-level component with leaf tokenizer coordinates.
+fn build_walk_static_boundary_link_nested(
+    inputs: &WalkStaticLinkInputs,
+    expansion: &NestedLinkExpansion<'_>,
+) -> Result<WalkStaticLinkOutput, String> {
+    let vocab = inputs.vocab;
+    let num_components = inputs.children.len() + 1;
+    let leaves = &expansion.leaves;
+
+    // The signed-transfer route links intact local tables and never invokes
+    // control elimination. Reject control-bearing leaves first.
+    for leaf in leaves.iter() {
+        if !leaf.table.control_terminals.is_empty() {
+            return Err(
+                "walk static link requires control-free component tables".to_string(),
+            );
+        }
+    }
+
+    // Effective static selection over top-level components: a requested block
+    // needs every leaf in its subtree free of virtual residual runtimes, whose
+    // lazily-allocated tokenizer states the link-time coordinate cannot cover.
+    // A requested-but-blocked block is a loud error, never a silent dynamic
+    // swap; unrequested blocks stay on the exact dynamic walker (hybrid).
+    let mut effective = BitSet::new(num_components);
+    for top in 0..num_components {
+        let requested = inputs
+            .static_components
+            .is_none_or(|bits| bits.contains(top));
+        if !requested {
+            continue;
+        }
+        let mut blocked = None;
+        for &leaf_index in &expansion.top_leaf_ranges[top] {
+            if leaves[leaf_index].tokenizer.has_virtual_residual_runtime() {
+                blocked = Some(leaf_index);
+                break;
+            }
+        }
+        if let Some(leaf_index) = blocked {
+            return Err(format!(
+                "walk static link component {top} requested a static shard but leaf {leaf_index} has a virtual residual runtime; leave it unselected (hybrid) or use the Dynamic boundary backend",
+            ));
+        }
+        effective.set(top);
+    }
+
+    let global_ignores = leaf_ignores_are_globally_erasable(leaves);
+
+    // Signed-transfer context over leaves first: the bounded-closure
+    // certificate declines nullable bound children and link-level cycles
+    // loudly here, before any walks run.
+    let unbound = nested_unbound_slot_terminals(expansion)?;
+    for &terminal in &unbound {
+        if terminal >= expansion.num_terminals {
+            return Err(format!(
+                "unbound slot terminal {terminal} lies outside the composed terminal domain",
+            ));
+        }
+    }
+    let signed_context = crate::compiler::boundary_transfer::build_signed_link_context_from_parts(
+        leaves.iter().map(|leaf| &leaf.table).collect(),
+        leaves.iter().map(|leaf| leaf.ignore_terminal).collect(),
+        expansion.links.clone(),
+        &expansion.leaf_terminal_offsets,
+        expansion.num_terminals,
+        global_ignores,
+        unbound.into_iter().collect(),
+    )?;
+
+    // Packed recursive splice (rules + layout only) for grammar analysis and
+    // the coordinator-layout pin.
+    let composed = splice_nested_block(0, expansion, global_ignores)?;
+    if composed.table.num_terminals != expansion.num_terminals {
+        return Err(format!(
+            "nested walk terminal domain {} differs from leaf domain {}",
+            composed.table.num_terminals, expansion.num_terminals,
+        ));
+    }
+    if composed.terminal_offsets.as_slice() != inputs.expected_terminal_offsets {
+        return Err(
+            "walk static link terminal layout differs from coordinator table".to_string(),
+        );
+    }
+    if composed.terminal_offsets.as_slice() != expansion.top_terminal_offsets.as_slice() {
+        return Err(
+            "nested walk top-level layout differs from leaf expansion".to_string(),
+        );
+    }
+
+    // Merged tokenizer + names + ignores over leaves.
+    let terminal_names = merged_leaf_terminal_display_names(leaves);
+    let tokenizer_inputs: Vec<(&Tokenizer, u32)> = leaves
+        .iter()
+        .enumerate()
+        .map(|(index, leaf)| {
+            (
+                leaf.composition_tokenizer(),
+                expansion.leaf_terminal_offsets[index],
+            )
+        })
+        .collect();
+    let (mut merged, tokenizer_offsets) =
+        Tokenizer::disjoint_union_with_terminal_offsets(&tokenizer_inputs);
+    if tokenizer_offsets.first() != Some(&1) {
+        return Err(
+            "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
+        );
+    }
+    if merged.terminal_exprs().is_none() {
+        if let Some(exprs) = merged_retained_terminal_exprs(
+            leaves,
+            &expansion.leaf_terminal_offsets,
+            expansion.num_terminals,
+        ) {
+            merged.restore_terminal_exprs(Some(exprs))?;
+        }
+    }
+    let ignores =
+        merged_leaf_ignore_terminals(leaves, &expansion.leaf_terminal_offsets, global_ignores);
+
+    // Grammar + pairwise follows over the spliced rules.
+    let augmented_start = composed
+        .table
+        .rules
+        .first()
+        .map(|rule| rule.lhs)
+        .ok_or_else(|| "composed table contains no augmented-start rule".to_string())?;
+    let grammar = AnalyzedGrammar::from_composed_rules(
+        composed.table.rules.clone(),
+        composed.table.num_terminals,
+        terminal_names,
+        composed.table.nonterminal_display_names.clone(),
+        augmented_start,
+    );
+    let disallowed = compute_disallowed_follows(&grammar);
+    let leaf_state_counts: Vec<u32> = tokenizer_inputs
+        .iter()
+        .map(|(tokenizer, _)| tokenizer.num_states())
+        .collect();
+
+    // Expected runtime scoped leaf packing (leaf order).
+    let mut expected_leaf_tokenizer_offsets = Vec::with_capacity(leaves.len());
+    let mut expected_total = 0u32;
+    for &count in &leaf_state_counts {
+        expected_leaf_tokenizer_offsets.push(expected_total);
+        expected_total = expected_total
+            .checked_add(count)
+            .ok_or_else(|| "scoped tokenizer state count overflow".to_string())?;
+    }
+
+    let empty_output = || WalkStaticLinkOutput {
+        published_shards: Vec::new(),
+        boundary_tokens_by_start_component: vec![Vec::new(); num_components],
+        effective_static_components: effective.clone(),
+        all_dynamic: false,
+        expected_leaf_tokenizer_offsets: expected_leaf_tokenizer_offsets.clone(),
+        expected_total_tokenizer_states: expected_total,
+        has_nested_components: true,
+    };
+    let retain_parent_non_crossing_paths = leaves
+        .iter()
+        .skip(1)
+        .any(|leaf| leaf.table.embedded_start_nullable());
+    // One walk plan per top-level component: blocks walk from their root leaf
+    // with the union of the block leaves' commit states.
+    let total_states = merged.num_states() as usize;
+    let mut walk_plans = Vec::with_capacity(num_components);
+    for top in 0..num_components {
+        let mut commit = vec![false; total_states];
+        for &leaf_index in &expansion.top_leaf_ranges[top] {
+            let start = tokenizer_offsets[leaf_index] as usize;
+            let end = start + leaf_state_counts[leaf_index] as usize;
+            if end > commit.len() {
+                return Err(
+                    "nested block commit range lies outside the merged tokenizer".to_string(),
+                );
+            }
+            commit[start..end].fill(true);
+        }
+        walk_plans.push(BoundaryShardWalkPlan {
+            start_component: top,
+            filter_component: expansion.top_root_leaves[top] as usize,
+            commit_states: commit,
+            retain_non_crossing_paths: retain_parent_non_crossing_paths && top == 0,
+        });
+    }
+    let Some((built, _link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
+        merged_tokenizer: &merged,
+        vocab,
+        grammar: &grammar,
+        disallowed_follows: &disallowed,
+        ignore_terminal: ignores.canonical,
+        terminal_offsets: &expansion.leaf_terminal_offsets,
+        tokenizer_offsets: &tokenizer_offsets,
+        component_state_counts: &leaf_state_counts,
+        retain_parent_non_crossing_paths,
+        walk_plans: Some(walk_plans),
+    }) else {
+        // Empty vocab: nothing can cross; pure component masks, no shards.
+        return Ok(empty_output());
+    };
+
+    // Signed-transfer shard publication over the leaf context, one shard per
+    // top-level component.
+    let mut published = Vec::new();
+    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
+    for shard in built {
+        tokens_by_component[shard.start_component] =
+            shard.candidate_tokens.iter().copied().collect();
+        if !effective.contains(shard.start_component) {
+            continue;
+        }
+        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
+        let library = crate::compiler::boundary_transfer::build_fragment_library(
+            &signed_context,
+            &emitted,
+            shard.start_component as u32,
+        )?;
+        let compiled = crate::compiler::boundary_transfer::compile_signed_shard_parser(
+            &signed_context,
+            &library,
+            &shard.output.dwa,
+            &shard.output.id_map,
+            shard.start_component as u32,
+        )?;
+        let work = WalkBoundaryShardWork {
+            start_component: shard.start_component as u32,
+            terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
+            id_map: shard.output.id_map,
+            candidate_tokens: shard
+                .candidate_tokens
+                .into_iter()
+                .collect::<Vec<_>>()
+                .into(),
+        };
+        let (one, _publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
+            work,
+            compiled,
+            &tokenizer_offsets,
+            &leaf_state_counts,
+        )?;
+        published.push(one);
+    }
+    published.sort_by_key(|shard| shard.start_component);
+    Ok(WalkStaticLinkOutput {
+        published_shards: published,
+        boundary_tokens_by_start_component: tokens_by_component,
+        effective_static_components: effective,
+        all_dynamic: false,
+        expected_leaf_tokenizer_offsets,
+        expected_total_tokenizer_states: expected_total,
+        has_nested_components: true,
     })
 }
 
@@ -1430,6 +2035,7 @@ mod tests {
             component_state_counts: &component_state_counts,
             // Core and dispatch schemas are never start-nullable.
             retain_parent_non_crossing_paths: false,
+            walk_plans: None,
         })
         .expect("walk shards");
         eprintln!(
@@ -1803,6 +2409,7 @@ mod tests {
             tokenizer_offsets: &composed.tokenizer_offsets,
             component_state_counts: &counts,
             retain_parent_non_crossing_paths,
+            walk_plans: None,
         })
         .expect("walk shards");
         let shards_built = built.len();
@@ -2147,6 +2754,7 @@ mod tests {
             retain_parent_non_crossing_paths: inputs
                 .iter()
                 .any(|child| child.constraint.table.embedded_start_nullable()),
+            walk_plans: None,
         })
         .expect("walk shards");
         assert_eq!(built.len(), 1, "only the child shard crosses here");

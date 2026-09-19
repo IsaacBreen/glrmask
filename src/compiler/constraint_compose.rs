@@ -93,7 +93,7 @@ use crate::runtime::{
 use crate::Vocab;
 use super::boundary_walk::{
     WalkStaticLinkInputs, build_walk_static_boundary_link,
-    dynamic_fallback_walk_link_output, walk_static_link_needs_dynamic_fallback,
+    dynamic_fallback_walk_link_output, walk_static_link_parent_needs_dynamic_fallback,
 };
 use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
 
@@ -18399,6 +18399,136 @@ pub(crate) fn merged_terminal_display_names(
     names
 }
 
+pub(crate) fn merged_leaf_terminal_display_names(leaves: &[&Constraint]) -> Vec<String> {
+    let mut names = Vec::new();
+    for (index, leaf) in leaves.iter().enumerate() {
+        if index == 0 {
+            names.extend(leaf.terminal_display_names.iter().cloned());
+        } else {
+            names.extend(
+                leaf.terminal_display_names
+                    .iter()
+                    .map(|name| format!("subgrammar{index}::{name}")),
+            );
+        }
+    }
+    names
+}
+
+/// Leaf-slice version of `component_ignores_are_globally_erasable` for nested
+/// static links, where the link spans recursively expanded intact leaves
+/// rather than direct components.
+pub(crate) fn leaf_ignores_are_globally_erasable(leaves: &[&Constraint]) -> bool {
+    if leaves.iter().any(|leaf| !leaf.table.skip_terminals.is_empty()) {
+        return false;
+    }
+    let Some(first) = leaves.first() else {
+        return true;
+    };
+    match first.ignore_terminal {
+        None => leaves.iter().all(|leaf| leaf.ignore_terminal.is_none()),
+        Some(_) => {
+            let Some(expected) = constraint_ignore_expr(first) else {
+                return false;
+            };
+            leaves.iter().skip(1).all(|leaf| {
+                let Some(_ignore) = leaf.ignore_terminal else {
+                    return false;
+                };
+                constraint_ignore_expr(leaf).is_some_and(|actual| actual == expected)
+            })
+        }
+    }
+}
+
+/// Leaf-slice version of `merged_ignore_terminals` for nested static links.
+pub(crate) fn merged_leaf_ignore_terminals(
+    leaves: &[&Constraint],
+    leaf_offsets: &[u32],
+    globally_erasable: bool,
+) -> MergedIgnoreTerminals {
+    let ignores = leaves
+        .iter()
+        .enumerate()
+        .filter_map(|(leaf_index, leaf)| {
+            leaf.ignore_terminal
+                .map(|terminal| leaf_offsets[leaf_index] + terminal)
+        })
+        .collect::<Vec<_>>();
+    let canonical = globally_erasable
+        .then(|| ignores.first().copied())
+        .flatten();
+    let canonical_expr = canonical.and_then(|_| constraint_ignore_expr(leaves[0]).cloned());
+    let mut all = BitSet::new(
+        leaf_offsets
+            .iter()
+            .copied()
+            .zip(leaves.iter())
+            .map(|(offset, leaf)| offset + leaf.tokenizer.num_terminals())
+            .max()
+            .unwrap_or(0) as usize,
+    );
+    for &ignore in &ignores {
+        all.set(ignore as usize);
+    }
+    for (leaf_index, leaf) in leaves.iter().enumerate() {
+        let terminal_offset = leaf_offsets[leaf_index] as usize;
+        for &skip in &leaf.table.skip_terminals {
+            all.set(terminal_offset + skip as usize);
+        }
+    }
+    let (global, scoped) = if canonical.is_some() {
+        (all.clone(), BitSet::new(all.len()))
+    } else {
+        (BitSet::new(all.len()), all.clone())
+    };
+    let aliases = canonical
+        .map(|canonical| {
+            ignores
+                .into_iter()
+                .filter(|&ignore| ignore != canonical)
+                .collect()
+        })
+        .unwrap_or_default();
+    MergedIgnoreTerminals {
+        canonical,
+        canonical_expr,
+        all,
+        scoped,
+        global,
+        aliases,
+    }
+}
+
+/// Recursively clear boundary shards inside nested segmented components.
+///
+/// A nested static link publishes one shard per top-level component over the
+/// full leaf-expanded link context; the outer block shard covers block-inner
+/// crossings, so inner overlays must carry no shards. Inner compositions may
+/// have installed exact dynamic (or static) shards of their own; leaving them
+/// would trip the strict-static trap (or double-cover) on a claimed static
+/// path. Operates on this composition's own overlay copies (`Arc::make_mut`
+/// detaches shared children), never on the caller's input constraints.
+pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint) {
+    let Some(overlay) = constraint.static_dynamic_overlay.as_mut() else {
+        return;
+    };
+    for component in &mut overlay.segmented_parser_components {
+        let inner = std::sync::Arc::make_mut(&mut component.constraint);
+        if inner.static_dynamic_overlay.is_none() {
+            continue;
+        }
+        if let Err(error) =
+            install_published_static_boundary_shards(inner.static_dynamic_overlay.as_mut().expect(
+                "nested segmented component requires overlay for shard clearing",
+            ), Vec::new())
+        {
+            debug_assert!(false, "nested shard clearing must not fail: {error}");
+        }
+        clear_nested_segmented_boundary_shards(inner);
+    }
+}
+
 fn merged_original_token_ids(
     vocab: &Vocab,
     special_token_terminals: &[SpecialTokenTerminal],
@@ -21002,9 +21132,9 @@ fn compose_constraints_owned_parent_impl(
                     {
                         Ok(dynamic_fallback_walk_link_output(num_components))
                     } else if (0..num_components).any(&requested_static)
-                        && walk_static_link_needs_dynamic_fallback(&parent, children)
+                        && walk_static_link_parent_needs_dynamic_fallback(&parent)
                     {
-                        Err("walk static link does not support nested segmented components; nested static linking is Phase 4, use the Dynamic boundary backend".to_string())
+                        Err("walk static link does not support an already-composed parent; use the Dynamic boundary backend".to_string())
                     } else {
                         let mut unsupported = None;
                         for index in 0..num_components {
@@ -21016,6 +21146,13 @@ fn compose_constraints_owned_parent_impl(
                             } else {
                                 children[index - 1].constraint
                             };
+                            // Nested blocks check their whole leaf subtree for
+                            // virtual residual runtimes inside the walk link
+                            // (leaf precision); only flat components are
+                            // checked here.
+                            if component.has_recursive_segmented_parser_tree() {
+                                continue;
+                            }
                             if component.tokenizer.has_virtual_residual_runtime() {
                                 unsupported = Some(index);
                                 break;
@@ -22006,6 +22143,13 @@ fn compose_constraints_owned_parent_impl(
                             Some(&walk.boundary_tokens_by_start_component),
                         );
                     }
+                    // Nested static links cover block-inner crossings with the
+                    // outer block shards; inner overlays must carry no shards
+                    // (their own exact dynamic/static shards would trip the
+                    // strict-static trap on a claimed static path).
+                    if walk.has_nested_components {
+                        clear_nested_segmented_boundary_shards(&mut result.constraint);
+                    }
                 }
             }
         }
@@ -22059,11 +22203,12 @@ fn compose_constraints_owned_parent_impl(
                 .recursive_parser_layout_for_pending_root()?
                 .expect("compact segmented runtime must have a recursive parser layout");
             // Pin a walk-static install against the authoritative leaf layout:
-            // the walk's private TSID maps assume direct-component leaves
-            // packed back-to-back. On any mismatch, decline loudly rather
-            // than misrouting queries or silently succeeding as dynamic.
-            // This must never fire for flat links; if it does, it is LOUD
-            // on purpose.
+            // the walk's private TSID maps assume expanded leaves (flat links:
+            // direct components; nested links: recursively expanded intact
+            // leaves) packed back-to-back in link order. On any mismatch,
+            // decline loudly rather than misrouting queries or silently
+            // succeeding as dynamic. This must never fire; if it does, it is
+            // LOUD on purpose.
             if let Some(Ok(Some(walk))) = walk_static_boundary_cell.get() {
                 if !walk.all_dynamic && !walk.published_shards.is_empty() {
                     let layout = result
@@ -26751,8 +26896,8 @@ table: &child.table,
         )
         .unwrap();
         // Nested link: the middle component is itself a segmented
-        // composition, so the outer link uses the exact Dynamic boundary
-        // backend (nested static linking is Phase 4). Behavior must still
+        // composition whose start is nullable (deferred class), so the outer
+        // link uses the exact Dynamic boundary backend. Behavior must still
         // match the monolithic constraint exactly, including through
         // save/load.
         let nested_inputs = [CompiledSubgrammarInput {
@@ -26760,8 +26905,9 @@ table: &child.table,
             additional_placeholder_terminals: &[],
             constraint: &middle,
         }];
-        // Requesting static shards for a nested link must decline loudly,
-        // never silently succeed as dynamic.
+        // Requesting static shards for a nullable nested link must decline
+        // loudly (nullable linked subgrammars are deferred), never silently
+        // succeed as dynamic.
         let declined = compose_constraints_owned_parent_segmented(
             outer_parent.clone(),
             &nested_inputs,
@@ -26770,7 +26916,7 @@ table: &child.table,
         );
         assert!(
             declined.is_err(),
-            "nested static link must decline loudly, got success",
+            "nullable nested static link must decline loudly, got success",
         );
         let composed = compose_constraints_owned_parent_segmented(
             outer_parent.clone(),
@@ -26801,6 +26947,385 @@ table: &child.table,
             assert_eq!(actual.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting());
         }
+    }
+
+    #[test]
+    fn nested_static_link_matches_dynamic_through_public_compose() {
+        // Production nested static link (acyclic, effectively nonnullable,
+        // depth 2) through the PUBLIC compose route: inner Dynamic reference
+        // composition, outer StaticParserDwa link, mask-gated corpus
+        // differential with the strict-static trap armed on the static side,
+        // plus backend pins and a shard ablation so the test cannot pass
+        // vacuously.
+        struct TrapGuard(bool);
+        impl TrapGuard {
+            fn set() -> Self {
+                unsafe {
+                    std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+                }
+                Self(true)
+            }
+            fn clear(&mut self) {
+                if self.0 {
+                    unsafe {
+                        std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                    }
+                    self.0 = false;
+                }
+            }
+        }
+        impl Drop for TrapGuard {
+            fn drop(&mut self) {
+                self.clear();
+            }
+        }
+        fn admits(mask: &[u32], token: u32) -> bool {
+            mask.get(token as usize / 32)
+                .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+        }
+        fn is_subset(a: &[u32], b: &[u32]) -> bool {
+            a.iter().zip(b.iter()).all(|(x, y)| x & !y == 0) && a.len() <= b.len()
+        }
+
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        // Token ids: 0 L, 1 R, 2 x, 3 y, 4 m, 5 g, 6 Lm, 7 Rm, 8 mg, 9 gm,
+        // 10 gx, 11 gy (same fixture as the lower-level nested pin).
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const M: u32 = 4;
+        const G: u32 = 5;
+        const LM: u32 = 6;
+        const RM: u32 = 7;
+        const MG: u32 = 8;
+        const GM: u32 = 9;
+        const GX: u32 = 10;
+        const GY: u32 = 11;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"m".to_vec()),
+            (5, b"g".to_vec()),
+            (6, b"Lm".to_vec()),
+            (7, b"Rm".to_vec()),
+            (8, b"mg".to_vec()),
+            (9, b"gm".to_vec()),
+            (10, b"gx".to_vec()),
+            (11, b"gy".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mid = Constraint::from_glrm_grammar(
+            r#"
+                start m;
+                t SUB2 ::= @token(998);
+                nt m ::= "m" SUB2;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let grandchild = Constraint::from_glrm_grammar(
+            r#"
+                start g;
+                nt g ::= "g";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(
+            !mid.table.embedded_start_nullable(),
+            "nested fixture mid must stay effectively nonnullable",
+        );
+        assert!(
+            !grandchild.table.embedded_start_nullable(),
+            "nested fixture grandchild must stay effectively nonnullable",
+        );
+        // Inner reference composition through the production dynamic route.
+        let mid_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&mid, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &grandchild,
+        }];
+        let mid_dyn = compose_constraints_owned_parent_segmented(
+            mid.clone(),
+            &mid_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("inner dynamic compose")
+        .constraint;
+        let outer_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &mid_dyn,
+        }];
+        let outer_dyn = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &outer_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("outer dynamic compose")
+        .constraint;
+        // The supported nested class links statically through the public
+        // route (no loud decline).
+        let outer_static = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &outer_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("outer nested static compose")
+        .constraint;
+        // Backend pins: both top-level components hold StaticParser shards and
+        // the nested middle overlay carries no shards of its own.
+        {
+            let overlay = outer_static
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            let mid_inner = overlay.segmented_parser_components[1]
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("mid overlay");
+            assert!(
+                mid_inner
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.boundary.is_none()),
+                "mid overlay must carry no shards (outer block shard covers block-start crossings)",
+            );
+            assert!(
+                mid_inner.segmented_boundary_shards.is_empty(),
+                "mid overlay shard list must be cleared",
+            );
+        }
+        // Mask-gated corpus from the dynamic reference (no trap): prefixes of
+        // the complete L/R strings plus fused-spelling entry points.
+        struct Node {
+            path: Vec<u32>,
+            mask: Vec<u32>,
+        }
+        let candidates: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![L, M],
+            vec![R, M],
+            vec![LM],
+            vec![RM],
+            vec![L, M, G],
+            vec![R, M, G],
+            vec![LM, G],
+            vec![RM, G],
+            vec![L, M, G, M],
+            vec![R, M, G, M],
+            vec![L, M, G, M, G],
+            vec![R, M, G, M, G],
+            vec![L, M, G, M, G, X],
+            vec![R, M, G, M, G, Y],
+        ];
+        let mut nodes = Vec::new();
+        for path in &candidates {
+            let mut st = outer_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits(&st.mask(), token) {
+                    ok = false;
+                    break;
+                }
+                if st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if !ok {
+                continue;
+            }
+            let mask = st.mask();
+            nodes.push(Node { path: path.clone(), mask });
+        }
+        assert!(
+            nodes.len() >= 10,
+            "nested corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        // Trap-armed replay: every recorded path matches identically on the
+        // public static composition. Any hidden dynamic fallback panics here.
+        let mut trap = TrapGuard::set();
+        let mut mismatches = 0usize;
+        for node in &nodes {
+            let mut st = outer_static.start();
+            for &token in &node.path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != node.mask {
+                mismatches += 1;
+            }
+        }
+        trap.clear();
+        assert_eq!(mismatches, 0, "nested static must match dynamic on every path");
+        // Readable call-site discrimination through two nesting levels.
+        for (prefix, fused, sibling, site) in [
+            (vec![L, M, G, M], GX, GY, "L"),
+            (vec![R, M, G, M], GY, GX, "R"),
+        ] {
+            let mut st = outer_static.start();
+            for &token in &prefix {
+                st.commit_token(token).unwrap();
+            }
+            let mask = st.mask();
+            assert!(admits(&mask, fused), "nested admits {fused} after {site}mgm");
+            assert!(!admits(&mask, sibling), "nested rejects {sibling} after {site}mgm");
+        }
+        {
+            let mut st = outer_static.start();
+            st.commit_token(L).unwrap();
+            assert!(admits(&st.mask(), M), "nested admits m after L");
+            assert!(admits(&st.mask(), MG), "nested admits mg after L");
+            assert!(!admits(&st.mask(), RM), "nested rejects Rm after L");
+        }
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions (the shards are genuinely used, not redundant).
+        let mut ablated = outer_static.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &candidates {
+            let mut dyn_st = outer_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+                assert!(
+                    is_subset(&abl_st.mask(), &dyn_st.mask()),
+                    "shard-less mask must stay a subset of the reference",
+                );
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn already_composed_parent_static_link_declines_loudly() {
+        // Compositional closure is over *children*: a fresh parent linked
+        // against composed children is the supported nested class. Reusing an
+        // already-composed constraint as the *parent* of a static link has no
+        // intact local table to link from, so the static route declines loudly
+        // (never silently succeeding as dynamic); the Dynamic backend still
+        // accepts the same shape.
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                nt a ::= "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_b = Constraint::from_glrm_grammar(
+            r#"
+                start b;
+                nt b ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        // First link fills SUB through the dynamic route, leaving SUB2 free.
+        let first_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let composed_parent = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &first_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("first dynamic compose")
+        .constraint;
+        assert!(
+            composed_parent.has_recursive_segmented_parser_tree(),
+            "first composition must leave a segmented parent",
+        );
+        let second_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&composed_parent, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_b,
+        }];
+        let declined = compose_constraints_owned_parent_segmented(
+            composed_parent.clone(),
+            &second_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        );
+        let error = match declined {
+            Ok(_) => panic!("static link over a composed parent must decline"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("already-composed parent"),
+            "decline must name the already-composed parent invariant, got: {error}",
+        );
+        // The same shape stays composable through the Dynamic backend.
+        compose_constraints_owned_parent_segmented(
+            composed_parent,
+            &second_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic compose over a composed parent stays supported");
     }
 
     #[test]
