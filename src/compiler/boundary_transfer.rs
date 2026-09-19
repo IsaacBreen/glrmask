@@ -1779,4 +1779,218 @@ mod tests {
     fn composer_scaffold_declines_loudly_without_hidden_fallback() {
         assert!(assemble_boundary_transfer_query().is_err());
     }
+
+    #[test]
+    fn nested_ready_depth_four_is_load_bearing() {
+        use crate::compiler::glr::parser::ScopedSubgrammarLink;
+        use crate::runtime::Constraint;
+        use crate::Vocab;
+
+        fn terminal_id(constraint: &Constraint, name: &str) -> TerminalID {
+            constraint
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap() as u32
+        }
+
+        fn find_local_containing(constraint: &Constraint, needle: &str) -> TerminalID {
+            constraint
+                .terminal_display_names
+                .iter()
+                .position(|candidate| candidate.contains(needle))
+                .unwrap() as u32
+        }
+
+        // Walk a deterministic parser DWA with a bottom-to-top stack-state
+        // word using the same transition API the runtime uses. Admission is
+        // exact reachability of a non-empty final weight over non-empty
+        // edge weights.
+        fn dwa_admits_stack_word(dwa: &DWA, word: &[u32]) -> bool {
+            let mut state = dwa.start_state();
+            for &symbol in word {
+                let label = symbol as i32;
+                let Some((target, weight)) = dwa.states()[state as usize]
+                    .transitions
+                    .get_entry(&label)
+                else {
+                    return false;
+                };
+                if weight.is_empty() {
+                    return false;
+                }
+                state = target;
+            }
+            dwa.states()[state as usize]
+                .final_weight
+                .as_ref()
+                .is_some_and(|weight| !weight.is_empty())
+        }
+
+        // Enumerate accepted stack words (bottom-to-top) over the
+        // deterministic parser DWA via DFS. The bounded program is acyclic,
+        // so the language is finite.
+        fn collect_accepted_words(dwa: &DWA, max_depth: usize) -> Vec<Vec<u32>> {
+            let mut out = Vec::new();
+            let mut stack: Vec<(u32, Vec<u32>)> = vec![(dwa.start_state(), Vec::new())];
+            while let Some((state, word)) = stack.pop() {
+                if dwa.states()[state as usize]
+                    .final_weight
+                    .as_ref()
+                    .is_some_and(|weight| !weight.is_empty())
+                {
+                    out.push(word.clone());
+                }
+                if word.len() >= max_depth {
+                    continue;
+                }
+                for (label, target, weight) in dwa.states()[state as usize].transitions.entries() {
+                    if weight.is_empty() {
+                        continue;
+                    }
+                    if label < 0 {
+                        continue;
+                    }
+                    let mut next_word = word.clone();
+                    next_word.push(label as u32);
+                    stack.push((target, next_word));
+                }
+            }
+            out
+        }
+
+        // Real nested fixture through real grammars: P ::= "L" SUB SUB "x",
+        // M ::= "m" SUB2, G ::= "g". Depth-2 chain certifies 2H = 4.
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"m".to_vec()),
+            (5, b"g".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mid = Constraint::from_glrm_grammar(
+            r#"
+                start m;
+                t SUB2 ::= @token(998);
+                nt m ::= "m" SUB2;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let grandchild = Constraint::from_glrm_grammar(
+            r#"
+                start g;
+                nt g ::= "g";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let sub_p = terminal_id(&parent, "SUB");
+        let sub2_m = terminal_id(&mid, "SUB2");
+        let n_p = parent.table.num_terminals;
+        let n_m = mid.table.num_terminals;
+        let n_g = grandchild.table.num_terminals;
+        let leaf_offsets = vec![0, n_p, n_p + n_m];
+        let num_terminals = n_p + n_m + n_g;
+        // Local id of grandchild "g" (display names quote the literal).
+        let g_local = find_local_containing(&grandchild, "g");
+        let g_global = leaf_offsets[2] + g_local;
+        let links = vec![
+            ScopedSubgrammarLink {
+                parent_component: 0,
+                slot_terminal: sub_p,
+                child_component: 1,
+                child_start: 0,
+                return_pop: 1,
+                child_start_nullable: false,
+            },
+            ScopedSubgrammarLink {
+                parent_component: 1,
+                slot_terminal: sub2_m,
+                child_component: 2,
+                child_start: 0,
+                return_pop: 1,
+                child_start_nullable: false,
+            },
+        ];
+        let mut context =
+            build_signed_link_context_from_parts(
+                vec![&parent.table, &mid.table, &grandchild.table],
+                vec![None, None, None],
+                links.clone(),
+                &leaf_offsets,
+                num_terminals,
+                false,
+                BTreeSet::new(),
+            )
+            .expect("nested signed context");
+        assert_eq!(context.closure.max_nesting_depth, 2);
+        assert_eq!(context.closure.max_controls_per_gap, 4);
+
+        // Synthetic *compiler-fixture* shard: g -> g across two lexical
+        // vertices. The middle gap must chain R(G1->M1) R(M1->P) E(P->M2)
+        // E(M2->G2): four control advancements before the second terminal.
+        let mut shard_dwa = DWA::new(0, 1);
+        let s1 = shard_dwa.add_state();
+        let s2 = shard_dwa.add_state();
+        shard_dwa.add_transition(0, g_global as i32, s1, Weight::all());
+        shard_dwa.add_transition(s1, g_global as i32, s2, Weight::all());
+        shard_dwa.set_final_weight(s2, Weight::all());
+        assert!(shard_dwa.is_acyclic());
+
+        let singleton = crate::compiler::stages::equiv_types::ManyToOneIdMap {
+            original_to_internal: vec![0],
+            internal_to_originals: vec![vec![0]],
+            representative_original_ids: vec![0],
+        };
+        let id_map = InternalIdMap {
+            tokenizer_states: singleton.clone(),
+            vocab_tokens: singleton,
+            deferred_vocab_singleton_original_ids: None,
+        };
+
+        let mut emitted = vec![false; num_terminals as usize];
+        emitted[g_global as usize] = true;
+        let library = build_fragment_library(&context, &emitted, 0).expect("fragment library");
+        let full = compile_signed_shard_parser(&context, &library, &shard_dwa, &id_map, 0)
+            .expect("depth-4 compilation must succeed");
+
+        context.closure.max_controls_per_gap = 2;
+        let library2 = build_fragment_library(&context, &emitted, 0).expect("fragment library");
+        let truncated = compile_signed_shard_parser(&context, &library2, &shard_dwa, &id_map, 0)
+            .expect("depth-2 compilation must succeed");
+
+        // Exact DWA-level load-bearing proof: some stack-state word reaches
+        // a final in the depth-4 program but not in the depth-2 program.
+        let full_words = collect_accepted_words(&full.parser_dwa, 12);
+        assert!(!full_words.is_empty(), "depth-4 program must admit something");
+        let mut witness: Option<Vec<u32>> = None;
+        for word in &full_words {
+            if !dwa_admits_stack_word(&truncated.parser_dwa, word) {
+                witness = Some(word.clone());
+                break;
+            }
+        }
+        let witness =
+            witness.expect("depth-4 must admit a stack word that depth-2 truncates (R,R,E,E)");
+        assert!(dwa_admits_stack_word(&full.parser_dwa, &witness));
+        assert!(!dwa_admits_stack_word(&truncated.parser_dwa, &witness));
+        eprintln!(
+            "[nested_ready_depth_four] witness_len={} witness={:?} full_states={} trunc_states={}",
+            witness.len(),
+            witness,
+            full.parser_dwa.num_states(),
+            truncated.parser_dwa.num_states(),
+        );
+    }
 }
