@@ -1498,6 +1498,37 @@ pub fn seed_root_nodes(
     start_state: u32,
     id_map: &InternalIdMap,
 ) -> NodesByTokenizerState {
+    seed_root_nodes_inner(tokenizer, nwa, start_state, id_map, None)
+}
+
+/// Seed walk roots only for internal-TSID classes that intersect a raw-state
+/// allow-list (`keep_raw_state[raw_state]`, length = `tokenizer.num_states()`).
+/// This is exact for walks that must cover exactly the allowed start states:
+/// every allowed raw state belongs to a kept class whose representative root
+/// covers the class behavior, and dropped classes cover no allowed state.
+/// `None` (via [`seed_root_nodes`]) preserves the historical seed-all behavior.
+pub fn seed_root_nodes_filtered(
+    tokenizer: &Tokenizer,
+    nwa: &mut NWA,
+    start_state: u32,
+    id_map: &InternalIdMap,
+    keep_raw_state: &[bool],
+) -> NodesByTokenizerState {
+    assert_eq!(
+        keep_raw_state.len(),
+        tokenizer.num_states() as usize,
+        "seed filter must cover the raw tokenizer-state domain",
+    );
+    seed_root_nodes_inner(tokenizer, nwa, start_state, id_map, Some(keep_raw_state))
+}
+
+fn seed_root_nodes_inner(
+    tokenizer: &Tokenizer,
+    nwa: &mut NWA,
+    start_state: u32,
+    id_map: &InternalIdMap,
+    keep_raw_state: Option<&[bool]>,
+) -> NodesByTokenizerState {
     let mut roots_by_tokenizer_state = NodesByTokenizerState::new();
 
     for (internal_tsid, representative_state) in id_map
@@ -1505,6 +1536,14 @@ pub fn seed_root_nodes(
         .iter_representative_ids()
         .enumerate()
     {
+        if let Some(keep) = keep_raw_state {
+            let intersects = id_map.tokenizer_states.internal_to_originals[internal_tsid]
+                .iter()
+                .any(|raw| keep.get(*raw as usize).copied().unwrap_or(false));
+            if !intersects {
+                continue;
+            }
+        }
         let root = nwa.add_state();
         let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
         nwa.add_epsilon(start_state, root, start_weight);

@@ -13675,6 +13675,10 @@ impl<'a> ConstraintState<'a> {
     /// Fill a mask directly from the lexer and parser stack, without using the
     /// parser DWA.
     pub(crate) fn fill_mask_dynamic(&self, buf: &mut [u32]) {
+        crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
+            "ConstraintState::fill_mask_dynamic",
+            self.constraint.uses_dynamic_runtime(),
+        );
         if self.constraint.uses_compact_segmented_parser_runtime() {
             self.fill_recursive_mask_by_exact_full_walk(buf);
             return;

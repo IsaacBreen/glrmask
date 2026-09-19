@@ -88,6 +88,15 @@ intended as diagnostic kill switches.
 | `GLRMASK_COMPACT_MERGE` | compact mode | `fast` |
 | `GLRMASK_COMPACT_MERGE_GLOBAL` | compact mode | `fast` |
 
+## Segmented Static Linker
+
+| Variable | Valid values | Default |
+|---|---|---|
+| `GLRMASK_DISABLE_STATIC_BOUNDARY_SHARDS` | presence toggle | off; the static boundary route attempts the signed walk link and declines loudly where it cannot serve (nullable nested links, already-composed parents, virtual-residual components). When set, static requests quietly install exact dynamic shards instead — the only quiet all-dynamic route on the static entry point. Diagnostic fallback; production callers needing dynamic behavior should use the explicit Dynamic backend. |
+| `GLRMASK_STRICT_STATIC_TRAP_DYNAMIC` | presence toggle | off; test-only proof flag. When set, evaluating any `DynamicDirect` boundary shard (or dynamic mask fallback) on a strict-static path panics loudly instead of silently succeeding, so differentials cannot pass vacuously through a hidden dynamic fallback. |
+| `GLRMASK_SIGNED_SHARD_NO_CONTROLS` | presence toggle | off; diagnostic size oracle only. When set, control (Entry/Finish) fragments are omitted and only ordinary transfers compose, isolating the control-closure size contribution. The result is not a valid shard (controls are required for exactness). |
+| `GLRMASK_SIGNED_SHARD_MINIMIZE_ORDER` | `descending` (case-insensitive) or unset | unset (`stable` order); diagnostic representation control. `descending` places denser partial behavior functions first for greedy absorption during signed-shard minimization. Affects only representation choices among already compatible classes, never the accepted weighted language; the DynamicDirect differential remains the arbiter. |
+
 ## JSON Schema Import
 
 | Variable | Valid values | Default |

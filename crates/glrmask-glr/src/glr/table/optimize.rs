@@ -117,6 +117,17 @@ pub(super) struct UnitReductionInliningReport {
     pub(super) changed_original_states: Vec<u32>,
 }
 
+/// Number of real control-elimination runs process-wide. No-op calls on
+/// control-free tables do not count. The prepared static linker's
+/// signed-transfer boundary compiler asserts this does not move across a link.
+static CONTROL_ELIMINATION_RUNS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide count of real `eliminate_control_terminals_exact` runs.
+pub fn control_elimination_run_count() -> u64 {
+    CONTROL_ELIMINATION_RUNS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlEliminationReport {
     pub states: usize,
@@ -222,6 +233,14 @@ const ABORT_CELLS: u8 = 3;
 const ABORT_SYNTHETIC_STATES: u8 = 4;
 const ABORT_STACK_EFFECT_VISITS: u8 = 5;
 
+/// Convergence caps for exact control elimination (see
+/// `exact_control_elimination`). Legitimate tables use a handful of visits
+/// (small segmented fixtures: 8–13) and sub-millisecond walls; the
+/// pathological cyclic case burns millions of visits without converging, so
+/// 100k visits (~0.6 s observed) fails fast with >1000x headroom.
+const EXACT_CONTROL_ELIMINATION_MAX_STACK_EFFECT_VISITS: usize = 100_000;
+const EXACT_CONTROL_ELIMINATION_MAX_WALL_MS: u128 = 10_000;
+
 fn abort_reason_str(code: u8) -> Option<&'static str> {
     match code {
         ABORT_ELAPSED => Some("elapsed_ms"),
@@ -262,18 +281,29 @@ impl UnitInlineBudget {
 
     /// Exact control elimination is a semantic compilation pass, not an
     /// optional optimizer. It must not succeed or fail according to the
-    /// environment limits used to bound speculative unit-reduction inlining.
-    /// Structural cycle/non-convergence guards live in the control compiler
-    /// itself; this object is retained only to reuse traversal accounting.
+    /// environment limits used to bound speculative unit-reduction inlining,
+    /// so the convergence caps below are hardcoded, not env-tunable.
+    ///
+    /// The caps exist because the symbolic traversal is not guaranteed to
+    /// terminate: on cyclic reduce graphs every lap accumulates a distinct
+    /// guard set, so the backtracking `visiting` set never repeats a key and
+    /// the DFS tree grows without bound (observed: a 7947-state composed
+    /// table burning 170k visits/s with no end). The visits cap bounds total
+    /// traversal work deterministically; the wall backstop bounds residual
+    /// non-visit work (frame cloning, cache-hit closure steps). Exhaustion
+    /// reports `reason=stack_effect_visits` / `reason=elapsed_ms`; callers
+    /// detect it with `control_elimination_budget_exhausted` and fall back
+    /// to dynamic boundary shards (static linking is an accelerator — the
+    /// dynamic backend always remains exact).
     fn exact_control_elimination() -> Self {
         use std::sync::atomic::{AtomicU8, AtomicUsize};
         Self {
             started_at: std::time::Instant::now(),
-            max_ms: u128::MAX,
+            max_ms: EXACT_CONTROL_ELIMINATION_MAX_WALL_MS,
             max_iterations: usize::MAX,
             max_cells: usize::MAX,
             max_synthetic_states: usize::MAX,
-            max_stack_effect_visits: usize::MAX,
+            max_stack_effect_visits: EXACT_CONTROL_ELIMINATION_MAX_STACK_EFFECT_VISITS,
             iterations: AtomicUsize::new(0),
             cells: AtomicUsize::new(0),
             synthetic_states: AtomicUsize::new(0),
@@ -1858,6 +1888,11 @@ impl GLRTable {
                 elapsed_ms: 0.0,
             });
         }
+        // Proof invariant for the prepared static linker: the new signed-transfer
+        // boundary compiler must never invoke control elimination. Count every
+        // real elimination run (no-op calls on control-free tables do not count)
+        // so link tests can assert the counter does not move across the link.
+        CONTROL_ELIMINATION_RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
         let started_at = std::time::Instant::now();
         let source = self.clone();
@@ -4378,6 +4413,15 @@ fn control_elimination_failure(
     )
 }
 
+/// True when a control-elimination error reports convergence-budget
+/// exhaustion (`reason=stack_effect_visits` / `reason=elapsed_ms`) rather
+/// than a semantic traversal failure. Budget exhaustion is a *decline*:
+/// the table stays controlled and the caller falls back to dynamic
+/// boundary shards. Any other elimination error is a hard failure.
+pub fn control_elimination_budget_exhausted(error: &str) -> bool {
+    error.contains("reason=stack_effect_visits") || error.contains("reason=elapsed_ms")
+}
+
 fn for_each_action_stack_rewrite(
     action: &Action,
     mut visit: impl FnMut(u32, &[u32]),
@@ -5276,7 +5320,19 @@ fn control_effect_closure(
         .saturating_mul(64)
         .saturating_add(256);
 
+    let mut closure_pops: u64 = 0;
     while let Some(frame) = queue.pop_front() {
+        closure_pops += 1;
+        // Cache-hit closure steps burn no visits; check the wall backstop
+        // directly so a giant sparse-control closure cannot stall.
+        if closure_pops % 16_384 == 0 && !budget.check_elapsed() {
+            return Err(control_elimination_failure(
+                budget,
+                origin_state,
+                EOF,
+                "control stack-effect closure exceeded its compile budget",
+            ));
+        }
         for (top_state, top_frame) in frame_top_branches(
             predecessors,
             origin_state,

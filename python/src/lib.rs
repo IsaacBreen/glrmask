@@ -1052,6 +1052,59 @@ impl PyDynamicConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
+    /// Diagnostic commit profile for the common single-alternative dynamic
+    /// constraint. This mirrors ConstraintState.commit_token_profiled so CFA's
+    /// step profiler can inspect O1/O2 commit tails directly.
+    fn commit_token_profiled<'py>(
+        &mut self,
+        py: Python<'py>,
+        token_id: u32,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let profile = self.inner.with_dependent_mut(|_owner, state| {
+            state
+                .commit_token_profiled(token_id)
+                .map_err(PyValueError::new_err)
+        })?;
+        let dict = PyDict::new(py);
+        dict.set_item("total_ns", profile.total_ns)?;
+        dict.set_item("scan_ns", profile.scan_ns)?;
+        dict.set_item("prune_ns", profile.prune_ns)?;
+        dict.set_item("queue_ns", profile.queue_ns)?;
+        dict.set_item("fuse_ns", profile.fuse_ns)?;
+        dict.set_item("initial_exec_ns", profile.initial_exec_ns)?;
+        dict.set_item("exec_ns", profile.exec_ns)?;
+        dict.set_item("queue_exec_ns", profile.queue_exec_ns)?;
+        dict.set_item("queue_match_ns", profile.queue_match_ns)?;
+        dict.set_item("queue_enqueue_ns", profile.queue_enqueue_ns)?;
+        dict.set_item("queue_bookkeeping_ns", profile.queue_bookkeeping_ns)?;
+        dict.set_item("advance_ns", profile.advance_ns)?;
+        dict.set_item("advance_may_check_ns", profile.advance_may_check_ns)?;
+        dict.set_item("advance_core_ns", profile.advance_core_ns)?;
+        dict.set_item("advance_future_disallow_ns", profile.advance_future_disallow_ns)?;
+        dict.set_item("actionable_ns", profile.actionable_ns)?;
+        dict.set_item("may_advance_ns", profile.may_advance_ns)?;
+        dict.set_item("n_tokenizer_states", profile.n_tokenizer_states)?;
+        dict.set_item("n_queue_entries", profile.n_queue_entries)?;
+        dict.set_item("n_advances", profile.n_advances)?;
+        dict.set_item("fast_path_total_ns", profile.fast_path_total_ns)?;
+        dict.set_item("fast_path_tokenizer_exec_ns", profile.fast_path_tokenizer_exec_ns)?;
+        dict.set_item("fast_path_match_scan_ns", profile.fast_path_match_scan_ns)?;
+        dict.set_item("fast_path_end_state_check_ns", profile.fast_path_end_state_check_ns)?;
+        dict.set_item("fast_path_prune_ns", profile.fast_path_prune_ns)?;
+        dict.set_item("fast_path_advance_ns", profile.fast_path_advance_ns)?;
+        dict.set_item("fast_path_future_disallow_ns", profile.fast_path_future_disallow_ns)?;
+        dict.set_item("fast_path_fuse_ns", profile.fast_path_fuse_ns)?;
+        dict.set_item("fast_path_state_update_ns", profile.fast_path_state_update_ns)?;
+        dict.set_item("failed_fast_path_probe_ns", profile.failed_fast_path_probe_ns)?;
+        dict.set_item("linear_fast_path_total_ns", profile.linear_fast_path_total_ns)?;
+        dict.set_item("linear_fast_path_exec_ns", profile.linear_fast_path_exec_ns)?;
+        dict.set_item("linear_fast_path_match_scan_ns", profile.linear_fast_path_match_scan_ns)?;
+        dict.set_item("linear_fast_path_end_state_check_ns", profile.linear_fast_path_end_state_check_ns)?;
+        dict.set_item("linear_fast_path_advance_ns", profile.linear_fast_path_advance_ns)?;
+        dict.set_item("linear_fast_path_fuse_ns", profile.linear_fast_path_fuse_ns)?;
+        Ok(dict)
+    }
+
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         self.inner

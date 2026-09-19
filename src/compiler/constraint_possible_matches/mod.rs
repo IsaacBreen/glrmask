@@ -3614,6 +3614,7 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     // quotient. Reuse the prepared Vocab-global copy instead of scanning all
     // original token IDs for every O2 constraint.
     let full_vocab_template = prepared_runtime_dynamic_vocab_for_vocab(vocab);
+
     let prepared_all_original_token_words = full_vocab_template.all_original_token_words_arc();
     let runtime_started = profile.then(Instant::now);
     let mut runtime = if materialize_runtime_indexes {

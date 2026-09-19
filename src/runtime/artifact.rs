@@ -3091,6 +3091,18 @@ pub(crate) struct DynamicLazyUnionMetadata {
     pub(crate) futures: BitSet,
 }
 
+#[derive(Debug)]
+pub(crate) enum DynamicLazyUnionRow {
+    Sparse(SmallVec<[(u8, u32); 8]>),
+    Dense(Box<[u32; 256]>),
+}
+
+impl Default for DynamicLazyUnionRow {
+    fn default() -> Self {
+        Self::Sparse(SmallVec::new())
+    }
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct DynamicLazyUnionCache {
     pub(crate) base_state_count: u32,
@@ -3100,9 +3112,15 @@ pub(crate) struct DynamicLazyUnionCache {
     /// repeated probes without paying to enumerate all 256 bytes of a newly
     /// encountered physical state.
     pub(crate) base_rows: Vec<Option<Box<[u32; 256]>>>,
+    /// Dedicated packed-key index for the overwhelmingly common two-state
+    /// derivatives.  Avoids hashing/cloning a SmallVec on every pair lookup.
+    pub(crate) state_by_pair: Option<Box<FxHashMap<u64, u32>>>,
     pub(crate) state_by_subset: FxHashMap<SmallVec<[u32; 8]>, u32>,
     pub(crate) subsets: Vec<SmallVec<[u32; 8]>>,
-    pub(crate) rows: Vec<[u32; 256]>,
+    /// Lazy virtual-state derivatives. Most derived states see only a few
+    /// vocabulary bytes, so keep them sparse and promote only genuinely hot
+    /// rows to a dense 256-cell table.
+    pub(crate) rows: Vec<DynamicLazyUnionRow>,
     pub(crate) metadata: Vec<Option<DynamicLazyUnionMetadata>>,
     /// Learned output-polarity hint for exact lazy-union/physical root states.
     /// 1 = observed non-dense, 2 = observed lexically dense. Runtime-only and

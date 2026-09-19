@@ -354,7 +354,9 @@ fn late_binding_multiple_adjacent_slots_handles_internal_multi_boundary_tokens()
 
     let open = Constraint::compile(parent, &vocab).unwrap();
     let partial = open.bind_grammar("left", &static_left).unwrap();
-    let complete = partial.bind_grammar("right", &dynamic_right).unwrap();
+    let complete = partial
+        .bind_grammar_dynamic_boundary("right", &dynamic_right)
+        .unwrap();
     assert_static_xyz_matches(&reference, &complete);
     let state = complete.start();
     assert!(!allowed(&state.mask(), 6));
@@ -601,7 +603,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .unwrap()
         .build()
         .unwrap();
-    let constraint = spec.compile().unwrap();
+    let constraint = spec.compile_dynamic().unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
     state.commit_token(8).unwrap();
@@ -680,7 +682,9 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     // coordinate; qualified nested slots must survive serialization and bind.
     let open = Constraint::load(&open.save()).unwrap();
     let leaf = Constraint::compile(Grammar::ebnf(r#"start ::= "x""#), &vocab).unwrap();
-    let fully_bound = open.bind_grammar("child.nested", &leaf).unwrap();
+    let fully_bound = open
+        .bind_grammar_dynamic_boundary("child.nested", &leaf)
+        .unwrap();
     let mut state = fully_bound.start();
     state.commit_token(0).unwrap();
     assert!(state.is_accepting());
@@ -699,7 +703,9 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .compile_dynamic()
         .unwrap();
     let dynamic_open = DynamicConstraint::load(&dynamic_open.save()).unwrap();
-    let dynamic_fully_bound = dynamic_open.bind_grammar("child.nested", &leaf).unwrap();
+    let dynamic_fully_bound = dynamic_open
+        .bind_grammar_dynamic_boundary("child.nested", &leaf)
+        .unwrap();
     let mut state = dynamic_fully_bound.start();
     state.commit_token(0).unwrap();
     assert!(state.is_accepting());

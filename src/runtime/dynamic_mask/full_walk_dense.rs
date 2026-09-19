@@ -1,6 +1,14 @@
 use super::*;
-use crate::runtime::artifact::DynamicMaskTrieFullWalkOp;
+use crate::runtime::artifact::{DynamicLazyUnionRow, DynamicMaskTrieFullWalkOp};
 use rustc_hash::FxHashSet;
+
+#[inline(always)]
+fn canonicalize_lazy_targets(targets: &mut SmallVec<[u32; 8]>) {
+    if targets.windows(2).any(|pair| pair[0] > pair[1]) {
+        targets.sort_unstable();
+    }
+    targets.dedup();
+}
 
 #[inline]
 fn physical_sole_live_terminal(tokenizer: &Tokenizer, state: u32) -> Option<TerminalID> {
@@ -158,6 +166,7 @@ struct FullWalkLazyUnion<'a> {
     base_state_count: u32,
     tokenizer: *const Tokenizer,
     overflowed: &'a std::cell::Cell<bool>,
+    use_pair_map: bool,
     cache: std::cell::UnsafeCell<std::sync::MutexGuard<'a, DynamicLazyUnionCache>>,
 }
 
@@ -173,6 +182,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         mut cache: std::sync::MutexGuard<'a, DynamicLazyUnionCache>,
         root_states: &[u32],
         overflowed: &'a std::cell::Cell<bool>,
+        use_pair_map: bool,
     ) -> Option<(Self, u32)> {
         if root_states.len() < 2 {
             return None;
@@ -207,6 +217,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             base_state_count,
             tokenizer: tokenizer as *const Tokenizer,
             overflowed,
+            use_pair_map,
             cache: std::cell::UnsafeCell::new(cache),
         };
         let root = table.intern_states(root_states)?;
@@ -216,6 +227,9 @@ impl<'a> FullWalkLazyUnion<'a> {
     #[inline]
     fn clear_cache(cache: &mut DynamicLazyUnionCache) {
         cache.base_rows.clear();
+        if let Some(pair_map) = cache.state_by_pair.as_mut() {
+            pair_map.clear();
+        }
         cache.state_by_subset.clear();
         cache.subsets.clear();
         cache.rows.clear();
@@ -237,7 +251,7 @@ impl<'a> FullWalkLazyUnion<'a> {
             }
         }
         let cache = unsafe { &mut *self.cache.get() };
-        let result = Self::intern_physical_inner(self.base_state_count, cache, physical);
+        let result = Self::intern_physical_inner(self.base_state_count, cache, physical, self.use_pair_map);
         if result.is_none() {
             self.overflowed.set(true);
         }
@@ -248,9 +262,20 @@ impl<'a> FullWalkLazyUnion<'a> {
         base_state_count: u32,
         cache: &mut DynamicLazyUnionCache,
         mut states: SmallVec<[u32; 8]>,
+        use_pair_map: bool,
     ) -> Option<u32> {
         states.sort_unstable();
         states.dedup();
+        Self::intern_sorted_physical_inner(base_state_count, cache, states, use_pair_map)
+    }
+
+    fn intern_sorted_physical_inner(
+        base_state_count: u32,
+        cache: &mut DynamicLazyUnionCache,
+        states: SmallVec<[u32; 8]>,
+        use_pair_map: bool,
+    ) -> Option<u32> {
+        debug_assert!(states.windows(2).all(|pair| pair[0] < pair[1]));
         match states.as_slice() {
             [] => return None,
             [state] => return Some(*state),
@@ -259,16 +284,39 @@ impl<'a> FullWalkLazyUnion<'a> {
         if states.iter().any(|&state| state >= base_state_count) {
             return None;
         }
-        if let Some(&state) = cache.state_by_subset.get(&states) {
+        let pair_key = if use_pair_map {
+            match states.as_slice() {
+                [first, second] => Some((u64::from(*first) << 32) | u64::from(*second)),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(key) = pair_key {
+            if let Some(&state) = cache
+                .state_by_pair
+                .as_ref()
+                .and_then(|pair_map| pair_map.get(&key))
+            {
+                return Some(state);
+            }
+        } else if let Some(&state) = cache.state_by_subset.get(&states) {
             return Some(state);
         }
         if cache.subsets.len() >= Self::RESERVED_EXTENSION_STATES {
             return None;
         }
         let id = base_state_count.checked_add(cache.subsets.len() as u32)?;
-        cache.state_by_subset.insert(states.clone(), id);
+        if let Some(key) = pair_key {
+            cache
+                .state_by_pair
+                .get_or_insert_with(|| Box::new(FxHashMap::default()))
+                .insert(key, id);
+        } else {
+            cache.state_by_subset.insert(states.clone(), id);
+        }
         cache.subsets.push(states);
-        cache.rows.push([Self::UNBUILT; 256]);
+        cache.rows.push(DynamicLazyUnionRow::default());
         cache.metadata.push(None);
         Some(id)
     }
@@ -315,6 +363,40 @@ impl<'a> FullWalkLazyUnion<'a> {
     }
 
     #[inline(always)]
+    fn uncached_base_cell(&self, state: u32, byte: u8) -> u32 {
+        if let Some(base_transitions) = self.base_transitions16 {
+            let cell = unsafe {
+                *base_transitions
+                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+            };
+            return if cell == u16::MAX {
+                u32::MAX
+            } else {
+                u32::from(cell & 0x7fff)
+                    | if cell & 0x8000 != 0 { 0x8000_0000 } else { 0 }
+            };
+        }
+        if let Some(base_transitions) = self.base_transitions32 {
+            return unsafe {
+                *base_transitions
+                    .get_unchecked((state as usize).wrapping_mul(256) + byte as usize)
+            };
+        }
+        let tokenizer = unsafe { &*self.tokenizer };
+        let target = tokenizer.dynamic_direct_transition(state, byte);
+        if target == u32::MAX {
+            return u32::MAX;
+        }
+        debug_assert!(target < 0x8000_0000);
+        target
+            | if tokenizer.matched_terminal_bitset(target).is_empty() {
+                0
+            } else {
+                0x8000_0000
+            }
+    }
+
+    #[inline(always)]
     fn base_cell(&self, state: u32, byte: u8) -> u32 {
         if let Some(base_transitions) = self.base_transitions16 {
             let cell = unsafe {
@@ -349,19 +431,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         if cached != Self::UNBUILT {
             return cached;
         }
-        let tokenizer = unsafe { &*self.tokenizer };
-        let target = tokenizer.dynamic_direct_transition(state, byte);
-        let value = if target == u32::MAX {
-            u32::MAX
-        } else {
-            debug_assert!(target < 0x8000_0000);
-            target
-                | if tokenizer.matched_terminals_slice(target).is_empty() {
-                    0
-                } else {
-                    0x8000_0000
-                }
-        };
+        let value = self.uncached_base_cell(state, byte);
         unsafe {
             let cache = &mut *self.cache.get();
             *cache
@@ -375,6 +445,147 @@ impl<'a> FullWalkLazyUnion<'a> {
     }
 
     #[inline(always)]
+    fn cached_virtual_cell(&self, index: usize, byte: u8) -> Option<u32> {
+        let cache = unsafe { &*self.cache.get() };
+        match cache.rows.get(index)? {
+            DynamicLazyUnionRow::Sparse(cells) => cells
+                .iter()
+                .find_map(|&(cached_byte, value)| (cached_byte == byte).then_some(value)),
+            DynamicLazyUnionRow::Dense(row) => {
+                let value = unsafe { *row.get_unchecked(byte as usize) };
+                (value != Self::UNBUILT).then_some(value)
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn cache_virtual_cell(&self, index: usize, byte: u8, value: u32) {
+        const SPARSE_CELL_LIMIT: usize = 8;
+        let cache = unsafe { &mut *self.cache.get() };
+        let row = unsafe { cache.rows.get_unchecked_mut(index) };
+        match row {
+            DynamicLazyUnionRow::Sparse(cells) => {
+                if let Some((_, existing)) = cells.iter_mut().find(|(cached_byte, _)| *cached_byte == byte) {
+                    *existing = value;
+                    return;
+                }
+                if cells.len() < SPARSE_CELL_LIMIT {
+                    cells.push((byte, value));
+                    return;
+                }
+                let mut dense = Box::new([Self::UNBUILT; 256]);
+                for &(cached_byte, cached_value) in cells.iter() {
+                    dense[cached_byte as usize] = cached_value;
+                }
+                dense[byte as usize] = value;
+                *row = DynamicLazyUnionRow::Dense(dense);
+            }
+            DynamicLazyUnionRow::Dense(dense) => unsafe {
+                *dense.get_unchecked_mut(byte as usize) = value;
+            },
+        }
+    }
+
+    /// After a wide virtual subset has already paid for several independent
+    /// byte probes, switch sparse physical components to row-wise construction
+    /// only when their cheap packed-row lengths prove that enumerating every
+    /// outgoing edge is no more work than another handful of subset probes.
+    fn maybe_materialize_sparse_wide_row(&self, index: usize) -> bool {
+        const WIDE_SUBSET_MIN: usize = 64;
+        const PROBE_AMORTIZATION: usize = 8;
+        if self.base_transitions16.is_some() || self.base_transitions32.is_some() {
+            return false;
+        }
+        let members = {
+            let cache = unsafe { &*self.cache.get() };
+            let Some(DynamicLazyUnionRow::Sparse(cells)) = cache.rows.get(index) else {
+                return false;
+            };
+            if cells.len() < PROBE_AMORTIZATION {
+                return false;
+            }
+            let Some(subset) = cache.subsets.get(index) else {
+                return false;
+            };
+            if subset.len() < WIDE_SUBSET_MIN {
+                return false;
+            }
+            subset.clone()
+        };
+        let tokenizer = unsafe { &*self.tokenizer };
+        let budget = members.len().saturating_mul(PROBE_AMORTIZATION);
+        let mut outgoing = 0usize;
+        for &member in &members {
+            let Some(count) = tokenizer.dynamic_direct_transition_count(member) else {
+                return false;
+            };
+            outgoing = outgoing.saturating_add(count);
+            if outgoing > budget {
+                return false;
+            }
+        }
+        // Near-one-edge-per-state dispatcher layers are already cheap to probe
+        // and do not amortize the fixed row-build machinery. Conversely, dense
+        // rows were rejected by `budget` above. Materialize only the middle
+        // regime where repeated subset probes dominate but sparse enumeration
+        // is still bounded.
+        if outgoing.saturating_mul(2) < members.len().saturating_mul(3) {
+            return false;
+        }
+
+        let mut targets_by_byte: [SmallVec<[u32; 8]>; 256] =
+            std::array::from_fn(|_| SmallVec::new());
+        let mut touched = SmallVec::<[u8; 32]>::new();
+        let mut finalizing = [false; 256];
+        for member in members {
+            for (byte, target) in tokenizer.transitions_from(member) {
+                let targets = unsafe { targets_by_byte.get_unchecked_mut(byte as usize) };
+                if targets.is_empty() {
+                    touched.push(byte);
+                }
+                targets.push(target);
+                if !finalizing[byte as usize]
+                    && !tokenizer.matched_terminal_bitset(target).is_empty()
+                {
+                    finalizing[byte as usize] = true;
+                }
+            }
+        }
+        let mut row = Box::new([u32::MAX; 256]);
+        for byte in touched {
+            let targets = unsafe { targets_by_byte.get_unchecked_mut(byte as usize) };
+            canonicalize_lazy_targets(targets);
+            let target = match targets.as_slice() {
+                [] => continue,
+                [single] => *single,
+                _ => {
+                    let cache = unsafe { &mut *self.cache.get() };
+                    let Some(target) = Self::intern_sorted_physical_inner(
+                        self.base_state_count,
+                        cache,
+                        std::mem::take(targets),
+                        self.use_pair_map,
+                    ) else {
+                        self.overflowed.set(true);
+                        return false;
+                    };
+                    target
+                }
+            };
+            row[byte as usize] = target
+                | if finalizing[byte as usize] {
+                    0x8000_0000
+                } else {
+                    0
+                };
+        }
+        unsafe {
+            (&mut *self.cache.get()).rows[index] = DynamicLazyUnionRow::Dense(row);
+        }
+        true
+    }
+
+    #[inline(always)]
     fn cell_raw(&self, state: u32, byte: u8) -> u32 {
         if state < self.base_state_count {
             return self.base_cell(state, byte);
@@ -382,42 +593,46 @@ impl<'a> FullWalkLazyUnion<'a> {
         let Some(index) = self.checked_extension_index(state) else {
             return u32::MAX;
         };
-        let cached = unsafe {
-            let cache = &*self.cache.get();
-            *cache.rows.get_unchecked(index).get_unchecked(byte as usize)
-        };
-        if cached != Self::UNBUILT {
+        if let Some(cached) = self.cached_virtual_cell(index, byte) {
             return cached;
+        }
+        if self.maybe_materialize_sparse_wide_row(index) {
+            return self
+                .cached_virtual_cell(index, byte)
+                .unwrap_or(u32::MAX);
         }
 
         let mut targets = SmallVec::<[u32; 8]>::new();
         let mut finalizer_bits = 0u32;
-        // `base_cell()` lazily fills `cache.base_rows`, so it mutates the same
-        // `DynamicLazyUnionCache`. Do not keep an immutable reference into
-        // `cache.subsets` alive across those calls: doing so through UnsafeCell
-        // violates Rust's aliasing rules even though the logical fields are
-        // disjoint, and can manifest as corrupted virtual-state IDs on later
-        // timing passes. The canonical subsets are deliberately tiny
-        // (`SmallVec<[u32; 8]>`), so copy the current one before touching the
-        // mutable base-row cache.
-        let members = unsafe { (&*self.cache.get()).subsets[index].clone() };
-        for member in members {
-            let cell = self.base_cell(member, byte);
-            if cell == u32::MAX {
-                continue;
+        // Virtual derivatives cache their own resulting cell, so member probes
+        // deliberately bypass the physical-row cache. That makes this scan
+        // read-only with respect to `DynamicLazyUnionCache`: borrow the canonical
+        // subset in place instead of cloning a potentially heap-backed wide
+        // union on every newly observed vocabulary byte.
+        {
+            let cache = unsafe { &*self.cache.get() };
+            for &member in &cache.subsets[index] {
+                let cell = self.uncached_base_cell(member, byte);
+                if cell == u32::MAX {
+                    continue;
+                }
+                finalizer_bits |= cell & 0x8000_0000;
+                targets.push(cell & 0x7fff_ffff);
             }
-            finalizer_bits |= cell & 0x8000_0000;
-            targets.push(cell & 0x7fff_ffff);
         }
-        targets.sort_unstable();
-        targets.dedup();
+        canonicalize_lazy_targets(&mut targets);
         let target = match targets.as_slice() {
             [] => u32::MAX,
             [state] => *state,
             _ => {
                 let cache = unsafe { &mut *self.cache.get() };
                 let Some(target) =
-                    Self::intern_physical_inner(self.base_state_count, cache, targets)
+                    Self::intern_sorted_physical_inner(
+                        self.base_state_count,
+                        cache,
+                        targets,
+                        self.use_pair_map,
+                    )
                 else {
                     self.overflowed.set(true);
                     return u32::MAX;
@@ -430,10 +645,7 @@ impl<'a> FullWalkLazyUnion<'a> {
         } else {
             target | finalizer_bits
         };
-        unsafe {
-            let cache = &mut *self.cache.get();
-            *cache.rows.get_unchecked_mut(index).get_unchecked_mut(byte as usize) = value;
-        }
+        self.cache_virtual_cell(index, byte, value);
         value
     }
 
@@ -1540,10 +1752,12 @@ pub(super) fn try_scalar_dispatch(
     // bytes from the current root configs cannot even cover a slice's
     // first-byte language, that slice cannot help this mask. This gate may
     // conservatively skip an optimization; it never admits a token.
-    let master_may_apply = if let (Some(safe_plus), Some(whitespace)) = (
-        vocab.llg_slice_by_cache_id(LLG_SAFE_PLUS_SLICE as u32),
-        vocab.llg_slice_by_cache_id(LLG_WHITESPACE_SLICE as u32),
-    ) {
+    let master_may_apply = if vocab.llg_master_trie().is_some()
+        && let (Some(safe_plus), Some(whitespace)) = (
+            vocab.llg_slice_by_cache_id(LLG_SAFE_PLUS_SLICE as u32),
+            vocab.llg_slice_by_cache_id(LLG_WHITESPACE_SLICE as u32),
+        )
+    {
         let mut root_first_bytes = U8Set::empty();
         let mut physical = SmallVec::<[u32; 8]>::new();
         for branch in root_branches {
@@ -1654,6 +1868,7 @@ pub(super) fn try_scalar_dispatch(
             return Ok(false);
         };
         let overflowed = std::cell::Cell::new(false);
+        let use_pair_map = !std::ptr::eq(tokenizer, &state.constraint.tokenizer);
         let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
             tokenizer,
             transitions16,
@@ -1661,6 +1876,7 @@ pub(super) fn try_scalar_dispatch(
             subset_cache,
             &reset_states,
             &overflowed,
+            use_pair_map,
         ) else {
             return Ok(false);
         };
@@ -2024,6 +2240,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 subset_cache,
                 &root_states,
                 &overflowed,
+                !std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer),
             ) {
                 let mut collapsed = DynamicBranches::new();
                 collapsed.push(DynamicBranch {
@@ -6677,6 +6894,7 @@ mod wide_scalar_dispatch_tests {
             guard,
             &[0, 32_768],
             &overflowed,
+            false,
         )
         .expect("wide lazy scalar-dispatch table");
 
@@ -6710,6 +6928,7 @@ mod wide_scalar_dispatch_tests {
             guard,
             &[0, 32_768],
             &overflowed,
+            false,
         )
         .expect("lazy table after soft-limit reset");
 
@@ -6749,6 +6968,7 @@ mod wide_scalar_dispatch_tests {
                 guard,
                 &[0, 32_768],
                 &overflowed,
+                false,
             )
             .expect("lazy table after repeated soft-limit reset");
 

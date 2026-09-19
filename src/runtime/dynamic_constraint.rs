@@ -23,7 +23,7 @@ use crate::grammar::flat::{DirectRegularAutomaton, GrammarDef, Symbol, Terminal,
 use crate::Vocab;
 
 use crate::runtime::{
-    dynamic_mask_profile_enabled, Constraint, ConstraintState, DynamicMaskVocab,
+    dynamic_mask_profile_enabled, CommitProfile, Constraint, ConstraintState, DynamicMaskVocab,
     SpecialTokenTerminal,
 };
 
@@ -3623,6 +3623,21 @@ impl<'a> DynamicConstraintState<'a> {
 
     fn commit_token_raw(&mut self, token_id: u32) -> Result<(), String> {
         self.retain_committing(|state| state.commit_token_raw(token_id))
+    }
+
+    /// Diagnostic commit profile for the overwhelmingly common single-
+    /// alternative dynamic constraint. Multi-alternative dynamic constraints
+    /// deliberately keep using the ordinary commit path rather than inventing
+    /// an ambiguous aggregate profile.
+    #[doc(hidden)]
+    pub fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
+        let [state] = self.alternatives.as_mut_slice() else {
+            return Err(format!(
+                "profiled dynamic commit requires exactly one alternative (have {})",
+                self.alternatives.len()
+            ));
+        };
+        state.commit_token_profiled(token_id)
     }
 
     /// Fill `buf` with the allowed-token mask as a packed bitset.

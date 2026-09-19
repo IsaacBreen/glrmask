@@ -3605,8 +3605,8 @@ fn restore_recursive_boundary_parser_v27(
     constraint: &Constraint,
     boundary: RecursiveSegmentedBoundaryParserV27,
     recursive_parser_state_count: u32,
+    recursive_tokenizer_state_count: u32,
 ) -> crate::Result<crate::runtime::artifact::SegmentedBoundaryParser> {
-    let global_tokenizer_states = constraint.tokenizer.num_states();
     let tsid_count = if boundary.uses_composed_tsid_coordinate {
         if !boundary.tokenizer_state_to_tsid.is_empty() {
             return Err(crate::GlrMaskError::Serialization(
@@ -3616,9 +3616,13 @@ fn restore_recursive_boundary_parser_v27(
         }
         constraint.internal_tsid_count()
     } else {
-        if boundary.tokenizer_state_to_tsid.len() != global_tokenizer_states as usize {
+        // v27 restores compact segmented runtimes only, whose shard queries
+        // index live leaf states directly. The private map therefore covers
+        // the recursive leaf total — not the outer composed tokenizer, which
+        // may canonicalize states the leaves keep distinct.
+        if boundary.tokenizer_state_to_tsid.len() != recursive_tokenizer_state_count as usize {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "recursive private-coordinate boundary shard has {} tokenizer-state entries for {global_tokenizer_states} outer states",
+                "recursive private-coordinate boundary shard has {} tokenizer-state entries for {recursive_tokenizer_state_count} leaf states",
                 boundary.tokenizer_state_to_tsid.len(),
             )));
         }
@@ -4191,6 +4195,7 @@ fn restore_recursive_segmented_runtime_v27(
                         constraint,
                         boundary,
                         layout.total_states,
+                        layout.total_tokenizer_states,
                     )?,
                 ))
             }

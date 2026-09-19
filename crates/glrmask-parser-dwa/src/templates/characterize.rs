@@ -106,6 +106,261 @@ pub fn characterize_finish_probe(table: &GLRTable) -> TerminalCharacterization {
     }
 }
 
+/// Endpoint policy for deriving a child Finish transfer from local EOF rows.
+///
+/// The ordinary characterizer ignores `Accept`; a Finish transfer must turn a
+/// pure EOF `Accept` into a bounded pop (`Return { pop }`) while keeping local
+/// EOF reductions. `return_pop` is the provider's canonical pop (1 or 2).
+/// `nullable_child_start` adds the provider's pop-one nullable alternative at
+/// every reduction-closure configuration whose current top is the child start,
+/// mirroring `advance_stacks_with_provider` processing `extra_stack_shifts`
+/// on each iteration of the selected symbol's closure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FinishEndpointPolicy {
+    pub return_pop: u32,
+    pub nullable_child_start: Option<u32>,
+}
+
+/// Local Finish transfer derived from a child table's EOF rows.
+pub struct FinishTransfer {
+    /// Full stack relation: ordinary local EOF effects plus `Return` pops
+    /// encoded as pop-only escapes (`stack_effect_edits(config, pop, [], [])`).
+    /// No negative resolution is performed; the caller composes the full
+    /// boundary transfer before cancelling.
+    pub characterization: TerminalCharacterization,
+    /// True when some EOF row performs ordinary local stack work beyond
+    /// reductions (shift/stack-shift/guarded/replace/skip/split-shift). Such
+    /// endpoints remain inside the child, so composing through them without
+    /// an outer control-choice point needs a separate proof; the bounded flat
+    /// prototype declines them loudly.
+    pub has_local_eof_effects: bool,
+}
+
+fn eof_action_is_canonical(action: &Action) -> bool {
+    match action {
+        Action::Accept => true,
+        Action::Reduce(..) => true,
+        Action::Split {
+            shift: None,
+            reduces,
+            accept: false,
+        } => !reduces.is_empty(),
+        _ => false,
+    }
+}
+
+fn process_finish_action_from_config(
+    table: &GLRTable,
+    source: CharacterizationSource,
+    config: &RelationConfig,
+    action: &Action,
+    policy: &FinishEndpointPolicy,
+    output: &mut CharacterizationOutput,
+    seen: &mut FxHashSet<RelationConfig>,
+    worklist: &mut VecDeque<RelationConfig>,
+) {
+    match action {
+        // Pure EOF Accept becomes the bounded Return pop with no pushes.
+        Action::Accept => {
+            emit_stack_effect_from_config(
+                source,
+                config,
+                policy.return_pop as usize,
+                &[],
+                &[],
+                output,
+            );
+        }
+        _ => {
+            process_action_from_config(
+                table, source, config, action, 0, output, seen, worklist,
+            );
+        }
+    }
+    // Nullable-start pop-one alternative, available at every closure
+    // configuration topped by the child start (provider `extra_stack_shifts`).
+    if let Some(start) = policy.nullable_child_start
+        && config.segment.last() == Some(&start)
+    {
+        emit_stack_effect_from_config(source, config, 1, &[], &[], output);
+    }
+}
+
+fn drain_finish_worklist(
+    table: &GLRTable,
+    source: CharacterizationSource,
+    policy: &FinishEndpointPolicy,
+    output: &mut CharacterizationOutput,
+    seen: &mut FxHashSet<RelationConfig>,
+    worklist: &mut VecDeque<RelationConfig>,
+) {
+    while let Some(config) = worklist.pop_front() {
+        let Some(&top_state) = config.segment.last() else {
+            continue;
+        };
+        match table.action(top_state, EOF) {
+            Some(action) => {
+                process_finish_action_from_config(
+                    table, source, &config, action, policy, output, seen, worklist,
+                );
+            }
+            None => {
+                // Nullable-start pop-one alternative with no local EOF work.
+                if policy.nullable_child_start == Some(top_state) {
+                    emit_stack_effect_from_config(source, &config, 1, &[], &[], output);
+                }
+            }
+        }
+    }
+}
+
+/// Derive the local Finish transfer for a child table under `policy`.
+///
+/// Local EOF reductions stay local reductions; pure EOF `Accept` becomes
+/// `Return { pop: return_pop }`; the nullable-start pop-one alternative is
+/// emitted wherever the provider emits it (initial seeds, every reached
+/// closure configuration, and the bare child start). Other EOF actions keep
+/// their literal provider semantics and set `has_local_eof_effects`.
+///
+/// Loud declines (never silent truncation):
+/// - `return_pop` outside 1..=2 (non-canonical completion shape);
+/// - `nullable_child_start` outside the table;
+/// - any EOF `Split { accept: true, .. }` (mixed accepting rows);
+/// - any forwarded shift involving EOF (replace/forward convention unaudited);
+/// - a nonterminal re-reduction cycle (boundedness not certified).
+pub fn characterize_finish_transfer(
+    table: &GLRTable,
+    policy: &FinishEndpointPolicy,
+) -> Result<FinishTransfer, String> {
+    if policy.return_pop != 1 && policy.return_pop != 2 {
+        return Err(format!(
+            "finish transfer requires canonical return_pop 1|2, got {}",
+            policy.return_pop,
+        ));
+    }
+    if let Some(start) = policy.nullable_child_start
+        && start >= table.num_states
+    {
+        return Err(format!(
+            "finish transfer nullable child start {start} outside {} states",
+            table.num_states,
+        ));
+    }
+    let mut eof_states = Vec::new();
+    let mut has_local_eof_effects = false;
+    for state in 0..table.num_states {
+        let Some(action) = table.action(state, EOF) else {
+            continue;
+        };
+        if matches!(action, Action::Split { accept: true, .. }) {
+            return Err(format!(
+                "finish transfer unsupported: child state {state} has a mixed accepting EOF Split",
+            ));
+        }
+        has_local_eof_effects |= !eof_action_is_canonical(action);
+        eof_states.push(state);
+    }
+    if table
+        .forwarded_shifts
+        .iter()
+        .any(|&(_, terminal)| terminal == EOF)
+    {
+        return Err(
+            "finish transfer unsupported: forwarded shift involving EOF needs provider-conformance audit"
+                .to_string(),
+        );
+    }
+    let index = build_characterization_index_for_terminal_count(table, table.num_terminals);
+    let mut output = CharacterizationOutput::default();
+    for &state in &eof_states {
+        let Some(action) = table.action(state, EOF) else {
+            continue;
+        };
+        let config = identity_config(state);
+        let mut seen = FxHashSet::default();
+        seen.insert(config.clone());
+        let mut worklist = VecDeque::new();
+        process_finish_action_from_config(
+            table,
+            CharacterizationSource::Initial,
+            &config,
+            action,
+            policy,
+            &mut output,
+            &mut seen,
+            &mut worklist,
+        );
+        drain_finish_worklist(
+            table,
+            CharacterizationSource::Initial,
+            policy,
+            &mut output,
+            &mut seen,
+            &mut worklist,
+        );
+    }
+    if let Some(start) = policy.nullable_child_start
+        && table.action(start, EOF).is_none()
+    {
+        // Bare nullable child start: immediate pop-one return alternative.
+        let config = identity_config(start);
+        output.emit_escape(
+            CharacterizationSource::Initial,
+            config.input.clone(),
+            Vec::new(),
+        );
+    }
+    for &top_state in &eof_states {
+        let Some(predecessors) = index
+            .goto_predecessors_by_target
+            .get(top_state as usize)
+        else {
+            continue;
+        };
+        for &(revealed_state, nonterminal, goto_replace) in predecessors {
+            let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
+            let mut seen = FxHashSet::default();
+            seen.insert(config.clone());
+            let mut worklist = VecDeque::from([config]);
+            drain_finish_worklist(
+                table,
+                CharacterizationSource::Nonterminal(nonterminal),
+                policy,
+                &mut output,
+                &mut seen,
+                &mut worklist,
+            );
+        }
+    }
+    let mut referenced_nts = BTreeSet::new();
+    for reduce in &output.reduces {
+        referenced_nts.insert(reduce.nonterminal);
+    }
+    for nt_escape in &output.nt_escapes {
+        referenced_nts.insert(nt_escape.source_nonterminal);
+    }
+    for nt_rereduce in &output.nt_rereduces {
+        referenced_nts.insert(nt_rereduce.source_nonterminal);
+        referenced_nts.insert(nt_rereduce.target_nonterminal);
+    }
+    let characterization = TerminalCharacterization {
+        escapes: output.escapes.into_iter().collect(),
+        reduces: output.reduces.into_iter().collect(),
+        nt_escapes: output.nt_escapes.into_iter().collect(),
+        nt_rereduces: output.nt_rereduces.into_iter().collect(),
+        all_nts: referenced_nts,
+    };
+    if let Some(cycle) = characterization.find_cycle() {
+        return Err(format!(
+            "finish transfer has a nonterminal re-reduction cycle (boundedness not certified): {cycle:?}",
+        ));
+    }
+    Ok(FinishTransfer {
+        characterization,
+        has_local_eof_effects,
+    })
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TerminalCharacterizationProfile {
     pub terminals: usize,

@@ -360,6 +360,103 @@ pub fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
     retain_nwa_states(nwa, &coreachable, true)
 }
 
+// ─── Crossing filter (static-link shard construction) ───────────────────────
+
+/// Keep only NWA paths that emit a terminal owned by a component other than
+/// `start_component`.
+///
+/// Seen-flag product over terminal-labeled edges: `(state, crossed)` follows
+/// labeled edges (setting the flag when the edge's terminal owner differs
+/// from `start_component`) and epsilon edges (flag unchanged); final weights
+/// survive only on crossed states. Weights are copied unchanged, so the
+/// weighted language is exactly the crossing subset of the input language —
+/// the same predicate the DWA-level crossing filter applies after
+/// determinize/minimize, applied here so determinization sees only the
+/// crossing sub-NWA. Terminal ownership comes from `terminal_offsets`
+/// (partition points; exactly one owner per terminal). State numbering is
+/// deterministic (BFS over deterministically-ordered edges).
+pub fn filter_nwa_to_crossing_paths(
+    nwa: &NWA,
+    terminal_offsets: &[u32],
+    start_component: usize,
+) -> NWA {
+    let owner = |label: i32| -> usize {
+        assert!(
+            label >= 0,
+            "crossing filter: non-terminal label {label}",
+        );
+        terminal_offsets
+            .partition_point(|&offset| offset <= label as u32)
+            .saturating_sub(1)
+    };
+    let mut states: Vec<NWAStateType> = Vec::new();
+    let mut ids: HashMap<(u32, bool), u32> = HashMap::new();
+    let mut payloads: Vec<(u32, bool)> = Vec::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    // Local macro-free interning: the borrow in each `match` arm ends before
+    // any insert, so this compiles under NLL without a helper closure.
+    let mut starts: Vec<u32> = Vec::new();
+    for &start in nwa.start_states() {
+        let key = (start, false);
+        match ids.get(&key) {
+            Some(&id) => starts.push(id),
+            None => {
+                let id = states.len() as u32;
+                ids.insert(key, id);
+                states.push(NWAStateType::default());
+                payloads.push(key);
+                queue.push_back(id);
+                starts.push(id);
+            }
+        }
+    }
+    while let Some(out) = queue.pop_front() {
+        let (source, seen) = payloads[out as usize];
+        let source_state = &nwa.states()[source as usize];
+        if seen {
+            states[out as usize].final_weight = source_state.final_weight.clone();
+        }
+        for &(target, ref weight) in &source_state.epsilons {
+            let key = (target, seen);
+            let next = match ids.get(&key) {
+                Some(&id) => id,
+                None => {
+                    let id = states.len() as u32;
+                    ids.insert(key, id);
+                    states.push(NWAStateType::default());
+                    payloads.push(key);
+                    queue.push_back(id);
+                    id
+                }
+            };
+            states[out as usize].epsilons.push((next, weight.clone()));
+        }
+        for (&label, targets) in &source_state.transitions {
+            let next_seen = seen || owner(label) != start_component;
+            for &(target, ref weight) in targets {
+                let key = (target, next_seen);
+                let next = match ids.get(&key) {
+                    Some(&id) => id,
+                    None => {
+                        let id = states.len() as u32;
+                        ids.insert(key, id);
+                        states.push(NWAStateType::default());
+                        payloads.push(key);
+                        queue.push_back(id);
+                        id
+                    }
+                };
+                states[out as usize]
+                    .transitions
+                    .entry(label)
+                    .or_default()
+                    .push((next, weight.clone()));
+            }
+        }
+    }
+    NWA::from_parts(states, starts)
+}
+
 // ─── Collapse always-allowed ─────────────────────────────────────────────────
 
 fn propagate_incoming_labels(

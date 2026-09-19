@@ -1421,6 +1421,43 @@ fn identity_skip_action() -> Action {
     Action::Skip
 }
 
+/// Give terminals the empty language in a composed-table copy: remove every
+/// action (and forwarded-shift entry) keyed by one of `terminals`, drop
+/// wide-frontier descriptors naming them, and rebuild the derived advance /
+/// guarded-shift rows from the pruned actions. Terminal IDs are stable
+/// (`num_terminals` unchanged); only the actions go away.
+///
+/// The static boundary linker applies this to its private spliced-table copy
+/// for every UNBOUND subgrammar slot. Bound slots are spliced (their
+/// placeholders are gone from both actions and rules), but unbound slots
+/// keep live placeholder shifts, which would admit phantom terminal paths
+/// through grammars that contribute nothing. Rules still name the emptied
+/// terminals (metadata only); characterization and parser construction
+/// consult actions, where the terminals are exactly dead. Control-free
+/// tables stay control-free (no new labels are introduced).
+pub fn empty_terminals_in_composed_table(table: &mut GLRTable, terminals: &[TerminalID]) {
+    if terminals.is_empty() {
+        return;
+    }
+    let dead: BTreeSet<TerminalID> = terminals.iter().copied().collect();
+    for row in &mut table.action {
+        for &terminal in &dead {
+            row.remove(&terminal);
+        }
+    }
+    table.forwarded_shifts.retain(|(_, terminal)| !dead.contains(terminal));
+    table
+        .direct_regular_wide_frontiers
+        .retain(|descriptor| !dead.contains(&descriptor.terminal));
+    table.rebuild_advance_rows_from_actions();
+    table.rebuild_unconditional_advance_rows();
+    if table_has_guarded_stack_shifts(table) {
+        table.rebuild_guarded_shift_index();
+    } else {
+        table.guarded_shift_index = vec![Default::default(); table.num_states as usize];
+    }
+}
+
 /// Reference subgrammar linker which preserves call and return boundaries as
 /// internal zero-width control terminals.
 ///

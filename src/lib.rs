@@ -230,7 +230,11 @@ pub mod __private {
         fn prepare_for_composition(&mut self, vocab: &Vocab) -> Result<()>;
 
         fn num_parser_states(&self) -> u32;
+        fn num_terminals(&self) -> u32;
         fn num_tokenizer_states(&self) -> usize;
+        fn internal_tsid_count(&self) -> usize;
+        fn parser_dwa_num_states(&self) -> u32;
+        fn parser_dwa_num_transitions(&self) -> usize;
         fn compute_forced_minimized_tokenizer_state_count(&self) -> usize;
         fn max_original_token_id(&self) -> Option<u32>;
         fn final_internal_token_count(&self) -> usize;
@@ -250,6 +254,13 @@ pub mod __private {
         fn compose_compiled_subgrammars_shared(
             self,
             children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
+        /// Measurement-only bridge: same placeholder-substitution composition
+        /// but with the DynamicDirect segmented boundary backend.
+        fn compose_compiled_subgrammars_dynamic(
+            self,
+            children: &[(&str, &Constraint)],
             vocab: &Vocab,
         ) -> Result<Self>;
     }
@@ -334,7 +345,8 @@ pub mod __private {
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
-                CompiledSubgrammarInput, compose_constraints_owned_parent,
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented,
             };
             use std::collections::BTreeSet;
 
@@ -361,9 +373,14 @@ pub mod __private {
                     constraint: child,
                 });
             }
-            compose_constraints_owned_parent(self, &inputs, vocab)
-                .map(|composition| composition.constraint)
-                .map_err(Error::Compilation)
+            compose_constraints_owned_parent_segmented(
+                self,
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
         }
 
         fn compose_compiled_subgrammars_shared(
@@ -372,7 +389,8 @@ pub mod __private {
             vocab: &Vocab,
         ) -> Result<Self> {
             use crate::compiler::constraint_compose::{
-                CompiledSubgrammarInput, compose_constraints_owned_parent_shared,
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented_shared,
             };
             use std::collections::BTreeSet;
             use std::sync::Arc;
@@ -402,9 +420,59 @@ pub mod __private {
                 });
                 shared.push(Arc::clone(child));
             }
-            compose_constraints_owned_parent_shared(self, &inputs, &shared, vocab)
-                .map(|composition| composition.constraint)
-                .map_err(Error::Compilation)
+            compose_constraints_owned_parent_segmented_shared(
+                self,
+                &inputs,
+                &shared,
+                vocab,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
+        }
+
+        fn compose_compiled_subgrammars_dynamic(
+            self,
+            children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented,
+            };
+            use std::collections::BTreeSet;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for &(name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| {
+                        Error::Compilation(format!(
+                            "parent has no subgrammar placeholder terminal {name:?}",
+                        ))
+                    })? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child,
+                });
+            }
+            compose_constraints_owned_parent_segmented(
+                self,
+                &inputs,
+                vocab,
+                SegmentedBoundaryBackend::Dynamic,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
         }
 
         fn clear_stale_weights() {
@@ -451,8 +519,24 @@ pub mod __private {
             Constraint::num_parser_states(self)
         }
 
+        fn num_terminals(&self) -> u32 {
+            self.table.num_terminals
+        }
+
         fn num_tokenizer_states(&self) -> usize {
             Constraint::num_tokenizer_states(self)
+        }
+
+        fn internal_tsid_count(&self) -> usize {
+            Constraint::internal_tsid_count(self)
+        }
+
+        fn parser_dwa_num_states(&self) -> u32 {
+            Constraint::parser_dwa(self).num_states()
+        }
+
+        fn parser_dwa_num_transitions(&self) -> usize {
+            Constraint::parser_dwa(self).num_transitions()
         }
 
         fn compute_forced_minimized_tokenizer_state_count(&self) -> usize {
@@ -607,6 +691,8 @@ pub mod __private {
         fn debug_parser_stacks(&self) -> Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
         fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile;
         fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64;
+        /// Measurement-only: exact dynamic-reference mask (no parser DWA).
+        fn fill_mask_dynamic_vec(&self) -> Vec<u32>;
         fn has_parser_ambiguity(&self) -> bool;
         fn parser_path_count(&self, limit: usize) -> usize;
         fn parser_root_count(&self) -> usize;
@@ -644,6 +730,12 @@ pub mod __private {
 
         fn fill_mask_timed_ns(&self, buf: &mut [u32]) -> u64 {
             ConstraintState::fill_mask_timed_ns(self, buf)
+        }
+
+        fn fill_mask_dynamic_vec(&self) -> Vec<u32> {
+            let mut buf = vec![0u32; self.constraint.mask_len()];
+            ConstraintState::fill_mask_dynamic(self, &mut buf);
+            buf
         }
 
         fn has_parser_ambiguity(&self) -> bool {

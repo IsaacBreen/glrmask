@@ -18,12 +18,17 @@ pub use action::{Action, GuardedStackShift, StackShift, StackShiftGuard};
 pub use compose::{
     ComposedTable, SubgrammarTableInput, compose_subgrammar_tables,
     compose_subgrammar_tables_explicit, compose_subgrammar_tables_explicit_with_rules,
-    compose_subgrammar_tables_with_rules, subgrammar_child_return_pop,
+    compose_subgrammar_tables_with_rules, empty_terminals_in_composed_table,
+    subgrammar_child_return_pop,
 };
 
 use build::{build_table, build_table_with_default_construction, Item, PendingAction};
 #[allow(unused_imports)]
 pub use optimize::ControlEliminationReport;
+#[allow(unused_imports)]
+pub use optimize::control_elimination_budget_exhausted;
+#[allow(unused_imports)]
+pub use optimize::control_elimination_run_count;
 use optimize::merge_same_core_lr1_states;
 
 use row::{ActionRow, GotoRow};

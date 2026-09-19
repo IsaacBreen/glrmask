@@ -1,4 +1,6 @@
 pub mod compile;
+pub(crate) mod boundary_transfer;
+pub(crate) mod boundary_walk;
 pub(crate) mod constraint_compose;
 #[cfg(feature = "internal-api")]
 pub(crate) mod o21137_subgrammar_bench;

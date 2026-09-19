@@ -41,7 +41,8 @@ use crate::automata::weighted::nwa::NWA;
 use crate::automata::weighted_u32::dwa::DWA;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::possible_matches::PossibleMatchesComputer;
-use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+use crate::compiler::stages::equiv_types::{InternalIdMap, ManyToOneIdMap};
+use equivalence_analysis::combined::CombinedEquivalenceProfile;
 use crate::compiler::stages::mapped_artifact::MappedArtifact;
 use crate::compiler::stages::id_map_and_terminal_dwa::types::LocalIdMapTerminalDwa;
 use crate::ds::bitset::BitSet;
@@ -53,7 +54,9 @@ use crate::Vocab;
 use super::types::{
     compile_profile_enabled, TerminalColoring, TerminalDwaBuildProfile, TerminalDwaPhaseProfile,
 };
-use nwa_builder::{build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes};
+use nwa_builder::{
+    build_nwa_via_trie_walk, internal_vocab_entries, seed_root_nodes, seed_root_nodes_filtered,
+};
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
@@ -65,7 +68,7 @@ use terminal_interchangeability::{
 };
 use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    max_structural_label_depth_to_final, prune_non_coreachable_states,
+    filter_nwa_to_crossing_paths, max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -572,6 +575,144 @@ fn quotient_exact_duplicate_states(dwa: DWA) -> DWA {
     DWA::from_parts(new_states, new_start)
 }
 
+/// Seed-independent L2P equivalence result, computed once per link and shared
+/// by every boundary-shard build over the same merged tokenizer.
+///
+/// The analysis depends only on (tokenizer, vocab, disallowed follows,
+/// grammar observation scope, active terminals, initial state map) — never on
+/// the shard's seed-state subset — so shard builds may reuse one instance.
+/// It is always computed with terminal-interchangeability discovery disabled:
+/// TI-off is the exact baseline construction (the strict-reference machinery
+/// validates TI-on against TI-off), and on shard inputs discovery always
+/// aborts anyway, so skipping it changes nothing but the ~2 s cost.
+#[derive(Debug, Clone)]
+pub struct SharedL2pEquivalence {
+    pub id_map: InternalIdMap,
+    pub profile: CombinedEquivalenceProfile,
+    pub id_map_ms: f64,
+}
+
+/// Crossing-path filter for boundary-shard builds (step 2 of the static-link
+/// redesign): keep only NWA paths that emit a terminal owned by a component
+/// other than `start_component`. Terminal ownership comes from the composed
+/// table's `terminal_offsets` (exactly one owner per terminal).
+#[derive(Debug, Clone, Copy)]
+pub struct L2pCrossingFilter<'a> {
+    pub terminal_offsets: &'a [u32],
+    pub start_component: usize,
+}
+
+/// Optional per-build overrides for boundary-shard L2P builds. `None`
+/// preserves the established single-build behavior exactly.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct L2pShardBuildOptions<'a> {
+    /// Reuse this precomputed equivalence instead of running Step 1. The
+    /// caller must have computed it for the same (tokenizer, vocab,
+    /// disallowed follows, grammar, active terminals, initial state map).
+    /// Implies `skip_ti_discovery`.
+    pub shared_equivalence: Option<&'a SharedL2pEquivalence>,
+    /// Skip terminal-interchangeability discovery rounds (exact: TI-off is
+    /// the baseline construction; discovery aborts on shard inputs).
+    pub skip_ti_discovery: bool,
+    /// Apply the NWA-level crossing filter before determinize/minimize.
+    pub crossing_filter: Option<L2pCrossingFilter<'a>>,
+    /// Skip the core TSID/token compaction and keep the Step-1 coordinate
+    /// exactly. Required when the consumer indexes (parser-stack x tsid):
+    /// compaction is terminal-behavior-exact but merges states whose
+    /// stack-indexed crossing viability differs, which makes a parser DWA
+    /// compiled over the compacted tsids over-admit.
+    pub skip_core_compact: bool,
+}
+
+/// Run only the Step 1 equivalence analysis for a shard build, with the exact
+/// arguments the entry point would use with TI discovery disabled.
+///
+/// This mirrors the Step 1 argument setup in
+/// `build_l2p_id_map_and_terminal_dwa_mode` for the TI-off case (no TI seed,
+/// no precomputed raw observations, analysis-active terminals = the passed
+/// active set). Keep the two in sync; the selected10 shard tests guard the
+/// shared path against drift.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_shared_l2p_equivalence(
+    partition_label: &str,
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    active_terminals: &[bool],
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    token_path_disallowed_follows: Option<&BTreeMap<u32, BitSet>>,
+    normalized_token_path_disallowed_follows: Option<&[BitSet]>,
+    shared_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabDfaCache>,
+    shared_original_vocab_analysis_dfa_cache: Option<&equivalence_analysis::vocab::fast::SharedVocabAnalysisDfaCache>,
+    shared_transition_cache: Option<&OnceLock<equivalence_analysis::compat::FlatTransitionCache>>,
+    flat_trans: Option<&std::sync::Arc<[u32]>>,
+    prebuilt_token_trie: Option<
+        &equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie,
+    >,
+    initial_state_map: Option<&ManyToOneIdMap>,
+) -> Option<SharedL2pEquivalence> {
+    if vocab.is_empty() {
+        return None;
+    }
+    debug_assert!(
+        !matches!(partition_label, "p7" | "p8"),
+        "shared L2P equivalence does not support token-position partitions",
+    );
+    let id_map_started_at = Instant::now();
+    let equivalence_vocab_dfa_cache = shared_original_vocab_dfa_cache.or(shared_vocab_dfa_cache);
+    let shared_analysis_dfa_cache = shared_original_vocab_analysis_dfa_cache;
+    // TI-off mirror of the entry-point setup: no coalesced follows, no TI
+    // seed, analysis-active terminals = the passed active set.
+    let equivalence_uses_pre_normalized_follows =
+        token_path_disallowed_follows.is_some() && normalized_token_path_disallowed_follows.is_some();
+    let equivalence_disallowed_follows =
+        token_path_disallowed_follows.unwrap_or(disallowed_follows);
+    let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
+        .then_some(active_terminals);
+    let (id_map, profile) = equivalence_analysis::combined::analyze_equivalences_with_group_filter(
+        partition_label,
+        tokenizer,
+        vocab,
+        equivalence_disallowed_follows,
+        ignore_terminal,
+        equivalence_uses_pre_normalized_follows,
+        equivalence_uses_pre_normalized_follows
+            .then_some(normalized_token_path_disallowed_follows)
+            .flatten(),
+        equivalence_active_groups,
+        equivalence_vocab_dfa_cache,
+        shared_analysis_dfa_cache,
+        0.0,
+        flat_trans,
+        shared_transition_cache,
+        initial_state_map,
+        false,
+        None,
+        None,
+        prebuilt_token_trie,
+    );
+    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    if l2p_timing_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][l2p_shared_equivalence] partition={} vocab_tokens={} initial_states_considered={} exact_reps={} vocab_equiv_ms={:.3} exact_state_equiv_ms={:.3} id_map_ms={:.3}",
+            partition_label,
+            vocab.entries_map().len(),
+            profile.initial_states_considered,
+            profile.exact_reps,
+            profile.vocab_equiv_ms,
+            profile.exact_state_equiv_ms,
+            id_map_ms,
+        );
+    }
+    Some(SharedL2pEquivalence {
+        id_map,
+        profile,
+        id_map_ms,
+    })
+}
+
 /// Build an L2+ id_map and terminal DWA for the given vocab and terminal set.
 ///
 /// Builds its own id_map via `InternalIdMap::build_with_group_filter` (full DFA-
@@ -636,6 +777,8 @@ pub fn build_l2p_id_map_and_terminal_dwa(
         prebuilt_token_trie,
         initial_state_map,
         false,
+        None,
+        None,
     )
 }
 
@@ -664,10 +807,19 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     >,
     initial_state_map: Option<&ManyToOneIdMap>,
     id_map_only: bool,
+    seed_state_filter: Option<&[bool]>,
+    shard_options: Option<&L2pShardBuildOptions>,
 ) -> Option<LocalIdMapTerminalDwa> {
     if vocab.is_empty() {
         return None;
     }
+    // A shared equivalence forces the TI-off path: it was computed without
+    // discovery, and re-running discovery could only waste ~2 s (its seed
+    // feeds Step 1 alone, which is skipped) or perturb the analysis-active
+    // terminal set the shared map was built under.
+    let skip_ti_discovery = shard_options
+        .is_some_and(|options| options.skip_ti_discovery || options.shared_equivalence.is_some());
+    let shared_equivalence = shard_options.and_then(|options| options.shared_equivalence);
 
     let total_started_at = Instant::now();
     let num_original_states = tokenizer.num_states() as usize;
@@ -737,7 +889,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         ti_restricted_observation_seed,
         ti_restricted_observation_seed_ms,
     ) =
-        if l2p_terminal_interchangeability_enabled_for_partition(partition_label)
+        if !skip_ti_discovery
+            && l2p_terminal_interchangeability_enabled_for_partition(partition_label)
             && !p0_terminal_interchangeability_small_tokenizer_skip(partition_label, tokenizer)
         {
             let mut active = active_terminals.to_vec();
@@ -997,7 +1150,13 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         equivalence_analysis::combined::analyze_equivalences_with_group_filter
     };
-    let (simplified_id_map, equiv_profile) = analyze_equivalences(
+    // A shared equivalence is the same full exact analysis the shard would
+    // run itself (same tokenizer, vocab, follows, grammar scope, active set),
+    // computed once per link — a cache, not a shortcut, so the note above
+    // still holds. The id_map boundary below reports 0 ms for the reuse.
+    let (simplified_id_map, equiv_profile) = match shared_equivalence {
+        Some(shared) => (shared.id_map.clone(), shared.profile.clone()),
+        None => analyze_equivalences(
             partition_label,
             tokenizer_for_build,
             vocab,
@@ -1025,7 +1184,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 })
                 .flatten(),
             prebuilt_token_trie,
-        );
+        ),
+    };
 
     if id_map_only {
         let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1089,7 +1249,14 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     let mut ti_canonicalize_transport_modes_ms = 0.0;
     let mut ti_transport_coordinate_quotient_ms = 0.0;
 
-    let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
+    // A shared equivalence was computed once per link by the caller; report
+    // 0 here so per-shard id_map time is honest (the once-time is reported
+    // by `compute_shared_l2p_equivalence`'s own profile line).
+    let id_map_ms = if shared_equivalence.is_some() {
+        0.0
+    } else {
+        id_map_started_at.elapsed().as_secs_f64() * 1000.0
+    };
 
     // tsid_fallback is independent of the NWA build / postprocess /
     // determinize / minimize pipeline: it only feeds into the final
@@ -1108,6 +1275,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         disallowed_ms,
         prune_ms,
         canonicalize_ms,
+        crossing_filter_ms,
         determinize_ms,
         minimize_ms,
         internal_vocab_count,
@@ -1138,6 +1306,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 0.0, // disallowed_ms
                 0.0, // prune_ms
                 0.0, // canonicalize_ms
+                0.0, // crossing_filter_ms
                 0.0, // determinize_ms
                 0.0, // minimize_ms
                 0usize, // internal_vocab_count
@@ -1177,7 +1346,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
 
             // ---- Step 6: Trie-walk NWA build ----
             let trie_build_started_at = Instant::now();
-            let roots = seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map);
+            let roots = match seed_state_filter {
+                Some(keep) => {
+                    seed_root_nodes_filtered(tokenizer, &mut nwa, start_state, &simplified_id_map, keep)
+                }
+                None => seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map),
+            };
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
             let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
@@ -1242,6 +1416,37 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             canonicalize_acyclic_nwa(&mut nwa);
             let canonicalize_ms = canonicalize_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_canonicalize = nwa.states().len();
+
+            // Boundary-shard crossing filter (static-link redesign step 2):
+            // keep only paths through foreign-owned terminals so
+            // determinize/minimize see the crossing sub-NWA instead of the
+            // full walk output. Same predicate as the DWA-level filter, hence
+            // the same minimized crossing DWA downstream.
+            let crossing_filter_ms = match shard_options.and_then(|options| options.crossing_filter) {
+                Some(filter) => {
+                    let started_at = Instant::now();
+                    let nwa_states_before = nwa.states().len();
+                    nwa = filter_nwa_to_crossing_paths(
+                        &nwa,
+                        filter.terminal_offsets,
+                        filter.start_component,
+                    );
+                    prune_non_coreachable_states(&mut nwa);
+                    let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                    if l2p_timing_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][l2p_crossing_filter] partition={} start_component={} nwa_states_before={} nwa_states_after={} total_ms={:.3}",
+                            partition_label,
+                            filter.start_component,
+                            nwa_states_before,
+                            nwa.states().len(),
+                            elapsed_ms,
+                        );
+                    }
+                    elapsed_ms
+                }
+                None => 0.0,
+            };
 
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             // Generic weighted subset construction becomes expensive in the broad p0
@@ -1346,6 +1551,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 disallowed_ms,
                 prune_ms,
                 canonicalize_ms,
+                crossing_filter_ms,
                 determinize_ms,
                 minimize_ms,
                 internal_vocab_count,
@@ -1363,8 +1569,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         return None;
     }
     let composed_id_map = simplified_id_map.clone();
-    let postprocess_ms =
-        always_allowed_ms + collapse_ms + disallowed_ms + prune_ms + canonicalize_ms;
+    let postprocess_ms = always_allowed_ms
+        + collapse_ms
+        + disallowed_ms
+        + prune_ms
+        + canonicalize_ms
+        + crossing_filter_ms;
     let max_length_reduction_pct = if equiv_profile.initial_states_considered == 0 {
         0.0
     } else {
@@ -1401,7 +1611,22 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 "GLRMASK_L2P_CORE_COMPACT_MERGE_ONLY",
                 partition_label,
             ));
-    if profiling && merge_only_core_compact {
+    // Validation-only escape hatch: skip the core TSID/token compaction so
+    // the returned DWA stays in Step-1 (equivalence-analysis) coordinates.
+    // Same-coordinate DWA comparisons (e.g. NWA-level vs DWA-level crossing
+    // filters from separate walks) are only meaningful uncompacted. Shard
+    // builds that feed a (parser-stack x tsid)-indexed parser DWA request
+    // the same via options (compaction is parser-behavior-lossy).
+    let skip_core_compact = shard_options.is_some_and(|options| options.skip_core_compact)
+        || std::env::var("GLRMASK_L2P_SKIP_CORE_COMPACT")
+            .map(|value| {
+                let trimmed = value.trim();
+                trimmed.is_empty() || trimmed == "1" || trimmed.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+    if skip_core_compact {
+        // No compaction: keep the Step-1 coordinate exactly.
+    } else if profiling && merge_only_core_compact {
         mapped_dwa.compact_dimensions_merge_only_fast_with_stats();
     } else if profiling {
         mapped_dwa.compact_dimensions_fast_with_stats();
@@ -1410,7 +1635,11 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         mapped_dwa.compact_dimensions_fast();
     }
-    let core_compact_ms = core_compact_started_at.elapsed().as_secs_f64() * 1000.0;
+    let core_compact_ms = if skip_core_compact {
+        0.0
+    } else {
+        core_compact_started_at.elapsed().as_secs_f64() * 1000.0
+    };
     let core_dwa_stats_after_compact = mapped_dwa.artifact().stats();
     let (core_dwa, core_id_map) = mapped_dwa.into_parts();
     let core_tsid_count = core_id_map.num_tsids();
@@ -1760,6 +1989,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 + minimize_ms
                 + ti_post_dwa_total_ms,
             compact_ms,
+            determinize_ms,
+            minimize_ms,
             ..TerminalDwaPhaseProfile::default()
         },
     };
