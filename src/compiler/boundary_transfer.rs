@@ -464,12 +464,13 @@ pub(crate) fn assemble_boundary_transfer_query() -> Result<(), String> {
 // program transcribed from the closure certificate K = Id ∪ C ∪ C²:
 //
 // - control-depth ports Ready(k,d) per crossing-terminal-automaton vertex k
-//   and depth d in 0..=2;
+//   and depth d in 0..=max_controls_per_gap;
 // - each real terminal-DWA edge k -t-> k' substitutes t's scoped signed local
 //   transfer fragment once, entered from any depth and exiting to the
 //   destination depth 0 with the stamped lexical weight;
 // - zero-width Entry/Finish transfer fragments go from Ready(k,d) to
-//   Ready(k,d+1) for d < 2; nothing is added after the maximum depth;
+//   Ready(k,d+1) for d < max_controls_per_gap; nothing is added after the
+//   maximum depth;
 // - final weights live only on depth-0 ports (no trailing closure for
 //   unrestricted admission endpoints);
 // - existing resolve_negative_codes_in_nwa runs ONCE over the assembled query;
@@ -540,69 +541,117 @@ impl<'a> SignedLinkContext<'a> {
     }
 }
 
-/// Bounded control-closure certificate for the supported flat prototype.
+/// Bounded control-closure certificate for acyclic nonnullable links.
 ///
-/// The advisor's sufficient theorem (§7.2): a flat component-instance DAG with
-/// effectively nonnullable bound children, no retained controls, and canonical
-/// EOF completion has K = Id ∪ C ∪ C² on well-formed stacks — at most two
-/// cross-component Entry/Return events per zero-visible-terminal gap. The
-/// compiler transcribes this directly as depth-indexed Ready ports instead of
-/// cyclic C* loops. General C* remains future support for
-/// nullable/unbounded-certified cases; it must not be used for this class.
+/// Control words in one zero-visible-terminal gap are Entry/Return events.
+/// Provider stack discipline plus effective nonnullability forces every gap
+/// word into return-then-enter shape `R^a E^b`: each Entry pushes a fresh
+/// child-start frame that (nonnullable) cannot reach EOF-accept without
+/// consuming a terminal, so no Return can follow an in-gap Entry; each Return
+/// pops a pre-existing frame, so Returns precede Entries. In an acyclic
+/// (DAG) link graph the live stack is always a simple component path — a
+/// repeated component would be a directed link cycle — hence with maximum
+/// nesting depth H (longest root-to-leaf path in edges) `a <= H` (one Return
+/// per level cascading up) and `b <= H` (one Entry per level descending), for
+/// at most `2H` control events per gap. The compiler transcribes this bound
+/// directly as depth-indexed Ready ports instead of cyclic C* loops.
+/// Link-level cycles admit unbounded stack growth and re-entry ping-pong;
+/// nullable children admit accept-ready fresh frames (Entry/Return
+/// ping-pong with no terminal); both keep their loud link-time declines.
+/// General C* remains future support for those classes and must not be used
+/// for this one.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ClosureCertificate {
-    /// Maximum feasible control advancements per gap (2 for H=1 flat links).
+    /// Maximum feasible control advancements per gap (2H for nesting depth H;
+    /// 2 for H=1 flat links).
     pub max_controls_per_gap: u32,
+    /// Maximum link nesting depth H (longest root-to-leaf path in edges).
+    pub max_nesting_depth: u32,
 }
 
-/// Check the supported-class contract for bounded flat closure. Loud decline
-/// (never silent truncation) on: nested links (a child that is itself a
-/// parent — Phase 4), nullable bound children (unbounded silent episodes per
-/// §7.3/§7.4 can require arbitrarily many Entry/Return events in one gap;
-/// single nullable words like EF would fit depth 2, but the certificate cannot
-/// cheaply distinguish them from unbounded unwinding or silent push growth),
-/// and anything but the single flat level. No-retained-controls and canonical
-/// Finish are enforced by context construction and Finish instantiation.
-pub(crate) fn certify_bounded_flat_closure(
+/// Check the supported-class contract for bounded closure. Loud decline
+/// (never silent truncation) on: link-level control cycles (unbounded stack
+/// growth / re-entry ping-pong), nullable bound children (unbounded silent
+/// episodes per §7.3/§7.4 can require arbitrarily many Entry/Return events in
+/// one gap; single nullable words like EF would fit small depths, but the
+/// certificate cannot cheaply distinguish them from unbounded unwinding or
+/// silent push growth), and anything but effectively-nonnullable canonical
+/// links. No-retained-controls and canonical Finish are enforced by context
+/// construction and Finish instantiation.
+pub(crate) fn certify_bounded_closure(
     links: &[ScopedSubgrammarLink],
 ) -> Result<ClosureCertificate, String> {
     for link in links {
-        if link.parent_component != 0 {
-            return Err(format!(
-                "bounded flat closure unsupported: link targets parent component {} (nested composition is Phase 4)",
-                link.parent_component,
-            ));
-        }
-        if links
-            .iter()
-            .any(|other| other.parent_component == link.child_component)
-        {
-            return Err(format!(
-                "bounded flat closure unsupported: child component {} is itself a parent (nested composition is Phase 4)",
-                link.child_component,
-            ));
-        }
         if link.child_start_nullable {
             return Err(format!(
-                "bounded flat closure unsupported: child component {} is effectively nullable; silent Entry/Return episodes have no uniform bound (general C* support is future work; use the Dynamic backend)",
+                "bounded closure unsupported: child component {} is effectively nullable; silent Entry/Return episodes have no uniform bound (general C* support is future work; use the Dynamic backend)",
                 link.child_component,
             ));
         }
     }
+    // Longest simple-path depth from the root (component 0) over the link
+    // DAG, with loud decline on any link-level cycle. Memoized DFS over
+    // component ids; components unreachable from the root still contribute
+    // their own longest paths (ports are shared program-wide).
+    fn longest_from(
+        component: u32,
+        links: &[ScopedSubgrammarLink],
+        memo: &mut BTreeMap<u32, u32>,
+        visiting: &mut Vec<u32>,
+    ) -> Result<u32, String> {
+        if let Some(&cached) = memo.get(&component) {
+            return Ok(cached);
+        }
+        if visiting.contains(&component) {
+            return Err(format!(
+                "bounded closure unsupported: link-level control cycle through component {component}; unbounded Entry/Return episodes need general C* support (use the Dynamic backend)",
+            ));
+        }
+        visiting.push(component);
+        let mut best = 0u32;
+        for link in links.iter().filter(|link| link.parent_component == component) {
+            let child_depth = longest_from(link.child_component, links, memo, visiting)?;
+            best = best.max(
+                child_depth
+                    .checked_add(1)
+                    .ok_or_else(|| "link nesting depth overflow".to_string())?,
+            );
+        }
+        visiting.pop();
+        memo.insert(component, best);
+        Ok(best)
+    }
+    let mut memo = BTreeMap::new();
+    let mut visiting = Vec::new();
+    let mut max_depth = 0u32;
+    let mut roots = BTreeSet::new();
+    roots.insert(0u32);
+    for link in links {
+        roots.insert(link.parent_component);
+        roots.insert(link.child_component);
+    }
+    for root in roots {
+        max_depth = max_depth.max(longest_from(root, links, &mut memo, &mut visiting)?);
+    }
+    let max_controls = max_depth
+        .checked_mul(2)
+        .ok_or_else(|| "control-closure depth overflow".to_string())?;
     Ok(ClosureCertificate {
-        max_controls_per_gap: 2,
+        max_controls_per_gap: max_controls,
+        max_nesting_depth: max_depth,
     })
 }
 
-/// Build and validate the signed-link context for one flat composition.
+/// Build and validate the signed-link context for one flat composition
+/// (single level: every link has `parent_component == 0`).
 ///
-/// Loud declines (never silent): nested or control-bearing components,
-/// disagreeing incoming links to a shared child, noncanonical
-/// child-start/return-pop, provider-unsupported slot shapes, forwarded shifts
-/// involving slots, and nullable bound children (bounded-closure certificate).
-/// The packed splice (rules + terminal layout) is still built
-/// by the caller for grammar/follows analysis and layout pins, but no parser
-/// behavior is ever derived from it.
+/// Loud declines (never silent): control-bearing components, disagreeing
+/// incoming links to a shared child, noncanonical child-start/return-pop,
+/// provider-unsupported slot shapes, forwarded shifts involving slots, and
+/// nullable bound children (bounded-closure certificate). The packed splice
+/// (rules + terminal layout) is still built by the caller for
+/// grammar/follows analysis and layout pins, but no parser behavior is ever
+/// derived from it.
 pub(crate) fn build_signed_link_context<'a>(
     parent: &'a Constraint,
     children: &'a [CompiledSubgrammarInput<'a>],
@@ -616,6 +665,61 @@ pub(crate) fn build_signed_link_context<'a>(
     for child in children {
         tables.push(&child.constraint.table);
     }
+    let mut ignore_terminals = Vec::with_capacity(children.len() + 1);
+    ignore_terminals.push(parent.ignore_terminal);
+    for child in children {
+        ignore_terminals.push(child.constraint.ignore_terminal);
+    }
+    let links = build_segmented_parser_links(children)?;
+    build_signed_link_context_from_parts(
+        tables,
+        ignore_terminals,
+        links,
+        terminal_offsets,
+        num_terminals,
+        global_ignores,
+        unbound_slots,
+    )
+}
+
+/// Build and validate the signed-link context from explicit link components:
+/// intact local tables (leaves in link-component order), per-component
+/// standalone ignore terminals, and the full (possibly nested) link set with
+/// local slot terminals. Nested links (`parent_component != 0`) are supported
+/// exactly when the link graph is acyclic and every link is effectively
+/// nonnullable and canonical: the certificate then bounds each
+/// zero-terminal gap by `2H` control events for nesting depth H.
+///
+/// Loud declines (never silent): control-bearing components, disagreeing
+/// incoming links to a shared child, noncanonical child-start/return-pop,
+/// provider-unsupported slot shapes, link-level control cycles, and nullable
+/// bound children.
+pub(crate) fn build_signed_link_context_from_parts<'a>(
+    tables: Vec<&'a GLRTable>,
+    ignore_terminals: Vec<Option<TerminalID>>,
+    links: Vec<ScopedSubgrammarLink>,
+    terminal_offsets: &[u32],
+    num_terminals: u32,
+    global_ignores: bool,
+    unbound_slots: BTreeSet<TerminalID>,
+) -> Result<SignedLinkContext<'a>, String> {
+    if tables.is_empty() {
+        return Err("signed link needs at least the parent component table".to_string());
+    }
+    if ignore_terminals.len() != tables.len() {
+        return Err(format!(
+            "signed link ignore-terminal count {} differs from component count {}",
+            ignore_terminals.len(),
+            tables.len(),
+        ));
+    }
+    if terminal_offsets.len() != tables.len() {
+        return Err(format!(
+            "signed link terminal-offset count {} differs from component count {}",
+            terminal_offsets.len(),
+            tables.len(),
+        ));
+    }
     for (index, table) in tables.iter().enumerate() {
         if !table.control_terminals.is_empty() {
             return Err(format!(
@@ -623,7 +727,18 @@ pub(crate) fn build_signed_link_context<'a>(
             ));
         }
     }
-    let links = build_segmented_parser_links(children)?;
+    for link in &links {
+        if link.parent_component as usize >= tables.len()
+            || link.child_component as usize >= tables.len()
+        {
+            return Err(format!(
+                "signed link references unknown component (parent {}, child {} with {} tables)",
+                link.parent_component,
+                link.child_component,
+                tables.len(),
+            ));
+        }
+    }
     validate_shared_child_links(&links)?;
     let mut state_offsets = Vec::with_capacity(tables.len());
     let mut total = 0u32;
@@ -633,15 +748,11 @@ pub(crate) fn build_signed_link_context<'a>(
             "signed link scoped parser-state coordinate overflow".to_string()
         })?;
     }
-    let mut ignore_terminals = Vec::with_capacity(tables.len());
-    ignore_terminals.push(parent.ignore_terminal);
-    for child in children {
-        ignore_terminals.push(child.constraint.ignore_terminal);
-    }
+    let parent_table = tables[0];
     let child_tables = tables[1..].to_vec();
-    let closure = certify_bounded_flat_closure(&links)?;
+    let closure = certify_bounded_closure(&links)?;
     let context = SignedLinkContext {
-        parent_table: tables[0],
+        parent_table,
         child_tables,
         links,
         terminal_offsets: terminal_offsets.to_vec(),
@@ -1006,10 +1117,9 @@ pub(crate) fn compile_signed_shard_parser(
     id_map: &InternalIdMap,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
-    if context.closure.max_controls_per_gap != 2 {
+    if context.closure.max_controls_per_gap == 0 && !context.links.is_empty() {
         return Err(format!(
-            "signed link shard {start_component} supports only max_controls_per_gap=2, got {}",
-            context.closure.max_controls_per_gap,
+            "signed link shard {start_component} has links but a zero control bound",
         ));
     }
     if !shard_dwa.is_acyclic() {
@@ -1601,11 +1711,11 @@ mod tests {
     }
 
     #[test]
-    fn nested_links_decline_loudly_at_link_time() {
+    fn nested_nonnullable_links_certify_with_doubled_depth() {
         use crate::compiler::glr::parser::ScopedSubgrammarLink;
-        // A child that is itself a parent (nested composition) is outside
-        // the bounded flat closure certificate: general C* support is future
-        // work, so the link declines loudly instead of composing silently.
+        // An acyclic nonnullable nested chain certifies with the 2H bound:
+        // depth-2 links allow at most 4 control events per gap (R^a E^b with
+        // a <= 2, b <= 2). Flat links keep the exact depth-2 certificate.
         let nested = vec![
             ScopedSubgrammarLink {
                 parent_component: 0,
@@ -1624,14 +1734,44 @@ mod tests {
                 child_start_nullable: false,
             },
         ];
-        let error = certify_bounded_flat_closure(&nested)
-            .expect_err("nested composition must decline loudly");
-        assert!(
-            error.contains("nested"),
-            "decline must name nesting, got: {error}",
-        );
+        let certificate =
+            certify_bounded_closure(&nested).expect("nonnullable nested chain must certify");
+        assert_eq!(certificate.max_nesting_depth, 2);
+        assert_eq!(certificate.max_controls_per_gap, 4);
         let flat = vec![nested[0]];
-        assert!(certify_bounded_flat_closure(&flat).is_ok());
+        let flat_certificate =
+            certify_bounded_closure(&flat).expect("flat link must certify");
+        assert_eq!(flat_certificate.max_nesting_depth, 1);
+        assert_eq!(flat_certificate.max_controls_per_gap, 2);
+        // Link-level control cycles keep their loud decline: unbounded stack
+        // growth and re-entry ping-pong need general C* support.
+        let cyclic = vec![
+            nested[0],
+            nested[1],
+            ScopedSubgrammarLink {
+                parent_component: 2,
+                slot_terminal: 5,
+                child_component: 1,
+                child_start: 0,
+                return_pop: 1,
+                child_start_nullable: false,
+            },
+        ];
+        let error =
+            certify_bounded_closure(&cyclic).expect_err("cyclic links must decline loudly");
+        assert!(
+            error.contains("cycle"),
+            "decline must name the cycle, got: {error}",
+        );
+        // Nullable links keep their loud decline.
+        let mut nullable = nested;
+        nullable[1].child_start_nullable = true;
+        let error =
+            certify_bounded_closure(&nullable).expect_err("nullable links must decline loudly");
+        assert!(
+            error.contains("nullable"),
+            "decline must name nullability, got: {error}",
+        );
     }
 
     #[test]
