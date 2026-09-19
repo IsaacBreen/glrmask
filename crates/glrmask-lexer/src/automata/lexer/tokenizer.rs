@@ -881,6 +881,17 @@ pub struct TerminalExclusionContinuation {
     pub right_max_remaining: Option<u32>,
 }
 
+/// Exact standalone-terminal residual coordinate paired with the raw combined
+/// tokenizer state that produced it. Runtime direct walkers use this only when
+/// the compiler-retained product-trace sidecar proves the mapping.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerminalResidualDirectCoordinate {
+    raw_state: u32,
+    terminal: TerminalID,
+    residual_state: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalResidualCoordinates {
     offsets: Arc<[u32]>,
@@ -9215,6 +9226,105 @@ impl Tokenizer {
 
     pub fn terminal_residual_coordinates(&self) -> Option<&TerminalResidualCoordinates> {
         self.terminal_residual_coordinates.as_deref()
+    }
+
+    /// Exact retained standalone-terminal residual for one physical combined
+    /// tokenizer state. Returns `None` when the compiler did not retain an
+    /// unambiguous coordinate or when the terminal is dead at this state.
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+    ) -> Option<TerminalResidualDirectCoordinate> {
+        if state >= self.num_states() || self.state_has_epsilon_transitions(state) {
+            return None;
+        }
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let row = coordinates.row(state)?;
+        let index = row
+            .binary_search_by_key(&terminal, |&(candidate, _)| candidate)
+            .ok()?;
+        let residual_state = row[index].1;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(terminal)?;
+        let live = dfa.finalizers(residual_state).contains(group as usize)
+            || dfa
+                .possible_future_group_ids(residual_state)
+                .contains(group as usize);
+        live.then_some(TerminalResidualDirectCoordinate {
+            raw_state: state,
+            terminal,
+            residual_state,
+        })
+    }
+
+    /// Advance a retained physical terminal-residual coordinate by one byte.
+    /// The direct path is accepted only when the raw combined tokenizer target
+    /// and the compile-time residual sidecar continue to agree exactly.
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_step(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+        byte: u8,
+    ) -> Option<TerminalResidualDirectCoordinate> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        let residual_target = dfa.step(coordinate.residual_state, byte)?;
+        let live = dfa.finalizers(residual_target).contains(group as usize)
+            || dfa
+                .possible_future_group_ids(residual_target)
+                .contains(group as usize);
+        if !live {
+            return None;
+        }
+        let raw_target = self.step(coordinate.raw_state, byte)?;
+        if self.state_has_epsilon_transitions(raw_target) {
+            return None;
+        }
+        let row = coordinates.row(raw_target)?;
+        let index = row
+            .binary_search_by_key(&coordinate.terminal, |&(candidate, _)| candidate)
+            .ok()?;
+        if row[index].1 != residual_target {
+            return None;
+        }
+        Some(TerminalResidualDirectCoordinate {
+            raw_state: raw_target,
+            terminal: coordinate.terminal,
+            residual_state: residual_target,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_accepting(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> Option<bool> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        Some(dfa.finalizers(coordinate.residual_state).contains(group as usize))
+    }
+
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_has_future(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> Option<bool> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        Some(
+            dfa.possible_future_group_ids(coordinate.residual_state)
+                .contains(group as usize),
+        )
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn terminal_residual_direct_coordinate_raw_state(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> u32 {
+        coordinate.raw_state
     }
 
     /// Exact compile-time exclusion certificate for a raw tokenizer state and
