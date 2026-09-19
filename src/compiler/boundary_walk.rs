@@ -1828,6 +1828,11 @@ mod tests {
         let vocab_path = std::env::var("PHASE1_VOCAB")
             .unwrap_or_else(|_| root.join("vocab_dump.bin").to_string_lossy().into_owned());
         let vocab = load_vocab(&vocab_path);
+        assert_eq!(
+            vocab.entries_map().len(),
+            128_256,
+            "selected10 expects the CFA Llama-3.1 vocabulary",
+        );
         let mut core =
             Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
                 .expect("load core");
