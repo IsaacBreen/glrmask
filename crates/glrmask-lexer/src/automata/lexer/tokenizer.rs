@@ -840,12 +840,54 @@ impl TerminalProjectedQuotient {
 
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TerminalExclusionResidualState {
+    pub(crate) left_state: u32,
+    /// `u32::MAX` means the finite exclusion component is already dead.
+    pub(crate) right_state: u32,
+    /// Exact maximum bytes remaining to an exclusion match while `right_state`
+    /// is live. `u32::MAX` is used only when the exclusion is already dead.
+    pub(crate) right_max_remaining: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalExclusionCertificate {
+    left_dfa: Arc<DFA>,
+    states: Arc<[TerminalExclusionResidualState]>,
+}
+
+impl TerminalExclusionCertificate {
+    pub(crate) fn new(
+        left_dfa: Arc<DFA>,
+        states: Vec<TerminalExclusionResidualState>,
+    ) -> Option<Self> {
+        (!states.is_empty()).then(|| Self {
+            left_dfa,
+            states: Arc::from(states.into_boxed_slice()),
+        })
+    }
+}
+
+/// Exact compile-time certificate for one raw tokenizer state inside a
+/// top-level `Exclude(left, right)` terminal. This is intentionally small and
+/// runtime-facing: all expensive expression/product analysis is completed
+/// while the tokenizer is built.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalExclusionContinuation {
+    pub terminal_residual_state: u32,
+    pub left_state: u32,
+    pub right_state: Option<u32>,
+    pub right_max_remaining: Option<u32>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalResidualCoordinates {
     offsets: Arc<[u32]>,
     entries: Arc<[(u32, u32)]>,
     terminal_dfas: Arc<[Arc<DFA>]>,
     terminal_groups: Arc<[u32]>,
+    exclusion_certificates: Arc<[Option<Arc<TerminalExclusionCertificate>>]>,
 }
 
 impl TerminalResidualCoordinates {
@@ -871,11 +913,13 @@ impl TerminalResidualCoordinates {
             entries.extend(row);
             offsets.push(entries.len() as u32);
         }
+        let exclusion_certificates = vec![None; terminal_dfas.len()];
         Self {
             offsets: Arc::from(offsets.into_boxed_slice()),
             entries: Arc::from(entries.into_boxed_slice()),
             terminal_dfas: Arc::from(terminal_dfas.into_boxed_slice()),
             terminal_groups: Arc::from(terminal_groups.into_boxed_slice()),
+            exclusion_certificates: Arc::from(exclusion_certificates.into_boxed_slice()),
         }
     }
 
@@ -908,6 +952,27 @@ impl TerminalResidualCoordinates {
     #[inline]
     pub fn terminal_dfa_count(&self) -> usize {
         self.terminal_dfas.len()
+    }
+
+    pub(crate) fn with_exclusion_certificates(
+        mut self,
+        certificates: Vec<Option<Arc<TerminalExclusionCertificate>>>,
+    ) -> Option<Self> {
+        if certificates.len() != self.terminal_dfas.len() {
+            return None;
+        }
+        self.exclusion_certificates = Arc::from(certificates.into_boxed_slice());
+        Some(self)
+    }
+
+    #[inline]
+    pub(crate) fn terminal_exclusion_certificate(
+        &self,
+        terminal: TerminalID,
+    ) -> Option<&TerminalExclusionCertificate> {
+        self.exclusion_certificates
+            .get(terminal as usize)?
+            .as_deref()
     }
 
     fn replace_terminals_with_appended_dfas(
@@ -970,16 +1035,22 @@ impl TerminalResidualCoordinates {
         }
         let mut terminal_dfas = self.terminal_dfas.iter().cloned().collect::<Vec<_>>();
         let mut terminal_groups = self.terminal_groups.iter().copied().collect::<Vec<_>>();
+        let mut exclusion_certificates = self.exclusion_certificates.iter().cloned().collect::<Vec<_>>();
         for (terminal, dfa) in replacements {
             let terminal_index = *terminal as usize;
             terminal_dfas[terminal_index] = Arc::clone(dfa);
             terminal_groups[terminal_index] = 0;
+            // The appended standalone DFA has different state numbering from
+            // the compile-time exclusion projection. Fail closed rather than
+            // retaining stale proof metadata.
+            exclusion_certificates[terminal_index] = None;
         }
         Some(Self {
             offsets: Arc::from(offsets.into_boxed_slice()),
             entries: Arc::from(entries.into_boxed_slice()),
             terminal_dfas: Arc::from(terminal_dfas.into_boxed_slice()),
             terminal_groups: Arc::from(terminal_groups.into_boxed_slice()),
+            exclusion_certificates: Arc::from(exclusion_certificates.into_boxed_slice()),
         })
     }
 
@@ -1043,11 +1114,13 @@ impl TerminalResidualCoordinates {
 
         let mut terminal_dfas = self.terminal_dfas.iter().cloned().collect::<Vec<_>>();
         let mut terminal_groups = self.terminal_groups.iter().copied().collect::<Vec<_>>();
+        let mut exclusion_certificates = self.exclusion_certificates.iter().cloned().collect::<Vec<_>>();
         for (terminals, dfa) in replacements {
             for &terminal in terminals {
                 let terminal_index = terminal as usize;
                 terminal_dfas[terminal_index] = Arc::clone(dfa);
                 terminal_groups[terminal_index] = 0;
+                exclusion_certificates[terminal_index] = None;
             }
         }
 
@@ -1056,6 +1129,7 @@ impl TerminalResidualCoordinates {
             entries: Arc::from(entries.into_boxed_slice()),
             terminal_dfas: Arc::from(terminal_dfas.into_boxed_slice()),
             terminal_groups: Arc::from(terminal_groups.into_boxed_slice()),
+            exclusion_certificates: Arc::from(exclusion_certificates.into_boxed_slice()),
         })
     }
 }
@@ -9141,6 +9215,43 @@ impl Tokenizer {
 
     pub fn terminal_residual_coordinates(&self) -> Option<&TerminalResidualCoordinates> {
         self.terminal_residual_coordinates.as_deref()
+    }
+
+    /// Exact compile-time exclusion certificate for a raw tokenizer state and
+    /// terminal. `Some` is returned only when the partitioned compiler retained
+    /// an unambiguous top-level `Exclude(left, right)` product coordinate and
+    /// proved the right language finite.
+    #[doc(hidden)]
+    pub fn terminal_exclusion_continuation(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+    ) -> Option<TerminalExclusionContinuation> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let row = coordinates.row(state)?;
+        let index = row
+            .binary_search_by_key(&terminal, |&(candidate, _)| candidate)
+            .ok()?;
+        let terminal_residual_state = row[index].1;
+        let certificate = coordinates.terminal_exclusion_certificate(terminal)?;
+        let residual = *certificate.states.get(terminal_residual_state as usize)?;
+        let right_live = residual.right_state != u32::MAX;
+        Some(TerminalExclusionContinuation {
+            terminal_residual_state,
+            left_state: residual.left_state,
+            right_state: right_live.then_some(residual.right_state),
+            right_max_remaining: right_live.then_some(residual.right_max_remaining),
+        })
+    }
+
+    /// Left operand DFA for a retained top-level exclusion certificate. State
+    /// numbers match `TerminalExclusionContinuation::left_state`.
+    #[doc(hidden)]
+    pub fn terminal_exclusion_left_dfa(&self, terminal: TerminalID) -> Option<&DFA> {
+        self.terminal_residual_coordinates
+            .as_deref()?
+            .terminal_exclusion_certificate(terminal)
+            .map(|certificate| certificate.left_dfa.as_ref())
     }
 
     /// Sound, potentially non-maximal observation partition for one terminal

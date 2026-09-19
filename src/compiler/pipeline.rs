@@ -1039,16 +1039,21 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
             .collect::<Vec<_>>();
         let prepare_bounded_code_in_parallel = !preserve_residual_oracle_coordinates
             && (prefer_general_bounded || giant_terminals.is_empty());
+        // The hybrid physical proxy feeds exact source-state IDs to dynamic
+        // masking. Retain product residual coordinates, but do not collapse
+        // traced duplicate coordinates: collapsing changes those hot runtime
+        // states and was measurably worse on the multi-root exclusion tail.
         let (mut tokenizer, prepared_components) = if prepare_bounded_code_in_parallel {
             let components_to_prepare = residual_components.clone();
             let (tokenizer, prepared) = rayon::join(
                 || {
-                    build_tokenizer_from_exprs_partitioned_impl(
+                    build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
                         &proxy_expressions,
                         Some(&terminal_labels),
                         &partition_ids,
                         Some(&residual_isolation_classes),
                         None,
+                        true,
                         false,
                     )
                 },
@@ -1057,12 +1062,13 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
             (tokenizer, Some(prepared))
         } else {
             (
-                build_tokenizer_from_exprs_partitioned_impl(
+                build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
                     &proxy_expressions,
                     Some(&terminal_labels),
                     &partition_ids,
                     Some(&residual_isolation_classes),
                     None,
+                    true,
                     false,
                 ),
                 None,
@@ -1120,12 +1126,13 @@ fn build_dynamic_virtual_tokenizer_from_exprs(
         .collect::<Vec<_>>();
     let partition_ids = lexer_partition_ids(grammar);
     let residual_isolation_classes = lexer_residual_isolation_classes(grammar);
-    let mut tokenizer = build_tokenizer_from_exprs_partitioned_impl(
+    let mut tokenizer = build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
         &proxy_expressions,
         Some(&terminal_labels),
         &partition_ids,
         Some(&residual_isolation_classes),
         None,
+        true,
         false,
     );
     // Drain ordinary nullable terminals before reserving the arithmetic state
@@ -2261,6 +2268,26 @@ fn build_tokenizer_from_exprs_partitioned_impl(
     adaptive_override: Option<bool>,
     prefer_product_trace_terminal_residuals: bool,
 ) -> Tokenizer {
+    build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
+        exprs,
+        profile_labels,
+        partition_ids,
+        residual_isolation_classes,
+        adaptive_override,
+        prefer_product_trace_terminal_residuals,
+        true,
+    )
+}
+
+fn build_tokenizer_from_exprs_partitioned_impl_with_trace_policy(
+    exprs: &[Expr],
+    profile_labels: Option<&[String]>,
+    partition_ids: &[u32],
+    residual_isolation_classes: Option<&[Option<u32>]>,
+    adaptive_override: Option<bool>,
+    prefer_product_trace_terminal_residuals: bool,
+    collapse_traced_duplicate_coordinates: bool,
+) -> Tokenizer {
     let profile_detail = std::env::var_os("GLRMASK_PROFILE_TOKENIZER_DETAIL").is_some();
     let started_at = Instant::now();
     let requested_product_trace_terminal_residuals = if prefer_product_trace_terminal_residuals {
@@ -2369,6 +2396,7 @@ fn build_tokenizer_from_exprs_partitioned_impl(
             residual_isolation_classes,
             Arc::from(exprs.to_vec()),
             adaptive_override,
+            collapse_traced_duplicate_coordinates,
         )
     {
         if profile_detail {

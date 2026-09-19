@@ -2680,6 +2680,70 @@ fn try_full_walk_mask(
 }
 
 
+/// Prove that the LEFT operand of a retained top-level exclusion remains a
+/// live, non-finalizing prefix for every word in `slice+`, starting from the
+/// exact left residual recorded for `source`. The exclusion certificate also
+/// proves the RIGHT operand finite. Together these facts imply every such
+/// prefix is live in `left \ right`: after any slice prefix, append enough
+/// further slice atoms to exceed the finite RIGHT bound, then complete LEFT.
+///
+/// This proof is deliberately independent of the combined lexer product: its
+/// state space is only `(slice_state, left_state)` and therefore stays tiny for
+/// the JSON safe-content monitor.
+fn exclusion_left_slice_prefix_live(
+    tokenizer: &Tokenizer,
+    source: u32,
+    terminal: TerminalID,
+    slice: &crate::compiler::stages::id_map_and_terminal_dwa::classify::VocabPartitionDfa,
+    work_limit: usize,
+) -> Option<bool> {
+    let certificate = tokenizer.terminal_exclusion_continuation(source, terminal)?;
+    // A retained certificate is constructed only for a finite RIGHT operand.
+    // At the current state RIGHT may already be dead; either case is fine.
+    let _finite_right_bound = certificate.right_max_remaining;
+    let left = tokenizer.terminal_exclusion_left_dfa(terminal)?;
+    let left_live = |state: u32| {
+        left.finalizers(state).is_empty()
+            && left.possible_future_group_ids(state).contains(0)
+    };
+    if !left_live(certificate.left_state) {
+        return Some(false);
+    }
+
+    let mut seen = FxHashSet::<(u32, u32)>::default();
+    let mut queue = std::collections::VecDeque::from([(
+        slice.start_state(),
+        certificate.left_state,
+    )]);
+    let mut work = 0usize;
+    while let Some((slice_state, left_state)) = queue.pop_front() {
+        if !seen.insert((slice_state, left_state)) {
+            continue;
+        }
+        for byte_value in 0u16..=255 {
+            let byte = byte_value as u8;
+            let slice_target = slice.step(slice_state, byte);
+            if !slice.can_reach_accepting(slice_target) {
+                continue;
+            }
+            work += 1;
+            if work > work_limit {
+                return None;
+            }
+            let Some(left_target) = left.step(left_state, byte) else {
+                return Some(false);
+            };
+            if !left_live(left_target) {
+                return Some(false);
+            }
+            if !seen.contains(&(slice_target, left_target)) {
+                queue.push_back((slice_target, left_target));
+            }
+        }
+    }
+    Some(true)
+}
+
 fn direct_slice_prefix_contained_config<T: FullWalkTransitionTable>(
     transitions: &mut T,
     start: u32,
@@ -3457,6 +3521,91 @@ fn try_full_walk_mask_with_table<
                 if profitable {
                     master_decision = Some((safe_radius, whitespace_proved));
                 }
+            }
+        }
+    }
+    // Finite-exclusion master cover for native multi-root unions.  A same-parser
+    // root set can contain a broad `Exclude(open, finite_literals)` source which
+    // the legacy single-root master cannot inspect.  The compile-time sidecar
+    // gives an exact source -> LEFT residual coordinate and proves RIGHT finite.
+    // If LEFT remains live and non-finalizing for the entire safe-content
+    // language, every pure-safe vocabulary token is a valid prefix through that
+    // root: any still-live finite exclusion can be pumped beyond its maximum
+    // remaining length before LEFT is completed.  The existing master trie then
+    // seeds exactly those proved tokens; quotes, escapes and boundaries stay on
+    // the ordinary exact residual walk.
+    if std::env::var_os("GLRMASK_DISABLE_FINITE_EXCLUSION_MASTER").is_none()
+        && master_decision.is_none()
+        && root_branches.len() > 1
+        && root_branches
+            .iter()
+            .all(|branch| branch.initial_prune_guard.is_passed())
+        && let Some(&parser_node) = root_parser_nodes.first()
+        && root_parser_nodes.iter().all(|&node| node == parser_node)
+        && let Some(safe_plus) = vocab.llg_slice_by_cache_id(0)
+        && vocab.llg_master_trie().is_some()
+    {
+        let admitted = parser_cache.admitted(state.constraint, parser_node).clone();
+        let mut proved = None::<(u32, TerminalID)>;
+        'sources: for branch in root_branches {
+            let Some(source) = branch.exact_tokenizer_state else {
+                continue;
+            };
+            for terminal_index in admitted.iter_ones() {
+                let Ok(terminal) = TerminalID::try_from(terminal_index) else {
+                    continue;
+                };
+                if Some(terminal) == state.constraint.ignore_terminal
+                    || state
+                        .constraint
+                        .tokenizer
+                        .terminal_exclusion_continuation(source, terminal)
+                        .is_none()
+                {
+                    continue;
+                }
+                if exclusion_left_slice_prefix_live(
+                    &state.constraint.tokenizer,
+                    source,
+                    terminal,
+                    safe_plus.dfa(),
+                    8 * 1024,
+                ) == Some(true)
+                {
+                    proved = Some((source, terminal));
+                    break 'sources;
+                }
+            }
+        }
+        if let Some((source, terminal)) = proved {
+            let safe_radius = vocab.llg_master_max_safe_chars();
+            let ordinary_ops = trie.full_walk_ops().len();
+            let max_permille = std::env::var(
+                "GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE",
+            )
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(500);
+            let residual_ops = vocab.llg_master_residual_ops(safe_radius, false);
+            let profitable = residual_ops.is_some_and(|residual| {
+                residual.saturating_mul(1000)
+                    <= ordinary_ops.saturating_mul(max_permille)
+            });
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROOF_PHASES").is_some() {
+                eprintln!(
+                    "[glrmask/profile][finite_exclusion_master] generation={} source={} terminal={} safe_radius={} ordinary_ops={} residual_ops={:?} max_permille={} profitable={}",
+                    state.generation,
+                    source,
+                    terminal,
+                    safe_radius,
+                    ordinary_ops,
+                    residual_ops,
+                    max_permille,
+                    profitable,
+                );
+            }
+            if profitable {
+                master_decision = Some((safe_radius, false));
             }
         }
     }
