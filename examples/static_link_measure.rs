@@ -1,4 +1,4 @@
-// Measurement driver for the prepared-static composition-linker redesign (worktree-only).
+// Measurement driver for the prepared-static composition-linker redesign.
 // Subcommands: sizes | link | tbm | compile-one | dump-schema | monolithic
 use std::fs;
 use std::path::{Path, PathBuf};

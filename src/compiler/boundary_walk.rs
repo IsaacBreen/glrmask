@@ -461,16 +461,12 @@ pub(crate) struct WalkStaticLinkOutput {
     pub has_nested_components: bool,
 }
 
-/// Whether the composition contains a nested segmented component: any direct
-/// component that is itself a segmented composition. The walk's scoped TSID
-/// map assumes direct-component leaves packed back-to-back, but a nested
-/// component expands into several runtime leaves, so the coordinates cannot
-/// match. Nested static linking is Phase 4; the dispatcher declines such
-/// static requests loudly (callers needing nesting use Dynamic).
 /// Whether the link's parent is itself a segmented composition. The walk
-/// expands nested *children* into intact leaves, but an already-composed
-/// parent has no intact local table (its table is a composed table with
-/// linker controls), so a static link with a nested parent declines loudly.
+/// expands nested *children* into intact leaves (nested static links over
+/// acyclic, effectively nonnullable children are supported), but an
+/// already-composed parent has no intact local table (its table is a composed
+/// table with linker controls), so a static link with a composed parent
+/// declines loudly (callers needing that shape use Dynamic).
 pub(crate) fn walk_static_link_parent_needs_dynamic_fallback(parent: &Constraint) -> bool {
     parent.has_recursive_segmented_parser_tree()
 }

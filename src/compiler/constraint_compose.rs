@@ -22931,8 +22931,9 @@ mod tests {
             vocab: &Vocab,
         ) -> crate::Result<Constraint>;
 
-        /// Exact dynamic segmented composition. For nested links (nested
-        /// static linking is Phase 4; static requests decline loudly).
+        /// Exact dynamic segmented composition. Reference route for nested
+        /// links (nullable nested links and already-composed parents decline
+        /// loudly on the static route; this backend accepts those shapes).
         fn compose_linked_children_for_test_dynamic(
             &self,
             children: &[(&str, &Constraint)],

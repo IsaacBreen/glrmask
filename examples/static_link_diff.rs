@@ -2,9 +2,9 @@
 // prepared-static composition-linker redesign (selected10 outer link).
 //
 // Gate semantics: compose the selected10 outer link twice — once with the
-// static backend (`compose_compiled_subgrammars`, whatever backend step 5
-// wires in) and once with the DynamicDirect backend
-// (`compose_compiled_subgrammars_dynamic`) — then walk a DETERMINISTIC corpus
+// static backend (`compose_compiled_subgrammars`, StaticParserDwa shards) and
+// once with the exact dynamic backend
+// (`compose_compiled_subgrammars_dynamic`, DynamicDirect shards) — then walk a DETERMINISTIC corpus
 // (fixed byte prefixes + a seeded token RNG stream) and require mask-for-mask
 // equality at every position. Prints mismatch count, position count, and an
 // FNV-1a checksum over the reference (dynamic) mask stream.
