@@ -2676,6 +2676,19 @@ fn finish_walk_shard_publication(
     tokenizer_offsets: &[u32],
     component_state_counts: &[u32],
 ) -> Result<(PublishedStaticBoundaryShard, WalkShardPublishProfile), String> {
+    // Contract pin for the static mask evaluators: the indexed-GSS x DWA
+    // product evaluators (BoundaryWeightDagEvaluator /
+    // BoundaryMask64DagEvaluator) recurse over (DWA state, GSS node) with
+    // post-insert memoization, which diverges on cyclic DWAs. Cyclic control
+    // programs (nullable C*) need a fixed-point evaluator first; until then
+    // they decline loudly here at publication, never silently hang the mask
+    // path. All current producers (acyclic signed programs through
+    // determinization) publish acyclic DWAs, so this is a no-op today.
+    if !parser_dwa.is_acyclic() {
+        return Err(format!(
+            "walk boundary shard {start_component} parser DWA is cyclic; cyclic control programs need general C* support (use the Dynamic backend)",
+        ));
+    }
     // The private TSID map is indexed by the installing runtime's scoped
     // tokenizer coordinate (leaves back-to-back from 0, no reset state) and
     // must cover every scoped link-time state exactly once; gaps would
@@ -27327,6 +27340,62 @@ table: &child.table,
             SegmentedBoundaryBackend::Dynamic,
         )
         .expect("dynamic compose over a composed parent stays supported");
+    }
+
+    #[test]
+    fn cyclic_parser_dwa_declines_loudly_at_publication() {
+        // Contract pin for the static mask evaluators: the indexed-GSS x DWA
+        // product evaluators recurse over (DWA state, GSS node) with
+        // post-insert memoization, which diverges on cyclic parser DWAs.
+        // Cyclic control programs (nullable C*) therefore decline loudly at
+        // publication, never silently hanging the mask path. A single-state
+        // self-loop is the smallest cyclic shape.
+        use crate::automata::weighted_u32::dwa::{DWA, DWAState};
+        use crate::ds::weight::Weight;
+        let cyclic = DWA::from_parts(
+            vec![DWAState {
+                transitions: [(1i32, (0u32, Weight::all()))].into_iter().collect(),
+                final_weight: None,
+            }],
+            0,
+        );
+        assert!(!cyclic.is_acyclic());
+        let id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap {
+                original_to_internal: vec![0],
+                internal_to_originals: vec![vec![0]],
+                representative_original_ids: vec![0],
+            },
+            vocab_tokens: ManyToOneIdMap {
+                original_to_internal: vec![0],
+                internal_to_originals: vec![vec![0]],
+                representative_original_ids: vec![0],
+            },
+            deferred_vocab_singleton_original_ids: None,
+        };
+        let error = match finish_walk_shard_publication(
+            0,
+            vec![0].into(),
+            cyclic,
+            &id_map,
+            WalkShardPublishProfile {
+                templates_ms: 0.0,
+                materialize_ms: 0.0,
+                normalize_ms: 0.0,
+                terms: 0,
+                parser_states: 0,
+                parser_trans: 0,
+            },
+            &[0],
+            &[1],
+        ) {
+            Ok(_) => panic!("cyclic parser DWA must decline loudly at publication"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("cyclic"),
+            "decline must name cyclicity, got: {error}",
+        );
     }
 
     #[test]
