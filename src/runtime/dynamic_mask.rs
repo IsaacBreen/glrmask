@@ -32,6 +32,8 @@ use super::artifact::{
 use super::state::ConstraintState;
 
 mod full_walk_dense;
+mod nfa_memo;
+pub(crate) use nfa_memo::DynamicNfaMemoSlot;
 
 type ParserStacks = LeveledGSS<u32, ()>;
 
@@ -1160,9 +1162,10 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             *self.future_contains_by_terminal.entry(terminal).or_default() += 1;
             *self.future_contains_by_state.entry((state, terminal)).or_default() += 1;
         }
+        let key = (state, terminal);
         let state = self.generic_config_for_state(state);
         let result = self.config_future_contains_exact(state, terminal);
-        self.future_contains_cache.insert((state, terminal), result);
+        self.future_contains_cache.insert(key, result);
         if let Some(started) = started {
             self.future_contains_ns = self
                 .future_contains_ns
@@ -5547,6 +5550,9 @@ struct DynamicNfaScanCache<'a> {
     config_matched: Vec<BitSet>,
     config_futures: Vec<BitSet>,
     raw_start_config: FxHashMap<u32, u32>,
+    projected_roots: FxHashMap<(u32, u32), u32>,
+    memo_member_words: usize,
+    memo_recycle: Option<Box<nfa_memo::DynamicNfaMemo>>,
     profile_transition_work: bool,
     profile_step_calls: usize,
     profile_step_cache_hits: usize,
@@ -5598,12 +5604,14 @@ impl<'a> DynamicNfaScanCache<'a> {
             .mask_runtime_tokenizer()
             .unwrap_or(&constraint.tokenizer);
         let use_constraint_fast_transitions = std::ptr::eq(tokenizer, &constraint.tokenizer);
-        Self::new_with_tokenizer(
+        let mut cache = Self::new_with_tokenizer(
             constraint,
             tokenizer,
             deadline,
             use_constraint_fast_transitions,
-        )
+        );
+        cache.restore_memo(vocab);
+        cache
     }
 
     fn new_with_tokenizer(
@@ -5634,6 +5642,9 @@ impl<'a> DynamicNfaScanCache<'a> {
             config_matched: Vec::new(),
             config_futures: Vec::new(),
             raw_start_config: FxHashMap::default(),
+            projected_roots: FxHashMap::default(),
+            memo_member_words: 0,
+            memo_recycle: None,
             profile_transition_work: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             profile_step_calls: 0,
             profile_step_cache_hits: 0,
@@ -5732,6 +5743,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             futures.union_with(self.tokenizer.possible_future_terminals(state));
         }
         self.config_ids.insert(states.clone(), id);
+        self.memo_member_words += states.len();
         self.configs.push(states.into_boxed_slice());
         self.config_admitted.push(None);
         self.config_is_fresh_reset.push(false);
@@ -5784,8 +5796,13 @@ impl<'a> DynamicNfaScanCache<'a> {
                 self.admitted_set_ids.insert(admitted.words().to_vec(), id);
                 id
             };
+            let key = (state, filter);
+            if let Some(&config) = self.projected_roots.get(&key) {
+                return Ok((config != DYNAMIC_NFA_CONFIG_DEAD).then_some(config));
+            }
             let states = self.tokenizer.singleton_epsilon_closure(state).into_vec();
             let config = self.intern_admitted_config(states, filter)?;
+            self.projected_roots.insert(key, config);
             return Ok((config != DYNAMIC_NFA_CONFIG_DEAD).then_some(config));
         }
         if self.deterministic || !self.tokenizer.state_has_epsilon_transitions(state) {
@@ -5923,6 +5940,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Err("dynamic lexer projected configuration-id namespace exhausted".to_owned());
         }
         let result = self.configs.len() as u32;
+        self.memo_member_words += key.1.len();
         self.configs.push(key.1.clone().into_boxed_slice());
         self.config_admitted.push(Some(filter));
         self.config_is_fresh_reset.push(false);
@@ -5957,6 +5975,7 @@ impl<'a> DynamicNfaScanCache<'a> {
             return Err("dynamic lexer reset configuration-id namespace exhausted".to_owned());
         }
         let reset = self.configs.len() as u32;
+        self.memo_member_words += states.len();
         self.configs.push(states);
         self.config_admitted.push(admitted);
         self.config_is_fresh_reset.push(true);
@@ -8154,6 +8173,7 @@ fn fill_mask_dynamic_impl(
                 probation_if_absent,
             );
         }
+        lexer_scan_cache.recycle_memo(vocab);
         return Ok(());
     }
 
