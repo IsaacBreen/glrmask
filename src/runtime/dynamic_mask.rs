@@ -35,6 +35,34 @@ mod full_walk_dense;
 
 type ParserStacks = LeveledGSS<u32, ()>;
 
+/// The current LR action row is a necessary condition for admitting a terminal
+/// when no zero-width control transitions can change the top first. It is only
+/// a candidate superset: stack-dependent reductions/guards still require the
+/// ordinary parser. A fully unconditional row additionally proves exactness.
+fn parser_row_projection_candidates(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+) -> Option<(BitSet, bool)> {
+    if constraint.uses_sparse_direct_regular_runtime()
+        || constraint.uses_compact_segmented_parser_runtime()
+        || !constraint.table.control_terminals.is_empty()
+    {
+        return None;
+    }
+    let top = stacks.single_top_value()?;
+    let row = constraint.table.advance_row(top)?;
+    let terminal_count = constraint.table.num_terminals as usize;
+    // The advance row may also contain EOF. Never put it in a lexer filter.
+    let mut candidates = BitSet::new(terminal_count);
+    for terminal in row.iter_ones().take_while(|&terminal| terminal < terminal_count) {
+        candidates.set(terminal);
+    }
+    let exact = constraint.table.unconditional_advance_row(top).is_some_and(|row| {
+        candidates.iter_ones().all(|terminal| row.contains(terminal))
+    });
+    Some((candidates, exact))
+}
+
 #[cfg(test)]
 thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
@@ -114,6 +142,19 @@ trait FullWalkTransitionTable {
     }
 
     fn root_state(&mut self, state: u32) -> Result<u32, String>;
+
+    #[inline(always)]
+    fn parser_projection_enabled(&self) -> bool { false }
+
+    #[inline(always)]
+    fn parser_initial_state(&mut self, initial: u32, _admitted: &BitSet) -> u32 {
+        initial
+    }
+
+    #[inline(always)]
+    fn small_future_terminals(&self, _state: u32) -> Option<SmallVec<[TerminalID; 4]>> {
+        None
+    }
 
     fn finalizer_code(&self, state: u32) -> u32;
 
@@ -1043,6 +1084,46 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         self.cache.config_for_raw_start(state)
     }
 
+    #[inline(always)]
+    fn parser_projection_enabled(&self) -> bool {
+        self.cache.parser_projection_enabled
+            && !self.cache.deterministic
+            && self.cache.use_constraint_fast_transitions
+    }
+
+    fn parser_initial_state(&mut self, initial: u32, admitted: &BitSet) -> u32 {
+        let source = self.cache.tokenizer().initial_state();
+        match self.cache.config_for_parser_admitted(source, admitted) {
+            Ok(Some(config)) => match self.cache.fresh_reset_config(config) {
+                Ok(reset) => reset,
+                Err(error) => {
+                    if self.error.is_none() { self.error = Some(error); }
+                    initial
+                }
+            },
+            Ok(None) => initial,
+            Err(error) => {
+                if self.error.is_none() { self.error = Some(error); }
+                initial
+            }
+        }
+    }
+
+    fn small_future_terminals(&self, state: u32) -> Option<SmallVec<[TerminalID; 4]>> {
+        if !self.parser_projection_enabled() {
+            return None;
+        }
+        let config = self.generic_config_for_state(state);
+        let futures = if let Some(raw) = self.cache.raw_state_for_config(config) {
+            self.cache.tokenizer().possible_future_terminals(raw)
+        } else {
+            &self.cache.config_futures[self.cache.config_index(config)?]
+        };
+        (futures.count_ones() <= 16).then(|| {
+            futures.iter_ones().map(|terminal| terminal as TerminalID).collect()
+        })
+    }
+
     fn finalizer_code(&self, state: u32) -> u32 {
         self.cache.config_finalizer_code(self.generic_config_for_state(state))
     }
@@ -1132,7 +1213,9 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         lexer_state: u32,
         parser_node: u32,
     ) -> bool {
-        if lexer_state == initial_lexer_state {
+        if lexer_state == initial_lexer_state
+            || parser_cache.nodes[parser_node as usize].reset_lexer == Some(lexer_state)
+        {
             return true;
         }
         if let Some(hot_id) = FullWalkHotScalarCache::id(lexer_state) {
@@ -1451,6 +1534,7 @@ enum FullWalkManyState {
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
+    reset_lexer: Option<u32>,
     token_boundary_allowed: Vec<u8>,
     children: SmallVec<[(TerminalID, u32); 16]>,
     last_child_terminal: TerminalID,
@@ -1493,6 +1577,7 @@ impl FullWalkParserCache {
             nodes.push(FullWalkParserNode {
                 gss: branch.gss.clone(),
                 admitted: None,
+                reset_lexer: None,
                 token_boundary_allowed: dense_lexer_state_count
                     .map_or_else(Vec::new, |count| vec![0; count]),
                 children: SmallVec::new(),
@@ -1572,6 +1657,7 @@ impl FullWalkParserCache {
             self.nodes.push(FullWalkParserNode {
                 gss,
                 admitted: None,
+                reset_lexer: None,
                 token_boundary_allowed: self
                     .dense_lexer_state_count
                     .map_or_else(Vec::new, |count| vec![0; count]),
@@ -1589,6 +1675,37 @@ impl FullWalkParserCache {
         self.nodes[node_index].last_child_terminal = terminal;
         self.nodes[node_index].last_child_target = target;
         (target != Self::DEAD).then_some(target)
+    }
+
+    /// Every terminal reset starts the language admitted by the *new* parser
+    /// frontier, not the unconstrained union of every lexical terminal.
+    #[inline]
+    fn initial_lexer(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut impl FullWalkTransitionTable,
+        initial: u32,
+        node: u32,
+    ) -> u32 {
+        if !transitions.parser_projection_enabled() {
+            return initial;
+        }
+        if let Some(cached) = self.nodes[node as usize].reset_lexer {
+            return cached;
+        }
+        let mut admitted = parser_row_projection_candidates(
+            constraint, &self.nodes[node as usize].gss,
+        ).map_or_else(|| self.admitted(constraint, node).clone(), |(candidates, _)| candidates);
+        if let Some(ignore) = constraint.ignore_terminal {
+            admitted.set(ignore as usize);
+        }
+        let reset = if admitted.count_ones() <= 16 {
+            transitions.parser_initial_state(initial, &admitted)
+        } else {
+            initial
+        };
+        self.nodes[node as usize].reset_lexer = Some(reset);
+        reset
     }
 
     fn admitted(&mut self, constraint: &Constraint, node: u32) -> &BitSet {
@@ -1611,6 +1728,24 @@ impl FullWalkParserCache {
             self.nodes[index].admitted = Some(admitted);
         }
         self.nodes[index].admitted.as_ref().unwrap()
+    }
+
+    /// For a small lexical future set, query only those actual terminals.
+    /// Reuse the same exact parser-child cache needed when one later finalizes;
+    /// do not convert/simulate the whole parser stack for every grammar terminal.
+    fn narrow_boundary_allowed<T: FullWalkTransitionTable>(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut T,
+        lexer: u32,
+        parser: u32,
+    ) -> Option<bool> {
+        let candidates = transitions.small_future_terminals(lexer)?;
+        Some(candidates.into_iter().any(|terminal| {
+            transitions.future_contains(lexer, terminal)
+                && (Some(terminal) == constraint.ignore_terminal
+                    || self.advance(constraint, parser, terminal).is_some())
+        }))
     }
 
     #[inline(always)]
@@ -1703,12 +1838,13 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = constraint.ignore_terminal.is_some_and(|terminal| {
+        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
+            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
             transitions.future_contains(lexer_state, terminal)
         }) || transitions.future_intersects(
             lexer_state,
             self.admitted(constraint, parser_node),
-        );
+        ));
         unsafe {
             *self
                 .hot_token_boundary_allowed
@@ -1743,12 +1879,13 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = constraint.ignore_terminal.is_some_and(|terminal| {
+        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
+            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
             transitions.future_contains(lexer_state, terminal)
         }) || transitions.future_intersects(
             lexer_state,
             self.admitted(constraint, parser_node),
-        );
+        ));
         unsafe { self.sparse_token_boundary_allowed.get_unchecked_mut(node) }
             .insert(lexer_state, if allowed { 2 } else { 1 });
         allowed
@@ -1923,7 +2060,7 @@ fn full_walk_scalar_finalizer(
     if code != MULTI {
         if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
             let reset = FullWalkBranch {
-                lexer_state: initial_lexer_state,
+                lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser),
                 parser_node: next_parser,
                 prune_guard: if Some(code) == constraint.ignore_terminal {
                     FullWalkPruneGuard::Passed
@@ -1957,7 +2094,7 @@ fn full_walk_scalar_finalizer(
             full_walk_push_unique(
                 &mut next,
                 FullWalkBranch {
-                    lexer_state: initial_lexer_state,
+                    lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser),
                     parser_node: next_parser,
                     prune_guard: if Some(terminal) == constraint.ignore_terminal {
                         FullWalkPruneGuard::Passed
@@ -2019,7 +2156,7 @@ fn full_walk_scalar_finalizer_hot_single(
     }
     if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
         let reset = FullWalkBranch {
-            lexer_state: initial_lexer_state,
+            lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser),
             parser_node: next_parser,
             prune_guard: if Some(code) == constraint.ignore_terminal {
                 FullWalkPruneGuard::Passed
@@ -2077,10 +2214,11 @@ fn full_walk_try_apply_plain_single_finalizer(
         return true;
     };
 
+    let reset_lexer = parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser);
     if next_parser != parser_node {
         *scalar_lexer = two_distinct_marker;
         *current_two = (
-            (initial_lexer_state, next_parser),
+            (reset_lexer, next_parser),
             (target, parser_node),
         );
         return true;
@@ -2089,7 +2227,7 @@ fn full_walk_try_apply_plain_single_finalizer(
     // If both exact coordinates are identical there is only one branch. When
     // the parser is the same but lexer coordinates differ, leave the rare case
     // to the existing exact union logic below.
-    if initial_lexer_state == target {
+    if reset_lexer == target {
         *scalar_lexer = target;
         *scalar_parser = parser_node;
         return true;
@@ -2135,7 +2273,7 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
                     full_walk_push_unique(
                         &mut next,
                         FullWalkBranch {
-                            lexer_state: initial_lexer_state,
+                            lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, parser_node),
                             parser_node,
                             prune_guard: matched_guard,
                         },
@@ -2155,7 +2293,7 @@ fn full_walk_step_many<T: FullWalkTransitionTable>(
             full_walk_push_unique(
                 &mut next,
                 FullWalkBranch {
-                    lexer_state: initial_lexer_state,
+                    lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, parser_node),
                     parser_node,
                     prune_guard: matched_guard,
                 },
@@ -4387,7 +4525,7 @@ fn try_full_walk_mask_with_table<
                                 full_walk_many_state_push_branch(
                                     &mut first_match_side,
                                     FullWalkBranch {
-                                        lexer_state: initial_lexer_state,
+                                        lexer_state: parser_cache.initial_lexer(state.constraint, transitions, initial_lexer_state, next_parser),
                                         parser_node: next_parser,
                                         prune_guard,
                                     },
@@ -5248,9 +5386,9 @@ struct DynamicBranch {
     /// Synthetic projected/subset roots leave this unavailable and decline
     /// regex-partition containment.
     exact_tokenizer_state: Option<u32>,
-    /// True only when a fresh epsilon-NFA root was exactly restricted to the
-    /// terminals admitted by this parser frontier. This narrow root is safe to
-    /// run through the parser-conditioned scalar hot lane.
+    /// True only when a root was restricted to exactly parser-admitted
+    /// terminals (not merely a row-presence superset). Such a root may use the
+    /// existing parser-conditioned scalar hot lane.
     parser_filtered_root: bool,
     /// Stronger proof: every matched/future terminal carried by the filtered
     /// runtime config is parser-admitted. Until the first terminal finalizes,
@@ -5391,6 +5529,16 @@ struct DynamicNfaScanCache<'a> {
     max_collection_items: Option<usize>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
+    // A restricted config denotes only paths ending at a terminal in its
+    // admitted set. The set is part of the hash-cons key: equal physical
+    // states with different admitted languages MUST NOT alias.
+    parser_projection_enabled: bool,
+    admitted_sets: Vec<BitSet>,
+    admitted_set_ids: FxHashMap<Vec<u64>, u32>,
+    admitted_config_ids: FxHashMap<(u32, Vec<u32>), u32>,
+    config_admitted: Vec<Option<u32>>,
+    fresh_reset_ids: FxHashMap<u32, u32>,
+    config_is_fresh_reset: Vec<bool>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
     residual_configs: Vec<u32>,
     // Canonical union metadata for interned multi-state configs. These make a
@@ -5474,6 +5622,13 @@ impl<'a> DynamicNfaScanCache<'a> {
             max_collection_items: deadline.map(|_| 5_000_000),
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
+            parser_projection_enabled: std::env::var_os("GLRMASK_DISABLE_PARSER_LEXER_PROJECTION").is_none(),
+            admitted_sets: Vec::new(),
+            admitted_set_ids: FxHashMap::default(),
+            admitted_config_ids: FxHashMap::default(),
+            config_admitted: Vec::new(),
+            fresh_reset_ids: FxHashMap::default(),
+            config_is_fresh_reset: Vec::new(),
             transitions: Vec::new(),
             residual_configs: Vec::new(),
             config_matched: Vec::new(),
@@ -5578,6 +5733,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         }
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
+        self.config_admitted.push(None);
+        self.config_is_fresh_reset.push(false);
         self.transitions.push(None);
         self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
         self.config_matched.push(matched);
@@ -5608,17 +5765,29 @@ impl<'a> DynamicNfaScanCache<'a> {
         self.config_for_raw_start(state)
     }
 
-    /// Exact parser-admitted restriction of a fresh epsilon-NFA lexer root.
-    /// The caller uses this only for the true tokenizer initial state. Its
-    /// singleton epsilon closure already contains every byte-consuming branch,
-    /// so epsilon-only dispatch states can be dropped after the closure is
-    /// materialized. A retained member must either already match an admitted
-    /// terminal or still have an admitted terminal in its lexical future.
-    fn config_for_fresh_start_admitted(
+    /// Restrict a lexer root to the parser-admitted terminal language. The
+    /// projection persists through byte transitions, until a terminal finalizes
+    /// and its new parser frontier supplies a new root. The disabled path keeps
+    /// the historical fresh-root-only physical-state filter for A/B validation.
+    fn config_for_parser_admitted(
         &mut self,
         state: u32,
         admitted: &BitSet,
     ) -> Result<Option<u32>, String> {
+        if self.parser_projection_enabled && !self.deterministic {
+            let filter = if let Some(&id) = self.admitted_set_ids.get(admitted.words()) {
+                id
+            } else {
+                self.check_growth(self.admitted_sets.len(), 1)?;
+                let id = self.admitted_sets.len() as u32;
+                self.admitted_sets.push(admitted.clone());
+                self.admitted_set_ids.insert(admitted.words().to_vec(), id);
+                id
+            };
+            let states = self.tokenizer.singleton_epsilon_closure(state).into_vec();
+            let config = self.intern_admitted_config(states, filter)?;
+            return Ok((config != DYNAMIC_NFA_CONFIG_DEAD).then_some(config));
+        }
         if self.deterministic || !self.tokenizer.state_has_epsilon_transitions(state) {
             return Ok(None);
         }
@@ -5647,6 +5816,11 @@ impl<'a> DynamicNfaScanCache<'a> {
     }
 
     fn config_terminals_subset_of(&self, config: u32, terminals: &BitSet) -> bool {
+        if !self.deterministic && self.raw_state_for_config(config).is_none() {
+            let index = self.config_index(config).expect("known config");
+            return self.config_matched[index].is_subset(terminals)
+                && self.config_futures[index].is_subset(terminals);
+        }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
             if !self.tokenizer.matched_terminal_bitset(state).is_subset(terminals)
@@ -5687,6 +5861,112 @@ impl<'a> DynamicNfaScanCache<'a> {
         Ok(())
     }
 
+
+    /// Lazy right-trimming of a labeled lexer to one admitted terminal set A.
+    ///
+    /// For a state q, retain precisely the output colors in A. A state with
+    /// neither a current A-finalizer nor a future A-finalizer is dead. Deleting
+    /// it cannot remove a prefix of a word in an admitted terminal language.
+    /// The same A follows every byte transition; parser advancement creates a
+    /// separate reset branch with its own A. Maximal-munch memories remain
+    /// attached to their original language, independently of that reset.
+    ///
+    /// This is part of the lexer transition, not a second per-byte oracle.
+    /// Both projected configs and their transitions are hash-consed/cached.
+    fn intern_admitted_config(
+        &mut self,
+        mut states: Vec<u32>,
+        filter: u32,
+    ) -> Result<u32, String> {
+        self.check_growth(0, states.len())?;
+        let admitted = &self.admitted_sets[filter as usize];
+        states.retain(|&member| {
+            let matched = self.tokenizer.matched_terminal_bitset(member);
+            if !matched.is_disjoint(admitted) {
+                return true;
+            }
+            if self.tokenizer.possible_future_terminals(member).is_disjoint(admitted) {
+                return false;
+            }
+            // The input is epsilon-closed. A pure epsilon dispatcher need not
+            // be carried into the next byte transition as well as its closure.
+            !self.tokenizer.state_has_epsilon_transitions(member)
+                || self.tokenizer.transitions_from(member).next().is_some()
+        });
+        if states.is_empty() {
+            return Ok(DYNAMIC_NFA_CONFIG_DEAD);
+        }
+        states.sort_unstable();
+        states.dedup();
+        let key = (filter, states);
+        if let Some(&cached) = self.admitted_config_ids.get(&key) {
+            return Ok(cached);
+        }
+        let mut matched = BitSet::new(self.tokenizer.num_terminals() as usize);
+        let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
+        for &member in &key.1 {
+            matched.union_with(self.tokenizer.matched_terminal_bitset(member));
+            futures.union_with(self.tokenizer.possible_future_terminals(member));
+        }
+        if matched.is_subset(admitted) && futures.is_subset(admitted) {
+            // All reachable outputs are already admitted. Return to the
+            // existing raw/hot lane without retaining a redundant product.
+            let states = key.1.clone();
+            let result = self.intern_config(states)?;
+            self.admitted_config_ids.insert(key, result);
+            return Ok(result);
+        }
+        matched.intersect_with(admitted);
+        futures.intersect_with(admitted);
+        self.check_growth(self.configs.len(), 1)?;
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err("dynamic lexer projected configuration-id namespace exhausted".to_owned());
+        }
+        let result = self.configs.len() as u32;
+        self.configs.push(key.1.clone().into_boxed_slice());
+        self.config_admitted.push(Some(filter));
+        self.config_is_fresh_reset.push(false);
+        self.transitions.push(None);
+        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
+        self.config_matched.push(matched);
+        self.config_futures.push(futures);
+        self.admitted_config_ids.insert(key, result);
+        Ok(result)
+    }
+
+    /// A parser reset accepts the token ending *at this boundary*, even when
+    /// no next terminal is admissible. Keep that epsilon acceptance out of the
+    /// ordinary projected-config interner: a consumed-byte lexer loop returning
+    /// to the same physical state must not acquire boundary acceptance. Every
+    /// byte transition from this wrapper lands in a non-fresh configuration.
+    fn fresh_reset_config(&mut self, config: u32) -> Result<u32, String> {
+        if let Some(&reset) = self.fresh_reset_ids.get(&config) {
+            return Ok(reset);
+        }
+        let (states, matched, futures, admitted) = if let Some(raw) = self.raw_state_for_config(config) {
+            (vec![raw].into_boxed_slice(),
+             self.tokenizer.matched_terminal_bitset(raw).clone(),
+             self.tokenizer.possible_future_terminals(raw).clone(), None)
+        } else {
+            let index = self.config_index(config).ok_or_else(|| "unknown projected reset config".to_owned())?;
+            (self.configs[index].clone(), self.config_matched[index].clone(),
+             self.config_futures[index].clone(), self.config_admitted[index])
+        };
+        self.check_growth(self.configs.len(), 1)?;
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err("dynamic lexer reset configuration-id namespace exhausted".to_owned());
+        }
+        let reset = self.configs.len() as u32;
+        self.configs.push(states);
+        self.config_admitted.push(admitted);
+        self.config_is_fresh_reset.push(true);
+        self.transitions.push(None);
+        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
+        self.config_matched.push(matched);
+        self.config_futures.push(futures);
+        self.fresh_reset_ids.insert(config, reset);
+        Ok(reset)
+    }
 
     fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
         if self.profile_transition_work {
@@ -5751,6 +6031,14 @@ impl<'a> DynamicNfaScanCache<'a> {
                     }
                 }
                 if target != u32::MAX {
+                    if self.config_admitted[config_index].is_some() {
+                        // Do not first intern the unrestricted closure only
+                        // to discard it while constructing the projection.
+                        let closure = self.tokenizer.singleton_epsilon_closure(target);
+                        self.check_growth(targets.len(), closure.len())?;
+                        targets.extend(closure);
+                        continue;
+                    }
                     let target_config = self.config_for_raw_start(target)?;
                     if let Some(target_state) = self.raw_state_for_config(target_config) {
                         self.check_growth(targets.len(), 1)?;
@@ -5767,6 +6055,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         };
         let target = if closed_targets.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
+        } else if let Some(filter) = self.config_admitted[config_index] {
+            self.intern_admitted_config(closed_targets, filter)?
         } else {
             self.intern_config(closed_targets)?
         };
@@ -5790,6 +6080,9 @@ impl<'a> DynamicNfaScanCache<'a> {
                 .then_some(config));
         }
         let config_index = self.config_index(config).ok_or_else(|| "unknown dynamic residual config".to_owned())?;
+        if self.config_admitted[config_index].is_some() {
+            return Ok((!self.config_futures[config_index].is_empty()).then_some(config));
+        }
         let cached = self.residual_configs[config_index];
         if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
             return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
@@ -5939,6 +6232,13 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminal: TerminalID,
     ) -> Result<bool, String> {
+        if !self.deterministic && self.raw_state_for_config(config).is_none()
+            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
+            && !self.config_futures[self.config_index(config).expect("known config")]
+                .contains(terminal as usize)
+        {
+            return Ok(false);
+        }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
             if let Some(owner_terminal) = self.tokenizer.virtual_residual_terminal_for_state(state) {
@@ -5978,6 +6278,12 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminals: &BitSet,
     ) -> Result<bool, String> {
+        if !self.deterministic && self.raw_state_for_config(config).is_none()
+            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
+            && terminals.is_disjoint(&self.config_futures[self.config_index(config).expect("known config")])
+        {
+            return Ok(false);
+        }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
             if let Some(owner_terminal) = self.tokenizer.virtual_residual_terminal_for_state(state) {
@@ -6009,6 +6315,25 @@ impl<'a> DynamicNfaScanCache<'a> {
         if self.deterministic {
             return Ok(rest.iter().all(|&state| state == first).then_some(first));
         }
+        if rest.iter().all(|&config| config == first) {
+            return Ok(Some(first));
+        }
+        if configs.iter().any(|&config| {
+            self.config_index(config).is_some_and(|index| self.config_is_fresh_reset[index])
+        }) {
+            // A union of physical lexer members alone cannot represent the
+            // fresh branch's epsilon acceptance. Preserve the branches instead.
+            return Ok(None);
+        }
+        let filter_for = |config| {
+            self.config_index(config).and_then(|index| self.config_admitted[index])
+        };
+        let filter = filter_for(first);
+        if rest.iter().any(|&config| filter_for(config) != filter) {
+            // Erasing a branch's terminal restriction would invalidate the
+            // projected-state invariant. Keep differing languages separate.
+            return Ok(None);
+        }
         let mut states = Vec::<u32>::new();
         for &config in configs {
             if let Some(state) = self.raw_state_for_config(config) {
@@ -6027,7 +6352,12 @@ impl<'a> DynamicNfaScanCache<'a> {
         if states.is_empty() {
             return Ok(None);
         }
-        self.intern_config(states).map(Some)
+        if let Some(filter) = filter {
+            let result = self.intern_admitted_config(states, filter)?;
+            Ok((result != DYNAMIC_NFA_CONFIG_DEAD).then_some(result))
+        } else {
+            self.intern_config(states).map(Some)
+        }
     }
 
     fn config_next_bytes(&self, config: u32) -> U8Set {
@@ -7606,32 +7936,45 @@ fn fill_mask_dynamic_impl(
                         .count(),
                 );
             }
+            // Project fresh starts and resets, but preserve an existing
+            // continuation root's exact raw coordinate. That coordinate enables
+            // the retained-terminal residual scheduler and established hot paths;
+            // wrapping it in a new product would trade those wins away.
             let (tokenizer_config, parser_filtered_root, parser_filtered_transparent) = if tokenizer_state == exact_initial_tsid
                 && projected_tokenizer_state == initial_tsid
-                && initial_prune_guard.is_passed()
+                // The initial maximal-munch guard is an independent token-set
+                // subtraction below. Narrow the positive lexer language first
+                // and leave the guard unchanged: (L intersect A) minus blocked.
+                // In particular, the finalized sibling of an extendable number
+                // carries a Pending guard; excluding it forfeits the main win.
+                && (initial_prune_guard.is_passed()
+                    || (lexer_scan_cache.parser_projection_enabled && !lexer_scan_cache.deterministic))
                 && vocab.mask_runtime_tokenizer().is_none()
             {
-                let parser_gss = with_empty_accumulators(&stacks);
-                let mut admitted = state
-                    .constraint
-                    .direct_regular_admissible_terminals(&parser_gss)
-                    .unwrap_or_else(|| {
-                        let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
-                        super::commit::exact_admitted_terminals_for_candidates(
-                            state.constraint,
-                            &parser_gss,
-                            &candidates,
-                        )
-                    });
+                let row_candidates = lexer_scan_cache.parser_projection_enabled
+                    .then(|| parser_row_projection_candidates(state.constraint, &stacks))
+                    .flatten();
+                let (mut admitted, exact_admission) = row_candidates.unwrap_or_else(|| {
+                    let parser_gss = with_empty_accumulators(&stacks);
+                    let admitted = state.constraint.direct_regular_admissible_terminals(&parser_gss)
+                        .unwrap_or_else(|| {
+                            let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
+                            super::commit::exact_admitted_terminals_for_candidates(
+                                state.constraint, &parser_gss, &candidates,
+                            )
+                        });
+                    (admitted, true)
+                });
                 if let Some(ignore) = state.constraint.ignore_terminal {
                     admitted.set(ignore as usize);
                 }
                 if admitted.count_ones() <= 16 {
                     if let Some(filtered) = lexer_scan_cache
-                        .config_for_fresh_start_admitted(projected_tokenizer_state, &admitted)?
+                        .config_for_parser_admitted(projected_tokenizer_state, &admitted)?
                     {
-                        let transparent = lexer_scan_cache.config_terminals_subset_of(filtered, &admitted);
-                        (filtered, true, transparent)
+                        let transparent = exact_admission
+                            && lexer_scan_cache.config_terminals_subset_of(filtered, &admitted);
+                        (filtered, exact_admission, transparent)
                     } else {
                         (
                             lexer_scan_cache.config_for_mask_root(projected_tokenizer_state)?,
