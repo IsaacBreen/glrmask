@@ -2663,17 +2663,14 @@ mod tests {
         let composed = low_level_compose(&parent, &children);
         let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
         let disallowed = compute_disallowed_follows(&grammar);
-        let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
-        let shared = shared_equivalence_for(
-            &composed.tokenizer,
-            &vocab,
-            composed.ignore_canonical,
-            &grammar,
-            &active,
-            &disallowed,
-            &flat,
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(
+                &composed.table.terminal_offsets,
+                grammar.num_terminals,
+            )
+            .expect("toy terminal ownership"),
         );
         for (index, (num_states, expected)) in
             [(parent.tokenizer.num_states(), vec![4u32]), (child.tokenizer.num_states(), vec![5u32])]
@@ -2686,6 +2683,23 @@ mod tests {
                 index,
                 composed.tokenizer.num_states() as usize,
             );
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    composed.tokenizer.num_states() as usize,
+                    commit,
+                )
+                .expect("toy initial-state domain"),
+                composed
+                    .tokenizer
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(index as u32),
+                true,
+                None,
+            )
+            .expect("toy boundary scope");
             let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &composed.tokenizer,
                 vocab: &vocab,
@@ -2693,10 +2707,7 @@ mod tests {
                 disallowed_follows: &disallowed,
                 ignore_terminal: composed.ignore_canonical,
                 follow_transparent_ignores: None,
-                terminal_offsets: &composed.table.terminal_offsets,
-                component_index: index,
-                commit_states: &commit,
-                shared_equivalence: &shared,
+                scope: &scope,
                 flat_trans: Some(&flat),
                 retain_non_crossing_paths: false,
             })
@@ -2792,26 +2803,14 @@ mod tests {
         let composed = &fixture.composed;
         let grammar = &fixture.grammar;
         let disallowed = &fixture.disallowed;
-        let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
-        let shared_started = Instant::now();
-        let shared = shared_equivalence_for(
-            &composed.tokenizer,
-            vocab,
-            composed.ignore_canonical,
-            grammar,
-            &active,
-            disallowed,
-            &flat,
-        );
-        let shared_wall_ms = shared_started.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "BOUNDARY_WALK shared id_map_ms={:.3} wall_ms={:.3} tsids={} itokens={}",
-            shared.id_map_ms,
-            shared_wall_ms,
-            shared.id_map.num_tsids(),
-            shared.id_map.num_internal_tokens(),
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(
+                &composed.table.terminal_offsets,
+                grammar.num_terminals,
+            )
+            .expect("selected10 terminal ownership"),
         );
 
         // Frozen output of the independent Phase-1 MINBOUND B-A oracle for
@@ -2833,6 +2832,23 @@ mod tests {
                 index,
                 composed.tokenizer.num_states() as usize,
             );
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    composed.tokenizer.num_states() as usize,
+                    commit,
+                )
+                .expect("selected10 initial-state domain"),
+                composed
+                    .tokenizer
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(index as u32),
+                true,
+                None,
+            )
+            .expect("selected10 boundary scope");
             let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &composed.tokenizer,
                 vocab,
@@ -2840,10 +2856,7 @@ mod tests {
                 disallowed_follows: disallowed,
                 ignore_terminal: composed.ignore_canonical,
                 follow_transparent_ignores: None,
-                terminal_offsets: &composed.table.terminal_offsets,
-                component_index: index,
-                commit_states: &commit,
-                shared_equivalence: &shared,
+                scope: &scope,
                 flat_trans: Some(&flat),
                 retain_non_crossing_paths: false,
             })
@@ -5297,18 +5310,42 @@ mod tests {
         );
         let disallowed = compute_disallowed_follows(&grammar);
 
-        // Two top-level walks sharing one link equivalence: the parent walk
-        // (parent commit, parent-leaf filter) and the block walk (whole-block
-        // commit, mid-leaf filter). The filter keeps a path iff it touches a
-        // terminal outside the filter leaf, so the block walk keeps every
-        // leaf-crossing gap (m→g, g→m, g→x) while the parent walk keeps the
-        // outer entries (L→m, R→m).
-        let active = vec![true; num_terminals as usize];
+        // Two top-level walks under immediate-component ownership: the parent
+        // owns leaf 0 and the already-composed block owns leaves 1+2. Pure
+        // m↔g crossings are internal to the block and must not become outer
+        // boundary candidates; g→x/g→y still crosses the block boundary.
         let flat: Arc<[u32]> = Arc::from(tdwa::l1::build_flat_transition_table(&merged));
-        let shared =
-            shared_equivalence_for(&merged, &vocab, None, &grammar, &active, &disallowed, &flat);
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::from_leaf_layout(
+                &leaf_offsets,
+                num_terminals,
+                &[
+                    tdwa::scope::ImmediateComponentId(0),
+                    tdwa::scope::ImmediateComponentId(1),
+                    tdwa::scope::ImmediateComponentId(1),
+                ],
+                2,
+            )
+            .expect("nested block ownership"),
+        );
         let total_states = merged.num_states() as usize;
         let run_walk = |component_index: usize, commit: &[bool]| {
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    total_states,
+                    commit.to_vec(),
+                )
+                .expect("nested initial-state domain"),
+                merged
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(component_index as u32),
+                true,
+                None,
+            )
+            .expect("nested boundary scope");
             build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &merged,
                 vocab: &vocab,
@@ -5316,11 +5353,8 @@ mod tests {
                 disallowed_follows: &disallowed,
                 ignore_terminal: None,
                 follow_transparent_ignores: None,
-                terminal_offsets: &leaf_offsets,
-                component_index,
-                commit_states: commit,
+                scope: &scope,
                 retain_non_crossing_paths: false,
-                shared_equivalence: &shared,
                 flat_trans: Some(&flat),
             })
             .expect("nonempty-vocab nested walks must produce a DWA")
@@ -5344,8 +5378,8 @@ mod tests {
             "block walk must cross (fused mg/gm/gx expected)",
         );
         assert!(
-            cand_b.contains(&GM) || cand_b.contains(&MG),
-            "block walk must cover an inner-boundary fused token, got {cand_b:?}",
+            !cand_b.contains(&GM) && !cand_b.contains(&MG),
+            "pure block-internal fused tokens must not become outer candidates, got {cand_b:?}",
         );
         assert!(
             cand_b.contains(&GX) || cand_b.contains(&GY),

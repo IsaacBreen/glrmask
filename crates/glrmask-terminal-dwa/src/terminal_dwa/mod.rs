@@ -2983,6 +2983,17 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     flat_trans: Arc<[u32]>,
     scope: &scope::BoundaryAnalysisScope,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    let mut tokenizer_reset_states = tokenizer
+        .deterministic_reset_states()
+        .into_iter()
+        .collect::<Vec<_>>();
+    tokenizer_reset_states.sort_unstable();
+    tokenizer_reset_states.dedup();
+    assert_eq!(
+        tokenizer_reset_states,
+        scope.reset_states(),
+        "boundary analysis scope reset domain must match the current-link tokenizer",
+    );
     let (families, mut profile) =
         build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             tokenizer,

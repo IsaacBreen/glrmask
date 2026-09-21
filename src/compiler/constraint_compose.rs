@@ -35016,14 +35016,31 @@ table: &dispatch.table,
             });
             // Phase 2 step 2 verification knob: NWA-level crossing filter
             // inside the entry point (before determinize/minimize).
-            let nwa_filter = std::env::var("PHASE1_NWAFILT")
+            let nwa_filter_enabled = std::env::var("PHASE1_NWAFILT")
                 .map(|value| value != "0")
-                .unwrap_or(false)
-                .then_some(nwa_crossing)
-                .flatten()
-                .map(|(terminal_offsets, start_component)| {
-                    tdwa::l2p::L2pCrossingFilter { terminal_offsets, start_component }
-                });
+                .unwrap_or(false);
+            let nwa_ownership = if nwa_filter_enabled {
+                nwa_crossing.map(|(terminal_offsets, _)| {
+                    tdwa::scope::BoundaryOwnership::flat(
+                        terminal_offsets,
+                        grammar.num_terminals,
+                    )
+                    .expect("phase1 crossing ownership")
+                })
+            } else {
+                None
+            };
+            let nwa_filter = match (nwa_crossing, nwa_ownership.as_ref()) {
+                (Some((_, start_component)), Some(ownership)) => {
+                    Some(tdwa::l2p::L2pCrossingFilter {
+                        ownership,
+                        start_component: tdwa::scope::ImmediateComponentId(
+                            start_component as u32,
+                        ),
+                    })
+                }
+                _ => None,
+            };
             let shard_options = if shared.is_some() || nwa_filter.is_some() {
                 Some(tdwa::l2p::L2pShardBuildOptions {
                     shared_equivalence: shared.as_ref(),

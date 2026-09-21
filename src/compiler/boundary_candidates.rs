@@ -386,6 +386,10 @@ fn fingerprint(
     semantics.update(
         &bincode::serialize(exprs).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
     );
+    semantics.update(
+        &bincode::serialize(&constraint.tokenizer)
+            .map_err(|_| SummaryUnavailable::MalformedMetadata)?,
+    );
     semantics.update(&constraint.ignore_terminal.unwrap_or(u32::MAX).to_le_bytes());
     for terminal in &constraint.table.skip_terminals {
         semantics.update(&terminal.to_le_bytes());
