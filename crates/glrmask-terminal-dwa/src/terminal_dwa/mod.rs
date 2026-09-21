@@ -1975,9 +1975,32 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let owned_classify_cache = classify::SharedClassifyCache::new();
     let shared_classify_cache: &classify::SharedClassifyCache =
         external_classify_cache.unwrap_or(&owned_classify_cache);
-    let token_path_disallowed_follows = Arc::new(
-        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal),
-    );
+    let mut token_path_disallowed_follows =
+        ignore_transparent_disallowed_follows(disallowed_follows, ignore_terminal);
+    // Scoped ignores are real labelled terminals for the signed parser, but
+    // they are transparent to the terminal-path classifier.  That classifier
+    // has no predecessor-carrying transparent state, so feeding it the raw
+    // follow rows would reject paths such as X -> scoped-WS -> child-a before
+    // the exact postprocess gets a chance to apply X -> a.  Widen only this
+    // early classifier relation: remove transparent rows/columns here, while
+    // the final follow product below still receives `disallowed_follows` plus
+    // `scope.follow_transparent()` and therefore enforces the skipped pair
+    // exactly.
+    if let Some(transparent) = boundary_scope.and_then(scope::BoundaryAnalysisScope::follow_transparent)
+    {
+        for terminal in transparent.iter() {
+            token_path_disallowed_follows.remove(&(terminal as u32));
+        }
+        for bits in token_path_disallowed_follows.values_mut() {
+            for terminal in transparent.iter() {
+                if terminal < bits.len() {
+                    bits.clear(terminal);
+                }
+            }
+        }
+        token_path_disallowed_follows.retain(|_, bits| !bits.is_zero());
+    }
+    let token_path_disallowed_follows = Arc::new(token_path_disallowed_follows);
     let normalized_token_path_disallowed_follows: Arc<[BitSet]> = Arc::from(
         l2p::equivalence_analysis::disallowed_follows::normalize_disallowed_follows(
             grammar.num_terminals as usize,

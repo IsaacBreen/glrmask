@@ -1717,6 +1717,7 @@ fn main() {
     let mut prefix_scenario: usize = 0;
     let mut prefix_max_steps: usize = 32;
     let mut prefix_seed: u64 = 0x9e37_79b9_7f4a_7c15;
+    let mut boundary_analysis_json = false;
     let mut positional: Vec<String> = Vec::new();
     let mut i = 1usize;
     while i < args.len() {
@@ -1746,12 +1747,21 @@ fn main() {
             "--prefix-scenario" => { i += 1; prefix_scenario = args[i].parse().expect("--prefix-scenario integer"); }
             "--prefix-max-steps" => { i += 1; prefix_max_steps = args[i].parse().expect("--prefix-max-steps integer"); }
             "--prefix-seed" => { i += 1; prefix_seed = args[i].parse().expect("--prefix-seed integer"); }
+            "--boundary-analysis-json" => { boundary_analysis_json = true; }
             other => positional.push(other.to_owned()),
         }
         i += 1;
     }
     if sub == "dump-schema" && !positional.is_empty() {
         index = positional[0].parse().expect("index integer");
+    }
+    if boundary_analysis_json {
+        // Set once before any compilation starts. The library emits one
+        // versioned JSON record per static boundary link; this keeps the
+        // detailed funnel/span instrumentation out of ordinary benchmark runs.
+        unsafe {
+            std::env::set_var("GLRMASK_BOUNDARY_ANALYSIS_JSON", "1");
+        }
     }
     match sub {
         "sizes" => cmd_sizes(&cache_dir, &dispatch_name),

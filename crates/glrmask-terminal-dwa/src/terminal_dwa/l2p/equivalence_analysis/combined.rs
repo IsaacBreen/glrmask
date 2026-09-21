@@ -2491,9 +2491,38 @@ fn analyze_equivalences_impl(
         // byte alphabet. Building the sparse relevant powerset over those
         // certified classes is therefore exact and avoids reconstructing the
         // same quotient topology over raw epsilon-NFA states.
-        let certified_powerset_seed_map = initial_state_map_has_stable_restricted_observation
-            .then_some(initial_state_map)
-            .flatten();
+        // The incoming scoped map is deliberately partial: it quotients only
+        // token-start states in the requested component.  The powerset view,
+        // however, is a continuation topology and may step into any raw state
+        // reachable after the current link reset.  Give those omitted states
+        // private singleton classes for this topology only.  This preserves
+        // the scoped initial equivalence relation while satisfying the
+        // powerset builder's total-state-map contract and keeps post-commit
+        // continuation exact.
+        let completed_certified_powerset_seed_map =
+            initial_state_map_has_stable_restricted_observation
+                .then(|| {
+                    initial_state_map.and_then(|map| {
+                        map.original_to_internal
+                            .iter()
+                            .any(|&class| class == u32::MAX)
+                            .then(|| {
+                                let mut completed = map.clone();
+                                super::super::super::scope::complete_with_continuation_singletons(
+                                    &mut completed,
+                                );
+                                completed
+                            })
+                    })
+                })
+                .flatten();
+        let certified_powerset_seed_map = if initial_state_map_has_stable_restricted_observation {
+            completed_certified_powerset_seed_map
+                .as_ref()
+                .or(initial_state_map)
+        } else {
+            None
+        };
         let (mut prepass_powerset_candidate, prepass_powerset_aborted) =
             if should_probe_prepass_powerset {
                 build_l2p_nfa_powerset_candidate(

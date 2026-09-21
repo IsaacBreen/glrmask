@@ -17,7 +17,13 @@ use crate::runtime::{
 
 const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 2;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
-const DEFAULT_MAX_BYTE_STEPS: usize = 2_000_000;
+const DEFAULT_MAX_INITIAL_FRONTIER_PROBES: usize = 1_000_000;
+// Frontier steps manipulate grammar-position sets rather than raw bytes, so
+// one "step" is materially more expensive than a tokenizer transition. Keep
+// the reusable-summary budget intentionally small: on large components the
+// safe fallback (all multibyte model tokens) is preferable to making a later
+// composition pay seconds to save a modest fraction of the vocabulary.
+const DEFAULT_MAX_BYTE_STEPS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BoundaryCandidateStats {
@@ -209,7 +215,15 @@ impl<'a> GrammarMachine<'a> {
                 }
                 Symbol::Terminal(terminal) if self.outward_terminals.contains(terminal) => {
                     // A prior token may already have traversed the child. Do not
-                    // retain the portal itself as a zero-offset candidate.
+                    // count the portal itself as a zero-offset candidate, but
+                    // retain its grammar position as a possible token-start
+                    // control. A real local Skip/IGNORE may consume positive
+                    // bytes while the grammar remains parked immediately
+                    // before this portal; that positive prefix then witnesses
+                    // the first outward event. `initial_frontier` admits this
+                    // seed only when the lexer can actually scan the expected
+                    // terminal or a local skip from the raw state.
+                    stable.insert(position);
                     pending.push(self.next_position(position));
                 }
                 Symbol::Terminal(_) => {
@@ -246,6 +260,19 @@ struct CandidateMachine<'a> {
 impl<'a> CandidateMachine<'a> {
     fn initial_frontier(&mut self) -> Result<Frontier, ()> {
         let starts = self.grammar.history_starts();
+        // The frontier pair cap is a memory/result-size budget, but applying it
+        // only after probing every raw-state × grammar-position pair lets a
+        // large legacy component spend tens of seconds discovering that the
+        // result must be widened anyway.  Bound the probe work itself first.
+        // Widening is always sound for this summary: callers fall back to all
+        // multibyte model tokens, never to an empty candidate set.
+        if starts
+            .len()
+            .saturating_mul(self.tokenizer.num_states() as usize)
+            > DEFAULT_MAX_INITIAL_FRONTIER_PROBES
+        {
+            return Err(());
+        }
         let mut frontier = Frontier::default();
         for raw in 0..self.tokenizer.num_states() {
             let futures = self.tokenizer.possible_future_terminals(raw);
@@ -294,15 +321,23 @@ impl<'a> CandidateMachine<'a> {
                     let mut advanced = BTreeSet::new();
                     for &position in &controls {
                         if self.grammar.skip_terminals.contains(&terminal) {
-                            advanced.insert(position);
+                            // Skip consumes a lexer terminal without advancing
+                            // the grammar symbol, but it can expose an outward
+                            // portal (or another internal nullable/control
+                            // path) at the same grammar position. Offset zero
+                            // outward is intentionally not a candidate and is
+                            // not traversed; retain any simultaneous internal
+                            // stable branches conservatively.
+                            let (closed, _outward) =
+                                self.grammar.operational_closure([position]);
+                            advanced.extend(closed);
                         }
                         if let Some(next) = self.grammar.advance_terminal(position, terminal) {
                             let (closed, outward) = self.grammar.operational_closure([next]);
                             // Outward at offset zero is deliberately ignored and
                             // not traversed. Internal closure remains live.
-                            if !outward {
-                                advanced.extend(closed);
-                            }
+                            let _ = outward;
+                            advanced.extend(closed);
                         }
                     }
                     if advanced.is_empty() {
@@ -348,7 +383,10 @@ impl<'a> CandidateMachine<'a> {
                     let mut advanced = BTreeSet::new();
                     for &position in controls {
                         if self.grammar.skip_terminals.contains(&terminal) {
-                            advanced.insert(position);
+                            let (closed, did_outward) =
+                                self.grammar.operational_closure([position]);
+                            outward |= did_outward;
+                            advanced.extend(closed);
                         }
                         if let Some(after_terminal) =
                             self.grammar.advance_terminal(position, terminal)
@@ -562,10 +600,14 @@ fn compute_summary(
         Ok(fp) => fp,
         Err(reason) => return (BoundaryCandidateSummary::Unknown { reason }, stats),
     };
+    let mut local_skip_terminals = constraint.table.skip_terminals.clone();
+    if let Some(ignore) = constraint.ignore_terminal {
+        local_skip_terminals.insert(ignore);
+    }
     let grammar = match GrammarMachine::new(
         rules,
         outward_terminals(constraint),
-        constraint.table.skip_terminals.clone(),
+        local_skip_terminals,
         constraint.table.control_terminals.clone(),
     ) {
         Ok(grammar) => grammar,
@@ -797,5 +839,141 @@ mod tests {
         .unwrap();
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
         assert_eq!(ids, Some(vec![1, 2]));
+    }
+
+    #[test]
+    fn stale_known_empty_fingerprint_is_recomputed_not_trusted() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"m".to_vec()),
+            (1, b"mg".to_vec()),
+            (2, b"mx".to_vec()),
+            (3, b"g".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(998);
+                nt document ::= "m" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        constraint
+            .boundary_candidate_summary
+            .set(BoundaryCandidateSummary::Known {
+                fingerprint: BoundaryCandidateFingerprint {
+                    algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
+                    component_semantics: [0; 32],
+                    public_interface: [0; 32],
+                    vocabulary: [0; 32],
+                },
+                tokens: OriginalTokenSet::Empty,
+                precision: SummaryPrecision::RegularUpperBound,
+            })
+            .unwrap();
+
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        assert_eq!(
+            ids,
+            Some(vec![1, 2]),
+            "fingerprint mismatch must widen/recompute instead of trusting stale empty",
+        );
+    }
+
+    #[test]
+    fn leading_component_ignore_can_precede_positive_outward_cut() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b" X a".to_vec()),
+            (1, b"X a".to_vec()),
+            (2, b" ".to_vec()),
+            (3, b"X".to_vec()),
+            (4, b"a".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        let ids = ids.expect("component summary should be known");
+        assert!(ids.contains(&0), "leading ignore must not hide the later outward cut");
+        assert!(ids.contains(&1), "direct outward-prefix token must remain a candidate");
+    }
+
+    #[test]
+    fn ignore_commit_can_expose_outward_cut_before_next_byte() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b" \ta".to_vec()),
+            (2, b" ".to_vec()),
+            (3, b"\t".to_vec()),
+            (4, b"a".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        assert!(
+            ids.expect("component summary should be known").contains(&1),
+            "committing WS after its positive-byte prefix must expose SUB before the following byte",
+        );
+    }
+
+    #[test]
+    fn multiple_local_terminal_commits_can_precede_outward_cut() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"ab".to_vec()),
+            (1, b"abx".to_vec()),
+            (2, b"ax".to_vec()),
+            (3, b"a".to_vec()),
+            (4, b"b".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "a" "b" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        assert_eq!(ids, Some(vec![1]));
+    }
+
+    #[test]
+    fn utf8_literal_prefix_uses_byte_offsets_without_rounding() {
+        let vocab = crate::Vocab::new(vec![
+            (0, "é".as_bytes().to_vec()),
+            (1, "éx".as_bytes().to_vec()),
+            (2, b"x".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "é" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        assert_eq!(ids, Some(vec![1]));
     }
 }

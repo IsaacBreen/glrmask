@@ -25420,6 +25420,14 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
 
         // Exhaust the small reachable token-prefix graph.  We compare masks
         // rather than the inline lowering's trivia-only completion artifact;
@@ -25662,6 +25670,14 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
             .static_dynamic_overlay
@@ -25702,12 +25718,7 @@ table: &child.table,
             &[0, 5, 6, 2, 6, 3, 6, 5, 1][..],
             &[0, 2, 10][..],
         ] {
-            let mut states = [
-                composed.start(),
-                composed_dynamic.start(),
-                loaded.start(),
-                monolithic.start(),
-            ];
+            let mut states = make_states();
             for &token in sequence {
                 let masks: Vec<Vec<u32>> =
                     states.iter().map(|state| state.mask()).collect();
@@ -25732,9 +25743,7 @@ table: &child.table,
         // must agree across routes.
         for sequence in [&[0u32, 1][..], &[0, 2, 4, 1][..], &[12][..], &[11][..], &[0, 2, 5, 3, 1][..]] {
             let mut rejects = Vec::new();
-            for mut state in
-                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-            {
+            for mut state in make_states() {
                 rejects.push(replay_first_rejection(
                     &mut |token| state.commit_token(token).is_ok(),
                     sequence,
@@ -25842,6 +25851,18 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        // Keep the large ConstraintState objects off this test function's
+        // stack. Several four-state inline arrays were enough to exceed the
+        // default Rust test-thread stack on macOS before the first statement
+        // executed, despite the runtime code itself being fine.
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
             .static_dynamic_overlay
@@ -25886,12 +25907,7 @@ table: &child.table,
             &[4, 2, 1][..],
             &[4, 9, 1][..],
         ] {
-            let mut states = [
-                composed.start(),
-                composed_dynamic.start(),
-                loaded.start(),
-                monolithic.start(),
-            ];
+            let mut states = make_states();
             for &token in sequence {
                 let masks: Vec<Vec<u32>> =
                     states.iter().map(|state| state.mask()).collect();
@@ -25912,9 +25928,7 @@ table: &child.table,
         }
         // `Xab` remains extendible on every route: commit 6, then 2, then 1,
         // and assert acceptance (Xaba! is valid).
-        for mut state in
-            [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-        {
+        for mut state in make_states() {
             for &token in &[6u32, 2, 1] {
                 state.commit_token(token).unwrap_or_else(|error| {
                     panic!("Xab extension rejected at {token}: {error}")
@@ -25925,9 +25939,7 @@ table: &child.table,
         // Rejected: completed `Xab!` only.
         for sequence in [&[14u32][..], &[0, 2, 3, 1][..], &[6, 1][..], &[4, 3, 1][..], &[0, 8, 1][..]] {
             let mut rejects = Vec::new();
-            for mut state in
-                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-            {
+            for mut state in make_states() {
                 rejects.push(replay_first_rejection(
                     &mut |token| state.commit_token(token).is_ok(),
                     sequence,
@@ -29081,9 +29093,10 @@ table: &child.table,
                 "multi-slot binds must not produce terminal aliases",
             );
         }
-        // Static shard authority: both tops hold StaticParser shards, no
-        // redundant global boundary parser, and the parent-block inner overlay
-        // carries no shards of its own.
+        // Static shard authority: both tops hold StaticParser shards and no
+        // redundant global boundary parser. The already-composed parent block
+        // retains its own static inner repair: under immediate block ownership
+        // the outer shard omits block-internal crossings by construction.
         {
             let overlay = stage3
                 .static_dynamic_overlay
@@ -29115,12 +29128,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the extension",
             );
         }
         // Byte-prefix differential (single-byte commits).
@@ -29481,10 +29501,12 @@ table: &child.table,
         )
         .expect("bind2 dynamic")
         .constraint;
-        // Static shard authority: both tops hold StaticParser shards, no
-        // redundant global boundary parser, and the parent-block inner overlay
-        // carries no shards of its own (outer block shards cover block-inner
-        // crossings).
+        // Static shard authority: both tops hold StaticParser shards and no
+        // redundant global boundary parser. The already-composed parent block
+        // retains its own static inner repair: under immediate block ownership
+        // the new outer shard deliberately omits block-internal crossings, so
+        // those retained shards are load-bearing coverage rather than duplicate
+        // work.
         {
             let overlay = stage2
                 .static_dynamic_overlay
@@ -29516,12 +29538,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the extension",
             );
         }
         // Byte-prefix differential (single-byte commits).
@@ -30996,8 +31025,8 @@ table: &child.table,
         .expect("dynamic extend after load")
         .constraint;
         // Static shard authority on the post-serde extend: both tops hold
-        // StaticParser shards, no redundant global boundary parser, and the
-        // parent-block inner overlay carries no shards of its own.
+        // StaticParser shards and no redundant global boundary parser. The
+        // loaded parent block retains its own static inner repair.
         {
             let overlay = stage2
                 .static_dynamic_overlay
@@ -31029,12 +31058,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the post-serde extension",
             );
         }
         // Byte-prefix differential (single-byte commits).

@@ -8139,6 +8139,13 @@ impl Constraint {
                 Some(owned_artifact.unwrap_or_else(|| std::sync::Arc::new(bytes.to_vec())))
             });
         }
+        if version != CONSTRAINT_VERSION && constraint.boundary_candidate_summary.get().is_none() {
+            let _ = constraint.boundary_candidate_summary.set(
+                crate::runtime::BoundaryCandidateSummary::Unknown {
+                    reason: crate::runtime::SummaryUnavailable::LegacyArtifact,
+                },
+            );
+        }
         Ok(constraint)
     }
 }
@@ -8166,6 +8173,15 @@ mod tests {
             ]),
         )
         .unwrap()
+    }
+
+    fn sample_boundary_fingerprint() -> crate::runtime::BoundaryCandidateFingerprint {
+        crate::runtime::BoundaryCandidateFingerprint {
+            algorithm_version: 77,
+            component_semantics: [7; 32],
+            public_interface: [8; 32],
+            vocabulary: [9; 32],
+        }
     }
 
     fn ignored_constraint() -> Constraint {
@@ -9045,6 +9061,126 @@ mod tests {
             }
             other => panic!("unexpected materialized summary: {other:?}"),
         }
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_empty_all_and_unknown_boundary_summaries() {
+        let mut dense = crate::ds::bitset::BitSet::new(3);
+        dense.set(0);
+        dense.set(2);
+        for summary in [
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Empty,
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Dense(Arc::new(dense)),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::AllByteTokensAtLeastTwo,
+                precision: crate::runtime::SummaryPrecision::BudgetWidenedUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Unknown {
+                reason: crate::runtime::SummaryUnavailable::Deferred,
+            },
+        ] {
+            let constraint = tiny_constraint();
+            constraint.boundary_candidate_summary.set(summary.clone()).unwrap();
+            let mut loaded = Constraint::load(&constraint.save()).unwrap();
+            loaded
+                .materialize_composition_link_metadata_for_compilation()
+                .unwrap();
+            let restored = loaded
+                .boundary_candidate_summary
+                .get()
+                .expect("CMS5 summary must materialize");
+            match (&summary, restored) {
+                (
+                    crate::runtime::BoundaryCandidateSummary::Known { tokens: expected, .. },
+                    crate::runtime::BoundaryCandidateSummary::Known { tokens: actual, .. },
+                ) => assert_eq!(
+                    expected.canonical_ids(constraint.token_bytes_iter()),
+                    actual.canonical_ids(loaded.token_bytes_iter()),
+                ),
+                (
+                    crate::runtime::BoundaryCandidateSummary::Unknown { reason: expected },
+                    crate::runtime::BoundaryCandidateSummary::Unknown { reason: actual },
+                ) => assert_eq!(expected, actual),
+                pair => panic!("summary variant changed across CMS5 roundtrip: {pair:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn current_boundary_summary_preserves_duplicate_byte_token_ids() {
+        let vocab = Vocab::new(vec![
+            (10, b"ab".to_vec()),
+            (11, b"ab".to_vec()),
+            (12, b"a".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start doc;
+                nt doc ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        constraint
+            .boundary_candidate_summary
+            .set(crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
+                    vec![10u32, 11u32].into_boxed_slice(),
+                )),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            })
+            .unwrap();
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        let crate::runtime::BoundaryCandidateSummary::Known { tokens, .. } = loaded
+            .boundary_candidate_summary
+            .get()
+            .expect("duplicate-ID summary must materialize")
+        else {
+            panic!("duplicate-ID summary changed variant");
+        };
+        assert_eq!(tokens.canonical_ids(loaded.token_bytes_iter()), vec![10, 11]);
+    }
+
+    #[test]
+    fn v29_artifact_without_composition_metadata_loads_legacy_unknown_summary() {
+        let mut constraint = tiny_constraint();
+        constraint.composition_reset_tokens_by_terminal.clear();
+        constraint.unbound_grammar_placeholders.clear();
+        constraint.composition_parser_templates_by_terminal.clear();
+        constraint
+            .composition_parser_characterizations_by_terminal
+            .clear();
+        constraint.composition_grammar_summary = None;
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::None;
+        let mut saved = constraint.save();
+        let (_, _, _, _, _, _, _, _, _, _, composition) =
+            v30_sections(&saved[CONSTRAINT_HEADER_LEN..]).unwrap();
+        assert!(composition.is_empty(), "legacy-empty fixture must have no CMS section");
+        saved[8..10].copy_from_slice(&PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION.to_le_bytes());
+        saved[CONSTRAINT_HEADER_LEN..CONSTRAINT_HEADER_LEN + 4]
+            .copy_from_slice(&V29_SECTION_MAGIC);
+
+        let loaded = Constraint::load(&saved).unwrap();
+        assert!(matches!(
+            loaded.boundary_candidate_summary.get(),
+            Some(crate::runtime::BoundaryCandidateSummary::Unknown {
+                reason: crate::runtime::SummaryUnavailable::LegacyArtifact
+            })
+        ));
+        assert_eq!(loaded.save(), saved, "unchanged v29 artifact must resave byte-for-byte");
     }
 
     #[test]
