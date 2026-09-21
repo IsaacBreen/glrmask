@@ -641,7 +641,14 @@ pub(crate) fn boundary_candidate_summary(
         }
     }
     let (summary, stats) = compute_summary(constraint, vocab);
-    let _ = constraint.boundary_candidate_summary.set(summary.clone());
+    // A loaded legacy artifact may retain an unchanged-resave byte cache.  Do
+    // not install a newly computed summary behind that cache: doing so would
+    // make the in-memory metadata differ from save() without a mutable cache
+    // invalidation path.  Current artifacts already carry their summary; fresh
+    // compiler-owned constraints have no cache here and may memoize normally.
+    if constraint.serialized_artifact_cache.is_none() {
+        let _ = constraint.boundary_candidate_summary.set(summary.clone());
+    }
     (summary, stats)
 }
 
