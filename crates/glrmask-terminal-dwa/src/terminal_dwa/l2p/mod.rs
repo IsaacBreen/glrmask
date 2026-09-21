@@ -66,9 +66,10 @@ use terminal_interchangeability::{
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
     TiDiscoveryContext,
 };
-use postprocess::{
+pub use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    filter_nwa_to_crossing_paths, max_structural_label_depth_to_final, prune_non_coreachable_states,
+    filter_dwa_to_crossing_paths, filter_nwa_to_crossing_paths,
+    max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -612,8 +613,8 @@ pub struct SharedL2pEquivalence {
 /// table's `terminal_offsets` (exactly one owner per terminal).
 #[derive(Debug, Clone, Copy)]
 pub struct L2pCrossingFilter<'a> {
-    pub terminal_offsets: &'a [u32],
-    pub start_component: usize,
+    pub ownership: &'a super::scope::BoundaryOwnership,
+    pub start_component: super::scope::ImmediateComponentId,
 }
 
 /// Optional per-build overrides for boundary-shard L2P builds. `None`
@@ -867,7 +868,10 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
+        if shard_options.is_none()
+            && l2p_global_token_position_enabled()
+            && matches!(partition_label, "p7" | "p8")
+        {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
@@ -1451,7 +1455,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let nwa_states_before = nwa.states().len();
                     nwa = filter_nwa_to_crossing_paths(
                         &nwa,
-                        filter.terminal_offsets,
+                        filter.ownership,
                         filter.start_component,
                     );
                     prune_non_coreachable_states(&mut nwa);
@@ -1460,7 +1464,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                         eprintln!(
                             "[glrmask/profile][l2p_crossing_filter] partition={} start_component={} nwa_states_before={} nwa_states_after={} total_ms={:.3}",
                             partition_label,
-                            filter.start_component,
+                            filter.start_component.0,
                             nwa_states_before,
                             nwa.states().len(),
                             elapsed_ms,

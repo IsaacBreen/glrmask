@@ -22,6 +22,7 @@ pub mod synthetic_state_map;
 pub use glrmask_dwa_merge::__private::merge;
 pub mod partition;
 mod regular_partition;
+pub mod scope;
 pub mod types;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -1718,6 +1719,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length(
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
         None,
+        None,
         false,
     )
 }
@@ -1755,6 +1757,7 @@ pub fn build_vocab_partition_from_static_id_maps(
         external_transition_cache,
         partition_local_synthesis_plan,
         prepared_partition_local_tokenizers,
+        None,
         None,
         true,
     );
@@ -1950,6 +1953,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     partition_local_synthesis_plan: Option<&PartitionLocalSynthesisPlan>,
     prepared_partition_local_tokenizers: Option<&PreparedPartitionLocalTokenizers>,
     terminal_filter: Option<&[bool]>,
+    boundary_scope: Option<&scope::BoundaryAnalysisScope>,
     id_map_only: bool,
 ) -> (TerminalDwaFamilies, TerminalDwaPhaseProfile) {
     let total_started_at = Instant::now();
@@ -1997,6 +2001,8 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     let direct_single_terminal = use_global_single_terminal_l1(grammar, ignore_terminal);
     if direct_single_terminal {
         let active_terminals = vec![true];
+        let scoped_initial_state_map =
+            boundary_scope.map(|scope| scope.initial_states().exact_singleton_map());
         if let Some(result) = l1::build_l1_id_map_and_terminal_dwa_mode(
             "single_terminal_global",
             tokenizer,
@@ -2008,7 +2014,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             &active_terminals,
             &flat_trans,
             None,
-            Some(global_max_length_state_map),
+            scoped_initial_state_map.or(Some(global_max_length_state_map)),
             None,
             None,
             None,
@@ -2386,12 +2392,13 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         let label = classify::vocab_partition_label(idx);
         if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_build_entry] label={} tokens={}", label, sub_vocab.len()); }
 
-        let ready_local = prepared_partition_local_tokenizers
-            .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
-            .or_else(|| {
-                partition_local_synthesis_plan
-                    .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
-                    .map(|local| {
+        let ready_local = boundary_scope.is_none().then(|| {
+            prepared_partition_local_tokenizers
+                .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
+                .or_else(|| {
+                    partition_local_synthesis_plan
+                        .and_then(|plan| build_partition_local_tokenizer(tokenizer, sub_vocab, plan))
+                        .map(|local| {
                         let flat_trans: Arc<[u32]> =
                             Arc::from(l1::build_flat_transition_table(&local.tokenizer));
                         let classify_cache = classify::SharedClassifyCache::new();
@@ -2400,13 +2407,14 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                             local.tokenizer.num_terminals(),
                             &classify_cache,
                         );
-                        ReadyPartitionLocalTokenizer {
-                            local,
-                            flat_trans,
-                            classify_cache,
-                        }
-                    })
-            });
+                            ReadyPartitionLocalTokenizer {
+                                local,
+                                flat_trans,
+                                classify_cache,
+                            }
+                        })
+                })
+        }).flatten();
         if !id_map_only && partition_local_synthesis_selected(&label)
             && let Some(ready) = ready_local
         {
@@ -2444,6 +2452,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&local_ti_output_cache),
                 Some(&ready.classify_cache),
                 terminal_filter,
+                None,
             );
             if let Some(parts) = local_result.as_mut()
                 && lift_partition_terminal_dwas_to_global(parts, &local.global_to_local).is_some()
@@ -2494,7 +2503,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
                 &flat_trans,
-                Some(global_max_length_state_map),
+                boundary_scope
+                    .map(|scope| scope.initial_states().exact_singleton_map())
+                    .or(Some(global_max_length_state_map)),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_original_vocab_dfa_cache),
                 Some(&shared_original_vocab_analysis_dfa_cache),
@@ -2502,6 +2513,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_ti_output_cache),
                 Some(&shared_classify_cache),
                 terminal_filter,
+                boundary_scope,
             )
         } else {
             partition::build_partition_id_map_and_terminal_dwa(
@@ -2517,7 +2529,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 &token_path_disallowed_follows,
                 &normalized_token_path_disallowed_follows,
                 &flat_trans,
-                Some(global_max_length_state_map),
+                boundary_scope
+                    .map(|scope| scope.initial_states().exact_singleton_map())
+                    .or(Some(global_max_length_state_map)),
                 Some(&shared_vocab_dfa_cache),
                 Some(&shared_original_vocab_dfa_cache),
                 Some(&shared_original_vocab_analysis_dfa_cache),
@@ -2525,6 +2539,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 Some(&shared_ti_output_cache),
                 Some(&shared_classify_cache),
                 terminal_filter,
+                boundary_scope,
             )
         }
         .map(|pair| (pair, started_at.elapsed().as_secs_f64() * 1000.0));
@@ -2950,6 +2965,86 @@ pub fn build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_leng
         MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map),
         profile,
     )
+}
+
+/// Build one boundary-shard terminal automaton through the ordinary
+/// partition/L1/L2P family pipeline, but with a checked initial-state scope and
+/// an already-restricted original-ID vocabulary.  TI and scope-incompatible
+/// tokenizer materialization shortcuts are disabled by the scoped adapters;
+/// L2P crossing is filtered before determinization and this final exact product
+/// also covers L1/split-L1 families.
+pub fn build_scoped_boundary_id_map_and_terminal_dwa(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    scope: &scope::BoundaryAnalysisScope,
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    let (families, mut profile) =
+        build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
+            tokenizer,
+            vocab,
+            terminal_coloring,
+            false,
+            ignore_terminal,
+            grammar,
+            disallowed_follows,
+            None,
+            flat_trans,
+            scope.initial_states().exact_singleton_map(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(scope),
+            false,
+        );
+
+    let family_count = families.len();
+    let merge_started = Instant::now();
+    let mapped_dwas = families
+        .into_vec()
+        .into_iter()
+        .map(|family| {
+            let (automaton, id_map) = family.into_parts();
+            let dwa = match automaton {
+                TerminalAutomaton::Dwa(dwa) => dwa,
+                TerminalAutomaton::TokenDeterministicNwa(nwa)
+                | TerminalAutomaton::EpsilonNwa(nwa) => {
+                    crate::automata::weighted::determinize::determinize(&nwa)
+                        .expect("scoped boundary terminal family must be acyclic")
+                }
+            };
+            MappedArtifact::new(dwa, id_map)
+        })
+        .collect::<Vec<_>>();
+
+    let reconciled = MappedArtifact::reconcile_vec(mapped_dwas);
+    let (dwas, id_map) = reconciled.into_parts();
+    let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    let mut starts = Vec::new();
+    for dwa in dwas {
+        let body = union.append_with_body(&dwa.to_nwa());
+        starts.extend(body.start_states);
+    }
+    union.set_start_states(starts);
+    let mut dwa = crate::automata::weighted::determinize::determinize(&union)
+        .expect("scoped boundary terminal-family union must be acyclic");
+    if scope.require_crossing() {
+        dwa = l2p::filter_dwa_to_crossing_paths(
+            &dwa,
+            scope.ownership(),
+            scope.start_component(),
+        );
+    }
+    if family_count > 1 || scope.require_crossing() {
+        profile.global_merge_ms += merge_started.elapsed().as_secs_f64() * 1000.0;
+    }
+    (MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map), profile)
 }
 
 pub fn build_id_map_and_terminal_dwa(

@@ -889,6 +889,7 @@ impl DynamicConstraint {
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
+            boundary_candidate_summary: std::sync::OnceLock::new(),
             late_grammar_slots: Vec::new(),
             late_bind_vocab: std::sync::OnceLock::new(),
             scoped_ignore_only_tokens: Vec::new(),
