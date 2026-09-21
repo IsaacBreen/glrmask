@@ -18,6 +18,7 @@ use super::runtime_repeat_product::{
 use super::runtime_unit_repeat::virtual_unit_repeat_state_ids_fit;
 use super::tokenizer::{
     CompressedTransitionEntries, CompressedTransitionSegment, Lexer,
+    TerminalExclusionCertificate, TerminalExclusionResidualState,
     TerminalResidualCoordinates, Tokenizer,
 };
 use super::dfa::DFA;
@@ -5695,6 +5696,7 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
     residual_isolation_classes: Option<&[Option<u32>]>,
     retained_exprs: Arc<[Expr]>,
     adaptive: Option<bool>,
+    collapse_traced_duplicate_coordinates: bool,
 ) -> Option<Tokenizer> {
     if exprs.len() != partitions.len() || exprs.len() != retained_exprs.len() || exprs.is_empty() {
         return None;
@@ -5750,7 +5752,13 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
         terminal_ids: Vec<usize>,
         dfa: Arc<DFA>,
         rows: Vec<Vec<(u32, u32)>>,
-        sources: Vec<(usize, Arc<DFA>, u32)>,
+        sources: Vec<(usize, Arc<DFA>, u32, Option<Arc<TerminalExclusionCertificate>>)>,
+    }
+
+    struct ComplexTerminalSource {
+        source: Arc<DFA>,
+        mapping: Vec<u32>,
+        exclusion: Option<Arc<TerminalExclusionCertificate>>,
     }
 
     let components = grouped
@@ -5817,7 +5825,12 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                 complex_ops[local_group] = Some((exclusions, intersections));
             }
 
-            let (dfa, trace) = compile_with_plan_internal_options(plan, true, true, true);
+            let (dfa, trace) = compile_with_plan_internal_options(
+                plan,
+                true,
+                true,
+                collapse_traced_duplicate_coordinates,
+            );
             let dfa = Arc::new(dfa);
             if visible_groups == 1 {
                 let terminal = terminal_ids[0];
@@ -5833,7 +5846,7 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                     terminal_ids,
                     dfa: Arc::clone(&dfa),
                     rows,
-                    sources: vec![(terminal, dfa, 0)],
+                    sources: vec![(terminal, dfa, 0, None)],
                 });
             }
 
@@ -5895,7 +5908,7 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
             // Any disagreement fails closed to the established projected path.
             let mut complex_sources = (0..visible_groups)
                 .into_par_iter()
-                .map(|local_group| -> Option<Option<(Arc<DFA>, Vec<u32>)>> {
+                .map(|local_group| -> Option<Option<ComplexTerminalSource>> {
                 if simple_sources[local_group].is_some() {
                     return Some(None);
                 }
@@ -5931,10 +5944,11 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                     let mut source = DFA::new(1);
                     source.ensure_group_capacity(1);
                     source.set_group_u8set(0, *dfa.group_id_to_u8set(local_group as u32));
-                    return Some(Some((
-                        Arc::new(source),
-                        vec![u32::MAX; dfa.num_states()],
-                    )));
+                    return Some(Some(ComplexTerminalSource {
+                        source: Arc::new(source),
+                        mapping: vec![u32::MAX; dfa.num_states()],
+                        exclusion: None,
+                    }));
                 }
 
                 let mut raw_state_by_key = FxHashMap::<SmallVec<[u32; 4]>, u32>::default();
@@ -6014,6 +6028,63 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                         return None;
                     }
                 }
+
+                // Optional Layer-2 certificate for the narrow, common shape
+                // `Exclude(left, finite_right)`. The exact product trace gives
+                // us left/right residual coordinates for every representative
+                // of the standalone terminal residual DFA. Failure here drops
+                // only the optimization sidecar; tokenizer correctness does not
+                // depend on this certificate.
+                let exclusion = (|| -> Option<Arc<TerminalExclusionCertificate>> {
+                    if exclusions.len() != 1 || !intersections.is_empty() {
+                        return None;
+                    }
+                    let terminal = *terminal_ids.get(local_group)?;
+                    if !matches!(retained_exprs.get(terminal)?, Expr::Exclude { .. }) {
+                        return None;
+                    }
+                    let left_coordinate = *coordinate_for_logical_group.get(local_group)?;
+                    let right_group = *exclusions.first()? as usize;
+                    let right_coordinate = *coordinate_for_logical_group.get(right_group)?;
+                    if left_coordinate == right_coordinate {
+                        return None;
+                    }
+                    let left_dfa = trace.components.get(left_coordinate)?.terminal_residual_dfa_arc()?;
+                    let right_dfa = trace.components.get(right_coordinate)?.terminal_residual_dfa_arc()?;
+                    let right_max_remaining = single_group_dfa_max_remaining(right_dfa.as_ref())?;
+                    let coordinate_states = partition_coordinate_states.as_ref()?;
+                    let mut residual_states = Vec::with_capacity(raw_representatives.len());
+                    for &representative in &raw_representatives {
+                        let coordinate_row = coordinate_states.get(representative as usize)?;
+                        let left_state = *coordinate_row.get(left_coordinate)?;
+                        if left_state == u32::MAX
+                            || !single_group_dfa_state_is_live(left_dfa.as_ref(), left_state)
+                        {
+                            return None;
+                        }
+                        let raw_right_state = *coordinate_row.get(right_coordinate)?;
+                        let (right_state, max_remaining) = if raw_right_state == u32::MAX
+                            || !single_group_dfa_state_is_live(right_dfa.as_ref(), raw_right_state)
+                        {
+                            (u32::MAX, u32::MAX)
+                        } else {
+                            let remaining = *right_max_remaining
+                                .get(raw_right_state as usize)?
+                                .as_ref()?;
+                            (raw_right_state, remaining)
+                        };
+                        residual_states.push(TerminalExclusionResidualState {
+                            left_state,
+                            right_state,
+                            right_max_remaining: max_remaining,
+                        });
+                    }
+                    Some(Arc::new(TerminalExclusionCertificate::new(
+                        left_dfa,
+                        residual_states,
+                    )?))
+                })();
+
                 if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
                     eprintln!(
                         "[glrmask/profile][product_trace_exceptional_terminal] local_group={} exclusions={} intersections={} source_states={} source_transitions={} source_compile_ms={:.3} mapping_ms={:.3}",
@@ -6026,7 +6097,11 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                         mapping_started.elapsed().as_secs_f64() * 1000.0,
                     );
                 }
-                Some(Some((source, mapping)))
+                Some(Some(ComplexTerminalSource {
+                    source,
+                    mapping,
+                    exclusion,
+                }))
             })
             .collect::<Option<Vec<_>>>()?;
 
@@ -6051,8 +6126,8 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
                         if simple_sources[local_group].is_some() {
                             continue;
                         }
-                        let (_, mapping) = complex_sources[local_group].as_ref()?;
-                        let residual_state = mapping[state];
+                        let complex_source = complex_sources[local_group].as_ref()?;
+                        let residual_state = complex_source.mapping[state];
                         if residual_state != u32::MAX {
                             row.push((terminal_ids[local_group] as u32, residual_state));
                         }
@@ -6068,10 +6143,15 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
             for local_group in 0..visible_groups {
                 let terminal = terminal_ids[local_group];
                 if let Some(source) = simple_sources[local_group].take() {
-                    sources.push((terminal, source, 0));
+                    sources.push((terminal, source, 0, None));
                 } else {
-                    let (source, _) = complex_sources[local_group].take()?;
-                    sources.push((terminal, source, 0));
+                    let complex_source = complex_sources[local_group].take()?;
+                    sources.push((
+                        terminal,
+                        complex_source.source,
+                        0,
+                        complex_source.exclusion,
+                    ));
                 }
             }
             Some(TracedComponent {
@@ -6095,14 +6175,16 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
     rows.push(Vec::new());
     let mut terminal_dfas = vec![None::<Arc<DFA>>; exprs.len()];
     let mut terminal_groups = vec![u32::MAX; exprs.len()];
+    let mut exclusion_certificates = vec![None::<Arc<TerminalExclusionCertificate>>; exprs.len()];
     let mut offset = 1u32;
     for component in components {
-        for (terminal, source, group) in component.sources {
+        for (terminal, source, group, exclusion) in component.sources {
             if terminal >= exprs.len() || terminal_dfas[terminal].is_some() {
                 return None;
             }
             terminal_dfas[terminal] = Some(source);
             terminal_groups[terminal] = group;
+            exclusion_certificates[terminal] = exclusion;
         }
         for local_group in component.dfa.possible_future_group_ids(0).iter() {
             root_futures.set(component.terminal_ids[local_group]);
@@ -6124,13 +6206,13 @@ pub fn build_partitioned_tokenizer_with_product_trace_terminal_residuals(
         return None;
     }
     let mut tokenizer = Regex { dfa: combined }.into_tokenizer(exprs.len() as u32, Some(retained_exprs));
-    tokenizer.set_terminal_residual_coordinates(
-        TerminalResidualCoordinates::from_rows_and_dfa_groups(
-            rows,
-            terminal_dfas,
-            terminal_groups,
-        ),
-    );
+    let coordinates = TerminalResidualCoordinates::from_rows_and_dfa_groups(
+        rows,
+        terminal_dfas,
+        terminal_groups,
+    )
+    .with_exclusion_certificates(exclusion_certificates)?;
+    tokenizer.set_terminal_residual_coordinates(coordinates);
     if std::env::var_os("GLRMASK_PROFILE_L1_IMPLEMENTATIONS").is_some() {
         eprintln!(
             "[glrmask/profile][product_trace_terminal_residual_coordinates] terminals={} states={} elapsed_ms={:.3}",
@@ -14780,6 +14862,52 @@ fn single_group_dfa_has_finite_language(dfa: &DFA) -> bool {
     removed == live_count
 }
 
+/// Exact maximum accepted suffix length from every live state of a
+/// deterministic one-group DFA. Returns `None` if the live subgraph contains a
+/// cycle or inconsistent future metadata, proving that no finite bound is
+/// available. Dead states are represented by `None` entries.
+fn single_group_dfa_max_remaining(dfa: &DFA) -> Option<Vec<Option<u32>>> {
+    fn visit(
+        dfa: &DFA,
+        state: u32,
+        colors: &mut [u8],
+        memo: &mut [Option<u32>],
+    ) -> Option<u32> {
+        let index = state as usize;
+        match *colors.get(index)? {
+            1 => return None,
+            2 => return *memo.get(index)?,
+            _ => {}
+        }
+        if !single_group_dfa_state_is_live(dfa, state) {
+            colors[index] = 2;
+            return None;
+        }
+        colors[index] = 1;
+        let mut best = dfa.finalizers(state).contains(0).then_some(0u32);
+        for (_, target) in dfa.transitions(state) {
+            if !single_group_dfa_state_is_live(dfa, target) {
+                continue;
+            }
+            let remaining = visit(dfa, target, colors, memo)?.checked_add(1)?;
+            best = Some(best.map_or(remaining, |current| current.max(remaining)));
+        }
+        let best = best?;
+        memo[index] = Some(best);
+        colors[index] = 2;
+        Some(best)
+    }
+
+    let mut colors = vec![0u8; dfa.num_states()];
+    let mut memo = vec![None; dfa.num_states()];
+    for state in 0..dfa.num_states() as u32 {
+        if single_group_dfa_state_is_live(dfa, state) && colors[state as usize] == 0 {
+            visit(dfa, state, &mut colors, &mut memo)?;
+        }
+    }
+    Some(memo)
+}
+
 fn product_component_has_finite_language(component: &ProductComponent) -> bool {
     match component {
         ProductComponent::Materialized(dfa)
@@ -17488,6 +17616,7 @@ mod tests {
             None,
             retained,
             Some(false),
+            true,
         )
         .expect("empty complex terminal should not force product-trace fallback");
 
@@ -17516,6 +17645,59 @@ mod tests {
                 "dead terminal unexpectedly appears in residual row {state}",
             );
         }
+    }
+
+    #[test]
+    fn product_trace_retains_finite_exclusion_continuation_certificate() {
+        let open = Expr::Seq(vec![
+            Expr::U8Seq(vec![b'"']),
+            Expr::Repeat {
+                expr: Box::new(Expr::U8Class(U8Set::from_bytes(b"ab"))),
+                min: 0,
+                max: None,
+            },
+            Expr::U8Seq(b"\": ".to_vec()),
+        ]);
+        let excluded = Expr::U8Seq(b"\"ab\": ".to_vec());
+        let exprs = vec![
+            Expr::Exclude {
+                expr: Box::new(open),
+                exclude: Box::new(excluded),
+            },
+            Expr::U8Seq(b"x".to_vec()),
+        ];
+        let partitions = vec![0u32, 0u32];
+        let tokenizer = super::build_partitioned_tokenizer_with_product_trace_terminal_residuals(
+            &exprs,
+            None,
+            &partitions,
+            None,
+            Arc::from(exprs.clone().into_boxed_slice()),
+            Some(false),
+            false,
+        )
+        .expect("finite exclusion should retain product-trace coordinates");
+
+        let certificates = (0..tokenizer.num_states())
+            .filter_map(|state| tokenizer.terminal_exclusion_continuation(state, 0))
+            .collect::<Vec<_>>();
+        assert!(!certificates.is_empty(), "expected exclusion continuation metadata");
+        assert!(
+            certificates
+                .iter()
+                .any(|certificate| certificate.right_max_remaining == Some(6)),
+            "the initial finite exclusion should have an exact six-byte remaining bound: {certificates:?}",
+        );
+        assert!(
+            certificates.iter().any(|certificate| certificate.right_state.is_none()),
+            "a non-matching open-name prefix should kill the finite exclusion while LEFT stays live: {certificates:?}",
+        );
+        assert!(certificates.iter().all(|certificate| {
+            certificate
+                .right_max_remaining
+                .is_none_or(|remaining| remaining <= 6)
+        }));
+        assert!(tokenizer.terminal_exclusion_left_dfa(0).is_some());
     }
 
     #[test]
