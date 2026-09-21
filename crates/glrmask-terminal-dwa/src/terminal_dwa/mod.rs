@@ -3031,10 +3031,12 @@ pub fn build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_leng
 
 /// Build one boundary-shard terminal automaton through the ordinary
 /// partition/L1/L2P family pipeline, but with a checked initial-state scope and
-/// an already-restricted original-ID vocabulary.  TI and scope-incompatible
-/// tokenizer materialization shortcuts are disabled by the scoped adapters;
-/// L2P crossing is filtered before determinization and this final exact product
-/// also covers L1/split-L1 families.
+/// an already-restricted original-ID vocabulary. Scope-incompatible tokenizer
+/// materialization shortcuts are disabled by the scoped adapters. TI is
+/// admitted only for narrow owner/policy-local candidate families and only
+/// after the ordinary exact transport witness is retained. L2P crossing is
+/// filtered before determinization and this final exact product also covers
+/// L1/split-L1 families.
 pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,

@@ -1029,10 +1029,27 @@ fn build_partition_id_map_and_terminal_dwa_impl(
             start_component: scope.start_component(),
         })
     });
+    let scoped_ti_candidate_groups = boundary_scope.map(|scope| {
+        super::l2p::scoped_terminal_interchangeability_candidate_groups(
+            tokenizer,
+            &l2p_mask,
+            grammar,
+            disallowed_follows,
+            ignore_terminal,
+            scope,
+        )
+    });
     let scoped_l2p_options = boundary_scope.map(|scope| super::l2p::L2pShardBuildOptions {
         shared_equivalence: None,
-        // First correctness path: TI transport is not scope-certified yet.
-        skip_ti_discovery: true,
+        // Scoped boundary TI is attempted only for the narrow pre-certified
+        // families above; the ordinary exact witness oracle is still the
+        // authority for every actual merge.
+        skip_ti_discovery: scoped_ti_candidate_groups
+            .as_ref()
+            .is_none_or(|groups| groups.is_empty()),
+        ti_candidate_groups: scoped_ti_candidate_groups
+            .as_ref()
+            .map(Vec::as_slice),
         crossing_filter: scoped_crossing_filter,
         // The parser consumer indexes the scoped Step-1 TSID coordinate.
         skip_core_compact: true,

@@ -8650,6 +8650,30 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
     context: &TiDiscoveryContext,
     ignore_terminal: Option<TerminalID>,
 ) -> TiRoundTransportWitnesses {
+    discover_one_round_with_transport_witnesses_in_context_permitted(
+        tokenizer,
+        active_terminals,
+        context,
+        ignore_terminal,
+        None,
+    )
+}
+
+/// Exact TI discovery restricted to caller-certified candidate families.
+///
+/// `permitted_groups` is only a *pair-discovery* restriction: every accepted
+/// pair still passes the same full tokenizer automorphism/witness proof as the
+/// unrestricted path.  Terminals from different groups are never considered
+/// interchangeable.  On iterative rounds the groups are projected through the
+/// current active representatives, so historical members cannot create a new
+/// cross-family merge later.
+pub fn discover_one_round_with_transport_witnesses_in_context_permitted(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    context: &TiDiscoveryContext,
+    ignore_terminal: Option<TerminalID>,
+    permitted_groups: Option<&[Vec<TerminalID>]>,
+) -> TiRoundTransportWitnesses {
         let candidates = active_terminals
             .iter()
             .enumerate()
@@ -8684,10 +8708,28 @@ pub fn discover_one_round_with_transport_witnesses_in_context(
         let topology_max_outdegree = topology.max_outdegree;
         let topology_byte_count = topology.bytes.len();
         let candidate_filter_started_at = profile_timing.then(Instant::now);
-        let root_candidate_groups = rooted_candidate_groups_from_signatures(
-            &candidates,
-            &context.root_output_signatures,
-        );
+        let root_candidate_groups = if let Some(permitted_groups) = permitted_groups {
+            let candidate_set = candidates.iter().copied().collect::<BTreeSet<_>>();
+            permitted_groups
+                .iter()
+                .flat_map(|group| {
+                    let active = group
+                        .iter()
+                        .copied()
+                        .filter(|terminal| candidate_set.contains(terminal))
+                        .collect::<Vec<_>>();
+                    rooted_candidate_groups_from_signatures(
+                        &active,
+                        &context.root_output_signatures,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            rooted_candidate_groups_from_signatures(
+                &candidates,
+                &context.root_output_signatures,
+            )
+        };
         let root_observed_states = context.root_observed_states;
         let root_candidate_pairs = root_candidate_groups
             .iter()
@@ -12203,6 +12245,38 @@ mod tests {
             terminal_count,
             Some(Arc::from(expressions.into_boxed_slice())),
         )
+    }
+
+    #[test]
+    fn permitted_candidate_groups_still_require_and_retain_exact_witnesses() {
+        let tokenizer = tokenizer(vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+        ]);
+        let mut relevant = [false; 256];
+        relevant[b'a' as usize] = true;
+        let context = TiDiscoveryContext::new(&tokenizer, &relevant);
+        let active = [true, true, true];
+        let permitted = vec![vec![0, 1]];
+        let round = discover_one_round_with_transport_witnesses_in_context_permitted(
+            &tokenizer,
+            &active,
+            &context,
+            None,
+            Some(&permitted),
+        );
+        assert_eq!(round.partition.get(&0), Some(&BTreeSet::from([0, 1])));
+        assert_eq!(round.partition.get(&2), Some(&BTreeSet::from([2])));
+        assert_eq!(round.partition.len(), 2);
+        assert!(
+            round.maps.contains_key(&(0, 1)),
+            "the permitted merge must retain its exact transport witness",
+        );
+        assert!(
+            round.maps.keys().all(|&(left, right)| left != 2 && right != 2),
+            "a terminal outside the permitted family must remain singleton",
+        );
     }
 
     #[test]

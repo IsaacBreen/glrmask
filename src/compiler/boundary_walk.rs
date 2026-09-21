@@ -2676,6 +2676,104 @@ mod tests {
         )
     }
 
+    #[test]
+    fn scoped_witnessed_ti_candidates_are_owner_and_policy_local() {
+        let _env_lock = crate::TEST_ENV_LOCK.lock().expect("test env lock poisoned");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+        let _no_small_skip = EnvVarGuard::set("GLRMASK_P0_TI_SKIP_MAX_TOKENIZER_STATES", "0");
+
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"ax".to_vec()),
+            (5, b"bx".to_vec()),
+            (6, b"xa".to_vec()),
+            (7, b"xc".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start doc;
+                t A ::= "a";
+                t B ::= "b";
+                t C ::= "c";
+                t X ::= "x";
+                nt doc ::= A X | B X | X C;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let grammar = analyzed_grammar(&constraint.table, &constraint.terminal_display_names);
+        let disallowed = compute_disallowed_follows(&grammar);
+        let a = terminal_id(&constraint, "A");
+        let b = terminal_id(&constraint, "B");
+        let c = terminal_id(&constraint, "C");
+        assert_eq!([a, b, c], [0, 1, 2], "fixture relies on declared terminal order");
+
+        // Deliberately split the otherwise identical C into a second immediate
+        // owner.  The TI pre-certificate must never cross that ownership
+        // boundary, even though the lexical expression is byte-identical.
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(&[0, 2], grammar.num_terminals)
+                .expect("two-owner TI fixture"),
+        );
+        let initial = tdwa::scope::InitialStateDomain::from_mask(
+            constraint.tokenizer.num_states() as usize,
+            vec![true; constraint.tokenizer.num_states() as usize],
+        )
+        .expect("full test initial domain");
+        let mut resets = constraint
+            .tokenizer
+            .deterministic_reset_states()
+            .into_iter()
+            .collect::<Vec<_>>();
+        resets.sort_unstable();
+        resets.dedup();
+        let scope = tdwa::scope::BoundaryAnalysisScope::new(
+            initial,
+            resets,
+            ownership,
+            tdwa::scope::ImmediateComponentId(0),
+            true,
+            None,
+        )
+        .expect("TI fixture scope");
+        let active = vec![true; grammar.num_terminals as usize];
+        let groups = tdwa::l2p::scoped_terminal_interchangeability_candidate_groups(
+            &constraint.tokenizer,
+            &active,
+            &grammar,
+            &disallowed,
+            constraint.ignore_terminal,
+            &scope,
+        );
+        assert_eq!(groups, vec![vec![a, b]]);
+
+        // Exercise the actual scoped family pipeline.  If the witnessed A/B
+        // merge activates, strict-reference mode rebuilds this exact scope with
+        // TI suppressed and compares the completed weighted language in
+        // original tokenizer-state/token coordinates.
+        let flat: Arc<[u32]> =
+            Arc::from(tdwa::l1::build_flat_transition_table(&constraint.tokenizer));
+        let coloring = crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring::identity(
+            grammar.num_terminals as usize,
+        );
+        let (_artifact, _profile) = tdwa::build_scoped_boundary_id_map_and_terminal_dwa(
+            &constraint.tokenizer,
+            &vocab,
+            &coloring,
+            constraint.ignore_terminal,
+            &grammar,
+            &disallowed,
+            flat,
+            &scope,
+        );
+    }
+
     /// Step-4c boundary parser table: the control-free spliced composed table
     /// (the Phase-1 object — never the dynamic path's control-bearing
     /// recursive table) with every unbound slot terminal emptied. Controls

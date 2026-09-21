@@ -35084,6 +35084,7 @@ table: &dispatch.table,
                 Some(tdwa::l2p::L2pShardBuildOptions {
                     shared_equivalence: shared.as_ref(),
                     skip_ti_discovery: shared.is_some(),
+                    ti_candidate_groups: None,
                     crossing_filter: nwa_filter,
                     skip_core_compact: false,
                     follow_transparent: None,
