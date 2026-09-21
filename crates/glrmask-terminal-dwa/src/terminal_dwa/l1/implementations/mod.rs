@@ -116,6 +116,10 @@ pub struct BuildInput<'a> {
     pub flat_trans: &'a Arc<[u32]>,
     pub transitions_by_byte: Option<&'a [u32]>,
     pub initial_state_map: Option<&'a ManyToOneIdMap>,
+    /// `u32::MAX` in `initial_state_map` means excluded from the complete
+    /// token-start domain, rather than an unclassified raw state that an L1
+    /// implementation should conservatively reintroduce.
+    pub initial_state_domain_is_exact: bool,
     pub shared_generic_nfa_topology: Option<&'a TokenBoundedAnalysisTopology>,
     pub shared_generic_nfa_trie: Option<&'a TokenBoundedAnalysisTrie>,
     pub subset_parent_order: Option<&'a L1IdentityVocabOrder>,

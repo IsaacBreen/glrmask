@@ -154,6 +154,49 @@ fn compact_columns(rows: &[Vec<u32>], tokens: usize, signatures: usize) -> (Vec<
     (classes, reps)
 }
 
+fn restrict_state_domain<R: Clone>(
+    input: &BuildInput<'_>,
+    state_class: &mut [u32],
+    rows: &mut Vec<R>,
+) {
+    if !input.initial_state_domain_is_exact {
+        return;
+    }
+    let domain = input
+        .initial_state_map
+        .expect("an exact L1 initial-state domain requires a state map");
+    assert_eq!(
+        domain.original_to_internal.len(),
+        state_class.len(),
+        "exact L1 initial-state domain must cover the raw tokenizer coordinate",
+    );
+    for (raw, class) in state_class.iter_mut().enumerate() {
+        if domain.original_to_internal[raw] == u32::MAX {
+            *class = u32::MAX;
+        }
+    }
+
+    let mut remap = vec![u32::MAX; rows.len()];
+    let mut restricted = Vec::new();
+    for &class in state_class.iter() {
+        if class == u32::MAX {
+            continue;
+        }
+        let class = class as usize;
+        assert!(class < rows.len(), "L1 state class lies outside row domain");
+        if remap[class] == u32::MAX {
+            remap[class] = restricted.len() as u32;
+            restricted.push(rows[class].clone());
+        }
+    }
+    for class in state_class {
+        if *class != u32::MAX {
+            *class = remap[*class as usize];
+        }
+    }
+    *rows = restricted;
+}
+
 pub(super) fn finish(
     input: BuildInput<'_>,
     aliases: &[Vec<u32>],
@@ -197,14 +240,23 @@ pub(super) fn finish_compacted(
     compact_ms: f64,
     total_ms: impl FnOnce() -> f64,
 ) -> Option<Finished> {
+    restrict_state_domain(&input, &mut state_class, &mut rows);
+    if rows.is_empty() {
+        return None;
+    }
     let initial = input.tokenizer.initial_state_id() as usize;
-    let initial_class = state_class[initial];
-    if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
-        rows.push(rows[initial_class as usize].clone());
-        state_class[initial] = (rows.len() - 1) as u32;
+    if state_class.get(initial).copied().is_some_and(|class| class != u32::MAX) {
+        let initial_class = state_class[initial];
+        if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
+            rows.push(rows[initial_class as usize].clone());
+            state_class[initial] = (rows.len() - 1) as u32;
+        }
     }
     let mut state_reps = vec![u32::MAX; rows.len()];
     for (raw, &class) in state_class.iter().enumerate() {
+        if class == u32::MAX {
+            continue;
+        }
         state_reps[class as usize] = state_reps[class as usize].min(raw as u32);
     }
     let tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(
@@ -350,15 +402,24 @@ pub(super) fn finish_sparse_terminal_rows(
     total_ms: impl FnOnce() -> f64,
 ) -> Option<Finished> {
     let state_map_started = Instant::now();
+    restrict_state_domain(&input, &mut state_class, &mut sparse_rows);
+    if sparse_rows.is_empty() {
+        return None;
+    }
     let initial = input.tokenizer.initial_state_id() as usize;
-    let initial_class = state_class[initial];
-    if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
-        sparse_rows.push(sparse_rows[initial_class as usize].clone());
-        state_class[initial] = (sparse_rows.len() - 1) as u32;
+    if state_class.get(initial).copied().is_some_and(|class| class != u32::MAX) {
+        let initial_class = state_class[initial];
+        if state_class.iter().filter(|&&class| class == initial_class).count() > 1 {
+            sparse_rows.push(sparse_rows[initial_class as usize].clone());
+            state_class[initial] = (sparse_rows.len() - 1) as u32;
+        }
     }
 
     let mut state_reps = vec![u32::MAX; sparse_rows.len()];
     for (raw, &class) in state_class.iter().enumerate() {
+        if class == u32::MAX {
+            continue;
+        }
         state_reps[class as usize] = state_reps[class as usize].min(raw as u32);
     }
     let tokenizer_states = ManyToOneIdMap::from_original_to_internal_with_representatives(

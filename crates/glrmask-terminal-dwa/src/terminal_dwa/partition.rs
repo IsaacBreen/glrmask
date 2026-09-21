@@ -1012,6 +1012,17 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         .flatten();
 
     let effective_l2p_initial_state_map = initial_state_map;
+    if boundary_scope.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        if let Some(map) = initial_state_map {
+            eprintln!(
+                "SCOPED_PART_INPUT partition={} o2i={:?} classes={:?} reps={:?}",
+                partition_label,
+                map.original_to_internal,
+                map.internal_to_originals,
+                map.representative_original_ids,
+            );
+        }
+    }
     let scoped_crossing_filter = boundary_scope.and_then(|scope| {
         scope.require_crossing().then_some(super::l2p::L2pCrossingFilter {
             ownership: scope.ownership(),
@@ -1026,6 +1037,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         // The parser consumer indexes the scoped Step-1 TSID coordinate.
         skip_core_compact: true,
         follow_transparent: scope.follow_transparent(),
+        initial_state_domain_is_exact: true,
     });
 
     // The split-off L1 branch observes only the L2P terminal set. Large lexer
@@ -1137,6 +1149,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        false,
                         id_map_only,
                     );
                     if let Some(part) = result.as_mut() {
@@ -1167,6 +1180,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        boundary_scope.is_some(),
                         id_map_only,
                     )
                 };
@@ -1219,7 +1233,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         shared_l1_token_trie.as_deref(),
                         initial_state_map,
                         id_map_only,
-                        None,
+                        boundary_scope.map(|scope| scope.initial_states().keep_raw()),
                         scoped_l2p_options.as_ref(),
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1347,7 +1361,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     shared_l1_token_trie.as_deref(),
                                     None,
                                     id_map_only,
-                                    None,
+                                    boundary_scope.map(|scope| scope.initial_states().keep_raw()),
                                     scoped_l2p_options.as_ref(),
                                 );
                                 if let Some(part) = result.as_mut() {
@@ -1385,7 +1399,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     shared_l1_token_trie.as_deref(),
                                     branch_initial_state_map,
                                     id_map_only,
-                                    None,
+                                    boundary_scope.map(|scope| scope.initial_states().keep_raw()),
                                     scoped_l2p_options.as_ref(),
                                 )
                             };
@@ -1429,6 +1443,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                 None,
                                 shared_l1_token_trie.as_deref(),
                                 shared_l1_parent_order.as_deref(),
+                                boundary_scope.is_some(),
                                 id_map_only,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -1700,6 +1715,7 @@ pub(super) fn build_partition_vocab_equivalence(
             flat_trans,
             transitions_by_byte: l1_transitions_by_byte,
             initial_state_map,
+            initial_state_domain_is_exact: false,
             shared_generic_nfa_topology: None,
             shared_generic_nfa_trie: None,
             subset_parent_order: None,
@@ -1787,6 +1803,7 @@ pub(super) fn build_partition_vocab_equivalence(
                 flat_trans,
                 transitions_by_byte: l1_transitions_by_byte,
                 initial_state_map,
+                initial_state_domain_is_exact: false,
                 shared_generic_nfa_topology: None,
                 shared_generic_nfa_trie: None,
                 subset_parent_order: None,

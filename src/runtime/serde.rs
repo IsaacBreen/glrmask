@@ -9004,6 +9004,50 @@ mod tests {
     }
 
     #[test]
+    fn current_constraint_artifact_preserves_boundary_candidate_summary() {
+        let constraint = tiny_constraint();
+        constraint
+            .boundary_candidate_summary
+            .set(crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: crate::runtime::BoundaryCandidateFingerprint {
+                    algorithm_version: 7,
+                    component_semantics: [1; 32],
+                    public_interface: [2; 32],
+                    vocabulary: [3; 32],
+                },
+                tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
+                    vec![0u32, 2u32].into_boxed_slice(),
+                )),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            })
+            .unwrap();
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(loaded.boundary_candidate_summary.get().is_none());
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        let summary = loaded
+            .boundary_candidate_summary
+            .get()
+            .expect("summary must materialize from CMS5");
+        match summary {
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint,
+                tokens,
+                precision,
+            } => {
+                assert_eq!(fingerprint.algorithm_version, 7);
+                assert_eq!(fingerprint.component_semantics, [1; 32]);
+                assert_eq!(fingerprint.public_interface, [2; 32]);
+                assert_eq!(fingerprint.vocabulary, [3; 32]);
+                assert_eq!(tokens.canonical_ids(loaded.token_bytes_iter()), vec![0, 2]);
+                assert_eq!(*precision, crate::runtime::SummaryPrecision::RegularUpperBound);
+            }
+            other => panic!("unexpected materialized summary: {other:?}"),
+        }
+    }
+
+    #[test]
     fn current_constraint_artifact_preserves_composition_reset_tokens() {
         let mut constraint = tiny_constraint();
         constraint.ensure_composition_reset_tokens_by_terminal();

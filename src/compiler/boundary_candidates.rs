@@ -15,7 +15,7 @@ use crate::runtime::{
     SummaryPrecision, SummaryUnavailable,
 };
 
-const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 1;
+const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 2;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
 const DEFAULT_MAX_BYTE_STEPS: usize = 2_000_000;
 
@@ -386,10 +386,6 @@ fn fingerprint(
     semantics.update(
         &bincode::serialize(exprs).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
     );
-    semantics.update(
-        &bincode::serialize(&constraint.tokenizer)
-            .map_err(|_| SummaryUnavailable::MalformedMetadata)?,
-    );
     semantics.update(&constraint.ignore_terminal.unwrap_or(u32::MAX).to_le_bytes());
     for terminal in &constraint.table.skip_terminals {
         semantics.update(&terminal.to_le_bytes());
@@ -416,6 +412,20 @@ fn fingerprint(
         interface.update(name.as_bytes());
         interface.update(&terminal.to_le_bytes());
     }
+    let mut specials = constraint
+        .special_token_terminals
+        .iter()
+        .filter(|special| {
+            constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+                || constraint.token_bytes_for_id(special.token_id).is_none()
+        })
+        .map(|special| (special.terminal_id, special.token_id))
+        .collect::<Vec<_>>();
+    specials.sort_unstable();
+    for (terminal, token) in specials {
+        interface.update(&terminal.to_le_bytes());
+        interface.update(&token.to_le_bytes());
+    }
 
     Ok(BoundaryCandidateFingerprint {
         algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
@@ -431,6 +441,16 @@ fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
         .values()
         .copied()
         .chain(constraint.late_grammar_slots.iter().map(|slot| slot.terminal_id))
+        .chain(
+            constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| {
+                    constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                })
+                .map(|special| special.terminal_id),
+        )
         .collect()
 }
 
@@ -504,6 +524,29 @@ fn compute_summary(
         input_tokens: vocab.len(),
         ..BoundaryCandidateStats::default()
     };
+    if constraint.uses_compact_segmented_parser_runtime() {
+        match constraint.recursive_parser_layout() {
+            Ok(Some(layout))
+                if constraint.tokenizer.num_states() != layout.total_tokenizer_states =>
+            {
+                return (
+                    BoundaryCandidateSummary::Unknown {
+                        reason: SummaryUnavailable::Deferred,
+                    },
+                    stats,
+                );
+            }
+            Err(_) => {
+                return (
+                    BoundaryCandidateSummary::Unknown {
+                        reason: SummaryUnavailable::MalformedMetadata,
+                    },
+                    stats,
+                );
+            }
+            Ok(_) => {}
+        }
+    }
     let rules = match constraint.retained_table_rules() {
         Ok(rules) if !rules.is_empty() => rules,
         _ => {
@@ -711,5 +754,48 @@ mod tests {
         let mut out = BTreeSet::new();
         add_descendant_ids(&entries, 2, &mut out);
         assert_eq!(out, BTreeSet::from([11, 12]));
+    }
+
+    #[test]
+    fn root_completion_requires_proper_prefix_and_preserves_duplicate_ids() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"ab".to_vec()),
+            (2, b"ab".to_vec()),
+            (3, b"b".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt document ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let (ids, stats) = boundary_candidate_ids(&constraint, &vocab);
+        assert_eq!(ids, Some(vec![1, 2]));
+        assert_eq!(stats.input_tokens, 4);
+        assert_eq!(stats.candidate_tokens, 2);
+    }
+
+    #[test]
+    fn live_out_of_vocab_special_slot_is_an_outward_portal() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"m".to_vec()),
+            (1, b"mg".to_vec()),
+            (2, b"mx".to_vec()),
+            (3, b"g".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(998);
+                nt document ::= "m" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
+        assert_eq!(ids, Some(vec![1, 2]));
     }
 }

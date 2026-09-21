@@ -160,6 +160,23 @@ impl InitialStateDomain {
     }
 }
 
+/// Preserve an already-proved scoped quotient for represented token-start
+/// states while giving every excluded raw state its own continuation-only
+/// TSID. Appending singletons keeps all existing TSID names stable, so weights
+/// built over the scoped domain need no remap. Root seeding remains separately
+/// controlled by [`InitialStateDomain`].
+pub fn complete_with_continuation_singletons(map: &mut ManyToOneIdMap) {
+    for raw in 0..map.original_to_internal.len() {
+        if map.original_to_internal[raw] != u32::MAX {
+            continue;
+        }
+        let internal = map.internal_to_originals.len() as u32;
+        map.original_to_internal[raw] = internal;
+        map.internal_to_originals.push(vec![raw as u32]);
+        map.representative_original_ids.push(raw as u32);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BoundaryAnalysisScope {
     initial_states: InitialStateDomain,
@@ -280,5 +297,18 @@ mod tests {
         assert_eq!(ownership.owner_of_terminal(0), Some(ImmediateComponentId(0)));
         assert_eq!(ownership.owner_of_terminal(6), Some(ImmediateComponentId(1)));
         assert_eq!(ownership.owner_of_terminal(8), Some(ImmediateComponentId(1)));
+    }
+
+    #[test]
+    fn continuation_completion_preserves_scoped_classes() {
+        let domain = InitialStateDomain::from_mask(
+            5,
+            vec![false, true, true, false, false],
+        )
+        .unwrap();
+        let mut map = domain.exact_singleton_map().clone();
+        complete_with_continuation_singletons(&mut map);
+        assert_eq!(map.original_to_internal, vec![2, 0, 1, 3, 4]);
+        assert_eq!(map.internal_to_originals, vec![vec![1], vec![2], vec![0], vec![3], vec![4]]);
     }
 }

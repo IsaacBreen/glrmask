@@ -18499,14 +18499,14 @@ pub(crate) fn merged_leaf_ignore_terminals(
     }
 }
 
-/// Recursively clear boundary shards inside nested segmented components.
+/// Recursively clear boundary shards inside a nested component selected for
+/// the conservative legacy replacement lane.
 ///
-/// A nested static link publishes one shard per top-level component over the
-/// full leaf-expanded link context; the outer block shard covers block-inner
-/// crossings, so inner overlays must carry no shards. Inner compositions may
-/// have installed exact dynamic (or static) shards of their own; leaving them
-/// would trip the strict-static trap (or double-cover) on a claimed static
-/// path. Operates on this composition's own overlay copies (`Arc::make_mut`
+/// That lane builds the outer shard over full vocabulary with per-leaf
+/// ownership, so it explicitly subsumes the replaced block's inner repair.
+/// Certified-static blocks do not use this helper: their inner static shards
+/// remain load-bearing and coexist with the summary-restricted outer block
+/// shard. Operates on this composition's own overlay copies (`Arc::make_mut`
 /// detaches shared children), never on the caller's input constraints.
 pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint) {
     let Some(overlay) = constraint.static_dynamic_overlay.as_mut() else {
@@ -18526,6 +18526,43 @@ pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint
         }
         clear_nested_segmented_boundary_shards(inner);
     }
+}
+
+/// Clear retained nested boundary shards only for top-level components whose
+/// outer walk deliberately used the legacy leaf-crossing predicate. Components
+/// compiled under true block ownership retain their already-static inner
+/// shards; those retained contributions are the proof that lets the outer
+/// repair omit block-internal crossings.
+pub(crate) fn clear_selected_nested_segmented_boundary_shards(
+    constraint: &mut Constraint,
+    selected: &BitSet,
+) -> Result<(), String> {
+    if selected.is_zero() {
+        return Ok(());
+    }
+    let overlay = constraint
+        .static_dynamic_overlay
+        .as_mut()
+        .ok_or_else(|| "nested shard clearing requires a segmented overlay".to_string())?;
+    for index in selected.iter() {
+        let component = overlay
+            .segmented_parser_components
+            .get_mut(index)
+            .ok_or_else(|| format!("nested shard clearing references component {index} outside overlay"))?;
+        let inner = std::sync::Arc::make_mut(&mut component.constraint);
+        if inner.static_dynamic_overlay.is_none() {
+            continue;
+        }
+        install_published_static_boundary_shards(
+            inner
+                .static_dynamic_overlay
+                .as_mut()
+                .expect("nested segmented component requires overlay for shard clearing"),
+            Vec::new(),
+        )?;
+        clear_nested_segmented_boundary_shards(inner);
+    }
+    Ok(())
 }
 
 fn merged_original_token_ids(
@@ -22170,13 +22207,10 @@ fn compose_constraints_owned_parent_impl(
                             Some(&walk.boundary_tokens_by_start_component),
                         );
                     }
-                    // Nested static links cover block-inner crossings with the
-                    // outer block shards; inner overlays must carry no shards
-                    // (their own exact dynamic/static shards would trip the
-                    // strict-static trap on a claimed static path).
-                    if walk.has_nested_components {
-                        clear_nested_segmented_boundary_shards(&mut result.constraint);
-                    }
+                    clear_selected_nested_segmented_boundary_shards(
+                        &mut result.constraint,
+                        &walk.clear_nested_boundary_components,
+                    )?;
                 }
             }
         }
@@ -28147,7 +28181,12 @@ table: &child.table,
             for &token in &node.path {
                 st.commit_token(token).expect("static replay");
             }
-            if st.mask() != node.mask {
+            let actual = st.mask();
+            if actual != node.mask {
+                eprintln!(
+                    "[glrmask/test][public_nested_static_mismatch] path={:?} dynamic={:?} static={:?}",
+                    node.path, node.mask, actual,
+                );
                 mismatches += 1;
             }
         }
@@ -35048,6 +35087,7 @@ table: &dispatch.table,
                     crossing_filter: nwa_filter,
                     skip_core_compact: false,
                     follow_transparent: None,
+                    initial_state_domain_is_exact: false,
                 })
             } else {
                 None

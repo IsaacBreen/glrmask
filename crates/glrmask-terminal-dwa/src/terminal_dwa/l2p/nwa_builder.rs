@@ -1536,19 +1536,21 @@ fn seed_root_nodes_inner(
         .iter_representative_ids()
         .enumerate()
     {
-        if let Some(keep) = keep_raw_state {
-            let intersects = id_map.tokenizer_states.internal_to_originals[internal_tsid]
+        let seed_state = if let Some(keep) = keep_raw_state {
+            let Some(&member) = id_map.tokenizer_states.internal_to_originals[internal_tsid]
                 .iter()
-                .any(|raw| keep.get(*raw as usize).copied().unwrap_or(false));
-            if !intersects {
+                .find(|&&raw| keep.get(raw as usize).copied().unwrap_or(false))
+            else {
                 continue;
-            }
-        }
+            };
+            member
+        } else {
+            representative_state
+        };
         let root = nwa.add_state();
         let start_weight = all_token_weight(internal_tsid as u32, id_map.max_internal_token_id());
         nwa.add_epsilon(start_state, root, start_weight);
-        if id_map.tokenizer_states.internal_to_originals[internal_tsid]
-            .contains(&tokenizer.initial_state_id())
+        if seed_state == tokenizer.initial_state_id()
             && let Some(dispatch_roots) = tokenizer.deterministic_dispatch_roots()
         {
             for &dispatch_root in dispatch_roots {
@@ -1556,7 +1558,10 @@ fn seed_root_nodes_inner(
             }
             continue;
         }
-        roots_by_tokenizer_state.merge(representative_state, &[root]);
+        debug_assert!(keep_raw_state.is_none_or(|keep| {
+            keep.get(seed_state as usize).copied().unwrap_or(false)
+        }));
+        roots_by_tokenizer_state.merge(seed_state, &[root]);
     }
 
     roots_by_tokenizer_state

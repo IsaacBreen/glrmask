@@ -2018,6 +2018,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             None,
             None,
             None,
+            boundary_scope.is_some(),
             id_map_only,
         ) {
             let total_ms = total_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -2619,6 +2620,26 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         && tokenizer.num_states() <= proven_disjoint_immediate_merge_max_tokenizer_states();
     for (result, idx) in partition_results {
         if let Some((parts, _)) = result {
+            if boundary_scope.is_some()
+                && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some()
+            {
+                for (name, part) in [
+                    ("part_l1", parts.l1.as_ref()),
+                    ("part_l2p", parts.l2p.as_ref()),
+                    ("part_split_l1", parts.l2p_single_l1.as_ref()),
+                ] {
+                    if let Some(part) = part {
+                        eprintln!(
+                            "SCOPED_PART idx={} name={} o2i={:?} classes={:?} reps={:?}",
+                            idx,
+                            name,
+                            part.id_map.tokenizer_states.original_to_internal,
+                            part.id_map.tokenizer_states.internal_to_originals,
+                            part.id_map.tokenizer_states.representative_original_ids,
+                        );
+                    }
+                }
+            }
             if let Some(l1) = parts.l1 {
                 if l1_partition_seen[idx] {
                     l1_token_domains_proven_disjoint = false;
@@ -2674,6 +2695,41 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
 
     let did_global_merge = l1_pairs.len() > 1 || l2p_pairs.len() > 1;
     let family_merge_started_at = Instant::now();
+    let merge_scoped_family = |pairs: Vec<LocalIdMapTerminalDwa>| {
+        debug_assert!(boundary_scope.is_some());
+        if let [only] = pairs.as_slice() {
+            return (
+                MappedArtifact::new(
+                    TerminalAutomaton::Dwa(only.dwa.clone()),
+                    only.id_map.clone(),
+                ),
+                TerminalDwaPhaseProfile::default(),
+            );
+        }
+        let started_at = Instant::now();
+        let mapped = pairs
+            .into_iter()
+            .map(|pair| MappedArtifact::new(pair.dwa, pair.id_map))
+            .collect::<Vec<_>>();
+        let reconciled = MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer(mapped);
+        let (dwas, id_map) = reconciled.into_parts();
+        let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+        let mut starts = Vec::new();
+        for dwa in dwas {
+            let body = union.append_with_body(&dwa.to_nwa());
+            starts.extend(body.start_states);
+        }
+        union.set_start_states(starts);
+        let dwa = crate::automata::weighted::determinize::determinize(&union)
+            .expect("scoped terminal family union must be acyclic");
+        (
+            MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map),
+            TerminalDwaPhaseProfile {
+                global_merge_ms: started_at.elapsed().as_secs_f64() * 1000.0,
+                ..TerminalDwaPhaseProfile::default()
+            },
+        )
+    };
     let merge_id_maps_only = |pairs: Vec<LocalIdMapTerminalDwa>| {
         let refs = pairs.iter().map(|pair| &pair.id_map).collect::<Vec<_>>();
         let id_map = merge::merge_internal_id_maps_only(
@@ -2693,6 +2749,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             (!l1_pairs.is_empty()).then(|| {
                 if id_map_only {
                     return merge_id_maps_only(l1_pairs);
+                }
+                if boundary_scope.is_some() {
+                    return merge_scoped_family(l1_pairs);
                 }
                 let family = if l1_token_domains_proven_disjoint {
                     merge::merge_id_maps_and_terminal_dwas_proven_disjoint(
@@ -2718,6 +2777,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             (!l2p_pairs.is_empty()).then(|| {
                 if id_map_only {
                     return merge_id_maps_only(l2p_pairs);
+                }
+                if boundary_scope.is_some() {
+                    return merge_scoped_family(l2p_pairs);
                 }
                 let token_nwa_merge = if l2p_token_domains_proven_disjoint {
                     merge::try_merge_id_maps_and_token_deterministic_nwa_proven_disjoint(
@@ -2983,6 +3045,14 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     flat_trans: Arc<[u32]>,
     scope: &scope::BoundaryAnalysisScope,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    if std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        eprintln!(
+            "SCOPED_INPUT o2i={:?} classes={:?} reps={:?}",
+            scope.initial_states().exact_singleton_map().original_to_internal,
+            scope.initial_states().exact_singleton_map().internal_to_originals,
+            scope.initial_states().exact_singleton_map().representative_original_ids,
+        );
+    }
     let mut tokenizer_reset_states = tokenizer
         .deterministic_reset_states()
         .into_iter()
@@ -3015,6 +3085,20 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
             false,
         );
 
+    if std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        for (name, family) in [("l1", families.l1.as_ref()), ("l2p", families.l2p.as_ref())] {
+            if let Some(family) = family {
+                eprintln!(
+                    "SCOPED_FAMILY name={} o2i={:?} classes={:?} reps={:?}",
+                    name,
+                    family.id_map().tokenizer_states.original_to_internal,
+                    family.id_map().tokenizer_states.internal_to_originals,
+                    family.id_map().tokenizer_states.representative_original_ids,
+                );
+            }
+        }
+    }
+
     let family_count = families.len();
     let merge_started = Instant::now();
     let mapped_dwas = families
@@ -3034,7 +3118,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
         })
         .collect::<Vec<_>>();
 
-    let reconciled = MappedArtifact::reconcile_vec(mapped_dwas);
+    let reconciled = MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer(mapped_dwas);
     let (dwas, id_map) = reconciled.into_parts();
     let mut union = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let mut starts = Vec::new();

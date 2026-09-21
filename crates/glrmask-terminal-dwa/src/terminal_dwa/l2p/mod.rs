@@ -645,6 +645,12 @@ pub struct L2pShardBuildOptions<'a> {
     /// canonical global ignore is tracked separately through
     /// `ignore_terminal`, which controls more than follow pruning.
     pub follow_transparent: Option<&'a BitSet>,
+    /// The incoming state map is the complete checked token-start domain, not
+    /// an incomplete quotient whose unmapped raw states should be reintroduced.
+    /// Each represented class is exact for this boundary build (the scoped
+    /// path currently supplies singletons), so the preliminary
+    /// restricted-observation pass must preserve that sparse domain.
+    pub initial_state_domain_is_exact: bool,
 }
 
 /// Run only the Step 1 equivalence analysis for a shard build, with the exact
@@ -1165,8 +1171,21 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         .as_ref()
         .map(|seed| &seed.state_map)
         .or(initial_state_map);
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        if let Some(map) = equivalence_initial_state_map {
+            eprintln!(
+                "SCOPED_L2P_EQ_INPUT partition={} ti_seed={} o2i={:?} classes={:?} reps={:?}",
+                partition_label,
+                ti_restricted_observation_seed.is_some(),
+                map.original_to_internal,
+                map.internal_to_originals,
+                map.representative_original_ids,
+            );
+        }
+    }
     let equivalence_initial_state_map_has_stable_restricted_observation =
-        ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
+        shard_options.is_some_and(|options| options.initial_state_domain_is_exact)
+        || ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
             equivalence_active_groups
                 .is_some_and(|active| active == seed.active_terminals.as_ref())
                 && relevant_bytes == seed.relevant_bytes
@@ -1180,7 +1199,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // run itself (same tokenizer, vocab, follows, grammar scope, active set),
     // computed once per link — a cache, not a shortcut, so the note above
     // still holds. The id_map boundary below reports 0 ms for the reuse.
-    let (simplified_id_map, equiv_profile) = match shared_equivalence {
+    let (mut simplified_id_map, equiv_profile) = match shared_equivalence {
         Some(shared) => (shared.id_map.clone(), shared.profile.clone()),
         None => analyze_equivalences(
             partition_label,
@@ -1212,6 +1231,20 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             prebuilt_token_trie,
         ),
     };
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        eprintln!(
+            "SCOPED_L2P_EQ partition={} o2i={:?} classes={:?} reps={:?}",
+            partition_label,
+            simplified_id_map.tokenizer_states.original_to_internal,
+            simplified_id_map.tokenizer_states.internal_to_originals,
+            simplified_id_map.tokenizer_states.representative_original_ids,
+        );
+    }
+    if shard_options.is_some_and(|options| options.initial_state_domain_is_exact) {
+        super::scope::complete_with_continuation_singletons(
+            &mut simplified_id_map.tokenizer_states,
+        );
+    }
 
     if id_map_only {
         let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1848,6 +1881,15 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         (core_dwa, core_id_map, core_dwa_stats_after_compact)
     };
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        eprintln!(
+            "SCOPED_L2P_OUT partition={} o2i={:?} classes={:?} reps={:?}",
+            partition_label,
+            id_map.tokenizer_states.original_to_internal,
+            id_map.tokenizer_states.internal_to_originals,
+            id_map.tokenizer_states.representative_original_ids,
+        );
+    }
     let ti_post_dwa_total_ms = ti_post_dwa_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);

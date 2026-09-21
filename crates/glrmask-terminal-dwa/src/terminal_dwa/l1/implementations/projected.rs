@@ -3803,14 +3803,16 @@ fn build_finite_projected_impl(
                 .or_default()
                 .extend_from_slice(&state_map.internal_to_originals[class]);
         }
-        // Defensive support for deliberately partial maps.  Production L1 maps
-        // are total, but an unmapped raw state must retain exact scalar behavior.
-        for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
-            if class == u32::MAX {
-                starts
-                    .entry(scanner.start(raw as u32))
-                    .or_default()
-                    .push(raw as u32);
+        // An incomplete quotient conservatively retains unmapped raw states.
+        // Under an exact boundary domain, however, unmapped means excluded.
+        if !input.initial_state_domain_is_exact {
+            for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
+                if class == u32::MAX {
+                    starts
+                        .entry(scanner.start(raw as u32))
+                        .or_default()
+                        .push(raw as u32);
+                }
             }
         }
     } else {
@@ -4528,7 +4530,11 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
                 .enumerate()
                 .map(|(raw, &class)| {
                     if class == u32::MAX {
-                        projected.root_sparse_row(raw as u32)
+                        if input.initial_state_domain_is_exact {
+                            Vec::new()
+                        } else {
+                            projected.root_sparse_row(raw as u32)
+                        }
                     } else {
                         representative_rows[class as usize].clone()
                     }
@@ -5109,12 +5115,14 @@ fn build_finite_projected_vocab_only(
                 .or_default()
                 .extend_from_slice(&state_map.internal_to_originals[class]);
         }
-        for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
-            if class == u32::MAX {
-                starts
-                    .entry(scanner.start(raw as u32))
-                    .or_default()
-                    .push(raw as u32);
+        if !input.initial_state_domain_is_exact {
+            for (raw, &class) in state_map.original_to_internal.iter().enumerate() {
+                if class == u32::MAX {
+                    starts
+                        .entry(scanner.start(raw as u32))
+                        .or_default()
+                        .push(raw as u32);
+                }
             }
         }
     } else {

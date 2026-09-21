@@ -518,6 +518,36 @@ where
         acc
     }
 
+    /// Reconcile artifacts over a deliberately sparse tokenizer-state domain.
+    /// Raw states unmapped by every input remain unmapped in the common map.
+    /// Ordinary compilation intentionally uses [`Self::reconcile_vec`], where
+    /// tokenizer coverage is global; boundary-scoped compilation uses this
+    /// variant so out-of-component raw states cannot re-enter through the
+    /// reconciler as an artificial `u32::MAX` class.
+    pub fn reconcile_vec_preserving_unmapped_tokenizer(
+        mut inputs: Vec<MappedArtifact<T>>,
+    ) -> MappedArtifact<Vec<T>> {
+        assert!(
+            !inputs.is_empty(),
+            "MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer called with empty inputs"
+        );
+        let common = {
+            let maps = inputs.iter().map(MappedArtifact::id_map).collect::<Vec<_>>();
+            reconcile::build_common_internal_id_map_preserving_unmapped_tokenizer(&maps)
+        };
+        let mut artifacts = Vec::with_capacity(inputs.len());
+        for mut input in inputs.drain(..) {
+            if !same_internal_id_maps(input.id_map(), &common) {
+                let (artifact, local) = input.parts_mut();
+                let mut weights = artifact.weight_refs_mut();
+                reconcile::remap_weights_into_existing_common(&mut weights, local, &common);
+                *local = common.clone();
+            }
+            artifacts.push(input.into_artifact());
+        }
+        MappedArtifact::new(artifacts, common)
+    }
+
     pub fn split_vec(self) -> Vec<MappedArtifact<T>> {
         let (artifacts, id_map) = self.into_parts();
         artifacts
