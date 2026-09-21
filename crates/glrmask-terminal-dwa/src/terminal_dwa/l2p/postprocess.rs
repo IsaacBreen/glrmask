@@ -725,6 +725,11 @@ pub fn collapse_always_allowed(
 /// Apply disallowed-follow constraints by subtracting a follow-pair DFA from
 /// the NWA. Takes the pre-computed `disallowed_follows` map and `num_terminals`.
 ///
+/// `ignore_terminal` is the canonical global ignore. `follow_transparent`
+/// carries the composed-ids of scoped-ignore terminals whose labels must be
+/// transparent to follow-pair pruning exactly like the canonical ignore; their
+/// scope is enforced later by the parser-shard scoped identity transfers.
+///
 /// Borrow each nonempty source row directly. The earlier dense normalization
 /// copied one `BitSet` per grammar terminal even though this product only needs
 /// indexed membership lookups; a pointer table preserves those lookups while
@@ -734,6 +739,7 @@ pub fn apply_disallowed_follow_constraints(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     num_terminals: usize,
     ignore_terminal: Option<TerminalID>,
+    follow_transparent: Option<&BitSet>,
 ) {
     let rows: Vec<Option<&BitSet>> = (0..num_terminals)
         .map(|terminal| {
@@ -746,13 +752,14 @@ pub fn apply_disallowed_follow_constraints(
         return;
     }
 
-    *nwa = subtract_disallowed_follows_direct(nwa, &rows, ignore_terminal);
+    *nwa = subtract_disallowed_follows_direct(nwa, &rows, ignore_terminal, follow_transparent);
 }
 
 fn subtract_disallowed_follows_direct(
     nwa: &NWA,
     disallowed_follows: &[Option<&BitSet>],
     ignore_terminal: Option<TerminalID>,
+    follow_transparent: Option<&BitSet>,
 ) -> NWA {
     type ProdState = (u32, Option<u32>);
 
@@ -800,9 +807,15 @@ fn subtract_disallowed_follows_direct(
             // parser-DWA composition can consume their identity template. They
             // remain transparent to the within-token follow-pair automaton:
             // they must neither be constrained by a predecessor nor become one.
-            let next_previous_terminal = if label < 0
+            // The canonical global ignore is `ignore_terminal`; scoped-ignore
+            // terminals arrive through `follow_transparent` with the same
+            // transparency (their scope is enforced by the parser-shard scoped
+            // identity transfers, not by follow pruning).
+            let transparent = label < 0
                 || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
-            {
+                || follow_transparent
+                    .is_some_and(|set| label >= 0 && set.contains(label as usize));
+            let next_previous_terminal = if transparent {
                 previous_terminal
             } else if (label as usize) < disallowed_follows.len() {
                 let terminal = label as usize;
@@ -862,12 +875,67 @@ mod tests {
             &disallowed,
             2,
             Some(ignore),
+            None,
         );
 
         let dwa = determinize(&nwa).unwrap();
         assert!(
             !dwa.eval_word(&[ignore as i32, real_terminal as i32]).is_empty(),
             "an initial labelled ignore must be transparent to follow pruning"
+        );
+    }
+
+    /// A scoped-ignore terminal threaded through `follow_transparent` must be
+    /// transparent to within-token follow pruning exactly like the canonical
+    /// ignore: it is neither constrained by a predecessor nor becomes one, its
+    /// label is retained, and genuinely disallowed non-ignore follow pairs are
+    /// still removed.
+    #[test]
+    fn scoped_follow_transparent_ignore_is_not_pruned_and_not_a_predecessor() {
+        // Terminals: X=0, WS=1 (scoped ignore), a=2, bad=3.
+        let x: u32 = 0;
+        let ws: u32 = 1;
+        let a: u32 = 2;
+        let bad: u32 = 3;
+        let mut nwa = NWA::new(1, 0);
+        let start = nwa.add_state();
+        let after_x = nwa.add_state();
+        let after_ws = nwa.add_state();
+        let accept = nwa.add_state();
+        let after_x_bad = nwa.add_state();
+        let bad_accept = nwa.add_state();
+        nwa.set_start_states(vec![start]);
+        nwa.add_transition(start, x as i32, after_x, Weight::all());
+        nwa.add_transition(after_x, ws as i32, after_ws, Weight::all());
+        nwa.add_transition(after_ws, a as i32, accept, Weight::all());
+        nwa.add_transition(start, x as i32, after_x_bad, Weight::all());
+        nwa.add_transition(after_x_bad, bad as i32, bad_accept, Weight::all());
+        nwa.set_final_weight(accept, Weight::all());
+        nwa.set_final_weight(bad_accept, Weight::all());
+
+        // X forbids WS (the scoped ignore) and bad; WS forbids a. Without
+        // follow transparency the X -> WS edge is pruned (predecessor
+        // constraint); if WS still became the predecessor the WS -> a edge
+        // would be pruned instead.
+        let mut x_row = BitSet::new(4);
+        x_row.set(ws as usize);
+        x_row.set(bad as usize);
+        let mut ws_row = BitSet::new(4);
+        ws_row.set(a as usize);
+        let disallowed = BTreeMap::from([(x, x_row), (ws, ws_row)]);
+
+        let mut transparent = BitSet::new(4);
+        transparent.set(ws as usize);
+        apply_disallowed_follow_constraints(&mut nwa, &disallowed, 4, None, Some(&transparent));
+
+        let dwa = determinize(&nwa).unwrap();
+        assert!(
+            !dwa.eval_word(&[x as i32, ws as i32, a as i32]).is_empty(),
+            "scoped-ignore WS must stay on the X WS a path and must not become a follow predecessor",
+        );
+        assert!(
+            dwa.eval_word(&[x as i32, bad as i32]).is_empty(),
+            "a genuinely disallowed X -> bad follow pair must still be removed",
         );
     }
 }

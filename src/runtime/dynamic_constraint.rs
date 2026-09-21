@@ -3730,6 +3730,40 @@ impl<'a> DynamicConstraintState<'a> {
 mod tests {
     use super::*;
 
+    /// Pins `TEST_COMPAT_MODE` to JsonSchema for full-JSON tests, restoring
+    /// the prior mode on drop. Mirrors `EnvVarGuard`'s compat handling in the
+    /// json_schema tests; the mode cell is the live control (env only seeds
+    /// fresh threads), so no env change is needed.
+    struct CompatModeGuard {
+        original: crate::import::json_schema::string::JsonStringCompatMode,
+    }
+
+    impl CompatModeGuard {
+        fn json_schema() -> Self {
+            Self::set_mode(crate::import::json_schema::string::JsonStringCompatMode::JsonSchema)
+        }
+
+        fn native() -> Self {
+            Self::set_mode(
+                crate::import::json_schema::string::JsonStringCompatMode::LlGuidanceNative,
+            )
+        }
+
+        fn set_mode(mode: crate::import::json_schema::string::JsonStringCompatMode) -> Self {
+            use crate::import::json_schema::string::TEST_COMPAT_MODE;
+            let original = TEST_COMPAT_MODE.with(|cell| cell.get());
+            TEST_COMPAT_MODE.with(|cell| cell.set(mode));
+            Self { original }
+        }
+    }
+
+    impl Drop for CompatModeGuard {
+        fn drop(&mut self) {
+            use crate::import::json_schema::string::TEST_COMPAT_MODE;
+            TEST_COMPAT_MODE.with(|cell| cell.set(self.original));
+        }
+    }
+
     mod projected_quotient_fixture {
         use crate as glrmask;
 
@@ -3924,7 +3958,51 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_json_schema_bounded_pattern_rejects_escaped_spellings_in_native_mode() {
+        // Native-default counterpart to the JsonSchema-mode escaped-spelling
+        // tests: the LlGuidanceNative lexical language deliberately does not
+        // materialize `\uXXXX` spellings (production default for automata
+        // size); raw spellings keep working. Same schema as the bounded
+        // liveness-oracle test; representative single pin, not a clone set.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _compat = CompatModeGuard::native();
+        let vocab = Vocab::new(vec![
+            (0, b"\"".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"aa".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"\\".to_vec()),
+            (5, b"u".to_vec()),
+            (6, b"0".to_vec()),
+            (7, b"6".to_vec()),
+            (8, b"1".to_vec()),
+        ]);
+        let schema = r#"{
+            "type": "string",
+            "pattern": "^(?:a|bb)+$",
+            "minLength": 2,
+            "maxLength": 5000
+        }"#;
+        let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+
+        let accepts = |bytes: &[u8]| {
+            let mut state = dynamic.start();
+            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        };
+        assert!(accepts(br#""aa""#));
+        assert!(!accepts(br#""\u0061\u0061""#));
+        assert!(!accepts(br#""a\u0061""#));
+    }
+
+    #[test]
     fn dynamic_json_schema_bounded_pattern_uses_exact_code_liveness_oracle() {
+        // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _compat = CompatModeGuard::json_schema();
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
@@ -4200,6 +4278,11 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_allof_bounded_patterns_share_exact_code_liveness_oracle() {
+        // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _compat = CompatModeGuard::json_schema();
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
@@ -4262,6 +4345,11 @@ mod tests {
 
     #[test]
     fn dynamic_json_schema_bounded_unicode_pattern_keeps_raw_and_escaped_spellings_exact() {
+        // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _compat = CompatModeGuard::json_schema();
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
             (1, "é".as_bytes().to_vec()),
@@ -7102,16 +7190,260 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_v20_round_trips_nonempty_projected_terminal_quotients() {
+    fn dynamic_v20_round_trips_minimal_nonempty_projected_quotients() {
+        // Serialization-unit intent: a minimal deterministic nonempty
+        // projected-quotient sidecar round-trips through save/load/transfer
+        // and preserves mask semantics exactly. The quotients come from the
+        // existing per-terminal containment builder (same exactness proofs as
+        // the shared-component selector) on a two-literal fixture — no
+        // reset-dispatcher sharing, no optimizer-selection assumptions, no
+        // JSON lowering, no compat-mode sensitivity.
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"d".to_vec()),
+            (4, b"e".to_vec()),
+            (5, b"f".to_vec()),
+            (6, b"g".to_vec()),
+        ]);
+        let mut constraint = DynamicConstraint::from_glrm_grammar(
+            "start start; t A ::= \"abcdef\"; t B ::= \"abcdeg\"; nt start ::= A | B;",
+            &vocab,
+        )
+        .unwrap();
+        let twin = constraint.clone();
+        assert!(
+            !twin
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared(),
+            "reference twin must be quotient-free (unprepared)"
+        );
+        assert!(
+            !twin
+                .inner
+                .dynamic_mask_vocab
+                .has_projected_terminal_quotients(),
+            "reference twin must be quotient-free (empty)"
+        );
+        let quotients = constraint
+            .inner
+            .tokenizer
+            .build_terminal_projected_quotients_for_containment();
+        assert_eq!(
+            quotients.len(),
+            2,
+            "both terminals of the minimal fixture must yield exact quotients"
+        );
+        constraint
+            .inner
+            .dynamic_mask_vocab
+            .set_projected_terminal_quotients(quotients);
+        assert!(
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared()
+        );
+        assert!(
+            constraint
+                .inner
+                .dynamic_mask_vocab
+                .has_projected_terminal_quotients()
+        );
+        let expected = constraint
+            .inner
+            .dynamic_mask_vocab
+            .projected_terminal_quotients_for_artifact();
+        assert!(!expected.is_empty());
+
+        // See the Snowplow sidecar test below: this is a test-only mutation of
+        // otherwise immutable post-build persistence metadata.
+        constraint.external_vocab_artifact_cache = None;
+        constraint.cache_external_vocab_artifact_for_save();
+
+        let saved = constraint.save();
+        assert_eq!(
+            u16::from_le_bytes([saved[8], saved[9]]),
+            DYNAMIC_CONSTRAINT_VERSION,
+        );
+        let loaded = DynamicConstraint::load(&saved).unwrap();
+        assert!(
+            loaded
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared()
+        );
+        assert!(
+            loaded
+                .inner
+                .dynamic_mask_vocab
+                .has_projected_terminal_quotients()
+        );
+        assert_eq!(
+            bincode::serialize(
+                &loaded
+                    .inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_for_artifact()
+            )
+            .unwrap(),
+            bincode::serialize(&expected).unwrap(),
+        );
+
+        let transfer = constraint.clone().into_saved();
+        assert_eq!(
+            u16::from_le_bytes([transfer[8], transfer[9]]),
+            DYNAMIC_TRANSFER_VERSION,
+        );
+        let transferred = DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
+        assert!(
+            transferred
+                .inner
+                .dynamic_mask_vocab
+                .projected_terminal_quotients_prepared()
+        );
+        assert!(
+            transferred
+                .inner
+                .dynamic_mask_vocab
+                .has_projected_terminal_quotients()
+        );
+        assert_eq!(
+            bincode::serialize(
+                &transferred
+                    .inner
+                    .dynamic_mask_vocab
+                    .projected_terminal_quotients_for_artifact()
+            )
+            .unwrap(),
+            bincode::serialize(&expected).unwrap(),
+        );
+
+        // Semantic exactness: prepared quotients must not change the accepted
+        // language or any mask. Differential of the quotient-free twin against
+        // the quotient-bearing original plus both reloaded artifacts over
+        // accept/reject paths.
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![0],
+            vec![0, 1],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![0, 1, 2, 3, 4, 6],
+            vec![1],
+            vec![0, 0],
+        ];
+        for path in &paths {
+            let mut states = [
+                twin.start(),
+                constraint.start(),
+                loaded.start(),
+                transferred.start(),
+            ];
+            let mut failed = false;
+            for &token in path {
+                let masks: Vec<_> = states.iter().map(|state| state.mask()).collect();
+                for (index, mask) in masks.iter().enumerate().skip(1) {
+                    assert_eq!(
+                        *mask, masks[0],
+                        "mask agreement at {path:?} before token {token} (state {index})",
+                    );
+                }
+                let results: Vec<bool> = states
+                    .iter_mut()
+                    .map(|state| state.commit_token(token).is_ok())
+                    .collect();
+                for (index, result) in results.iter().enumerate().skip(1) {
+                    assert_eq!(
+                        *result, results[0],
+                        "commit agreement at {path:?} token {token} (state {index})",
+                    );
+                }
+                if !results[0] {
+                    // All four agree on rejection; the API's post-failure
+                    // guarantee is `is_rejected`, so assert that (not masks or
+                    // acceptance) and stop this path.
+                    for (index, state) in states.iter().enumerate() {
+                        assert!(
+                            state.is_rejected(),
+                            "rejected state {index} at {path:?} token {token} must report is_rejected",
+                        );
+                    }
+                    failed = true;
+                    break;
+                }
+            }
+            if failed {
+                continue;
+            }
+            // Every commit succeeded: compare the post-path masks (initial and
+            // after-every-successful-commit coverage) and acceptance.
+            let masks: Vec<_> = states.iter().map(|state| state.mask()).collect();
+            for (index, mask) in masks.iter().enumerate().skip(1) {
+                assert_eq!(
+                    *mask, masks[0],
+                    "final mask agreement at {path:?} (state {index})",
+                );
+            }
+            let accepting: Vec<bool> =
+                states.iter().map(|state| state.is_accepting()).collect();
+            for (index, value) in accepting.iter().enumerate().skip(1) {
+                assert_eq!(
+                    *value, accepting[0],
+                    "acceptance agreement at {path:?} (state {index})",
+                );
+            }
+        }
+        // Explicit acceptance/rejection pins on every artifact (not only
+        // cross-artifact equality), so the differential above is not vacuous.
+        for (label, artifact) in [
+            ("twin", &twin),
+            ("original", &constraint),
+            ("loaded", &loaded),
+            ("transferred", &transferred),
+        ] {
+            for path in [vec![0u32, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4, 6]] {
+                let mut state = artifact.start();
+                for &token in &path {
+                    state.commit_token(token).unwrap();
+                }
+                assert!(state.is_accepting(), "{label} must accept {path:?}");
+            }
+            let mut state = artifact.start();
+            assert!(
+                !state.is_accepting(),
+                "{label} must not accept the empty prefix"
+            );
+            assert!(
+                state.commit_token(1).is_err(),
+                "{label} must reject a leading b"
+            );
+            let mut state = artifact.start();
+            state.commit_token(0).unwrap();
+            assert!(
+                !state.is_accepting(),
+                "{label} must not accept the proper prefix [a]"
+            );
+            assert!(
+                state.commit_token(0).is_err(),
+                "{label} must reject the aa divergence"
+            );
+        }
+    }
+
+    #[test]
+    fn dynamic_v20_round_trips_snowplow_optimizer_selected_quotients() {
         let _env_lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let (schema, vocab) = projected_quotient_fixture::schema_and_vocab();
-        // This is wire-format coverage for a nonempty projected-quotient sidecar,
-        // not a contract on the production dynamic JSON importer's current lexer
-        // partitioning. The dynamic importer now isolates this fixture's large
-        // terminals, so use the ordinary lowering here to retain the historical
-        // shared deterministic component that exercises quotient serialization.
+        // Integration tolerance: whatever the shared-component optimizer
+        // selects for Snowplow (currently nothing — the lexer isolates this
+        // fixture's large terminals), the sidecar round-trips and masks agree
+        // end to end. Nonempty wire-format coverage lives in the minimal
+        // unit test above; this test must NOT pin the optimizer's selection.
+        // Do not restore production sharing just to make Snowplow nonempty.
         let schema_value: serde_json::Value = serde_json::from_str(schema).unwrap();
         let named = crate::import::json_schema::schema_to_named_grammar(&schema_value).unwrap();
         let mut factored = crate::grammar::factoring::factor_named_grammar(named);
@@ -7127,10 +7459,6 @@ mod tests {
             .inner
             .tokenizer
             .build_shared_component_terminal_projected_quotients(256);
-        assert!(
-            !quotients.is_empty(),
-            "Snowplow fixture must exercise the production retained projected-quotient path"
-        );
         constraint
             .inner
             .dynamic_mask_vocab
@@ -7139,7 +7467,6 @@ mod tests {
             .inner
             .dynamic_mask_vocab
             .projected_terminal_quotients_for_artifact();
-        assert!(!expected.is_empty());
 
         // The private mutation above occurs after public finalization froze the
         // canonical transfer artifact. Refresh it explicitly for wire-format

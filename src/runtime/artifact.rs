@@ -9517,9 +9517,12 @@ impl ParserComponentTableSource for SegmentedParserComponentTables<'_> {
 
     #[inline]
     fn component_ignore_terminal(&self, component: u32) -> Option<u32> {
-        self.components
-            .get(component as usize)
-            .and_then(|component| component.constraint.ignore_terminal)
+        let component = self.components.get(component as usize)?;
+        // A composed component table already owns its scoped ignores in its
+        // rows (`skip_terminals` provenance); provider-level Identity would
+        // shadow those rows. Only raw component tables need it here.
+        let ignore = component.constraint.ignore_terminal?;
+        (!component.constraint.table.skip_terminals.contains(&ignore)).then_some(ignore)
     }
 }
 

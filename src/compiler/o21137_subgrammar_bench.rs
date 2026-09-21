@@ -427,6 +427,9 @@ fn build_parent(
     )
 }
 
+// The legacy owned-parent path is intentionally unsupported; this benchmark
+// now returns that error rather than silently switching backends.
+#[allow(deprecated)]
 fn compose_named_parent_owned(
     parent: Constraint,
     children: &[(&str, &Constraint)],

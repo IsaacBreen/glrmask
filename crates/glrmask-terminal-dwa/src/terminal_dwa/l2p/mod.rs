@@ -636,6 +636,14 @@ pub struct L2pShardBuildOptions<'a> {
     /// stack-indexed crossing viability differs, which makes a parser DWA
     /// compiled over the compacted tsids over-admit.
     pub skip_core_compact: bool,
+    /// Composed-ids of scoped-ignore terminals that must be transparent to the
+    /// within-token follow-pair pruning: they must neither be constrained by a
+    /// predecessor nor become one, exactly like the canonical ignore. Their
+    /// labels are retained (not elided) so the parser-shard scoped identity
+    /// transfers can still consume them; scope enforcement stays there. The
+    /// canonical global ignore is tracked separately through
+    /// `ignore_terminal`, which controls more than follow pruning.
+    pub follow_transparent: Option<&'a BitSet>,
 }
 
 /// Run only the Step 1 equivalence analysis for a shard build, with the exact
@@ -1417,6 +1425,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 equivalence_disallowed_follows,
                 grammar.num_terminals as usize,
                 ignore_terminal,
+                shard_options.and_then(|options| options.follow_transparent),
             );
             let disallowed_ms = disallowed_started_at.elapsed().as_secs_f64() * 1000.0;
             let nwa_states_after_disallowed = nwa.states().len();
@@ -2022,6 +2031,11 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         // tokenizer-state and token coordinates. Global token-position strict
         // mode validates C against the pre-C raw construction; TI strict mode
         // validates only TI against the same C-seeded construction.
+        // The baseline must inherit the caller's build scope (id_map_only, seed
+        // filter, shard options) verbatim: comparing a shard-scoped candidate
+        // against a full-scope rebuild is a guaranteed spurious mismatch
+        // (unseeded states, dropped shared equivalence, missing crossing
+        // filter, re-enabled TI discovery and core compaction).
         let strict_baseline_started_at = Instant::now();
         let baseline = {
             let _strict_reference_suppress =
@@ -2042,7 +2056,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let _suppress_vocab_reuse_single_target_disallowed =
                 vocab_reuse_single_target_disallowed_strict_reference
                     .then(SuppressVocabReuseSingleTargetDisallowed::new);
-            build_l2p_id_map_and_terminal_dwa(
+            build_l2p_id_map_and_terminal_dwa_mode(
                 partition_label,
                 tokenizer,
                 vocab,
@@ -2063,6 +2077,9 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 flat_trans,
                 prebuilt_token_trie,
                 initial_state_map,
+                id_map_only,
+                seed_state_filter,
+                shard_options,
             )
             .expect("terminal interchangeability baseline L2P build unexpectedly returned None")
         };

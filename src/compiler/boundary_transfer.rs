@@ -38,7 +38,7 @@ use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted_u32::dwa::DWA;
-use crate::automata::weighted_u32::minimize::{minimize, reverse_hashcons_owned};
+use crate::automata::weighted_u32::minimize::reverse_hashcons_owned;
 use crate::automata::weighted_u32::minimize_acyclic::{
     PointwiseClassOrder, minimize_acyclic_owned_with_pointwise_class_order,
 };
@@ -60,7 +60,7 @@ use crate::compiler::stages::templates::characterize::{
 };
 use super::boundary_walk::boundary_accepted_tokens;
 use crate::compiler::stages::equiv_types::InternalIdMap;
-use crate::ds::weight::{Weight, shared_rangeset};
+use crate::ds::weight::{SharedTokenSet, Weight, shared_rangeset};
 use crate::grammar::flat::TerminalID;
 use crate::runtime::Constraint;
 
@@ -834,14 +834,222 @@ fn finish_fragment_key(num_terminals: u32, link_index: usize) -> Result<Terminal
         .ok_or_else(|| "signed link finish fragment key overflow".to_string())
 }
 
+/// Identity that covers every component's scoped parser-state interval.
+///
+/// A uniformly globally erasable ignore may be skipped while the parser is
+/// inside *any* component, so its identity relation must range over the whole
+/// scoped state space: the union of each component's `identity_transfer`,
+/// re-scoped with that component's injection, not just the owning component's
+/// interval.
+fn build_global_ignore_identity(
+    context: &SignedLinkContext,
+) -> Result<TerminalCharacterization, String> {
+    let mut escapes = Vec::new();
+    for component in 0..context.state_offsets.len() as u32 {
+        let table = context.component_table(component)?;
+        let injection = context.injection(component)?;
+        let scoped = scope_characterization(&identity_transfer(table.num_states), &injection)?;
+        escapes.extend(scoped.escapes);
+    }
+    Ok(TerminalCharacterization {
+        escapes,
+        reduces: Vec::new(),
+        nt_escapes: Vec::new(),
+        nt_rereduces: Vec::new(),
+        all_nts: BTreeSet::new(),
+    })
+}
+
+/// Resolve the exact scoped transfer for one emitted composed terminal.
+///
+/// A component-standalone ignore terminal resolves to Identity: owner-scoped
+/// when the ignore is scope-dependent, or the combined global identity when
+/// `context.global_ignores` certifies the ignore is uniformly globally
+/// erasable. `global_ignore_identity` caches that combined relation across the
+/// emitted terminals of one library build.
+fn scoped_transfer_for_terminal(
+    context: &SignedLinkContext,
+    terminal: TerminalID,
+    global_ignore_identity: &mut Option<TerminalCharacterization>,
+) -> Result<TerminalCharacterization, String> {
+    if context.unbound_slots.contains(&terminal) {
+        return Ok(empty_transfer());
+    }
+    let (owner, local) = context.terminal_owner(terminal)?;
+    let table = context.component_table(owner)?;
+    let owner_ignore =
+        context.ignore_terminals.get(owner as usize).copied().flatten() == Some(local);
+    if owner_ignore {
+        if !context.global_ignores {
+            // Scope-dependent ignore: identity only inside the owning
+            // component's interval.
+            let injection = context.injection(owner)?;
+            return scope_characterization(&identity_transfer(table.num_states), &injection);
+        }
+        // Uniformly globally erasable ignore: identity across every component
+        // scope, built once per library.
+        if global_ignore_identity.is_none() {
+            *global_ignore_identity = Some(build_global_ignore_identity(context)?);
+        }
+        return Ok(global_ignore_identity
+            .as_ref()
+            .expect("global ignore identity was just built")
+            .clone());
+    }
+    if local >= table.num_terminals {
+        return Err(format!(
+            "signed link terminal {terminal} resolves to local {local} outside component {owner} domain {}",
+            table.num_terminals,
+        ));
+    }
+    let mut local_selected = vec![false; table.num_terminals as usize];
+    local_selected[local as usize] = true;
+    let characterized = characterize_selected_terminals_for_terminal_count(
+        table,
+        table.num_terminals,
+        &local_selected,
+    );
+    match characterized.get(&local) {
+        Some(characterization) => {
+            let injection = context.injection(owner)?;
+            scope_characterization(characterization, &injection)
+        }
+        None => {
+            // No characterization entry: exact only when the terminal has no
+            // parser action anywhere in the local table.
+            let has_action =
+                (0..table.num_states).any(|state| table.action(state, local).is_some());
+            if has_action {
+                return Err(format!(
+                    "signed link terminal {terminal} (component {owner} local {local}) has parser actions but no characterization",
+                ));
+            }
+            Ok(empty_transfer())
+        }
+    }
+}
+
+/// Test-only: format one transfer characterization's escapes/reduces.
+#[cfg(test)]
+fn format_characterization(transfer: &TerminalCharacterization) -> (Vec<String>, Vec<String>) {
+    let escapes = transfer
+        .escapes
+        .iter()
+        .map(|escape| format!("R{:?} P{:?}", escape.pop, escape.pushes))
+        .collect::<Vec<_>>();
+    let reduces = transfer
+        .reduces
+        .iter()
+        .map(|reduce| format!("R{:?} -> nt{}", reduce.pop, reduce.nonterminal))
+        .collect::<Vec<_>>();
+    (escapes, reduces)
+}
+
+/// Test-only: dump the resolved scoped transfer (pop/push escapes) for each
+/// emitted terminal of a shard library. Enabled by
+/// `GLRMASK_DEBUG_TRANSFER_LIBRARY`.
+#[cfg(test)]
+fn trace_transfer_characterization(
+    context: &SignedLinkContext,
+    terminal: TerminalID,
+    transfer: &TerminalCharacterization,
+) {
+    if std::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
+        return;
+    }
+    let owner = context.terminal_owner(terminal).ok();
+    let kind = if transfer.escapes.is_empty()
+        && transfer.reduces.is_empty()
+        && transfer.nt_escapes.is_empty()
+        && transfer.nt_rereduces.is_empty()
+    {
+        "empty"
+    } else {
+        "characterized"
+    };
+    let (escapes, reduces) = format_characterization(transfer);
+    eprintln!(
+        "[transfer-lib] global_ignores={} terminal={terminal} owner={owner:?} kind={kind} escapes={escapes:?} reduces={reduces:?}",
+        context.global_ignores,
+    );
+}
+
+/// Test-only: dump one Entry/Finish control fragment's pop/push escapes.
+/// Enabled by `GLRMASK_DEBUG_TRANSFER_LIBRARY`.
+#[cfg(test)]
+fn trace_control_fragment(label: &str, transfer: &TerminalCharacterization) {
+    if std::env::var_os("GLRMASK_DEBUG_TRANSFER_LIBRARY").is_none() {
+        return;
+    }
+    let (escapes, reduces) = format_characterization(transfer);
+    eprintln!("[transfer-ctl] {label} escapes={escapes:?} reduces={reduces:?}");
+}
+
+/// Test-only: enumerate bounded accepted stack words of the compiled shard
+/// parser DWA, keeping only paths whose edge-weight intersection with the final
+/// weight is non-empty. Labels are encoded parser states. Enabled by
+/// `GLRMASK_DEBUG_BOUNDARY_WORDS`.
+#[cfg(test)]
+fn trace_signed_shard_parser_words(
+    start_component: u32,
+    parser_dwa: &DWA,
+    total_scoped_states: u32,
+) {
+    if std::env::var_os("GLRMASK_DEBUG_BOUNDARY_WORDS").is_none() {
+        return;
+    }
+    const MAX_LEN: usize = 6;
+    const MAX_WORDS: usize = 128;
+    let mut accepted = Vec::<Vec<u32>>::new();
+    let mut stack = vec![(
+        parser_dwa.start_state(),
+        crate::ds::weight::Weight::all(),
+        Vec::<u32>::new(),
+    )];
+    while let Some((state_id, path_weight, word)) = stack.pop() {
+        let Some(state) = parser_dwa.states().get(state_id as usize) else {
+            continue;
+        };
+        if let Some(final_weight) = state.final_weight.as_ref()
+            && !path_weight.intersection(final_weight).is_empty()
+        {
+            accepted.push(word.clone());
+            if accepted.len() >= MAX_WORDS {
+                break;
+            }
+        }
+        if word.len() >= MAX_LEN {
+            continue;
+        }
+        for (label, target, edge_weight) in state.transitions.entries() {
+            if label < 0 {
+                continue;
+            }
+            let next_weight = path_weight.intersection(edge_weight);
+            if next_weight.is_empty() {
+                continue;
+            }
+            let mut next_word = word.clone();
+            next_word.push(label as u32);
+            stack.push((target, next_weight, next_word));
+        }
+    }
+    accepted.sort();
+    accepted.dedup();
+    eprintln!(
+        "[signed-parser-words component={start_component}] total_scoped_states={total_scoped_states} accepted_stack_words(len<={MAX_LEN})={accepted:?}"
+    );
+}
+
 /// Build the scoped fragment library for one shard's emitted terminal set.
 ///
 /// Every emitted composed terminal resolves to exactly one scoped transfer:
 /// the owner's local characterization (empty relation when the terminal has
 /// no parser action anywhere — verified by scan, never assumed), the Identity
-/// transfer for a component-standalone ignore terminal (the provider applies
-/// Identity before consulting table rows), or the empty relation for unbound
-/// slots. A resolvable-but-missing characterization is a loud error.
+/// transfer for a component-standalone ignore terminal (owner-scoped, or the
+/// combined global identity when the ignore is uniformly globally erasable),
+/// or the empty relation for unbound slots. A resolvable-but-missing
+/// characterization is a loud error.
 pub(crate) fn build_fragment_library(
     context: &SignedLinkContext,
     emitted: &[bool],
@@ -850,6 +1058,9 @@ pub(crate) fn build_fragment_library(
     let templates_started = Instant::now();
     let mut combined: BTreeMap<TerminalID, TerminalCharacterization> = BTreeMap::new();
     let mut ordinary_terms = 0usize;
+    // Uniformly globally erasable ignores share one scoped identity covering
+    // every component; build it at most once per library.
+    let mut global_ignore_identity: Option<TerminalCharacterization> = None;
     for (terminal, demanded) in emitted.iter().enumerate() {
         if !demanded {
             continue;
@@ -861,57 +1072,11 @@ pub(crate) fn build_fragment_library(
                 context.num_terminals,
             ));
         }
-        if context.unbound_slots.contains(&terminal) {
-            combined.insert(terminal, empty_transfer());
-            ordinary_terms += 1;
-            continue;
-        }
-        let (owner, local) = context.terminal_owner(terminal)?;
-        let table = context.component_table(owner)?;
-        if !context.global_ignores
-            && context.ignore_terminals.get(owner as usize).copied().flatten() == Some(local)
-        {
-            let injection = context.injection(owner)?;
-            combined.insert(
-                terminal,
-                scope_characterization(&identity_transfer(table.num_states), &injection)?,
-            );
-            ordinary_terms += 1;
-            continue;
-        }
-        if local >= table.num_terminals {
-            return Err(format!(
-                "signed link terminal {terminal} resolves to local {local} outside component {owner} domain {}",
-                table.num_terminals,
-            ));
-        }
-        let mut local_selected = vec![false; table.num_terminals as usize];
-        local_selected[local as usize] = true;
-        let characterized = characterize_selected_terminals_for_terminal_count(
-            table,
-            table.num_terminals,
-            &local_selected,
-        );
-        let local_characterization = characterized.get(&local);
-        let scoped = match local_characterization {
-            Some(characterization) => {
-                let injection = context.injection(owner)?;
-                scope_characterization(characterization, &injection)?
-            }
-            None => {
-                // No characterization entry: exact only when the terminal has
-                // no parser action anywhere in the local table.
-                let has_action = (0..table.num_states)
-                    .any(|state| table.action(state, local).is_some());
-                if has_action {
-                    return Err(format!(
-                        "signed link terminal {terminal} (component {owner} local {local}) has parser actions but no characterization",
-                    ));
-                }
-                empty_transfer()
-            }
-        };
-        combined.insert(terminal, scoped);
+        let transfer =
+            scoped_transfer_for_terminal(context, terminal, &mut global_ignore_identity)?;
+        #[cfg(test)]
+        trace_transfer_characterization(context, terminal, &transfer);
+        combined.insert(terminal, transfer);
         ordinary_terms += 1;
     }
     let mut entry_keys = Vec::with_capacity(context.links.len());
@@ -938,12 +1103,28 @@ pub(crate) fn build_fragment_library(
         let scoped_child_start = child_injection.scope_state(link.child_start)?;
         let entry = instantiate_entry(scoped_slot, scoped_child_start, link.parent_component);
         let entry_key = entry_fragment_key(context.num_terminals, link_index)?;
+        #[cfg(test)]
+        trace_control_fragment(
+            &format!(
+                "entry link{link_index} parent{} slot{} child_start{}",
+                link.parent_component, link.slot_terminal, scoped_child_start,
+            ),
+            &entry.characterization,
+        );
         combined.insert(entry_key, entry.characterization);
         entry_keys.push(entry_key);
         // Child Finish under this link's endpoint policy.
         let child_table = context.component_table(link.child_component)?;
         let (finish, has_local_eof_effects) =
             instantiate_finish(child_table, link, &child_injection)?;
+        #[cfg(test)]
+        trace_control_fragment(
+            &format!(
+                "finish link{link_index} child{} return_pop{}",
+                link.child_component, link.return_pop,
+            ),
+            &finish.characterization,
+        );
         if has_local_eof_effects {
             return Err(format!(
                 "signed static link unsupported: child component {} performs ordinary local EOF stack work; composing through it needs outer control-choice points",
@@ -1067,24 +1248,148 @@ fn weight_cell_count(weight: &Weight) -> (usize, usize) {
 /// dropping internal tokens whose originals are all outside it. Outer TSID
 /// ranges are preserved exactly (emptied ranges are dropped, adjacent equal
 /// ranges merged by the remap primitive).
+///
+/// Test-only reference: production uses `project_weight_to_kept_in_place`.
+#[cfg(test)]
 fn project_weight_to_kept(weight: &Weight, kept: &[bool]) -> Weight {
     weight.remap_token_sets_preserving_tsid_ranges(|tokens| {
-        let mut dropped = false;
-        for token in tokens.iter() {
-            if !kept.get(token as usize).copied().unwrap_or(true) {
-                dropped = true;
-                break;
-            }
-        }
-        if !dropped {
-            return tokens.clone();
-        }
-        let filtered: RangeSetBlaze<u32> = tokens
-            .iter()
-            .filter(|token| kept.get(*token as usize).copied().unwrap_or(true))
-            .collect();
-        shared_rangeset(filtered)
+        project_inner_token_set(tokens, kept, None)
     })
+}
+
+/// Per-shard memo for inner token-set projection results. `kept` is fixed
+/// for the shard, so the result depends only on the input set. Keyed by
+/// `Arc::as_ptr` with BOTH Arcs owned per entry (prevents ABA address
+/// reuse). Created once before the projection loop, dropped right after.
+/// The memo OWNS an immutable borrow of the shard's `kept` mask: cross-mask
+/// cache reuse is unrepresentable (a different mask needs a new memo).
+/// Memory bound (structural, not a latency guarantee): at most
+/// `PROJECTION_MEMO_CAP` entries, each two Arcs (refcount bumps, no deep
+/// copies) plus one map node; dropped with the cache.
+struct ProjectionMemo<'a> {
+    kept: &'a [bool],
+    map: rustc_hash::FxHashMap<usize, (SharedTokenSet, SharedTokenSet)>,
+    cap: usize,
+    calls: u64,
+    hits: u64,
+    misses: u64,
+    no_drop: u64,
+    rebuilds: u64,
+    cap_rejections: u64,
+    unchanged_weights: u64,
+    remapped_weights: u64,
+}
+
+const PROJECTION_MEMO_CAP: usize = 65536;
+
+impl<'a> ProjectionMemo<'a> {
+    fn new(kept: &'a [bool]) -> Self {
+        Self::with_cap(kept, PROJECTION_MEMO_CAP)
+    }
+
+    fn with_cap(kept: &'a [bool], cap: usize) -> Self {
+        Self {
+            kept,
+            map: rustc_hash::FxHashMap::default(),
+            cap,
+            calls: 0,
+            hits: 0,
+            misses: 0,
+            no_drop: 0,
+            rebuilds: 0,
+            cap_rejections: 0,
+            unchanged_weights: 0,
+            remapped_weights: 0,
+        }
+    }
+
+    fn project(&mut self, tokens: &SharedTokenSet) -> SharedTokenSet {
+        self.calls += 1;
+        let key = std::sync::Arc::as_ptr(tokens) as usize;
+        if let Some((_, result)) = self.map.get(&key) {
+            self.hits += 1;
+            return result.clone();
+        }
+        self.misses += 1;
+        let result = project_inner_token_set(tokens, self.kept, Some(self));
+        if self.map.len() < self.cap {
+            self.map.insert(key, (tokens.clone(), result.clone()));
+        } else {
+            self.cap_rejections += 1;
+        }
+        result
+    }
+}
+
+/// Exact inner-set projection body shared by the uncached path and the memo
+/// miss path. `memo` (when present) only feeds the no-drop/rebuild counters;
+/// the computation is identical either way.
+fn project_inner_token_set(
+    tokens: &SharedTokenSet,
+    kept: &[bool],
+    memo: Option<&mut ProjectionMemo>,
+) -> SharedTokenSet {
+    let mut dropped = false;
+    for token in tokens.iter() {
+        if !kept.get(token as usize).copied().unwrap_or(true) {
+            dropped = true;
+            break;
+        }
+    }
+    if !dropped {
+        if let Some(memo) = memo {
+            memo.no_drop += 1;
+        }
+        return tokens.clone();
+    }
+    if let Some(memo) = memo {
+        memo.rebuilds += 1;
+    }
+    let filtered: RangeSetBlaze<u32> = tokens
+        .iter()
+        .filter(|token| kept.get(*token as usize).copied().unwrap_or(true))
+        .collect();
+    shared_rangeset(filtered)
+}
+
+/// Project one weight through a per-shard memo. Identical output to
+/// `project_weight_to_kept` for the shard's `kept`; the memo must not
+/// outlive the shard it was built for.
+fn project_weight_to_kept_memo(
+    weight: &Weight,
+    memo: &mut ProjectionMemo<'_>,
+) -> Weight {
+    weight.remap_token_sets_preserving_tsid_ranges(|tokens| memo.project(tokens))
+}
+
+/// In-place wrapper: if EVERY inner set projects to itself (Arc::ptr_eq),
+/// the weight is already fully kept — return without remapping, cloning, or
+/// reassigning. Otherwise fall through to the memoized whole-weight remap
+/// (double lookups on changed weights are counted transparently in the memo
+/// counters). Returns true when the weight was left untouched.
+fn project_weight_to_kept_in_place(
+    weight: &mut Weight,
+    memo: &mut ProjectionMemo<'_>,
+) -> bool {
+    // One extra scan, only over inner-set Arcs (no token enumeration): the
+    // memo hit path is a pointer lookup + Arc clone, so unchanged weights
+    // skip the TSID-map rebuild entirely. The scan's borrow must end before
+    // any reassignment, so the changed decision is recorded as a flag first.
+    let mut changed = false;
+    for (_, tokens) in weight.raw_range_values() {
+        if !std::sync::Arc::ptr_eq(&memo.project(tokens), tokens) {
+            changed = true;
+            break;
+        }
+    }
+    if !changed {
+        memo.unchanged_weights += 1;
+        return true;
+    }
+    memo.remapped_weights += 1;
+    let remapped = project_weight_to_kept_memo(weight, memo);
+    *weight = remapped;
+    false
 }
 
 /// Compile one shard: bounded-DAG assembly, single exact negative resolution,
@@ -1308,15 +1613,33 @@ pub(crate) fn compile_signed_shard_parser(
             cells_inner_before += inner;
         }
     }
+    // Per-shard projection memo: `kept` is fixed for this shard, so inner
+    // results depend only on the input set. Created here, dropped right
+    // after the loop below. Values own both Arcs (no ABA address reuse).
+    let mut memo = ProjectionMemo::new(&kept);
     for state in parser_dwa.states_mut() {
         for (_, edge_weight) in state.transitions.values_mut() {
-            *edge_weight = project_weight_to_kept(edge_weight, &kept);
+            project_weight_to_kept_in_place(edge_weight, &mut memo);
         }
         if let Some(final_weight) = state.final_weight.as_mut() {
-            *final_weight = project_weight_to_kept(final_weight, &kept);
+            project_weight_to_kept_in_place(final_weight, &mut memo);
         }
     }
     let project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!(
+            "[glrmask/profile][signed_shard_projection_memo] start_component={start_component} calls={} hits={} misses={} no_drop={} rebuilds={} entries={} cap_rejections={} unchanged_weights={} remapped_weights={}",
+            memo.calls,
+            memo.hits,
+            memo.misses,
+            memo.no_drop,
+            memo.rebuilds,
+            memo.map.len(),
+            memo.cap_rejections,
+            memo.unchanged_weights,
+            memo.remapped_weights,
+        );
+    }
     // Exact post-normalization reduction, staged cheap-first:
     // 1. reverse structural hash-cons: merges only states with identical
     //    (final weight, ordered label->(target,weight) rows) bottom-up. A pure
@@ -1347,31 +1670,23 @@ pub(crate) fn compile_signed_shard_parser(
     let hashcons_ms = hashcons_started.elapsed().as_secs_f64() * 1000.0;
     let post_hash_states = parser_dwa.num_states();
     let post_hash_trans = parser_dwa.num_transitions();
-    // Exact grouping-order diagnostic: DescendingDomain places denser partial
-    // behavior functions first for greedy absorption. The order policy affects
-    // only representation choices among already compatible classes, never the
-    // accepted weighted language (documented on the enum); the DynamicDirect
-    // differential remains the arbiter. Env-gated; default is Stable.
+    // Grouping order for greedy absorption: DescendingDomain places denser
+    // partial behavior functions first. The order policy affects only
+    // representation choices among already compatible classes, never the
+    // accepted weighted language (documented on the enum; proven by the
+    // `prepared_static_minimize_orders_are_weighted_equivalent` diagnostic);
+    // the DynamicDirect differential remains the arbiter.
     // Path-conditioned minimization is deliberately NOT used: its precondition
     // (edge weights already encoding cumulative live-path domains from a
     // backward-pushed construction) is unproven for determinize_with_supports
     // output — indeed the default minimize path runs push_weights first, which
     // would be unnecessary if determinize output satisfied it.
-    let minimize_descending = std::env::var("GLRMASK_SIGNED_SHARD_MINIMIZE_ORDER")
-        .ok()
-        .is_some_and(|value| value.eq_ignore_ascii_case("descending"));
     let minimize_started = Instant::now();
-    let (parser_dwa, minimize_order) = if minimize_descending {
-        (
-            minimize_acyclic_owned_with_pointwise_class_order(
-                parser_dwa,
-                PointwiseClassOrder::DescendingDomain,
-            ),
-            "descending",
-        )
-    } else {
-        (minimize(&parser_dwa), "stable")
-    };
+    let parser_dwa = minimize_acyclic_owned_with_pointwise_class_order(
+        parser_dwa,
+        PointwiseClassOrder::DescendingDomain,
+    );
+    let minimize_order = "descending";
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
     eprintln!(
         "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} candidates={} kept_internals={} cells_outer_before={} cells_inner_before={} project_ms={project_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_order={minimize_order} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
@@ -1386,6 +1701,8 @@ pub(crate) fn compile_signed_shard_parser(
         parser_dwa.num_states(),
         parser_dwa.num_transitions(),
     );
+    #[cfg(test)]
+    trace_signed_shard_parser_words(start_component, &parser_dwa, context.total_scoped_states);
     Ok(SignedShardOutput {
         parser_dwa,
         templates_ms: library.templates_ms,
@@ -1507,6 +1824,148 @@ pub(crate) fn eof_terminal() -> TerminalID {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Memo must reproduce the exact reference on every input class.
+    #[test]
+    fn projection_memo_matches_reference() {
+        use range_set_blaze::RangeSetBlaze;
+        fn set(ranges: &[(u32, u32)]) -> RangeSetBlaze<u32> {
+            ranges.iter().copied().map(|(s, e)| s..=e).collect()
+        }
+        fn weight(entries: &[(u32, &[(u32, u32)])]) -> Weight {
+            Weight::from_per_tsid_token_sets(
+                entries.iter().copied().map(|(tsid, rs)| (tsid, set(rs))),
+            )
+        }
+        fn ranges_of(w: &Weight) -> Vec<(u32, u32, Vec<(u32, u32)>)> {
+            w.raw_range_values()
+                .map(|(r, t)| {
+                    (
+                        *r.start(),
+                        *r.end(),
+                        t.ranges().map(|x| (*x.start(), *x.end())).collect(),
+                    )
+                })
+                .collect()
+        }
+        // kept pattern: alternating keep/drop over 0..32.
+        let kept: Vec<bool> = (0..32).map(|i| i % 2 == 0).collect();
+        let cases: Vec<Vec<(u32, &[(u32, u32)])>> = vec![
+            vec![(0, &[(0, 31)])],                        // mixed set
+            vec![(0, &[(0, 7)]), (1, &[(0, 7)])],          // repeated shape
+            vec![(0, &[(0, 31)]), (2, &[(0, 31)])],        // structurally equal Arcs
+            vec![(3, &[(100, 200)])],                      // out-of-domain retained
+            vec![(0, &[(u32::MAX - 4, u32::MAX)])],        // u32::MAX sparse
+            vec![(0, &[])],                                // empty inner
+        ];
+        for (ci, entries) in cases.iter().enumerate() {
+            let input = weight(entries);
+            let want = project_weight_to_kept(&input, &kept);
+            let mut memo = ProjectionMemo::new(&kept);
+            let got = project_weight_to_kept_memo(&input, &mut memo);
+            assert_eq!(ranges_of(&got), ranges_of(&want), "case {ci}");
+        }
+        // Repeated same Arc: second call must hit.
+        {
+            let input = weight(&[(0, &[(0, 31)])]);
+            let mut memo = ProjectionMemo::new(&kept);
+            let first = project_weight_to_kept_memo(&input, &mut memo);
+            let second = project_weight_to_kept_memo(&input, &mut memo);
+            assert_eq!(ranges_of(&first), ranges_of(&second));
+            assert!(memo.hits >= 1, "same-Arc repeat must hit");
+        }
+        // All-kept / all-dropped universes.
+        {
+            let all_kept = vec![true; 16];
+            let input = weight(&[(0, &[(0, 15)])]);
+            let mut memo = ProjectionMemo::new(&all_kept);
+            let got = project_weight_to_kept_memo(&input, &mut memo);
+            assert_eq!(ranges_of(&got), ranges_of(&input));
+            let none_kept = vec![false; 16];
+            let mut memo = ProjectionMemo::new(&none_kept);
+            let got = project_weight_to_kept_memo(&input, &mut memo);
+            assert!(got.raw_range_values().next().is_none());
+        }
+        // Multi-TSID preservation: outer ranges untouched.
+        {
+            let input = weight(&[(0, &[(0, 31)]), (2, &[(0, 31)]), (u32::MAX, &[(0, 5)])]);
+            let mut memo = ProjectionMemo::new(&kept);
+            let got = project_weight_to_kept_memo(&input, &mut memo);
+            let want = project_weight_to_kept(&input, &kept);
+            assert_eq!(ranges_of(&got), ranges_of(&want));
+            let outers: Vec<(u32, u32)> =
+                got.raw_range_values().map(|(r, _)| (*r.start(), *r.end())).collect();
+            assert!(outers.contains(&(u32::MAX, u32::MAX)));
+        }
+        // Two separate cache contexts, different kept: no cross-context reuse.
+        // (Each memo owns its own kept borrow, so reuse is unrepresentable.)
+        {
+            let input = weight(&[(0, &[(0, 15)])]);
+            let kept_a = vec![true; 16];
+            let kept_b = vec![false; 16];
+            let mut memo_a = ProjectionMemo::new(&kept_a);
+            let mut memo_b = ProjectionMemo::new(&kept_b);
+            let got_a = project_weight_to_kept_memo(&input, &mut memo_a);
+            let got_b = project_weight_to_kept_memo(&input, &mut memo_b);
+            assert_eq!(ranges_of(&got_a), ranges_of(&input));
+            assert!(got_b.raw_range_values().next().is_none());
+            assert_eq!(ranges_of(&got_a), ranges_of(&project_weight_to_kept(&input, &kept_a)));
+            assert_eq!(ranges_of(&got_b), ranges_of(&project_weight_to_kept(&input, &kept_b)));
+        }
+        // Saturation: small-capacity constructor stops inserting at cap.
+        // Distinct inner sets under ONE kept mask (the production pattern):
+        // first `cap` unique sets insert, later ones reject but stay exact.
+        {
+            let kept_a: Vec<bool> = (0..64).map(|i| i % 2 == 0).collect();
+            let mut memo = ProjectionMemo::with_cap(&kept_a, 2);
+            for i in 0..8u32 {
+                let w = weight(&[(0, &[(i * 8, i * 8 + 7)])]);
+                let got = project_weight_to_kept_memo(&w, &mut memo);
+                let want = project_weight_to_kept(&w, &kept_a);
+                assert_eq!(ranges_of(&got), ranges_of(&want));
+            }
+            assert!(memo.cap_rejections > 0, "cap must reject inserts");
+            assert!(memo.map.len() <= 2);
+        }
+        // In-place wrapper: no-op weights untouched, changed weights match.
+        {
+            // All-kept: every inner set ptr-equals through the memo → true.
+            let all_kept = vec![true; 200];
+            let mut memo = ProjectionMemo::new(&all_kept);
+            let mut untouched = weight(&[(0, &[(0, 15)]), (2, &[(100, 110)])]);
+            let before: Vec<usize> = untouched
+                .raw_range_values()
+                .map(|(_, t)| std::sync::Arc::as_ptr(t) as usize)
+                .collect();
+            assert!(
+                project_weight_to_kept_in_place(&mut untouched, &mut memo),
+                "all-kept weight must be a no-op",
+            );
+            let after: Vec<usize> = untouched
+                .raw_range_values()
+                .map(|(_, t)| std::sync::Arc::as_ptr(t) as usize)
+                .collect();
+            assert_eq!(before, after, "no-op must not reassign inner Arcs");
+            assert_eq!(memo.unchanged_weights, 1);
+            // Mixed multi-TSID: one dropped token forces the remap path.
+            let kept_mixed: Vec<bool> =
+                (0..16).map(|i| i != 5).collect();
+            let mut memo = ProjectionMemo::new(&kept_mixed);
+            let mut changed = weight(&[(0, &[(0, 15)]), (2, &[(0, 15)])]);
+            assert!(
+                !project_weight_to_kept_in_place(&mut changed, &mut memo),
+                "changed weight must take the remap path",
+            );
+            assert_eq!(memo.remapped_weights, 1);
+            assert_eq!(
+                ranges_of(&changed),
+                ranges_of(&project_weight_to_kept(
+                    &weight(&[(0, &[(0, 15)]), (2, &[(0, 15)])]),
+                    &kept_mixed,
+                )),
+            );
+        }
+    }
 
     fn matcher_top_is(pop: &[StackMatcher], state: u32) -> bool {
         matches!(pop.first(), Some(StackMatcher::State(top)) if *top == state)
@@ -1991,6 +2450,127 @@ mod tests {
             witness,
             full.parser_dwa.num_states(),
             truncated.parser_dwa.num_states(),
+        );
+    }
+
+    /// Build a two-component (parent + child) signed context where both
+    /// components carry their own ignore terminal. `global` selects whether the
+    /// context certifies the ignores as uniformly globally erasable.
+    fn two_component_ignore_context<'a>(
+        parent: &'a Constraint,
+        child: &'a Constraint,
+        global: bool,
+    ) -> (SignedLinkContext<'a>, TerminalID) {
+        let sub_p = parent
+            .terminal_display_names
+            .iter()
+            .position(|candidate| candidate == "SUB")
+            .expect("parent SUB terminal") as TerminalID;
+        let parent_terminals = parent.table.num_terminals;
+        let terminal_offsets = vec![0, parent_terminals];
+        let num_terminals = parent_terminals + child.table.num_terminals;
+        let links = vec![ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: sub_p,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 1,
+            child_start_nullable: false,
+        }];
+        let context = build_signed_link_context_from_parts(
+            vec![&parent.table, &child.table],
+            vec![parent.ignore_terminal, child.ignore_terminal],
+            links,
+            &terminal_offsets,
+            num_terminals,
+            global,
+            BTreeSet::new(),
+        )
+        .expect("two-component signed context");
+        let child_ignore_local = child.ignore_terminal.expect("child ignore terminal");
+        (context, parent_terminals + child_ignore_local)
+    }
+
+    fn ignore_test_constraints() -> (Constraint, Constraint) {
+        use crate::Vocab;
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b" ".to_vec()),
+            (2, b"\t".to_vec()),
+            (3, b"a".to_vec()),
+            (4, b"!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                ignore WS;
+                t WS ::= "\t"+;
+                nt child ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        (parent, child)
+    }
+
+    /// A globally erasable ignore identity must apply while the parser is
+    /// inside the parent *and* inside the child.
+    #[test]
+    fn global_ignore_identity_spans_parent_and_child_scopes() {
+        let (parent, child) = ignore_test_constraints();
+        let (context, child_ignore) = two_component_ignore_context(&parent, &child, true);
+        assert!(context.global_ignores);
+        let mut cache = None;
+        let transfer =
+            scoped_transfer_for_terminal(&context, child_ignore, &mut cache).expect("transfer");
+        assert!(cache.is_some(), "global identity is cached once per library");
+        // Child scope: the child's own start state.
+        let child_start = context.state_offsets[1];
+        assert!(
+            !apply_characterization(&transfer, &[child_start]).is_empty(),
+            "global ignore identity must apply inside the child scope",
+        );
+        // Parent scope: parent state zero and the last parent state.
+        assert!(
+            !apply_characterization(&transfer, &[0]).is_empty(),
+            "global ignore identity must apply inside the parent scope",
+        );
+        assert!(
+            !apply_characterization(&transfer, &[parent.table.num_states - 1]).is_empty(),
+            "global ignore identity must apply across the whole parent interval",
+        );
+    }
+
+    /// A scope-dependent (non-global) child ignore identity must stay inside
+    /// the child scope and must not apply in the parent.
+    #[test]
+    fn scoped_child_ignore_identity_does_not_apply_in_parent() {
+        let (parent, child) = ignore_test_constraints();
+        let (context, child_ignore) = two_component_ignore_context(&parent, &child, false);
+        assert!(!context.global_ignores);
+        let mut cache = None;
+        let transfer =
+            scoped_transfer_for_terminal(&context, child_ignore, &mut cache).expect("transfer");
+        assert!(cache.is_none(), "scoped ignore must not build a global identity");
+        let child_start = context.state_offsets[1];
+        assert!(
+            !apply_characterization(&transfer, &[child_start]).is_empty(),
+            "scoped child ignore identity must apply inside the child scope",
+        );
+        assert!(
+            apply_characterization(&transfer, &[0]).is_empty(),
+            "scoped child ignore identity must not apply in the parent scope",
         );
     }
 }

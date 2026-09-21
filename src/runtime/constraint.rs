@@ -90,7 +90,11 @@ impl ParserComponentTableSource for RecursiveSegmentedParserTables<'_> {
 
     #[inline]
     fn component_ignore_terminal(&self, component: u32) -> Option<TerminalID> {
-        self.leaf_constraint(component)?.ignore_terminal
+        let constraint = self.leaf_constraint(component)?;
+        // Same idempotence contract: composed leaf tables own their scoped
+        // ignores in-row; only raw leaves need provider-level Identity.
+        let ignore = constraint.ignore_terminal?;
+        (!constraint.table.skip_terminals.contains(&ignore)).then_some(ignore)
     }
 }
 

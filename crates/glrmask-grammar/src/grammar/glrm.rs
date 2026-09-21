@@ -853,6 +853,138 @@ pub fn from_glrm_with_bindings_and_external_subgrammars(
     lower_parsed_grammar(scope, &external_tokens)
 }
 
+/// Debug/internal grammar construction: parse a GLRM parent and structurally
+/// replace selected `extern grammar NAME;` occurrences with inline subgrammars
+/// taken from the supplied child GLRM sources.
+///
+/// `children` keys are fully qualified occurrence paths, not global names:
+///
+/// * `"child"` binds a direct `extern grammar child;` in the parent scope;
+/// * `"outer::inner"` binds an `extern grammar inner;` nested inside an inline
+///   `g outer ::= { ... };` subgrammar already present in the parent source;
+/// * `"child::grandchild"` binds an `extern grammar grandchild;` inside the
+///   child source bound to `"child"`.
+///
+/// Each occurrence is parsed once from its own source string and keeps its own
+/// `start`, `ignore`, and lexer partitions; no global name substitution is
+/// performed. Duplicate binding keys, external occurrences with no binding, and
+/// supplied bindings that match no occurrence are all rejected explicitly.
+///
+/// This returns an ordinary [`NamedGrammar`]: it is grammar construction, not a
+/// constraint/composition API, and the result compiles through the normal
+/// non-composition compiler. It is GLRM-only and deliberately does not add a
+/// `GrammarSource` variant. Bindings are a finite set of occurrence paths, so an
+/// arbitrary cyclic `extern grammar` graph cannot be encoded; cycles are
+/// therefore not detected as such (a path that is never supplied is reported as
+/// an unbound external occurrence instead). Identical child source strings in
+/// distinct occurrences are independent and are never treated as cycles.
+#[cfg(feature = "internal-api")]
+pub fn from_glrm_with_inline_subgrammars(
+    parent: &str,
+    children: &[(&str, &str)],
+) -> Result<NamedGrammar, GlrMaskError> {
+    const MAX_INLINE_DEPTH: usize = 64;
+
+    let mut bindings = BTreeMap::<String, &str>::new();
+    for &(key, source) in children {
+        if bindings.insert(key.to_string(), source).is_some() {
+            return Err(err(&format!(
+                "inline subgrammar binding {key:?} was supplied more than once",
+            )));
+        }
+    }
+    let mut consumed = BTreeSet::<String>::new();
+
+    let mut scope = parse_glrm_scope(parent)?;
+    bind_inline_subgrammars(
+        &mut scope,
+        "",
+        &bindings,
+        &mut consumed,
+        0,
+        MAX_INLINE_DEPTH,
+    )?;
+
+    for key in bindings.keys() {
+        if !consumed.contains(key) {
+            return Err(err(&format!(
+                "inline subgrammar binding {key:?} did not match any external grammar occurrence",
+            )));
+        }
+    }
+
+    let lowered = lower_parsed_grammar(scope, &BTreeMap::new())?;
+    if !lowered.placeholders.is_empty() {
+        return Err(err(
+            "inline subgrammar replacement left an unbound external placeholder",
+        ));
+    }
+    Ok(lowered.grammar)
+}
+
+#[cfg(feature = "internal-api")]
+fn parse_glrm_scope(source: &str) -> Result<ParsedGlrmScope, GlrMaskError> {
+    let tokens = Lexer::new(source).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    parser.parse_root_scope()
+}
+
+/// Structurally walk a parsed scope and replace every bound `External`
+/// subgrammar with an `Inline` scope parsed from its child source. `prefix` is
+/// the fully qualified occurrence path of `scope`; child paths extend it with
+/// `::`. `consumed` records which supplied bindings were actually used so
+/// unused bindings can be rejected after the walk.
+#[cfg(feature = "internal-api")]
+fn bind_inline_subgrammars(
+    scope: &mut ParsedGlrmScope,
+    prefix: &str,
+    bindings: &BTreeMap<String, &str>,
+    consumed: &mut BTreeSet<String>,
+    depth: usize,
+    max_depth: usize,
+) -> Result<(), GlrMaskError> {
+    if depth > max_depth {
+        return Err(err(
+            "inline subgrammar nesting exceeded the maximum supported depth",
+        ));
+    }
+    for subgrammar in &mut scope.subgrammars {
+        let path = if prefix.is_empty() {
+            subgrammar.name.clone()
+        } else {
+            format!("{prefix}::{}", subgrammar.name)
+        };
+        if matches!(subgrammar.body, ParsedSubgrammarBody::External) {
+            let source = bindings.get(&path).copied().ok_or_else(|| {
+                err(&format!(
+                    "external subgrammar {path:?} has no inline binding",
+                ))
+            })?;
+            consumed.insert(path.clone());
+            let mut child_scope = parse_glrm_scope(source)?;
+            bind_inline_subgrammars(
+                &mut child_scope,
+                &path,
+                bindings,
+                consumed,
+                depth + 1,
+                max_depth,
+            )?;
+            subgrammar.body = ParsedSubgrammarBody::Inline(child_scope);
+        } else if let ParsedSubgrammarBody::Inline(child_scope) = &mut subgrammar.body {
+            bind_inline_subgrammars(
+                child_scope,
+                &path,
+                bindings,
+                consumed,
+                depth + 1,
+                max_depth,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 // ---- Tokens ----------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
@@ -4576,4 +4708,152 @@ nt start = WORD;
         from_glrm(&dumped).unwrap();
     }
 
+}
+
+#[cfg(all(test, feature = "internal-api"))]
+mod inline_subgrammar_tests {
+    use super::*;
+
+    fn assert_same_grammar(actual: &NamedGrammar, expected: &NamedGrammar) {
+        assert_eq!(
+            format!("{actual:#?}"),
+            format!("{expected:#?}"),
+            "inline subgrammar rewrite did not match the hand-inlined grammar",
+        );
+    }
+
+    #[test]
+    fn direct_external_binding_matches_hand_inlined_grammar() {
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            &[("SUB", "start child; nt child ::= \"a\";")],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; g SUB ::= { start child; nt child ::= \"a\"; }; nt document ::= \"X\" SUB \"!\";",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+    }
+
+    #[test]
+    fn nested_external_child_and_grandchild_are_bound() {
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            &[
+                (
+                    "SUB",
+                    "start child; extern grammar GRAND; nt child ::= \"a\" GRAND;",
+                ),
+                ("SUB::GRAND", "start grand; nt grand ::= \"b\";"),
+            ],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; g SUB ::= { start child; g GRAND ::= { start grand; nt grand ::= \"b\"; }; nt child ::= \"a\" GRAND; }; nt document ::= \"X\" SUB \"!\";",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+    }
+
+    #[test]
+    fn existing_inline_subgrammar_containing_external_is_bound() {
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; g OUTER ::= { start outer; extern grammar INNER; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
+            &[("OUTER::INNER", "start inner; nt inner ::= \"b\";")],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; g OUTER ::= { start outer; g INNER ::= { start inner; nt inner ::= \"b\"; }; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+    }
+
+    #[test]
+    fn identical_rule_and_terminal_names_stay_in_separate_scopes() {
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; t X ::= \"X\"; extern grammar SUB; nt document ::= X SUB;",
+            &[("SUB", "start child; t X ::= \"Y\"; nt child ::= X;")],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; t X ::= \"X\"; g SUB ::= { start child; t X ::= \"Y\"; nt child ::= X; }; nt document ::= X SUB;",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+        // The child keeps its own `X`; no global name substitution collapsed
+        // the two distinct `X` terminals into one.
+        let dump = to_glrm(&actual);
+        assert!(dump.contains("\"X\""), "parent X literal missing: {dump}");
+        assert!(dump.contains("\"Y\""), "child X literal missing: {dump}");
+    }
+
+    #[test]
+    fn repeated_identical_child_sources_are_independent_occurrences() {
+        const CHILD: &str = "start child; nt child ::= \"a\";";
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar LEFT; extern grammar RIGHT; nt document ::= LEFT RIGHT;",
+            &[("LEFT", CHILD), ("RIGHT", CHILD)],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; g LEFT ::= { start child; nt child ::= \"a\"; }; g RIGHT ::= { start child; nt child ::= \"a\"; }; nt document ::= LEFT RIGHT;",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+    }
+
+    #[test]
+    fn missing_duplicate_and_unused_bindings_are_rejected() {
+        let missing = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar SUB; nt document ::= SUB;",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{missing}").contains("has no inline binding"),
+            "unexpected missing-binding error: {missing}",
+        );
+
+        let duplicate = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar SUB; nt document ::= SUB;",
+            &[
+                ("SUB", "start child; nt child ::= \"a\";"),
+                ("SUB", "start other; nt other ::= \"b\";"),
+            ],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{duplicate}").contains("supplied more than once"),
+            "unexpected duplicate-binding error: {duplicate}",
+        );
+
+        let unused = from_glrm_with_inline_subgrammars(
+            "start document; nt document ::= \"a\";",
+            &[("SUB", "start child; nt child ::= \"a\";")],
+        )
+        .unwrap_err();
+        assert!(
+            format!("{unused}").contains("did not match any external grammar occurrence"),
+            "unexpected unused-binding error: {unused}",
+        );
+    }
+
+    #[test]
+    fn child_ignore_and_lexer_partitions_survive_inlining() {
+        let actual = from_glrm_with_inline_subgrammars(
+            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            &[(
+                "SUB",
+                "start child; ignore WS; t WS ::= \" \"+; t WORD ::= /[a-z]+/; nt child ::= WORD;",
+            )],
+        )
+        .unwrap();
+        let expected = from_glrm(
+            "start document; g SUB ::= { start child; ignore WS; t WS ::= \" \"+; t WORD ::= /[a-z]+/; nt child ::= WORD; }; nt document ::= \"X\" SUB \"!\";",
+        )
+        .unwrap();
+        assert_same_grammar(&actual, &expected);
+    }
 }

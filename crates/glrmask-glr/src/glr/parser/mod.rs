@@ -4671,15 +4671,27 @@ fn apply_provider_guarded_stack_shifts<P: ParserActionProvider>(
     out
 }
 
-/// Canonical provider-driven GLR advance over the existing `u32` parser GSS.
-/// Local component actions remain borrowed; state IDs are injected into the
-/// compact disjoint-union coordinate only when pushed.
-pub fn advance_stacks_with_provider<P: ParserActionProvider>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProviderAdvanceMode {
+    Advance,
+    Completion,
+}
+
+struct ProviderAdvanceResult {
+    shifted: ParserGSS,
+    accepted: bool,
+}
+
+fn advance_provider_traversal<P: ParserActionProvider>(
     provider: &P,
     mut closure: ParserGSS,
     symbol: P::Symbol,
-) -> ParserGSS {
+    mode: ProviderAdvanceMode,
+) -> ProviderAdvanceResult {
     let mut shifted = ParserGSS::empty();
+    let mut accepted = false;
+    let mut visited = FxHashSet::<u32>::default();
+    let mut key_interner = GssSemanticKeyInterner::<u32, TerminalsDisallowed>::new();
 
     loop {
         let mut next = ParserGSS::empty();
@@ -4690,35 +4702,48 @@ pub fn advance_stacks_with_provider<P: ParserActionProvider>(
             };
             let isolated = closure.isolate(Some(state));
 
-            for shift in &provided.extra_stack_shifts {
-                let branch = push_states(isolated.clone().popn(shift.pop as isize), &shift.pushes);
-                merge_into(&mut shifted, branch);
+            if mode == ProviderAdvanceMode::Advance {
+                for shift in &provided.extra_stack_shifts {
+                    let branch = push_states(isolated.clone().popn(shift.pop as isize), &shift.pushes);
+                    merge_into(&mut shifted, branch);
+                }
             }
 
             match provided.action {
                 ProvidedActionRef::Local { scope, action } => {
-                    match action {
-                        Action::GuardedStackShifts(shifts) => {
-                            merge_into(
-                                &mut shifted,
-                                apply_provider_guarded_stack_shifts(
-                                    provider,
-                                    scope,
-                                    isolated.clone(),
-                                    shifts,
-                                ),
-                            );
+                    let is_accept =
+                        matches!(action, Action::Accept | Action::Split { accept: true, .. });
+                    if is_accept {
+                        accepted = true;
+                        if mode == ProviderAdvanceMode::Completion {
+                            return ProviderAdvanceResult { shifted, accepted: true };
                         }
-                        _ => {
-                            action.for_each_stack_shift(|pop, pushes| {
-                                let branch = provider_push_local_states(
-                                    provider,
-                                    scope,
-                                    isolated.clone().popn(pop as isize),
-                                    pushes,
+                    }
+
+                    if mode == ProviderAdvanceMode::Advance {
+                        match action {
+                            Action::GuardedStackShifts(shifts) => {
+                                merge_into(
+                                    &mut shifted,
+                                    apply_provider_guarded_stack_shifts(
+                                        provider,
+                                        scope,
+                                        isolated.clone(),
+                                        shifts,
+                                    ),
                                 );
-                                merge_into(&mut shifted, branch);
-                            });
+                            }
+                            _ => {
+                                action.for_each_stack_shift(|pop, pushes| {
+                                    let branch = provider_push_local_states(
+                                        provider,
+                                        scope,
+                                        isolated.clone().popn(pop as isize),
+                                        pushes,
+                                    );
+                                    merge_into(&mut shifted, branch);
+                                });
+                            }
                         }
                     }
 
@@ -4738,36 +4763,66 @@ pub fn advance_stacks_with_provider<P: ParserActionProvider>(
                             } else {
                                 base.push(target)
                             };
-                            merge_into(&mut next, branch);
+                            if mode == ProviderAdvanceMode::Completion {
+                                if !branch.is_empty() {
+                                    let key = key_interner.key(&branch);
+                                    if visited.insert(key) {
+                                        merge_into(&mut next, branch);
+                                    }
+                                }
+                            } else {
+                                merge_into(&mut next, branch);
+                            }
                         }
                     });
                 }
                 ProvidedActionRef::Identity => {
-                    merge_into(&mut shifted, isolated.clone());
+                    if mode == ProviderAdvanceMode::Advance {
+                        merge_into(&mut shifted, isolated.clone());
+                    }
                 }
                 ProvidedActionRef::Call {
                     parent_target,
                     child_start,
                     replace,
                 } => {
-                    let branch = isolated
-                        .clone()
-                        .popn(isize::from(replace))
-                        .push(parent_target)
-                        .push(child_start);
-                    merge_into(&mut shifted, branch);
+                    if mode == ProviderAdvanceMode::Advance {
+                        let branch = isolated
+                            .clone()
+                            .popn(isize::from(replace))
+                            .push(parent_target)
+                            .push(child_start);
+                        merge_into(&mut shifted, branch);
+                    }
                 }
                 ProvidedActionRef::Return { pop } => {
-                    merge_into(&mut shifted, isolated.clone().popn(pop as isize));
+                    if mode == ProviderAdvanceMode::Advance {
+                        merge_into(&mut shifted, isolated.clone().popn(pop as isize));
+                    }
                 }
             }
         }
 
         if next.is_empty() {
-            return shifted;
+            return ProviderAdvanceResult { shifted, accepted };
         }
-        closure = next;
+        closure = if mode == ProviderAdvanceMode::Completion {
+            close_provider_control_stacks(provider, &next)
+        } else {
+            next
+        };
     }
+}
+
+/// Canonical provider-driven GLR advance over the existing `u32` parser GSS.
+/// Local component actions remain borrowed; state IDs are injected into the
+/// compact disjoint-union coordinate only when pushed.
+pub fn advance_stacks_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    closure: ParserGSS,
+    symbol: P::Symbol,
+) -> ParserGSS {
+    advance_provider_traversal(provider, closure, symbol, ProviderAdvanceMode::Advance).shifted
 }
 
 /// Close a provider-driven frontier under provider-owned zero-width controls.
@@ -4828,6 +4883,11 @@ pub fn advance_provider_control_closed_stacks<P: ParserActionProvider>(
 /// Exact semantic admission through the provider. This is deliberately the
 /// reference implementation; provider-specific row/guard fast paths can replace
 /// it later without changing the contract.
+/// Fast path for [`stack_may_advance_on_with_provider`]: after control
+/// closure, return true for any top with `Identity` or a zero-pop shift whose
+/// nonempty pushes all map via `scope_state` (pop-0 on a live branch provably
+/// yields a shifted branch). Everything else stays on the exact reference
+/// path (`advance_stacks_with_provider(...).is_empty()`).
 pub fn stack_may_advance_on_with_provider<P: ParserActionProvider>(
     provider: &P,
     stack: &ParserGSS,
@@ -4837,11 +4897,41 @@ pub fn stack_may_advance_on_with_provider<P: ParserActionProvider>(
         return false;
     }
     let closed = close_provider_control_stacks(provider, stack);
+    for top in closed.peek_values() {
+        let Some(provided) = provider.action(top, symbol) else {
+            continue;
+        };
+        if !provided.extra_stack_shifts.is_empty() {
+            continue;
+        }
+        match provided.action {
+            ProvidedActionRef::Identity => return true,
+            ProvidedActionRef::Local { scope, action } => {
+                let mut sufficient = false;
+                action.for_each_stack_shift(|pop, pushes| {
+                    if sufficient || pop != 0 || pushes.is_empty() {
+                        return;
+                    }
+                    if pushes
+                        .iter()
+                        .all(|&local| provider.scope_state(scope, local).is_some())
+                    {
+                        sufficient = true;
+                    }
+                });
+                if sufficient {
+                    return true;
+                }
+            }
+            ProvidedActionRef::Call { .. } | ProvidedActionRef::Return { .. } => {}
+        }
+    }
     !advance_stacks_with_provider(provider, closed, symbol).is_empty()
 }
 
 /// Provider equivalent of `stacks_finished`: after zero-width closure, report
-/// whether any top has an action on the caller-supplied outer EOF symbol.
+/// whether any top can reach a genuine accepting action on the caller-supplied
+/// outer EOF symbol via predecessor-feasible reductions.
 pub fn stacks_finished_with_provider<P: ParserActionProvider>(
     provider: &P,
     stack: &ParserGSS,
@@ -4851,10 +4941,7 @@ pub fn stacks_finished_with_provider<P: ParserActionProvider>(
         return false;
     }
     let closed = close_provider_control_stacks(provider, stack);
-    closed
-        .peek_values()
-        .into_iter()
-        .any(|state| provider.action(state, eof_symbol).is_some())
+    advance_provider_traversal(provider, closed, eof_symbol, ProviderAdvanceMode::Completion).accepted
 }
 
 /// Provider equivalent of linker-control closure. The caller supplies the
@@ -5232,7 +5319,35 @@ type ExactAdmissionSemanticKey = u32;
 
 type ExactAdmissionKeyInterner = GssSemanticKeyInterner<u32, TerminalsDisallowed>;
 
+/// What `exact_admission_may_advance_on` is asked to prove.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExactAdmissionMode {
+    /// Ordinary admission: any action that can advance on the token counts,
+    /// including shifts, skips, replace-shifts and stack shifts.
+    MayAdvance,
+    /// Completion: only a genuine accepting action counts. A shift, skip,
+    /// replace-shift or stack shift is progress, not completion; a feasible
+    /// reduction chain that reaches an accept is still completion.
+    Completion,
+}
+
 fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: TerminalID) -> bool {
+    exact_admission_may_advance_on_mode(table, stack, token, ExactAdmissionMode::MayAdvance)
+}
+
+/// Completion on EOF: a genuine accepting action or a GSS-predecessor-feasible
+/// reduction chain to one. Never a bare shift/skip/replace.
+fn exact_admission_completes_on_eof(table: &GLRTable, stack: &ParserGSS) -> bool {
+    exact_admission_may_advance_on_mode(table, stack, EOF, ExactAdmissionMode::Completion)
+}
+
+fn exact_admission_may_advance_on_mode(
+    table: &GLRTable,
+    stack: &ParserGSS,
+    token: TerminalID,
+    mode: ExactAdmissionMode,
+) -> bool {
+    let may_advance = mode == ExactAdmissionMode::MayAdvance;
     let mut queue = VecDeque::<ParserGSS>::new();
     let mut visited = FxHashSet::<ExactAdmissionSemanticKey>::default();
     let mut key_interner = ExactAdmissionKeyInterner::new();
@@ -5256,14 +5371,18 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                 continue;
             };
             match action {
-                Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => return true,
+                Action::Shift(..) | Action::ReplaceShifts(_) | Action::Skip => {
+                    if may_advance {
+                        return true;
+                    }
+                }
                 Action::StackShifts(shifts) => {
-                    if !apply_stack_shifts(isolated.clone(), shifts).is_empty() {
+                    if may_advance && !apply_stack_shifts(isolated.clone(), shifts).is_empty() {
                         return true;
                     }
                 }
                 Action::GuardedStackShifts(shifts) => {
-                    if stack_may_apply_guarded_shifts(&isolated, shifts) {
+                    if may_advance && stack_may_apply_guarded_shifts(&isolated, shifts) {
                         return true;
                     }
                 }
@@ -5286,7 +5405,7 @@ fn exact_admission_may_advance_on(table: &GLRTable, stack: &ParserGSS, token: Te
                     if *accept && token == EOF {
                         return true;
                     }
-                    if shift.is_some() {
+                    if may_advance && shift.is_some() {
                         return true;
                     }
                     for &(nt, len) in reduces {
@@ -5709,8 +5828,8 @@ fn stack_may_apply_guarded_shifts(stack: &ParserGSS, shifts: &[GuardedStackShift
 #[cfg(test)]
 mod tests {
     use super::{
-        DisjointComponentActionProvider, ParserGSS, ScopedParserSymbol,
-        ScopedSubgrammarLink, close_provider_control_stacks,
+        DisjointComponentActionProvider, ParserComponentTableSource, ParserGSS,
+        ScopedParserSymbol, ScopedSubgrammarLink, close_provider_control_stacks,
         advance_provider_control_closed_stacks,
         materialize_control_eliminated_scoped_provider_table,
         ParserActionProvider,
@@ -5726,6 +5845,9 @@ mod tests {
         stack_admissible_terminals,
         stack_may_advance_on,
         stack_may_advance_on_any,
+        stacks_finished,
+        stacks_finished_with_provider,
+        GLRTableActionProvider,
         stack_may_advance_disjoint_top_terminals_bounded,
         try_advance_bounded_concrete_paths,
         try_advance_mixed_top_replace_wave,
@@ -5734,6 +5856,11 @@ mod tests {
         try_advance_pop1_reduce_plus_stackshift_wave,
         try_advance_pop1_stackshift_shift_wave,
         try_advance_single_active_pop1_stackshift_wave,
+        GssSemanticKeyInterner,
+        ProvidedAction,
+        ProvidedActionRef,
+        merge_into,
+        reduce_sources_from_isolated,
     };
     use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::compiler::glr::analysis::EOF;
@@ -5743,7 +5870,253 @@ mod tests {
     };
     use crate::ds::bitset::BitSet;
     use crate::ds::leveled_gss::Merge;
+    use crate::grammar::flat::TerminalID;
+    use rustc_hash::FxHashSet;
     use smallvec::SmallVec;
+
+    #[test]
+    fn provider_may_advance_fastpath_matches_exact_reference() {
+        use super::stack_may_advance_on_with_provider;
+        // Exact old expression, kept as the reference (unchanged semantics).
+        fn exact<P: ParserActionProvider>(
+            provider: &P,
+            stack: &ParserGSS,
+            symbol: P::Symbol,
+        ) -> bool {
+            if stack.is_empty() {
+                return false;
+            }
+            !advance_stacks_with_provider(
+                provider,
+                close_provider_control_stacks(provider, stack),
+                symbol,
+            )
+            .is_empty()
+        }
+
+        fn check<P: ParserActionProvider>(
+            provider: &P,
+            stack: &ParserGSS,
+            symbol: P::Symbol,
+            expect: bool,
+            case: &str,
+        ) {
+            assert_eq!(
+                stack_may_advance_on_with_provider(provider, stack, symbol),
+                expect,
+                "optimized predicate disagrees with expected ({case})"
+            );
+            assert_eq!(
+                exact(provider, stack, symbol),
+                expect,
+                "reference disagrees with expected (fixture wrong? {case})"
+            );
+        }
+
+        // Plain zero-pop shift: sufficient fast path, true.
+        let plain = build_test_table(
+            2,
+            2,
+            &[&[(0, Action::Shift(1, false))], &[]],
+            &[&[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&plain);
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        check(&provider, &stack, 0, true, "plain-true");
+        check(&provider, &stack, 1, false, "plain-false");
+
+        // Split accept+shift: shift alternative suffices, true.
+        let split = build_test_table(
+            3,
+            2,
+            &[&[(
+                0,
+                Action::Split {
+                    shift: Some((1, false)),
+                    reduces: vec![(0, 1)],
+                    accept: true,
+                },
+            )], &[], &[]],
+            &[&[(0, (2, false))], &[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&split);
+        check(&provider, &stack, 0, true, "split");
+
+        // Accept only: no shift, false.
+        let accept_only = build_test_table(2, 2, &[&[(0, Action::Accept)], &[]], &[&[], &[]]);
+        let provider = GLRTableActionProvider::new(&accept_only);
+        check(&provider, &stack, 0, false, "accept-only");
+
+        // Empty input: false without touching the provider.
+        let empty = ParserGSS::empty();
+        check(&provider, &empty, 0, false, "empty");
+
+        // Skip stays on the reference path (fast path requires nonempty
+        // pushes); both must agree it advances.
+        let skip = build_test_table(2, 2, &[&[(0, Action::Skip)], &[]], &[&[], &[]]);
+        let provider = GLRTableActionProvider::new(&skip);
+        check(&provider, &stack, 0, true, "skip");
+
+        // Zero-pop StackShifts with mapped pushes: true.
+        let shifts = build_test_table(
+            3,
+            2,
+            &[&[(
+                0,
+                Action::StackShifts(vec![
+                    StackShift { pop: 1, pushes: vec![2] },
+                    StackShift { pop: 0, pushes: vec![1] },
+                ]),
+            )], &[], &[]],
+            &[&[], &[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&shifts);
+        check(&provider, &stack, 0, true, "zeropop-shift");
+
+        // Nonzero-pop shift: the fallback decides. NOTE: this fixture's lone
+        // single-stack CANNOT pop (pop(1) on [0] saturates at the root, so
+        // the reference admits it) — the fast path must not claim pop>0.
+        let pop1 = build_test_table(
+            2,
+            2,
+            &[&[(0, Action::StackShifts(vec![StackShift { pop: 1, pushes: vec![1] }]))], &[]],
+            &[&[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&pop1);
+        let lone = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        check(&provider, &lone, 0, true, "pop1-saturated");
+
+        // Reduce-to-shift via feasible goto: fallback computes true.
+        let red = build_test_table(
+            3,
+            2,
+            &[&[(0, Action::Reduce(0, 1))], &[(0, Action::Shift(2, false))], &[]],
+            &[&[(0, (1, false))], &[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&red);
+        let deep = ParserGSS::from_single_stack(vec![0, 0], TerminalsDisallowed::new());
+        check(&provider, &deep, 0, true, "reduce-shift");
+
+        // Infeasible reduction (no goto): false.
+        let nogoto = build_test_table(
+            2,
+            2,
+            &[&[(0, Action::Reduce(0, 1))], &[]],
+            &[&[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&nogoto);
+        check(&provider, &deep, 0, false, "infeasible-reduce");
+
+        // Guarded shift, guard matches: fallback true; guard fails: false.
+        let guarded = build_test_table(
+            3,
+            2,
+            &[&[(
+                0,
+                Action::GuardedStackShifts(vec![GuardedStackShift {
+                    guards: vec![StackShiftGuard { pop: 1, states: vec![0] }],
+                    pop: 1,
+                    pushes: vec![2],
+                }]),
+            )], &[], &[]],
+            &[&[], &[], &[]],
+        );
+        let provider = GLRTableActionProvider::new(&guarded);
+        check(&provider, &deep, 0, true, "guarded-pass");
+        let bad = ParserGSS::from_single_stack(vec![1, 0], TerminalsDisallowed::new());
+        check(&provider, &bad, 0, false, "guarded-fail");
+
+        // Identity via disjoint-provider ignore terminal: fast path true.
+        let ws_parent = build_test_table(2, 2, &[&[(0, Action::Shift(1, false))], &[]], &[&[], &[]]);
+        struct WsSource<'a> {
+            table: &'a GLRTable,
+        }
+        impl ParserComponentTableSource for WsSource<'_> {
+            fn component_count(&self) -> usize {
+                1
+            }
+            fn component_table(&self, component: u32) -> Option<&GLRTable> {
+                (component == 0).then_some(self.table)
+            }
+            fn component_ignore_terminal(&self, component: u32) -> Option<TerminalID> {
+                (component == 0).then_some(1)
+            }
+        }
+        let ws_source = WsSource { table: &ws_parent };
+        let ws_links: [ScopedSubgrammarLink; 0] = [];
+        let ws_provider =
+            DisjointComponentActionProvider::new(&ws_source, &ws_links).unwrap();
+        let ws_top = ws_provider.scoped_state(0, 0).unwrap();
+        let ws_stack =
+            ParserGSS::from_single_stack(vec![ws_top], TerminalsDisallowed::new());
+        check(
+            &ws_provider,
+            &ws_stack,
+            ScopedParserSymbol::Terminal { component: 0, terminal: 1 },
+            true,
+            "identity-ignore",
+        );
+
+        // Unmapped PUSH target on a valid top: provider denies the mapping,
+        // so the alternative is infeasible — both must agree false.
+        struct DenyTargetProvider<'a> {
+            inner: GLRTableActionProvider<'a>,
+        }
+        impl ParserActionProvider for DenyTargetProvider<'_> {
+            type Symbol = TerminalID;
+            fn action(&self, state: u32, symbol: TerminalID) -> Option<ProvidedAction<'_>> {
+                self.inner.action(state, symbol)
+            }
+            fn scope_state(&self, _scope: u32, _local: u32) -> Option<u32> {
+                None
+            }
+            fn goto_target(
+                &self,
+                scope: u32,
+                goto_from: u32,
+                nt: u32,
+            ) -> Option<(u32, bool)> {
+                self.inner.goto_target(scope, goto_from, nt)
+            }
+            fn state_count_hint(&self) -> usize {
+                self.inner.state_count_hint()
+            }
+        }
+        let deny_table = build_test_table(
+            2,
+            2,
+            &[&[(0, Action::Shift(1, false))], &[]],
+            &[&[], &[]],
+        );
+        let deny_inner = GLRTableActionProvider::new(&deny_table);
+        let deny_provider = DenyTargetProvider { inner: deny_inner };
+        check(&deny_provider, &stack, 0, false, "unmapped-push");
+
+        // Unknown-scope top (provider.action None): false, no wrong short-circuit.
+        let parent = build_test_table(2, 2, &[&[(0, Action::Shift(1, false))], &[]], &[&[], &[]]);
+        let child = build_test_table(2, 2, &[&[(0, Action::Shift(1, false))], &[]], &[&[], &[]]);
+        let components = [&parent, &child];
+        let links: [ScopedSubgrammarLink; 0] = [];
+        let provider = DisjointComponentActionProvider::new(&components, &links).unwrap();
+        let foreign = ParserGSS::from_single_stack(vec![u32::MAX - 1], TerminalsDisallowed::new());
+        check(
+            &provider,
+            &foreign,
+            ScopedParserSymbol::Terminal { component: 0, terminal: 0 },
+            false,
+            "unknown-scope",
+        );
+        // Same disjoint provider, valid mapped shift: true.
+        let p0 = provider.scoped_state(0, 0).unwrap();
+        let ok = ParserGSS::from_single_stack(vec![p0], TerminalsDisallowed::new());
+        check(
+            &provider,
+            &ok,
+            ScopedParserSymbol::Terminal { component: 0, terminal: 0 },
+            true,
+            "disjoint-mapped-shift",
+        );
+    }
 
     #[test]
     fn disjoint_component_provider_parses_across_link_without_composed_table() {
@@ -7754,6 +8127,672 @@ mod tests {
         assert!(stack_may_advance_on_any(&table, &stack, &eof));
     }
 
+    /// A nullable-skip / trivia reduction leaves an EOF `Reduce` on the top
+    /// state. That is NOT completion when the reduction has no feasible goto
+    /// continuation to an accepting state.
+    #[test]
+    fn eof_reduce_without_root_accept_is_incomplete() {
+        let table = build_test_table(
+            3,
+            1,
+            &[&[], &[(EOF, Action::Reduce(0, 1))], &[(EOF, Action::Accept)]],
+            &[&[], &[], &[]],
+        );
+        let stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(
+            !stacks_finished(&table, &stack),
+            "an EOF reduce with no goto continuation must not count as completion",
+        );
+    }
+
+    /// The same EOF `Reduce` DOES complete when its reduction chain has a
+    /// feasible goto to an accepting state.
+    #[test]
+    fn eof_reduction_chain_reaches_root_accept() {
+        let table = build_test_table(
+            3,
+            1,
+            &[&[], &[(EOF, Action::Reduce(0, 1))], &[(EOF, Action::Accept)]],
+            &[&[(0, (2, false))], &[], &[]],
+        );
+        let stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(
+            stacks_finished(&table, &stack),
+            "an EOF reduce chain that reaches an accepting state must complete",
+        );
+    }
+
+    /// A nullable/empty root accepts EOF directly from the start state.
+    #[test]
+    fn nullable_empty_root_eof_accepts() {
+        let table = build_test_table(1, 1, &[&[(EOF, Action::Accept)]], &[&[]]);
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(stacks_finished(&table, &stack));
+    }
+
+    /// A valid reduce branch to Accept completes even when an ambiguous sibling
+    /// reduce branch is dead.
+    #[test]
+    fn ambiguous_eof_split_with_dead_branch_still_completes() {
+        let table = build_test_table(
+            4,
+            1,
+            &[
+                &[],
+                &[(EOF, Action::Split {
+                    shift: None,
+                    reduces: vec![(0, 1), (1, 1)],
+                    accept: false,
+                })],
+                &[(EOF, Action::Accept)],
+                &[],
+            ],
+            &[&[(0, (2, false))], &[], &[], &[]],
+        );
+        let stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(
+            stacks_finished(&table, &stack),
+            "an ambiguous EOF split completes when one reduce branch reaches Accept",
+        );
+    }
+
+    /// An EOF shift is ordinary progress, not completion: `may_advance` must
+    /// stay true while the completion predicate rejects it.
+    #[test]
+    fn eof_shift_may_advance_but_is_not_completion() {
+        let mut table =
+            build_test_table(2, 1, &[&[(EOF, Action::Shift(1, false))], &[]], &[&[], &[]]);
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(
+            stack_may_advance_on(&table, &stack, EOF),
+            "an EOF shift is an ordinary advance",
+        );
+        assert!(
+            !stacks_finished(&table, &stack),
+            "an EOF shift alone must not count as completion",
+        );
+    }
+
+    /// An EOF skip (scoped-ignore shape) is ordinary progress, not completion.
+    #[test]
+    fn eof_skip_may_advance_but_is_not_completion() {
+        let mut table = build_test_table(1, 1, &[&[(EOF, Action::Skip)]], &[&[]]);
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(
+            stack_may_advance_on(&table, &stack, EOF),
+            "an EOF skip is an ordinary advance",
+        );
+        assert!(
+            !stacks_finished(&table, &stack),
+            "an EOF skip alone must not count as completion",
+        );
+    }
+
+    /// A split with only a shift branch (no accepting branch) is not
+    /// completion, even though the shift is an ordinary advance.
+    #[test]
+    fn eof_split_shift_only_is_not_completion() {
+        let mut table = build_test_table(
+            2,
+            1,
+            &[
+                &[],
+                &[(EOF, Action::Split {
+                    shift: Some((1, false)),
+                    reduces: Vec::new(),
+                    accept: false,
+                })],
+            ],
+            &[&[], &[]],
+        );
+        table.admission_policy = AdmissionPolicy::ExactSimulation;
+        let stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(
+            stack_may_advance_on(&table, &stack, EOF),
+            "an EOF split shift is an ordinary advance",
+        );
+        assert!(
+            !stacks_finished(&table, &stack),
+            "an EOF split with only a shift branch must not count as completion",
+        );
+    }
+
+    #[test]
+    fn provider_eof_suite_mirrors_concrete_semantics() {
+        // 1. Orphan reduce false: reduce with no goto continuation does not complete
+        let table1 = build_test_table(
+            3,
+            1,
+            &[&[], &[(EOF, Action::Reduce(0, 1))], &[(EOF, Action::Accept)]],
+            &[&[], &[], &[]],
+        );
+        let provider1 = GLRTableActionProvider::new(&table1);
+        let stack1 = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider1, &stack1, EOF));
+
+        // 2. Reduce chain Accept true: reduce reaches Accept via goto
+        let table2 = build_test_table(
+            3,
+            1,
+            &[&[], &[(EOF, Action::Reduce(0, 1))], &[(EOF, Action::Accept)]],
+            &[&[(0, (2, false))], &[], &[]],
+        );
+        let provider2 = GLRTableActionProvider::new(&table2);
+        let stack2 = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(stacks_finished_with_provider(&provider2, &stack2, EOF));
+
+        // 3. Nullable empty root true
+        let table3 = build_test_table(1, 1, &[&[(EOF, Action::Accept)]], &[&[]]);
+        let provider3 = GLRTableActionProvider::new(&table3);
+        let stack3 = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(stacks_finished_with_provider(&provider3, &stack3, EOF));
+
+        // 4. Ambiguous dead branch + Accept true
+        let table4 = build_test_table(
+            4,
+            1,
+            &[
+                &[],
+                &[(EOF, Action::Split {
+                    shift: None,
+                    reduces: vec![(0, 1), (1, 1)],
+                    accept: false,
+                })],
+                &[(EOF, Action::Accept)],
+                &[],
+            ],
+            &[&[(0, (2, false))], &[], &[], &[]],
+        );
+        let provider4 = GLRTableActionProvider::new(&table4);
+        let stack4 = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        assert!(stacks_finished_with_provider(&provider4, &stack4, EOF));
+
+        // 5. EOF shift/skip/stackshift false
+        let table_shift = build_test_table(2, 1, &[&[(EOF, Action::Shift(1, false))], &[]], &[&[], &[]]);
+        let provider_shift = GLRTableActionProvider::new(&table_shift);
+        let stack_shift = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_shift, &stack_shift, EOF));
+
+        let table_skip = build_test_table(1, 1, &[&[(EOF, Action::Skip)]], &[&[]]);
+        let provider_skip = GLRTableActionProvider::new(&table_skip);
+        let stack_skip = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_skip, &stack_skip, EOF));
+
+        let table_stackshift = build_test_table(
+            2,
+            1,
+            &[&[(EOF, Action::StackShifts(vec![StackShift { pop: 0, pushes: vec![1] }]))], &[]],
+            &[&[], &[]],
+        );
+        let provider_stackshift = GLRTableActionProvider::new(&table_stackshift);
+        let stack_stackshift = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_stackshift, &stack_stackshift, EOF));
+
+        // 6. No action / empty stack false
+        let table_no_action = build_test_table(1, 1, &[&[]], &[&[]]);
+        let provider_no_action = GLRTableActionProvider::new(&table_no_action);
+        let stack_no_action = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_no_action, &stack_no_action, EOF));
+        assert!(!stacks_finished_with_provider(&provider_no_action, &ParserGSS::empty(), EOF));
+
+        // 7. Infeasible pop false (reduce length > stack depth)
+        let table_infeasible = build_test_table(
+            2,
+            1,
+            &[&[(EOF, Action::Reduce(0, 5))], &[(EOF, Action::Accept)]],
+            &[&[(0, (1, false))], &[]],
+        );
+        let provider_infeasible = GLRTableActionProvider::new(&table_infeasible);
+        let stack_infeasible = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_infeasible, &stack_infeasible, EOF));
+
+        // 8. Reduction cycle terminates false
+        let table_cycle = build_test_table(
+            2,
+            1,
+            &[&[(EOF, Action::Reduce(0, 1))], &[]],
+            &[&[(0, (0, false))], &[]],
+        );
+        let provider_cycle = GLRTableActionProvider::new(&table_cycle);
+        let stack_cycle = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(!stacks_finished_with_provider(&provider_cycle, &stack_cycle, EOF));
+    }
+
+    #[test]
+    fn provider_split_with_accept_shift_and_reduce_preserves_shifts_and_accepts() {
+        let token = 0;
+        let nt = 0;
+        // States:
+        // State 0 (base): goto on nt -> State 2
+        // State 1 (top): Split with accept + shift(3) + reduce(nt, 1)
+        // State 2: reduction goto target, shifts 4 on token
+        // State 3: direct shift target
+        // State 4: reduction-derived shift target
+        let table = build_test_table(
+            5,
+            1,
+            &[
+                &[],
+                &[(
+                    token,
+                    Action::Split {
+                        shift: Some((3, false)),
+                        reduces: vec![(nt, 1)],
+                        accept: true,
+                    },
+                )],
+                &[(token, Action::Shift(4, false))],
+                &[],
+                &[],
+            ],
+            &[
+                &[(nt, (2, false))],
+                &[],
+                &[],
+                &[],
+                &[],
+            ],
+        );
+        let provider = GLRTableActionProvider::new(&table);
+        let stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+
+        // 1. Advance mode: verifies both direct shift (state 3) and reduction-derived shift (state 4) are preserved
+        let advanced = advance_stacks_with_provider(&provider, stack.clone(), token);
+        let paths = advanced.to_stacks(32).expect("should enumerate paths");
+        let top_states: FxHashSet<u32> = paths.iter().map(|(s, _)| *s.last().unwrap()).collect();
+        assert!(
+            top_states.contains(&3),
+            "Advance must preserve direct shift from Action::Split; top_states={:?}",
+            top_states
+        );
+        assert!(
+            top_states.contains(&4),
+            "Advance must preserve reduction-derived shift from Action::Split; top_states={:?}",
+            top_states
+        );
+        assert_eq!(top_states.len(), 2);
+
+        // 2. Completion mode: verifies accept: true causes stacks_finished_with_provider to accept
+        assert!(
+            stacks_finished_with_provider(&provider, &stack, token),
+            "Completion must accept when Action::Split has accept: true"
+        );
+    }
+
+    #[test]
+    fn provider_eof_non_acceptance_variants() {
+        // EOF extra_stack_shifts alone does not count as acceptance
+        struct ExtraStackShiftsProvider;
+        impl ParserActionProvider for ExtraStackShiftsProvider {
+            type Symbol = TerminalID;
+            fn action(&self, _state: u32, _symbol: TerminalID) -> Option<ProvidedAction<'_>> {
+                Some(ProvidedAction {
+                    action: ProvidedActionRef::Identity,
+                    reduction_scope: 0,
+                    extra_stack_shifts: smallvec::smallvec![StackShift {
+                        pop: 0,
+                        pushes: vec![1],
+                    }],
+                })
+            }
+            fn scope_state(&self, _scope: u32, local: u32) -> Option<u32> {
+                Some(local)
+            }
+            fn goto_target(&self, _scope: u32, _from: u32, _nt: u32) -> Option<(u32, bool)> {
+                None
+            }
+            fn state_count_hint(&self) -> usize {
+                2
+            }
+        }
+
+        let stack = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        assert!(
+            !stacks_finished_with_provider(&ExtraStackShiftsProvider, &stack, EOF),
+            "extra_stack_shifts must not count as acceptance in Completion mode"
+        );
+
+        // EOF Identity alone does not count as acceptance
+        struct IdentityProvider;
+        impl ParserActionProvider for IdentityProvider {
+            type Symbol = TerminalID;
+            fn action(&self, _state: u32, _symbol: TerminalID) -> Option<ProvidedAction<'_>> {
+                Some(ProvidedAction {
+                    action: ProvidedActionRef::Identity,
+                    reduction_scope: 0,
+                    extra_stack_shifts: SmallVec::new(),
+                })
+            }
+            fn scope_state(&self, _scope: u32, local: u32) -> Option<u32> {
+                Some(local)
+            }
+            fn goto_target(&self, _scope: u32, _from: u32, _nt: u32) -> Option<(u32, bool)> {
+                None
+            }
+            fn state_count_hint(&self) -> usize {
+                1
+            }
+        }
+
+        assert!(
+            !stacks_finished_with_provider(&IdentityProvider, &stack, EOF),
+            "Identity must not count as acceptance in Completion mode"
+        );
+    }
+
+    #[test]
+    fn provider_nullable_growing_stack_cycle_bounded_witness() {
+        let nt = 0;
+        let table = build_test_table(
+            2,
+            1,
+            &[
+                &[(EOF, Action::Reduce(nt, 0))],
+                &[(EOF, Action::Reduce(nt, 0))],
+            ],
+            &[
+                &[(nt, (1, false))],
+                &[(nt, (1, false))],
+            ],
+        );
+        let provider = GLRTableActionProvider::new(&table);
+        let mut key_interner = GssSemanticKeyInterner::<u32, TerminalsDisallowed>::new();
+        let mut visited = FxHashSet::<u32>::default();
+
+        let mut current = ParserGSS::from_single_stack(vec![0], TerminalsDisallowed::new());
+        let mut keys = Vec::new();
+
+        for _ in 0..10 {
+            let mut next = ParserGSS::empty();
+            for state in current.peek_values() {
+                let provided = provider.action(state, EOF).unwrap();
+                let isolated = current.isolate(Some(state));
+                if let ProvidedActionRef::Local { action, .. } = provided.action {
+                    action.for_each_reduce(|nt, len| {
+                        for (goto_from, base) in
+                            reduce_sources_from_isolated(&isolated, len as usize)
+                        {
+                            if let Some((target, is_replace)) =
+                                provider.goto_target(provided.reduction_scope, goto_from, nt)
+                            {
+                                let branch = if is_replace {
+                                    base.popn(1).push(target)
+                                } else {
+                                    base.push(target)
+                                };
+                                let key = key_interner.key(&branch);
+                                assert!(
+                                    visited.insert(key),
+                                    "key must be fresh because stack depth increased"
+                                );
+                                keys.push(key);
+                                merge_into(&mut next, branch);
+                            }
+                        }
+                    });
+                }
+            }
+            assert!(!next.is_empty());
+            current = next;
+        }
+        // NOTE: This test is explicitly diagnostic. Passing this probe confirms that whole-stack
+        // deduplication alone does not terminate nullable growing-stack cycles; it does NOT imply
+        // fixed correctness of unbounded cycle termination.
+        assert_eq!(keys.len(), 10);
+        let unique_keys: FxHashSet<_> = keys.iter().copied().collect();
+        assert_eq!(
+            unique_keys.len(),
+            10,
+            "whole-stack dedup generated unique keys for all growing stacks; dedup does not terminate growing-stack cycles"
+        );
+    }
+
+    #[test]
+    fn provider_eof_reduction_exposing_control_transition_accepts() {
+        // Test synthetic chain: reduce -> control -> Accept on EOF.
+        // Stack starts at [0, 10].
+        // State 10 on EOF: Reduce(nt=0, len=1).
+        // Goto from 0 on nt=0: State 1.
+        // State 1 has NO EOF action, but exposes control symbol CTRL (999).
+        // On CTRL (999): State 1 shifts to State 2.
+        // State 2 on EOF: Action::Accept.
+        const CTRL_SYM: u32 = 999;
+        static ACTION_REDUCE: Action = Action::Reduce(0, 1);
+        static ACTION_SHIFT_CTRL: Action = Action::Shift(2, false);
+        static ACTION_ACCEPT: Action = Action::Accept;
+
+        struct ReduceControlAcceptProvider;
+        impl ParserActionProvider for ReduceControlAcceptProvider {
+            type Symbol = u32;
+            fn action(&self, state: u32, symbol: u32) -> Option<ProvidedAction<'_>> {
+                match (state, symbol) {
+                    (10, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACTION_REDUCE },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (1, CTRL_SYM) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACTION_SHIFT_CTRL },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (2, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACTION_ACCEPT },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    _ => None,
+                }
+            }
+            fn control_symbols(&self, state: u32, out: &mut SmallVec<[Self::Symbol; 4]>) {
+                if state == 1 {
+                    out.push(CTRL_SYM);
+                }
+            }
+            fn scope_state(&self, _scope: u32, local: u32) -> Option<u32> {
+                Some(local)
+            }
+            fn goto_target(&self, _scope: u32, goto_from: u32, nt: u32) -> Option<(u32, bool)> {
+                if goto_from == 0 && nt == 0 {
+                    Some((1, false))
+                } else {
+                    None
+                }
+            }
+            fn state_count_hint(&self) -> usize {
+                16
+            }
+        }
+
+        let provider = ReduceControlAcceptProvider;
+        let stack = ParserGSS::from_single_stack(vec![0, 10], TerminalsDisallowed::new());
+
+        // Completion-mode traversal closes controls on the next reduction frontier,
+        // so post-reduction control transitions are explored and reach Accept.
+        let finished = stacks_finished_with_provider(&provider, &stack, EOF);
+        assert!(
+            finished,
+            "Completion-mode traversal closes controls on the next reduction frontier, exposing post-reduction control transitions to Accept"
+        );
+
+        // Retain separate post-reduction frontier direct verification:
+        let post_reduce_stack = ParserGSS::from_single_stack(vec![0, 1], TerminalsDisallowed::new());
+        let closed_post = close_provider_control_stacks(&provider, &post_reduce_stack);
+        assert!(
+            stacks_finished_with_provider(&provider, &closed_post, EOF),
+            "When post-reduction frontier is control-closed, it reaches State 2 which accepts on EOF"
+        );
+    }
+
+    #[test]
+    fn provider_eof_reduction_two_stage_control_accepts() {
+        // Chain: reduce1 -> control1 -> reduce2 -> control2 -> Accept
+        // [0, 10] -> Reduce(nt0=0, len=1) -> [0, 1]
+        // [0, 1] on CTRL1 (991) -> shifts 2 -> [0, 1, 2]
+        // [0, 1, 2] on EOF -> Reduce(nt1=1, len=2) -> base [0], goto nt1=1 -> [0, 3]
+        // [0, 3] on CTRL2 (992) -> shifts 4 -> [0, 3, 4]
+        // [0, 3, 4] on EOF -> Accept
+        const CTRL1: u32 = 991;
+        const CTRL2: u32 = 992;
+        static REDUCE_1: Action = Action::Reduce(0, 1);
+        static SHIFT_CTRL1: Action = Action::Shift(2, false);
+        static REDUCE_2: Action = Action::Reduce(1, 2);
+        static SHIFT_CTRL2: Action = Action::Shift(4, false);
+        static ACCEPT_ACT: Action = Action::Accept;
+
+        struct TwoStageProvider;
+        impl ParserActionProvider for TwoStageProvider {
+            type Symbol = u32;
+            fn action(&self, state: u32, symbol: u32) -> Option<ProvidedAction<'_>> {
+                match (state, symbol) {
+                    (10, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &REDUCE_1 },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (1, CTRL1) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &SHIFT_CTRL1 },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (2, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &REDUCE_2 },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (3, CTRL2) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &SHIFT_CTRL2 },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (4, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACCEPT_ACT },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    _ => None,
+                }
+            }
+            fn control_symbols(&self, state: u32, out: &mut SmallVec<[Self::Symbol; 4]>) {
+                match state {
+                    1 => out.push(CTRL1),
+                    3 => out.push(CTRL2),
+                    _ => {}
+                }
+            }
+            fn scope_state(&self, _scope: u32, local: u32) -> Option<u32> {
+                Some(local)
+            }
+            fn goto_target(&self, _scope: u32, goto_from: u32, nt: u32) -> Option<(u32, bool)> {
+                match (goto_from, nt) {
+                    (0, 0) => Some((1, false)),
+                    (0, 1) => Some((3, false)),
+                    _ => None,
+                }
+            }
+            fn state_count_hint(&self) -> usize {
+                16
+            }
+        }
+
+        let provider = TwoStageProvider;
+        let stack = ParserGSS::from_single_stack(vec![0, 10], TerminalsDisallowed::new());
+        assert!(
+            stacks_finished_with_provider(&provider, &stack, EOF),
+            "Two consecutive reduce/control stages should complete to Accept"
+        );
+    }
+
+    #[test]
+    fn provider_eof_reduction_exposing_control_transition_no_accept_rejects() {
+        // Negative case: reduce -> control -> non-accepting state
+        const CTRL_SYM: u32 = 999;
+        static ACTION_REDUCE: Action = Action::Reduce(0, 1);
+        static ACTION_SHIFT_CTRL: Action = Action::Shift(2, false);
+
+        struct NoAcceptProvider;
+        impl ParserActionProvider for NoAcceptProvider {
+            type Symbol = u32;
+            fn action(&self, state: u32, symbol: u32) -> Option<ProvidedAction<'_>> {
+                match (state, symbol) {
+                    (10, EOF) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACTION_REDUCE },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    (1, CTRL_SYM) => Some(ProvidedAction {
+                        action: ProvidedActionRef::Local { scope: 0, action: &ACTION_SHIFT_CTRL },
+                        reduction_scope: 0,
+                        extra_stack_shifts: SmallVec::new(),
+                    }),
+                    // State 2 has no EOF action
+                    _ => None,
+                }
+            }
+            fn control_symbols(&self, state: u32, out: &mut SmallVec<[Self::Symbol; 4]>) {
+                if state == 1 {
+                    out.push(CTRL_SYM);
+                }
+            }
+            fn scope_state(&self, _scope: u32, local: u32) -> Option<u32> {
+                Some(local)
+            }
+            fn goto_target(&self, _scope: u32, goto_from: u32, nt: u32) -> Option<(u32, bool)> {
+                if goto_from == 0 && nt == 0 {
+                    Some((1, false))
+                } else {
+                    None
+                }
+            }
+            fn state_count_hint(&self) -> usize {
+                16
+            }
+        }
+
+        let provider = NoAcceptProvider;
+        let stack = ParserGSS::from_single_stack(vec![0, 10], TerminalsDisallowed::new());
+        assert!(
+            !stacks_finished_with_provider(&provider, &stack, EOF),
+            "reduce -> control -> non-accepting state must reject"
+        );
+    }
+
+    #[test]
+    fn provider_scoped_composition_eof_control_closure_accepts() {
+        let parent_table = build_test_table(
+            2,
+            1,
+            &[&[(0, Action::Shift(1, false))], &[(EOF, Action::Accept)]],
+            &[&[], &[]],
+        );
+        let child_table = build_test_table(
+            1,
+            1,
+            &[&[(EOF, Action::Accept)]],
+            &[&[]],
+        );
+        let tables: [&GLRTable; 2] = [&parent_table, &child_table];
+        let links = [ScopedSubgrammarLink {
+            parent_component: 0,
+            slot_terminal: 0,
+            child_component: 1,
+            child_start: 0,
+            return_pop: 1,
+            child_start_nullable: true,
+        }];
+        let provider = DisjointComponentActionProvider::new(&tables, &links).unwrap();
+
+        let child_start_scoped = provider.scoped_state(1, 0).unwrap();
+        let stack = ParserGSS::from_single_stack(
+            vec![provider.scoped_state(0, 0).unwrap(), child_start_scoped],
+            TerminalsDisallowed::new(),
+        );
+        let parent_eof = ScopedParserSymbol::Terminal { component: 0, terminal: EOF };
+        assert!(stacks_finished_with_provider(&provider, &stack, parent_eof));
+    }
+
     #[test]
     fn advance_stacks_materializes_single_concrete_path_for_split() {
         let token = 0;
@@ -8377,15 +9416,20 @@ pub fn stacks_finished(table: &GLRTable, stack: &ParserGSS) -> bool {
 }
 
 /// Completion predicate for a frontier already closed under linker controls.
+///
+/// Reuses the exact admission simulation on `EOF` (the same
+/// reduction-feasibility closure `stack_may_advance_on_control_closed` uses) in
+/// accept-only `Completion` mode instead of treating *any* EOF action as
+/// completion. A nullable skip reduction leaves an EOF `Reduce` on a trivia
+/// state; that reduce is only a genuine completion when its
+/// GSS-predecessor-feasible reduction chain reaches `Action::Accept` (or an
+/// accepting `Split`). Requiring an immediate `Accept` would reject valid
+/// reducible completions, so the full closure is followed. A bare EOF
+/// shift/skip/replace is never completion.
 pub fn stacks_finished_control_closed(table: &GLRTable, stack: &ParserGSS) -> bool {
     if stack.is_empty() {
         return false;
     }
 
-    let has_eof_action = stack
-        .peek_values()
-        .iter()
-        .any(|&state| table.action(state, EOF).is_some());
-
-    has_eof_action
+    exact_admission_completes_on_eof(table, stack)
 }

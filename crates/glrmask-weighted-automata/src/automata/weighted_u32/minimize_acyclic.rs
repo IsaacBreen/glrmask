@@ -14,7 +14,7 @@ use smallvec::SmallVec;
 
 use super::dwa::{DWA, DWAState};
 use super::equivalence::find_difference;
-use crate::ds::weight::{Weight, WeightIntersectionIndex};
+use crate::ds::weight::{SharedTokenSet, Weight, WeightIntersectionIndex};
 
 type Label = i32;
 
@@ -4071,7 +4071,8 @@ impl MergedStateBuilder {
 /// weights again is redundant. Rebuilding weights from this partial function is
 /// exactly the same union, expressed once per output group instead of once per
 /// input member.
-fn pointwise_groups_to_builders(
+#[cfg(test)]
+fn pointwise_groups_to_builders_reference(
     groups: &[PointwiseMergeGroup],
     interner: &PointwiseBehaviorInterner,
 ) -> Vec<MergedStateBuilder> {
@@ -4086,14 +4087,15 @@ fn pointwise_groups_to_builders(
                 PointwiseBehaviorMap::Dense(entries) => entries
                     .iter()
                     .enumerate()
-                    .filter_map(|(tsid, region)| region.as_ref().map(|region| (tsid as u32, region)))
+                    .filter_map(|(tsid, region)| {
+                        region.as_ref().map(|region| (tsid as u32, region))
+                    })
                     .collect::<Vec<_>>(),
             };
             entries.sort_unstable_by_key(|(tsid, _)| *tsid);
 
             let mut final_entries = Vec::<(u32, RangeSetBlaze<u32>)>::new();
-            let mut transition_entries =
-                BTreeMap::<Label, Vec<(u32, RangeSetBlaze<u32>)>>::new();
+            let mut transition_entries = BTreeMap::<Label, Vec<(u32, RangeSetBlaze<u32>)>>::new();
 
             for (tsid, region) in entries {
                 let mut final_ranges = Vec::<std::ops::RangeInclusive<u32>>::new();
@@ -4130,6 +4132,188 @@ fn pointwise_groups_to_builders(
             }
             for (label, entries) in transition_entries {
                 let weight = Weight::from_per_tsid_token_sets(entries);
+                if weight.is_empty() {
+                    continue;
+                }
+                let target = *group
+                    .targets_by_label
+                    .get(&label)
+                    .expect("pointwise behavior label must have a merged target");
+                builder.add_transition(label, target, weight);
+            }
+            builder
+        })
+        .collect()
+}
+
+/// Decoded token sets for one unique pointwise behavior region.
+///
+/// `final_tokens` is `None` when no token in the region is final-active.
+/// `transitions` carries one entry per distinct label in the region; each
+/// entry stores the mapped target alongside the token set. The target is
+/// stored so every cache reuse can re-assert the existing
+/// `targets_by_label` invariant without consulting another interner.
+struct DecodedPointwiseRegion {
+    final_tokens: Option<SharedTokenSet>,
+    transitions: Vec<(Label, u32, SharedTokenSet)>,
+}
+
+fn decode_pointwise_region(
+    region: &[TokenBehaviorRange],
+    interner: &PointwiseBehaviorInterner,
+) -> DecodedPointwiseRegion {
+    let mut final_ranges = Vec::<std::ops::RangeInclusive<u32>>::new();
+    let mut ranges_by_label = BTreeMap::<Label, (u32, Vec<std::ops::RangeInclusive<u32>>)>::new();
+    for token_range in region.iter() {
+        let behavior = interner.get(token_range.behavior);
+        if behavior.final_active {
+            final_ranges.push(token_range.start..=token_range.end);
+        }
+        for &(label, target) in &behavior.transitions {
+            match ranges_by_label.entry(label) {
+                std::collections::btree_map::Entry::Occupied(mut entry) => {
+                    debug_assert_eq!(entry.get().0, target);
+                    entry.get_mut().1.push(token_range.start..=token_range.end);
+                }
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((target, vec![token_range.start..=token_range.end]));
+                }
+            }
+        }
+    }
+    let final_tokens = (!final_ranges.is_empty())
+        .then(|| crate::ds::weight::shared_rangeset(RangeSetBlaze::from_iter(final_ranges)));
+    let transitions = ranges_by_label
+        .into_iter()
+        .map(|(label, (target, ranges))| {
+            (
+                label,
+                target,
+                crate::ds::weight::shared_rangeset(RangeSetBlaze::from_iter(ranges)),
+            )
+        })
+        .collect();
+    DecodedPointwiseRegion {
+        final_tokens,
+        transitions,
+    }
+}
+
+/// Materialize the exact union behavior already computed by pointwise coloring
+/// directly into one builder per merge group.
+///
+/// Pointwise coloring maintains, for every `(tsid, token)` in a group's live
+/// domain, the complete deterministic behavior: finality plus labelled mapped
+/// targets. Re-expanding all member states after that proof and unioning their
+/// weights again is redundant. Rebuilding weights from this partial function is
+/// exactly the same union, expressed once per output group instead of once per
+/// input member.
+///
+/// Regions are shared `Arc`s: every TSID with identical behavior points at
+/// the same allocation. This decodes each unique region once per call
+/// (keyed by the region pointer, which stays valid because `groups` is
+/// borrowed for the whole call and the behavior interner is fixed for the
+/// same call) and reuses the decoded token sets for every TSID occurrence
+/// via [`Weight::from_per_tsid_shared`]. The per-TSID entries, TSID sort,
+/// group targets, and coordinate IDs are unchanged.
+fn pointwise_groups_to_builders(
+    groups: &[PointwiseMergeGroup],
+    interner: &PointwiseBehaviorInterner,
+) -> Vec<MergedStateBuilder> {
+    // Call-scoped only: groups hold every original Arc alive for the whole
+    // call and `interner` is fixed for the same call, so a pointer key cannot
+    // observe ABA reuse or a cross-context region.
+    let mut decoded_by_region_ptr: FxHashMap<usize, DecodedPointwiseRegion> = FxHashMap::default();
+    if std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
+        || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some()
+    {
+        let materialize_started_at = Instant::now();
+        let builders =
+            pointwise_groups_to_builders_cached(groups, interner, &mut decoded_by_region_ptr);
+        let materialize_ms = materialize_started_at.elapsed().as_secs_f64() * 1000.0;
+        let region_occurrences = groups
+            .iter()
+            .map(|group| match &group.behavior_by_tsid {
+                PointwiseBehaviorMap::Sparse(entries) => entries.len(),
+                PointwiseBehaviorMap::Dense(entries) => entries.iter().flatten().count(),
+            })
+            .sum::<usize>();
+        let (mut output_final_weights, mut output_transition_weights) = (0usize, 0usize);
+        for builder in &builders {
+            output_final_weights += builder.final_weights_pending.len();
+            output_transition_weights += builder
+                .transitions_pending
+                .values()
+                .map(|(_, pending)| pending.len())
+                .sum::<usize>();
+        }
+        eprintln!(
+            "[glrmask/profile][weighted_dwa_minimize_pointwise_materialize] groups={} region_occurrences={} unique_decodes={} output_final_weights={} output_transition_weights={} materialize_ms={:.3}",
+            groups.len(),
+            region_occurrences,
+            decoded_by_region_ptr.len(),
+            output_final_weights,
+            output_transition_weights,
+            materialize_ms,
+        );
+        return builders;
+    }
+    pointwise_groups_to_builders_cached(groups, interner, &mut decoded_by_region_ptr)
+}
+
+fn pointwise_groups_to_builders_cached(
+    groups: &[PointwiseMergeGroup],
+    interner: &PointwiseBehaviorInterner,
+    decoded_by_region_ptr: &mut FxHashMap<usize, DecodedPointwiseRegion>,
+) -> Vec<MergedStateBuilder> {
+    groups
+        .iter()
+        .map(|group| {
+            let mut entries = match &group.behavior_by_tsid {
+                PointwiseBehaviorMap::Sparse(entries) => entries
+                    .iter()
+                    .map(|(&tsid, region)| (tsid, region))
+                    .collect::<Vec<_>>(),
+                PointwiseBehaviorMap::Dense(entries) => entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(tsid, region)| {
+                        region.as_ref().map(|region| (tsid as u32, region))
+                    })
+                    .collect::<Vec<_>>(),
+            };
+            entries.sort_unstable_by_key(|(tsid, _)| *tsid);
+
+            let mut final_entries = Vec::<(u32, SharedTokenSet)>::new();
+            let mut transition_entries = BTreeMap::<Label, Vec<(u32, SharedTokenSet)>>::new();
+
+            for (tsid, region) in entries {
+                let region_ptr = Arc::as_ptr(region) as usize;
+                let decoded = match decoded_by_region_ptr.entry(region_ptr) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(decode_pointwise_region(region, interner))
+                    }
+                };
+                if let Some(final_tokens) = decoded.final_tokens.as_ref() {
+                    final_entries.push((tsid, Arc::clone(final_tokens)));
+                }
+                for (label, target, tokens) in &decoded.transitions {
+                    debug_assert_eq!(group.targets_by_label.get(label), Some(target));
+                    transition_entries
+                        .entry(*label)
+                        .or_default()
+                        .push((tsid, Arc::clone(tokens)));
+                }
+            }
+
+            let mut builder = MergedStateBuilder::default();
+            let final_weight = Weight::from_per_tsid_shared(final_entries);
+            if !final_weight.is_empty() {
+                builder.add_final_weight(&final_weight);
+            }
+            for (label, entries) in transition_entries {
+                let weight = Weight::from_per_tsid_shared(entries);
                 if weight.is_empty() {
                     continue;
                 }
@@ -4749,21 +4933,19 @@ fn minimize_acyclic_owned_impl(
 #[cfg(test)]
 mod tests {
     use super::{
-        batch_build_weight, build_exact_group_summary, final_weights_compatible_on_domain,
-        find_difference, memberwise_group_compatible, minimize_acyclic,
-        reverse_hashcons_acyclic_owned,
-        minimize_acyclic_owned_path_conditioned, push_weights, try_minimize_small_pairwise_direct,
-        overlay_compatible_token_behavior_ranges,
-        sorted_weights_compatible_on_domain,
-        sorted_weights_compatible_on_domain_intersection,
-        weight_is_disjoint_from_domain_intersection, weights_equal_on_domain,
-        weights_equal_on_domain_intersection, ClassProfile, PointwiseBehaviorInterner,
-        PointwiseBehaviorMap, PointwiseBehaviorMapLayout, PointwiseProfile,
-        PointwiseRegionBuildCache, PointwiseRegionInterner, TokenBehaviorRange,
-        build_pointwise_profile, build_token_behavior_region,
+        ClassProfile, PointwiseBehaviorInterner, PointwiseBehaviorMap, PointwiseBehaviorMapLayout,
+        PointwiseMergeGroup, PointwiseProfile, PointwiseRegionBuildCache, PointwiseRegionInterner,
+        TokenBehaviorRange, batch_build_weight, build_exact_group_summary, build_pointwise_profile,
+        build_token_behavior_region, final_weights_compatible_on_domain, find_difference,
+        memberwise_group_compatible, minimize_acyclic, minimize_acyclic_owned_path_conditioned,
+        overlay_compatible_token_behavior_ranges, pointwise_groups_to_builders,
+        pointwise_groups_to_builders_reference, push_weights, reverse_hashcons_acyclic_owned,
+        sorted_weights_compatible_on_domain, sorted_weights_compatible_on_domain_intersection,
+        try_minimize_small_pairwise_direct, weight_is_disjoint_from_domain_intersection,
+        weights_equal_on_domain, weights_equal_on_domain_intersection,
     };
-    use crate::weighted_u32::dwa::{DWA, DWAState};
     use crate::ds::weight::Weight;
+    use crate::weighted_u32::dwa::{DWA, DWAState};
     use range_set_blaze::RangeSetBlaze;
     use std::sync::Arc;
 
@@ -5414,5 +5596,326 @@ mod tests {
         assert_disjoint_matches_overlap(&weight_a, &left, &right);
         assert_disjoint_matches_overlap(&weight_b, &left, &right);
         assert_equal_matches_overlap(&weight_a, &weight_b, &left, &right);
+    }
+
+    /// Stable vs DescendingDomain must preserve the ORIGINAL input language:
+    /// find_difference(input, each) and find_difference(stable, descending)
+    /// are all None. Seeded DAGs: 6-12 states, sorted labels, overlapping
+    /// domains, divergent continuations, nontrivial finals, missing edges.
+    fn seeded_dag_input(seed: u64) -> DWA {
+        let mut rng = seed.wrapping_add(1);
+        let mut next = move || {
+            rng ^= rng >> 12;
+            rng ^= rng << 25;
+            rng ^= rng >> 27;
+            rng = rng.wrapping_mul(0x2545_f491_4f6c_dd1d);
+            rng
+        };
+        let n_states = 6 + (next() % 7) as usize; // 6..=12
+        let mut states = vec![DWAState::default(); n_states];
+        let outer_domains: [&[(u32, &[(u32, u32)])]; 3] = [
+            &[(0, &[(1, 8)]), (1, &[(3, 10)])],
+            &[(0, &[(5, 12)]), (2, &[(1, 4)])],
+            &[(1, &[(1, 6)]), (2, &[(7, 15)])],
+        ];
+        for i in 0..n_states {
+            let mut label = 1i32;
+            while label <= 4 {
+                if next() % 4 != 0 && i + 1 < n_states {
+                    let span = (next() % (n_states - i - 1) as u64) as usize;
+                    let target = i + 1 + span;
+                    let dom = outer_domains[(next() % 3) as usize];
+                    let w = if next() % 2 == 0 {
+                        weight(dom)
+                    } else {
+                        weight(&[(0, &[(4, 9)]), (1, &[(8, 13)])])
+                    };
+                    states[i].transitions.insert(label, (target as u32, w));
+                }
+                label += 1;
+            }
+            if next() % 3 == 0 {
+                states[i].final_weight =
+                    Some(weight(&[(0, &[(2, 5)]), (2, &[(9, 11)])]));
+            }
+            if next() % 5 == 0 {
+                states[i].final_weight =
+                    Some(weight(&[(1, &[(1, 3)]), (3, &[(20, 25)])]));
+            }
+        }
+        // Accept spine: label-5 chain with uniform weight plus matching final,
+        // so every input has nonempty language by construction.
+        let spine = weight(&[(0, &[(1, 8)])]);
+        for i in 0..n_states - 1 {
+            states[i].transitions.insert(5, (i as u32 + 1, spine.clone()));
+        }
+        states[n_states - 1].final_weight = Some(spine);
+        let input = DWA::from_parts(states, 0);
+        assert!(
+            !input.eval_word(&vec![5; n_states - 1]).is_empty(),
+            "seed {seed}: spine must accept",
+        );
+        input
+    }
+
+    fn assert_orders_preserve_language(seed: u64, input: &DWA) {
+        use super::{minimize_acyclic_owned_with_pointwise_class_order, PointwiseClassOrder};
+        let stable = minimize_acyclic_owned_with_pointwise_class_order(
+            input.clone(),
+            PointwiseClassOrder::Stable,
+        );
+        let descending = minimize_acyclic_owned_with_pointwise_class_order(
+            input.clone(),
+            PointwiseClassOrder::DescendingDomain,
+        );
+        for (name, minimized) in [("stable", &stable), ("descending", &descending)] {
+            match find_difference(input, minimized) {
+                Ok(None) => {}
+                Ok(Some(word)) => {
+                    panic!("seed {seed} {name}: differs from input at word {word:?}")
+                }
+                Err(e) => panic!("seed {seed} {name}: checker error: {e:?}"),
+            }
+        }
+        match find_difference(&stable, &descending) {
+            Ok(None) => {}
+            Ok(Some(word)) => {
+                panic!("seed {seed}: stable vs descending differ at word {word:?}")
+            }
+            Err(e) => panic!("seed {seed}: order-pair checker error: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn minimize_pointwise_orders_preserve_language_seeded_family() {
+        for seed in 0..64u64 {
+            assert_orders_preserve_language(seed, &seeded_dag_input(seed));
+        }
+    }
+
+    #[test]
+    fn pointwise_region_decode_reuse_matches_reference() {
+        // Behavior ids are per-interner indices, so id 0 in `interner` and
+        // id 0 in `other_interner` below denote DIFFERENT behaviors. The
+        // decode cache is keyed by region Arc pointer and lives for one
+        // `pointwise_groups_to_builders` call only, so the second call must
+        // decode the same region Arc under its own interner and produce a
+        // different weight. If the cache ever retained entries across calls,
+        // the second call would wrongly reuse the first call's token sets.
+        let mut interner = PointwiseBehaviorInterner::default();
+        let final_only = interner.intern(true, Vec::new());
+        let labeled = interner.intern(false, vec![(7, 3)]);
+        let labeled_final = interner.intern(true, vec![(7, 3)]);
+        let multi_a = interner.intern(false, vec![(7, 3), (9, 5)]);
+        let mut other_interner = PointwiseBehaviorInterner::default();
+        // Deliberately intern in a different order so shared ids collide:
+        // id 0 = label 17 -> target 23 (not final), id 1 = final-only.
+        let other_labeled = other_interner.intern(false, vec![(17, 23)]);
+        let other_final_only = other_interner.intern(true, Vec::new());
+        assert_eq!(final_only, 0);
+        assert_eq!(other_labeled, 0);
+        assert_eq!(other_final_only, 1);
+
+        let region_final = Arc::new(vec![TokenBehaviorRange {
+            start: 0,
+            end: 4,
+            behavior: final_only,
+        }]);
+        let region_labeled = Arc::new(vec![
+            TokenBehaviorRange {
+                start: 0,
+                end: 2,
+                behavior: labeled_final,
+            },
+            TokenBehaviorRange {
+                start: 3,
+                end: 9,
+                behavior: labeled,
+            },
+        ]);
+        let region_multi = Arc::new(vec![
+            TokenBehaviorRange {
+                start: 0,
+                end: 3,
+                behavior: multi_a,
+            },
+            TokenBehaviorRange {
+                start: 100,
+                end: 109,
+                behavior: multi_a,
+            },
+        ]);
+        let region_empty = Arc::new(Vec::new());
+        // Structurally equal but distinct Arc: same decode, different pointer.
+        let region_labeled_clone = Arc::new((*region_labeled).clone());
+        assert!(!Arc::ptr_eq(&region_labeled, &region_labeled_clone));
+        assert_eq!(&*region_labeled, &*region_labeled_clone);
+        // Max-valid-TSID region. `u32::MAX` itself is the reserved
+        // `WEIGHT_ALL_SENTINEL` / "no coordinate" marker (see
+        // `shared_tokens_for_sorted_tsids`: `u32::MAX` always yields the empty
+        // token set), so `u32::MAX - 1` is the largest TSID this path may
+        // carry. The single-token region below pins that boundary exactly.
+        let region_max = Arc::new(vec![TokenBehaviorRange {
+            start: u32::MAX - 1,
+            end: u32::MAX - 1,
+            behavior: labeled_final,
+        }]);
+
+        // Direct Sparse construction (not via merge_profile) so the
+        // structurally-equal distinct Arcs keep distinct pointers by
+        // construction; the asserts below prove the distinction survived.
+        let mut sparse_entries: rustc_hash::FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>> =
+            rustc_hash::FxHashMap::default();
+        sparse_entries.insert(1, Arc::clone(&region_final));
+        sparse_entries.insert(2, Arc::clone(&region_labeled));
+        sparse_entries.insert(3, Arc::clone(&region_labeled));
+        sparse_entries.insert(5, Arc::clone(&region_multi));
+        sparse_entries.insert(6, Arc::clone(&region_empty));
+        sparse_entries.insert(9, Arc::clone(&region_labeled_clone));
+        sparse_entries.insert(11, Arc::clone(&region_max));
+        assert!(Arc::ptr_eq(
+            sparse_entries.get(&2).expect("tsid 2 present"),
+            &region_labeled
+        ));
+        assert!(Arc::ptr_eq(
+            sparse_entries.get(&3).expect("tsid 3 present"),
+            &region_labeled
+        ));
+        assert!(!Arc::ptr_eq(
+            sparse_entries.get(&2).expect("tsid 2 present"),
+            sparse_entries.get(&9).expect("tsid 9 present")
+        ));
+        assert_eq!(
+            sparse_entries.get(&2).expect("tsid 2 present").as_ref(),
+            sparse_entries.get(&9).expect("tsid 9 present").as_ref()
+        );
+        let sparse_group = PointwiseMergeGroup {
+            targets_by_label: [(7, 3), (9, 5)].into_iter().collect(),
+            behavior_by_tsid: PointwiseBehaviorMap::Sparse(sparse_entries),
+            member_classes: vec![0],
+        };
+        let mut dense_slots: Vec<Option<Arc<Vec<TokenBehaviorRange>>>> = vec![None; 12];
+        dense_slots[0] = Some(Arc::clone(&region_multi));
+        dense_slots[2] = Some(Arc::clone(&region_labeled));
+        dense_slots[4] = Some(Arc::clone(&region_labeled_clone));
+        dense_slots[7] = Some(Arc::clone(&region_final));
+        assert!(!Arc::ptr_eq(
+            dense_slots[2].as_ref().expect("slot 2 present"),
+            dense_slots[4].as_ref().expect("slot 4 present")
+        ));
+        let dense_group = PointwiseMergeGroup {
+            targets_by_label: [(7, 3), (9, 5)].into_iter().collect(),
+            behavior_by_tsid: PointwiseBehaviorMap::Dense(dense_slots),
+            member_classes: vec![1],
+        };
+        // Cross-group Arc sharing: same region_labeled Arc in both groups.
+        let groups = vec![sparse_group, dense_group];
+
+        let expected = pointwise_groups_to_builders_reference(&groups, &interner);
+        let actual = pointwise_groups_to_builders(&groups, &interner);
+        assert_eq!(expected.len(), actual.len());
+        for (index, (want, got)) in expected.iter().zip(actual.iter()).enumerate() {
+            assert_eq!(
+                want.final_weights_pending, got.final_weights_pending,
+                "group {index} final weights differ",
+            );
+            assert_eq!(
+                want.transitions_pending.len(),
+                got.transitions_pending.len(),
+                "group {index} transition label count differs",
+            );
+            for (label, (want_target, want_weights)) in &want.transitions_pending {
+                let (got_target, got_weights) = got
+                    .transitions_pending
+                    .get(label)
+                    .unwrap_or_else(|| panic!("group {index} missing label {label}"));
+                assert_eq!(
+                    want_target, got_target,
+                    "group {index} label {label} target differs"
+                );
+                assert_eq!(
+                    want_weights, got_weights,
+                    "group {index} label {label} weights differ"
+                );
+            }
+        }
+        // Empty-region TSID 6 contributes no final and no transition rows.
+        assert!(
+            expected[0]
+                .transitions_pending
+                .values()
+                .all(|(_, weights)| weights.iter().all(|w| !w.is_empty()))
+        );
+
+        // Cross-context regression: the SAME region Arc decodes under two
+        // different interners where behavior id 0 means different things
+        // (final-only above vs label 17 -> target 23 here). Each call must
+        // decode with its own interner; a cache retained across calls would
+        // leak the first call's final-only token set into the second call.
+        let region_collision = Arc::new(vec![TokenBehaviorRange {
+            start: 0,
+            end: 5,
+            behavior: 0,
+        }]);
+        let mut first_entries: rustc_hash::FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>> =
+            rustc_hash::FxHashMap::default();
+        first_entries.insert(10, Arc::clone(&region_collision));
+        let first_groups = vec![PointwiseMergeGroup {
+            targets_by_label: rustc_hash::FxHashMap::default(),
+            behavior_by_tsid: PointwiseBehaviorMap::Sparse(first_entries),
+            member_classes: vec![0],
+        }];
+        let first_expected = pointwise_groups_to_builders_reference(&first_groups, &interner);
+        let first_actual = pointwise_groups_to_builders(&first_groups, &interner);
+        assert_eq!(
+            first_expected[0].final_weights_pending,
+            first_actual[0].final_weights_pending
+        );
+        assert!(first_actual[0].transitions_pending.is_empty());
+        assert!(!first_actual[0].final_weights_pending.is_empty());
+
+        let mut second_entries: rustc_hash::FxHashMap<u32, Arc<Vec<TokenBehaviorRange>>> =
+            rustc_hash::FxHashMap::default();
+        second_entries.insert(10, Arc::clone(&region_collision));
+        let second_groups = vec![PointwiseMergeGroup {
+            targets_by_label: [(17, 23)].into_iter().collect(),
+            behavior_by_tsid: PointwiseBehaviorMap::Sparse(second_entries),
+            member_classes: vec![0],
+        }];
+        let second_expected =
+            pointwise_groups_to_builders_reference(&second_groups, &other_interner);
+        let second_actual = pointwise_groups_to_builders(&second_groups, &other_interner);
+        assert_eq!(
+            second_expected[0].final_weights_pending,
+            second_actual[0].final_weights_pending
+        );
+        assert_eq!(
+            second_expected[0].transitions_pending,
+            second_actual[0].transitions_pending
+        );
+        // Contexts genuinely differ: final-only vs label-17 transition.
+        assert!(second_actual[0].final_weights_pending.is_empty());
+        assert!(second_actual[0].transitions_pending.contains_key(&17));
+        assert!(!first_actual[0].transitions_pending.contains_key(&17));
+        assert_ne!(
+            first_actual[0].final_weights_pending,
+            second_actual[0].final_weights_pending
+        );
+    }
+
+    #[test]
+    fn minimize_pointwise_orders_preserve_language_overlapping_partial_states() {
+        // Two states share label 1 with overlapping (not equal) weights and
+        // divergent continuations; label 2 missing from one; distinct finals.
+        let mut states = vec![DWAState::default(); 5];
+        states[0].transitions.insert(1, (1, weight(&[(0, &[(1, 8)])])));
+        states[0].transitions.insert(2, (2, weight(&[(0, &[(1, 8)])])));
+        states[1].transitions.insert(1, (3, weight(&[(0, &[(5, 12)])])));
+        states[1].transitions.insert(3, (4, weight(&[(1, &[(1, 6)])])));
+        states[2].transitions.insert(1, (3, weight(&[(0, &[(1, 4)])])));
+        states[2].transitions.insert(4, (4, weight(&[(2, &[(7, 15)])])));
+        states[3].final_weight = Some(weight(&[(0, &[(2, 5)]), (2, &[(9, 11)])]));
+        states[4].final_weight = Some(weight(&[(1, &[(1, 3)]), (3, &[(20, 25)])]));
+        assert_orders_preserve_language(u64::MAX, &DWA::from_parts(states, 0));
     }
 }

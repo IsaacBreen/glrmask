@@ -210,6 +210,24 @@ pub mod __private {
 
     pub type Result<T> = std::result::Result<T, Error>;
 
+    /// Internal debug bridge: compile an ordinary
+    /// [`crate::grammar::ast::NamedGrammar`] through the normal
+    /// (non-composition) compiler path, using the same default table
+    /// construction as the ordinary GLRM route
+    /// (`Constraint::from_glrm_grammar` -> `ExperimentalCoreMerged`).
+    pub fn compile_named_grammar(
+        named: crate::grammar::ast::NamedGrammar,
+        vocab: &Vocab,
+    ) -> Result<Constraint> {
+        crate::import::compile_from_named_grammar(
+            named,
+            vocab,
+            "named_grammar_internal",
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+            &[],
+        )
+    }
+
     /// Internal release-only benchmark for exact o21137 subgrammar decomposition.
     pub fn run_o21137_subgrammar_benchmark(mode: &str) {
         crate::compiler::o21137_subgrammar_bench::run(mode);

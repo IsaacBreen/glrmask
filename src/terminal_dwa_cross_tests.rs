@@ -33,7 +33,7 @@ mod ti_mre_tests {
 
     #[test]
     fn p7_and_p8_use_terminal_interchangeability_by_default() {
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
 
         assert!(crate::compiler::stages::id_map_and_terminal_dwa::l2p::l2p_terminal_interchangeability_enabled_for_partition("p7"));
@@ -42,7 +42,7 @@ mod ti_mre_tests {
 
     #[test]
     fn terminal_interchangeability_policy_leaves_generic_partitions_unchanged() {
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
 
         assert!(crate::compiler::stages::id_map_and_terminal_dwa::l2p::l2p_terminal_interchangeability_enabled_for_partition("p0"));
@@ -51,7 +51,7 @@ mod ti_mre_tests {
 
     #[test]
     fn terminal_interchangeability_policy_defaults_enabled_and_honors_explicit_disable() {
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let original = env::var_os("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
         unsafe {
             env::remove_var("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY");
@@ -84,7 +84,7 @@ nt S ::= TRUE | FALSE | NULL;
                 (4, b" -".to_vec()),
             ]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         let _strict = EnvVarGuard::set(
@@ -110,7 +110,7 @@ nt S ::= QUOTE IDENT;
                 (2, b"\"_".to_vec()),
             ]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         let _strict = EnvVarGuard::set(
@@ -130,7 +130,7 @@ nt S ::= QUOTE IDENT;
                 (2, b"\"green\"".to_vec()),
             ]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
         let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
@@ -162,7 +162,7 @@ nt S ::= A | B | C;
                 (2, b"z".to_vec()),
             ]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
         let _force_l2p = EnvVarGuard::set("GLRMASK_FORCE_ALL_L2P", "1");
         let _disable_vocab_split = EnvVarGuard::set("GLRMASK_SPLIT_L2P_VOCAB", "0");
@@ -193,7 +193,7 @@ nt S ::= QUOTE IDENT;
                 (2, b"\"_".to_vec()),
             ]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _adaptive = EnvVarGuard::set("GLRMASK_LEXER_ADAPTIVE", "0");
         let _structural = EnvVarGuard::set("GLRMASK_STRUCTURAL_BOUNDARY_LEXICAL_PARTITION", "1");
         let _disable_ti =
@@ -227,7 +227,7 @@ nt S ::= FROM V | SPACE V SPACE CLASS;
 "#;
         let vocab = Vocab::new(vec![(0, b" !".to_vec()), (1, b" _".to_vec())]);
 
-        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
         let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
         Constraint::from_glrm_grammar(grammar, &vocab)
             .expect("TI must preserve the completed terminal-DWA language");

@@ -92,8 +92,7 @@ use crate::runtime::{
 };
 use crate::Vocab;
 use super::boundary_walk::{
-    WalkStaticLinkInputs, build_walk_static_boundary_link,
-    dynamic_fallback_walk_link_output, walk_static_link_parent_needs_dynamic_fallback,
+    WalkStaticLinkInputs, build_walk_static_boundary_link, dynamic_fallback_walk_link_output,
 };
 use super::{macro_join, macro_parallelism_disabled, report_macro_item_timings};
 
@@ -107,7 +106,7 @@ use structural_sharing::{
 };
 
 #[inline]
-fn compose_profile_enabled() -> bool {
+pub(crate) fn compose_profile_enabled() -> bool {
     std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
 }
@@ -19510,11 +19509,26 @@ fn validate_compiled_subgrammar_placeholders(
     Ok(())
 }
 
+#[deprecated(
+    note = "legacy compiled-artifact flattened composition is unsupported; use explicit segmented composition or the grammar-level inline reference"
+)]
+#[allow(unreachable_code)]
 pub(crate) fn compose_constraints(
     parent: &Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    // Retained for reference. This entry point is intentionally unsupported: it
+    // splices compiled artifacts (tables, tokenizers, automata) rather than
+    // composing at the grammar level. Prefer explicit segmented composition
+    // (`compose_constraints_owned_parent_segmented`) or the grammar-level inline
+    // reference (`grammar::glrm::from_glrm_with_inline_subgrammars` compiled
+    // through the ordinary named-grammar path).
+    let _ = (parent, children, vocab);
+    return Err(
+        "legacy compiled-artifact flattened composition is unsupported; use explicit segmented composition or the grammar-level inline reference"
+            .to_string(),
+    );
     let materialized_parent = materialized_constraint_for_composition(parent)?;
     let parent = materialized_parent.as_ref().unwrap_or(parent);
     let materialized_children = children
@@ -20272,11 +20286,17 @@ pub(crate) fn compose_constraints(
 /// Fast consuming composition path. The parent remains the logical and physical
 /// base of the returned ordinary `Constraint`; child tokenizer states are
 /// appended to it, so the million-state parent is neither cloned nor rebased.
+#[deprecated(
+    note = "Legacy owned-parent composition is unsupported; use explicit segmented composition or compose_constraints for flattened validation"
+)]
+#[allow(unreachable_code)]
 pub(crate) fn compose_constraints_owned_parent(
     parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    // Retained for reference; this entry point is intentionally unsupported.
+    return Err("legacy owned-parent composition is unsupported; use explicit segmented composition or compose_constraints for flattened validation".into());
     compose_constraints_owned_parent_impl(parent, children, None, None, None, vocab)
 }
 
@@ -20361,12 +20381,18 @@ pub(crate) fn compose_constraints_owned_parent_segmented_shared(
     )
 }
 
+#[deprecated(
+    note = "Legacy owned-parent composition is unsupported; use explicit segmented composition or compose_constraints for flattened validation"
+)]
+#[allow(unreachable_code)]
 pub(crate) fn compose_constraints_owned_parent_shared(
     parent: Constraint,
     children: &[CompiledSubgrammarInput<'_>],
     shared_children: &[Arc<Constraint>],
     vocab: &Vocab,
 ) -> Result<ConstraintComposition, String> {
+    // Retained for reference; this entry point is intentionally unsupported.
+    return Err("legacy owned-parent composition is unsupported; use explicit segmented composition or compose_constraints for flattened validation".into());
     if shared_children.len() != children.len() {
         return Err("shared child/component count mismatch".into());
     }
@@ -20453,6 +20479,7 @@ fn compose_constraints_owned_parent_impl(
         && (std::env::var_os("GLRMASK_COMPOSE_GENERIC_BOUNDARY_REFERENCE").is_some()
             || std::env::var_os("GLRMASK_VALIDATE_COMPOSE_COMPONENT_BOUNDARY_VIEW").is_some())
     {
+        #[allow(deprecated)]
         return compose_constraints(&parent, children, vocab);
     }
     if compose_profile_enabled() {
@@ -20653,14 +20680,16 @@ fn compose_constraints_owned_parent_impl(
     let mut composed_table = composed_table_result?;
     let structural_started_at = Instant::now();
     let structural_states_before = composed_table.table.num_states as usize;
-    // The quotient merges duplicate child LR regions, which can break the
+    // The quotient merges duplicate child LR regions, which breaks the
     // functional global-to-local parser-state relations the segmented runtime
     // requires (observed as "non-functional LR-state relation" on multi-child
-    // links). It is only a table-size optimization, so static segmented links
-    // skip it; dynamic and flattened links keep the existing behavior.
+    // links). Both segmented backends (StaticParserDwa and Dynamic) build the
+    // same `state_relations` inverse, so the quotient must be skipped whenever
+    // an explicit segmented boundary is requested. It is only a table-size
+    // optimization; only the non-segmented (flattened) path keeps it.
     let attempt_structural_sharing = structural_sharing_enabled()
         && children.len() > 1
-        && explicit_segmented_boundary != Some(SegmentedBoundaryBackend::StaticParserDwa);
+        && explicit_segmented_boundary.is_none();
     let structural_report = if attempt_structural_sharing {
         let terminal_analysis = composition_terminal_classes(&parent, children, &composed_table);
         let nonterminal_classes = structural_nonterminal_classes(
@@ -20886,7 +20915,8 @@ fn compose_constraints_owned_parent_impl(
         Result<Option<super::boundary_walk::WalkStaticLinkOutput>, String>,
     >::new();
     let skip_boundary_for_floor =
-        std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
+        explicit_segmented_boundary.is_none()
+            && std::env::var_os("GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC").is_some();
     let preparation_started_at = Instant::now();
     let ((tokenizer_result, tokenizer_ms), (prepared_components_result, (boundary_result, boundary_ms))) =
         macro_join(
@@ -21131,10 +21161,6 @@ fn compose_constraints_owned_parent_impl(
                         .is_some()
                     {
                         Ok(dynamic_fallback_walk_link_output(num_components))
-                    } else if (0..num_components).any(&requested_static)
-                        && walk_static_link_parent_needs_dynamic_fallback(&parent)
-                    {
-                        Err("walk static link does not support an already-composed parent; use the Dynamic boundary backend".to_string())
                     } else {
                         let mut unsupported = None;
                         for index in 0..num_components {
@@ -22219,20 +22245,32 @@ fn compose_constraints_owned_parent_impl(
                         != walk.expected_leaf_tokenizer_offsets
                         || layout.total_tokenizer_states
                             != walk.expected_total_tokenizer_states
+                        || layout.leaf_terminal_offsets
+                            != walk.expected_leaf_terminal_offsets
+                        || layout.total_leaf_terminals
+                            != walk.expected_total_leaf_terminals
                     {
                         eprintln!(
-                            "[glrmask/profile][constraint_walk_static_link_layout_mismatch] expected_offsets={:?} actual_offsets={:?} expected_total={} actual_total={} action=decline",
+                            "[glrmask/profile][constraint_walk_static_link_layout_mismatch] expected_offsets={:?} actual_offsets={:?} expected_total={} actual_total={} expected_term_offsets={:?} actual_term_offsets={:?} expected_term_total={} actual_term_total={} action=decline",
                             walk.expected_leaf_tokenizer_offsets,
                             layout.leaf_tokenizer_state_offsets,
                             walk.expected_total_tokenizer_states,
                             layout.total_tokenizer_states,
+                            walk.expected_leaf_terminal_offsets,
+                            layout.leaf_terminal_offsets,
+                            walk.expected_total_leaf_terminals,
+                            layout.total_leaf_terminals,
                         );
                         return Err(format!(
-                            "walk static link leaf layout mismatch: expected offsets {:?} total {}, runtime has offsets {:?} total {}; declining static shards",
+                            "walk static link leaf layout mismatch: expected offsets {:?} total {} terms {:?} total {}, runtime has offsets {:?} total {} terms {:?} total {}; declining static shards",
                             walk.expected_leaf_tokenizer_offsets,
                             walk.expected_total_tokenizer_states,
+                            walk.expected_leaf_terminal_offsets,
+                            walk.expected_total_leaf_terminals,
                             layout.leaf_tokenizer_state_offsets,
                             layout.total_tokenizer_states,
+                            layout.leaf_terminal_offsets,
+                            layout.total_leaf_terminals,
                         ));
                     }
                 }
@@ -22520,7 +22558,7 @@ fn compose_constraints_owned_parent_impl(
     let boundary_work = boundary_work
         .map(|work| work.materialize(&result.constraint.table, vocab).into_parts());
     let segmented_skip_flatten = std::env::var_os("GLRMASK_EXPERIMENT_SEGMENTED_SKIP_FLATTEN")
-        .is_some()
+            .is_some()
         && boundary_work.is_none()
         && result
             .constraint
@@ -22886,11 +22924,12 @@ pub(crate) fn load_vocab(path: &str) -> Vocab {
 mod tests {
     use super::*;
     use crate::compiler::glr::table::{
-        SubgrammarTableInput, compose_subgrammar_tables,
+        GlrTableConstruction, SubgrammarTableInput, compose_subgrammar_tables,
     };
     use crate::grammar::flat::TerminalID;
     include!("minbound_trigram.rs");
     include!("minbound_factor.rs");
+    include!("minbound_scoped_ignore.rs");
 
     fn byte_vocab() -> Vocab {
         Vocab::new(
@@ -22906,6 +22945,179 @@ mod tests {
             .iter()
             .position(|candidate| candidate == name)
             .unwrap() as u32
+    }
+
+    /// Ordinary (non-composition) compile of a grammar-level inline reference:
+    /// structurally rewrite `extern grammar` occurrences to inline subgrammars
+    /// and compile through the normal named-grammar path, using the ordinary
+    /// GLRM default table construction (`ExperimentalCoreMerged`).
+    fn compile_inline_source_oracle(
+        parent: &str,
+        children: &[(&str, &str)],
+        vocab: &Vocab,
+    ) -> Constraint {
+        let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(parent, children)
+            .expect("grammar-level inline subgrammar rewrite");
+        crate::import::compile_from_named_grammar(
+            named,
+            vocab,
+            "inline_source_oracle",
+            GlrTableConstruction::ExperimentalCoreMerged,
+            &[],
+        )
+        .expect("ordinary compile of grammar-level inline reference")
+    }
+
+    /// Differential check: the grammar-level inline reference (ordinary
+    /// compile) must agree with explicit segmented Static and Dynamic built
+    /// from the same source/vocabulary, including fused model tokens that cross
+    /// the child boundary.
+    #[cfg(feature = "internal-api")]
+    #[test]
+    fn grammar_level_inline_reference_matches_segmented_static_and_dynamic() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"Xa".to_vec()),
+            (5, b"b!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+
+        let inline_parent = r#"
+            start document;
+            extern grammar SUB;
+            nt document ::= "X" SUB "!";
+        "#;
+        let inline_children = [("SUB", "start child; nt child ::= \"a\" \"b\";")];
+        let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
+            inline_parent,
+            &inline_children,
+        )
+        .unwrap();
+        let inline = crate::__private::compile_named_grammar(named.clone(), &vocab).unwrap();
+        let compiled = crate::__private::compile_named_grammar(named, &vocab).unwrap();
+        let segmented_static = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let segmented_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        for (name, constraint) in [
+            ("inline", &inline),
+            ("compile_named_grammar", &compiled),
+            ("segmented_static", &segmented_static),
+            ("segmented_dynamic", &segmented_dynamic),
+        ] {
+            let mut state = constraint.start();
+            assert!(state.commit_bytes(b"Xa").is_ok(), "{name} rejected fused Xa");
+            assert!(state.commit_bytes(b"b").is_ok(), "{name} rejected b");
+            assert!(state.commit_bytes(b"!").is_ok(), "{name} rejected !");
+            assert!(state.is_accepting(), "{name} did not accept Xab!");
+        }
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &inline,
+            &segmented_static,
+            &vocab,
+            4,
+            "inline-vs-segmented-static",
+        );
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &segmented_dynamic,
+            &segmented_static,
+            &vocab,
+            4,
+            "segmented-dynamic-vs-segmented-static",
+        );
+    }
+
+    /// Differential check for a nested external child+grandchild through the
+    /// grammar-level inline reference versus explicit segmented Static.
+    #[cfg(feature = "internal-api")]
+    #[test]
+    fn grammar_level_inline_reference_nested_matches_segmented_static() {
+        let vocab = byte_vocab();
+        let inner = Constraint::from_glrm_grammar(
+            r#"
+                start inner;
+                nt inner ::= "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let outer_parent = Constraint::from_glrm_grammar(
+            r#"
+                start outer;
+                t INNER ::= @token(998);
+                nt outer ::= "a" INNER;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let outer = outer_parent
+            .compose_linked_children_for_test(&[("INNER", &inner)], &vocab)
+            .unwrap();
+        let document_parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t OUTER ::= @token(999);
+                nt document ::= "<" OUTER ">";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let segmented = document_parent
+            .compose_linked_children_for_test(&[("OUTER", &outer)], &vocab)
+            .unwrap();
+
+        let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
+            r#"
+                start document;
+                extern grammar OUTER;
+                nt document ::= "<" OUTER ">";
+            "#,
+            &[
+                (
+                    "OUTER",
+                    "start outer; extern grammar INNER; nt outer ::= \"a\" INNER;",
+                ),
+                ("OUTER::INNER", "start inner; nt inner ::= \"b\";"),
+            ],
+        )
+        .unwrap();
+        let inline = crate::__private::compile_named_grammar(named, &vocab).unwrap();
+
+        let mut inline_state = inline.start();
+        let mut segmented_state = segmented.start();
+        assert!(inline_state.commit_bytes(b"<ab>").is_ok());
+        assert!(segmented_state.commit_bytes(b"<ab>").is_ok());
+        assert!(inline_state.is_accepting());
+        assert!(segmented_state.is_accepting());
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &inline,
+            &segmented,
+            &vocab,
+            4,
+            "nested-inline-vs-segmented-static",
+        );
     }
 
     trait ComposeLinkedChildrenForTest {
@@ -22925,6 +23137,7 @@ mod tests {
         /// is flattened-table behavior (skip-terminal materialization,
         /// runtime-product selection, control-edge sequencing) or pre-existing
         /// static gaps (scoped ignores) that Phase 2b preserves as-is.
+        #[allow(deprecated)]
         fn compose_linked_children_for_test_flattened(
             &self,
             children: &[(&str, &Constraint)],
@@ -22932,8 +23145,8 @@ mod tests {
         ) -> crate::Result<Constraint>;
 
         /// Exact dynamic segmented composition. Reference route for nested
-        /// links (nullable nested links and already-composed parents decline
-        /// loudly on the static route; this backend accepts those shapes).
+        /// links (nullable nested links decline loudly on the static route;
+        /// this backend accepts those shapes).
         fn compose_linked_children_for_test_dynamic(
             &self,
             children: &[(&str, &Constraint)],
@@ -23002,6 +23215,7 @@ mod tests {
             .map_err(crate::GlrMaskError::Compilation)
         }
 
+        #[allow(deprecated)]
         fn compose_linked_children_for_test_flattened(
             &self,
             children: &[(&str, &Constraint)],
@@ -23268,6 +23482,7 @@ table: &child.constraint.table,
     }
 
     #[test]
+    #[ignore = "historical unsupported compiled-artifact flattened composer"]
     fn runtime_lexer_product_coalesces_equivalent_ambiguous_child_lanes() {
         let vocab = Vocab::new(vec![
             (0, b"a".to_vec()),
@@ -23350,6 +23565,7 @@ table: &child.constraint.table,
     }
 
     #[test]
+    #[ignore = "historical unsupported compiled-artifact flattened composer"]
     fn multi_tsid_runtime_lexer_product_remains_recomposable() {
         let vocab = byte_vocab();
         let left = Constraint::from_glrm_grammar(
@@ -23944,6 +24160,27 @@ table: &child.table,
             vocab,
             max_depth,
             true,
+            "",
+        );
+    }
+
+    /// Labeled variant: prefixes every failure message with `label` so a
+    /// multi-backend comparison identifies which side (oracle/static/dynamic)
+    /// diverged.
+    fn assert_constraints_equivalent_on_reachable_prefixes_labeled(
+        actual: &Constraint,
+        expected: &Constraint,
+        vocab: &Vocab,
+        max_depth: usize,
+        label: &str,
+    ) {
+        assert_constraints_equivalent_on_reachable_prefixes_inner(
+            actual,
+            expected,
+            vocab,
+            max_depth,
+            true,
+            label,
         );
     }
 
@@ -23959,6 +24196,25 @@ table: &child.table,
             vocab,
             max_depth,
             false,
+            "",
+        );
+    }
+
+    /// Labeled variant of the mask-only comparison.
+    fn assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+        actual: &Constraint,
+        expected: &Constraint,
+        vocab: &Vocab,
+        max_depth: usize,
+        label: &str,
+    ) {
+        assert_constraints_equivalent_on_reachable_prefixes_inner(
+            actual,
+            expected,
+            vocab,
+            max_depth,
+            false,
+            label,
         );
     }
 
@@ -23968,7 +24224,13 @@ table: &child.table,
         vocab: &Vocab,
         max_depth: usize,
         compare_completion: bool,
+        label: &str,
     ) {
+        let tag = if label.is_empty() {
+            String::new()
+        } else {
+            format!("{label}: ")
+        };
         let token_ids = vocab.entries_map().keys().copied().collect::<Vec<_>>();
         let mut frontier = vec![Vec::<u32>::new()];
         for depth in 0..=max_depth {
@@ -23978,10 +24240,10 @@ table: &child.table,
                 let mut expected_state = expected.start();
                 for &token in &prefix {
                     actual_state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("actual rejected reachable prefix {prefix:?}: {error}")
+                        panic!("{tag}actual rejected reachable prefix {prefix:?}: {error}")
                     });
                     expected_state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("expected rejected its own reachable prefix {prefix:?}: {error}")
+                        panic!("{tag}expected rejected its own reachable prefix {prefix:?}: {error}")
                     });
                 }
 
@@ -23995,13 +24257,13 @@ table: &child.table,
                 }
                 assert_eq!(
                     actual_mask, expected_mask,
-                    "mask mismatch after reachable prefix {prefix:?}",
+                    "{tag}mask mismatch after reachable prefix {prefix:?}",
                 );
                 if compare_completion {
                     assert_eq!(
                         actual_state.is_accepting(),
                         expected_state.is_accepting(),
-                        "completion mismatch after reachable prefix {prefix:?}",
+                        "{tag}completion mismatch after reachable prefix {prefix:?}",
                     );
                 }
 
@@ -24100,6 +24362,105 @@ table: &child.table,
                 "transported singleton epsilon closure differs at state {state}",
             );
         }
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_owned_parent_composition_is_unsupported() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"d".to_vec()),
+            (4, b"ab".to_vec()),
+            (5, b"cd".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "a" SUB "d";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "b" "c";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let placeholder = terminal(&parent, "SUB");
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: placeholder,
+            additional_placeholder_terminals: &[],
+            constraint: &child,
+        }];
+
+        let ordinary = compose_constraints_owned_parent(parent.clone(), &inputs, &vocab)
+            .err()
+            .expect("legacy owned-parent composition must be rejected");
+        assert!(
+            ordinary.contains("legacy owned-parent composition is unsupported"),
+            "unexpected message: {ordinary}",
+        );
+
+        let shared_children = [Arc::new(child.clone())];
+        let shared = compose_constraints_owned_parent_shared(
+            parent.clone(),
+            &inputs,
+            &shared_children,
+            &vocab,
+        )
+        .err()
+        .expect("legacy shared owned-parent composition must be rejected");
+        assert!(
+            shared.contains("legacy owned-parent composition is unsupported"),
+            "unexpected message: {shared}",
+        );
+
+        // The separate borrowed flattened path is unsupported as well.
+        let borrowed = compose_constraints(&parent, &inputs, &vocab)
+            .err()
+            .expect("legacy borrowed flattened composition must be rejected");
+        assert!(
+            borrowed.contains("legacy compiled-artifact flattened composition is unsupported"),
+            "unexpected message: {borrowed}",
+        );
+
+        // Explicit segmented StaticParserDwa and Dynamic stay supported and agree.
+        let static_owned = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .map(|composition| composition.constraint)
+        .expect("explicit StaticParserDwa segmented composition must remain supported");
+        let dynamic_owned = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .map(|composition| composition.constraint)
+        .expect("explicit Dynamic segmented composition must remain supported");
+
+        let mut static_state = static_owned.start();
+        let mut dynamic_state = dynamic_owned.start();
+        assert_eq!(static_state.mask(), dynamic_state.mask(), "start masks must agree");
+        assert!(static_state.commit_bytes(b"ab").is_ok(), "static must accept the cross-boundary token");
+        assert!(dynamic_state.commit_bytes(b"ab").is_ok(), "dynamic must accept the cross-boundary token");
+        assert_eq!(
+            static_state.mask(),
+            dynamic_state.mask(),
+            "masks after the cross-boundary token must agree",
+        );
+        assert!(static_state.commit_bytes(b"cd").is_ok());
+        assert!(dynamic_state.commit_bytes(b"cd").is_ok());
+        assert!(static_state.is_accepting() && dynamic_state.is_accepting());
     }
 
     #[test]
@@ -24333,15 +24694,44 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
-        let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+        let composed_static = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let source_oracle = compile_inline_source_oracle(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                extern grammar SUB;
+                nt document ::= "X" SUB "!";
+            "#,
+            &[("SUB", "start child; nt child ::= \"a\";")],
+            &vocab,
+        );
 
-        assert_constraints_equivalent_on_reachable_prefixes(
-            &composed,
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &source_oracle,
             &monolithic,
             &vocab,
             5,
+            "oracle-vs-monolithic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_static,
+            &source_oracle,
+            &vocab,
+            5,
+            "static-vs-oracle",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &source_oracle,
+            &vocab,
+            5,
+            "dynamic-vs-oracle",
         );
     }
 
@@ -24490,9 +24880,35 @@ table: &child.table,
             matches!(row.get(&parent_ignore), Some(Action::Skip))
         }));
 
-        let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+        let composed_static = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let source_oracle = compile_inline_source_oracle(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= "ab";
+                t X ::= "X";
+                t BANG ::= "!";
+                extern grammar SUB;
+                nt document ::= X SUB BANG;
+            "#,
+            &[(
+                "SUB",
+                "start child; t CHILD_T ::= \"t\"; nt child ::= CHILD_T;",
+            )],
+            &vocab,
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &source_oracle,
+            &monolithic,
+            &vocab,
+            4,
+            "oracle-vs-monolithic",
+        );
         let mut prepared_parent = parent.clone();
         let mut prepared_child = child.clone();
         prepared_parent.ensure_composition_reset_tokens_by_terminal();
@@ -24514,19 +24930,25 @@ table: &child.table,
             prepared_child.tokenizer.num_terminals() as usize,
         );
         let cached_composed = prepared_parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &prepared_child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &prepared_child)], &vocab)
             .unwrap();
         for sequence in [[0u32, 1, 2].as_slice(), [3u32, 4, 5].as_slice()] {
-            let mut actual = composed.start();
+            let mut actual = composed_static.start();
+            let mut dynamic = composed_dynamic.start();
             let mut cached = cached_composed.start();
             let mut expected = monolithic.start();
             for &token in sequence {
                 let actual_mask = actual.mask();
+                let dynamic_mask = dynamic.mask();
                 let cached_mask = cached.mask();
                 let expected_mask = expected.mask();
                 assert_eq!(
                     cached_mask, expected_mask,
                     "prepared-cache mask mismatch before token {token} in sequence {sequence:?}",
+                );
+                assert_eq!(
+                    dynamic_mask, expected_mask,
+                    "dynamic mask mismatch before token {token} in sequence {sequence:?}",
                 );
                 if actual_mask != expected_mask {
                     eprintln!(
@@ -24553,6 +24975,9 @@ table: &child.table,
                 actual.commit_token(token).unwrap_or_else(|error| {
                     panic!("composed rejected token {token} in {sequence:?}: {error}")
                 });
+                dynamic.commit_token(token).unwrap_or_else(|error| {
+                    panic!("dynamic composed rejected token {token} in {sequence:?}: {error}")
+                });
                 cached.commit_token(token).unwrap_or_else(|error| {
                     panic!("prepared-cache composed rejected token {token} in {sequence:?}: {error}")
                 });
@@ -24561,8 +24986,10 @@ table: &child.table,
                 });
             }
             assert_eq!(actual.mask(), expected.mask());
+            assert_eq!(dynamic.mask(), expected.mask());
             assert_eq!(cached.mask(), expected.mask());
             assert_eq!(actual.is_accepting(), expected.is_accepting());
+            assert_eq!(dynamic.is_accepting(), expected.is_accepting());
             assert_eq!(cached.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting(), "sequence {sequence:?} should finish");
         }
@@ -24615,30 +25042,74 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
-        let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+        let composed_static = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let source_oracle = compile_inline_source_oracle(
+            r#"
+                start document;
+                extern grammar SUB;
+                nt document ::= "X" SUB "!";
+            "#,
+            &[(
+                "SUB",
+                "start child; ignore WS; t WS ::= \" \"+; nt child ::= \"a\";",
+            )],
+            &vocab,
+        );
 
-        assert!(composed.ignore_terminal.is_none());
-        assert!(!composed.table.skip_terminals.is_empty());
-        assert!(composed.table.action.iter().any(|row| {
-            row.iter().any(|(terminal, action)| {
-                composed.table.skip_terminals.contains(&terminal)
-                    && matches!(action, Action::Skip)
-            })
-        }));
-        assert!(composed.table.control_terminals.is_empty());
+        // Fused-token integration: the scoped child ignore is transparent to
+        // within-token follow pruning, so the single fused model token "X a!"
+        // (parent X -> child scoped-ignore WS -> child a -> parent !) must be
+        // admitted at start by the static shard, matching the oracle and the
+        // dynamic backend.
+        assert!(
+            token_allowed(&composed_static.start().mask(), 0),
+            "static shard must admit the fused parent-X + scoped-child-ignore token"
+        );
+        assert!(token_allowed(&source_oracle.start().mask(), 0));
+        assert!(token_allowed(&composed_dynamic.start().mask(), 0));
 
-        assert_constraints_equivalent_on_reachable_prefixes(
-            &composed,
+        // Inside the child scope the child ignore is allowed, but the child
+        // cannot complete the document alone (acceptance stays false until the
+        // parent's "!").
+        let mut static_inside_child = composed_static.start();
+        let mut oracle_inside_child = source_oracle.start();
+        static_inside_child.commit_token(2).unwrap();
+        oracle_inside_child.commit_token(2).unwrap();
+        assert!(token_allowed(&static_inside_child.mask(), 3));
+        assert!(token_allowed(&oracle_inside_child.mask(), 3));
+        assert!(!static_inside_child.is_accepting());
+        assert!(!oracle_inside_child.is_accepting());
+
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &source_oracle,
             &monolithic,
             &vocab,
             5,
+            "oracle-vs-monolithic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_static,
+            &source_oracle,
+            &vocab,
+            5,
+            "static-vs-oracle",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &source_oracle,
+            &vocab,
+            5,
+            "dynamic-vs-oracle",
         );
 
         // Child trivia is not globally active before the parent has entered
         // the child scope.
-        assert!(!token_allowed(&composed.start().mask(), 3));
+        assert!(!token_allowed(&composed_static.start().mask(), 3));
         assert!(!token_allowed(&monolithic.start().mask(), 3));
     }
 
@@ -24780,41 +25251,55 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
-        let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+        let composed_static = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
             .unwrap();
-        let loaded = Constraint::load(&composed.save()).unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let loaded = Constraint::load(&composed_static.save()).unwrap();
 
-        for constraint in [&composed, &loaded] {
+        for constraint in [&composed_static, &loaded] {
             assert!(constraint.ignore_terminal.is_none());
-            assert_eq!(constraint.table.skip_terminals.len(), 2);
-            assert!(constraint.table.control_terminals.is_empty());
         }
 
-        // The current inline scoped-ignore lowering materialises nullable skip
-        // productions. Its `is_complete()` predicate can report a
-        // trivia-only prefix as complete before the visible root has parsed.
-        // Compare exact masks/commit language here and assert completion on the
-        // complete boundary strings below, rather than preserving that
-        // unrelated inline-lowering artefact in the explicit linker.
-        assert_constraints_mask_equivalent_on_reachable_prefixes(
-            &composed,
+        // The inline scoped-ignore lowering materialises nullable skip
+        // productions. Its `is_complete()` predicate can report a trivia-only
+        // prefix as complete before the visible root has parsed. Compare exact
+        // masks/commit language here and assert completion on the complete
+        // boundary strings below, rather than preserving that unrelated
+        // inline-lowering artefact in the explicit linker. Per-stage mask
+        // attribution for this witness lives in `runtime::mask`
+        // (`GLRMASK_DEBUG_MASK_STAGES`).
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &composed_static,
             &monolithic,
             &vocab,
             5,
+            "static-vs-monolithic",
         );
-        assert_constraints_equivalent_on_reachable_prefixes(
-            &loaded,
-            &composed,
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
             &vocab,
             5,
+            "dynamic-vs-monolithic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &loaded,
+            &composed_static,
+            &vocab,
+            5,
+            "loaded-vs-static",
         );
 
         for (token, expected) in [(0, true), (1, true), (9, false), (10, true), (11, false), (12, false)] {
-            let mut actual = composed.start();
+            let mut actual = composed_static.start();
+            let mut dynamic = composed_dynamic.start();
             let mut loaded_state = loaded.start();
             let mut reference = monolithic.start();
             assert_eq!(actual.commit_token(token).is_ok(), expected, "token {token}");
+            assert_eq!(dynamic.commit_token(token).is_ok(), expected, "dynamic token {token}");
             assert_eq!(
                 loaded_state.commit_token(token).is_ok(),
                 expected,
@@ -24822,6 +25307,7 @@ table: &child.table,
             );
             assert_eq!(reference.commit_token(token).is_ok(), expected, "reference token {token}");
             assert_eq!(actual.is_accepting(), expected, "token {token}");
+            assert_eq!(dynamic.is_accepting(), expected, "dynamic token {token}");
             assert_eq!(loaded_state.is_accepting(), expected, "loaded token {token}");
             assert_eq!(reference.is_accepting(), expected, "reference token {token}");
         }
@@ -24893,24 +25379,36 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
         // Exhaust the small reachable token-prefix graph.  We compare masks
         // rather than the inline lowering's trivia-only completion artifact;
         // successful complete strings are checked explicitly below.
-        assert_constraints_mask_equivalent_on_reachable_prefixes(
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
             &composed,
             &monolithic,
             &vocab,
             4,
+            "static-vs-monolithic",
         );
-        assert_constraints_equivalent_on_reachable_prefixes(
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
+            &vocab,
+            4,
+            "dynamic-vs-monolithic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
             &loaded,
             &composed,
             &vocab,
             4,
+            "loaded-vs-static",
         );
 
         // Cover each scoped-ignore boundary shape explicitly:
@@ -24936,16 +25434,20 @@ table: &child.table,
         ];
         for &sequence in valid_sequences {
             let mut actual = composed.start();
+            let mut dynamic = composed_dynamic.start();
             let mut restored = loaded.start();
             let mut expected = monolithic.start();
             for &token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "mask before {sequence:?} token {token}");
+                assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask before {sequence:?} token {token}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask before {sequence:?} token {token}");
                 actual.commit_token(token).unwrap();
+                dynamic.commit_token(token).unwrap();
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
             assert!(actual.is_accepting(), "composed incomplete for {sequence:?}");
+            assert!(dynamic.is_accepting(), "dynamic composed incomplete for {sequence:?}");
             assert!(restored.is_accepting(), "loaded incomplete for {sequence:?}");
             assert!(expected.is_accepting(), "reference incomplete for {sequence:?}");
         }
@@ -24955,16 +25457,19 @@ table: &child.table,
         // the child has returned.
         for sequence in [&[2u32, 13][..], &[19][..], &[21][..]] {
             let mut actual = composed.start();
+            let mut dynamic = composed_dynamic.start();
             let mut restored = loaded.start();
             let mut expected = monolithic.start();
             for &token in &sequence[..sequence.len() - 1] {
                 actual.commit_token(token).unwrap();
+                dynamic.commit_token(token).unwrap();
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
             let token = *sequence.last().unwrap();
             let expected_result = expected.commit_token(token).is_ok();
             assert_eq!(actual.commit_token(token).is_ok(), expected_result);
+            assert_eq!(dynamic.commit_token(token).is_ok(), expected_result);
             assert_eq!(restored.commit_token(token).is_ok(), expected_result);
             assert!(!expected_result, "invalid scoped sequence {sequence:?} was accepted");
         }
@@ -24983,7 +25488,10 @@ table: &child.table,
         )
         .unwrap();
         let outer = outer_parent
-            .compose_linked_children_for_test_flattened(&[("INNER", &loaded)], &vocab)
+            .compose_linked_children_for_test(&[("INNER", &loaded)], &vocab)
+            .unwrap();
+        let outer_dynamic = outer_parent
+            .compose_linked_children_for_test_dynamic(&[("INNER", &loaded)], &vocab)
             .unwrap();
         let outer_monolithic = Constraint::from_glrm_grammar(
             r#"
@@ -25006,28 +25514,410 @@ table: &child.table,
         )
         .unwrap();
 
-        assert_constraints_mask_equivalent_on_reachable_prefixes(
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
             &outer,
             &outer_monolithic,
             &vocab,
             4,
+            "outer-static-vs-outer-monolithic",
+        );
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &outer_dynamic,
+            &outer_monolithic,
+            &vocab,
+            4,
+            "outer-dynamic-vs-outer-monolithic",
         );
         for sequence in [&[0u32, 16, 1][..], &[14, 6, 15][..], &[17][..]] {
             let mut actual = outer.start();
+            let mut dynamic = outer_dynamic.start();
             let mut expected = outer_monolithic.start();
             for &token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "outer mask before {sequence:?} token {token}");
+                assert_eq!(dynamic.mask(), expected.mask(), "outer dynamic mask before {sequence:?} token {token}");
                 actual.commit_token(token).unwrap();
+                dynamic.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
             assert!(actual.is_accepting(), "outer incomplete for {sequence:?}");
+            assert!(dynamic.is_accepting(), "outer dynamic incomplete for {sequence:?}");
             assert!(expected.is_accepting(), "outer reference incomplete for {sequence:?}");
         }
 
         let mut actual = outer.start();
+        let mut dynamic = outer_dynamic.start();
         let mut expected = outer_monolithic.start();
         assert_eq!(actual.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
+        assert_eq!(dynamic.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
         assert!(!expected.is_accepting());
+    }
+
+    /// Replay a token sequence through one route, returning the index of the
+    /// first rejected token (`None` if the whole sequence commits).
+    fn replay_first_rejection(
+        commit: &mut dyn FnMut(u32) -> bool,
+        sequence: &[u32],
+    ) -> Option<usize> {
+        sequence.iter().position(|&token| !commit(token))
+    }
+
+    #[test]
+    fn integration_scoped_ignore_follow_boundary_masks() {
+        // Parent `X SUB !` with a parent-space ignore; child `a` then `b`
+        // with a child-tab ignore. Completion-aware mask parity (depth 4)
+        // across static/dynamic/loaded/inline; explicit valid completions;
+        // rejections with first-rejection-index agreement; save/load parity;
+        // real StaticParser shards installed.
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"!".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"c".to_vec()),
+            (5, b" ".to_vec()),
+            (6, b"\t".to_vec()),
+            (7, b"X\ta".to_vec()),
+            (8, b"X\tab!".to_vec()),
+            (9, b"a\tb".to_vec()),
+            (10, b"b\t !".to_vec()),
+            (11, b"X\tb!".to_vec()),
+            (12, b"Xa\tc!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                ignore CHILD_WS;
+                t CHILD_WS ::= "\t"+;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore PARENT_WS;
+                t PARENT_WS ::= " "+;
+                g child ::= {
+                    start child;
+                    ignore CHILD_WS;
+                    t CHILD_WS ::= "\t"+;
+                    nt child ::= "a" "b";
+                };
+                nt document ::= "X" child "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let loaded = Constraint::load(&composed.save()).unwrap();
+        // Real StaticParser shards installed (not fallback-only).
+        let overlay = composed
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("static_dynamic_overlay must be present");
+        assert!(
+            !overlay.segmented_parser_components.is_empty(),
+            "static link must install parser components",
+        );
+        for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+            match &component.boundary.as_ref().expect("component must have a boundary shard").backend {
+                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_) => {}
+                other => panic!("component {index} must be StaticParser, got {other:?}"),
+            }
+        }
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed,
+            &monolithic,
+            &vocab,
+            4,
+            "integration-ignore static-vs-inline",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
+            &vocab,
+            4,
+            "integration-ignore dynamic-vs-inline",
+        );
+        // Valid strings complete on all four builds (incl. ignore ownership:
+        // [0,5,6,2,6,3,6,5,1] spaces the parent parts, tabs the child parts;
+        // [0,2,10] fuses child-b + parent-ignore + `!`).
+        for sequence in [
+            &[0u32, 2, 3, 1][..],
+            &[7, 3, 1][..],
+            &[0, 9, 1][..],
+            &[8][..],
+            &[0, 5, 6, 2, 6, 3, 6, 5, 1][..],
+            &[0, 2, 10][..],
+        ] {
+            let mut states = [
+                composed.start(),
+                composed_dynamic.start(),
+                loaded.start(),
+                monolithic.start(),
+            ];
+            for &token in sequence {
+                let masks: Vec<Vec<u32>> =
+                    states.iter().map(|state| state.mask()).collect();
+                assert_eq!(masks[0], masks[3], "static mask before {sequence:?} token {token}");
+                assert_eq!(masks[1], masks[3], "dynamic mask before {sequence:?} token {token}");
+                assert_eq!(masks[2], masks[3], "loaded mask before {sequence:?} token {token}");
+                for state in states.iter_mut() {
+                    state.commit_token(token).unwrap_or_else(|error| {
+                        panic!("valid sequence {sequence:?} rejected at {token}: {error}")
+                    });
+                }
+            }
+            for (label, state) in
+                ["static", "dynamic", "loaded", "inline"].iter().zip(states.iter())
+            {
+                assert!(state.is_accepting(), "{label} incomplete for {sequence:?}");
+            }
+        }
+        // Invalid: missing `a` ([0,1]), unexpected `c` ([12]), wrong-scope
+        // space inside the child ([0,2,5,3,1]), stray fused token ([11]).
+        // Every route must reject at least one token; first-rejection index
+        // must agree across routes.
+        for sequence in [&[0u32, 1][..], &[0, 2, 4, 1][..], &[12][..], &[11][..], &[0, 2, 5, 3, 1][..]] {
+            let mut rejects = Vec::new();
+            for mut state in
+                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
+            {
+                rejects.push(replay_first_rejection(
+                    &mut |token| state.commit_token(token).is_ok(),
+                    sequence,
+                ));
+            }
+            for (label, rejection) in
+                ["static", "dynamic", "loaded", "inline"].iter().zip(rejects.iter())
+            {
+                assert!(
+                    rejection.is_some(),
+                    "{label} accepted invalid scoped sequence {sequence:?}",
+                );
+            }
+            assert_eq!(rejects[0], rejects[3], "static/inline rejection index on {sequence:?}");
+            assert_eq!(rejects[1], rejects[3], "dynamic/inline rejection index on {sequence:?}");
+            assert_eq!(rejects[2], rejects[3], "loaded/inline rejection index on {sequence:?}");
+        }
+        // Save/load preserves masks + completion.
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &loaded,
+            &composed,
+            &vocab,
+            4,
+            "integration-ignore loaded-vs-static",
+        );
+    }
+
+    #[test]
+    fn integration_finite_exclusion_boundary_masks() {
+        // Parent `X SUB !` (no ignores); child `OPEN ::= [ab]+ - "ab"`.
+        // Tests exclusion-operator composition compatibility (static vs
+        // dynamic vs inline, save/load). NOT a certificate/master-activation
+        // proof: the tiny fixture does not trigger dynamic-virtual
+        // optimization (see the dedicated lexer certificate unit test).
+        // Prefix `Xab` stays extendible; only completed `Xab!` is forbidden.
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"!".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"Xa".to_vec()),
+            (5, b"Xb".to_vec()),
+            (6, b"Xab".to_vec()),
+            (7, b"Xaa".to_vec()),
+            (8, b"ab".to_vec()),
+            (9, b"aa".to_vec()),
+            (10, b"ab!".to_vec()),
+            (11, b"aa!".to_vec()),
+            (12, b"Xa!".to_vec()),
+            (13, b"Xb!".to_vec()),
+            (14, b"Xab!".to_vec()),
+            (15, b"Xaa!".to_vec()),
+            (16, b"Xaba!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                t OPEN ::= [ab]+ - "ab";
+                nt child ::= OPEN;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        // The child lowers `OPEN` to an exclusion operator (AST-level proof
+        // the sidecar-eligible shape reaches composition; independent of any
+        // tokenizer certificate location).
+        let open_terminal = child
+            .terminal_display_names()
+            .iter()
+            .position(|name| name == "OPEN")
+            .expect("child must have OPEN terminal") as u32;
+        assert!(
+            matches!(
+                child.retained_terminal_expr(open_terminal),
+                Some(Expr::Exclude { .. })
+            ),
+            "child OPEN terminal must lower to Expr::Exclude",
+        );
+        let monolithic = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                g child ::= {
+                    start child;
+                    t OPEN ::= [ab]+ - "ab";
+                    nt child ::= OPEN;
+                };
+                nt document ::= "X" child "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let composed = parent
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let loaded = Constraint::load(&composed.save()).unwrap();
+        // Real StaticParser shards installed (not fallback-only).
+        let overlay = composed
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("static_dynamic_overlay must be present");
+        assert!(
+            !overlay.segmented_parser_components.is_empty(),
+            "static link must install parser components",
+        );
+        for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+            match &component.boundary.as_ref().expect("component must have a boundary shard").backend {
+                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_) => {}
+                other => panic!("component {index} must be StaticParser, got {other:?}"),
+            }
+        }
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed,
+            &composed_dynamic,
+            &vocab,
+            4,
+            "integration-exclusion static-vs-dynamic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed,
+            &monolithic,
+            &vocab,
+            4,
+            "integration-exclusion static-vs-inline",
+        );
+        // Valid completions, incl. legitimate Xabab!/Xaab! and char-by-char.
+        for sequence in [
+            &[12u32][..],
+            &[13][..],
+            &[15][..],
+            &[16][..],
+            &[0, 2, 1][..],
+            &[0, 3, 1][..],
+            &[0, 2, 2, 1][..],
+            &[0, 2, 3, 2, 1][..],
+            &[6, 8, 1][..],
+            &[4, 8, 1][..],
+            &[4, 2, 1][..],
+            &[4, 9, 1][..],
+        ] {
+            let mut states = [
+                composed.start(),
+                composed_dynamic.start(),
+                loaded.start(),
+                monolithic.start(),
+            ];
+            for &token in sequence {
+                let masks: Vec<Vec<u32>> =
+                    states.iter().map(|state| state.mask()).collect();
+                assert_eq!(masks[0], masks[1], "static/dynamic mask before {sequence:?} token {token}");
+                assert_eq!(masks[0], masks[3], "static/inline mask before {sequence:?} token {token}");
+                assert_eq!(masks[2], masks[3], "loaded/inline mask before {sequence:?} token {token}");
+                for state in states.iter_mut() {
+                    state.commit_token(token).unwrap_or_else(|error| {
+                        panic!("valid exclusion sequence {sequence:?} rejected at {token}: {error}")
+                    });
+                }
+            }
+            for (label, state) in
+                ["static", "dynamic", "loaded", "inline"].iter().zip(states.iter())
+            {
+                assert!(state.is_accepting(), "{label} incomplete for {sequence:?}");
+            }
+        }
+        // `Xab` remains extendible on every route: commit 6, then 2, then 1,
+        // and assert acceptance (Xaba! is valid).
+        for mut state in
+            [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
+        {
+            for &token in &[6u32, 2, 1] {
+                state.commit_token(token).unwrap_or_else(|error| {
+                    panic!("Xab extension rejected at {token}: {error}")
+                });
+            }
+            assert!(state.is_accepting(), "Xaba! must complete");
+        }
+        // Rejected: completed `Xab!` only.
+        for sequence in [&[14u32][..], &[0, 2, 3, 1][..], &[6, 1][..], &[4, 3, 1][..], &[0, 8, 1][..]] {
+            let mut rejects = Vec::new();
+            for mut state in
+                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
+            {
+                rejects.push(replay_first_rejection(
+                    &mut |token| state.commit_token(token).is_ok(),
+                    sequence,
+                ));
+            }
+            for (label, rejection) in
+                ["static", "dynamic", "loaded", "inline"].iter().zip(rejects.iter())
+            {
+                assert!(
+                    rejection.is_some(),
+                    "{label} accepted forbidden exclusion sequence {sequence:?}",
+                );
+            }
+            assert_eq!(rejects[0], rejects[3], "static/inline rejection index on {sequence:?}");
+            assert_eq!(rejects[1], rejects[3], "dynamic/inline rejection index on {sequence:?}");
+            assert_eq!(rejects[2], rejects[3], "loaded/inline rejection index on {sequence:?}");
+        }
+        // Save/load preserves masks + completion.
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &loaded,
+            &composed,
+            &vocab,
+            4,
+            "integration-exclusion loaded-vs-static",
+        );
     }
 
     #[test]
@@ -25088,10 +25978,16 @@ table: &child.table,
         // edge.  The direct continuation row therefore exposes a control
         // terminal, not lexical terminal "b".
         let parent_with_right = parent
-            .compose_linked_children_for_test_flattened(&[("RIGHT", &right)], &vocab)
+            .compose_linked_children_for_test(&[("RIGHT", &right)], &vocab)
             .unwrap();
         let composed = parent_with_right
-            .compose_linked_children_for_test_flattened(&[("LEFT", &left)], &vocab)
+            .compose_linked_children_for_test(&[("LEFT", &left)], &vocab)
+            .unwrap();
+        let parent_with_right_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("RIGHT", &right)], &vocab)
+            .unwrap();
+        let composed_dynamic = parent_with_right_dynamic
+            .compose_linked_children_for_test_dynamic(&[("LEFT", &left)], &vocab)
             .unwrap();
 
         let monolithic = Constraint::from_glrm_grammar(
@@ -25166,6 +26062,14 @@ table: &child.table,
         reference.commit_token(2).unwrap();
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
+
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
+            &vocab,
+            4,
+            "dynamic-vs-monolithic",
+        );
     }
 
     #[test]
@@ -25221,11 +26125,12 @@ table: &child.table,
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
 
-        assert_constraints_equivalent_on_reachable_prefixes(
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
             &composed,
             &monolithic,
             &vocab,
             4,
+            "polluter-static-vs-monolithic",
         );
     }
 
@@ -25277,7 +26182,10 @@ table: &child.table,
         )
         .unwrap();
         let composed = parent
-            .compose_linked_children_for_test_flattened(&[("SUB", &child)], &vocab)
+            .compose_linked_children_for_test(&[("SUB", &child)], &vocab)
+            .unwrap();
+        let composed_dynamic = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
 
@@ -25298,31 +26206,44 @@ table: &child.table,
 
         for sequence in [vec![0, 1, 2], vec![3], vec![4, 5, 6, 5, 6, 5, 7, 5]] {
             let mut actual = composed.start();
+            let mut dynamic = composed_dynamic.start();
             let mut restored = loaded.start();
             let mut expected = monolithic.start();
             for token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
+                assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask mismatch before token {token}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask mismatch before token {token}");
                 actual.commit_token(token).unwrap();
+                dynamic.commit_token(token).unwrap();
                 restored.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
             assert!(actual.is_accepting());
+            assert!(dynamic.is_accepting());
             assert!(restored.is_accepting());
             assert!(expected.is_accepting());
         }
 
-        assert_constraints_equivalent_on_reachable_prefixes(
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
             &composed,
             &monolithic,
             &vocab,
             4,
+            "static-vs-monolithic",
         );
-        assert_constraints_equivalent_on_reachable_prefixes(
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
+            &vocab,
+            4,
+            "dynamic-vs-monolithic",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
             &loaded,
             &composed,
             &vocab,
             4,
+            "loaded-vs-static",
         );
 
         // The compiled child no longer carries runtime controls. Reusing it in
@@ -26704,7 +27625,10 @@ table: &child.table,
         )
         .unwrap();
         let arg_a = arg_a_parent
-            .compose_linked_children_for_test_flattened(&[("EXPR", &expr)], &vocab)
+            .compose_linked_children_for_test(&[("EXPR", &expr)], &vocab)
+            .unwrap();
+        let arg_a_dynamic = arg_a_parent
+            .compose_linked_children_for_test_dynamic(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
         let arg_b_parent = Constraint::from_glrm_grammar(
@@ -26717,7 +27641,10 @@ table: &child.table,
         )
         .unwrap();
         let arg_b = arg_b_parent
-            .compose_linked_children_for_test_flattened(&[("EXPR", &expr)], &vocab)
+            .compose_linked_children_for_test(&[("EXPR", &expr)], &vocab)
+            .unwrap();
+        let arg_b_dynamic = arg_b_parent
+            .compose_linked_children_for_test_dynamic(&[("EXPR", &expr)], &vocab)
             .unwrap();
 
         let dispatch_parent = Constraint::from_glrm_grammar(
@@ -26732,7 +27659,13 @@ table: &child.table,
         )
         .unwrap();
         let dispatch = dispatch_parent
-            .compose_linked_children_for_test_flattened(&[("ARGA", &arg_a), ("ARGB", &arg_b)], &vocab)
+            .compose_linked_children_for_test(&[("ARGA", &arg_a), ("ARGB", &arg_b)], &vocab)
+            .unwrap();
+        let dispatch_dynamic = dispatch_parent
+            .compose_linked_children_for_test_dynamic(
+                &[("ARGA", &arg_a_dynamic), ("ARGB", &arg_b_dynamic)],
+                &vocab,
+            )
             .unwrap();
 
         // The two argument children both expose the same nested `expr` as a
@@ -26750,11 +27683,15 @@ table: &child.table,
         .unwrap();
         let composed = outer_parent
             .clone()
-            .compose_linked_children_for_test_flattened(&[("CALL", &dispatch)], &vocab)
+            .compose_linked_children_for_test(&[("CALL", &dispatch)], &vocab)
+            .unwrap();
+        let composed_dynamic = outer_parent
+            .clone()
+            .compose_linked_children_for_test_dynamic(&[("CALL", &dispatch_dynamic)], &vocab)
             .unwrap();
         let loaded_dispatch = Constraint::load(&dispatch.save()).unwrap();
         let composed_from_loaded = outer_parent
-            .compose_linked_children_for_test_flattened(&[("CALL", &loaded_dispatch)], &vocab)
+            .compose_linked_children_for_test(&[("CALL", &loaded_dispatch)], &vocab)
             .unwrap();
 
         let monolithic = Constraint::from_glrm_grammar(
@@ -26774,18 +27711,43 @@ table: &child.table,
         for bytes in [b"Xt.ta(x)!".as_slice(), b"Xt.tb(x)!", b"Xt.ta({a:x})!", b"Xt.tb({b:x})!"] {
             let mut expected = monolithic.start();
             let mut actual = composed.start();
+            let mut dynamic = composed_dynamic.start();
             let mut restored = composed_from_loaded.start();
             for &byte in bytes {
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before byte {byte:?}");
+                assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask mismatch before byte {byte:?}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask mismatch before byte {byte:?}");
                 actual.commit_token(byte as u32).unwrap();
+                dynamic.commit_token(byte as u32).unwrap();
                 restored.commit_token(byte as u32).unwrap();
                 expected.commit_token(byte as u32).unwrap();
             }
             assert!(actual.is_accepting());
+            assert!(dynamic.is_accepting());
             assert!(restored.is_accepting());
             assert!(expected.is_accepting());
         }
+
+        // Structural sharing is a table-size optimization only. With sharing at
+        // its default (no env opt-out), both explicit segmented backends must
+        // still agree with the fully source-inlined grammar on masks *and*
+        // acceptance, which requires the quotient to be skipped whenever an
+        // explicit segmented boundary is requested (both build the same
+        // global->local state_relations inverse).
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed,
+            &monolithic,
+            &vocab,
+            4,
+            "contextual-static-vs-source-inline",
+        );
+        assert_constraints_equivalent_on_reachable_prefixes_labeled(
+            &composed_dynamic,
+            &monolithic,
+            &vocab,
+            4,
+            "contextual-dynamic-vs-source-inline",
+        );
     }
 
     #[test]
@@ -27241,15 +28203,461 @@ table: &child.table,
         assert!(strict >= 1, "ablation must lose at least one admission");
     }
 
+    /// Mask-for-mask differential over byte-prefix scenarios: static and dynamic
+    /// compositions must agree on masks, commit outcomes, and acceptance.
+    /// Oracle-driven (no hardcoded masks).
+    fn assert_composed_masks_equal(
+        name: &str,
+        static_comp: &Constraint,
+        dynamic: &Constraint,
+        prefixes: &[Vec<u8>],
+    ) {
+        for (scenario, prefix) in prefixes.iter().enumerate() {
+            let mut st_static = static_comp.start();
+            let mut st_dyn = dynamic.start();
+            let mut consumed = 0usize;
+            loop {
+                assert_eq!(
+                    st_static.mask(),
+                    st_dyn.mask(),
+                    "{name}: mask mismatch scenario={scenario} consumed={consumed}",
+                );
+                if consumed == prefix.len() {
+                    break;
+                }
+                let r_static = st_static.commit_bytes(&prefix[consumed..consumed + 1]);
+                let r_dyn = st_dyn.commit_bytes(&prefix[consumed..consumed + 1]);
+                assert_eq!(
+                    r_static.is_ok(),
+                    r_dyn.is_ok(),
+                    "{name}: commit divergence scenario={scenario} consumed={consumed}",
+                );
+                if r_static.is_err() {
+                    break;
+                }
+                consumed += 1;
+            }
+            assert_eq!(
+                st_static.is_accepting(),
+                st_dyn.is_accepting(),
+                "{name}: acceptance mismatch scenario={scenario}",
+            );
+        }
+    }
+
+    /// Token-level differential over fused/multibyte scenarios: commit whole
+    /// vocabulary tokens (not byte slices) on both backends, comparing masks,
+    /// commit outcomes, and acceptance. Oracle-driven (no hardcoded masks).
+    /// Multibyte tokens that span a component boundary cross CALL/RETURN inside
+    /// the boundary shards; byte-prefix differentials alone cannot see them.
+    fn assert_composed_token_masks_equal(
+        name: &str,
+        static_comp: &Constraint,
+        dynamic: &Constraint,
+        paths: &[Vec<u32>],
+    ) {
+        for (scenario, path) in paths.iter().enumerate() {
+            let mut st_static = static_comp.start();
+            let mut st_dyn = dynamic.start();
+            let mut step = 0usize;
+            loop {
+                assert_eq!(
+                    st_static.mask(),
+                    st_dyn.mask(),
+                    "{name}: mask mismatch scenario={scenario} step={step}",
+                );
+                if step == path.len() {
+                    break;
+                }
+                let r_static = st_static.commit_token(path[step]);
+                let r_dyn = st_dyn.commit_token(path[step]);
+                assert_eq!(
+                    r_static.is_ok(),
+                    r_dyn.is_ok(),
+                    "{name}: commit divergence scenario={scenario} step={step} token={}",
+                    path[step],
+                );
+                if r_static.is_err() {
+                    break;
+                }
+                step += 1;
+            }
+            assert_eq!(
+                st_static.is_accepting(),
+                st_dyn.is_accepting(),
+                "{name}: acceptance mismatch scenario={scenario}",
+            );
+        }
+    }
+
+    /// Process-wide strict-static trap: any hidden dynamic fallback on a
+    /// claimed-static path panics while armed. Tests arm it only around the
+    /// static side (the dynamic oracle is built unarmed) under `TEST_ENV_LOCK`.
+    struct StrictStaticTrapGuard(bool);
+    impl StrictStaticTrapGuard {
+        fn arm() -> Self {
+            unsafe {
+                std::env::set_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC", "1");
+            }
+            Self(true)
+        }
+        fn disarm(&mut self) {
+            if self.0 {
+                unsafe {
+                    std::env::remove_var("GLRMASK_STRICT_STATIC_TRAP_DYNAMIC");
+                }
+                self.0 = false;
+            }
+        }
+    }
+    impl Drop for StrictStaticTrapGuard {
+        fn drop(&mut self) {
+            self.disarm();
+        }
+    }
+
+    fn admits_token(mask: &[u32], token: u32) -> bool {
+        mask.get(token as usize / 32)
+            .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
+    }
+
     #[test]
-    fn already_composed_parent_static_link_declines_loudly() {
-        // Compositional closure is over *children*: a fresh parent linked
-        // against composed children is the supported nested class. Reusing an
-        // already-composed constraint as the *parent* of a static link has no
-        // intact local table to link from, so the static route declines loudly
-        // (never silently succeeding as dynamic); the Dynamic backend still
-        // accepts the same shape.
-        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+    fn floor_flag_does_not_suppress_explicit_static_boundary_shards() {
+        // The legacy `GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC` floor
+        // flag must not suppress boundary shards on modern explicit Static /
+        // Dynamic links: the env read is gated on
+        // `explicit_segmented_boundary.is_none()`. Uses the public nested
+        // fixture (12-token vocab; parent `"L" SUB SUB "x" | "R" SUB SUB "y"`;
+        // mid `"m" SUB2`; grandchild `"g"`): inner Dynamic reference, outer
+        // Static + Dynamic. Unflagged baseline first; then flag set (RAII)
+        // with flagged static + dynamic; then all four compared mask-for-mask
+        // over [LM,G,M,GX] and [RM,G,M,GY] with end acceptance.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        struct FloorFlagGuard {
+            previous: Option<std::ffi::OsString>,
+        }
+        impl FloorFlagGuard {
+            fn set(value: Option<&str>) -> Self {
+                const KEY: &str = "GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC";
+                let previous = std::env::var_os(KEY);
+                unsafe {
+                    match value {
+                        Some(v) => std::env::set_var(KEY, v),
+                        None => std::env::remove_var(KEY),
+                    }
+                }
+                Self { previous }
+            }
+        }
+        impl Drop for FloorFlagGuard {
+            fn drop(&mut self) {
+                const KEY: &str = "GLRMASK_EXPERIMENT_OWNED_COMPONENTS_ONLY_STATIC";
+                unsafe {
+                    match &self.previous {
+                        Some(v) => std::env::set_var(KEY, v),
+                        None => std::env::remove_var(KEY),
+                    }
+                }
+            }
+        }
+        fn has_static_shard(constraint: &Constraint) -> bool {
+            constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .is_some_and(|overlay| {
+                    overlay
+                        .segmented_parser_components
+                        .iter()
+                        .any(|component| {
+                            matches!(
+                                component.boundary.as_ref().map(|shard| &shard.backend),
+                                Some(crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_))
+                            )
+                        })
+                })
+        }
+        const M: u32 = 4;
+        const G: u32 = 5;
+        const LM: u32 = 6;
+        const RM: u32 = 7;
+        const GX: u32 = 10;
+        const GY: u32 = 11;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"m".to_vec()),
+            (5, b"g".to_vec()),
+            (6, b"Lm".to_vec()),
+            (7, b"Rm".to_vec()),
+            (8, b"mg".to_vec()),
+            (9, b"gm".to_vec()),
+            (10, b"gx".to_vec()),
+            (11, b"gy".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "L" SUB SUB "x" | "R" SUB SUB "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mid = Constraint::from_glrm_grammar(
+            r#"
+                start m;
+                t SUB2 ::= @token(998);
+                nt m ::= "m" SUB2;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let grandchild = Constraint::from_glrm_grammar(
+            r#"
+                start g;
+                nt g ::= "g";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let mid_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&mid, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &grandchild,
+        }];
+        let mid_dyn = compose_constraints_owned_parent_segmented(
+            mid.clone(),
+            &mid_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("inner dynamic compose")
+        .constraint;
+        let outer_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &mid_dyn,
+        }];
+        // Unflagged baseline static + dynamic FIRST (flag explicitly absent).
+        let _baseline_unset = FloorFlagGuard::set(None);
+        let base_static = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &outer_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("baseline static compose")
+        .constraint;
+        let base_dynamic = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &outer_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("baseline dynamic compose")
+        .constraint;
+        assert!(
+            has_static_shard(&base_static),
+            "baseline static link must publish a static shard",
+        );
+        // Flagged static + dynamic under RAII flag (restores prior value).
+        let (flag_static, flag_dynamic) = {
+            let _flag = FloorFlagGuard::set(Some("1"));
+            (
+                compose_constraints_owned_parent_segmented(
+                    parent.clone(),
+                    &outer_inputs,
+                    &vocab,
+                    SegmentedBoundaryBackend::StaticParserDwa,
+                )
+                .expect("flagged static compose")
+                .constraint,
+                compose_constraints_owned_parent_segmented(
+                    parent.clone(),
+                    &outer_inputs,
+                    &vocab,
+                    SegmentedBoundaryBackend::Dynamic,
+                )
+                .expect("flagged dynamic compose")
+                .constraint,
+            )
+        };
+        assert!(
+            has_static_shard(&flag_static),
+            "floor flag must not suppress static boundary shards on an explicit static link",
+        );
+        // All four compared mask-for-mask: INITIAL masks first, then the
+        // commit loop; fresh states (reset) per sequence.
+        for sequence in [&[LM, G, M, GX][..], &[RM, G, M, GY][..]] {
+            let mut states = [
+                base_static.start(),
+                base_dynamic.start(),
+                flag_static.start(),
+                flag_dynamic.start(),
+            ];
+            let initial = [
+                states[0].mask(),
+                states[1].mask(),
+                states[2].mask(),
+                states[3].mask(),
+            ];
+            assert_eq!(initial[0], initial[1], "baseline initial static==dynamic");
+            assert_eq!(initial[2], initial[3], "flagged initial static==dynamic");
+            assert_eq!(initial[0], initial[2], "flagged initial==baseline initial");
+            for &token in sequence {
+                for st in &mut states {
+                    assert!(
+                        admits_token(&st.mask(), token),
+                        "floor-flag token {token} admitted",
+                    );
+                    st.commit_token(token).expect("floor-flag commit");
+                }
+                let masks = [
+                    states[0].mask(),
+                    states[1].mask(),
+                    states[2].mask(),
+                    states[3].mask(),
+                ];
+                assert_eq!(masks[0], masks[1], "baseline static==dynamic");
+                assert_eq!(masks[2], masks[3], "flagged static==dynamic");
+                assert_eq!(masks[0], masks[2], "flagged==baseline");
+            }
+            for st in &states {
+                assert!(st.is_accepting(), "floor-flag sequence must accept");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "diagnostic: requires GLRMASK_MINIMIZE_EQ_LEFT/RIGHT prepared static.bin paths (A1/B1); run explicitly"]
+    fn prepared_static_minimize_orders_are_weighted_equivalent() {
+        // Diagnostic weighted-language equivalence between two prepared
+        // static compositions differing ONLY in signed-shard minimize order
+        // (Stable vs DescendingDomain). Both must be built by the SAME binary
+        // from the SAME inputs (selected10 cache, sequential-3 prepare flow).
+        // For each StaticParser shard present in BOTH (matched by
+        // start_component, nonempty on both sides, identical component set),
+        // `find_difference` (symmetric checker) must return None on the
+        // recursive-parser-coordinate DWAs. Coordinate comparability is
+        // verified from loaded metadata (`uses_composed_tsid_coordinate`,
+        // `tokenizer_state_to_tsid`, `internal_token_to_originals` equal);
+        // any mismatch stops the test instead of comparing incomparable
+        // weights. State counts are NOT compared (representation may differ).
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let left_path = std::env::var("GLRMASK_MINIMIZE_EQ_LEFT")
+            .expect("GLRMASK_MINIMIZE_EQ_LEFT must name the Stable prepared static.bin");
+        let right_path = std::env::var("GLRMASK_MINIMIZE_EQ_RIGHT")
+            .expect("GLRMASK_MINIMIZE_EQ_RIGHT must name the Descending prepared static.bin");
+        let phase1 = std::env::var("PHASE1_DIR")
+            .expect("PHASE1_DIR must name the selected10 cache root");
+        let vocab = super::load_vocab(
+            &std::path::Path::new(&phase1).join("vocab_dump.bin").display().to_string(),
+        );
+        let load = |path: &str| {
+            let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+            Constraint::load_with_vocab(bytes, &vocab)
+                .unwrap_or_else(|e| panic!("load {path}: {e:?}"))
+        };
+        let left = load(&left_path);
+        let right = load(&right_path);
+        let left_overlay = left
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("LEFT prepared static must retain a segmented overlay");
+        let right_overlay = right
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("RIGHT prepared static must retain a segmented overlay");
+        let collect = |overlay: &crate::runtime::StaticDynamicOverlayMetadata| {
+            let mut shards = std::collections::BTreeMap::new();
+            for component in &overlay.segmented_parser_components {
+                let Some(shard) = component.boundary.as_ref() else {
+                    continue;
+                };
+                let crate::runtime::SegmentedBoundaryShardBackend::StaticParser(parser) =
+                    &shard.backend
+                else {
+                    continue;
+                };
+                assert!(
+                    shards.insert(shard.start_component, parser.clone()).is_none(),
+                    "duplicate start_component shard",
+                );
+            }
+            shards
+        };
+        let left_shards = collect(left_overlay);
+        let right_shards = collect(right_overlay);
+        assert!(!left_shards.is_empty(), "LEFT must carry >=1 static shard");
+        assert!(!right_shards.is_empty(), "RIGHT must carry >=1 static shard");
+        let left_set: Vec<u32> = left_shards.keys().copied().collect();
+        let right_set: Vec<u32> = right_shards.keys().copied().collect();
+        assert_eq!(
+            left_set, right_set,
+            "static shard component sets must be identical (LEFT {left_set:?} vs RIGHT {right_set:?})"
+        );
+        let mut checked = 0usize;
+        for (component, left_parser) in &left_shards {
+            let right_parser = &right_shards[component];
+            eprintln!("[minimize-eq] start_component={component}: checking");
+            assert_eq!(
+                left_parser.uses_composed_tsid_coordinate,
+                right_parser.uses_composed_tsid_coordinate,
+                "component {component}: composed-TSID coordinate assumption differs",
+            );
+            assert_eq!(
+                left_parser.tokenizer_state_to_tsid, right_parser.tokenizer_state_to_tsid,
+                "component {component}: tokenizer_state_to_tsid differs; incomparable weights",
+            );
+            assert_eq!(
+                left_parser.internal_token_to_originals,
+                right_parser.internal_token_to_originals,
+                "component {component}: internal_token_to_originals differs; incomparable weights",
+            );
+            let (Some(left_dwa), Some(right_dwa)) = (
+                left_parser.recursive_parser_dwa.as_ref(),
+                right_parser.recursive_parser_dwa.as_ref(),
+            ) else {
+                panic!("component {component}: both sides must carry recursive_parser_dwa");
+            };
+            assert!(left_dwa.is_acyclic(), "component {component}: LEFT DWA must be acyclic");
+            assert!(right_dwa.is_acyclic(), "component {component}: RIGHT DWA must be acyclic");
+            match crate::automata::weighted_u32::equivalence::find_difference(left_dwa, right_dwa) {
+                Ok(None) => {
+                    eprintln!(
+                        "[minimize-eq] start_component={component}: done equivalent (states {} vs {})",
+                        left_dwa.num_states(),
+                        right_dwa.num_states(),
+                    );
+                    checked += 1;
+                }
+                Ok(Some(word)) => panic!(
+                    "component {component}: weighted-language difference at word {word:?}"
+                ),
+                Err(e) => panic!("component {component}: checker error: {e:?}"),
+            }
+        }
+        assert!(checked > 0, "must check >=1 shard non-vacuously");
+        eprintln!("[minimize-eq] all {checked} static shards weighted-equivalent");
+    }
+
+    #[test]
+    fn already_composed_parent_static_link_extends_and_matches_dynamic() {
+        // Chained static binds: reusing an already-composed constraint as the
+        // *parent* of a static link expands the parent block to intact leaves
+        // exactly like nested children (no dynamic fallback, no silent
+        // substitution). First link fills SUB through the dynamic route,
+        // leaving SUB2 free; the static second link must succeed with
+        // installed static shards and dynamic-identical masks.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let vocab = Vocab::new(vec![
             (0, b"L".to_vec()),
             (1, b"R".to_vec()),
@@ -27282,7 +28690,6 @@ table: &child.table,
             &vocab,
         )
         .unwrap();
-        // First link fills SUB through the dynamic route, leaving SUB2 free.
         let first_inputs = [CompiledSubgrammarInput {
             placeholder_terminal: terminal(&parent, "SUB"),
             additional_placeholder_terminals: &[],
@@ -27300,33 +28707,2603 @@ table: &child.table,
             composed_parent.has_recursive_segmented_parser_tree(),
             "first composition must leave a segmented parent",
         );
+        // Coverage boundary: this shape carries no terminal aliases, so slot
+        // resolution runs the interval path. (`global_terminal_aliases` are
+        // ignore-fold metadata produced only by
+        // `build_segmented_runtime_metadata` from `merged_ignore_terminals`
+        // (which sees only per-component `ignore_terminal`s) — additional
+        // placeholder terminals produce links, never aliases. A slot naming a
+        // folded terminal therefore declines loudly as ambiguous, by design.)
+        for component in composed_parent
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("segmented overlay")
+            .segmented_parser_components
+            .iter()
+        {
+            assert!(
+                component.global_terminal_aliases.is_empty(),
+                "pin fixture shape must stay alias-free",
+            );
+        }
         let second_inputs = [CompiledSubgrammarInput {
             placeholder_terminal: terminal(&composed_parent, "SUB2"),
             additional_placeholder_terminals: &[],
             constraint: &child_b,
         }];
-        let declined = compose_constraints_owned_parent_segmented(
+        let extended = compose_constraints_owned_parent_segmented(
             composed_parent.clone(),
             &second_inputs,
             &vocab,
             SegmentedBoundaryBackend::StaticParserDwa,
-        );
-        let error = match declined {
-            Ok(_) => panic!("static link over a composed parent must decline"),
-            Err(error) => error,
-        };
+        )
+        .expect("static link over a composed parent must extend")
+        .constraint;
+        let overlay = extended
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("extended composition must retain segmented metadata");
         assert!(
-            error.contains("already-composed parent"),
-            "decline must name the already-composed parent invariant, got: {error}",
+            !overlay.segmented_boundary_shards.is_empty(),
+            "extended composition must publish static shards",
         );
-        // The same shape stays composable through the Dynamic backend.
-        compose_constraints_owned_parent_segmented(
+        assert!(
+            overlay.segmented_boundary_parser.is_none(),
+            "extended composition must not retain a redundant global boundary parser",
+        );
+        let reference = compose_constraints_owned_parent_segmented(
             composed_parent,
             &second_inputs,
             &vocab,
             SegmentedBoundaryBackend::Dynamic,
         )
-        .expect("dynamic compose over a composed parent stays supported");
+        .expect("dynamic second link")
+        .constraint;
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b'L', b'y'],
+            vec![b'R', b'x'],
+            vec![b'x'],
+        ];
+        assert_composed_masks_equal("composed-parent-extend", &extended, &reference, &prefixes);
+    }
+
+    #[test]
+    fn composed_parent_three_bind_chain_with_nonroot_slot_matches_dynamic() {
+        // Same deep-debug-stack headroom as the branching fixture (measured
+        // there): 3-level multibyte static prime/mask exceeds the default 2MB.
+        std::thread::Builder::new()
+            .name("three-bind".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(composed_parent_three_bind_chain_body)
+            .expect("spawn three-bind fixture worker")
+            .join()
+            .expect("three-bind fixture worker panicked");
+    }
+
+    /// Deep-stack worker body for the three-bind test (see the wrapper above).
+    fn composed_parent_three_bind_chain_body() {
+        // Three chained static binds where the second bind's slot is owned by
+        // a NON-ROOT leaf of the parent block (A's open SUB_A), and the third
+        // bind fills two placeholders (additional terminals) with a composed
+        // child: composed-as-parent and composed-as-child in one chain.
+        // Multibyte tokens cross CALL (Lx, xy, Ry) and RETURN (yx, yy, yz) over
+        // three nesting levels.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const Z: u32 = 4;
+        const LX: u32 = 5;
+        const XY: u32 = 6;
+        const YX: u32 = 7;
+        const RY: u32 = 8;
+        const YY: u32 = 9;
+        const YZ: u32 = 10;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"z".to_vec()),
+            (5, b"Lx".to_vec()),
+            (6, b"xy".to_vec()),
+            (7, b"yx".to_vec()),
+            (8, b"Ry".to_vec()),
+            (9, b"yy".to_vec()),
+            (10, b"yz".to_vec()),
+        ]);
+        let root = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                t SUB3 ::= @token(997);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y" | "R" SUB3 "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                t SUB_A ::= @token(996);
+                nt a ::= "x" SUB_A;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_c = Constraint::from_glrm_grammar(
+            r#"
+                start c;
+                nt c ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        // Composed child for the third bind (two slots, one filler).
+        let parent_b = Constraint::from_glrm_grammar(
+            r#"
+                start bp;
+                t SB1 ::= @token(995);
+                t SB2 ::= @token(994);
+                nt bp ::= SB1 | SB2;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_e = Constraint::from_glrm_grammar(
+            r#"
+                start e;
+                nt e ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let b_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent_b, "SB1"),
+            additional_placeholder_terminals: &[terminal(&parent_b, "SB2")],
+            constraint: &child_e,
+        }];
+        let child_b = compose_constraints_owned_parent_segmented(
+            parent_b,
+            &b_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind0: composed child")
+        .constraint;
+        // Placeholder/link contract: additional placeholder terminals produce
+        // one link per slot sharing the child (`build_segmented_parser_links`),
+        // never `global_terminal_aliases` entries (those are ignore-fold
+        // metadata from `build_segmented_runtime_metadata` over
+        // `merged_ignore_terminals`, which sees only `ignore_terminal`s).
+        {
+            let overlay = child_b
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("bind0 segmented overlay");
+            assert_eq!(
+                overlay.segmented_parser_links.len(),
+                2,
+                "two slots (SB1, SB2) must produce two links",
+            );
+            for link in &overlay.segmented_parser_links {
+                assert_eq!(link.parent_component, 0);
+                assert_eq!(link.child_component, 1);
+            }
+            assert_eq!(
+                overlay
+                    .segmented_parser_links
+                    .iter()
+                    .map(|link| link.slot_terminal)
+                    .collect::<Vec<_>>(),
+                vec![b_inputs[0].placeholder_terminal]
+                    .into_iter()
+                    .chain(b_inputs[0].additional_placeholder_terminals.iter().copied())
+                    .collect::<Vec<_>>(),
+                "one link per placeholder slot, in slot order",
+            );
+            assert!(
+                overlay
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.global_terminal_aliases.is_empty()),
+                "multi-slot binds must not produce terminal aliases",
+            );
+        }
+        let bind1 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&root, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1")
+        .constraint;
+        let stage1_dyn = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1 dynamic")
+        .constraint;
+        // SUB_A is owned by A's leaf (non-root): its composed id is A's overlay
+        // offset plus its A-local id (the public bind path exposes the same id
+        // as a qualified late-grammar slot).
+        let sub_a = stage1
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("segmented overlay")
+            .segmented_parser_components[1]
+            .terminal_offset
+            + terminal(&child_a, "SUB_A");
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_a,
+            additional_placeholder_terminals: &[],
+            constraint: &child_c,
+        }];
+        // White-box pin: the SUB_A slot lives in A's leaf (non-root), so the
+        // outer link must target a nonzero parent leaf with a leaf-local slot.
+        let expansion = crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1, &bind2)
+            .expect("bind2 expansion");
+        assert_eq!(expansion.top_leaf_ranges.len(), 2, "two tops");
+        assert_eq!(expansion.top_leaf_ranges[0].len(), 2, "parent block spans two leaves");
+        assert_eq!(expansion.links.len(), 2, "one inner plus one outer link");
+        let outer = expansion
+            .links
+            .iter()
+            .find(|link| link.child_component == expansion.top_root_leaves[1])
+            .expect("outer link to the new child");
+        assert_ne!(
+            outer.parent_component, 0,
+            "non-root-owned slot must not resolve to leaf 0",
+        );
+        assert!(
+            (outer.slot_terminal as usize)
+                < expansion.leaves[outer.parent_component as usize]
+                    .table
+                    .num_terminals as usize,
+            "resolved slot must be leaf-local",
+        );
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind2")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        let bind3 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage2, "SUB2"),
+            additional_placeholder_terminals: &[terminal(&stage2, "SUB3")],
+            constraint: &child_b,
+        }];
+        let stage3 = compose_constraints_owned_parent_segmented(
+            stage2.clone(),
+            &bind3,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind3")
+        .constraint;
+        let stage3_dyn = compose_constraints_owned_parent_segmented(
+            stage2_dyn,
+            &bind3,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind3 dynamic")
+        .constraint;
+        // bind3 fills two placeholders with one composed child: two links, no
+        // aliases (same placeholder/link contract as bind0).
+        {
+            let overlay = stage3
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("bind3 segmented overlay");
+            assert_eq!(
+                overlay.segmented_parser_links.len(),
+                2,
+                "two slots (SUB2, SUB3) must produce two links",
+            );
+            for link in &overlay.segmented_parser_links {
+                assert_eq!(link.parent_component, 0);
+                assert_eq!(link.child_component, 1);
+            }
+            assert!(
+                overlay
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.global_terminal_aliases.is_empty()),
+                "multi-slot binds must not produce terminal aliases",
+            );
+        }
+        // Static shard authority: both tops hold StaticParser shards, no
+        // redundant global boundary parser, and the parent-block inner overlay
+        // carries no shards of its own.
+        {
+            let overlay = stage3
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+            let inner = overlay.segmented_parser_components[0]
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("parent-block overlay");
+            assert!(
+                inner
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.boundary.is_none()),
+                "parent-block overlay must carry no shards",
+            );
+            assert!(
+                inner.segmented_boundary_shards.is_empty(),
+                "parent-block overlay shard list must be cleared",
+            );
+        }
+        // Byte-prefix differential (single-byte commits).
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'y'],
+            vec![b'L', b'x', b'y', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b'R', b'y', b'z'],
+            vec![b'L', b'y'],
+            vec![b'R', b'x'],
+            vec![b'z'],
+        ];
+        assert_composed_masks_equal("bind3-bytes", &stage3, &stage3_dyn, &prefixes);
+        // Token-level differential (whole multibyte commits across CALL/RETURN).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![L, X],
+            vec![L, X, Y],
+            vec![L, XY],
+            vec![LX, Y],
+            vec![LX, YX],
+            vec![L, X, Y, X],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, YY],
+            vec![R, Y, Y],
+            vec![RY, Z],
+            vec![R, YZ],
+            vec![R, Y, Z],
+            vec![L, Y],
+            vec![R, X],
+            vec![L, X, Z],
+            vec![Z],
+        ];
+        assert_composed_token_masks_equal("bind3-tokens", &stage3, &stage3_dyn, &paths);
+        // Fused/single equivalence: the same bytes through fused crossings
+        // reach the same masks and acceptance as single-byte tokens, proving
+        // the multibyte crossings resolve through the static shards.
+        for (fused, single) in [
+            (vec![LX], vec![L, X]),
+            (vec![RY], vec![R, Y]),
+            (vec![L, XY], vec![L, X, Y]),
+            (vec![LX, YX], vec![L, X, Y, X]),
+            (vec![R, YY], vec![R, Y, Y]),
+            (vec![R, YZ], vec![R, Y, Z]),
+        ] {
+            let mut st_fused = stage3.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage3.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        assert!(admits_token(&stage3.start().mask(), LX), "Lx crossing must be live");
+        assert!(admits_token(&stage3.start().mask(), RY), "Ry crossing must be live");
+        // Trap-armed replay of the oracle-gated corpus: any hidden dynamic
+        // fallback on the static side panics here.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage3_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "three-bind corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage3.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(mismatches, 0, "three-bind static must match dynamic on every path");
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions (the shards are genuinely authoritative, not redundant).
+        let mut ablated = stage3.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage3_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn composed_parent_branching_then_nonroot_extension_matches_dynamic() {
+        // Static prime/mask evaluation recurses per nesting level with large
+        // debug scratch frames (pre-existing runtime characteristic: the
+        // existing deep tests need >1MB too, measured); this 3-level multibyte
+        // shape needs more than the default 2MB, so the whole body runs on a
+        // worker with headroom. The panic hook still prints assertion details;
+        // a join failure fails the test.
+        std::thread::Builder::new()
+            .name("branching-extension".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(composed_parent_branching_then_nonroot_extension_body)
+            .expect("spawn branching fixture worker")
+            .join()
+            .expect("branching fixture worker panicked");
+    }
+
+    /// Deep-stack worker body for the branching test (see the wrapper above).
+    fn composed_parent_branching_then_nonroot_extension_body() {
+        // Branching-then-nonroot-extension: bind1a/bind1b fill sibling slots A
+        // and B; bind2 fills a slot owned by A's leaf (non-root) with C. Leaf
+        // expansion follows overlay storage ([root, A, B] plus the appended
+        // C), while the analysis splice packs link-tree DFS ([root, A, C, B]);
+        // the splice must remap explicitly into leaf coordinate instead of
+        // assuming the orders coincide. Multibyte tokens cross CALL (Lx, xz,
+        // Ry) and RETURN (zx, yy) over two nesting levels.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const Z: u32 = 4;
+        const LX: u32 = 5;
+        const XZ: u32 = 6;
+        const ZX: u32 = 7;
+        const RY: u32 = 8;
+        const YY: u32 = 9;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"z".to_vec()),
+            (5, b"Lx".to_vec()),
+            (6, b"xz".to_vec()),
+            (7, b"zx".to_vec()),
+            (8, b"Ry".to_vec()),
+            (9, b"yy".to_vec()),
+        ]);
+        let root = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB_A ::= @token(999);
+                t SUB_B ::= @token(998);
+                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                t SUB_INNER ::= @token(996);
+                nt a ::= "x" SUB_INNER;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_b = Constraint::from_glrm_grammar(
+            r#"
+                start b;
+                nt b ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_c = Constraint::from_glrm_grammar(
+            r#"
+                start c;
+                nt c ::= "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        // Two sequential sibling binds (multi-child single links are a known
+        // dynamic-oracle gap: the structural quotient breaks the functional
+        // LR-state relation there, so the oracle cannot be built that way).
+        // bind1a fills SUB_A, bind1b fills SUB_B; the existing root then has
+        // siblings A and B with overlay nesting [[root, A], B].
+        let bind1a = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&root, "SUB_A"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1a = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1a")
+        .constraint;
+        let stage1a_dyn = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1a dynamic")
+        .constraint;
+        let bind1b = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage1a, "SUB_B"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_b,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            stage1a.clone(),
+            &bind1b,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1b")
+        .constraint;
+        let stage1_dyn = compose_constraints_owned_parent_segmented(
+            stage1a_dyn,
+            &bind1b,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1b dynamic")
+        .constraint;
+        {
+            let overlay = stage1
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("stage1 segmented overlay");
+            assert_eq!(
+                overlay.segmented_parser_components.len(),
+                2,
+                "bind1b stores [[root, A], B]",
+            );
+            assert!(
+                overlay.segmented_parser_components[0]
+                    .constraint
+                    .has_recursive_segmented_parser_tree(),
+                "bind1b component 0 must stay a segmented subtree",
+            );
+        }
+        // SUB_INNER is owned by A's leaf: component 0's offset plus A's offset
+        // inside the nested overlay plus its A-local id (the same id the
+        // public bind path exposes as a qualified slot).
+        let sub_inner = {
+            let overlay = stage1
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("segmented overlay");
+            let nested = &overlay.segmented_parser_components[0];
+            let nested_overlay = nested
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("nested segmented overlay");
+            nested.terminal_offset
+                + nested_overlay.segmented_parser_components[1].terminal_offset
+                + terminal(&child_a, "SUB_INNER")
+        };
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_inner,
+            additional_placeholder_terminals: &[],
+            constraint: &child_c,
+        }];
+        // White-box pin: leaves are storage order [root, A, B, C] with the
+        // parent block spanning three leaves, and the outer link targets A's
+        // (non-root) leaf with a leaf-local slot.
+        let expansion = crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1, &bind2)
+            .expect("bind2 expansion");
+        assert_eq!(expansion.leaves.len(), 4, "root, A, B, C");
+        assert_eq!(
+            expansion.top_leaf_ranges,
+            vec![vec![0usize, 1usize, 2usize], vec![3usize]],
+            "parent block spans three leaves; C is its own top",
+        );
+        let outer = expansion
+            .links
+            .iter()
+            .find(|link| link.child_component == expansion.top_root_leaves[1])
+            .expect("outer link to the new child");
+        assert_eq!(
+            outer.parent_component, 1,
+            "slot owned by A must resolve to A's leaf",
+        );
+        assert!(
+            (outer.slot_terminal as usize)
+                < expansion.leaves[1].table.num_terminals as usize,
+            "resolved slot must be leaf-local",
+        );
+        // The fixture must genuinely interleave: leaves stay storage order
+        // [root, A, B, C] while the splice packs DFS [root, A, C, B].
+        let dfs_order = crate::compiler::boundary_walk::nested_splice_leaf_order(&expansion)
+            .expect("bind2 DFS order");
+        assert_eq!(
+            dfs_order,
+            vec![0usize, 1, 3, 2],
+            "splice DFS order must interleave with leaf order",
+        );
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind2: late non-root extension must link statically")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        // Static shard authority: both tops hold StaticParser shards, no
+        // redundant global boundary parser, and the parent-block inner overlay
+        // carries no shards of its own (outer block shards cover block-inner
+        // crossings).
+        {
+            let overlay = stage2
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+            let inner = overlay.segmented_parser_components[0]
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("parent-block overlay");
+            assert!(
+                inner
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.boundary.is_none()),
+                "parent-block overlay must carry no shards",
+            );
+            assert!(
+                inner.segmented_boundary_shards.is_empty(),
+                "parent-block overlay shard list must be cleared",
+            );
+        }
+        // Byte-prefix differential (single-byte commits).
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'z'],
+            vec![b'L', b'x', b'z', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b'L', b'y'],
+            vec![b'R', b'x'],
+            vec![b'L', b'x', b'y'],
+            vec![b'z'],
+        ];
+        assert_composed_masks_equal("branch-extend-bytes", &stage2, &stage2_dyn, &prefixes);
+        // Token-level differential (whole multibyte commits across CALL/RETURN).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![L, X],
+            vec![L, X, Z],
+            vec![L, XZ],
+            vec![LX, Z],
+            vec![LX, ZX],
+            vec![L, X, Z, X],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, YY],
+            vec![R, Y, Y],
+            vec![L, Y],
+            vec![R, X],
+            vec![L, X, Y],
+            vec![Z],
+        ];
+        assert_composed_token_masks_equal("branch-extend-tokens", &stage2, &stage2_dyn, &paths);
+        // Fused/single equivalence: the same bytes through fused crossings
+        // reach the same masks and acceptance as single-byte tokens, proving
+        // the multibyte crossings resolve through the static shards.
+        for (fused, single) in [
+            (vec![LX], vec![L, X]),
+            (vec![RY], vec![R, Y]),
+            (vec![L, XZ], vec![L, X, Z]),
+            (vec![LX, ZX], vec![L, X, Z, X]),
+            (vec![R, YY], vec![R, Y, Y]),
+        ] {
+            let mut st_fused = stage2.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage2.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        assert!(admits_token(&stage2.start().mask(), LX), "Lx crossing must be live");
+        assert!(admits_token(&stage2.start().mask(), RY), "Ry crossing must be live");
+        // Trap-armed replay of the oracle-gated corpus: any hidden dynamic
+        // fallback on the static side panics here.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage2_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "branching corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage2.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(mismatches, 0, "branching static must match dynamic on every path");
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions (the shards are genuinely authoritative, not redundant).
+        let mut ablated = stage2.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage2_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn composed_parent_cross_parent_multislot_static_matches_dynamic() {
+        // Same deep-debug-stack headroom as the other 3-level multibyte
+        // static prime/mask fixtures: exceeds the default 2MB.
+        std::thread::Builder::new()
+            .name("cross-parent-multislot".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(composed_parent_cross_parent_multislot_body)
+            .expect("spawn cross-parent fixture worker")
+            .join()
+            .expect("cross-parent fixture worker panicked");
+    }
+
+    /// Deep-stack worker body (see above): a cross-parent multi-slot bind is
+    /// a VALID public bind case ("incorporated once and shared by every
+    /// listed call site") supported by the Dynamic backend, and the static
+    /// route supports it too via occurrence mapping. ONE child input fills
+    /// slots owned by DIFFERENT leaves (root leaf + A's leaf), so the packed
+    /// analysis visits the shared child once per parent path ([0,1,2,2])
+    /// while the runtime keeps ONE shared child. Static-vs-dynamic
+    /// differentials over multibyte CALL/RETURN crossings from both parents,
+    /// fused/single equivalence, a trap-armed replay, and shard ablation
+    /// prove the acceptance is genuine. This is NOT the same case as DAG
+    /// reuse across inputs (distinct leaves; see the reused-sibling test).
+    fn composed_parent_cross_parent_multislot_body() {
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const LX: u32 = 4;
+        const RY: u32 = 5;
+        const XY: u32 = 6;
+        const YX: u32 = 7;
+        const YY: u32 = 8;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"Lx".to_vec()),
+            (5, b"Ry".to_vec()),
+            (6, b"xy".to_vec()),
+            (7, b"yx".to_vec()),
+            (8, b"yy".to_vec()),
+        ]);
+        let root = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB_A ::= @token(999);
+                t SUB_B ::= @token(998);
+                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                t SUB_INNER ::= @token(996);
+                nt a ::= "x" SUB_INNER;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_c = Constraint::from_glrm_grammar(
+            r#"
+                start c;
+                nt c ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let bind1a = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&root, "SUB_A"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1a = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1a")
+        .constraint;
+        let stage1a_dyn = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1a dynamic")
+        .constraint;
+        let sub_b = terminal(&stage1a, "SUB_B");
+        let sub_inner = stage1a
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("overlay")
+            .segmented_parser_components[1]
+            .terminal_offset
+            + terminal(&child_a, "SUB_INNER");
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_b,
+            additional_placeholder_terminals: &[sub_inner],
+            constraint: &child_c,
+        }];
+        // White-box pin: the expansion really is the DAG shape (child root
+        // with two distinct parents), and the occurrence oracle visits the
+        // shared child once per parent path.
+        let expansion =
+            crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1a, &bind2)
+                .expect("expansion");
+        assert_eq!(expansion.leaves.len(), 3, "root, A, C");
+        let child_root = expansion.top_root_leaves[1] as usize;
+        let mut parents: Vec<u32> = expansion
+            .links
+            .iter()
+            .filter(|link| link.child_component as usize == child_root)
+            .map(|link| link.parent_component)
+            .collect();
+        parents.sort_unstable();
+        parents.dedup();
+        assert_eq!(parents, vec![0, 1], "one child, two distinct parents");
+        let dfs_order =
+            crate::compiler::boundary_walk::nested_splice_leaf_order(&expansion)
+                .expect("occurrence oracle accepts the shared child");
+        assert_eq!(
+            dfs_order,
+            vec![0, 1, 2, 2],
+            "shared child occurs once per parent path"
+        );
+        // The static route supports the valid bind (no deferral).
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1a.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("static cross-parent multi-slot bind is supported")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1a_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        // Static shard authority on the extended artifact.
+        {
+            let overlay = stage2
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+        }
+        // Byte-prefix differential: crossings into/out of the shared child
+        // from BOTH parents.
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'y'],
+            vec![b'L', b'x', b'y', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b'L', b'y'],
+            vec![b'R', b'x'],
+            vec![b'y'],
+        ];
+        assert_composed_masks_equal("xparent-bytes", &stage2, &stage2_dyn, &prefixes);
+        // Token-level differential (multibyte CALL/RETURN crossings).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![L, X],
+            vec![L, XY],
+            vec![LX, Y],
+            vec![L, X, Y],
+            vec![L, X, Y, X],
+            vec![LX, Y, X],
+            vec![L, XY, X],
+            vec![L, X, YX],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, YY],
+            vec![R, Y, Y],
+            vec![L, Y],
+            vec![R, X],
+            vec![Y],
+        ];
+        assert_composed_token_masks_equal("xparent-tokens", &stage2, &stage2_dyn, &paths);
+        // Fused/single equivalence across both parents' CALL/RETURN sites.
+        for (fused, single) in [
+            (vec![LX, Y, X], vec![L, X, Y, X]),
+            (vec![L, XY, X], vec![L, X, Y, X]),
+            (vec![L, X, YX], vec![L, X, Y, X]),
+            (vec![RY, Y], vec![R, Y, Y]),
+            (vec![R, YY], vec![R, Y, Y]),
+        ] {
+            let mut st_fused = stage2.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage2.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        // Both parents genuinely reach the shared child: each call site
+        // accepts completions on both backends.
+        for path in [vec![L, X, Y, X], vec![R, Y, Y]] {
+            let mut st = stage2_dyn.start();
+            for &token in &path {
+                st.commit_token(token).unwrap();
+            }
+            assert!(st.is_accepting(), "oracle must accept {path:?}");
+            let mut st = stage2.start();
+            for &token in &path {
+                st.commit_token(token).unwrap();
+            }
+            assert!(st.is_accepting(), "static must accept {path:?}");
+        }
+        // Trap-armed replay of the oracle-gated corpus.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage2_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "cross-parent corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage2.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(
+            mismatches, 0,
+            "cross-parent static must match dynamic on every path"
+        );
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions.
+        let mut ablated = stage2.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage2_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn composed_parent_cross_parent_shared_subtree_matches_dynamic() {
+        // Same deep-debug-stack headroom as the sibling 3-level multibyte
+        // static prime/mask fixtures: exceeds the default 2MB.
+        std::thread::Builder::new()
+            .name("cross-parent-subtree".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(composed_parent_cross_parent_shared_subtree_body)
+            .expect("spawn cross-parent subtree fixture worker")
+            .join()
+            .expect("cross-parent subtree fixture worker panicked");
+    }
+
+    /// Deep-stack worker body (see above): repeated-subtree authority. The
+    /// shared child C has its own bound descendant D (late bind into the
+    /// shared leaf AFTER the cross-parent bind), so the packed analysis
+    /// repeats the whole C+D subtree once per parent path ([0,1,2,3,2,3])
+    /// while the runtime still shares one C and one D. Same fused
+    /// multibyte CALL/RETURN/trap/ablation authority as the sibling test,
+    /// extended across the C-to-D call site.
+    fn composed_parent_cross_parent_shared_subtree_body() {
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const Z: u32 = 4;
+        const LX: u32 = 5;
+        const RY: u32 = 6;
+        const XY: u32 = 7;
+        const YX: u32 = 8;
+        const YY: u32 = 9;
+        const YZ: u32 = 10;
+        const ZX: u32 = 11;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"z".to_vec()),
+            (5, b"Lx".to_vec()),
+            (6, b"Ry".to_vec()),
+            (7, b"xy".to_vec()),
+            (8, b"yx".to_vec()),
+            (9, b"yy".to_vec()),
+            (10, b"yz".to_vec()),
+            (11, b"zx".to_vec()),
+        ]);
+        let root = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB_A ::= @token(999);
+                t SUB_B ::= @token(998);
+                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                t SUB_INNER ::= @token(996);
+                nt a ::= "x" SUB_INNER;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_c = Constraint::from_glrm_grammar(
+            r#"
+                start c;
+                t SUB_D ::= @token(995);
+                nt c ::= "y" SUB_D;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_d = Constraint::from_glrm_grammar(
+            r#"
+                start d;
+                nt d ::= "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let bind1a = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&root, "SUB_A"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1a = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1a")
+        .constraint;
+        let stage1a_dyn = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1a dynamic")
+        .constraint;
+        let sub_b = terminal(&stage1a, "SUB_B");
+        let sub_inner = stage1a
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("overlay")
+            .segmented_parser_components[1]
+            .terminal_offset
+            + terminal(&child_a, "SUB_INNER");
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_b,
+            additional_placeholder_terminals: &[sub_inner],
+            constraint: &child_c,
+        }];
+        // The slotted C binds cross-parent exactly like the atomic sibling.
+        let expansion =
+            crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1a, &bind2)
+                .expect("expansion");
+        assert_eq!(expansion.leaves.len(), 3, "root, A, C");
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1a.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("static cross-parent bind of the slotted child")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1a_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        // Late bind D into the SHARED leaf: C is a top-level component of
+        // stage2, so its slot addresses directly off its terminal offset.
+        let sub_d = stage2
+            .static_dynamic_overlay
+            .as_ref()
+            .expect("stage2 overlay")
+            .segmented_parser_components[1]
+            .terminal_offset
+            + terminal(&child_c, "SUB_D");
+        let bind3 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_d,
+            additional_placeholder_terminals: &[],
+            constraint: &child_d,
+        }];
+        // White-box pin: the shared child keeps both parents, D hangs under
+        // the shared child alone (shape pin, numbering-independent), and the
+        // occurrence oracle repeats the whole shared subtree once per parent
+        // path (leaves append in bind order: root, A, C, D).
+        let expansion3 =
+            crate::compiler::boundary_walk::expand_nested_link_leaves(&stage2, &bind3)
+                .expect("expansion3");
+        assert_eq!(expansion3.leaves.len(), 4, "root, A, C, D");
+        let parents_of = |leaf: usize| -> Vec<u32> {
+            let mut parents: Vec<u32> = expansion3
+                .links
+                .iter()
+                .filter(|link| link.child_component as usize == leaf)
+                .map(|link| link.parent_component)
+                .collect();
+            parents.sort_unstable();
+            parents.dedup();
+            parents
+        };
+        let mut shared = None;
+        for leaf in 0..expansion3.leaves.len() {
+            if parents_of(leaf).len() == 2 {
+                assert!(shared.is_none(), "exactly one shared child");
+                shared = Some(leaf);
+            }
+        }
+        let shared = shared.expect("shared child keeps two parents");
+        let mut under_shared = Vec::new();
+        for leaf in 0..expansion3.leaves.len() {
+            if parents_of(leaf) == vec![shared as u32] {
+                under_shared.push(leaf);
+            }
+        }
+        assert_eq!(
+            under_shared.len(),
+            1,
+            "one descendant hangs under the shared child alone"
+        );
+        let dfs_order3 =
+            crate::compiler::boundary_walk::nested_splice_leaf_order(&expansion3)
+                .expect("occurrence oracle accepts the shared subtree");
+        assert_eq!(
+            dfs_order3,
+            vec![0, 1, 2, 3, 2, 3],
+            "shared subtree occurs once per parent path"
+        );
+        let stage3 = compose_constraints_owned_parent_segmented(
+            stage2.clone(),
+            &bind3,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("static late bind into the shared leaf")
+        .constraint;
+        let stage3_dyn = compose_constraints_owned_parent_segmented(
+            stage2_dyn,
+            &bind3,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind3 dynamic")
+        .constraint;
+        // Static shard authority on the twice-extended artifact.
+        {
+            let overlay = stage3
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+        }
+        // Byte-prefix differential across the C-to-D call site.
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'y'],
+            vec![b'L', b'x', b'y', b'z'],
+            vec![b'L', b'x', b'y', b'z', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'z'],
+            vec![b'R', b'y', b'z', b'y'],
+            vec![b'L', b'y'],
+            vec![b'R', b'x'],
+            vec![b'z'],
+        ];
+        assert_composed_masks_equal("xsubtree-bytes", &stage3, &stage3_dyn, &prefixes);
+        // Token-level differential (multibyte CALL/RETURN crossings).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![L, X],
+            vec![L, XY],
+            vec![LX, Y],
+            vec![L, X, Y],
+            vec![L, X, Y, Z],
+            vec![L, X, Y, Z, X],
+            vec![LX, Y, Z, X],
+            vec![L, XY, Z, X],
+            vec![L, X, YZ, X],
+            vec![L, X, Y, ZX],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, Y, Z],
+            vec![RY, Z],
+            vec![R, YZ],
+            vec![R, Y, Z, Y],
+            vec![RY, Z, Y],
+            vec![R, YZ, Y],
+            vec![L, Y],
+            vec![R, X],
+            vec![Z],
+        ];
+        assert_composed_token_masks_equal("xsubtree-tokens", &stage3, &stage3_dyn, &paths);
+        // Fused/single equivalence across every CALL/RETURN site.
+        for (fused, single) in [
+            (vec![LX, Y, Z, X], vec![L, X, Y, Z, X]),
+            (vec![L, XY, Z, X], vec![L, X, Y, Z, X]),
+            (vec![L, X, YZ, X], vec![L, X, Y, Z, X]),
+            (vec![L, X, Y, ZX], vec![L, X, Y, Z, X]),
+            (vec![RY, Z, Y], vec![R, Y, Z, Y]),
+            (vec![R, YZ, Y], vec![R, Y, Z, Y]),
+        ] {
+            let mut st_fused = stage3.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage3.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        // Both parents genuinely reach the shared subtree on both backends.
+        for path in [vec![L, X, Y, Z, X], vec![R, Y, Z, Y]] {
+            let mut st = stage3_dyn.start();
+            for &token in &path {
+                st.commit_token(token).unwrap();
+            }
+            assert!(st.is_accepting(), "oracle must accept {path:?}");
+            let mut st = stage3.start();
+            for &token in &path {
+                st.commit_token(token).unwrap();
+            }
+            assert!(st.is_accepting(), "static must accept {path:?}");
+        }
+        // Trap-armed replay of the oracle-gated corpus.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage3_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "shared-subtree corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage3.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(
+            mismatches, 0,
+            "shared-subtree static must match dynamic on every path"
+        );
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions.
+        let mut ablated = stage3.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage3_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn composed_parent_extend_with_whitespace_aliases_matches_dynamic() {
+        // Same deep-debug-stack headroom as the branching/three-bind fixtures
+        // (measured there): 3-level multibyte static prime/mask exceeds the
+        // default 2MB.
+        std::thread::Builder::new()
+            .name("whitespace-aliases".into())
+            .stack_size(64 * 1024 * 1024)
+            .spawn(composed_parent_whitespace_aliases_body)
+            .expect("spawn whitespace fixture worker")
+            .join()
+            .expect("whitespace fixture worker panicked");
+    }
+
+    /// Deep-stack worker body for the whitespace-alias test (see above).
+    fn composed_parent_whitespace_aliases_body() {
+        // Late bind over alias-bearing overlays: every grammar declares an
+        // identical whitespace ignore, so each composed overlay carries REAL
+        // `global_terminal_aliases` (child ignores folded into the canonical
+        // parent ignore). The static extension must still succeed with
+        // dynamic-identical behavior: slots are non-vocabulary placeholder
+        // sentinels while alias keys are vocabulary-matching ignore terminals,
+        // so no legitimate slot can name an alias key (placeholder validation
+        // rejects vocabulary-matching terminals) and resolution takes the
+        // interval path. Success alongside provably non-empty aliases proves
+        // the interval path narrowly (any alias hit would decline loudly).
+        // Multibyte tokens cross CALL/RETURN with whitespace flowing across
+        // component boundaries on both sides of the late bind.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const Z: u32 = 4;
+        const SP: u32 = 5;
+        const LX: u32 = 6;
+        const XZ: u32 = 7;
+        const ZX: u32 = 8;
+        const RY: u32 = 9;
+        const YY: u32 = 10;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"z".to_vec()),
+            (5, b" ".to_vec()),
+            (6, b"Lx".to_vec()),
+            (7, b"xz".to_vec()),
+            (8, b"zx".to_vec()),
+            (9, b"Ry".to_vec()),
+            (10, b"yy".to_vec()),
+        ]);
+        let root = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t SUB_A ::= @token(999);
+                t SUB_B ::= @token(998);
+                t WS ::= " "+;
+                nt document ::= "L" SUB_A "x" | "R" SUB_B "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                ignore WS;
+                t SUB_INNER ::= @token(996);
+                t WS ::= " "+;
+                nt a ::= "x" SUB_INNER;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_b = Constraint::from_glrm_grammar(
+            r#"
+                start b;
+                ignore WS;
+                t WS ::= " "+;
+                nt b ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_c = Constraint::from_glrm_grammar(
+            r#"
+                start c;
+                ignore WS;
+                t WS ::= " "+;
+                nt c ::= "z";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        for (name, constraint) in
+            [("root", &root), ("A", &child_a), ("B", &child_b), ("C", &child_c)]
+        {
+            assert!(
+                constraint.ignore_terminal.is_some(),
+                "{name} must carry a real ignore terminal",
+            );
+        }
+        let bind1a = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&root, "SUB_A"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1a = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1a")
+        .constraint;
+        let stage1a_dyn = compose_constraints_owned_parent_segmented(
+            root.clone(),
+            &bind1a,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1a dynamic")
+        .constraint;
+        // bind1a's overlay carries a REAL alias: A's whitespace folded into
+        // the canonical root whitespace (exact producer math).
+        let canonical_a = terminal(&root, "WS");
+        {
+            let overlay = stage1a
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("stage1a segmented overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            assert!(
+                overlay.segmented_parser_components[0]
+                    .global_terminal_aliases
+                    .is_empty(),
+                "canonical component carries no alias entries",
+            );
+            assert_eq!(
+                overlay.segmented_parser_components[1].global_terminal_aliases,
+                vec![(canonical_a, terminal(&child_a, "WS"))],
+                "child ignore must fold into the canonical parent ignore",
+            );
+            // The alias key matches vocabulary (whitespace) while the bound
+            // slot is a non-vocabulary sentinel: no overlap by construction.
+            assert!(
+                stage1a
+                    .possible_matches
+                    .get(&canonical_a)
+                    .is_some_and(|weight| !weight.is_empty()),
+                "canonical ignore must match vocabulary",
+            );
+            assert_ne!(
+                bind1a[0].placeholder_terminal, canonical_a,
+                "bound slot must not name the alias key",
+            );
+        }
+        let bind1b = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage1a, "SUB_B"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_b,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            stage1a.clone(),
+            &bind1b,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1b")
+        .constraint;
+        let stage1_dyn = compose_constraints_owned_parent_segmented(
+            stage1a_dyn,
+            &bind1b,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1b dynamic")
+        .constraint;
+        // bind1b's overlay likewise folds B's whitespace into the same
+        // canonical ignore (component 0 starts at terminal 0).
+        {
+            let overlay = stage1
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("stage1 segmented overlay");
+            assert_eq!(
+                overlay.segmented_parser_components[1].global_terminal_aliases,
+                vec![(canonical_a, terminal(&child_b, "WS"))],
+                "second child ignore must fold into the same canonical ignore",
+            );
+            assert_ne!(
+                bind1b[0].placeholder_terminal, canonical_a,
+                "bound slot must not name the alias key",
+            );
+        }
+        let sub_inner = {
+            let overlay = stage1.static_dynamic_overlay.as_ref().expect("overlay");
+            let nested = &overlay.segmented_parser_components[0];
+            let nested_overlay = nested
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("nested overlay");
+            nested.terminal_offset
+                + nested_overlay.segmented_parser_components[1].terminal_offset
+                + terminal(&child_a, "SUB_INNER")
+        };
+        // The late-bind slot (in stage1's composed coordinate) also cannot
+        // name the alias key: non-vocabulary sentinel vs whitespace.
+        assert_ne!(
+            sub_inner, canonical_a,
+            "late-bind slot must not name the alias key",
+        );
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_inner,
+            additional_placeholder_terminals: &[],
+            constraint: &child_c,
+        }];
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind2 over alias-bearing parent must extend statically")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        // Static shard authority on the extended artifact.
+        {
+            let overlay = stage2
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+        }
+        // Byte-prefix differential with whitespace flowing across boundaries.
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'z'],
+            vec![b'L', b'x', b'z', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b' '],
+            vec![b'L', b' '],
+            vec![b'L', b' ', b'x'],
+            vec![b'L', b'x', b' ', b'z', b'x'],
+            vec![b'L', b'x', b'z', b' ', b'x'],
+            vec![b'R', b' ', b'y', b'y'],
+            vec![b'L', b'y'],
+            vec![b'z'],
+        ];
+        assert_composed_masks_equal("ws-alias-bytes", &stage2, &stage2_dyn, &prefixes);
+        // Token-level differential (multibyte crossings + whitespace tokens).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![SP],
+            vec![L, X],
+            vec![L, SP, X],
+            vec![LX, SP],
+            vec![L, X, Z],
+            vec![L, XZ],
+            vec![LX, Z],
+            vec![LX, ZX],
+            vec![L, X, Z, X],
+            vec![LX, SP, ZX],
+            vec![L, SP, X, SP, Z, X],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, YY],
+            vec![R, Y, Y],
+            vec![R, SP, Y, Y],
+            vec![L, Y],
+            vec![R, X],
+            vec![Z],
+        ];
+        assert_composed_token_masks_equal("ws-alias-tokens", &stage2, &stage2_dyn, &paths);
+        // Fused/single equivalence (whitespace-free pairs, proven pattern).
+        for (fused, single) in [
+            (vec![LX], vec![L, X]),
+            (vec![RY], vec![R, Y]),
+            (vec![L, XZ], vec![L, X, Z]),
+            (vec![LX, ZX], vec![L, X, Z, X]),
+            (vec![R, YY], vec![R, Y, Y]),
+        ] {
+            let mut st_fused = stage2.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage2.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        // Whitespace genuinely flows: the oracle accepts spaced completions.
+        for path in [vec![L, SP, X, Z, X], vec![R, SP, Y, Y]] {
+            let mut st = stage2_dyn.start();
+            for &token in &path {
+                st.commit_token(token).unwrap();
+            }
+            assert!(st.is_accepting(), "oracle must accept spaced {path:?}");
+        }
+        // Trap-armed replay of the oracle-gated corpus.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage2_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "whitespace corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage2.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(mismatches, 0, "whitespace static must match dynamic on every path");
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions.
+        let mut ablated = stage2.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage2_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+    }
+
+    #[test]
+    fn composed_parent_static_extend_with_reused_sibling() {
+        // DAG reuse: the same child constraint fills slots on both binds. Leaf
+        // expansion keys visits by position (never a global seen set), so the
+        // shared child expands once per use with distinct leaves.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                nt a ::= "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let bind1 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1")
+        .constraint;
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage1, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let expansion = crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1, &bind2)
+            .expect("bind2 expansion");
+        assert_eq!(expansion.leaves.len(), 3, "root plus two uses of the shared child");
+        assert_eq!(
+            expansion.top_leaf_ranges,
+            vec![vec![0usize, 1usize], vec![2usize]],
+            "each use of the shared child must occupy its own leaf (no identity dedup)",
+        );
+        assert_eq!(
+            expansion.leaves[1].table.num_terminals,
+            expansion.leaves[2].table.num_terminals,
+            "both uses expand the same reassembled child table",
+        );
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind2")
+        .constraint;
+        let stage1_dyn = compose_constraints_owned_parent_segmented(
+            parent,
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind1 dynamic")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            stage1_dyn,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("bind2 dynamic")
+        .constraint;
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'x'],
+            vec![b'R'],
+            vec![b'R', b'x'],
+            vec![b'R', b'x', b'y'],
+            vec![b'L', b'y'],
+            vec![b'R', b'y'],
+        ];
+        assert_composed_masks_equal("reused-sibling", &stage2, &stage2_dyn, &prefixes);
+    }
+
+    #[test]
+    fn composed_parent_static_extend_after_serialization_round_trip() {
+        // Components and links survive save/load, so a loaded composed parent
+        // extends statically with identical results. Multibyte tokens cross
+        // CALL (Lx, Ry) and RETURN (xx, yy) on both the pre- and post-serde
+        // links.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        const L: u32 = 0;
+        const R: u32 = 1;
+        const X: u32 = 2;
+        const Y: u32 = 3;
+        const LX: u32 = 4;
+        const XX: u32 = 5;
+        const RY: u32 = 6;
+        const YY: u32 = 7;
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"Lx".to_vec()),
+            (5, b"xx".to_vec()),
+            (6, b"Ry".to_vec()),
+            (7, b"yy".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                nt a ::= "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_b = Constraint::from_glrm_grammar(
+            r#"
+                start b;
+                nt b ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let bind1 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            parent,
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1")
+        .constraint;
+        let bytes = stage1.save();
+        let loaded = Constraint::load(bytes.as_slice()).expect("load composed parent");
+        assert!(
+            loaded.has_recursive_segmented_parser_tree(),
+            "loaded parent must retain its segmented tree",
+        );
+        // The loaded overlay must carry bind1's link intact (slot, child, and
+        // alias-free components), since the static extend resolves slots
+        // through it.
+        {
+            let overlay = loaded
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("loaded segmented overlay");
+            assert_eq!(
+                overlay.segmented_parser_components.len(),
+                2,
+                "loaded parent keeps [root, A]",
+            );
+            let [link] = overlay.segmented_parser_links.as_slice() else {
+                panic!(
+                    "loaded parent must retain bind1's single link, got {:?}",
+                    overlay.segmented_parser_links.len(),
+                );
+            };
+            assert_eq!(link.parent_component, 0);
+            assert_eq!(link.slot_terminal, bind1[0].placeholder_terminal);
+            assert_eq!(link.child_component, 1);
+            assert!(
+                overlay
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.global_terminal_aliases.is_empty()),
+                "loaded components must stay alias-free",
+            );
+        }
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&loaded, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_b,
+        }];
+        let stage2 = compose_constraints_owned_parent_segmented(
+            loaded.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("static extend after load")
+        .constraint;
+        let stage2_dyn = compose_constraints_owned_parent_segmented(
+            loaded,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("dynamic extend after load")
+        .constraint;
+        // Static shard authority on the post-serde extend: both tops hold
+        // StaticParser shards, no redundant global boundary parser, and the
+        // parent-block inner overlay carries no shards of its own.
+        {
+            let overlay = stage2
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("static overlay");
+            assert_eq!(overlay.segmented_parser_components.len(), 2);
+            for (index, component) in overlay.segmented_parser_components.iter().enumerate() {
+                let shard = component.boundary.as_ref().unwrap_or_else(|| {
+                    panic!("installed top component {index} must carry a static shard")
+                });
+                assert!(
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ),
+                    "installed component {index} must be a StaticParser shard",
+                );
+            }
+            assert!(
+                overlay.segmented_boundary_parser.is_none(),
+                "extended composition must not retain a redundant global boundary parser",
+            );
+            let inner = overlay.segmented_parser_components[0]
+                .constraint
+                .static_dynamic_overlay
+                .as_ref()
+                .expect("parent-block overlay");
+            assert!(
+                inner
+                    .segmented_parser_components
+                    .iter()
+                    .all(|component| component.boundary.is_none()),
+                "parent-block overlay must carry no shards",
+            );
+            assert!(
+                inner.segmented_boundary_shards.is_empty(),
+                "parent-block overlay shard list must be cleared",
+            );
+        }
+        // Byte-prefix differential (single-byte commits).
+        let prefixes: Vec<Vec<u8>> = vec![
+            vec![],
+            vec![b'L'],
+            vec![b'L', b'x'],
+            vec![b'L', b'x', b'x'],
+            vec![b'R'],
+            vec![b'R', b'y'],
+            vec![b'R', b'y', b'y'],
+            vec![b'L', b'y'],
+        ];
+        assert_composed_masks_equal("post-serde-extend-bytes", &stage2, &stage2_dyn, &prefixes);
+        // Token-level differential (whole multibyte commits across CALL/RETURN).
+        let paths: Vec<Vec<u32>> = vec![
+            vec![],
+            vec![L],
+            vec![R],
+            vec![LX],
+            vec![RY],
+            vec![L, X],
+            vec![L, XX],
+            vec![LX, X],
+            vec![L, X, X],
+            vec![R, Y],
+            vec![RY, Y],
+            vec![R, YY],
+            vec![R, Y, Y],
+            vec![L, Y],
+            vec![R, X],
+            vec![X],
+        ];
+        assert_composed_token_masks_equal("post-serde-extend-tokens", &stage2, &stage2_dyn, &paths);
+        // Fused/single equivalence over the extended (deeper) artifact.
+        for (fused, single) in [
+            (vec![LX], vec![L, X]),
+            (vec![RY], vec![R, Y]),
+            (vec![L, XX], vec![L, X, X]),
+            (vec![LX, X], vec![L, X, X]),
+            (vec![R, YY], vec![R, Y, Y]),
+        ] {
+            let mut st_fused = stage2.start();
+            for &token in &fused {
+                st_fused.commit_token(token).unwrap();
+            }
+            let mut st_single = stage2.start();
+            for &token in &single {
+                st_single.commit_token(token).unwrap();
+            }
+            assert_eq!(
+                st_fused.mask(),
+                st_single.mask(),
+                "fused/single mask equivalence for {fused:?} vs {single:?}",
+            );
+            assert_eq!(
+                st_fused.is_accepting(),
+                st_single.is_accepting(),
+                "fused/single acceptance equivalence for {fused:?} vs {single:?}",
+            );
+        }
+        assert!(admits_token(&stage2.start().mask(), LX), "Lx crossing must be live");
+        assert!(admits_token(&stage2.start().mask(), RY), "Ry crossing must be live");
+        // Trap-armed replay of the oracle-gated corpus.
+        let mut nodes: Vec<(Vec<u32>, Vec<u32>)> = Vec::new();
+        for path in &paths {
+            let mut st = stage2_dyn.start();
+            let mut ok = true;
+            for &token in path {
+                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                nodes.push((path.clone(), st.mask()));
+            }
+        }
+        assert!(
+            nodes.len() >= 10,
+            "post-serde corpus must cover real positions, got {}",
+            nodes.len()
+        );
+        let mut trap = StrictStaticTrapGuard::arm();
+        let mut mismatches = 0usize;
+        for (path, mask) in &nodes {
+            let mut st = stage2.start();
+            for &token in path {
+                st.commit_token(token).expect("static replay");
+            }
+            if st.mask() != *mask {
+                mismatches += 1;
+            }
+        }
+        trap.disarm();
+        assert_eq!(mismatches, 0, "post-serde static must match dynamic on every path");
+        // Ablation: clearing the installed top-level shards must lose
+        // admissions.
+        let mut ablated = stage2.clone();
+        install_published_static_boundary_shards(
+            ablated.static_dynamic_overlay.as_mut().expect("overlay"),
+            Vec::new(),
+        )
+        .expect("clear shards");
+        let mut strict = 0usize;
+        for path in &paths {
+            let mut dyn_st = stage2_dyn.start();
+            let mut abl_st = ablated.start();
+            for &token in path {
+                if !admits_token(&dyn_st.mask(), token) {
+                    break;
+                }
+                dyn_st.commit_token(token).unwrap();
+                if !admits_token(&abl_st.mask(), token) {
+                    strict += 1;
+                    break;
+                }
+                abl_st.commit_token(token).unwrap();
+            }
+        }
+        assert!(strict >= 1, "ablation must lose at least one admission");
+        // The extended artifact itself round-trips with identical behavior.
+        let reloaded =
+            Constraint::load(stage2.save().as_slice()).expect("reload extended composition");
+        assert_composed_masks_equal("post-serde-reload-bytes", &reloaded, &stage2_dyn, &prefixes);
+        assert_composed_token_masks_equal(
+            "post-serde-reload-tokens",
+            &reloaded,
+            &stage2_dyn,
+            &paths,
+        );
+    }
+
+    #[test]
+    fn composed_parent_static_extend_pins_runtime_leaf_layout() {
+        // The installing runtime must visit the extended link's leaves in the
+        // walk's preorder (parent block first): pin terminal offsets exactly
+        // and tokenizer offsets structurally against the leaf expansion.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                nt a ::= "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_b = Constraint::from_glrm_grammar(
+            r#"
+                start b;
+                nt b ::= "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let bind1 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            parent,
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1")
+        .constraint;
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage1, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_b,
+        }];
+        let stage2 = compose_constraints_owned_parent_segmented(
+            stage1.clone(),
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind2")
+        .constraint;
+        let expansion = crate::compiler::boundary_walk::expand_nested_link_leaves(&stage1, &bind2)
+            .expect("bind2 expansion");
+        let layout = stage2
+            .recursive_parser_layout()
+            .expect("layout result")
+            .expect("recursive layout present");
+        assert_eq!(
+            layout.leaf_terminal_offsets, expansion.leaf_terminal_offsets,
+            "runtime terminal preorder must match the walk leaf order",
+        );
+        assert_eq!(
+            layout.total_leaf_terminals, expansion.num_terminals,
+            "runtime terminal total must match the walk domain",
+        );
+        assert_eq!(
+            layout.leaf_tokenizer_state_offsets.len(),
+            expansion.leaves.len(),
+            "one tokenizer block per leaf",
+        );
+        assert!(
+            layout
+                .leaf_tokenizer_state_offsets
+                .windows(2)
+                .all(|pair| pair[0] < pair[1]),
+            "tokenizer blocks must pack back-to-back in leaf order: {:?}",
+            layout.leaf_tokenizer_state_offsets,
+        );
+        assert!(
+            layout.total_tokenizer_states
+                > *layout.leaf_tokenizer_state_offsets.last().unwrap_or(&0),
+            "tokenizer total must cover the packed blocks",
+        );
+    }
+
+    #[test]
+    fn composed_parent_static_extend_with_nullable_child_declines_loudly() {
+        // Extending a composed parent must not smuggle in deferred nullable
+        // support: a nullable second child declines exactly like the flat case.
+        let _env_lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let vocab = Vocab::new(vec![
+            (0, b"L".to_vec()),
+            (1, b"R".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"y".to_vec()),
+            (4, b"a".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t SUB2 ::= @token(998);
+                nt document ::= "L" SUB "x" | "R" SUB2 "y";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child_a = Constraint::from_glrm_grammar(
+            r#"
+                start a;
+                nt a ::= "x";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let nullable_b = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt item ::= "a";
+                nt child ::= item?;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert!(
+            nullable_b.table.embedded_start_nullable(),
+            "pin fixture must stay effectively nullable",
+        );
+        let bind1 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&parent, "SUB"),
+            additional_placeholder_terminals: &[],
+            constraint: &child_a,
+        }];
+        let stage1 = compose_constraints_owned_parent_segmented(
+            parent,
+            &bind1,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("bind1")
+        .constraint;
+        let bind2 = [CompiledSubgrammarInput {
+            placeholder_terminal: terminal(&stage1, "SUB2"),
+            additional_placeholder_terminals: &[],
+            constraint: &nullable_b,
+        }];
+        let error = match compose_constraints_owned_parent_segmented(
+            stage1,
+            &bind2,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("nullable second bind must decline loudly"),
+        };
+        assert!(
+            error.contains("nullable"),
+            "decline must name nullability, got: {error}",
+        );
     }
 
     #[test]
@@ -31052,6 +35029,7 @@ table: &dispatch.table,
                     skip_ti_discovery: shared.is_some(),
                     crossing_filter: nwa_filter,
                     skip_core_compact: false,
+                    follow_transparent: None,
                 })
             } else {
                 None
@@ -31768,6 +35746,7 @@ table: &dispatch.table,
                 disallowed,
                 grammar.num_terminals as usize,
                 ignore_terminal,
+                None,
             );
             let disallowed_ms = step_started.elapsed().as_secs_f64() * 1000.0;
             let step_started = Instant::now();

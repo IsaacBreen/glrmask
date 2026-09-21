@@ -4799,4 +4799,37 @@ mod tests {
         assert!(visited > 4);
     }
 
+    #[test]
+    fn probe_normal_grammar_compiler_nullable_recursive_growing_stack() {
+        // Grammar:
+        // Rule 0: S -> A (nt 0 -> nt 1)
+        // Rule 1: A -> A B (nt 1 -> nt 1, nt 2) -- recursive with net push
+        // Rule 2: B -> epsilon (nt 2 -> empty) -- nullable
+        // Rule 3: A -> 'x' (nt 1 -> terminal 0)
+        let grammar = analyzed(
+            vec![
+                Rule { lhs: 0, rhs: vec![Symbol::Nonterminal(1)] },
+                Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(1), Symbol::Nonterminal(2)] },
+                Rule { lhs: 2, rhs: Vec::new() },
+                Rule { lhs: 1, rhs: vec![Symbol::Terminal(0)] },
+            ],
+            0,
+            1,
+        );
+        let table = super::build_table(&grammar);
+        eprintln!(
+            "[GRAMMAR_SCC_PROBE] compiled: num_states={} num_rules={} construction={:?}",
+            table.num_states, table.num_rules, table.construction
+        );
+        for (state, row) in table.action.iter().enumerate() {
+            for (terminal, action) in row.iter() {
+                eprintln!("[GRAMMAR_SCC_PROBE] state={state} term={terminal} action={action:?}");
+            }
+        }
+        for (state, row) in table.goto.iter().enumerate() {
+            for (nt, (target, replace)) in row.iter() {
+                eprintln!("[GRAMMAR_SCC_PROBE] goto state={state} nt={nt} target={target} replace={replace}");
+            }
+        }
+    }
 }

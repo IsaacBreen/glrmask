@@ -40,6 +40,19 @@ impl<'a> SubgrammarTableInput<'a> {
         std::iter::once(self.placeholder_terminal)
             .chain(self.additional_placeholder_terminals.iter().copied())
     }
+
+    /// Idempotent ignore materialization. `GLRTable.skip_terminals` records
+    /// terminals whose table action is parser identity in a subset of states;
+    /// its presence is the per-terminal provenance that scoped-ignore
+    /// ownership is already materialized in this table. A requested ignore
+    /// already owned there must NOT be re-injected: every transported row for
+    /// that terminal (Skip, Reduce, or absent) is authoritative. Only a raw
+    /// child whose ignore was erased at the lexer (absent from
+    /// `skip_terminals`) needs Skip materialization.
+    #[inline]
+    fn effective_ignore_terminal(&self) -> Option<TerminalID> {
+        self.ignore_terminal.filter(|ignore| !self.table.skip_terminals.contains(ignore))
+    }
 }
 
 #[derive(Debug)]
@@ -666,6 +679,11 @@ pub fn compose_subgrammar_tables_with_rules(
 
     let mut action = parent.action.clone();
     let mut goto = parent.goto.clone();
+    // Idempotent root-ignore materialization: a precomposed parent table that
+    // already owns this ignore in `skip_terminals` keeps its transported rows
+    // (Skip, Reduce, or absent) unchanged instead of gaining Skip everywhere.
+    let parent_scoped_ignore_terminal = parent_scoped_ignore_terminal
+        .filter(|ignore| !parent.skip_terminals.contains(ignore));
     if let Some(ignore) = parent_scoped_ignore_terminal {
         for row in &mut action {
             merge_action_cell(row, ignore, identity_skip_action())?;
@@ -713,7 +731,7 @@ pub fn compose_subgrammar_tables_with_rules(
                 .filter(|&terminal| terminal != EOF)
                 .map(|terminal| terminal + terminal_offset)
                 .collect::<BTreeSet<_>>();
-            if let Some(ignore) = input.ignore_terminal {
+            if let Some(ignore) = input.effective_ignore_terminal() {
                 entries.insert(ignore + terminal_offset);
             }
             input
@@ -852,7 +870,10 @@ pub fn compose_subgrammar_tables_with_rules(
         // actions.  This is ordinary LR state splitting, not a control/epsilon
         // transition: the first child-ignore token replaces caller -> phase.
         let mut child_scope_phase = BTreeMap::<u32, u32>::new();
-        if child_input.ignore_terminal.is_some() {
+        // Phase refinement is only needed when this compose newly
+        // materializes the child ignore. An already-scoped child carries its
+        // own entry behavior in its transported rows.
+        if child_input.effective_ignore_terminal().is_some() {
             for &(_, caller, _, _) in &call_sites {
                 let phase = next_state;
                 next_state += 1;
@@ -881,7 +902,7 @@ pub fn compose_subgrammar_tables_with_rules(
         }
         state_relations.push(child_relation);
 
-        if let Some(local_ignore) = child_input.ignore_terminal {
+        if let Some(local_ignore) = child_input.effective_ignore_terminal() {
             skip_terminals.insert(local_ignore + terminal_offset);
         }
         let row_transport_started_at = profile.then(Instant::now);
@@ -1053,7 +1074,7 @@ pub fn compose_subgrammar_tables_with_rules(
                     }
                 }
             }
-            if let Some(local_ignore) = child_input.ignore_terminal {
+            if let Some(local_ignore) = child_input.effective_ignore_terminal() {
                 merge_action_cell(
                     &mut mapped_action_row,
                     local_ignore + terminal_offset,
@@ -1087,7 +1108,7 @@ pub fn compose_subgrammar_tables_with_rules(
                         )?;
                     }
                 }
-                if let Some(local_ignore) = child_input.ignore_terminal {
+                if let Some(local_ignore) = child_input.effective_ignore_terminal() {
                     merge_action_cell(
                         &mut reference,
                         local_ignore + terminal_offset,
@@ -1200,7 +1221,7 @@ pub fn compose_subgrammar_tables_with_rules(
             }
 
             if let (Some(local_ignore), Some(&phase_state)) = (
-                child_input.ignore_terminal,
+                child_input.effective_ignore_terminal(),
                 child_scope_phase.get(&caller_state),
             ) {
                 rows_needing_compress.insert(phase_state as usize);
@@ -1552,6 +1573,10 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
     } else {
         Vec::new()
     };
+    // Same idempotence as the legacy path: a precomposed parent already owns
+    // this ignore; only a raw parent needs root Skip materialization.
+    let parent_scoped_ignore_terminal = parent_scoped_ignore_terminal
+        .filter(|ignore| !parent.skip_terminals.contains(ignore));
     if let Some(ignore) = parent_scoped_ignore_terminal {
         for row in &mut action {
             merge_action_cell(row, ignore, identity_skip_action())?;
@@ -1619,7 +1644,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                 .iter()
                 .map(|terminal| terminal + terminal_offset),
         );
-        if let Some(ignore) = child_input.ignore_terminal {
+        if let Some(ignore) = child_input.effective_ignore_terminal() {
             skip_terminals.insert(ignore + terminal_offset);
         }
 
@@ -1699,7 +1724,8 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                 String,
             > {
                 let source_action = &child.action[local_state as usize];
-                let extras = usize::from(child_input.ignore_terminal.is_some())
+                let effective_ignore = child_input.effective_ignore_terminal();
+                let extras = usize::from(effective_ignore.is_some())
                     + usize::from(child_input.start_nullable && local_state == child_start);
                 let mut mapped_action =
                     ActionRow::Sparse(SparseRow::with_expected_len(source_action.len() + extras));
@@ -1781,7 +1807,7 @@ pub fn compose_subgrammar_tables_explicit_with_rules(
                     }
                 }
 
-                if let Some(local_ignore) = child_input.ignore_terminal {
+                if let Some(local_ignore) = child_input.effective_ignore_terminal() {
                     let mapped_ignore = local_ignore + terminal_offset;
                     merge_action_cell(
                         &mut mapped_action,
@@ -3046,6 +3072,169 @@ mod tests {
                 "direct scoped-ignore splice differs from explicit semantics for {word:?}",
             );
         });
+    }
+
+    #[test]
+    fn recomposing_precomposed_child_preserves_scoped_rows_verbatim() {
+        // Fixture covers Skip/absent ownership for a marked ignore (Reduce
+        // cells asserted where observed); the full Reduce-on-ignore
+        // collision is exercised by the nested integration test.
+        let (raw_child, raw_analysis) = table(
+            r#"
+                start child;
+                t C_WS ::= "\t"+;
+                t A ::= "a";
+                nt child ::= A;
+                nt wrap ::= C_WS child;
+            "#,
+        );
+        let (parent, parent_analysis) = table(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                t P_WS ::= " "+;
+                t L ::= "<";
+                t R ::= ">";
+                nt document ::= L SUB R;
+            "#,
+        );
+        let raw_ws = terminal(&raw_analysis, "C_WS");
+        let raw_a = terminal(&raw_analysis, "A");
+        let parent_ws = terminal(&parent_analysis, "P_WS");
+        let sub = terminal(&parent_analysis, "SUB");
+        assert!(!raw_child.skip_terminals.contains(&raw_ws));
+        // Per-terminal negative control: marking an UNRELATED terminal must
+        // not block materialization of the requested ignore.
+        let mut decoy_child = raw_child.clone();
+        decoy_child.skip_terminals.insert(raw_a);
+        let no_additionals: &[TerminalID] = &[];
+        macro_rules! mk_input {
+            ($child_table:expr, $ignore:expr) => {
+                SubgrammarTableInput {
+                    placeholder_terminal: sub,
+                    additional_placeholder_terminals: no_additionals,
+                    table: $child_table,
+                    ignore_terminal: $ignore,
+                    start_nullable: false,
+                }
+            };
+        }
+        assert_eq!(mk_input!(&raw_child, Some(raw_ws)).effective_ignore_terminal(), Some(raw_ws));
+        assert_eq!(mk_input!(&decoy_child, Some(raw_ws)).effective_ignore_terminal(), Some(raw_ws));
+
+        // At least one composer variant must observe a Reduce cell for the
+        // marked ignore; every observed one is asserted mapped above.
+        let mut saw_reduce_global = false;
+        let mut saw_reduce_mapped = false;
+        for use_explicit in [false, true] {
+            let compose_once = |input: &SubgrammarTableInput<'_>| {
+                if use_explicit {
+                    compose_subgrammar_tables_explicit(&parent, Some(parent_ws), std::slice::from_ref(input))
+                } else {
+                    compose_subgrammar_tables(&parent, Some(parent_ws), std::slice::from_ref(input))
+                }
+            };
+            let once = compose_once(&mk_input!(&raw_child, Some(raw_ws))).unwrap();
+            let child_offset = once.terminal_offsets[1];
+            let scoped_ws = child_offset + raw_ws;
+            assert!(once.table.skip_terminals.contains(&scoped_ws));
+            // Decoy composes identically: unrelated skip membership changes
+            // nothing about the requested ignore's materialization.
+            let decoy_once = compose_once(&mk_input!(&decoy_child, Some(raw_ws))).unwrap();
+            assert!(decoy_once.table.skip_terminals.contains(&scoped_ws));
+            assert!(decoy_once.table.action.iter().any(|row| {
+                matches!(row.get(&scoped_ws), Some(Action::Skip))
+            }));
+
+            // Source inventory for the marked ignore over internal states.
+            let child_accept = accept_state(&once.table).unwrap();
+            let mut saw_skip = false;
+            let mut saw_reduce = false;
+            let mut saw_absent = false;
+            for (local, row) in once.table.action.iter().enumerate().skip(1) {
+                if local as u32 == child_accept {
+                    continue;
+                }
+                match row.get(&scoped_ws) {
+                    Some(Action::Skip) => saw_skip = true,
+                    Some(Action::Reduce(..)) => saw_reduce = true,
+                    None => saw_absent = true,
+                    // Entry cells (phase Shift) are out of scope here.
+                    Some(_) => {}
+                }
+            }
+            assert!(saw_skip && saw_absent, "explicit={use_explicit}: need Skip+absent cells");
+            saw_reduce_global = saw_reduce_global || saw_reduce;
+
+            // Source snapshot: composer must not mutate its input table.
+            let before_actions: Vec<Vec<(TerminalID, Action)>> = once.table.action.iter().map(|row| row.iter().map(|(t, a)| (t, a.clone())).collect()).collect();
+            let before_skips = once.table.skip_terminals.clone();
+
+            // Nested recompose with the materialized ignore requested again.
+            let nested = compose_once(&mk_input!(&once.table, Some(scoped_ws))).unwrap();
+            assert_eq!(mk_input!(&once.table, Some(scoped_ws)).effective_ignore_terminal(), None);
+            assert_eq!(before_skips, once.table.skip_terminals);
+            let after_actions: Vec<Vec<(TerminalID, Action)>> = once.table.action.iter().map(|row| row.iter().map(|(t, a)| (t, a.clone())).collect()).collect();
+            assert_eq!(before_actions, after_actions);
+            assert_advance_matches_actions(&nested.table);
+
+            // Destination check via state_relations under terminal rebase.
+            let nested_offset = nested.terminal_offsets[1];
+            let re_scoped = nested_offset + scoped_ws;
+            let relation = &nested.state_relations[1];
+            assert_eq!(relation.len(), once.table.action.len());
+            for (local, targets) in relation.iter().enumerate() {
+                if local == 0 {
+                    continue;
+                }
+                let src = once.table.action[local].get(&scoped_ws).cloned();
+                for &dst in targets {
+                    // Accept-state representatives remap by construction.
+                    if local as u32 == child_accept {
+                        continue;
+                    }
+                    let got = nested.table.action[dst as usize].get(&re_scoped).cloned();
+                    // NT ids rebase by the nested nonterminal offset: the
+                    // nested compose prepends the parent NTs, so source NT n
+                    // maps to parent_nt_count + n.
+                    let nt_offset = parent.nonterminal_display_names.len() as u32;
+                    let mapped_src = src.clone().map(|action| match action {
+                        Action::Reduce(nt, len) => Action::Reduce(nt + nt_offset, len),
+                        other => other,
+                    });
+                    match (&mapped_src, &got) {
+                        (None, None) => {}
+                        (Some(Action::Skip), Some(Action::Skip)) => {}
+                        (Some(Action::Reduce(a, b)), Some(Action::Reduce(c, d))) if a == c && b == d => {
+                            saw_reduce_mapped = true;
+                        }
+                        _ if !matches!(src, None | Some(Action::Skip) | Some(Action::Reduce(..))) => {}
+                        _ => panic!("explicit={use_explicit}: row {local}->{dst} not preserved: {src:?}->{got:?}"),
+                    }
+                }
+            }
+
+            // Precomposed parent: root injection retains present+absent rows.
+            let mut scoped_parent = parent.clone();
+            scoped_parent.skip_terminals.insert(parent_ws);
+            let p_accept = accept_state(&scoped_parent).unwrap();
+            for (i, row) in scoped_parent.action.iter_mut().enumerate() {
+                if i as u32 != p_accept && i % 2 == 0 {
+                    row.insert(parent_ws, Action::Skip);
+                }
+            }
+            let before_parent: Vec<Option<Action>> = scoped_parent.action.iter().map(|row| row.get(&parent_ws).cloned()).collect();
+            let via_parent = if use_explicit {
+                compose_subgrammar_tables_explicit(&scoped_parent, Some(parent_ws), std::slice::from_ref(&mk_input!(&raw_child, Some(raw_ws)))).unwrap()
+            } else {
+                compose_subgrammar_tables(&scoped_parent, Some(parent_ws), std::slice::from_ref(&mk_input!(&raw_child, Some(raw_ws)))).unwrap()
+            };
+            for (i, cell) in before_parent.iter().enumerate() {
+                assert_eq!(via_parent.table.action[i].get(&parent_ws).cloned(), *cell, "explicit={use_explicit}: parent row {i} changed");
+            }
+        }
+        assert!(saw_reduce_global, "at least one composer variant must observe a Reduce cell");
+        assert_eq!(saw_reduce_mapped, saw_reduce_global, "every observed Reduce must assert mapped");
     }
 
     #[test]

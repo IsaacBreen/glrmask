@@ -214,6 +214,39 @@ impl Drop for EnvVarGuard {
     }
 }
 
+/// Pins `TEST_COMPAT_MODE` without touching the process environment. The
+/// compat mode cell is thread-local (the live control for lowering); writing
+/// the env var instead would leak across threads — a fresh libtest thread
+/// created during the window would initialize its cell from the leaked value
+/// and keep it for all its later tests. Prefer this over `EnvVarGuard` for
+/// pure mode pins; keep `EnvVarGuard` where the env var itself is load-bearing
+/// (subprocess children, explicit env-behavior tests).
+struct CompatModeGuard {
+    original: super::string::JsonStringCompatMode,
+}
+
+impl CompatModeGuard {
+    fn json_schema() -> Self {
+        Self::set_mode(super::string::JsonStringCompatMode::JsonSchema)
+    }
+
+    fn native() -> Self {
+        Self::set_mode(super::string::JsonStringCompatMode::LlGuidanceNative)
+    }
+
+    fn set_mode(mode: super::string::JsonStringCompatMode) -> Self {
+        let original = super::string::TEST_COMPAT_MODE.with(|cell| cell.get());
+        super::string::TEST_COMPAT_MODE.with(|cell| cell.set(mode));
+        Self { original }
+    }
+}
+
+impl Drop for CompatModeGuard {
+    fn drop(&mut self) {
+        super::string::TEST_COMPAT_MODE.with(|cell| cell.set(self.original));
+    }
+}
+
 fn rule_expr<'a>(grammar: &'a NamedGrammar, name: &str) -> &'a GrammarExpr {
     &grammar
         .rules
@@ -376,6 +409,8 @@ fn exact_subtraction_lowering_env_var_defaults_false_and_accepts_truthy_values()
 #[test]
 fn exact_subtraction_json_schema_dump_uses_helpers_when_enabled() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _compat = CompatModeGuard::json_schema();
     let _lower = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS");
 
     let schema = json!({
@@ -415,6 +450,8 @@ fn exact_subtraction_json_schema_dump_uses_helpers_when_enabled() {
 #[test]
 fn exact_subtraction_json_schema_dump_keeps_direct_subtraction_when_disabled() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _compat = CompatModeGuard::json_schema();
     let _lower = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_LOWER_EXACT_SUBTRACTIONS", "0");
     let _promote = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_PROMOTE_LITERAL_CHOICES", "0");
 
@@ -2125,6 +2162,11 @@ fn required_property_covered_by_pattern_properties_is_synthesized() {
 
 #[test]
 fn required_property_matching_multiple_patterns_applies_all_pattern_schemas() {
+    // Full-JSON intent (pre-tighten): overlapping patterns apply all schemas.
+    // The LlGuidanceNative default deliberately rejects overlap, so pin this
+    // test to JsonSchema mode explicitly (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "required": ["line1"],
@@ -2181,6 +2223,9 @@ fn fixed_property_still_intersects_matching_pattern_property() {
 
 #[test]
 fn open_no_pattern_object_lowers_to_expr_nfa_body() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2200,6 +2245,9 @@ fn open_no_pattern_object_lowers_to_expr_nfa_body() {
 
 #[test]
 fn large_optional_open_object_uses_fused_prefix_chain_rules() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let mut properties = serde_json::Map::new();
     for index in 0..16 {
         properties.insert(format!("k{index}"), json!({"type": "string"}));
@@ -2717,6 +2765,9 @@ fn shared_additional_key_colon_terminal_is_emitted_once() {
 
 #[test]
 fn additional_properties_factoring_uses_shared_key_colon_terminal() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -2739,7 +2790,96 @@ fn additional_properties_factoring_uses_shared_key_colon_terminal() {
 }
 
 #[test]
+fn additional_properties_factoring_native_and_jsonschema_agree_on_plain_ascii() {
+    // Native-default counterpart to the JsonSchema-mode factoring pin. Each
+    // mode is tested independently with fresh states per sample: exactly one
+    // commit_bytes per complete instance plus is_accepting. No cross-mode
+    // mask comparison — the lowered layouts legitimately differ
+    // (shared-colon factoring is a JsonSchema-mode layout); the shared
+    // contract is complete-instance acceptance on plain-ASCII samples, where
+    // the lexical languages coincide. All properties are optional. Samples
+    // use the compiler's canonical fixed single-space separators
+    // (`JSON_SEPARATOR_WS_REGEX`); compact JSON is a formatting rejection,
+    // pinned separately below, not a semantic outcome.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let schema = r#"{
+        "type": "object",
+        "properties": {
+            "outer": {
+                "type": "object",
+                "properties": {
+                    "comments": {"type": "string"},
+                    "contexts": {"type": "string"}
+                },
+                "additionalProperties": {"type": "string"}
+            }
+        },
+        "additionalProperties": false
+    }"#;
+    let vocab = byte_vocab();
+    fn accepts(constraint: &DynamicConstraint, instance: &[u8]) -> (bool, bool) {
+        let mut state = constraint.start();
+        let ok = state.commit_bytes(instance).is_ok();
+        (ok, ok && state.is_accepting())
+    }
+    let samples: [(&str, &[u8]); 6] = [
+        (
+            "valid/full",
+            br#"{"outer": {"comments": "hello", "contexts": "world", "extra": "ok"}}"#,
+        ),
+        ("valid/outer-empty", br#"{"outer": {}}"#),
+        ("valid/root-empty", br#"{}"#),
+        ("invalid/extra-type", br#"{"outer": {"extra": 1}}"#),
+        ("invalid/outside", br#"{"outside": "x"}"#),
+        ("invalid/compact-format", br#"{"outer":{}}"#),
+    ];
+    let native: [(bool, bool); 6] = {
+        let _mode = CompatModeGuard::native();
+        let constraint = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        std::array::from_fn(|index| accepts(&constraint, samples[index].1))
+    };
+    let json: [(bool, bool); 6] = {
+        let _mode = CompatModeGuard::json_schema();
+        let constraint = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
+        std::array::from_fn(|index| accepts(&constraint, samples[index].1))
+    };
+    // Independent per-mode pins: (commit_ok, accepting).
+    for (label, outcomes) in [("native", &native), ("json", &json)] {
+        for (index, (name, _)) in samples.iter().enumerate() {
+            let expected = match *name {
+                "valid/full" | "valid/outer-empty" | "valid/root-empty" => (true, true),
+                "invalid/extra-type" | "invalid/outside" | "invalid/compact-format" => {
+                    (false, false)
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                outcomes[index], expected,
+                "{label} disagrees on {name}",
+            );
+        }
+    }
+    // Shared-subset agreement on complete instances. A mismatch here is a
+    // semantic witness for parent reasoning, not a layout artifact: both
+    // modes already passed their independent pins above.
+    assert_eq!(
+        native, json,
+        "complete-instance acceptance differs; per-sample (commit_ok, accepting): {:?}",
+        samples
+            .iter()
+            .map(|(name, _)| name)
+            .zip(native.iter().zip(json.iter()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disabled() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    // Thread-local only (no env write, no cross-test leak); the re-executed
+    // child sets its own mode via this same guard before any lowering.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
         let status = Command::new(env::current_exe().unwrap())
             .arg("--nocapture")
@@ -2774,6 +2914,11 @@ fn huge_shared_additional_exclusion_set_uses_expanded_literal_addback_when_disab
 
 #[test]
 fn huge_shared_additional_exclusion_set_uses_shared_addback_by_default() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    // Thread-local only (no env write, no cross-test leak); the re-executed
+    // child sets its own mode via this same guard before any lowering.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     if env::var_os("GLRMASK_JSON_SCHEMA_SHARE_AP_ADDBACK_CHILD").is_none() {
         let status = Command::new(env::current_exe().unwrap())
             .arg("--nocapture")
@@ -2824,6 +2969,9 @@ fn huge_shared_additional_exclusion_set_uses_shared_addback_by_default() {
 
 #[test]
 fn shared_additional_excluded_key_skips_closed_object_keys() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -4288,6 +4436,9 @@ fn medium_bounded_string_terminalizes_with_env_override() {
 
 #[test]
 fn ascii_string_pattern_class_unicode_escape_branch_is_compact() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "string",
         "pattern": "^[0-9A-Z_a-z]+$"
@@ -4519,6 +4670,8 @@ fn complex_anchored_pattern_splitting_is_disabled_by_default() {
 #[test]
 fn complex_anchored_pattern_splitting_is_importer_only_and_selective() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _compat = CompatModeGuard::json_schema();
 
     {
         let _guard = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_SPLIT_COMPLEX_PATTERNS", "1");
@@ -6343,6 +6496,9 @@ fn literal_quote_merge_env_overrides_remain_effective() {
 
 #[test]
 fn object_const_uses_json_separator_rules() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "const": {
             "$data": "1/password",
@@ -6815,6 +6971,9 @@ fn llguidance_bounded_integer_multiple_rejects_signed_start() {
 
 #[test]
 fn bounded_integer_multiple_of_sixteen_lowers_without_enumerating_large_range() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "integer",
         "minimum": -2032,
@@ -7301,6 +7460,9 @@ fn object_typed_anyof_branches_do_not_emit_generic_json_object_fallback() {
 
 #[test]
 fn anyof_open_objects_with_disjoint_optional_properties_collapses_to_json_object() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "anyOf": [
             {
@@ -7385,6 +7547,9 @@ fn constrained_open_objects_do_not_collapse_to_json_object() {
 
 #[test]
 fn anyof_open_objects_with_shared_optional_property_does_not_collapse_to_json_object() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "anyOf": [
             {
@@ -7490,6 +7655,9 @@ fn anyof_nested_object_allof_refs_factor_into_single_body() {
 #[test]
 fn pattern_map_anyof_open_objects_with_disjoint_optional_properties_collapses_value_to_json_object()
 {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "patternProperties": {
@@ -7933,6 +8101,9 @@ fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
 
 #[test]
 fn allof_merges_plain_object_branches() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "allOf": [
             {
@@ -8393,6 +8564,9 @@ fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
 
 #[test]
 fn open_object_anyof_uses_single_object_body_nfa() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "type": "object",
         "properties": {
@@ -8725,6 +8899,9 @@ fn llguidance_compat_keeps_subsumed_open_object_branch_with_pattern_properties()
 
 #[test]
 fn anyof_drops_subsumed_open_object_branch_for_o83993_shape() {
+    // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _compat = CompatModeGuard::json_schema();
     let schema = json!({
         "anyOf": [
             {

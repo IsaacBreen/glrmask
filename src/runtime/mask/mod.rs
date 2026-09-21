@@ -82,6 +82,40 @@ fn original_mask_contains(buf: &[u32], token_id: u32) -> bool {
         .is_some_and(|word| word & (1u32 << (token_id % 32)) != 0)
 }
 
+/// Test-only switch for the segmented-mask stage trace. Enabled by
+/// `GLRMASK_DEBUG_MASK_STAGES`; compiled only under `cfg(test)`.
+#[cfg(test)]
+fn segmented_mask_stage_trace_enabled() -> bool {
+    std::env::var_os("GLRMASK_DEBUG_MASK_STAGES").is_some()
+}
+
+#[cfg(test)]
+fn segmented_mask_bits(buf: &[u32]) -> Vec<u32> {
+    let mut bits = Vec::new();
+    for (word_index, &word) in buf.iter().enumerate() {
+        let mut word = word;
+        while word != 0 {
+            let bit = word.trailing_zeros() as usize;
+            bits.push((word_index * 32 + bit) as u32);
+            word &= word - 1;
+        }
+    }
+    bits
+}
+
+#[cfg(test)]
+fn segmented_mask_stage_trace(stage: &str, buf: &[u32]) {
+    if !segmented_mask_stage_trace_enabled() {
+        return;
+    }
+    let bits = segmented_mask_bits(buf);
+    eprintln!(
+        "[mask-stages] {stage} token8={} token9={} bits={bits:?}",
+        bits.contains(&8),
+        bits.contains(&9),
+    );
+}
+
 
 fn exact_component_trigger_accepted_weight(
     constraint: &Constraint,
@@ -3904,6 +3938,8 @@ impl<'a> ConstraintState<'a> {
         } else {
             buf.fill(0);
         }
+        #[cfg(test)]
+        segmented_mask_stage_trace("baseline", buf);
         let mut component_times = SmallVec::<[u64; 4]>::new();
         let required_component_mask_len = overlay
             .segmented_parser_components
@@ -3963,6 +3999,8 @@ impl<'a> ConstraintState<'a> {
             // A nested hybrid component recursively retains the same split.
             shadow.fill_mask(component_buf);
             self.or_segmented_component_mask(buf, &component_buf);
+            #[cfg(test)]
+            segmented_mask_stage_trace(&format!("component-{component_index}"), buf);
             component_times.push(component_started_at.map_or(0, elapsed_ns));
         }
 
@@ -3970,6 +4008,8 @@ impl<'a> ConstraintState<'a> {
         if !self.or_segmented_boundary_shards_mask(overlay, buf) {
             return false;
         }
+        #[cfg(test)]
+        segmented_mask_stage_trace("shards", buf);
         let boundary_ns = boundary_started_at.map_or(0, elapsed_ns);
         if let Some(started_at) = total_started_at {
             eprintln!(
@@ -4206,6 +4246,79 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
+    /// Test-only: report one boundary shard's mask contribution by snapshot
+    /// diff, together with the effective top state / source context that made
+    /// it active. Enabled by `GLRMASK_DEBUG_MASK_STAGES`.
+    #[cfg(test)]
+    fn trace_segmented_shard_delta(
+        &self,
+        component_index: usize,
+        shard: &crate::runtime::SegmentedBoundaryShard,
+        before: &[u32],
+        after: &[u32],
+    ) {
+        if !segmented_mask_stage_trace_enabled() {
+            return;
+        }
+        let mut added = Vec::new();
+        for (word_index, (&before_word, &after_word)) in
+            before.iter().zip(after.iter()).enumerate()
+        {
+            let mut delta = after_word & !before_word;
+            while delta != 0 {
+                let bit = delta.trailing_zeros() as usize;
+                added.push((word_index * 32 + bit) as u32);
+                delta &= delta - 1;
+            }
+        }
+        let compact = self.constraint.uses_compact_segmented_parser_runtime();
+        let mut contexts = Vec::new();
+        for (&global_tokenizer_state, gss) in self.state.iter() {
+            let _ = gss.for_each_stack_top_first_bounded(128, |top_first, _| {
+                match top_first.first().copied() {
+                    Some(top) => {
+                        let owner = if compact {
+                            self.constraint
+                                .compact_segmented_parser_component(top)
+                                .map(|(component, _)| component as u32)
+                        } else {
+                            shard
+                                .start_parser_states
+                                .contains(top as usize)
+                                .then_some(shard.start_component)
+                        };
+                        contexts.push(format!(
+                            "gts={global_tokenizer_state} top={top} owner={owner:?} active={}",
+                            owner == Some(shard.start_component),
+                        ));
+                    }
+                    None => contexts.push(format!(
+                        "gts={global_tokenizer_state} empty_stack active={}",
+                        shard.accepts_empty_stack,
+                    )),
+                }
+            });
+        }
+        let backend = match &shard.backend {
+            crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_) => "StaticParser",
+            crate::runtime::SegmentedBoundaryShardBackend::DynamicTerminalTrie(_) => {
+                "DynamicTerminalTrie"
+            }
+            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect => "DynamicDirect",
+        };
+        let candidates = shard
+            .candidate_tokens
+            .as_ref()
+            .map(|tokens| tokens.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        eprintln!(
+            "[mask-stages] shard[{component_index}] backend={backend} start_component={} candidates={candidates:?} added_bits={added:?} token8={} token9={} contexts={contexts:?}",
+            shard.start_component,
+            added.contains(&8),
+            added.contains(&9),
+        );
+    }
+
     fn or_segmented_boundary_shards_mask(
         &self,
         overlay: &crate::runtime::StaticDynamicOverlayMetadata,
@@ -4224,6 +4337,8 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 };
                 debug_assert_eq!(shard.start_component as usize, component_index);
+                #[cfg(test)]
+                let before_shard = segmented_mask_stage_trace_enabled().then(|| buf.to_vec());
                 let ok = match &shard.backend {
                     crate::runtime::SegmentedBoundaryShardBackend::StaticParser(boundary) => {
                         self.or_segmented_boundary_parser_mask(
@@ -4263,6 +4378,10 @@ impl<'a> ConstraintState<'a> {
                         true
                     }
                 };
+                #[cfg(test)]
+                if let Some(before_shard) = before_shard {
+                    self.trace_segmented_shard_delta(component_index, shard, &before_shard, buf);
+                }
                 if !ok {
                     return false;
                 }

@@ -2161,6 +2161,10 @@ pub fn build_bounded_analysis_view_with_trie(
     active_groups: Option<&[bool]>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> BoundedAnalysisView {
+    // Invariant: analysis views used by vocabulary equivalence must materialize
+    // all token suffix trajectories from start_state (whose epsilon closure covers
+    // all component reset roots) so that restart/suffix evaluations encounter valid
+    // transitions.
     build_bounded_analysis_topology_impl(
         tokenizer,
         None,
@@ -2168,7 +2172,7 @@ pub fn build_bounded_analysis_view_with_trie(
         tokens,
         false,
         true,
-        true,
+        true, // include_reset_suffixes
         false,
         None,
         None,
@@ -2201,6 +2205,10 @@ pub fn build_bounded_analysis_view_from_combined_starts_with_trie(
     active_groups: Option<&[bool]>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
 ) -> BoundedAnalysisView {
+    // Invariant: analysis views used by vocabulary equivalence must materialize
+    // all token suffix trajectories from start_state (whose epsilon closure covers
+    // all component reset roots) so that restart/suffix evaluations encounter valid
+    // transitions.
     build_bounded_analysis_topology_impl(
         tokenizer,
         None,
@@ -2208,7 +2216,7 @@ pub fn build_bounded_analysis_view_from_combined_starts_with_trie(
         tokens,
         true,
         true,
-        true,
+        true, // include_reset_suffixes
         false,
         None,
         None,
@@ -4799,5 +4807,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bounded_analysis_view_materializes_reset_suffix_transitions_from_start_state() {
+        let tokenizer =
+            crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let raw_states = (0..tokenizer.num_states() as usize).collect::<Vec<_>>();
+        let tokens: Vec<&[u8]> = vec![b"xa", b"xaa", b"xb"];
+        let bounded = build_bounded_analysis_view_with_trie(
+            &tokenizer,
+            &raw_states,
+            &tokens,
+            None,
+            None,
+        );
+        let dfa = bounded.tokenizer_view.dfa();
+        let start_state = dfa.start_state;
+        let trans_a = dfa.trans(start_state, b'a' as usize);
+        assert_ne!(
+            trans_a,
+            u32::MAX,
+            "bounded view must materialize suffix transitions from start_state for byte 'a'",
+        );
     }
 }
