@@ -375,9 +375,9 @@ pub(crate) struct BoundaryShardLinkProfile {
 }
 
 /// Opt-in (`GLRMASK_PROFILE_COMPOSE`/`GLRMASK_PROFILE_COMPILE`) coherent
-/// breakdown of one flat static-link call. `total_ms` and the stage walls
-/// (`setup`, `link_context`, `walks`, `templates`, `parser_dwa`, `publish`)
-/// are INCLUSIVE monotonic-`Instant` walls. `walks_ms` is the wall of the
+/// breakdown of one flat static-link call. `total_ms`, `setup`,
+/// `link_context`, `walks`, `transfer_prepare`, and `shard_pipeline` are
+/// INCLUSIVE monotonic-`Instant` walls. `walks_ms` is the wall of the
 /// shard-walk fan-out, which runs via `rayon` `par_iter` unless
 /// `GLRMASK_DISABLE_MACRO_PARALLELISM` is set — so per-shard rows may sum
 /// above it from genuine thread overlap. Separately, per-shard
@@ -387,9 +387,9 @@ pub(crate) struct BoundaryShardLinkProfile {
 /// printed subfields must never be summed into a "per-shard walk total".
 /// The per-shard line therefore prints the raw subfields with an explicit
 /// inclusive labeling — do not sum them and do not treat any sum as elapsed
-/// time. `residual_ms` is `total - accounted` (setup + context +
-/// walks wall + templates + parser-DWA + publish walls): genuinely
-/// uninstrumented work, never a second count of an exclusive leaf.
+/// time. Per-shard template/parser/publish fields are work diagnostics and may
+/// overlap; they are not part of `accounted_ms`. `residual_ms` is `total -
+/// accounted` using only non-overlapping stage walls.
 pub(crate) struct WalkStaticLinkBreakdown {
     pub total_ms: f64,
     pub nested: bool,
@@ -397,9 +397,15 @@ pub(crate) struct WalkStaticLinkBreakdown {
     pub setup_ms: f64,
     pub shared_flat_ms: f64,
     pub shared_equiv_ms: f64,
-    pub walk_ms: f64,
+    /// End-to-end wall from per-component lexical walk through publication.
+    /// Component items may overlap under macro parallelism.
+    pub component_pipeline_wall_ms: f64,
+    pub transfer_prepare_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub templates_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub parser_dwa_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub publish_ms: f64,
     pub accounted_ms: f64,
     pub residual_ms: f64,
@@ -410,8 +416,8 @@ pub(crate) struct WalkStaticLinkBreakdown {
 /// profile is the existing `BoundaryWalkProfile` reported as-is (its
 /// `walk_ms` is the inclusive L2P-call wall and `terminal_dwa_ms` includes
 /// `determinize_ms` + `minimize_ms` — never sum the row), the parser-DWA
-/// templates/publish walls are true per-shard `Instant` walls (serial loop),
-/// and `slot` names the grammar placeholder bound at this link
+/// templates/parser/publish fields are true per-shard `Instant` work
+/// durations and may overlap with other rows. `slot` names the grammar placeholder bound at this link
 /// (`link.parent_component -> link.child_component` via that slot terminal).
 pub(crate) struct WalkStaticLinkShardBreakdown {
     pub start_component: usize,
@@ -429,9 +435,14 @@ pub(crate) struct WalkStaticLinkShardBreakdown {
 /// Components with a proved empty candidate domain or empty crossing set are
 /// skipped (the runtime skips missing shards). Returns `None` only when the
 /// model vocabulary itself is empty.
-pub(crate) fn build_boundary_shard_walks(
+fn map_boundary_shard_walks_with<R, F>(
     inputs: &BoundaryShardLinkInputs,
-) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
+    consume: &F,
+) -> Result<Option<(Vec<(usize, R)>, BoundaryShardLinkProfile)>, String>
+where
+    R: Send,
+    F: Fn(BuiltBoundaryShardWalk) -> Result<R, String> + Sync,
+{
     use rayon::prelude::*;
 
     let flat_started = Instant::now();
@@ -605,29 +616,66 @@ pub(crate) fn build_boundary_shard_walks(
             candidate_tokens,
         })
     };
-    let mut built: Vec<BuiltBoundaryShardWalk> = if crate::compiler::macro_parallelism_disabled()
-    {
+    let build_and_consume = |plan: &BoundaryShardWalkPlan| -> Result<
+        Option<(usize, R, BoundaryWalkProfile)>,
+        String,
+    > {
+        let Some(shard) = build_one(plan) else {
+            return Ok(None);
+        };
+        let start_component = shard.start_component;
+        let profile = shard.output.profile.clone();
+        let value = consume(shard)?;
+        Ok(Some((start_component, value, profile)))
+    };
+    let mut completed = if crate::compiler::macro_parallelism_disabled() {
         let mut timings = Vec::with_capacity(plans.len());
-        let built: Vec<Option<BuiltBoundaryShardWalk>> = plans
+        let built = plans
             .iter()
             .map(|plan| {
                 let started = Instant::now();
-                let result = build_one(plan);
+                let result = build_and_consume(plan);
                 timings.push(started.elapsed().as_secs_f64() * 1000.0);
                 result
             })
-            .collect();
-        crate::compiler::report_macro_item_timings("boundary_walk_shard_walks", &timings);
-        built.into_iter().flatten().collect()
+            .collect::<Result<Vec<_>, String>>()?;
+        crate::compiler::report_macro_item_timings("boundary_walk_component_pipelines", &timings);
+        built.into_iter().flatten().collect::<Vec<_>>()
     } else {
-        plans.par_iter().map(build_one).collect::<Vec<_>>().into_iter().flatten().collect()
+        plans
+            .par_iter()
+            .map(build_and_consume)
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
     };
-    built.sort_by_key(|shard| shard.start_component);
+    completed.sort_by_key(|(start_component, _, _)| *start_component);
     let mut link_profile = link_profile;
-    for shard in &built {
-        link_profile.per_shard.push((shard.start_component, shard.output.profile.clone()));
+    for (start_component, _, profile) in &completed {
+        link_profile.per_shard.push((*start_component, profile.clone()));
     }
-    Some((built, link_profile))
+    let values = completed
+        .into_iter()
+        .map(|(start_component, value, _)| (start_component, value))
+        .collect();
+    Ok(Some((values, link_profile)))
+}
+
+/// Reference/test wrapper that stops after the scoped lexical walk. Production
+/// uses `map_boundary_shard_walks_with` so each component can continue into its
+/// parser pipeline immediately on the same worker.
+pub(crate) fn build_boundary_shard_walks(
+    inputs: &BoundaryShardLinkInputs,
+) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
+    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard))
+        .expect("identity boundary-walk consumer cannot fail")
+        .map(|(built, profile)| {
+            (
+                built.into_iter().map(|(_, shard)| shard).collect(),
+                profile,
+            )
+        })
 }
 
 /// Inputs for a production static boundary link over one composition.
@@ -1514,73 +1562,49 @@ pub(crate) fn build_walk_static_boundary_link(
         })
         .collect::<Vec<_>>();
     let link_setup_ms = link_setup_started.elapsed().as_secs_f64() * 1000.0;
-    let walks_started = Instant::now();
-    let Some((built, link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-        merged_tokenizer: &merged,
-        vocab,
-        grammar: &grammar,
-        disallowed_follows: &disallowed,
-        ignore_terminal: ignores.canonical,
-        follow_transparent_ignores: Some(&ignores.scoped),
-        terminal_offsets: &composed.terminal_offsets,
-        leaf_to_immediate: None,
-        tokenizer_offsets: &tokenizer_offsets,
-        component_state_counts: &component_state_counts,
-        candidate_tokens_by_component: Some(&candidate_tokens_by_component),
-        retain_parent_non_crossing_paths,
-        walk_plans: None,
-    }) else {
-        // Empty vocab: nothing can cross; pure component masks, no shards.
-        return Ok(empty_output());
-    };
-    let walks_ms = walks_started.elapsed().as_secs_f64() * 1000.0;
-
-    // Signed-transfer shard publication: scoped ordinary transfers +
-    // Entry/Finish exports composed in the control-aware signed NWA, exact
-    // negative resolution, table-free normalization. No provider table, no
-    // elimination; unbound slots carry empty-language semantics inside the
-    // fragment library.
-    let mut published = Vec::new();
-    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
-    let mut shard_rows: Vec<WalkStaticLinkShardBreakdown> = Vec::new();
-    let mut templates_ms = 0.0f64;
-    let mut parser_dwa_ms = 0.0f64;
-    let mut publish_ms = 0.0f64;
-    for shard in built {
-        tokens_by_component[shard.start_component] =
-            shard.candidate_tokens.iter().copied().collect();
-        if !effective.contains(shard.start_component) {
-            continue;
+    let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
+        &signed_context,
+    )?;
+    let transfer_prepare_ms = transfer_cache.prepare_ms;
+    struct ProcessedShard {
+        start_component: usize,
+        candidates: Vec<u32>,
+        published: Option<PublishedStaticBoundaryShard>,
+        row: Option<WalkStaticLinkShardBreakdown>,
+    }
+    let process_shard = |shard: BuiltBoundaryShardWalk| -> Result<ProcessedShard, String> {
+        let start_component = shard.start_component;
+        let candidates = shard.candidate_tokens.iter().copied().collect::<Vec<_>>();
+        if !effective.contains(start_component) {
+            return Ok(ProcessedShard {
+                start_component,
+                candidates,
+                published: None,
+                row: None,
+            });
         }
-        // Slot identity for this shard's link (flat links: the single outer
-        // link whose child_component matches this shard's start component).
         let (slot_parent, slot_child, slot_terminal) = signed_context
             .links
             .iter()
-            .find(|link| link.child_component as usize == shard.start_component)
+            .find(|link| link.child_component as usize == start_component)
             .map(|link| (link.parent_component, link.child_component, link.slot_terminal))
-            .unwrap_or((u32::MAX, shard.start_component as u32, u32::MAX));
-        let walk_profile = link_profile
-            .per_shard
-            .iter()
-            .find(|(component, _)| *component == shard.start_component)
-            .map(|(_, profile)| profile.clone())
-            .unwrap_or_default();
-        // Accumulated profile is NOT an elapsed wall (see struct docs): the
-        // raw subfields are printed as-reported; no summed per-shard walk
-        // total is constructed (any such sum would double-count
-        // determinize/minimize inside terminal_dwa_ms).
-        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
+            .unwrap_or((u32::MAX, start_component as u32, u32::MAX));
+        let walk_profile = shard.output.profile.clone();
+        let emitted = boundary_emitted_terminals(
+            &shard.output.dwa,
+            composed.table.num_terminals as usize,
+        );
         let templates_started = Instant::now();
-        let library = crate::compiler::boundary_transfer::build_fragment_library(
+        let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
             &signed_context,
+            &transfer_cache,
             &emitted,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         let shard_templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
         #[cfg(test)]
         trace_boundary_terminal_dwa_words(
-            &format!("component{}", shard.start_component),
+            &format!("component{start_component}"),
             &shard.output.dwa,
             composed.table.num_terminals as usize,
         );
@@ -1590,49 +1614,92 @@ pub(crate) fn build_walk_static_boundary_link(
             &library,
             &shard.output.dwa,
             &shard.output.id_map,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         let shard_parser_ms = parser_started.elapsed().as_secs_f64() * 1000.0;
         let work = WalkBoundaryShardWork {
-            start_component: shard.start_component as u32,
+            start_component: start_component as u32,
             terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
-            candidate_tokens: shard
-                .candidate_tokens
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into(),
+            candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
         let publish_started = Instant::now();
-        let (one, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
+        let (published, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
             work,
             compiled,
             &tokenizer_offsets,
             &component_state_counts,
         )?;
         let shard_publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
-        templates_ms += shard_templates_ms;
-        parser_dwa_ms += shard_parser_ms;
-        publish_ms += shard_publish_ms;
         let _ = publish_profile;
-        shard_rows.push(WalkStaticLinkShardBreakdown {
-            start_component: shard.start_component,
-            parent_component: slot_parent,
-            child_component: slot_child,
-            slot_terminal: slot_terminal,
-            walk: walk_profile,
-            templates_ms: shard_templates_ms,
-            parser_dwa_ms: shard_parser_ms,
-            publish_ms: shard_publish_ms,
-        });
-        published.push(one);
+        Ok(ProcessedShard {
+            start_component,
+            candidates,
+            published: Some(published),
+            row: Some(WalkStaticLinkShardBreakdown {
+                start_component,
+                parent_component: slot_parent,
+                child_component: slot_child,
+                slot_terminal,
+                walk: walk_profile,
+                templates_ms: shard_templates_ms,
+                parser_dwa_ms: shard_parser_ms,
+                publish_ms: shard_publish_ms,
+            }),
+        })
+    };
+    let component_pipeline_started = Instant::now();
+    let Some((processed, link_profile)) = map_boundary_shard_walks_with(
+        &BoundaryShardLinkInputs {
+            merged_tokenizer: &merged,
+            vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: ignores.canonical,
+            follow_transparent_ignores: Some(&ignores.scoped),
+            terminal_offsets: &composed.terminal_offsets,
+            leaf_to_immediate: None,
+            tokenizer_offsets: &tokenizer_offsets,
+            component_state_counts: &component_state_counts,
+            candidate_tokens_by_component: Some(&candidate_tokens_by_component),
+            retain_parent_non_crossing_paths,
+            walk_plans: None,
+        },
+        &process_shard,
+    )? else {
+        return Ok(empty_output());
+    };
+    let component_pipeline_wall_ms =
+        component_pipeline_started.elapsed().as_secs_f64() * 1000.0;
+    let mut processed = processed
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    processed.sort_by_key(|item| item.start_component);
+    let mut published = Vec::new();
+    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
+    let mut shard_rows = Vec::<WalkStaticLinkShardBreakdown>::new();
+    for item in processed {
+        tokens_by_component[item.start_component] = item.candidates;
+        if let Some(one) = item.published {
+            published.push(one);
+        }
+        if let Some(row) = item.row {
+            shard_rows.push(row);
+        }
     }
     published.sort_by_key(|shard| shard.start_component);
+    let templates_ms = shard_rows.iter().map(|row| row.templates_ms).sum::<f64>();
+    let parser_dwa_ms = shard_rows.iter().map(|row| row.parser_dwa_ms).sum::<f64>();
+    let publish_ms = shard_rows.iter().map(|row| row.publish_ms).sum::<f64>();
     let total_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
-    let accounted_ms = link_setup_ms + link_context_ms + walks_ms + templates_ms + parser_dwa_ms + publish_ms;
+    let accounted_ms = link_setup_ms
+        + link_context_ms
+        + transfer_prepare_ms
+        + component_pipeline_wall_ms;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][walk_static_link_breakdown] nested=false components={} total_ms={total_ms:.3} setup_ms={link_setup_ms:.3} link_context_ms={link_context_ms:.3} walks_ms={walks_ms:.3} shared_flat_ms={:.3} shared_equiv_ms={:.3} templates_ms={templates_ms:.3} parser_dwa_ms={parser_dwa_ms:.3} publish_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
+            "[glrmask/profile][walk_static_link_breakdown] nested=false components={} total_ms={total_ms:.3} setup_ms={link_setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} shared_equiv_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
             num_components,
             link_profile.flat_ms,
             link_profile.shared_wall_ms,
@@ -1667,7 +1734,8 @@ pub(crate) fn build_walk_static_boundary_link(
             setup_ms: link_setup_ms,
             shared_flat_ms: link_profile.flat_ms,
             shared_equiv_ms: link_profile.shared_wall_ms,
-            walk_ms: walks_ms,
+            component_pipeline_wall_ms,
+            transfer_prepare_ms,
             templates_ms,
             parser_dwa_ms,
             publish_ms,
@@ -2356,44 +2424,37 @@ fn build_walk_static_boundary_link_nested(
     {
         return Err("nested boundary ownership did not cover every leaf".to_string());
     }
-    let Some((built, _link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-        merged_tokenizer: &merged,
-        vocab,
-        grammar: &grammar,
-        disallowed_follows: &disallowed,
-        ignore_terminal: ignores.canonical,
-        follow_transparent_ignores: Some(&ignores.scoped),
-        terminal_offsets: &expansion.leaf_terminal_offsets,
-        leaf_to_immediate: Some(&leaf_to_immediate),
-        tokenizer_offsets: &tokenizer_offsets,
-        component_state_counts: &leaf_state_counts,
-        candidate_tokens_by_component: Some(&candidate_tokens_by_component),
-        retain_parent_non_crossing_paths,
-        walk_plans: Some(walk_plans),
-    }) else {
-        // Empty vocab: nothing can cross; pure component masks, no shards.
-        return Ok(empty_output());
-    };
-
-    // Signed-transfer shard publication over the leaf context, one shard per
-    // top-level component.
-    let mut published = Vec::new();
-    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
-    for shard in built {
-        tokens_by_component[shard.start_component] =
-            shard.candidate_tokens.iter().copied().collect();
-        if !effective.contains(shard.start_component) {
-            continue;
+    let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
+        &signed_context,
+    )?;
+    struct ProcessedNestedShard {
+        start_component: usize,
+        candidates: Vec<u32>,
+        published: Option<PublishedStaticBoundaryShard>,
+    }
+    let process_shard = |shard: BuiltBoundaryShardWalk| -> Result<ProcessedNestedShard, String> {
+        let start_component = shard.start_component;
+        let candidates = shard.candidate_tokens.iter().copied().collect::<Vec<_>>();
+        if !effective.contains(start_component) {
+            return Ok(ProcessedNestedShard {
+                start_component,
+                candidates,
+                published: None,
+            });
         }
-        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
-        let library = crate::compiler::boundary_transfer::build_fragment_library(
+        let emitted = boundary_emitted_terminals(
+            &shard.output.dwa,
+            composed.table.num_terminals as usize,
+        );
+        let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
             &signed_context,
+            &transfer_cache,
             &emitted,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         #[cfg(test)]
         trace_boundary_terminal_dwa_words(
-            &format!("component{}", shard.start_component),
+            &format!("component{start_component}"),
             &shard.output.dwa,
             composed.table.num_terminals as usize,
         );
@@ -2402,25 +2463,59 @@ fn build_walk_static_boundary_link_nested(
             &library,
             &shard.output.dwa,
             &shard.output.id_map,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         let work = WalkBoundaryShardWork {
-            start_component: shard.start_component as u32,
+            start_component: start_component as u32,
             terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
-            candidate_tokens: shard
-                .candidate_tokens
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into(),
+            candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
-        let (one, _publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
-            work,
-            compiled,
-            &tokenizer_offsets,
-            &leaf_state_counts,
-        )?;
-        published.push(one);
+        let (published, _publish_profile) =
+            crate::compiler::boundary_transfer::publish_signed_shard(
+                work,
+                compiled,
+                &tokenizer_offsets,
+                &leaf_state_counts,
+            )?;
+        Ok(ProcessedNestedShard {
+            start_component,
+            candidates,
+            published: Some(published),
+        })
+    };
+    let Some((processed, _link_profile)) = map_boundary_shard_walks_with(
+        &BoundaryShardLinkInputs {
+            merged_tokenizer: &merged,
+            vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: ignores.canonical,
+            follow_transparent_ignores: Some(&ignores.scoped),
+            terminal_offsets: &expansion.leaf_terminal_offsets,
+            leaf_to_immediate: Some(&leaf_to_immediate),
+            tokenizer_offsets: &tokenizer_offsets,
+            component_state_counts: &leaf_state_counts,
+            candidate_tokens_by_component: Some(&candidate_tokens_by_component),
+            retain_parent_non_crossing_paths,
+            walk_plans: Some(walk_plans),
+        },
+        &process_shard,
+    )? else {
+        return Ok(empty_output());
+    };
+    let mut processed = processed
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    processed.sort_by_key(|item| item.start_component);
+    let mut published = Vec::new();
+    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
+    for item in processed {
+        tokens_by_component[item.start_component] = item.candidates;
+        if let Some(shard) = item.published {
+            published.push(shard);
+        }
     }
     published.sort_by_key(|shard| shard.start_component);
     Ok(WalkStaticLinkOutput {
