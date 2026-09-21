@@ -3379,7 +3379,7 @@ fn segmented_runtime_artifact_ref(
         return segmented_runtime_artifact_v24_ref(constraint)
             .map(SegmentedRuntimeArtifactV27Ref::LegacyV24);
     }
-    constraint
+    let layout = constraint
         .recursive_parser_layout()
         .expect("validated recursive runtime must derive its parser layout before serialization")
         .expect("provider-native segmented runtime must have a recursive parser layout");
@@ -3388,6 +3388,29 @@ fn segmented_runtime_artifact_ref(
         .recursive_compiler_table
         .get()
         .expect("recursive runtime must retain its compiler table blob");
+    if overlay.recursive_tokenizer_internal_tsids.get().is_none() {
+        let compatibility_omission = recursive_compiler_table.is_empty()
+            && !overlay.segmented_parser_components.is_empty()
+            && overlay.segmented_parser_components.iter().all(|component| {
+                component.boundary.as_ref().is_some_and(|shard| {
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                    )
+                })
+            });
+        if !compatibility_omission {
+            panic!("recursive runtime must retain its scoped tokenizer TSID relation");
+        }
+        // Wire compatibility only: old v27 readers require one row per scoped
+        // tokenizer state. The live DynamicDirect coordinator never consumes
+        // this quotient, so materialize the historical all-zero relation only
+        // when serialization is explicitly requested.
+        overlay
+            .recursive_tokenizer_internal_tsids
+            .set(Arc::new(vec![vec![0u32]; layout.total_tokenizer_states as usize]))
+            .expect("recursive serializer compatibility relation initialized twice");
+    }
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()

@@ -2,6 +2,7 @@
 // Subcommands: sizes | link | tbm | compile-one | dump-schema | monolithic
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use glrmask::{Constraint, Grammar, Vocab};
@@ -507,6 +508,61 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
     }
 }
 
+fn cmd_dynamic_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
+    let core_bytes = fs::read(cache_dir.join("core.bin")).expect("core.bin missing");
+    let dispatch_bytes = fs::read(cache_dir.join(dispatch_name)).expect("dispatch cache missing");
+    let mut samples = Vec::with_capacity(runs);
+    for run in 0..runs {
+        // Keep artifact load/deserialization outside the composition clock. This
+        // command exists specifically to make the DynamicDirect linker cheap to
+        // iterate without paying the much slower static linker on every sample.
+        let mut core = Constraint::load_with_vocab(&core_bytes, vocab).unwrap();
+        let mut dispatch = Constraint::load_with_vocab(&dispatch_bytes, vocab).unwrap();
+        core.prepare_for_dynamic_composition(vocab).unwrap();
+        dispatch.prepare_for_dynamic_composition(vocab).unwrap();
+        let dispatch = Arc::new(dispatch);
+        let started = Instant::now();
+        let composed = if std::env::var_os("STATIC_LINK_MEASURE_DYNAMIC_BORROWED").is_some() {
+            core.compose_compiled_subgrammars_dynamic(
+                &[("PROGRAMMATIC_TOOL_SUFFIX", dispatch.as_ref())],
+                vocab,
+            )
+            .unwrap()
+        } else {
+            core.compose_compiled_subgrammars_dynamic_shared(
+                &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&dispatch))],
+                vocab,
+            )
+            .unwrap()
+        };
+        let elapsed = started.elapsed();
+        if run == 0 {
+            let bytes = composed.save().len();
+            stat_line("composed-dynamic#fresh", bytes, &composed);
+            if std::env::var_os("STATIC_LINK_MEASURE_DYNAMIC_VALIDATE").is_some() {
+                validate_dynamic_link_artifact(
+                    &composed,
+                    &core_bytes,
+                    &dispatch_bytes,
+                    vocab,
+                );
+            }
+        }
+        std::hint::black_box(composed);
+        samples.push(elapsed.as_secs_f64() * 1000.0);
+        println!("[dynamic-link] run {}/{} compose_ms={:.3}", run + 1, runs, elapsed.as_secs_f64() * 1000.0);
+    }
+    samples.sort_by(f64::total_cmp);
+    println!(
+        "DYNAMIC_LINK_RESULT runs={} p50_ms={:.3} p90_ms={:.3} p99_ms={:.3} p100_ms={:.3}",
+        samples.len(),
+        percentile(&samples, 0.50),
+        percentile(&samples, 0.90),
+        percentile(&samples, 0.99),
+        percentile(&samples, 1.0),
+    );
+}
+
 /// Shared current-prefix coverage: the 22 composed byte prefixes driven by
 /// `cmd_tbm` for static/dynamic/mono (NOT the historical 22 differential
 /// scenarios, whose case identity is unrecovered). Factored so `cmd_tbm` and
@@ -518,6 +574,99 @@ fn composed_prefixes() -> Vec<Vec<u8>> {
         v.push(format!("const x = tools.tool_{tool}({{").into_bytes());
     }
     v
+}
+
+
+fn validate_dynamic_link_artifact(
+    fast: &Constraint,
+    core_bytes: &[u8],
+    dispatch_bytes: &[u8],
+    vocab: &Vocab,
+) {
+    let saved = fast.save();
+    let reloaded = Constraint::load_with_vocab(&saved, vocab)
+        .expect("reload optimized DynamicDirect artifact");
+
+    let reference_core = Constraint::load_with_vocab(core_bytes, vocab)
+        .expect("load reference core with vocab");
+    let reference_dispatch = Constraint::load_with_vocab(dispatch_bytes, vocab)
+        .expect("load reference dispatch with vocab");
+    let reference = reference_core
+        .compose_compiled_subgrammars_dynamic(
+            &[("PROGRAMMATIC_TOOL_SUFFIX", &reference_dispatch)],
+            vocab,
+        )
+        .expect("build borrowed DynamicDirect reference");
+
+    let prefixes = composed_prefixes();
+    let mut compared_masks = 0usize;
+    for (index, prefix) in prefixes.iter().enumerate() {
+        let mut fast_state = fast.start();
+        let mut reload_state = reloaded.start();
+        let mut reference_state = reference.start();
+        let fast_commit = fast_state.commit_bytes(prefix);
+        let reload_commit = reload_state.commit_bytes(prefix);
+        let reference_commit = reference_state.commit_bytes(prefix);
+        assert_eq!(
+            fast_commit.is_ok(),
+            reference_commit.is_ok(),
+            "optimized/reference prefix acceptance differs at {index}: {:?}",
+            String::from_utf8_lossy(prefix),
+        );
+        assert_eq!(
+            reload_commit.is_ok(),
+            fast_commit.is_ok(),
+            "optimized reload prefix acceptance differs at {index}: {:?}",
+            String::from_utf8_lossy(prefix),
+        );
+        if fast_commit.is_ok() {
+            let fast_mask = fast_state.mask();
+            let reload_mask = reload_state.mask();
+            let reference_mask = reference_state.mask();
+            assert_eq!(
+                fast_mask, reference_mask,
+                "optimized/reference mask differs at prefix {index}: {:?}",
+                String::from_utf8_lossy(prefix),
+            );
+            assert_eq!(
+                reload_mask, fast_mask,
+                "optimized reload mask differs at prefix {index}: {:?}",
+                String::from_utf8_lossy(prefix),
+            );
+            compared_masks += 1;
+        }
+    }
+
+    // The selected10 dispatch child is already recursively composed; wrapping
+    // the just-built result once more verifies that an optimized recursive
+    // coordinator can itself be consumed as an immutable child without
+    // reconstructing its retired flattened compiler views.
+    let nested_core = Constraint::load_with_vocab(core_bytes, vocab)
+        .expect("load nested core with vocab");
+    let fast_child = Arc::new(fast.clone());
+    let nested = nested_core
+        .compose_compiled_subgrammars_dynamic_shared(
+            &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&fast_child))],
+            vocab,
+        )
+        .expect("compose optimized recursive result as nested child");
+    let nested_saved = nested.save();
+    let nested_reload = Constraint::load_with_vocab(&nested_saved, vocab)
+        .expect("reload nested optimized DynamicDirect artifact");
+    let nested_mask = nested.start().mask();
+    let nested_reload_mask = nested_reload.start().mask();
+    assert_eq!(
+        nested_mask, nested_reload_mask,
+        "nested optimized DynamicDirect initial mask differs after reload",
+    );
+
+    eprintln!(
+        "[dynamic-validate] exact=true prefixes={} compared_masks={} artifact_bytes={} nested_artifact_bytes={}",
+        prefixes.len(),
+        compared_masks,
+        saved.len(),
+        nested_saved.len(),
+    );
 }
 
 fn rng_choose_token(mask: &[u32], rng: &mut u64) -> Option<u32> {
@@ -555,14 +704,19 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
             } else {
                 "dispatch.bin"
             };
-            let core = load_constraint(&cache_dir.join("core.bin"));
-            let dispatch = load_constraint(&cache_dir.join(dispatch_name));
+            let core_bytes = fs::read(cache_dir.join("core.bin")).expect("core cache missing");
+            let dispatch_bytes = fs::read(cache_dir.join(dispatch_name)).expect("dispatch cache missing");
+            let mut core = Constraint::load_with_vocab(&core_bytes, vocab).expect("load core with vocab");
+            let mut dispatch = Constraint::load_with_vocab(&dispatch_bytes, vocab).expect("load dispatch with vocab");
+            core.prepare_for_dynamic_composition(vocab).expect("prepare core link metadata");
+            dispatch.prepare_for_dynamic_composition(vocab).expect("prepare dispatch link metadata");
             if which == "static" {
                 core.compose_compiled_subgrammars(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], vocab)
                     .unwrap()
             } else {
-                core.compose_compiled_subgrammars_dynamic(
-                    &[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)],
+                let dispatch = Arc::new(dispatch);
+                core.compose_compiled_subgrammars_dynamic_shared(
+                    &[("PROGRAMMATIC_TOOL_SUFFIX", Arc::clone(&dispatch))],
                     vocab,
                 )
                 .unwrap()
@@ -1768,6 +1922,10 @@ fn main() {
         "link" => {
             let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
             cmd_link(&cache_dir, &vocab, &dispatch_name, runs);
+        }
+        "dynamic-link" => {
+            let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
+            cmd_dynamic_link(&cache_dir, &vocab, &dispatch_name, runs);
         }
         "tbm" => {
             let vocab = read_vocab_dump(&cache_dir.join("vocab_dump.bin"));
