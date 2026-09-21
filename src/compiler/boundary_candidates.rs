@@ -15,9 +15,8 @@ use crate::runtime::{
     SummaryPrecision, SummaryUnavailable,
 };
 
-const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 2;
+const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 3;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
-const DEFAULT_MAX_INITIAL_FRONTIER_PROBES: usize = 1_000_000;
 // Frontier steps manipulate grammar-position sets rather than raw bytes, so
 // one "step" is materially more expensive than a tokenizer transition. Keep
 // the reusable-summary budget intentionally small: on large components the
@@ -29,12 +28,14 @@ const DEFAULT_MAX_BYTE_STEPS: usize = 10_000;
 pub(crate) struct BoundaryCandidateStats {
     pub(crate) input_tokens: usize,
     pub(crate) candidate_tokens: usize,
+    pub(crate) history_positions: usize,
+    pub(crate) initial_frontier_pairs: usize,
     pub(crate) byte_steps: usize,
     pub(crate) widened_subtrees: usize,
     pub(crate) peak_frontier_pairs: usize,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Frontier {
     by_lexer_state: BTreeMap<u32, BTreeSet<usize>>,
 }
@@ -253,27 +254,46 @@ struct CandidateMachine<'a> {
     reset_states: Vec<u32>,
     max_frontier_pairs: usize,
     max_byte_steps: usize,
+    history_positions: usize,
+    initial_frontier_pairs: usize,
     byte_steps: usize,
     peak_frontier_pairs: usize,
 }
 
 impl<'a> CandidateMachine<'a> {
-    fn initial_frontier(&mut self) -> Result<Frontier, ()> {
-        let starts = self.grammar.history_starts();
-        // The frontier pair cap is a memory/result-size budget, but applying it
-        // only after probing every raw-state × grammar-position pair lets a
-        // large legacy component spend tens of seconds discovering that the
-        // result must be widened anyway.  Bound the probe work itself first.
-        // Widening is always sound for this summary: callers fall back to all
-        // multibyte model tokens, never to an empty candidate set.
-        if starts
-            .len()
-            .saturating_mul(self.tokenizer.num_states() as usize)
-            > DEFAULT_MAX_INITIAL_FRONTIER_PROBES
-        {
-            return Err(());
+    #[inline]
+    fn raw_can_consume_byte(&self, raw: u32, byte: u8) -> bool {
+        if !self.tokenizer.state_has_epsilon_transitions(raw) {
+            return self.tokenizer.state_first_bytes(raw).contains(byte);
         }
+        self.tokenizer
+            .execute_from_state_end_only(&[], raw)
+            .iter()
+            .any(|&state| self.tokenizer.state_first_bytes(state).contains(byte))
+    }
+
+    fn indexed_initial_seed(&mut self, starts: &BTreeSet<usize>) -> Result<Frontier, ()> {
+        // Index grammar positions by the terminal they are waiting for.  The
+        // previous implementation probed every raw lexer state against every
+        // history position and therefore needed a pessimistic Cartesian-product
+        // budget.  Large composed components could trip that budget even when
+        // the *actual* compatible frontier was tiny.  A position has exactly
+        // one expected terminal, so visiting only the state's live future
+        // terminals constructs the identical relation without the quadratic
+        // probe space.
+        let mut positions_by_terminal = BTreeMap::<TerminalID, Vec<usize>>::new();
+        for &position in starts {
+            if let Some(terminal) = self.grammar.expected_terminal(position) {
+                positions_by_terminal
+                    .entry(terminal)
+                    .or_default()
+                    .push(position);
+            }
+        }
+
         let mut frontier = Frontier::default();
+        let mut frontier_pairs = 0usize;
+        let mut overflowed = false;
         for raw in 0..self.tokenizer.num_states() {
             let futures = self.tokenizer.possible_future_terminals(raw);
             let can_skip = self
@@ -281,17 +301,46 @@ impl<'a> CandidateMachine<'a> {
                 .skip_terminals
                 .iter()
                 .any(|&terminal| (terminal as usize) < futures.len() && futures.get(terminal as usize));
-            let controls = starts
-                .iter()
-                .filter_map(|&position| {
-                    let expected = self.grammar.expected_terminal(position)?;
-                    (((expected as usize) < futures.len() && futures.get(expected as usize)) || can_skip)
-                        .then_some(position)
-                })
-                .collect::<BTreeSet<_>>();
-            frontier.insert_controls(raw, &controls);
+            let controls = if can_skip {
+                // A local skip can consume positive bytes without advancing
+                // the parser, so every grammar history position remains a
+                // possible control while that skip is live.
+                starts.clone()
+            } else {
+                let mut controls = BTreeSet::new();
+                for terminal in self.tokenizer.possible_future_terminals_iter(raw) {
+                    if let Some(positions) = positions_by_terminal.get(&terminal) {
+                        controls.extend(positions.iter().copied());
+                    }
+                }
+                controls
+            };
+            frontier_pairs = frontier_pairs.saturating_add(controls.len());
+            if frontier_pairs > self.max_frontier_pairs {
+                // Finish counting the exact logical relation without retaining
+                // any more rows. This keeps the widening path memory-bounded
+                // while making diagnostics distinguish "barely above cap"
+                // from a genuinely huge initial relation.
+                overflowed = true;
+            }
+            if !overflowed {
+                frontier.insert_controls(raw, &controls);
+            }
+        }
+        self.initial_frontier_pairs = frontier_pairs;
+        self.peak_frontier_pairs = self.peak_frontier_pairs.max(frontier_pairs);
+        if overflowed {
+            return Err(());
         }
         self.observe_frontier(&frontier)?;
+        Ok(frontier)
+    }
+
+    fn initial_frontier(&mut self) -> Result<Frontier, ()> {
+        let starts = self.grammar.history_starts();
+        self.history_positions = starts.len();
+        let frontier = self.indexed_initial_seed(&starts)?;
+        self.initial_frontier_pairs = frontier.pair_count();
         // Accepting lexer states may commit exactly at the model-token boundary.
         // Such an offset-zero outward event is not itself a candidate, but an
         // internal commit can change the parser/lexer state from which byte 0
@@ -363,13 +412,21 @@ impl<'a> CandidateMachine<'a> {
     }
 
     fn consume(&mut self, frontier: &Frontier, byte: u8) -> Result<(Frontier, bool), ()> {
-        self.byte_steps = self.byte_steps.saturating_add(frontier.by_lexer_state.len());
-        if self.byte_steps > self.max_byte_steps {
-            return Err(());
-        }
         let mut next = Frontier::default();
         let mut outward = false;
         for (&raw, controls) in &frontier.by_lexer_state {
+            // Charge only exact epsilon-closed state/byte transitions that can
+            // do real work.  The old counter charged every frontier state for
+            // every trie edge, so a 25k-state component exhausted a 10k budget
+            // before its first byte even though almost all states were dead on
+            // that byte.
+            if !self.raw_can_consume_byte(raw, byte) {
+                continue;
+            }
+            self.byte_steps = self.byte_steps.saturating_add(1);
+            if self.byte_steps > self.max_byte_steps {
+                return Err(());
+            }
             let targets = self.tokenizer.step_all(&[raw], byte);
             for target in targets {
                 // The terminal need not commit here; retain the ordinary
@@ -624,6 +681,8 @@ fn compute_summary(
         reset_states,
         max_frontier_pairs: DEFAULT_MAX_FRONTIER_PAIRS,
         max_byte_steps: DEFAULT_MAX_BYTE_STEPS,
+        history_positions: 0,
+        initial_frontier_pairs: 0,
         byte_steps: 0,
         peak_frontier_pairs: 0,
     };
@@ -632,6 +691,10 @@ fn compute_summary(
         Err(()) => {
             stats.widened_subtrees = 1;
             stats.candidate_tokens = vocab.iter().filter(|(_, bytes)| bytes.len() >= 2).count();
+            stats.history_positions = machine.history_positions;
+            stats.initial_frontier_pairs = machine.initial_frontier_pairs;
+            stats.byte_steps = machine.byte_steps;
+            stats.peak_frontier_pairs = machine.peak_frontier_pairs;
             return (
                 BoundaryCandidateSummary::Known {
                     fingerprint: fp,
@@ -663,6 +726,8 @@ fn compute_summary(
     }
     let ids = candidates.into_iter().collect::<Vec<_>>();
     stats.candidate_tokens = ids.len();
+    stats.history_positions = machine.history_positions;
+    stats.initial_frontier_pairs = machine.initial_frontier_pairs;
     stats.byte_steps = machine.byte_steps;
     stats.peak_frontier_pairs = machine.peak_frontier_pairs;
     stats.widened_subtrees = widened_subtrees;
@@ -784,6 +849,96 @@ pub(crate) fn boundary_candidate_ids(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_indexed_initial_seed_matches_bruteforce(constraint: &Constraint) {
+        let rules = constraint.retained_table_rules().unwrap();
+        let mut local_skip_terminals = constraint.table.skip_terminals.clone();
+        if let Some(ignore) = constraint.ignore_terminal {
+            local_skip_terminals.insert(ignore);
+        }
+        let grammar = GrammarMachine::new(
+            rules,
+            outward_terminals(constraint),
+            local_skip_terminals,
+            constraint.table.control_terminals.clone(),
+        )
+        .unwrap();
+        let reset_states = constraint
+            .tokenizer
+            .deterministic_reset_states()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let mut machine = CandidateMachine {
+            tokenizer: &constraint.tokenizer,
+            grammar,
+            reset_states,
+            max_frontier_pairs: usize::MAX,
+            max_byte_steps: usize::MAX,
+            history_positions: 0,
+            initial_frontier_pairs: 0,
+            byte_steps: 0,
+            peak_frontier_pairs: 0,
+        };
+        let starts = machine.grammar.history_starts();
+        let indexed = machine.indexed_initial_seed(&starts).unwrap();
+
+        let mut reference = Frontier::default();
+        for raw in 0..machine.tokenizer.num_states() {
+            let futures = machine.tokenizer.possible_future_terminals(raw);
+            let can_skip = machine
+                .grammar
+                .skip_terminals
+                .iter()
+                .any(|&terminal| {
+                    (terminal as usize) < futures.len() && futures.get(terminal as usize)
+                });
+            let controls = starts
+                .iter()
+                .filter_map(|&position| {
+                    let expected = machine.grammar.expected_terminal(position)?;
+                    (((expected as usize) < futures.len() && futures.get(expected as usize))
+                        || can_skip)
+                        .then_some(position)
+                })
+                .collect::<BTreeSet<_>>();
+            reference.insert_controls(raw, &controls);
+        }
+        assert_eq!(indexed, reference);
+    }
+
+    #[test]
+    fn indexed_initial_frontier_matches_bruteforce_with_and_without_skip() {
+        let vocab = crate::Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b" ".to_vec()),
+            (3, b"ab".to_vec()),
+            (4, b" a".to_vec()),
+        ]);
+        let plain = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "a" SUB | "b" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert_indexed_initial_seed_matches_bruteforce(&plain);
+
+        let ignored = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                ignore WS;
+                t WS ::= " "+;
+                t SUB ::= @token(999);
+                nt document ::= "a" SUB | "b" SUB;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        assert_indexed_initial_seed_matches_bruteforce(&ignored);
+    }
 
     #[test]
     fn proper_prefix_widening_excludes_token_ending_at_prefix() {

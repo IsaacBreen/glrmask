@@ -2085,14 +2085,23 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
             .reachable_bytes_union()
     });
 
-    let sub_vocabs: Arc<[Vocab]> = match partition_scheme {
-        "char_type" => build_char_type_sub_vocabs(
+    // Scoped crossing keeps the ordinary disjoint vocabulary partitions, but
+    // uses the stricter all-L2P/no-split policy inside each partition below.
+    // The selected10 acceptance gate reconciles the partitioned result with a
+    // full-vocabulary scoped build and proves exact weighted-language equality.
+    // Keep a diagnostic full-vocabulary switch for that reference and future
+    // regressions without making it the production critical path.
+    let scoped_full_vocab = boundary_scope.is_some()
+        && std::env::var_os("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB").is_some();
+    let sub_vocabs: Arc<[Vocab]> = match (scoped_full_vocab, partition_scheme) {
+        (true, _) => Arc::from(vec![vocab.clone()].into_boxed_slice()),
+        (false, "char_type") => build_char_type_sub_vocabs(
             vocab,
             partition_local_synthesis_plan.is_some(),
             automatic_p2_overflow_threshold(tokenizer.num_states()),
             char_type_relevant_bytes,
         ),
-        "l2p_cost" => {
+        (false, "l2p_cost") => {
             let cost_fn = l2p_partition_cost_fn_from_env();
             let objective = l2p_partition_objective_from_env();
             let num_partitions = l2p_partition_count_from_env();
@@ -2123,7 +2132,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
 
             vocab_from_token_partitions(vocab, partitioning.partitions)
         }
-        "auto_l2p_cost" => {
+        (false, "auto_l2p_cost") => {
             let cost_fn = l2p_partition_cost_fn_from_env();
             let objective = l2p_partition_objective_from_env();
             let num_partitions = l2p_partition_count_from_env();
@@ -2242,11 +2251,12 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 }
             }
         }
-        other => panic!(
+        (false, other) => panic!(
             "Invalid GLRMASK_PARTITION_SCHEME={other}; expected one of: char_type, l2p_cost, auto_l2p_cost"
         ),
     };
-    let relevance_omitted_token_ids = if id_map_only && partition_scheme == "char_type" {
+    let relevance_omitted_token_ids =
+        if !scoped_full_vocab && id_map_only && partition_scheme == "char_type" {
         char_type_relevant_bytes
             .map(|relevant_bytes| {
                 char_type_relevance_omitted_token_ids(
@@ -2257,9 +2267,9 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
                 )
             })
             .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+        } else {
+            Vec::new()
+        };
     let partition_vocab_ms = partition_vocab_started_at.elapsed().as_secs_f64() * 1000.0;
     profile.id_map_ms += partition_vocab_ms;
     if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_vocab_end] partitions={} ms={:.3}", sub_vocabs.len(), partition_vocab_ms); }
@@ -3126,7 +3136,7 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
 
     let family_count = families.len();
     let merge_started = Instant::now();
-    let mapped_dwas = families
+    let mut mapped_dwas = families
         .into_vec()
         .into_iter()
         .map(|family| {
@@ -3142,6 +3152,20 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
             MappedArtifact::new(dwa, id_map)
         })
         .collect::<Vec<_>>();
+
+    // A single scoped family has already applied the exact ownership crossing
+    // product and its local L2P postprocess. Re-wrapping it as an NWA and
+    // determinizing again can expand a compact shard into thousands of
+    // weighted subset states without changing the language. Multi-partition
+    // builds still reconcile through the generic union below.
+    if mapped_dwas.len() == 1 {
+        let mapped = mapped_dwas.pop().expect("length checked");
+        let (dwa, id_map) = mapped.into_parts();
+        return (
+            MappedArtifact::new(TerminalAutomaton::Dwa(dwa), id_map),
+            profile,
+        );
+    }
 
     let reconciled = MappedArtifact::reconcile_vec_preserving_unmapped_tokenizer(mapped_dwas);
     let (dwas, id_map) = reconciled.into_parts();

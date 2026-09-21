@@ -20,6 +20,7 @@ use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::weighted_u32::minimize_acyclic::minimize_acyclic_owned;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
@@ -224,12 +225,31 @@ pub(crate) fn build_boundary_terminal_dwa(
         inputs.scope,
     );
     let (automaton, id_map) = mapped.into_parts();
-    let dwa = match automaton {
+    let mut dwa = match automaton {
         TerminalAutomaton::Dwa(dwa) => dwa,
         TerminalAutomaton::TokenDeterministicNwa(_) | TerminalAutomaton::EpsilonNwa(_) => {
             unreachable!("scoped boundary family builder publishes one DWA")
         }
     };
+    // The scoped ordinary-family pipeline can retain structurally live
+    // terminal paths whose token/TSID weights have no complete original-token
+    // witness.  Such an automaton denotes the empty boundary language even
+    // though it still has transitions.  Canonicalize it here so callers do
+    // not carry dead terminal structure into template/parser construction and
+    // so the empty-shard representation remains stable across family choices.
+    let lexical_accepted_tokens = accepted_original_tokens(&dwa, &id_map).len();
+    let final_minimize_started = Instant::now();
+    if lexical_accepted_tokens == 0 {
+        dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    } else if dwa.num_states() > 1 && dwa.is_acyclic() {
+        // Family/partition reconciliation is language-preserving but can leave
+        // thousands of structurally distinct states whose weighted suffix
+        // languages are identical. Boundary shards are always acyclic; one
+        // final exact weighted minimization restores the canonical compact
+        // relation before signed parser substitution.
+        dwa = minimize_acyclic_owned(dwa);
+    }
+    let final_minimize_ms = final_minimize_started.elapsed().as_secs_f64() * 1000.0;
     let walk_ms = walk_started.elapsed().as_secs_f64() * 1000.0;
     let profile = BoundaryWalkProfile {
         input_tokens: inputs.vocab.len(),
@@ -238,14 +258,14 @@ pub(crate) fn build_boundary_terminal_dwa(
         continuation_reset_states: inputs.scope.reset_states().len(),
         tokenizer_classes: id_map.num_tsids() as usize,
         token_classes: id_map.num_internal_tokens() as usize,
-        lexical_accepted_tokens: 0,
+        lexical_accepted_tokens,
         setup_ms,
         walk_ms,
         id_map_ms: tdwa_profile.id_map_ms,
-        terminal_dwa_ms: tdwa_profile.terminal_dwa_ms,
+        terminal_dwa_ms: tdwa_profile.terminal_dwa_ms + final_minimize_ms,
         compact_ms: tdwa_profile.compact_ms,
         determinize_ms: tdwa_profile.determinize_ms,
-        minimize_ms: tdwa_profile.minimize_ms,
+        minimize_ms: tdwa_profile.minimize_ms + final_minimize_ms,
     };
     Some(BoundaryWalkOutput {
         dwa,
@@ -437,6 +457,8 @@ pub(crate) struct WalkStaticLinkShardBreakdown {
     pub slot_terminal: u32,
     pub walk: BoundaryWalkProfile,
     pub summary_ms: f64,
+    pub summary_history_positions: usize,
+    pub summary_initial_frontier_pairs: usize,
     pub summary_byte_steps: usize,
     pub summary_peak_frontier_pairs: usize,
     pub summary_widened_subtrees: usize,
@@ -475,6 +497,8 @@ fn emit_boundary_analysis_json(breakdown: &WalkStaticLinkBreakdown) {
                 },
                 "summary": {
                     "ms": row.summary_ms,
+                    "history_positions": row.summary_history_positions,
+                    "initial_frontier_pairs": row.summary_initial_frontier_pairs,
                     "byte_steps": row.summary_byte_steps,
                     "peak_frontier_pairs": row.summary_peak_frontier_pairs,
                     "widened_subtrees": row.summary_widened_subtrees,
@@ -1757,6 +1781,8 @@ pub(crate) fn build_walk_static_boundary_link(
                 slot_terminal,
                 walk: walk_profile,
                 summary_ms: *summary_ms,
+                summary_history_positions: summary_stats.history_positions,
+                summary_initial_frontier_pairs: summary_stats.initial_frontier_pairs,
                 summary_byte_steps: summary_stats.byte_steps,
                 summary_peak_frontier_pairs: summary_stats.peak_frontier_pairs,
                 summary_widened_subtrees: summary_stats.widened_subtrees,
@@ -2672,6 +2698,8 @@ fn build_walk_static_boundary_link_nested(
                 slot_terminal,
                 walk: walk_profile,
                 summary_ms: *summary_ms,
+                summary_history_positions: summary_stats.history_positions,
+                summary_initial_frontier_pairs: summary_stats.initial_frontier_pairs,
                 summary_byte_steps: summary_stats.byte_steps,
                 summary_peak_frontier_pairs: summary_stats.peak_frontier_pairs,
                 summary_widened_subtrees: summary_stats.widened_subtrees,
@@ -2806,6 +2834,14 @@ mod tests {
             let original = std::env::var_os(key);
             unsafe {
                 std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
             }
             Self { key, original }
         }
@@ -3115,36 +3151,6 @@ mod tests {
             .collect()
     }
 
-    fn shared_equivalence_for(
-        tokenizer: &Tokenizer,
-        vocab: &Vocab,
-        ignore_terminal: Option<u32>,
-        grammar: &AnalyzedGrammar,
-        active_terminals: &[bool],
-        disallowed: &BTreeMap<u32, BitSet>,
-        flat: &Arc<[u32]>,
-    ) -> tdwa::l2p::SharedL2pEquivalence {
-        tdwa::l2p::compute_shared_l2p_equivalence(
-            "boundary_shard_test",
-            tokenizer,
-            vocab,
-            ignore_terminal,
-            grammar,
-            active_terminals,
-            disallowed,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(flat),
-            None,
-            None,
-        )
-        .expect("shared equivalence must compute")
-    }
-
     #[test]
     fn toy_two_component_crossing_sets() {
         // Parent `doc ::= PA SUB PB` with child `item ::= CC CD` bound at SUB.
@@ -3251,7 +3257,7 @@ mod tests {
             let scope = tdwa::scope::BoundaryAnalysisScope::new(
                 tdwa::scope::InitialStateDomain::from_mask(
                     composed.tokenizer.num_states() as usize,
-                    commit,
+                    commit.clone(),
                 )
                 .expect("toy initial-state domain"),
                 composed
@@ -3386,7 +3392,6 @@ mod tests {
             )
             .expect("selected10 terminal ownership"),
         );
-
         // Frozen output of the independent Phase-1 MINBOUND B-A oracle for
         // this exact selected10 fixture. The original artifact is preserved
         // in the 2026-09-18 linker compaction with SHA-256
@@ -3409,7 +3414,7 @@ mod tests {
             let scope = tdwa::scope::BoundaryAnalysisScope::new(
                 tdwa::scope::InitialStateDomain::from_mask(
                     composed.tokenizer.num_states() as usize,
-                    commit,
+                    commit.clone(),
                 )
                 .expect("selected10 initial-state domain"),
                 composed
@@ -3460,6 +3465,13 @@ mod tests {
                 assert!(tokens.is_empty(), "core shard must be empty, got {}", tokens.len());
                 assert_eq!(output.dwa.num_states(), 1, "empty core shard DWA shape");
             } else {
+                if tokens != oracle {
+                    let missing = oracle.difference(&tokens).copied().collect::<Vec<_>>();
+                    let extra = tokens.difference(&oracle).copied().collect::<Vec<_>>();
+                    eprintln!(
+                        "BOUNDARY_WALK oracle_diff missing={missing:?} extra={extra:?}"
+                    );
+                }
                 assert_eq!(tokens.len(), 143, "dispatch shard token count");
                 assert_eq!(tokens, oracle, "dispatch shard must match the oracle set");
                 assert_eq!(
@@ -3476,6 +3488,82 @@ mod tests {
     #[ignore]
     fn selected10_boundary_walk_crossing() {
         run_selected10_boundary_walk_crossing();
+    }
+
+    /// Exact weighted-language gate for scoped vocabulary partitioning. The
+    /// full-vocabulary all-L2P build is the conservative reference. Reconcile
+    /// both private TSID/token quotients into one common coordinate before
+    /// asking the acyclic weighted-DWA equivalence checker for a distinguishing
+    /// terminal word.
+    #[test]
+    #[ignore]
+    fn selected10_partitioned_scoped_matches_full_weighted_relation() {
+        require_release_selected10_gate(
+            "selected10_partitioned_scoped_matches_full_weighted_relation",
+        );
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        let fixture = load_selected10_outer();
+        let component_state_counts = [
+            fixture.core.tokenizer.num_states(),
+            fixture.dispatch.tokenizer.num_states(),
+        ];
+        let build = || {
+            build_boundary_shard_walks(&BoundaryShardLinkInputs {
+                merged_tokenizer: &fixture.composed.tokenizer,
+                vocab: &fixture.vocab,
+                grammar: &fixture.grammar,
+                disallowed_follows: &fixture.disallowed,
+                ignore_terminal: fixture.composed.ignore_canonical,
+                follow_transparent_ignores: None,
+                terminal_offsets: &fixture.composed.table.terminal_offsets,
+                leaf_to_immediate: None,
+                tokenizer_offsets: &fixture.composed.tokenizer_offsets,
+                component_state_counts: &component_state_counts,
+                candidate_tokens_by_component: None,
+                retain_parent_non_crossing_paths: false,
+                walk_plans: None,
+            })
+            .expect("selected10 scoped boundary build")
+            .0
+        };
+
+        let full = {
+            let _full = EnvVarGuard::set("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB", "1");
+            build()
+        };
+        let partitioned = {
+            let _partitioned = EnvVarGuard::unset("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB");
+            build()
+        };
+        assert_eq!(full.len(), partitioned.len(), "nonempty shard set differs");
+        for (full, partitioned) in full.into_iter().zip(partitioned) {
+            let start_component = full.start_component;
+            assert_eq!(
+                start_component, partitioned.start_component,
+                "shard publication order differs",
+            );
+            let full = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
+                full.output.dwa,
+                full.output.id_map,
+            );
+            let partitioned = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
+                partitioned.output.dwa,
+                partitioned.output.id_map,
+            );
+            let reconciled: crate::compiler::stages::mapped_artifact::MappedArtifact<(DWA, DWA)> =
+                (full, partitioned).into();
+            let ((full, partitioned), _) = reconciled.into_parts();
+            match crate::automata::weighted_u32::equivalence::find_difference(
+                &full,
+                &partitioned,
+            ) {
+                Ok(None) => {}
+                Ok(Some(word)) => panic!(
+                    "partitioned scoped shard {start_component} changed weighted language at terminal word {word:?}",
+                ),
+                Err(error) => panic!("weighted equivalence checker failed: {error:?}"),
+            }
+        }
     }
 
     /// Durable two-stage strict acceptance gate for boundary shards. Arms the

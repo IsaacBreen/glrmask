@@ -772,9 +772,11 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     let pre_classify_setup_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
-    // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
-    let force_all_l2p =
-        std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+    // Scoped boundary analysis needs the complete terminal-word observation:
+    // after the first lexical commit it may reset into the whole current link,
+    // so the ordinary L1 shortcut is not a proved replacement for L2P here.
+    let force_all_l2p = boundary_scope.is_some()
+        || std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -913,7 +915,9 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         None
     };
 
-    let use_l2p_vocab_split = has_l2p && split_l2p_vocab_enabled();
+    // Likewise, the split-off L2P-single shortcut is certified for ordinary
+    // local masking, not for the stronger scoped crossing relation.
+    let use_l2p_vocab_split = has_l2p && boundary_scope.is_none() && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(
             tokenizer,
