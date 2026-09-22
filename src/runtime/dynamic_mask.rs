@@ -6744,7 +6744,7 @@ fn fill_mask_dynamic_impl(
     additive_static_baseline: bool,
     candidate_mask: Option<&[u32]>,
 ) -> Result<(), String> {
-    let required = state.constraint.mask_len();
+    let required = state.constraint.body_mask_len();
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (buf, tail) = buf.split_at_mut(required);
     tail.fill(0);
@@ -7212,7 +7212,7 @@ mod tests {
     }
 
     fn direct_mask(state: &ConstraintState<'_>) -> Vec<u32> {
-        let mut mask = vec![0u32; state.constraint.mask_len()];
+        let mut mask = vec![0u32; state.constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut mask);
         mask
     }
@@ -7370,7 +7370,7 @@ mod tests {
         let (hash, query) = dynamic_mask_lookup_query(&state).unwrap();
         let owned_key = query.to_owned_state_key();
         let dyn_vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-        let mut mask_buf = vec![0u32; state.constraint.mask_len()];
+        let mut mask_buf = vec![0u32; state.constraint.body_mask_len()];
         dyn_vocab.cache_mask(owned_key, hash, &mask_buf, false);
 
         let start = std::time::Instant::now();
@@ -7561,7 +7561,7 @@ nt start ::= A B | B A;
         )
         .unwrap();
         let state = dynamic.inner.start();
-        let mut exact = vec![0u32; dynamic.inner.mask_len()];
+        let mut exact = vec![0u32; dynamic.inner.body_mask_len()];
         fill_mask_dynamic(&state, &mut exact);
 
         let mut additive = vec![0u32; exact.len()];

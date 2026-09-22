@@ -26,6 +26,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 
+const ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT1";
+
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
@@ -1663,7 +1665,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     if !constraint.token_mask_caches_ready() {
         return Vec::new();
     }
-    let mask_words = constraint.mask_len();
+    let mask_words = constraint.body_mask_len();
     let prefix_rows = constraint.word_group_prefix_buf_masks.len();
     let word_groups = constraint.word_group_sparse_masks.len();
     let word_entries = constraint
@@ -5733,7 +5735,7 @@ impl Constraint {
         if self.serialized_artifact_cache.is_some() {
             return;
         }
-        let bytes = self.save();
+        let bytes = self.save_body();
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
@@ -5797,6 +5799,17 @@ impl Constraint {
     /// Current artifacts use a compact sectioned representation and retain
     /// runtime-native sections where doing so materially reduces load latency.
     pub fn save(&self) -> Vec<u8> {
+        if self.end_tokens.is_empty() { return self.save_body(); }
+        let body = self.save_body();
+        let mut bytes = Vec::with_capacity(12 + self.end_tokens.len() * 4 + body.len());
+        bytes.extend_from_slice(ROOT_POLICY_MAGIC);
+        bytes.extend_from_slice(&(self.end_tokens.len() as u32).to_le_bytes());
+        for &id in self.end_tokens.iter() { bytes.extend_from_slice(&id.to_le_bytes()); }
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    pub(crate) fn save_body(&self) -> Vec<u8> {
         if let Some(bytes) = &self.serialized_artifact_cache {
             return clone_serialized_artifact(bytes.as_slice());
         }
@@ -6663,7 +6676,32 @@ impl Constraint {
     /// accepted; current-format artifacts copy borrowed input once because
     /// runtime structures retain zero-copy views into persistent backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
-        match bytes.into() {
+        let bytes = bytes.into();
+        if !bytes.starts_with(ROOT_POLICY_MAGIC) { return Self::load_body(bytes); }
+        if bytes.len() < 12 {
+            return Err(crate::Error::Serialization("truncated root policy header".to_owned()));
+        }
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        let start = count.checked_mul(4).and_then(|len| 12usize.checked_add(len))
+            .filter(|&start| start < bytes.len())
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
+        let ids: Vec<u32> = bytes[12..start].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked"))).collect();
+        if count == 0 || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(crate::Error::Serialization("noncanonical end-token policy".to_owned()));
+        }
+        let body = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body(Cow::Owned(bytes.split_off(start)))?,
+            Cow::Borrowed(bytes) => Self::load_body(Cow::Borrowed(&bytes[start..]))?,
+        };
+        if !body.late_grammar_slots.is_empty() {
+            return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
+        }
+        body.with_end_tokens(&ids).map_err(|error| crate::Error::Serialization(error.to_string()))
+    }
+
+    fn load_body(bytes: Cow<'_, [u8]>) -> crate::Result<Self> {
+        match bytes {
             Cow::Owned(bytes) => {
                 let backing = std::sync::Arc::new(bytes);
                 Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))

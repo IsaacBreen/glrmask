@@ -19194,6 +19194,7 @@ fn build_composed_constraint_unfinalized(
     let token_bytes = vocab.entries_arc();
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint {
+            end_tokens: std::sync::Arc::from([]),
         runtime_backend: ConstraintRuntimeBackend::Static,
         static_dynamic_overlay: None,
         boundary_trigger: crate::runtime::BoundaryTrigger::None,

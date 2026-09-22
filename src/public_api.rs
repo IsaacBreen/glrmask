@@ -64,14 +64,10 @@ impl BuildOptions {
 #[derive(Debug, Clone)]
 pub struct Module {
     inner: Arc<RuntimeConstraint>,
-    late_token_slots: Vec<ModuleTokenSlot>,
-}
-
-#[derive(Debug, Clone)]
-struct ModuleTokenSlot {
-    name: String,
-    terminal_id: u32,
-    placeholder_token_id: u32,
+    // All open slots are retained in inner.late_grammar_slots for the exact
+    // linker. This manifest preserves the public token-vs-grammar distinction
+    // without storing unstable terminal coordinates outside the runtime.
+    late_token_slots: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -223,13 +219,9 @@ impl<'a> Grammar<'a> {
         vocab: &Vocab,
         options: BuildOptions,
     ) -> Result<RuntimeConstraint> {
-        if !options.end_token_ids().is_empty() {
-            return Err(Error::Compilation(
-                "final end-token policy is not yet available through BuildOptions".to_owned(),
-            ));
-        }
         let _optimization = options.optimization_value();
-        let spec = ConstraintSpec::builder(self.clone(), vocab)?.build()?;
+        let mut spec = ConstraintSpec::builder(self.clone(), vocab)?.build()?;
+        spec.automatic_boundary_selection = true;
         if let Some(name) = spec.unbound_grammar_names.first() {
             return Err(Error::Compilation(format!(
                 "external grammar {name:?} is unbound; compile_module() if an open compiled artifact is intended",
@@ -237,7 +229,7 @@ impl<'a> Grammar<'a> {
         }
         let constraint = spec.compile()?;
         ensure_runnable_constraint(&constraint)?;
-        Ok(constraint)
+        constraint.with_end_tokens(options.end_token_ids())
     }
 
     /// Compile reusable local machinery while allowing unresolved grammar
@@ -274,38 +266,43 @@ impl<'a> Grammar<'a> {
                 placeholder_ids.insert(name, placeholder);
             }
         }
-        let spec = builder.build()?;
-        let mut constraint = spec.compile()?;
-        let mut late_token_slots = Vec::with_capacity(placeholder_ids.len());
-        for (name, placeholder_token_id) in placeholder_ids {
-            let terminals = constraint
-                .special_token_terminals
-                .iter()
-                .filter(|special| special.token_id == placeholder_token_id)
-                .map(|special| special.terminal_id)
-                .collect::<BTreeSet<_>>();
-            if terminals.len() != 1 {
-                return Err(Error::Compilation(format!(
-                    "compiled external token {name:?} did not resolve to exactly one hidden terminal",
-                )));
-            }
-            late_token_slots.push(ModuleTokenSlot {
-                name,
-                terminal_id: *terminals.iter().next().expect("length checked"),
-                placeholder_token_id,
-            });
+        let mut spec = builder.build()?;
+        spec.allow_open_source_tokens = true;
+        spec.automatic_boundary_selection = true;
+        spec.open_token_placeholders = placeholder_ids.clone();
+        let constraint = spec.compile()?;
+        let mut late_token_slots = placeholder_ids.keys().cloned().collect::<BTreeSet<_>>();
+        // Composition transports terminal coordinates itself. Only qualified
+        // names cross the public boundary, including names from open children.
+        for (name, value) in &self.bindings {
+            let nested = match value {
+                GrammarValue::Module(module) => module.late_token_slots.clone(),
+                GrammarValue::Source(grammar) => grammar.unresolved_token_names()?,
+                _ => continue,
+            };
+            late_token_slots.extend(nested.into_iter().map(|slot| format!("{name}.{slot}")));
         }
-        let placeholder_terminals = late_token_slots
-            .iter()
-            .map(|slot| slot.terminal_id)
-            .collect::<BTreeSet<_>>();
-        if constraint.sanitize_placeholder_terminal_token_domain(&placeholder_terminals) {
-            constraint.rebuild_runtime_caches();
+        let module = Module { inner: Arc::new(constraint), late_token_slots };
+        module.validate_slot_manifest()?;
+        Ok(module)
+    }
+
+    fn unresolved_token_names(&self) -> Result<BTreeSet<String>> {
+        let mut names = match self.source {
+            GrammarSource::Glrm(source) => crate::grammar::glrm::external_declarations(source)?
+                .token_names.into_iter()
+                .filter(|name| !self.bindings.contains_key(name)).collect(),
+            _ => BTreeSet::new(),
+        };
+        for (name, value) in &self.bindings {
+            let nested = match value {
+                GrammarValue::Module(module) => module.late_token_slots.clone(),
+                GrammarValue::Source(grammar) => grammar.unresolved_token_names()?,
+                _ => continue,
+            };
+            names.extend(nested.into_iter().map(|slot| format!("{name}.{slot}")));
         }
-        Ok(Module {
-            inner: Arc::new(constraint),
-            late_token_slots,
-        })
+        Ok(names)
     }
 
     fn glrm_source(&self) -> Option<&'a str> {
@@ -639,6 +636,14 @@ pub struct ConstraintSpec<'a> {
     token_bindings: BTreeMap<String, Vec<u32>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     unbound_grammar_names: Vec<String>,
+    // Only explicit module compilation may preserve unbound source token
+    // slots. Legacy specification compilation keeps its validation contract.
+    allow_open_source_tokens: bool,
+    automatic_boundary_selection: bool,
+    // These belong to this source component. Register their terminal identity
+    // before linking: another component may independently use the same hidden
+    // token ID, which is not a globally unique linker coordinate.
+    open_token_placeholders: BTreeMap<String, u32>,
     boundary_trigger_detail: BoundaryTriggerDetail,
     boundary_summary_policy: BoundarySummaryPolicy,
 }
@@ -788,43 +793,53 @@ impl<'a> ConstraintSpec<'a> {
         Ok(constraint)
     }
 
+    fn register_open_token_placeholders(&self, parent: &mut RuntimeConstraint) -> Result<()> {
+        for (name, &placeholder_id) in &self.open_token_placeholders {
+            let terminals = parent.special_token_terminals.iter()
+                .filter(|special| special.token_id == placeholder_id)
+                .map(|special| special.terminal_id).collect::<BTreeSet<_>>();
+            if terminals.len() != 1 {
+                return Err(Error::Compilation(format!(
+                    "compiled external token {name:?} did not resolve to exactly one component-local terminal",
+                )));
+            }
+            parent.late_grammar_slots.push(crate::runtime::LateGrammarSlot {
+                name: name.clone(),
+                terminal_id: *terminals.iter().next().expect("length checked"),
+            });
+        }
+        if !self.open_token_placeholders.is_empty() {
+            parent.serialized_artifact_cache = None;
+            if parent.sanitize_late_grammar_placeholder_token_domain() {
+                parent.rebuild_runtime_caches();
+            }
+        }
+        Ok(())
+    }
+
     fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
+        let mut parent = if let Some(source) = self.grammar.glrm_source() {
+            RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+                source, &[], self.vocab, &token_bindings, &[],
+            )?
+        } else {
+            compile_static_source(&self.grammar, self.vocab, &token_bindings)?
+        };
+        self.register_open_token_placeholders(&mut parent)?;
         if self.grammar_bindings.is_empty() {
-            if let Some(source) = self.grammar.glrm_source() {
-                return RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
-                    source,
-                    &[],
-                    self.vocab,
-                    &token_bindings,
-                    &[],
-                );
-            }
-            return compile_static_source(&self.grammar, self.vocab, &token_bindings);
+            return Ok(parent);
         }
-
-        let source = self.grammar.glrm_source().ok_or_else(|| {
-            Error::Compilation("external grammar bindings require a GLRM grammar".to_owned())
-        })?;
-        let parent = RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
-            source,
-            &[],
-            self.vocab,
-            &token_bindings,
-            &[],
-        )?;
         let children = self.compile_children(ChildCompileMode::Static)?;
         let children = prepare_compiled_children(
-            children,
-            self.vocab,
-            SegmentedBoundaryBackend::StaticParserDwa,
+            children, self.vocab, SegmentedBoundaryBackend::StaticParserDwa,
         )?;
-        compose_named_children(
-            parent,
-            &children,
-            self.vocab,
-            SegmentedBoundaryBackend::StaticParserDwa,
-        )
+        let boundary_backend = if self.automatic_boundary_selection {
+            select_supported_boundary(&parent, &children)?
+        } else {
+            SegmentedBoundaryBackend::StaticParserDwa
+        };
+        compose_named_children(parent, &children, self.vocab, boundary_backend)
     }
 
     /// Compile this specification into a [`DynamicConstraint`].
@@ -911,7 +926,9 @@ impl<'a> ConstraintSpec<'a> {
     ) -> Result<Vec<(String, CompiledChild<'_>)>> {
         self.grammar_bindings
             .iter()
-            .map(|(name, binding)| Ok((name.clone(), binding.compile(self.vocab, mode)?)))
+            .map(|(name, binding)| Ok((name.clone(), binding.compile(
+                self.vocab, mode, self.allow_open_source_tokens,
+            )?)))
             .collect()
     }
 
@@ -998,6 +1015,9 @@ impl<'a> ConstraintSpecBuilder<'a> {
                     grammar_bindings.insert(name, GrammarBinding::StaticOwned(child));
                 }
             }
+        }
+        for (name, binding) in &mut grammar_bindings {
+            binding.bind_target(vocab, name)?;
         }
         Ok(Self {
             grammar,
@@ -1105,6 +1125,9 @@ impl<'a> ConstraintSpecBuilder<'a> {
             token_bindings: self.token_bindings,
             grammar_bindings: self.grammar_bindings,
             unbound_grammar_names,
+            allow_open_source_tokens: false,
+            automatic_boundary_selection: false,
+            open_token_placeholders: BTreeMap::new(),
             boundary_trigger_detail: self.boundary_trigger_detail,
             boundary_summary_policy: self.boundary_summary_policy,
         })
@@ -1209,19 +1232,28 @@ impl GrammarBinding<'_> {
         &'a self,
         vocab: &Vocab,
         mode: ChildCompileMode,
+        allow_open_source_tokens: bool,
     ) -> Result<CompiledChild<'a>> {
         match self {
-            Self::Source(grammar) => {
-                let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
-                match mode {
-                    ChildCompileMode::Static => {
-                        Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+            Self::Source(grammar) => match mode {
+                ChildCompileMode::Static => {
+                    if !allow_open_source_tokens {
+                        if let Some(name) = grammar.unresolved_token_names()?.first() {
+                            return Err(Error::Compilation(format!(
+                                "external token {name:?} is unbound in source child; use compile_module() to retain open token slots",
+                            )));
+                        }
                     }
-                    ChildCompileMode::Dynamic => {
-                        Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
-                    }
+                    let module = grammar.compile_module(vocab)?;
+                    Ok(CompiledChild::StaticOwned(
+                        Arc::try_unwrap(module.inner).unwrap_or_else(|shared| (*shared).clone()),
+                    ))
                 }
-            }
+                ChildCompileMode::Dynamic => {
+                    let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
+                    Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                }
+            },
             Self::Spec(spec) => match mode {
                 ChildCompileMode::Static => {
                     Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
@@ -1249,17 +1281,23 @@ impl GrammarBinding<'_> {
         Self: 'a,
     {
         match self {
-            Self::Source(grammar) => {
-                let spec = ConstraintSpec::builder(grammar, vocab)?.build()?;
-                match mode {
-                    ChildCompileMode::Static => {
-                        Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
+            Self::Source(grammar) => match mode {
+                ChildCompileMode::Static => {
+                    if let Some(name) = grammar.unresolved_token_names()?.first() {
+                        return Err(Error::Compilation(format!(
+                            "external token {name:?} is unbound in source child; use compile_module() to retain open token slots",
+                        )));
                     }
-                    ChildCompileMode::Dynamic => {
-                        Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
-                    }
+                    let module = grammar.compile_module(vocab)?;
+                    Ok(CompiledChild::StaticOwned(
+                        Arc::try_unwrap(module.inner).unwrap_or_else(|shared| (*shared).clone()),
+                    ))
                 }
-            }
+                ChildCompileMode::Dynamic => {
+                    let spec = ConstraintSpec::builder(grammar, vocab)?.build()?;
+                    Ok(CompiledChild::DynamicOwned(spec.compile_dynamic()?))
+                }
+            },
             Self::Spec(spec) => match mode {
                 ChildCompileMode::Static => {
                     Ok(CompiledChild::StaticOwned(spec.compile_static_with_trigger_uncached()?))
@@ -1293,6 +1331,9 @@ fn prepare_compiled_children(
                 vocab,
                 boundary_backend,
             )?;
+            // Root termination is policy, not an embedded grammar terminal.
+            // The native artifact cache already contains body-only bytes.
+            constraint.end_tokens = Arc::from([]);
             // `compose_named_children` always uses the segmented linker. Decode
             // composition-only metadata on this first owned child copy so the
             // linker does not clone the whole compiled child a second time
@@ -1619,106 +1660,129 @@ fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
     Ok(())
 }
 
-fn bind_module_exact_tokens(
-    module: &Module,
-    name: &str,
-    token_ids: &[u32],
-) -> Result<Module> {
-    let Some(slot_index) = module
-        .late_token_slots
-        .iter()
-        .position(|slot| slot.name == name)
-    else {
-        if module
-            .inner
-            .late_grammar_slots
-            .iter()
-            .any(|slot| slot.name == name)
+/// The current bounded static linker requires nonnullable child links. Decide
+/// from retained semantic metadata before construction, never by catching a
+/// compiler error or silently falling back during mask generation.
+fn select_supported_boundary(
+    parent: &RuntimeConstraint,
+    children: &[(String, Arc<RuntimeConstraint>)],
+) -> Result<SegmentedBoundaryBackend> {
+    fn contains_nullable_link(constraint: &RuntimeConstraint) -> bool {
+        constraint.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+            overlay.segmented_parser_links.iter().any(|link| link.child_start_nullable)
+                || overlay.segmented_parser_components.iter()
+                    .any(|component| contains_nullable_link(&component.constraint))
+        })
+    }
+    if contains_nullable_link(parent) {
+        return Ok(SegmentedBoundaryBackend::Dynamic);
+    }
+    for (_, child) in children {
+        if child.composition_start_nullable().map_err(Error::Compilation)?
+            || contains_nullable_link(child)
         {
-            return Err(Error::Compilation(format!(
-                "external {name:?} has kind grammar, not token",
-            )));
+            return Ok(SegmentedBoundaryBackend::Dynamic);
         }
-        return Err(Error::Compilation(format!(
-            "no unresolved external token named {name:?} is present in this module",
-        )));
-    };
-    if token_ids.is_empty() {
-        return Err(Error::Compilation(format!(
-            "external token {name:?} must bind at least one exact token ID",
-        )));
     }
-
-    let slot = module.late_token_slots[slot_index].clone();
-    let mut constraint = module.inner.as_ref().clone();
-    constraint.special_token_terminals.retain(|special| {
-        !(special.terminal_id == slot.terminal_id
-            && special.token_id == slot.placeholder_token_id)
-    });
-    for &token_id in token_ids {
-        constraint
-            .special_token_terminals
-            .push(crate::runtime::SpecialTokenTerminal {
-                terminal_id: slot.terminal_id,
-                token_id,
-            });
-    }
-    constraint
-        .special_token_terminals
-        .sort_unstable_by_key(|special| (special.terminal_id, special.token_id));
-    constraint.special_token_terminals.dedup();
-    constraint.serialized_artifact_cache = None;
-    constraint.boundary_candidate_summary = std::sync::OnceLock::new();
-    constraint.rebuild_runtime_caches();
-
-    let mut late_token_slots = module.late_token_slots.clone();
-    late_token_slots.remove(slot_index);
-    Ok(Module {
-        inner: Arc::new(constraint),
-        late_token_slots,
-    })
+    Ok(SegmentedBoundaryBackend::StaticParserDwa)
 }
 
+fn bind_module_compiled_child(
+    module: &Module,
+    name: &str,
+    child: Arc<RuntimeConstraint>,
+) -> Result<RuntimeConstraint> {
+    let children = vec![(name.to_owned(), child)];
+    let backend = select_supported_boundary(&module.inner, &children)?;
+    bind_static_parent_grammar(&module.inner, name, Arc::clone(&children[0].1), backend)
+}
+
+fn bind_module_exact_tokens(module: &Module, name: &str, token_ids: &[u32]) -> Result<Module> {
+    module.require_slot_kind(name, ExternKind::Token)?;
+    // Exact values have no byte language. Build only their tiny compiler-owned
+    // adapter, then use the normal linker to transport ALL token/terminal/DWA
+    // coordinates. Never reparse/recompile the parent's or a supplied child's
+    // source, and never relabel only runtime metadata after static compilation.
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+    let named = NamedGrammar {
+        start: "__exact_tokens".to_owned(),
+        rules: vec![NamedRule {
+            name: "__exact_tokens".to_owned(),
+            expr: crate::import::choice_or_single(
+                token_ids.iter().copied().map(GrammarExpr::SpecialToken).collect(),
+            ),
+            is_terminal: false,
+            is_internal: false,
+        }],
+        ignore: None,
+        lexer_partitions: BTreeMap::new(),
+        lexer_literal_partitions: BTreeMap::new(),
+        default_lexer_partition: None,
+    };
+    let vocab = constraint_vocab(module.inner.as_ref());
+    let adapter = crate::import::compile_from_named_grammar(
+        named,
+        &vocab,
+        "exact_token_binding",
+        crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        &[],
+    )?;
+    let inner = bind_module_compiled_child(module, name, Arc::new(adapter))?;
+    let mut late_token_slots = module.late_token_slots.clone();
+    late_token_slots.remove(name);
+    let result = Module { inner: Arc::new(inner), late_token_slots };
+    result.validate_slot_manifest()?;
+    Ok(result)
+}
+
+const MODULE_MAGIC: &[u8; 8] = b"GLRMOD01";
+const MODULE_HEADER_LEN: usize = 16;
+
 impl Module {
-    /// Bind one compiled grammar child or vocabulary-qualified exact-token
-    /// value. Source grammars are intentionally not accepted on this compiled
-    /// path.
+    fn validate_slot_manifest(&self) -> Result<()> {
+        if !self.inner.end_tokens.is_empty() {
+            return Err(Error::Serialization("module artifact contains final-root policy".to_owned()));
+        }
+        for name in &self.late_token_slots {
+            if !self.inner.late_grammar_slots.iter().any(|slot| slot.name == *name) {
+                return Err(Error::Serialization(format!(
+                    "module token slot {name:?} has no compiled linker slot",
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn require_slot_kind(&self, name: &str, expected: ExternKind) -> Result<()> {
+        if !self.inner.late_grammar_slots.iter().any(|slot| slot.name == name) {
+            return Err(Error::Compilation(format!(
+                "no unresolved external {} named {name:?} is present in this module",
+                expected.name(),
+            )));
+        }
+        let is_token = self.late_token_slots.contains(name);
+        if is_token != matches!(expected, ExternKind::Token) {
+            return Err(Error::Compilation(format!(
+                "external {name:?} has kind {}, not {}", expected.opposite_name(), expected.name(),
+            )));
+        }
+        Ok(())
+    }
+
+    /// Bind one compiled grammar child or vocabulary-qualified exact-token value.
+    ///
+    /// Source grammars are intentionally not accepted. An exact-token value
+    /// creates a small compiler-owned adapter; the existing parent and child
+    /// machinery is reused by the linker without reparsing their sources.
     #[allow(private_bounds)]
     pub fn bind<'a, T>(&self, name: impl AsRef<str>, value: T) -> Result<Self>
-    where
-        T: IntoModuleValue<'a>,
-    {
+    where T: IntoModuleValue<'a> {
         let name = name.as_ref();
-        let constraint = match value.into_module_value() {
-            ModuleValue::Module(child) => {
-                if !child.late_token_slots.is_empty() {
-                    return Err(Error::Compilation(
-                        "a module with unresolved exact-token slots must bind those slots before it is embedded"
-                            .to_owned(),
-                    ));
-                }
-                bind_static_parent_grammar(
-                    self.inner.as_ref(),
-                    name,
-                    Arc::clone(&child.inner),
-                    SegmentedBoundaryBackend::StaticParserDwa,
-                )?
-            }
-            ModuleValue::StaticBorrowed(child) => bind_static_parent_grammar(
-                self.inner.as_ref(),
-                name,
-                child,
-                SegmentedBoundaryBackend::StaticParserDwa,
-            )?,
-            ModuleValue::StaticOwned(child) => bind_static_parent_grammar(
-                self.inner.as_ref(),
-                name,
-                child,
-                SegmentedBoundaryBackend::StaticParserDwa,
-            )?,
+        let mut late_token_slots = self.late_token_slots.clone();
+        let inner = match value.into_module_value() {
             ModuleValue::ExactToken(token) => {
-                let vocab = constraint_vocab(self.inner.as_ref());
-                if !token.targets(&vocab) {
+                self.require_slot_kind(name, ExternKind::Token)?;
+                if !token.targets(&constraint_vocab(&self.inner)) {
                     return Err(Error::Compilation(format!(
                         "external token {name:?} was built for an incompatible vocabulary",
                     )));
@@ -1726,19 +1790,34 @@ impl Module {
                 return bind_module_exact_tokens(self, name, &[token.id()]);
             }
             ModuleValue::ExactTokens(tokens) => {
-                let vocab = constraint_vocab(self.inner.as_ref());
-                if !tokens.targets(&vocab) {
+                self.require_slot_kind(name, ExternKind::Token)?;
+                if !tokens.targets(&constraint_vocab(&self.inner)) {
                     return Err(Error::Compilation(format!(
                         "external token {name:?} was built for an incompatible vocabulary",
                     )));
                 }
                 return bind_module_exact_tokens(self, name, tokens.ids());
             }
+            ModuleValue::Module(child) => {
+                self.require_slot_kind(name, ExternKind::Grammar)?;
+                let inner = bind_module_compiled_child(self, name, Arc::clone(&child.inner))?;
+                late_token_slots.extend(
+                    child.late_token_slots.iter().map(|slot| format!("{name}.{slot}")),
+                );
+                inner
+            }
+            ModuleValue::StaticBorrowed(child) => {
+                self.require_slot_kind(name, ExternKind::Grammar)?;
+                bind_module_compiled_child(self, name, Arc::new(child.clone()))?
+            }
+            ModuleValue::StaticOwned(child) => {
+                self.require_slot_kind(name, ExternKind::Grammar)?;
+                bind_module_compiled_child(self, name, child)?
+            }
         };
-        Ok(Self {
-            inner: Arc::new(constraint),
-            late_token_slots: self.late_token_slots.clone(),
-        })
+        let result = Self { inner: Arc::new(inner), late_token_slots };
+        result.validate_slot_manifest()?;
+        Ok(result)
     }
 
     /// Finish a fully bound module as a runnable constraint.
@@ -1748,44 +1827,69 @@ impl Module {
 
     /// Finish a fully bound module with final build options.
     pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
-        if !options.end_token_ids().is_empty() {
-            return Err(Error::Compilation(
-                "final end-token policy is not yet available through BuildOptions".to_owned(),
-            ));
-        }
         let _optimization = options.optimization_value();
-        if let Some(slot) = self.late_token_slots.first() {
-            return Err(Error::Compilation(format!(
-                "external token {:?} is still unbound",
-                slot.name,
-            )));
+        if let Some(name) = self.late_token_slots.first() {
+            return Err(Error::Compilation(format!("external token {name:?} is still unbound")));
         }
-        ensure_runnable_constraint(self.inner.as_ref())?;
-        Ok(self.inner.as_ref().clone())
+        ensure_runnable_constraint(&self.inner)?;
+        self.inner.as_ref().clone().with_end_tokens(options.end_token_ids())
     }
 
-    /// Serialize this compiled module.
+    /// Serialize a module, including open-slot kinds and the exact vocabulary.
+    ///
+    /// Module artifacts are distinct from runnable constraint artifacts.
     pub fn save(&self) -> Vec<u8> {
-        self.inner.save()
+        let names: Vec<_> = self.late_token_slots.iter().collect();
+        let manifest = bincode::serialize(&names).expect("in-memory module manifest is serializable");
+        let body = self.inner.save();
+        let mut bytes = Vec::with_capacity(MODULE_HEADER_LEN + manifest.len() + body.len());
+        bytes.extend_from_slice(MODULE_MAGIC);
+        bytes.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&manifest);
+        bytes.extend_from_slice(&body);
+        bytes
     }
 
-    /// Load a compiled artifact as a module. Open grammar slots remain open.
+    /// Load a module. Open slots remain open and retain their token/grammar kind.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(RuntimeConstraint::load(bytes)?),
-            late_token_slots: Vec::new(),
-        })
+        use bincode::Options;
+        let bytes = bytes.into();
+        let data = bytes.as_ref();
+        if data.len() < MODULE_HEADER_LEN || !data.starts_with(MODULE_MAGIC) {
+            return Err(Error::Serialization("invalid module artifact header".to_owned()));
+        }
+        let manifest_len = u64::from_le_bytes(data[8..16].try_into().expect("header length checked"));
+        let body_start = usize::try_from(manifest_len).ok()
+            .and_then(|len| MODULE_HEADER_LEN.checked_add(len))
+            .filter(|&end| end < data.len())
+            .ok_or_else(|| Error::Serialization("invalid module manifest length".to_owned()))?;
+        let names: Vec<String> = bincode::DefaultOptions::new()
+            .with_fixint_encoding().with_limit(manifest_len).reject_trailing_bytes()
+            .deserialize(&data[MODULE_HEADER_LEN..body_start])
+            .map_err(|error| Error::Serialization(format!("invalid module manifest: {error}")))?;
+        let mut late_token_slots = BTreeSet::new();
+        for name in names {
+            if name.is_empty() || !late_token_slots.insert(name) {
+                return Err(Error::Serialization("empty or duplicate module token slot".to_owned()));
+            }
+        }
+        let inner = match bytes {
+            std::borrow::Cow::Owned(mut bytes) => RuntimeConstraint::load(bytes.split_off(body_start))?,
+            std::borrow::Cow::Borrowed(bytes) => RuntimeConstraint::load(&bytes[body_start..])?,
+        };
+        let module = Self { inner: Arc::new(inner), late_token_slots };
+        module.validate_slot_manifest()?;
+        Ok(module)
     }
 
-    /// Load a compiled artifact while sharing an existing exact vocabulary.
+    /// Load a module while sharing an existing exact vocabulary.
     pub fn load_with_vocab<'b>(
-        bytes: impl Into<std::borrow::Cow<'b, [u8]>>,
-        vocab: &Vocab,
+        bytes: impl Into<std::borrow::Cow<'b, [u8]>>, vocab: &Vocab,
     ) -> Result<Self> {
-        Ok(Self {
-            inner: Arc::new(RuntimeConstraint::load_with_vocab(bytes, vocab)?),
-            late_token_slots: Vec::new(),
-        })
+        let mut module = Self::load(bytes)?;
+        Arc::get_mut(&mut module.inner).expect("freshly loaded module has unique ownership")
+            .bind_vocab_exact(vocab).map_err(Error::Serialization)?;
+        Ok(module)
     }
 }
 

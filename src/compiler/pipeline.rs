@@ -5984,6 +5984,7 @@ fn compile_prepared_with_profile_and_table_construction(
             crate::automata::lexer::tokenizer::artifact_serde::compact_large_fast_runtime(&mut tokenizer);
         }
         let mut constraint = Constraint {
+            end_tokens: std::sync::Arc::from([]),
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,

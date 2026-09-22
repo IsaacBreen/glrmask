@@ -9864,6 +9864,9 @@ pub(crate) struct LateGrammarSlot {
 /// [`Constraint::start`] to create a mutable per-sequence state.
 #[derive(Debug, Clone)]
 pub struct Constraint {
+    /// Final generation policy, not part of the embeddable compiled body.
+    /// The outer root artifact stores these separately from compiler data.
+    pub(crate) end_tokens: Arc<[u32]>,
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Reusable component-local trigger metadata for dynamic composition.
@@ -10239,6 +10242,8 @@ pub struct Constraint {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(remote = "Constraint")]
 pub(crate) struct ConstraintSerde {
+    #[serde(skip, default)]
+    pub(crate) end_tokens: Arc<[u32]>,
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(skip, default)]

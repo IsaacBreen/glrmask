@@ -293,7 +293,7 @@ fn assert_dynamic_mask_equivalence(state: &ConstraintState<'_>, static_mask: &[u
         return;
     }
 
-    let mut dynamic_mask = vec![0u32; state.constraint.mask_len()];
+    let mut dynamic_mask = vec![0u32; state.constraint.body_mask_len()];
     crate::compiler::boundary_transfer::permit_strict_static_dynamic(|| {
         state.fill_mask_dynamic(&mut dynamic_mask)
     });
@@ -1988,16 +1988,16 @@ mod tests {
                 actual.commit_token(token).unwrap();
                 expected.commit_token(token).unwrap();
             }
-            let mut fallback = vec![0u32; poisoned.mask_len()];
+            let mut fallback = vec![0u32; poisoned.body_mask_len()];
             actual.fill_recursive_mask_by_exact_full_walk(&mut fallback);
             let expected_mask = expected.mask();
             assert_eq!(fallback, expected_mask);
 
-            let mut dynamic_reference = vec![0u32; poisoned.mask_len()];
+            let mut dynamic_reference = vec![0u32; poisoned.body_mask_len()];
             actual.fill_mask_dynamic(&mut dynamic_reference);
             assert_eq!(dynamic_reference, expected_mask);
 
-            let mut profiled = vec![0u32; poisoned.mask_len()];
+            let mut profiled = vec![0u32; poisoned.body_mask_len()];
             actual.fill_mask_profiled(&mut profiled);
             assert_eq!(profiled, expected_mask);
         }
@@ -2103,9 +2103,9 @@ mod tests {
             ParserGSS::from_stacks(&[(vec![0u32], disallowed)]),
         );
 
-        let mut expected = vec![0u32; constraint.mask_len()];
+        let mut expected = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut expected);
-        let mut actual = vec![0u32; constraint.mask_len()];
+        let mut actual = vec![0u32; constraint.body_mask_len()];
         state.fill_mask(&mut actual);
         assert_eq!(actual, expected);
 
@@ -2119,9 +2119,9 @@ mod tests {
             loaded_tokenizer_state,
             ParserGSS::from_stacks(&[(vec![0u32], loaded_disallowed)]),
         );
-        let mut loaded_expected = vec![0u32; loaded.mask_len()];
+        let mut loaded_expected = vec![0u32; loaded.body_mask_len()];
         loaded_state.fill_mask_dynamic(&mut loaded_expected);
-        let mut loaded_actual = vec![0u32; loaded.mask_len()];
+        let mut loaded_actual = vec![0u32; loaded.body_mask_len()];
         loaded_state.fill_mask(&mut loaded_actual);
         assert_eq!(loaded_actual, loaded_expected);
     }
@@ -2156,9 +2156,9 @@ mod tests {
         let mut state = constraint.start();
         state.commit_token(0).expect("opening quote should commit");
 
-        let mut static_mask = vec![0u32; constraint.mask_len()];
+        let mut static_mask = vec![0u32; constraint.body_mask_len()];
         state.fill_mask(&mut static_mask);
-        let mut dynamic_mask = vec![0u32; constraint.mask_len()];
+        let mut dynamic_mask = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut dynamic_mask);
 
         assert_eq!(static_mask, dynamic_mask);
@@ -2195,9 +2195,9 @@ mod tests {
             MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY + 1,
         );
 
-        let mut direct = vec![0u32; constraint.mask_len()];
+        let mut direct = vec![0u32; constraint.body_mask_len()];
         assert!(state.try_fill_mask_single_path_direct(&mut direct));
-        let mut dynamic = vec![0u32; constraint.mask_len()];
+        let mut dynamic = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut dynamic);
         assert_eq!(direct, dynamic);
         assert!(mask_contains(&direct, 0));
@@ -2279,11 +2279,11 @@ mod tests {
                     if !seen.insert(format!("{key:?}")) {
                         continue;
                     }
-                    let mut expected = vec![0u32; constraint.mask_len()];
+                    let mut expected = vec![0u32; constraint.body_mask_len()];
                     state.fill_mask_dynamic(&mut expected);
                     if state.has_parser_ambiguity() {
                         ambiguous_states += 1;
-                        let mut actual = vec![0u32; constraint.mask_len()];
+                        let mut actual = vec![0u32; constraint.body_mask_len()];
                         assert!(state.fill_mask_indexed_dag(&mut actual, true));
                         assert_eq!(
                             actual, expected,
@@ -2337,11 +2337,11 @@ mod tests {
         let mut checkpoint = None;
 
         for (index, bytes) in sequence.into_iter().enumerate() {
-            let mut expected = vec![0u32; constraint.mask_len()];
+            let mut expected = vec![0u32; constraint.body_mask_len()];
             state.fill_mask_dynamic(&mut expected);
             if state.has_parser_ambiguity() {
-                let mut first = vec![0u32; constraint.mask_len()];
-                let mut second = vec![0u32; constraint.mask_len()];
+                let mut first = vec![0u32; constraint.body_mask_len()];
+                let mut second = vec![0u32; constraint.body_mask_len()];
                 assert!(state.fill_mask_indexed_dag(&mut first, true));
                 assert!(state.fill_mask_indexed_dag(&mut second, true));
                 assert_eq!(first, expected);
@@ -2356,10 +2356,10 @@ mod tests {
         }
 
         state = checkpoint.expect("checkpoint should be captured");
-        let mut expected = vec![0u32; constraint.mask_len()];
+        let mut expected = vec![0u32; constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut expected);
         if state.has_parser_ambiguity() {
-            let mut actual = vec![0u32; constraint.mask_len()];
+            let mut actual = vec![0u32; constraint.body_mask_len()];
             assert!(state.fill_mask_indexed_dag(&mut actual, true));
             assert_eq!(actual, expected, "restored indexed mask diverged");
         }
@@ -3946,7 +3946,7 @@ impl<'a> ConstraintState<'a> {
             .iter()
             .zip(projected_states.iter())
             .filter_map(|(component, state)| {
-                (!state.is_empty()).then(|| component.constraint.mask_len())
+                (!state.is_empty()).then(|| component.constraint.body_mask_len())
             })
             .max()
             .unwrap_or(0)
@@ -3975,6 +3975,7 @@ impl<'a> ConstraintState<'a> {
             let component_started_at = profile.then(Instant::now);
             component_buf.fill(0);
             let shadow = ConstraintState {
+            terminated: false,
                 constraint: component.constraint.as_ref(),
                 state,
                 buffers: Default::default(),
@@ -4170,24 +4171,25 @@ impl<'a> ConstraintState<'a> {
                 let mut scratch = self.mask_scratch.lock().unwrap();
                 let mut reusable = std::mem::take(&mut scratch.output_buf);
                 reusable.resize(
-                    buf.len().max(component.constraint.mask_len()),
+                    buf.len().max(component.constraint.body_mask_len()),
                     0,
                 );
                 component_buf = Some(reusable);
             } else if component_buf
                 .as_ref()
-                .is_some_and(|buffer| buffer.len() < component.constraint.mask_len())
+                .is_some_and(|buffer| buffer.len() < component.constraint.body_mask_len())
             {
                 component_buf
                     .as_mut()
                     .expect("segmented component mask buffer exists")
-                    .resize(component.constraint.mask_len(), 0);
+                    .resize(component.constraint.body_mask_len(), 0);
             }
             let component_buf = component_buf
                 .as_mut()
                 .expect("active segmented component requires a mask buffer");
             component_buf.fill(0);
             let shadow = ConstraintState {
+            terminated: false,
                 constraint: component.constraint.as_ref(),
                 state,
                 buffers: Default::default(),
@@ -7292,7 +7294,7 @@ impl<'a> ConstraintState<'a> {
                         if delta_profile_enabled {
                             profile.delta_prev_available = 1;
                             profile.delta_unchanged_words = merged.len() as u64;
-                            profile.delta_copy_cost_words = self.constraint.mask_len() as u64;
+                            profile.delta_copy_cost_words = self.constraint.body_mask_len() as u64;
                             profile.delta_used_seed = 1;
                         }
                     }
@@ -7303,7 +7305,7 @@ impl<'a> ConstraintState<'a> {
             if !use_delta_seed {
                 if let Some(cache_data) = cache.as_ref().filter(|c| c.merged_dense.len() == merged.len()) {
                     let scratch_cost = self.constraint.estimate_internal_dense_to_buf_cost(&merged);
-                    let copy_cost_words = self.constraint.mask_len() as u64;
+                    let copy_cost_words = self.constraint.body_mask_len() as u64;
                     let mut added_bits = 0u64;
                     let mut removed_bits = 0u64;
                     let mut unchanged_words = 0u64;
@@ -7572,7 +7574,7 @@ impl<'a> ConstraintState<'a> {
                 self.constraint.word_group_sparse_masks.len(),
                 self.constraint.word_group_sparse_total_entries,
                 self.constraint.word_group_sparse_max_entries,
-                self.constraint.word_group_sparse_masks.len() * self.constraint.mask_len(),
+                self.constraint.word_group_sparse_masks.len() * self.constraint.body_mask_len(),
                 self.constraint.internal_token_buf_flat_len(),
                 other_ns,
                 queue_debug.enqueue_calls,
@@ -7631,7 +7633,7 @@ impl<'a> ConstraintState<'a> {
         }
         drop(cache);
 
-        let mut buf = vec![0u32; self.constraint.mask_len()];
+        let mut buf = vec![0u32; self.constraint.body_mask_len()];
         if self.constraint.uses_dynamic_runtime() {
             self.fill_mask_dynamic(&mut buf);
             self.store_mask_cache_reuse_dense(&buf);
@@ -7862,6 +7864,7 @@ impl<'a> ConstraintState<'a> {
         // only fresh commit scratch and can safely reuse the caller's mask
         // scratch sequentially.
         let mut shadow = Box::new(ConstraintState {
+            terminated: false,
             constraint: self.constraint,
             state: self.state.clone(),
             buffers: CommitBuffers::for_constraint(self.constraint),
@@ -7877,8 +7880,27 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
+    /// Fill the next-token mask, including final-root termination policy.
     pub fn fill_mask(&self, buf: &mut [u32]) {
-        let required = self.constraint.mask_len();
+        assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is smaller than constraint mask");
+        if self.terminated {
+            buf.fill(0);
+            return;
+        }
+        self.fill_body_mask(buf);
+        if !self.constraint.end_tokens.is_empty() {
+            let accepting = self.is_accepting();
+            for &id in self.constraint.end_tokens.iter() {
+                let word = &mut buf[id as usize / 32];
+                let bit = 1u32 << (id % 32);
+                // End IDs are reserved generation controls, not byte pieces.
+                if accepting { *word |= bit; } else { *word &= !bit; }
+            }
+        }
+    }
+
+    pub(crate) fn fill_body_mask(&self, buf: &mut [u32]) {
+        let required = self.constraint.body_mask_len();
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (mask, tail) = buf.split_at_mut(required);
         tail.fill(0);
@@ -8085,7 +8107,12 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn fill_mask_profiled(&self, buf: &mut [u32]) -> MaskProfile {
-        let required = self.constraint.mask_len();
+        if self.terminated || !self.constraint.end_tokens.is_empty() {
+            let started = Instant::now();
+            self.fill_mask(buf);
+            return MaskProfile { total_ns: elapsed_ns(started), ..MaskProfile::default() };
+        }
+        let required = self.constraint.body_mask_len();
         assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
         let (buf, tail) = buf.split_at_mut(required);
         tail.fill(0);

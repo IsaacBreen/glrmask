@@ -886,6 +886,7 @@ impl DynamicConstraint {
             .max()
             .unwrap_or(0);
         let inner = Constraint {
+            end_tokens: std::sync::Arc::from([]),
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
