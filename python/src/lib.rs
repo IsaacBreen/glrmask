@@ -16,6 +16,8 @@
 //! dependent relationship. The only handwritten `unsafe` in this file is the
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
+mod final_api;
+
 #[cfg(feature = "allocation-tracking")]
 mod allocation_tracking;
 
@@ -574,6 +576,20 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
+    /// Resolve one exact token, preserving this complete vocabulary identity.
+    fn token(&self, id: u32) -> PyResult<final_api::PyExactToken> {
+        self.inner.token(id).map(|inner| final_api::PyExactToken { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Resolve a nonempty set of distinct exact token IDs.
+    fn tokens(&self, ids: Vec<u32>) -> PyResult<final_api::PyExactTokens> {
+        self.inner.tokens(ids).map(|inner| final_api::PyExactTokens { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn __len__(&self) -> usize { self.inner.len() }
+
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
@@ -866,17 +882,24 @@ impl PyConstraint {
         })
     }
 
-    fn save(&self) -> Vec<u8> {
-        self.inner.save()
+    /// Serialize the compiled body and final termination policy as bytes.
+    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let bytes = py.allow_threads(|| self.inner.save());
+        PyBytes::new(py, &bytes)
     }
 
     #[staticmethod]
-    fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = constraint_result(glrmask::Constraint::load_with_vocab(
-            data.to_vec(),
-            &vocab.inner,
-        ))?;
-        Self::from_constraint_result(Ok::<_, String>(constraint), vocab)
+    #[pyo3(signature = (data, vocab=None))]
+    fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
+        let data = data.to_vec();
+        let vocab = vocab.map(|vocab| vocab.inner.clone());
+        let loaded = py.allow_threads(move || match vocab {
+            Some(vocab) => glrmask::Constraint::load_with_vocab(data, &vocab),
+            None => glrmask::Constraint::load(data),
+        });
+        let inner = constraint_result(loaded)?;
+        let max_token = inner.max_original_token_id().unwrap_or(0);
+        Ok(Self { inner: Arc::new(inner), max_token })
     }
 
     fn start(&self) -> PyConstraintState {
@@ -1164,6 +1187,11 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
+    /// Whether an allowed final end token has completed this sequence.
+    fn is_terminated(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_terminated())
+    }
+
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1186,6 +1214,10 @@ impl PyConstraintState {
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
+        let required = self.inner.borrow_owner().mask_len();
+        if buf.len() < required {
+            return Err(PyValueError::new_err(format!("mask needs at least {required} packed words")));
+        }
         self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
         Ok(())
     }
@@ -1998,6 +2030,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // constraint.
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
+    final_api::register(m)?;
     m.add_class::<PyVocab>()?;
     m.add_class::<PyVocabPartition>()?;
     m.add_class::<PyConstraint>()?;
@@ -2008,6 +2041,11 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr(
         "__all__",
         [
+            "Grammar",
+            "Module",
+            "ExactToken",
+            "ExactTokens",
+            "Optimization",
             "Vocab",
             "VocabPartition",
             "Constraint",
