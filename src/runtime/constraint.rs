@@ -13815,6 +13815,13 @@ impl<'a> ConstraintState<'a> {
             self.constraint.uses_dynamic_runtime(),
         );
         if self.constraint.uses_compact_segmented_parser_runtime() {
+            match super::dynamic_mask::try_fill_recursive_mask_shared(self, buf) {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    panic!("shared recursive dynamic mask generation failed: {error}");
+                }
+            }
             self.fill_recursive_mask_by_exact_full_walk(buf);
             return;
         }
