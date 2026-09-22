@@ -20504,6 +20504,70 @@ fn compose_constraints_owned_parent_impl(
         .collect::<Vec<_>>();
     let normalize_inputs_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let children = normalized_children.as_slice();
+    // Compute the reusable bounded interface-tail envelope while the semantic
+    // parent/child graph is still explicit. This is intentionally before any
+    // flattening: child summaries compose through typed calls, so known parent
+    // postambles survive without a raw lexer-state × parser-history product.
+    let boundary_tail_prepared = {
+        let bindings = children
+            .iter()
+            .flat_map(|child| {
+                child
+                    .placeholder_terminals()
+                    .map(move |slot| (slot, child.constraint))
+            })
+            .collect::<Vec<_>>();
+        match crate::compiler::boundary_tail::build_composition_boundary_tail_r2(
+            &parent,
+            &bindings,
+            vocab,
+        ) {
+            Ok(probe) => {
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][boundary_tail_prepare] level=2 candidates={} exit_last1={} exit_pairs={} fp_iters={} widened={} child_ms={:.3} summary_ms={:.3} map_ms={:.3}",
+                        probe.candidate_ids.len(),
+                        probe.exit_last1_count,
+                        probe.exit_pair_count,
+                        probe.fixed_point_iterations,
+                        probe.fixed_point_widened,
+                        probe.child_summary_ms,
+                        probe.summary_ms,
+                        probe.map_ms,
+                    );
+                }
+                Some((probe.candidate_ids, probe.fixed_point_widened, 2u8))
+            }
+            Err(r2_error) => match crate::compiler::boundary_tail::build_composition_boundary_tail_r1(
+                &parent,
+                &bindings,
+                vocab,
+            ) {
+                Ok(probe) => {
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][boundary_tail_prepare] level=1 candidates={} exit_bytes={} fp_iters={} widened={} summary_ms={:.3} map_ms={:.3} r2_unavailable={r2_error:?}",
+                            probe.candidate_ids.len(),
+                            probe.exit_byte_count,
+                            probe.fixed_point_iterations,
+                            probe.fixed_point_widened,
+                            probe.summary_ms,
+                            probe.map_ms,
+                        );
+                    }
+                    Some((probe.candidate_ids, probe.fixed_point_widened, 1u8))
+                }
+                Err(r1_error) => {
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][boundary_tail_prepare] unavailable r2={r2_error:?} r1={r1_error:?}"
+                        );
+                    }
+                    None
+                }
+            },
+        }
+    };
     // A packed child must be materialized into a compiler-owned clone, so the
     // shared-Arc optimization can no longer refer to the exact compiler input.
     let shared_children = if materialized_any_child {
@@ -22351,6 +22415,23 @@ fn compose_constraints_owned_parent_impl(
                 components_have_no_runtime_product,
             )
         });
+        if let Some((candidate_ids, widened, level)) = boundary_tail_prepared.as_ref() {
+            if let Err(error) = crate::compiler::boundary_candidates::install_precomputed_boundary_candidate_ids(
+                &mut result.constraint,
+                vocab,
+                candidate_ids,
+                *widened,
+            ) {
+                if compose_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_tail_install] level={level} skipped={error:?}");
+                }
+            } else if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][boundary_tail_install] level={level} candidates={} installed=true",
+                    candidate_ids.len(),
+                );
+            }
+        }
         detach_recursive_component_compiler_views(&mut result.constraint)?;
         result.constraint.detach_recursive_outer_table()?;
         result.constraint.detach_recursive_outer_tokenizer()?;
@@ -22846,6 +22927,23 @@ fn compose_constraints_owned_parent_impl(
         );
     }
     result.constraint.rebuild_runtime_caches();
+    if let Some((candidate_ids, widened, level)) = boundary_tail_prepared {
+        if let Err(error) = crate::compiler::boundary_candidates::install_precomputed_boundary_candidate_ids(
+            &mut result.constraint,
+            vocab,
+            &candidate_ids,
+            widened,
+        ) {
+            if compose_profile_enabled() {
+                eprintln!("[glrmask/profile][boundary_tail_install] level={level} skipped={error:?}");
+            }
+        } else if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][boundary_tail_install] level={level} candidates={} installed=true",
+                candidate_ids.len(),
+            );
+        }
+    }
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(

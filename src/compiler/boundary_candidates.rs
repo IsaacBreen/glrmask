@@ -15,7 +15,7 @@ use crate::runtime::{
     SummaryPrecision, SummaryUnavailable,
 };
 
-const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 3;
+const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 4;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
 // Frontier steps manipulate grammar-position sets rather than raw bytes, so
 // one "step" is materially more expensive than a tokenizer transition. Keep
@@ -470,64 +470,160 @@ fn fingerprint(
     vocab: &crate::Vocab,
     rules: &[Rule],
 ) -> Result<BoundaryCandidateFingerprint, SummaryUnavailable> {
-    let exprs = constraint
-        .retained_terminal_exprs()
-        .ok_or(SummaryUnavailable::MissingGrammarMetadata)?;
-    let mut semantics = blake3::Hasher::new();
-    semantics.update(b"glrmask-boundary-component-semantics-v1\0");
-    semantics.update(
-        &bincode::serialize(rules).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
-    );
-    semantics.update(
-        &bincode::serialize(exprs).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
-    );
-    semantics.update(&constraint.ignore_terminal.unwrap_or(u32::MAX).to_le_bytes());
-    for terminal in &constraint.table.skip_terminals {
-        semantics.update(&terminal.to_le_bytes());
-    }
-    for terminal in &constraint.table.control_terminals {
-        semantics.update(&terminal.to_le_bytes());
+    let vocabulary = crate::compiler::compile::vocab_content_digest(vocab);
+
+    // A provider-native composed constraint intentionally does not retain one
+    // flattened top-level terminal-expression array: its immutable semantic
+    // object is the immediate component tree plus typed call links. Fingerprint
+    // exactly that structure so a summary prepared before flattening survives
+    // save/load and later compiler-view materialization without trusting an
+    // opaque cache entry.
+    if let Some(overlay) = constraint
+        .static_dynamic_overlay
+        .as_ref()
+        .filter(|overlay| !overlay.segmented_parser_components.is_empty())
+    {
+        let mut semantics = blake3::Hasher::new();
+        semantics.update(b"glrmask-boundary-component-semantics-v2-composite\0");
+        semantics.update(&(overlay.segmented_parser_components.len() as u64).to_le_bytes());
+        for (component_index, component) in overlay.segmented_parser_components.iter().enumerate() {
+            let child_rules = component
+                .constraint
+                .retained_table_rules()
+                .map_err(|_| SummaryUnavailable::MissingGrammarMetadata)?;
+            if child_rules.is_empty() {
+                return Err(SummaryUnavailable::MissingGrammarMetadata);
+            }
+            let child = fingerprint(component.constraint.as_ref(), vocab, child_rules)?;
+            semantics.update(&(component_index as u64).to_le_bytes());
+            semantics.update(&child.component_semantics);
+            semantics.update(&child.public_interface);
+        }
+        let mut links = overlay.segmented_parser_links.iter().collect::<Vec<_>>();
+        links.sort_unstable_by_key(|link| {
+            (
+                link.parent_component,
+                link.slot_terminal,
+                link.child_component,
+                link.child_start,
+                link.return_pop,
+                link.child_start_nullable,
+            )
+        });
+        semantics.update(&(links.len() as u64).to_le_bytes());
+        for link in &links {
+            semantics.update(&link.parent_component.to_le_bytes());
+            semantics.update(&link.slot_terminal.to_le_bytes());
+            semantics.update(&link.child_component.to_le_bytes());
+            semantics.update(&link.child_start.to_le_bytes());
+            semantics.update(&link.return_pop.to_le_bytes());
+            semantics.update(&[u8::from(link.child_start_nullable)]);
+        }
+
+        // Over-validation is intentional here: make the public-interface digest a
+        // function of the complete immediate composition identity plus any still
+        // explicitly exported slots on the wrapper. Binding an old exported slot
+        // necessarily produces a new composition/fingerprint.
+        let semantics_digest = *semantics.finalize().as_bytes();
+        let mut interface = blake3::Hasher::new();
+        interface.update(b"glrmask-boundary-public-interface-v2-composite\0");
+        interface.update(&semantics_digest);
+        for (name, terminal) in &constraint.unbound_grammar_placeholders {
+            interface.update(&(name.len() as u64).to_le_bytes());
+            interface.update(name.as_bytes());
+            interface.update(&terminal.to_le_bytes());
+        }
+        let mut late = constraint
+            .late_grammar_slots
+            .iter()
+            .map(|slot| (slot.name.as_str(), slot.terminal_id))
+            .collect::<Vec<_>>();
+        late.sort_unstable();
+        for (name, terminal) in late {
+            interface.update(&(name.len() as u64).to_le_bytes());
+            interface.update(name.as_bytes());
+            interface.update(&terminal.to_le_bytes());
+        }
+
+        return Ok(BoundaryCandidateFingerprint {
+            algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
+            component_semantics: semantics_digest,
+            public_interface: *interface.finalize().as_bytes(),
+            vocabulary,
+        });
     }
 
-    let mut interface = blake3::Hasher::new();
-    interface.update(b"glrmask-boundary-public-interface-v1\0");
-    for (name, terminal) in &constraint.unbound_grammar_placeholders {
-        interface.update(&(name.len() as u64).to_le_bytes());
-        interface.update(name.as_bytes());
-        interface.update(&terminal.to_le_bytes());
-    }
-    let mut late = constraint
-        .late_grammar_slots
-        .iter()
-        .map(|slot| (slot.name.as_str(), slot.terminal_id))
-        .collect::<Vec<_>>();
-    late.sort_unstable();
-    for (name, terminal) in late {
-        interface.update(&(name.len() as u64).to_le_bytes());
-        interface.update(name.as_bytes());
-        interface.update(&terminal.to_le_bytes());
-    }
-    let mut specials = constraint
-        .special_token_terminals
-        .iter()
-        .filter(|special| {
-            constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                || constraint.token_bytes_for_id(special.token_id).is_none()
-        })
-        .map(|special| (special.terminal_id, special.token_id))
-        .collect::<Vec<_>>();
-    specials.sort_unstable();
-    for (terminal, token) in specials {
-        interface.update(&terminal.to_le_bytes());
-        interface.update(&token.to_le_bytes());
+    // Ordinary leaf component: hash its retained grammar + terminal
+    // definitions exactly as before.
+    if let Some(exprs) = constraint.retained_terminal_exprs() {
+        let mut semantics = blake3::Hasher::new();
+        semantics.update(b"glrmask-boundary-component-semantics-v2-leaf\0");
+        semantics.update(
+            &bincode::serialize(rules).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
+        );
+        semantics.update(
+            &bincode::serialize(exprs).map_err(|_| SummaryUnavailable::MalformedMetadata)?,
+        );
+        semantics.update(&constraint.ignore_terminal.unwrap_or(u32::MAX).to_le_bytes());
+        for terminal in &constraint.table.skip_terminals {
+            semantics.update(&terminal.to_le_bytes());
+        }
+        for terminal in &constraint.table.control_terminals {
+            semantics.update(&terminal.to_le_bytes());
+        }
+        let mut semantic_specials = constraint
+            .special_token_terminals
+            .iter()
+            .map(|special| (special.terminal_id, special.token_id))
+            .collect::<Vec<_>>();
+        semantic_specials.sort_unstable();
+        for (terminal, token) in semantic_specials {
+            semantics.update(&terminal.to_le_bytes());
+            semantics.update(&token.to_le_bytes());
+        }
+
+        let mut interface = blake3::Hasher::new();
+        interface.update(b"glrmask-boundary-public-interface-v2-leaf\0");
+        for (name, terminal) in &constraint.unbound_grammar_placeholders {
+            interface.update(&(name.len() as u64).to_le_bytes());
+            interface.update(name.as_bytes());
+            interface.update(&terminal.to_le_bytes());
+        }
+        let mut late = constraint
+            .late_grammar_slots
+            .iter()
+            .map(|slot| (slot.name.as_str(), slot.terminal_id))
+            .collect::<Vec<_>>();
+        late.sort_unstable();
+        for (name, terminal) in late {
+            interface.update(&(name.len() as u64).to_le_bytes());
+            interface.update(name.as_bytes());
+            interface.update(&terminal.to_le_bytes());
+        }
+        let mut specials = constraint
+            .special_token_terminals
+            .iter()
+            .filter(|special| {
+                constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+                    || constraint.token_bytes_for_id(special.token_id).is_none()
+            })
+            .map(|special| (special.terminal_id, special.token_id))
+            .collect::<Vec<_>>();
+        specials.sort_unstable();
+        for (terminal, token) in specials {
+            interface.update(&terminal.to_le_bytes());
+            interface.update(&token.to_le_bytes());
+        }
+
+        return Ok(BoundaryCandidateFingerprint {
+            algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
+            component_semantics: *semantics.finalize().as_bytes(),
+            public_interface: *interface.finalize().as_bytes(),
+            vocabulary,
+        });
     }
 
-    Ok(BoundaryCandidateFingerprint {
-        algorithm_version: BOUNDARY_CANDIDATE_ALGORITHM_VERSION,
-        component_semantics: *semantics.finalize().as_bytes(),
-        public_interface: *interface.finalize().as_bytes(),
-        vocabulary: crate::compiler::compile::vocab_content_digest(vocab),
-    })
+    Err(SummaryUnavailable::MissingGrammarMetadata)
 }
 
 fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
@@ -619,6 +715,48 @@ fn compute_summary(
         input_tokens: vocab.len(),
         ..BoundaryCandidateStats::default()
     };
+    let rules = match constraint.retained_table_rules() {
+        Ok(rules) if !rules.is_empty() => rules,
+        _ => {
+            return (
+                BoundaryCandidateSummary::Unknown {
+                    reason: SummaryUnavailable::MissingGrammarMetadata,
+                },
+                stats,
+            );
+        }
+    };
+    let fp = match fingerprint(constraint, vocab, rules) {
+        Ok(fp) => fp,
+        Err(reason) => return (BoundaryCandidateSummary::Unknown { reason }, stats),
+    };
+
+    // First-principles interface-tail envelope.  This deliberately quantifies
+    // away parser history and raw residual lexer identity: a real positive
+    // proper-prefix boundary witness must have some final byte immediately
+    // before the outward event, and this r=1 algebra computes a sound set of
+    // such bytes while preserving known parent postambles through opaque
+    // interiors.  It is both dramatically smaller and cheaper than the old
+    // raw-state × grammar-position frontier on composed constraints.
+    if let Ok(probe) = crate::compiler::boundary_tail::build_boundary_tail_r1(constraint, vocab) {
+        let ids = probe.candidate_ids;
+        stats.candidate_tokens = ids.len();
+        stats.widened_subtrees = usize::from(probe.fixed_point_widened);
+        let precision = if probe.fixed_point_widened {
+            SummaryPrecision::BudgetWidenedUpperBound
+        } else {
+            SummaryPrecision::RegularUpperBound
+        };
+        return (
+            BoundaryCandidateSummary::Known {
+                fingerprint: fp,
+                tokens: OriginalTokenSet::from_sorted_unique(ids, vocab.max_token_id()),
+                precision,
+            },
+            stats,
+        );
+    }
+
     if constraint.uses_compact_segmented_parser_runtime() {
         match constraint.recursive_parser_layout() {
             Ok(Some(layout))
@@ -642,21 +780,6 @@ fn compute_summary(
             Ok(_) => {}
         }
     }
-    let rules = match constraint.retained_table_rules() {
-        Ok(rules) if !rules.is_empty() => rules,
-        _ => {
-            return (
-                BoundaryCandidateSummary::Unknown {
-                    reason: SummaryUnavailable::MissingGrammarMetadata,
-                },
-                stats,
-            );
-        }
-    };
-    let fp = match fingerprint(constraint, vocab, rules) {
-        Ok(fp) => fp,
-        Err(reason) => return (BoundaryCandidateSummary::Unknown { reason }, stats),
-    };
     let mut local_skip_terminals = constraint.table.skip_terminals.clone();
     if let Some(ignore) = constraint.ignore_terminal {
         local_skip_terminals.insert(ignore);
@@ -744,6 +867,36 @@ fn compute_summary(
         },
         stats,
     )
+}
+
+pub(crate) fn install_precomputed_boundary_candidate_ids(
+    constraint: &mut Constraint,
+    vocab: &crate::Vocab,
+    ids: &[u32],
+    widened: bool,
+) -> Result<(), String> {
+    let rules = constraint.retained_table_rules()?;
+    if rules.is_empty() {
+        return Err("cannot install boundary candidate summary without retained grammar rules".to_owned());
+    }
+    let fp = fingerprint(constraint, vocab, rules)
+        .map_err(|reason| format!("cannot fingerprint precomputed boundary summary: {reason:?}"))?;
+    let mut ids = ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let summary = BoundaryCandidateSummary::Known {
+        fingerprint: fp,
+        tokens: OriginalTokenSet::from_sorted_unique(ids, vocab.max_token_id()),
+        precision: if widened {
+            SummaryPrecision::BudgetWidenedUpperBound
+        } else {
+            SummaryPrecision::RegularUpperBound
+        },
+    };
+    constraint
+        .boundary_candidate_summary
+        .set(summary)
+        .map_err(|_| "boundary candidate summary was already installed".to_owned())
 }
 
 pub(crate) fn boundary_candidate_summary(
@@ -1131,4 +1284,77 @@ mod tests {
         let (ids, _) = boundary_candidate_ids(&constraint, &vocab);
         assert_eq!(ids, Some(vec![1]));
     }
+    #[test]
+    fn composed_interface_tail_summary_survives_save_load() {
+        use crate::compiler::constraint_compose::{
+            CompiledSubgrammarInput, SegmentedBoundaryBackend,
+            compose_constraints_owned_parent_segmented,
+        };
+
+        let vocab = crate::Vocab::new(vec![
+            (0, b")x".to_vec()),
+            (1, b"})x".to_vec()),
+            (2, b"a)x".to_vec()),
+            (3, b")".to_vec()),
+            (4, b"x)".to_vec()),
+            (5, b"}".to_vec()),
+            (6, b"p(".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "p(" SUB ")";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                nt document ::= "}";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let slot = parent
+            .terminal_display_names
+            .iter()
+            .position(|name| name == "SUB")
+            .expect("SUB terminal") as u32;
+        let direct_r2 = crate::compiler::boundary_tail::build_composition_boundary_tail_r2(
+            &parent,
+            &[(slot, &child)],
+            &vocab,
+        )
+        .unwrap();
+        assert_eq!(direct_r2.candidate_ids, vec![0, 1]);
+        let composed = compose_constraints_owned_parent_segmented(
+            parent,
+            &[CompiledSubgrammarInput {
+                placeholder_terminal: slot,
+                additional_placeholder_terminals: &[],
+                constraint: &child,
+            }],
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .unwrap()
+        .constraint;
+
+        let (fresh, _) = boundary_candidate_ids(&composed, &vocab);
+        assert_eq!(fresh, Some(vec![0, 1]));
+        let mut loaded = Constraint::load(&composed.save()).unwrap();
+        assert!(
+            loaded.boundary_candidate_summary.get().is_none(),
+            "current artifacts deliberately defer composition-link metadata",
+        );
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        let (reloaded, stats) = boundary_candidate_ids(&loaded, &vocab);
+        assert_eq!(reloaded, fresh);
+        assert_eq!(stats.candidate_tokens, 2);
+    }
+
 }
