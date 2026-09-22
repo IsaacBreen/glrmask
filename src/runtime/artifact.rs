@@ -7667,14 +7667,14 @@ impl DynamicMaskVocab {
         // A fixed 64-entry limit caused long source-specialized sequences to
         // evict their expensive early masks during the warmup pass, so every
         // measured pass recomputed them. Bound by bytes instead: Llama-sized
-        // masks retain about 512 states in 8 MiB, while tiny vocabularies may
+        // masks retain about 2k states in 32 MiB, while tiny vocabularies may
         // retain more without material memory cost.
         // Opt-in bounded capacity experiment; default and key semantics unchanged.
         static CACHE_BUDGET_MIB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         let budget_mib = *CACHE_BUDGET_MIB.get_or_init(|| {
             std::env::var("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_BUDGET_MIB")
                 .ok().and_then(|s| s.parse::<usize>().ok())
-                .filter(|n| (1..=64).contains(n)).unwrap_or(8)
+                .filter(|n| (1..=64).contains(n)).unwrap_or(32)
         });
         const MIN_MASK_CACHE_ENTRIES: usize = 64;
         const MAX_MASK_CACHE_ENTRIES: usize = 4096;
