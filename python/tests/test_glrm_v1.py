@@ -1,5 +1,6 @@
 import pytest
 import glrmask
+from glrmask._glrmask import DynamicConstraint as LegacyDynamicConstraint
 
 
 def _vocab():
@@ -15,7 +16,7 @@ def _grammar():
     '''
 
 
-@pytest.mark.parametrize("constraint_type", [glrmask.Constraint, glrmask.DynamicConstraint])
+@pytest.mark.parametrize("constraint_type", [glrmask.Constraint, LegacyDynamicConstraint])
 def test_named_external_terminal_binding(constraint_type):
     constraint = constraint_type.from_glrm_grammar(
         _grammar(), _vocab(), bindings={"END": [77, 78]}

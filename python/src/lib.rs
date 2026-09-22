@@ -816,6 +816,15 @@ impl PyConstraint {
         subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
         bindings: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
+        // Compatibility-only constructor. Preserve two historical behaviors
+        // intentionally absent from the final public Grammar API:
+        // - unresolved grammar slots may be returned in an open Constraint;
+        // - exact special IDs may lie outside the byte vocabulary.
+        //
+        // Compile the parent locally with those raw token bindings, then use
+        // the exact dynamic late-linker for supplied children. This also handles
+        // nullable children without reviving the old explicitly-static builder
+        // composition path.
         let mut builder = glrmask::ConstraintSpec::builder(
             glrmask::Grammar::glrm(glrm_source),
             &vocab.inner,
@@ -826,21 +835,21 @@ impl PyConstraint {
                 .bind_token(name, token_ids)
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
         }
-        if let Some(subgrammars) = subgrammars {
-            for (name, child) in subgrammars {
-                let child = child.borrow(py);
-                builder = builder
-                    .bind_grammar(name, Arc::clone(&child.inner))
-                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            }
-        }
         let spec = builder
             .build()
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        Self::from_constraint_result(
-            spec.compile(),
-            vocab,
-        )
+        let mut constraint = spec
+            .compile()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if let Some(subgrammars) = subgrammars {
+            for (name, child) in subgrammars {
+                let child = child.borrow(py);
+                constraint = constraint
+                    .bind_grammar_dynamic_boundary(name, Arc::clone(&child.inner))
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+            }
+        }
+        Self::from_constraint_result(Ok::<_, glrmask::Error>(constraint), vocab)
     }
 
     #[staticmethod]
@@ -2047,11 +2056,8 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "ExactTokens",
             "Optimization",
             "Vocab",
-            "VocabPartition",
             "Constraint",
             "ConstraintState",
-            "DynamicConstraint",
-            "DynamicConstraintState",
             "_internal",
         ],
     )?;

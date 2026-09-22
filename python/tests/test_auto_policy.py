@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 import glrmask
+import glrmask.auto as auto
 
 
 def test_auto_policy_selects_all_three_tiers() -> None:
@@ -25,9 +26,9 @@ def test_auto_policy_selects_all_three_tiers() -> None:
             for i in range(60)
         },
     }
-    assert glrmask.select_json_schema_auto_tier(o1) == "o1"
-    assert glrmask.select_json_schema_auto_tier(o2) == "o2"
-    assert glrmask.select_json_schema_auto_tier(o3) == "o3"
+    assert auto.select_json_schema_auto_tier(o1) == "o1"
+    assert auto.select_json_schema_auto_tier(o2) == "o2"
+    assert auto.select_json_schema_auto_tier(o3) == "o3"
 
 
 def test_auto_constraint_roundtrip_preserves_selected_tier() -> None:
@@ -40,9 +41,9 @@ def test_auto_constraint_roundtrip_preserves_selected_tier() -> None:
             "z": {"type": "number"},
         },
     }
-    constraint = glrmask.AutoConstraint.from_json_schema(schema, vocab)
+    constraint = auto.AutoConstraint.from_json_schema(schema, vocab)
     assert constraint.selected_tier == "o1"
-    restored = glrmask.AutoConstraint.load(constraint.save(), vocab)
+    restored = auto.AutoConstraint.load(constraint.save(), vocab)
     assert restored.selected_tier == constraint.selected_tier
     assert restored.mask_len() == constraint.mask_len()
 
@@ -64,14 +65,12 @@ def test_auto_shape_uses_fit_corpus_schema_normalization() -> None:
             for i in range(200)
         },
     }
-    shape = glrmask.json_schema_auto_shape(schema)
+    shape = auto.json_schema_auto_shape(schema)
     assert shape.properties == 0
     assert shape.max_length == 0
 
 
 def test_auto_selector_short_circuits_obvious_o3_without_normalized_copy(monkeypatch) -> None:
-    import glrmask.auto as auto
-
     schema = {
         "type": "object",
         "properties": {

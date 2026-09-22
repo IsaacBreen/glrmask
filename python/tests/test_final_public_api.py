@@ -9,6 +9,27 @@ def vocab():
     return glrmask.Vocab.from_id_to_bytes({0: b'a', 1: b'b', 7: b'a', 8: b'', 63: b''})
 
 
+def test_top_level_surface_hides_engine_and_experimental_policy_types():
+    for name in [
+        "Grammar",
+        "Module",
+        "ExactToken",
+        "ExactTokens",
+        "Optimization",
+        "Vocab",
+        "Constraint",
+        "ConstraintState",
+    ]:
+        assert hasattr(glrmask, name), name
+    for name in [
+        "DynamicConstraint",
+        "DynamicConstraintState",
+        "VocabPartition",
+        "AutoConstraint",
+    ]:
+        assert not hasattr(glrmask, name), name
+
+
 def test_json_schema_constructor_accepts_text_and_objects():
     v = glrmask.Vocab.from_id_to_bytes({0: b'1', 1: b'2'})
     for schema in ['{"const":1}', {'const': 1}]:
