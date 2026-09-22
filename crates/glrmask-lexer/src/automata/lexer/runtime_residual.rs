@@ -5281,6 +5281,63 @@ impl VirtualResidualRuntime {
 
     }
 
+    /// Upper bound on complete atoms consumed before this residual must use
+    /// its literal closing suffix. The atom language must coincide with one
+    /// body code word, and must be unable to start that suffix. Unlike a
+    /// containment radius, this is a negative certificate: longer whole-atom
+    /// words cannot remain in the terminal or finalize it and change parser.
+    pub(super) fn safe_atom_length_upper_bound(
+        &self,
+        state: u32,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_accepting: &[bool],
+        slice_can_reach_accepting: &[bool],
+    ) -> Option<u32> {
+        if slice_class_count == 0 || slice_class_count > 256
+            || slice_start as usize >= slice_accepting.len()
+            || slice_accepting.len() != slice_can_reach_accepting.len()
+            || slice_transitions.len() != slice_accepting.len().checked_mul(slice_class_count)?
+            || slice_accepting[slice_start as usize]
+            || slice_byte_to_class.iter().any(|&x| x as usize >= slice_class_count)
+        { return None; }
+        let mut store = self.store.lock().unwrap();
+        let coordinate = self.oracle_coordinate_for_state_locked(&store, state)?;
+        let BoundedCodeEnvelopeState::Body { completed, body_state: 0 } = coordinate.envelope
+        else { return None; };
+        let oracle = store.liveness_oracle.as_ref()?;
+        let closing_first = *oracle.suffix.first()?;
+        let next = slice_transitions[(slice_start as usize)*slice_class_count
+            + slice_byte_to_class[closing_first as usize] as usize];
+        if slice_can_reach_accepting.get(next as usize).copied().unwrap_or(false) {
+            return None;
+        }
+        let remaining = oracle.max.checked_sub(completed)?;
+        let fingerprint = {
+            let mut hash = rustc_hash::FxHasher::default();
+            slice_start.hash(&mut hash);
+            slice_class_count.hash(&mut hash);
+            slice_byte_to_class.hash(&mut hash);
+            slice_transitions.hash(&mut hash);
+            slice_accepting.hash(&mut hash);
+            slice_can_reach_accepting.hash(&mut hash);
+            hash.finish()
+        };
+        let exact_atom = if let Some(&v) = store.slice_atom_body_exact_cache.get(&fingerprint) {
+            v
+        } else {
+            let v = store.liveness_oracle.as_ref()?.slice_atom_is_exact_body_code(
+                slice_start, slice_class_count, slice_byte_to_class, slice_transitions,
+                slice_accepting, slice_can_reach_accepting,
+            );
+            store.slice_atom_body_exact_cache.insert(fingerprint, v);
+            v
+        };
+        exact_atom.then_some(u32::try_from(remaining).unwrap_or(u32::MAX))
+    }
+
     pub(super) fn parser_transparent_byte_dfa_repeat_radius(
         &self,
         state: u32,

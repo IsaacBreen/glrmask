@@ -11081,6 +11081,25 @@ impl Tokenizer {
             )
     }
 
+    /// Exact whole-atom length ceiling for one virtual residual, if its
+    /// finite code envelope and closing suffix establish that certificate.
+    #[doc(hidden)]
+    pub fn virtual_residual_safe_atom_length_upper_bound(
+        &self,
+        state: u32,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_accepting: &[bool],
+        slice_can_reach_accepting: &[bool],
+    ) -> Option<u32> {
+        self.virtual_residual_runtime_for_state(state)?.safe_atom_length_upper_bound(
+            state, slice_start, slice_class_count, slice_byte_to_class,
+            slice_transitions, slice_accepting, slice_can_reach_accepting,
+        )
+    }
+
     #[doc(hidden)]
     pub fn virtual_residual_parser_transparent_byte_dfa_repeat_radius(
         &self,

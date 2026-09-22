@@ -5518,6 +5518,81 @@ fn try_full_walk_mask_with_table_from_initial<
             llg_master_decision = Some(decision);
         }
     }
+    // Certify an upper bound separately from the positive safe radius. A
+    // successful lower-radius proof alone NEVER licenses rejecting long tokens.
+    // Every source in this one exact root's epsilon closure must have a finite
+    // body envelope that cannot finish its terminal on a safe-string atom.
+    static SAFE_ENVELOPE_UPPER_ENABLED: OnceLock<bool> = OnceLock::new();
+    let mut safe_envelope_upper = if *SAFE_ENVELOPE_UPPER_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_EXPERIMENT_SAFE_ENVELOPE_UPPER").is_some()
+    }) && HOT_SINGLE_ROOT && root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed()
+        && vocab.llg_master_trie().is_some()
+        && !vocab.is_grammar_quotiented()
+    {
+        (|| -> Option<u16> {
+            let source = root_branches[0].exact_tokenizer_state?;
+            let tok = &state.constraint.tokenizer;
+            let slice = vocab.llg_slice_by_cache_id(LLG_SAFE_PLUS_SLICE as u32)?;
+            let dfa = slice.dfa();
+            let mut upper = None::<u32>;
+            for raw in tok.singleton_epsilon_closure(source).iter().copied() {
+                // Pure structural epsilon nodes add no consuming behavior.
+                if tok.state_has_epsilon_transitions(raw)
+                    && tok.transitions_from(raw).next().is_none()
+                    && tok.matched_terminal_bitset(raw).is_empty()
+                {
+                    continue;
+                }
+                let bound = tok.virtual_residual_safe_atom_length_upper_bound(
+                    raw,
+                    dfa.start_state(),
+                    dfa.class_count(),
+                    dfa.byte_to_class_map(),
+                    dfa.transition_table(),
+                    dfa.accepting_map(),
+                    dfa.can_reach_accepting_map(),
+                )?;
+                upper = Some(upper.map_or(bound, |old| old.max(bound)));
+            }
+            let upper = u16::try_from(upper?).ok()?;
+            // No vocabulary token can exceed the maximum observed safe length.
+            if upper >= vocab.llg_master_max_safe_chars() {
+                return None;
+            }
+            if let Some(lower) = llg_master_decision {
+                if lower.whitespace || lower.safe_radius > upper {
+                    return None;
+                }
+            }
+            Some(upper)
+        })()
+    } else {
+        None
+    };
+    if safe_envelope_upper.is_some() && llg_master_decision.is_none() {
+        llg_master_decision = Some(LlgMasterDecision::default());
+    }
+    let safe_interval_work = |decision: LlgMasterDecision| -> Option<usize> {
+        let base = vocab.llg_master_residual_ops(decision.safe_radius, decision.whitespace)?;
+        if let Some(upper) = safe_envelope_upper {
+            let above_upper = vocab.llg_master_residual_ops(upper, decision.whitespace)?;
+            let all_safe_skipped = vocab.llg_master_residual_ops(u16::MAX, decision.whitespace)?;
+            Some(base.checked_sub(above_upper)?.checked_add(all_safe_skipped)?)
+        } else {
+            Some(base)
+        }
+    };
+    if std::env::var_os("GLRMASK_DIAG_SAFE_ENVELOPE_UPPER").is_some() {
+        eprintln!(
+            "[safe_envelope_upper] generation={} lower={:?} upper={:?} work={:?}",
+            state.generation,
+            llg_master_decision.map(|v| v.safe_radius),
+            safe_envelope_upper,
+            llg_master_decision.and_then(safe_interval_work)
+        );
+    }
+
     // Exact master proofs are not automatically profitable. Selecting the
     // partitioned master trie also abandons the optimized ordinary-trie hot
     // lane; for small bounded radii the residual master walk can be comparable
@@ -5529,8 +5604,7 @@ fn try_full_walk_mask_with_table_from_initial<
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(500);
         let ordinary_ops = trie.full_walk_ops().len();
-        let profitable = vocab
-            .llg_master_residual_ops(decision.safe_radius, decision.whitespace)
+        let profitable = safe_interval_work(decision)
             .is_some_and(|residual_ops| {
                 residual_ops.saturating_mul(1000)
                     <= ordinary_ops.saturating_mul(max_permille)
@@ -5543,6 +5617,9 @@ fn try_full_walk_mask_with_table_from_initial<
         if !profitable {
             llg_master_decision = None;
         }
+    }
+    if llg_master_decision.is_none() {
+        safe_envelope_upper = None;
     }
     let trie = llg_master_decision
         .and_then(|_| vocab.llg_master_trie())
@@ -6268,8 +6345,14 @@ fn try_full_walk_mask_with_table_from_initial<
                 let root_slot = partition_root_slot;
                 partition_root_slot += 1;
                 if let Some(class) = trie.root_layout_class(root_slot) {
-                    let master_skip = llg_master_decision
-                        .is_some_and(|decision| decision.admits_root_class(class));
+                    let master_skip = llg_master_decision.is_some_and(|decision| {
+                        decision.admits_root_class(class)
+                            || safe_envelope_upper.is_some_and(|upper| {
+                                let count =
+                                    crate::runtime::dynamic_mask_llg_master_safe_chars(class);
+                                count != 0 && count > upper
+                            })
+                    });
                     if master_skip {
                         super::full_walk_skip_admitted_subtree_generic(
                             trie,
