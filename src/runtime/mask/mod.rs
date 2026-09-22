@@ -2052,6 +2052,45 @@ mod tests {
             .is_some_and(|word| word & (1u32 << (token % 32)) != 0)
     }
 
+    #[test]
+    fn component_mask_word_copy_matches_exact_membership_dense_sparse_and_specials() {
+        // Dense prefixes ending on and between word boundaries; sparse holes;
+        // byte aliases; out-of-vocabulary specials; and longer output buffers.
+        let vocabularies = [
+            (0..2).collect::<Vec<u32>>(),
+            (0..32).collect::<Vec<u32>>(),
+            (0..35).collect::<Vec<u32>>(),
+            vec![0, 3, 31, 32, 65, 96],
+        ];
+        for ids in vocabularies {
+            let vocab = Vocab::new(ids.iter().map(|&id| (id, b"a".to_vec())).collect());
+            let original = crate::ConstraintSpec::builder(
+                Grammar::glrm("glrm 1; start document; extern token SPECIAL; nt document = \"a\" | SPECIAL;"),
+                &vocab,
+            ).unwrap().bind_token("SPECIAL", [70, 130]).unwrap().build().unwrap().compile().unwrap();
+            let loaded = Constraint::load(original.save()).unwrap();
+            for constraint in [&original, &loaded] {
+                let state = constraint.start();
+                for seed in [0u32, 0x5555_5555, 0xffff_ffff] {
+                    let mut actual = vec![seed; constraint.mask_len() + 2];
+                    let mut expected = actual.clone();
+                    let source: Vec<_> = (0..actual.len() + 1)
+                        .map(|i| if seed == 0 { u32::MAX } else { seed.rotate_left(i as u32) })
+                        .collect();
+                    for (word, (&bits, output)) in source.iter().zip(&mut expected).enumerate() {
+                        for bit in 0..32 {
+                            if bits & (1u32 << bit) != 0 && state.knows_token_id(word as u32 * 32 + bit) {
+                                *output |= 1u32 << bit;
+                            }
+                        }
+                    }
+                    state.or_segmented_component_mask(&mut actual, &source);
+                    assert_eq!(actual, expected, "ids={ids:?}, seed={seed}");
+                }
+            }
+        }
+    }
+
 
     fn exact_start_trigger_contains(constraint: &Constraint, token: u32) -> bool {
         let crate::runtime::BoundaryTrigger::Exact(dwa) = &constraint.boundary_trigger else {
@@ -3776,12 +3815,36 @@ impl<'a> ConstraintState<'a> {
         // token-ID space, so never OR those private IDs straight through into
         // the caller-visible mask.  Intersect with the outer constraint's
         // actual token universe while copying set bits.
+        // Most model vocabularies have exactly the byte IDs 0..N. Prove that
+        // from the existing immutable index: N distinct nonnegative IDs with
+        // maximum N-1 leave no holes. No vocabulary scan, derived table or
+        // composition-build work is needed. Copy this proven prefix with the
+        // same word-wise OR used by the ordinary mask path, and retain exact
+        // pointwise membership for sparse IDs / private-special-token tails.
+        let (byte_count, max_byte_id) = self.constraint.packed_token_bytes.as_ref()
+            .map(|packed| (packed.len(), packed.max_token_id()))
+            .unwrap_or_else(|| (
+                self.constraint.token_bytes.len(),
+                self.constraint.token_bytes.last_key_value().map(|(&id, _)| id),
+            ));
+        let dense_byte_count = if byte_count != 0
+            && max_byte_id.is_some_and(|id| u64::from(id) + 1 == byte_count as u64)
+        { byte_count } else { 0 };
+        let full_words = (dense_byte_count / 32).min(output.len()).min(component_mask.len());
+        for (target, &source) in output[..full_words].iter_mut().zip(&component_mask[..full_words]) {
+            *target |= source;
+        }
         for (word_index, (&source_word, target_word)) in component_mask
             .iter()
             .zip(output.iter_mut())
             .enumerate()
+            .skip(full_words)
         {
-            let mut remaining = source_word;
+            let known_prefix = if word_index == dense_byte_count / 32 && dense_byte_count % 32 != 0 {
+                (1u32 << (dense_byte_count % 32)) - 1
+            } else { 0 };
+            *target_word |= source_word & known_prefix;
+            let mut remaining = source_word & !*target_word;
             while remaining != 0 {
                 let bit = remaining.trailing_zeros();
                 let token_id = word_index as u32 * 32 + bit;
@@ -4370,6 +4433,10 @@ impl<'a> ConstraintState<'a> {
             component_times.push(component_started_at.map_or(0, elapsed_ns));
         }
 
+        if let Some(mut reusable) = component_buf.take() {
+            reusable.clear();
+            self.mask_scratch.lock().unwrap().output_buf = reusable;
+        }
         let boundary_started_at = profile.then(Instant::now);
         if !self.or_segmented_boundary_shards_mask(overlay, buf) {
             return false;
