@@ -4406,7 +4406,7 @@ impl<'a> ConstraintState<'a> {
             let shadow = ConstraintState {
                 constraint: component.constraint.as_ref(),
                 state,
-                buffers: Default::default(),
+                buffers: CommitBuffers::for_mask_only_shadow(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: {
@@ -4623,7 +4623,7 @@ impl<'a> ConstraintState<'a> {
             let shadow = ConstraintState {
                 constraint: component.constraint.as_ref(),
                 state,
-                buffers: Default::default(),
+                buffers: CommitBuffers::for_mask_only_shadow(),
                 generation: self.generation,
                 mask_cache: Mutex::new(None),
                 mask_scratch: {

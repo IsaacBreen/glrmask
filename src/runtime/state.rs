@@ -398,6 +398,13 @@ impl Default for CommitBuffers {
 }
 
 impl CommitBuffers {
+    /// Short-lived read-only mask projections never execute a token commit.
+    /// Do not construct the speculative flat-commit GSS pool for each mask.
+    /// Keep ordinary ConstraintState/commit allocation policy unchanged.
+    pub(crate) fn for_mask_only_shadow() -> Self {
+        Self::with_flat_frontier_preallocation(0)
+    }
+
     /// Finite recursive mask probes use exact queue/lexer advancement, not the
     /// speculative flat-commit pool. Other callers retain their existing pool.
     pub(crate) fn for_finite_recursive_mask() -> Self {
