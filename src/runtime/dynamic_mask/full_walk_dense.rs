@@ -1430,11 +1430,19 @@ fn precollapse_master_decision(
             // for this `(source, terminal, slice)`. Derive the candidate list
             // once and reuse it for virtual proof, quotient proof, and (for
             // safe+) the bounded-radius fallback below.
+            // Parser admission alone may include hundreds of terminals
+            // unrelated to this exact lexer source. Byte support is not a
+            // liveness certificate. Refuse impossible candidates BEFORE any
+            // per-terminal construction; this only removes an acceleration.
+            let filter_source_live = std::env::var_os(
+                "GLRMASK_EXPERIMENT_PROOF_SOURCE_LIVE_GATE",
+            ).is_some();
             let eligible = admitted
                 .iter_ones()
                 .map(|terminal| terminal as TerminalID)
                 .filter(|&terminal| {
-                    tokenizer
+                    (!filter_source_live || tokenizer.terminal_state_is_live(source, terminal))
+                        && tokenizer
                         .terminal_byte_support(terminal)
                         .is_some_and(|support| slice.slice_token_bytes().is_subset(&support))
                         && tokenizer
@@ -1543,10 +1551,26 @@ fn precollapse_master_decision(
             // consuming explicitly/prepared quotients when present, but do not
             // synthesize them online for the O2 runtime.
             if needs_quotient && !eligible.is_empty() && !vocab.is_grammar_quotiented() {
-                vocab.prepare_runtime_projected_terminal_quotients(
-                    &state.constraint.tokenizer,
-                    &safe_plus_slice.slice_token_bytes(),
-                );
+                if std::env::var_os("GLRMASK_EXPERIMENT_DEMAND_TERMINAL_PROOF").is_some() {
+                    // The admitted candidate list is already exact. Preparing all
+                    // broad terminals here puts unrelated grammar-wide work on a
+                    // single mask's cold path. Reuse the existing per-terminal
+                    // cache without changing the containment proof or its scope.
+                    for &terminal in &eligible {
+                        if prepared_slice_slot.and_then(|slot| {
+                            vocab.prepared_master_proof_result(source, slot, terminal)
+                        }).is_none() {
+                            vocab.prepare_runtime_projected_terminal_quotient(
+                                &state.constraint.tokenizer, terminal,
+                            );
+                        }
+                    }
+                } else {
+                    vocab.prepare_runtime_projected_terminal_quotients(
+                        &state.constraint.tokenizer,
+                        &safe_plus_slice.slice_token_bytes(),
+                    );
+                }
             }
 
             for &terminal in &eligible {
@@ -4572,6 +4596,7 @@ fn dense_hot_root_probe<T: FullWalkTransitionTable>(
     transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     hot_scalar: &mut FullWalkHotScalarCache,
+    certified_byte: Option<u8>,
 ) -> DenseHotRootProbe {
     if !trie.has_full_walk_root_byte_index() {
         return DenseHotRootProbe {
@@ -4592,7 +4617,16 @@ fn dense_hot_root_probe<T: FullWalkTransitionTable>(
         return probe;
     };
 
-    for raw_byte in 0u16..=255 {
+    // Experiment E: when a single certified live root byte is supplied, probe
+    // only it. Every omitted byte is lexically dead at this root lexer
+    // coordinate (single-live-root-byte proof), so it only ever populates a
+    // DEAD cache entry and can never set `prefer_pruning`. Bound the loop to
+    // that single byte so E actually performs one iteration.
+    let (raw_byte_start, raw_byte_end) = match certified_byte {
+        Some(certified) => (certified as u16, certified as u16),
+        None => (0u16, 255u16),
+    };
+    for raw_byte in raw_byte_start..=raw_byte_end {
         let byte = raw_byte as u8;
         let Some((start_op, _, _)) = trie.full_walk_root_byte_range(byte) else {
             continue;
@@ -4656,6 +4690,7 @@ fn try_dense_hot_scalar_edges<
     const POSITIVE: bool,
     const PRUNE_INTERIOR: bool,
     const OBSERVE_DENSITY: bool,
+    const BOUNDED_ROOT: bool,
 >(
     state: &ConstraintState<'_>,
     vocab: &DynamicMaskVocab,
@@ -4669,9 +4704,17 @@ fn try_dense_hot_scalar_edges<
     transitions: &T,
     parser_cache: &mut FullWalkParserCache,
     mut hot_scalar: FullWalkHotScalarCache,
+    root_range: Option<(u32, u32, usize)>,
     buf: &mut [u32],
 ) -> Result<Option<bool>, String> {
     if !trie.full_walk_all_consume() || trie.full_walk_max_parent_depth() >= 255 {
+        return Ok(None);
+    }
+    // Experiment E: a bounded walk is only ever the positive, non-observing
+    // specialization. Negative polarity would leave out-of-range (lexically
+    // dead) bits set, and observing density over a partial range would corrupt
+    // the global dense-output hint.
+    if BOUNDED_ROOT && (!POSITIVE || OBSERVE_DENSITY) {
         return Ok(None);
     }
 
@@ -4699,6 +4742,26 @@ fn try_dense_hot_scalar_edges<
     let mut token_marker_index = 0usize;
     let mut skipped_original_tokens = 0usize;
     let mut remaining_ops = walk_ops.iter();
+
+    // Experiment E bounded-root setup. This is a compile-time specialization:
+    // the legacy BOUNDED_ROOT=false monomorph keeps `remaining_ops =
+    // walk_ops.iter()` and pays no range-index branch in the edge loop. For
+    // BOUNDED_ROOT=true the iterator keeps the FULL tail (`walk_ops[start..]`,
+    // never `[start..end]`) because the skip helpers recover the absolute op
+    // index as `walk_ops.len() - remaining_ops.as_slice().len()`; a truncated
+    // slice would corrupt that global-index arithmetic.
+    let root_range_end: usize = if BOUNDED_ROOT {
+        let (start, end, marker_start) = match root_range {
+            Some(range) => range,
+            None => return Ok(None),
+        };
+        debug_assert!(start <= end);
+        token_marker_index = marker_start;
+        remaining_ops = walk_ops[start as usize..].iter();
+        end as usize
+    } else {
+        0
+    };
     let mut lexer: u8;
     let mut parser = root_parser;
     let mut boundary_parser = root_parser;
@@ -4707,7 +4770,20 @@ fn try_dense_hot_scalar_edges<
     dense_hot_refresh_liveness(&hot_scalar, boundary_row, &mut hot_liveness);
     let mut two = ((0u32, 0u32), (0u32, 0u32));
 
-    'edge_walk: while let Some(&first_op) = remaining_ops.next() {
+    'edge_walk: loop {
+        if BOUNDED_ROOT {
+            // Stop at the certified range end at each outer edge boundary. The
+            // global next-op index is derived from the full tail (see setup),
+            // and `end` aligns with a starts_edge op, so no per-byte range
+            // check is needed.
+            let next_op_index = walk_ops.len() - remaining_ops.as_slice().len();
+            if next_op_index >= root_range_end {
+                break;
+            }
+        }
+        let Some(&first_op) = remaining_ops.next() else {
+            break;
+        };
         if !first_op.starts_edge() || !first_op.consumes_byte() {
             return Ok(None);
         }
@@ -5191,6 +5267,11 @@ fn try_full_walk_mask_with_table_from_initial<
                 let admitted = parser_cache.admitted(state.constraint, root_parser_nodes[0]);
                 let mut candidates = SmallVec::<[TerminalID; 4]>::new();
                 let lexer_state = root_branches[0].tokenizer_config;
+                let filter_first_bytes = std::env::var_os(
+                    "GLRMASK_EXPERIMENT_GENERIC_MASTER_FIRST_BYTES",
+                ).is_some();
+                let first_bytes = filter_first_bytes.then(|| safe_plus.first_bytes());
+                let exact_source = root_branches[0].exact_tokenizer_state;
                 for terminal in admitted.iter_ones().map(|terminal| terminal as TerminalID) {
                     let lexer_live = transitions.future_contains(
                         lexer_scan_cache.tokenizer(),
@@ -5205,6 +5286,15 @@ fn try_full_walk_mask_with_table_from_initial<
                             .tokenizer
                             .terminal_byte_support(terminal)
                             .is_some_and(|support| safe_plus.slice_token_bytes().is_subset(&support))
+                        // A wide parser row need not imply a wide proof search.
+                        // Use the exact source's cheap first-byte necessary
+                        // condition BEFORE applying the candidate-count limit.
+                        // Unknown/virtual sources remain conservative candidates.
+                        && !first_bytes.zip(exact_source).is_some_and(|(bytes, source)| {
+                            state.constraint.tokenizer.physical_terminal_residual_covers_first_bytes(
+                                source, terminal, bytes,
+                            ) == Some(false)
+                        })
                     {
                         candidates.push(terminal);
                     }
@@ -5218,6 +5308,10 @@ fn try_full_walk_mask_with_table_from_initial<
                     .exact_tokenizer_state
                     .is_some_and(|source| vocab.has_prepared_master_prover_row(source));
                 let candidate_limit = if prepared_wide { 8 } else { 2 };
+                if std::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
+                    eprintln!("[candidate_gate] generation={} lexer={} exact={:?} candidates={} limit={} first_bytes_gate={}",
+                        state.generation, lexer_state, exact_source, candidates.len(), candidate_limit, filter_first_bytes);
+                }
                 (!candidates.is_empty() && candidates.len() <= candidate_limit)
                     .then_some(candidates)
             })
@@ -5441,6 +5535,11 @@ fn try_full_walk_mask_with_table_from_initial<
                 residual_ops.saturating_mul(1000)
                     <= ordinary_ops.saturating_mul(max_permille)
             });
+        if std::env::var_os("GLRMASK_DIAG_CANDIDATE_GATES").is_some() {
+            eprintln!("[candidate_gate_master] generation={} radius={} whitespace={} ordinary={} residual={:?} profitable={}",
+                state.generation, decision.safe_radius, decision.whitespace, ordinary_ops,
+                vocab.llg_master_residual_ops(decision.safe_radius, decision.whitespace), profitable);
+        }
         if !profitable {
             llg_master_decision = None;
         }
@@ -5533,6 +5632,65 @@ fn try_full_walk_mask_with_table_from_initial<
         }
     };
 
+    // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
+    // lexer-state coordinate so the common DFS path needs no separate kind
+    // load/store. Full-walk lexer states are bounded far below these u32
+    // sentinels by the dense-transition memory budget.
+    const FULL_WALK_LEXER_TWO_DISTINCT: u32 = u32::MAX - 4;
+    const FULL_WALK_LEXER_TWO: u32 = u32::MAX - 3;
+    const FULL_WALK_LEXER_GUARDED_PAIR: u32 = u32::MAX - 2;
+    const FULL_WALK_LEXER_MULTI: u32 = u32::MAX - 1;
+    const FULL_WALK_LEXER_DEAD: u32 = u32::MAX;
+
+    // Change D: hoist the exact single-live-root-byte scheduler above the
+    // hot-lane choice. The same exact proof (a physical root lexer coordinate
+    // with exactly one outgoing byte) now both suppresses the hot lane when its
+    // root range cannot amortize the 256-byte root probe, and drives the generic
+    // walk without recomputation. Opaque / lazy-union / virtual roots stay None
+    // and keep their previous hot-lane selection.
+    static SINGLE_BYTE_ROOT_WALK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let sparse_root_walk_enabled = *SINGLE_BYTE_ROOT_WALK_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_SINGLE_BYTE_ROOT_WALK").is_none()
+    });
+    let hoisted_root_coord = (root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed())
+        .then(|| root_branches[0].tokenizer_config);
+    let sparse_root_range = if sparse_root_walk_enabled
+        && positive_rebuild
+        && !deferred_output
+        && llg_master_decision.is_none()
+        && let Some(root_lexer) = hoisted_root_coord
+        && root_lexer < FULL_WALK_LEXER_TWO_DISTINCT
+        && root_lexer < lexer_scan_cache.tokenizer().num_states()
+        && trie.node(0).token_id.is_none()
+        && trie.has_full_walk_root_byte_index()
+    {
+        let mut transitions = lexer_scan_cache.tokenizer().transitions_from(root_lexer);
+        let first = transitions.next();
+        match (first, transitions.next()) {
+            (Some((byte, _)), None) => trie.full_walk_root_byte_range(byte),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    // Exact work of the scheduled root range (end - start): the op count the
+    // generic scheduler iterates for the single live root byte. It is NOT
+    // `remaining_ops.len()`, which also includes later sibling ranges.
+    let sparse_root_range_span = sparse_root_range
+        .map(|(start, end, _)| end.saturating_sub(start) as u64);
+    static DENSE_HOT_MIN_ROOT_OPS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let dense_hot_min_root_ops = *DENSE_HOT_MIN_ROOT_OPS.get_or_init(|| {
+        std::env::var("GLRMASK_EXPERIMENT_DENSE_HOT_MIN_ROOT_OPS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(4096)
+    });
+    // Legacy scheduling (0) and every non-scheduled root keep the hot lane; only
+    // a proved narrow root range hands the walk to the generic scheduler.
+    let dense_hot_root_profitable = sparse_root_range_span
+        .map_or(true, |span| dense_hot_min_root_ops == 0 || span >= dense_hot_min_root_ops);
+
     let dense_hot_negative_proof =
         std::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_NEGATIVE").is_some()
             && std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
@@ -5551,7 +5709,7 @@ fn try_full_walk_mask_with_table_from_initial<
         if copy_len < buf.len() {
             buf[copy_len..].fill(0);
         }
-        match try_dense_hot_scalar_edges::<_, false, true, false>(
+        match try_dense_hot_scalar_edges::<_, false, true, false, false>(
             state,
             vocab,
             trie,
@@ -5564,6 +5722,7 @@ fn try_full_walk_mask_with_table_from_initial<
             &transitions,
             &mut parser_cache,
             FullWalkHotScalarCache::new(),
+            None,
             buf,
         )? {
             Some(true) => {
@@ -5579,7 +5738,7 @@ fn try_full_walk_mask_with_table_from_initial<
         }
     }
 
-    let dense_hot_lane_eligible = std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
+    let dense_hot_lane_would = std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
         && !profile_walk
         && !profile_kernel
         && HOT_SINGLE_ROOT
@@ -5588,7 +5747,132 @@ fn try_full_walk_mask_with_table_from_initial<
         && llg_master_decision.is_none()
         && positive_rebuild
         && !deferred_output;
-    if dense_hot_lane_eligible {
+    // Change D profitability gate: same exact eligibility, narrowed by the exact
+    // root-range op span. `GLRMASK_DISABLE_DENSE_HOT_LANE` stays authoritative.
+    let dense_hot_lane_eligible = dense_hot_lane_would && dense_hot_root_profitable;
+    // (dense-hot selection diagnostic relocated below, after `e_active` is known)
+
+    // Experiment E: exact single-root-range traversal INSIDE the dense hot
+    // executor, with the root probe restricted to the certified live byte.
+    // E is gated on `dense_hot_lane_would` (NOT Change D's span profitability
+    // gate) plus a certified single-live-root-byte range. Opt-in only.
+    static DENSE_HOT_ROOT_RANGE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let dense_hot_root_range_enabled = *DENSE_HOT_ROOT_RANGE_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_EXPERIMENT_DENSE_HOT_ROOT_RANGE").is_some()
+    });
+    // TODO(root-range-certificate): a conservative `state_has_epsilon_transitions`
+    // exclusion of the certified root row was intentionally left OUT pending the
+    // parent's exact executed-row proof (Flat16/Flat32 rows copy transitions_from
+    // directly; epsilon-only states carry no byte transitions). Re-add here as a
+    // single isolated `&& !...epsilon...` term if the proof requires it.
+    let dense_hot_lane_eligible_e = dense_hot_root_range_enabled
+        && dense_hot_lane_would
+        && sparse_root_range.is_some();
+    // E's certified live byte is read from the range's first op, which must be a
+    // starts_edge / consumes_byte op at parent_depth 0 (the root-byte index is
+    // built from non-empty root edges only). Decline E to the legacy path if the
+    // invariant is not met.
+    let e_certified_byte: Option<u8> = if dense_hot_lane_eligible_e {
+        let (start, _, _) = sparse_root_range.expect("E eligibility implies a certified range");
+        let first_op = trie.full_walk_ops()[start as usize];
+        if first_op.starts_edge() && first_op.consumes_byte() && first_op.parent_depth() == 0 {
+            Some(first_op.byte())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let e_active = e_certified_byte.is_some();
+
+    // Correctness-only certification assert (off for timing; does not change
+    // executor selection). Opt-in via GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE. This
+    // runtime check is NOT a replacement for the reviewer's all-T certificate.
+    static DENSE_HOT_ROOT_RANGE_ASSERT_ENABLED: std::sync::OnceLock<bool> =
+        std::sync::OnceLock::new();
+    let dense_hot_root_range_assert = *DENSE_HOT_ROOT_RANGE_ASSERT_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE").is_some()
+    });
+    static DENSE_HOT_ROOT_RANGE_ASSERT_GENERATION: std::sync::OnceLock<Option<u64>> =
+        std::sync::OnceLock::new();
+    let dense_hot_root_range_assert_generation =
+        *DENSE_HOT_ROOT_RANGE_ASSERT_GENERATION.get_or_init(|| {
+            std::env::var("GLRMASK_ASSERT_DENSE_HOT_ROOT_RANGE_GENERATION")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+        });
+    static ROOT_RANGE_ASSERT_PRINTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if e_active && dense_hot_root_range_assert {
+        let certified = e_certified_byte.expect("e_active implies a certified byte");
+        let root_lexer = root_branches[0].tokenizer_config;
+        // Every non-certified byte must be lexically dead at this root lexer
+        // (exact executed T-cell check over all 256 bytes).
+        for raw in 0u16..=255 {
+            let b = raw as u8;
+            if b == certified {
+                continue;
+            }
+            let cell = transitions.cell(root_lexer, b);
+            assert!(
+                T::cell_is_dead(cell),
+                "root-range E: non-certified byte {} not dead at root lexer {}",
+                b,
+                root_lexer
+            );
+        }
+        // Range-bound invariants.
+        let (start, end, marker_start) = sparse_root_range.expect("E requires a range");
+        let walk_ops = trie.full_walk_ops();
+        let token_markers = vocab.full_walk_token_markers_for(trie);
+        let start = start as usize;
+        let end = end as usize;
+        assert!(start < end && end <= walk_ops.len(), "root-range E: bad bounds ({start},{end})");
+        let first_op = walk_ops[start];
+        assert!(
+            first_op.starts_edge() && first_op.consumes_byte() && first_op.parent_depth() == 0,
+            "root-range E: bad start op"
+        );
+        if end < walk_ops.len() {
+            assert!(
+                walk_ops[end].starts_edge() && walk_ops[end].parent_depth() == 0,
+                "root-range E: bad end boundary"
+            );
+        }
+        assert!(marker_start <= token_markers.len(), "root-range E: marker start out of range");
+        let should_print = dense_hot_root_range_assert_generation == Some(state.generation)
+            || !ROOT_RANGE_ASSERT_PRINTED.swap(true, std::sync::atomic::Ordering::Relaxed);
+        if should_print {
+            eprintln!(
+                "[glrmask/root_range_assert] generation={} root_lexer={} t={} range=({},{},{}) certified={} walk_ops={}",
+                state.generation, root_lexer, std::any::type_name::<T>(), start, end, marker_start, certified, walk_ops.len()
+            );
+        }
+    }
+
+    // Extended selection diagnostic (after `e_active` is known). The bounded-vs-
+    // negative choice is printed inside the executor block once the probe result
+    // is available.
+    static DENSE_HOT_SELECTION_GENERATION: std::sync::OnceLock<Option<u64>> =
+        std::sync::OnceLock::new();
+    let profile_selection = *DENSE_HOT_SELECTION_GENERATION.get_or_init(|| {
+        std::env::var("GLRMASK_PROFILE_DENSE_HOT_SELECTION_GENERATION")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+    }) == Some(state.generation);
+    if profile_selection {
+        eprintln!(
+            "[glrmask/profile][dense_hot_selection] generation={} root_lexer={:?} range_span={:?} threshold={} would_hot={} selected_hot={} e_active={}",
+            state.generation,
+            hoisted_root_coord,
+            sparse_root_range_span,
+            dense_hot_min_root_ops,
+            dense_hot_lane_would,
+            dense_hot_lane_eligible,
+            e_active,
+        );
+    }
+    if dense_hot_lane_eligible || e_active {
         let root_lexer = root_branches[0].tokenizer_config;
         let root_parser = root_parser_nodes[0];
         let mut hot_scalar = FullWalkHotScalarCache::new();
@@ -5608,38 +5892,108 @@ fn try_full_walk_mask_with_table_from_initial<
             &transitions,
             &mut parser_cache,
             &mut hot_scalar,
+            e_certified_byte,
         );
         let learned_dense = if probe.prefer_pruning {
             None
         } else {
             transitions.dense_output_hint(root_lexer)
         };
+        if profile_selection {
+            let selection = if e_active {
+                if probe.prefer_pruning {
+                    "bounded_prune"
+                } else if learned_dense == Some(true) {
+                    "negative_full"
+                } else {
+                    "bounded_positive"
+                }
+            } else if probe.prefer_pruning {
+                "prune"
+            } else if learned_dense == Some(true) {
+                "negative_full"
+            } else if learned_dense == Some(false) {
+                "positive_sparse"
+            } else {
+                "positive_observe"
+            };
+            eprintln!(
+                "[glrmask/profile][dense_hot_selection_choice] generation={} e_active={} selection={}",
+                state.generation, e_active, selection
+            );
+        }
 
-        let mut hot_scalar = Some(hot_scalar);
-        let dense_result = if probe.prefer_pruning {
-            try_dense_hot_scalar_edges::<_, true, true, false>(
-                state,
-                vocab,
-                trie,
-                root_lexer,
-                root_parser,
-                initial_lexer_state,
-                finalizer_code,
-                single_finalizer_continues,
-                lexer_scan_cache.tokenizer(),
-                &transitions,
-                &mut parser_cache,
-                hot_scalar.take().unwrap(),
-                buf,
-            )?
-        } else if learned_dense == Some(true) {
+        // The negative executor (learned dense) needs the all-admitted baseline.
+        if !probe.prefer_pruning && learned_dense == Some(true) {
             let all_words = vocab.all_original_token_words();
             let copy_len = buf.len().min(all_words.len());
             buf[..copy_len].copy_from_slice(&all_words[..copy_len]);
             if copy_len < buf.len() {
                 buf[copy_len..].fill(0);
             }
-            try_dense_hot_scalar_edges::<_, false, false, false>(
+        }
+        let mut hot_scalar = Some(hot_scalar);
+        let dense_result = if e_active {
+            // E dispatch: bounded POSITIVE traversal over the certified root
+            // byte's op range. Dense masks keep the full-vocabulary NEGATIVE
+            // executor: a bounded positive path must not leave out-of-range
+            // initially admitted bits set, and a partial walk must not
+            // reinterpret a global dense hint as range density. E never caches
+            // a partial density (OBSERVE_DENSITY=false throughout).
+            if probe.prefer_pruning {
+                try_dense_hot_scalar_edges::<_, true, true, false, true>(
+                    state,
+                    vocab,
+                    trie,
+                    root_lexer,
+                    root_parser,
+                    initial_lexer_state,
+                    finalizer_code,
+                    single_finalizer_continues,
+                    lexer_scan_cache.tokenizer(),
+                    &transitions,
+                    &mut parser_cache,
+                    hot_scalar.take().unwrap(),
+                    sparse_root_range,
+                    buf,
+                )?
+            } else if learned_dense == Some(true) {
+                try_dense_hot_scalar_edges::<_, false, false, false, false>(
+                    state,
+                    vocab,
+                    trie,
+                    root_lexer,
+                    root_parser,
+                    initial_lexer_state,
+                    finalizer_code,
+                    single_finalizer_continues,
+                    lexer_scan_cache.tokenizer(),
+                    &transitions,
+                    &mut parser_cache,
+                    hot_scalar.take().unwrap(),
+                    None,
+                    buf,
+                )?
+            } else {
+                try_dense_hot_scalar_edges::<_, true, false, false, true>(
+                    state,
+                    vocab,
+                    trie,
+                    root_lexer,
+                    root_parser,
+                    initial_lexer_state,
+                    finalizer_code,
+                    single_finalizer_continues,
+                    lexer_scan_cache.tokenizer(),
+                    &transitions,
+                    &mut parser_cache,
+                    hot_scalar.take().unwrap(),
+                    sparse_root_range,
+                    buf,
+                )?
+            }
+        } else if probe.prefer_pruning {
+            try_dense_hot_scalar_edges::<_, true, true, false, false>(
                 state,
                 vocab,
                 trie,
@@ -5652,10 +6006,28 @@ fn try_full_walk_mask_with_table_from_initial<
                 &transitions,
                 &mut parser_cache,
                 hot_scalar.take().unwrap(),
+                None,
+                buf,
+            )?
+        } else if learned_dense == Some(true) {
+            try_dense_hot_scalar_edges::<_, false, false, false, false>(
+                state,
+                vocab,
+                trie,
+                root_lexer,
+                root_parser,
+                initial_lexer_state,
+                finalizer_code,
+                single_finalizer_continues,
+                lexer_scan_cache.tokenizer(),
+                &transitions,
+                &mut parser_cache,
+                hot_scalar.take().unwrap(),
+                None,
                 buf,
             )?
         } else if learned_dense == Some(false) {
-            try_dense_hot_scalar_edges::<_, true, false, false>(
+            try_dense_hot_scalar_edges::<_, true, false, false, false>(
                 state,
                 vocab,
                 trie,
@@ -5668,10 +6040,11 @@ fn try_full_walk_mask_with_table_from_initial<
                 &transitions,
                 &mut parser_cache,
                 hot_scalar.take().unwrap(),
+                None,
                 buf,
             )?
         } else {
-            try_dense_hot_scalar_edges::<_, true, false, true>(
+            try_dense_hot_scalar_edges::<_, true, false, true, false>(
                 state,
                 vocab,
                 trie,
@@ -5684,6 +6057,7 @@ fn try_full_walk_mask_with_table_from_initial<
                 &transitions,
                 &mut parser_cache,
                 hot_scalar.take().unwrap(),
+                None,
                 buf,
             )?
         };
@@ -5702,15 +6076,6 @@ fn try_full_walk_mask_with_table_from_initial<
         }
     }
 
-    // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
-    // lexer-state coordinate so the common DFS path needs no separate kind
-    // load/store. Full-walk lexer states are bounded far below these u32
-    // sentinels by the dense-transition memory budget.
-    const FULL_WALK_LEXER_TWO_DISTINCT: u32 = u32::MAX - 4;
-    const FULL_WALK_LEXER_TWO: u32 = u32::MAX - 3;
-    const FULL_WALK_LEXER_GUARDED_PAIR: u32 = u32::MAX - 2;
-    const FULL_WALK_LEXER_MULTI: u32 = u32::MAX - 1;
-    const FULL_WALK_LEXER_DEAD: u32 = u32::MAX;
     let mut stack_lexer = [FULL_WALK_LEXER_DEAD; 256];
     let mut stack_parser = [0u32; 256];
     let mut stack_two = [((0u32, 0u32), (0u32, 0u32)); 256];
@@ -5802,38 +6167,10 @@ fn try_full_walk_mask_with_table_from_initial<
     let mut guarded_self_loop_bytes = [0u64; 4];
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
     let mut partition_root_slot = 0usize;
-    // Exact single-byte root scheduler. For a positive-rebuild
-    // mask, lexically dead root-byte subtrees contribute no output mutations.
-    // When the execution root is one scalar state with exactly one outgoing
-    // byte, enter that vocabulary root range directly instead of probing every
-    // other root byte only to kill its subtree. Keep this deliberately narrow:
-    // it is the common cheap-mask shape where the skipped root probes are a
-    // material fraction of total work, and it adds no multi-range scheduling
-    // machinery to broader states.
-    static SINGLE_BYTE_ROOT_WALK_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let sparse_root_walk_enabled = *SINGLE_BYTE_ROOT_WALK_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_DISABLE_SINGLE_BYTE_ROOT_WALK").is_none()
-    });
-    let sparse_root_range = if sparse_root_walk_enabled
-        && positive_rebuild
-        && !deferred_output
-        && llg_master_decision.is_none()
-        && root_branches.len() == 1
-        && stack_lexer[0] < FULL_WALK_LEXER_TWO_DISTINCT
-        && stack_lexer[0] < tokenizer.num_states()
-        && trie.node(0).token_id.is_none()
-        && trie.has_full_walk_root_byte_index()
-    {
-        let root_lexer = stack_lexer[0];
-        let mut transitions = tokenizer.transitions_from(root_lexer);
-        let first = transitions.next();
-        match (first, transitions.next()) {
-            (Some((byte, _)), None) => trie.full_walk_root_byte_range(byte),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    // `sparse_root_range` was computed above (Change D) from the same exact
+    // single-live-root-byte proof and is reused unchanged here. It stays a
+    // `walk_ops[start..]` iterator with `range_end` stopping logic because the
+    // skip helpers derive absolute offsets from `walk_ops.len() - remaining.len()`.
     let sparse_root_range_end = sparse_root_range.map_or(0, |range| range.1);
     let mut remaining_ops = if let Some((start, _, marker_start)) = sparse_root_range {
         token_marker_index = marker_start;

@@ -3702,6 +3702,27 @@ fn try_full_walk_mask_with_table<
                     {
                         return false;
                     }
+                    if std::env::var_os("GLRMASK_EXPERIMENT_DEMAND_TERMINAL_PROOF").is_some()
+                        && !vocab.is_grammar_quotiented()
+                    {
+                        // This path already consumes projected bounded-radius
+                        // proofs below, but must first prepare the relevant
+                        // terminal. Positive containment is the existing exact
+                        // quotient certificate. False/unknown never admits bits:
+                        // false proceeds to bounded radius, None to old fallback.
+                        vocab.prepare_runtime_projected_terminal_quotient(
+                            &state.constraint.tokenizer, terminal,
+                        );
+                        if let Some(result) = vocab.projected_terminal_slice_contained(
+                            terminal, source, slice.cache_id(), slice.dfa(),
+                        ) {
+                            if std::env::var_os("GLRMASK_DIAG_DEMAND_TERMINAL_PROOF").is_some() {
+                                eprintln!("[demand_terminal_proof] generation={} source={} terminal={} slice={} contained={}",
+                                    state.generation, source, terminal, slice.cache_id(), result);
+                            }
+                            return result;
+                        }
+                    }
                     if let Some(cached) =
                         vocab.cached_direct_slice_contained(terminal, lexer_state, cache_id)
                     {

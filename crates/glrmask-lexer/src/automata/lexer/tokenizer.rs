@@ -12119,6 +12119,65 @@ impl Tokenizer {
         self.scalar_physical_component_states(root).is_some()
     }
 
+    /// Discover a complete small physical component, or decline before large
+    /// traversal/quotient scratch allocation. Each distinct state is queued at
+    /// most once; byte edges are charged before visiting their targets.
+    fn scalar_physical_component_states_bounded(
+        &self,
+        root: u32,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<Vec<u32>> {
+        if state_limit == 0 { return None; }
+        let mut seen = FxHashSet::<u32>::default();
+        let mut pending = vec![root];
+        seen.insert(root);
+        let mut transition_work = 0usize;
+        while let Some(state) = pending.pop() {
+            if state >= self.num_states()
+                || self.state_is_virtual_runtime(state)
+                || self.state_has_epsilon_transitions(state)
+            { return None; }
+            for (_, target) in self.transitions_from(state) {
+                if transition_work >= transition_limit { return None; }
+                transition_work += 1;
+                if !seen.contains(&target) {
+                    if seen.len() >= state_limit { return None; }
+                    seen.insert(target);
+                    pending.push(target);
+                }
+            }
+        }
+        let mut states = seen.into_iter().collect::<Vec<_>>();
+        states.sort_unstable();
+        Some(states)
+    }
+
+    /// An optional acceleration only: None means use the normal exact walker.
+    /// Importantly there is NO expression-compiler or retained-coordinate
+    /// fallback here: those would defeat the cold-construction ceiling.
+    /// Accepted components use the unchanged exact quotient constructor.
+    #[doc(hidden)]
+    pub fn build_terminal_projected_quotient_for_containment_bounded(
+        &self,
+        terminal: TerminalID,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<TerminalProjectedQuotient> {
+        // The existing constructor creates a source-coordinate map. Bound
+        // this independent allocation too, even for a tiny selected component.
+        const MAX_SOURCE_MAP_STATES: u32 = 1 << 20;
+        if terminal >= self.num_terminals
+            || state_limit == 0
+            || self.num_states() > MAX_SOURCE_MAP_STATES
+        { return None; }
+        let root = self.terminal_dispatch_root_candidate(terminal)?;
+        let states = self.scalar_physical_component_states_bounded(
+            root, state_limit, transition_limit,
+        )?;
+        self.terminal_live_subautomaton_quotient_from_component(terminal, &states)
+    }
+
     fn scalar_physical_component_states(&self, root: u32) -> Option<Vec<u32>> {
         let mut seen = FxHashSet::<u32>::default();
         let mut pending = vec![root];
@@ -14530,6 +14589,46 @@ mod tests {
             num_terminals,
             Some(Arc::from(exprs.into_boxed_slice())),
         )
+    }
+
+
+    #[test]
+    fn coldcap_component_limits_are_exact_and_cycles_are_deduplicated() {
+        let t = Tokenizer::from_parts(one_byte_component(b'a'), 1, None);
+        let full = t.scalar_physical_component_states(0).unwrap();
+        assert_eq!(full, vec![0, 1]);
+        assert!(t.scalar_physical_component_states_bounded(0, 0, 10).is_none());
+        assert!(t.scalar_physical_component_states_bounded(0, 1, 10).is_none());
+        assert!(t.scalar_physical_component_states_bounded(0, 2, 0).is_none());
+        assert_eq!(t.scalar_physical_component_states_bounded(0, 2, 1), Some(full));
+        let looped = tokenizer_from_exprs(vec![plus(bytes(&[b'a', b'b', b'c']))]);
+        let root = looped.start_state();
+        let states = looped.scalar_physical_component_states(root).unwrap();
+        let edges = states.iter().map(|&s| looped.transitions_from(s).count()).sum();
+        assert_eq!(looped.scalar_physical_component_states_bounded(root, states.len(), edges), Some(states));
+    }
+
+    #[test]
+    fn coldcap_accepted_quotient_is_identical_to_unbounded_constructor() {
+        let t = Tokenizer::from_parts(one_byte_component(b'a'), 1, None);
+        let old = t.build_terminal_projected_quotients_for_containment_candidates(&[0]);
+        let new = t.build_terminal_projected_quotient_for_containment_bounded(0, 2, 1).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(new.full_states, old[0].1.full_states);
+        assert_eq!(new.projected_states, old[0].1.projected_states);
+        assert_eq!(new.byte_to_class, old[0].1.byte_to_class);
+        assert_eq!(new.class_representatives, old[0].1.class_representatives);
+        assert_eq!(new.class_targets, old[0].1.class_targets);
+        assert!(t.build_terminal_projected_quotient_for_containment_bounded(0, 1, 1).is_none());
+        assert!(t.build_terminal_projected_quotient_for_containment_bounded(7, 2, 1).is_none());
+    }
+
+    #[test]
+    fn coldcap_rejects_epsilon_component_without_partial_certificate() {
+        let mut dfa = one_byte_component(b'a');
+        dfa.add_epsilon_transition(0, 1);
+        let t = Tokenizer::from_parts(dfa, 1, None);
+        assert!(t.scalar_physical_component_states_bounded(0, 100, 1000).is_none());
     }
 
     fn one_byte_component(byte: u8) -> DFA {

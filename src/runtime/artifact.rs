@@ -6947,12 +6947,26 @@ impl DynamicMaskVocab {
             }
         }
 
-        let built = source
-            .build_terminal_projected_quotients_for_containment_candidates(&[terminal])
-            .into_iter()
-            .find_map(|(candidate, quotient)| {
-                (candidate == terminal).then(|| Arc::new(quotient))
-            });
+        let state_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_STATE_CAP")
+            .ok().and_then(|value| value.parse::<usize>().ok());
+        let built = if let Some(state_cap) = state_cap {
+            let edge_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_EDGE_CAP")
+                .ok().and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| state_cap.saturating_mul(128));
+            let quotient = source.build_terminal_projected_quotient_for_containment_bounded(
+                terminal, state_cap, edge_cap,
+            );
+            if std::env::var_os("GLRMASK_DIAG_DEMAND_PROOF_CAP").is_some() {
+                eprintln!("[demand_proof_cap] terminal={} state_cap={} edge_cap={} built={}",
+                    terminal, state_cap, edge_cap, quotient.is_some());
+            }
+            quotient.map(Arc::new)
+        } else {
+            source.build_terminal_projected_quotients_for_containment_candidates(&[terminal])
+                .into_iter().find_map(|(candidate, quotient)| {
+                    (candidate == terminal).then(|| Arc::new(quotient))
+                })
+        };
         self.runtime_projected_terminal_quotient_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -7592,6 +7606,18 @@ impl DynamicMaskVocab {
     }
 
     fn dynamic_mask_cache_payload(&self, mask: &[u32]) -> DynamicMaskCachePayload {
+        // G: the entry budget already charges every payload its full dense
+        // size. Direct storage therefore stays within that existing payload
+        // bound, at the cost of giving up sparse working-set compression.
+        // Avoid the two classification scans plus sparse materialization scan.
+        // Exact word-for-word copy; key matching, eviction, and admission are
+        // unchanged. Experiment only until representative measurements pass.
+        static DIRECT_COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DIRECT_COPY.get_or_init(|| {
+            std::env::var_os("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_DENSE_ONLY").is_some()
+        }) {
+            return DynamicMaskCachePayload::Dense(Arc::from(mask));
+        }
         let baseline = self.all_original_token_words();
         let nonzero_count = mask.iter().filter(|&&word| word != 0).count();
         let baseline_diff_count = mask
@@ -7642,11 +7668,17 @@ impl DynamicMaskVocab {
         // measured pass recomputed them. Bound by bytes instead: Llama-sized
         // masks retain about 512 states in 8 MiB, while tiny vocabularies may
         // retain more without material memory cost.
-        const MASK_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+        // Opt-in bounded capacity experiment; default and key semantics unchanged.
+        static CACHE_BUDGET_MIB: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let budget_mib = *CACHE_BUDGET_MIB.get_or_init(|| {
+            std::env::var("GLRMASK_EXPERIMENT_DYNAMIC_MASK_CACHE_BUDGET_MIB")
+                .ok().and_then(|s| s.parse::<usize>().ok())
+                .filter(|n| (1..=64).contains(n)).unwrap_or(8)
+        });
         const MIN_MASK_CACHE_ENTRIES: usize = 64;
         const MAX_MASK_CACHE_ENTRIES: usize = 4096;
         let mask_bytes = mask.len().saturating_mul(std::mem::size_of::<u32>()).max(1);
-        let max_entries = (MASK_CACHE_BUDGET_BYTES / mask_bytes)
+        let max_entries = ((budget_mib * 1024 * 1024) / mask_bytes)
             .clamp(MIN_MASK_CACHE_ENTRIES, MAX_MASK_CACHE_ENTRIES);
         let mut cache = self
             .mask_cache
