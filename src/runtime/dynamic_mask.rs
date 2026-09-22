@@ -32,6 +32,7 @@ use super::artifact::{
 use super::state::ConstraintState;
 
 mod full_walk_dense;
+mod recursive_provider;
 
 type ParserStacks = LeveledGSS<u32, ()>;
 
@@ -468,6 +469,14 @@ struct RecursiveFullWalkTransitions<'a> {
 
 impl<'a> RecursiveFullWalkTransitions<'a> {
     fn new(constraint: &'a Constraint) -> Option<Self> {
+        let provider = Self::new_for_parser_routing(constraint)?;
+        provider.leaves.iter().all(|leaf| {
+            !leaf.constraint.tokenizer_has_epsilon_transitions
+                && !leaf.constraint.tokenizer.has_any_virtual_runtime()
+        }).then_some(provider)
+    }
+
+    fn new_for_parser_routing(constraint: &'a Constraint) -> Option<Self> {
         let layout = constraint.recursive_parser_layout().ok().flatten()?;
         if layout.leaves.is_empty() {
             return None;
@@ -475,9 +484,6 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
         let mut leaves = SmallVec::new();
         for leaf_index in 0..layout.leaves.len() {
             let leaf = constraint.recursive_leaf_constraint(leaf_index)?;
-            if leaf.tokenizer_has_epsilon_transitions || leaf.tokenizer.has_any_virtual_runtime() {
-                return None;
-            }
             leaves.push(RecursiveFullWalkLeaf {
                 constraint: leaf,
                 lexer_offset: layout.leaf_tokenizer_state_offsets[leaf_index],
@@ -881,6 +887,90 @@ fn full_walk_hot_persist_put(key: (usize, u64), hot: FullWalkHotScalarCache) {
     FULL_WALK_HOT_PERSIST_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, hot);
     });
+}
+
+impl<'a, 'b> FullWalkConfigTransitions<'a, 'b> {
+    fn new(cache: &'a mut DynamicNfaScanCache<'b>, max_token_len: usize, generation: u64) -> Self {
+    let profile = cache.profile_transition_work;
+    let (
+        step_calls_start,
+        step_cache_hits_start,
+        step_cache_misses_start,
+        physical_states_scanned_start,
+        intern_calls_start,
+        intern_hits_start,
+        intern_new_start,
+    ) = (
+        cache.profile_step_calls,
+        cache.profile_step_cache_hits,
+        cache.profile_step_cache_misses,
+        cache.profile_physical_states_scanned,
+        cache.profile_intern_calls,
+        cache.profile_intern_hits,
+        cache.profile_intern_new,
+    );
+    let hot_enabled = env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE", true);
+    let hot_persist_key = (hot_enabled
+        && env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST", false))
+        .then(|| {
+            (
+                cache.tokenizer() as *const Tokenizer as usize,
+                generation,
+            )
+        });
+    let hot_scalar = if hot_enabled {
+        hot_persist_key
+            .and_then(full_walk_hot_persist_take)
+            .unwrap_or_else(FullWalkHotScalarCache::new)
+    } else {
+        FullWalkHotScalarCache::new()
+    };
+    Self {
+        cache: cache,
+        error: None,
+        raw_cell_rows: Vec::new(),
+        hot_scalar,
+        hot_enabled,
+        hot_persist_key,
+        raw_target_cells: Vec::new(),
+        virtual_dense_row_by_raw_state: Vec::new(),
+        virtual_dense_row_ids: FxHashMap::default(),
+        virtual_dense_rows: Vec::new(),
+        virtual_dense_cell_cache_enabled: dynamic_virtual_dense_cell_cache_experiment_enabled(),
+        profile,
+        cell_calls: 0,
+        raw_cell_hits: 0,
+        raw_cell_misses: 0,
+        physical_raw_cell_misses: 0,
+        virtual_raw_cell_misses: 0,
+        physical_raw_transition_ns: 0,
+        virtual_raw_transition_ns: 0,
+        raw_config_for_start_ns: 0,
+        raw_has_finalizer_ns: 0,
+        future_contains_calls: 0,
+        future_contains_cache: FxHashMap::default(),
+        future_contains_by_terminal: FxHashMap::default(),
+        future_contains_by_state: FxHashMap::default(),
+        future_contains_ns: 0,
+        future_intersects_calls: 0,
+        future_intersects_ns: 0,
+        single_finalizer_continues_calls: 0,
+        single_finalizer_continues_ns: 0,
+        max_raw_state_seen: 0,
+        config_cell_calls: 0,
+        step_calls_start,
+        step_cache_hits_start,
+        step_cache_misses_start,
+        physical_states_scanned_start,
+        intern_calls_start,
+        intern_hits_start,
+        intern_new_start,
+        profile_max_token_len: max_token_len,
+        profile_virtual_exact_sources: FxHashSet::default(),
+        profile_virtual_dense_sources: FxHashSet::default(),
+        profile_virtual_exact_pairs: FxHashSet::default(),
+        profile_virtual_dense_pairs: FxHashSet::default(),
+    }    }
 }
 
 impl FullWalkConfigTransitions<'_, '_> {
@@ -3286,86 +3376,9 @@ fn try_full_walk_mask(
             }
         }
         _ => {
-            let profile = lexer_scan_cache.profile_transition_work;
-            let (
-                step_calls_start,
-                step_cache_hits_start,
-                step_cache_misses_start,
-                physical_states_scanned_start,
-                intern_calls_start,
-                intern_hits_start,
-                intern_new_start,
-            ) = (
-                lexer_scan_cache.profile_step_calls,
-                lexer_scan_cache.profile_step_cache_hits,
-                lexer_scan_cache.profile_step_cache_misses,
-                lexer_scan_cache.profile_physical_states_scanned,
-                lexer_scan_cache.profile_intern_calls,
-                lexer_scan_cache.profile_intern_hits,
-                lexer_scan_cache.profile_intern_new,
+            let mut table = FullWalkConfigTransitions::new(
+                lexer_scan_cache, vocab.max_token_byte_len(), state.generation,
             );
-            let hot_enabled = env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_CACHE", true);
-            let hot_persist_key = (hot_enabled
-                && env_flag("GLRMASK_EXPERIMENT_HOT_SCALAR_PERSIST", false))
-                .then(|| {
-                    (
-                        lexer_scan_cache.tokenizer() as *const Tokenizer as usize,
-                        state.generation,
-                    )
-                });
-            let hot_scalar = if hot_enabled {
-                hot_persist_key
-                    .and_then(full_walk_hot_persist_take)
-                    .unwrap_or_else(FullWalkHotScalarCache::new)
-            } else {
-                FullWalkHotScalarCache::new()
-            };
-            let mut table = FullWalkConfigTransitions {
-                cache: lexer_scan_cache,
-                error: None,
-                raw_cell_rows: Vec::new(),
-                hot_scalar,
-                hot_enabled,
-                hot_persist_key,
-                raw_target_cells: Vec::new(),
-                virtual_dense_row_by_raw_state: Vec::new(),
-                virtual_dense_row_ids: FxHashMap::default(),
-                virtual_dense_rows: Vec::new(),
-                virtual_dense_cell_cache_enabled: dynamic_virtual_dense_cell_cache_experiment_enabled(),
-                profile,
-                cell_calls: 0,
-                raw_cell_hits: 0,
-                raw_cell_misses: 0,
-                physical_raw_cell_misses: 0,
-                virtual_raw_cell_misses: 0,
-                physical_raw_transition_ns: 0,
-                virtual_raw_transition_ns: 0,
-                raw_config_for_start_ns: 0,
-                raw_has_finalizer_ns: 0,
-                future_contains_calls: 0,
-                future_contains_cache: FxHashMap::default(),
-                future_contains_by_terminal: FxHashMap::default(),
-                future_contains_by_state: FxHashMap::default(),
-                future_contains_ns: 0,
-                future_intersects_calls: 0,
-                future_intersects_ns: 0,
-                single_finalizer_continues_calls: 0,
-                single_finalizer_continues_ns: 0,
-                max_raw_state_seen: 0,
-                config_cell_calls: 0,
-                step_calls_start,
-                step_cache_hits_start,
-                step_cache_misses_start,
-                physical_states_scanned_start,
-                intern_calls_start,
-                intern_hits_start,
-                intern_new_start,
-                profile_max_token_len: vocab.max_token_byte_len(),
-                profile_virtual_exact_sources: FxHashSet::default(),
-                profile_virtual_dense_sources: FxHashSet::default(),
-                profile_virtual_exact_pairs: FxHashSet::default(),
-                profile_virtual_dense_pairs: FxHashSet::default(),
-            };
             let result = if root_branches.len() == 1 {
                 try_full_walk_mask_with_table_dispatch::<_, true>(
                     state,
@@ -7533,9 +7546,9 @@ pub(crate) fn dynamic_mask_state_has_cached_result(state: &ConstraintState<'_>) 
 
 /// Execute a recursive/provider-native composition through the same strict
 /// vocabulary traversal used by ordinary dynamic masking. Only the lexer/parser
-/// coordinate adapters differ. Finite epsilon-free leaves are supported by
-/// this first lane; other recursive runtimes return false and retain the
-/// established exact recursive fallback.
+/// coordinate adapters differ. Finite epsilon-free leaves use direct mapped
+/// transitions; epsilon/virtual leaves delegate to the ordinary config lexer
+/// executor through a scoped adapter over this same vocabulary traversal.
 pub(crate) fn try_fill_recursive_mask_shared(
     state: &ConstraintState<'_>,
     buf: &mut [u32],
@@ -7544,8 +7557,16 @@ pub(crate) fn try_fill_recursive_mask_shared(
         return Ok(false);
     }
     let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) else {
-        return Ok(false);
+        return recursive_provider::fill(state, buf);
     };
+    fill_recursive_mask_using(state, buf, &mut transitions)
+}
+
+fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
+    state: &ConstraintState<'_>,
+    buf: &mut [u32],
+    transitions: &mut T,
+) -> Result<bool, String> {
     let required = state.constraint.mask_len();
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (buf, tail) = buf.split_at_mut(required);
@@ -7556,7 +7577,7 @@ pub(crate) fn try_fill_recursive_mask_shared(
     for (&lexer_state, gss) in state.state.iter() {
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             roots.push(DynamicBranch {
-                tokenizer_config: lexer_state,
+                tokenizer_config: transitions.root_state(lexer_state)?,
                 // Scoped recursive states are not source states of the outer
                 // tokenizer. Keeping this None also disables ordinary-only
                 // residual/slice proofs until provider-native proofs exist.
@@ -7581,7 +7602,7 @@ pub(crate) fn try_fill_recursive_mask_shared(
             trie,
             &roots,
             buf,
-            &mut transitions,
+            transitions,
         )
     } else {
         try_full_walk_mask_with_table_dispatch::<_, false>(
@@ -7590,7 +7611,7 @@ pub(crate) fn try_fill_recursive_mask_shared(
             trie,
             &roots,
             buf,
-            &mut transitions,
+            transitions,
         )
     }
 }
@@ -8367,7 +8388,61 @@ mod tests {
                             "shared/full recursive mask mismatch capacity={capacity} leaf={leaf_source} prefix={:?}",
                             String::from_utf8_lossy(prefix),
                         );
+                        // Force the ordinary config executor even when the
+                        // finite direct adapter is eligible. This checks
+                        // scoped namespace/guard/reset transport independently
+                        // of the fast finite representation.
+                        assert!(recursive_provider::fill(&state, &mut shared).unwrap());
+                        assert_eq!(shared, reference,
+                            "config recursive mismatch capacity={capacity} leaf={leaf_source} prefix={prefix:?}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_shared_config_covers_virtual_and_epsilon_leaves() {
+        let words: Vec<Vec<u8>> = vec![
+            b"".to_vec(), b"X".to_vec(), b"!".to_vec(), b"\"".to_vec(),
+            b"x:".to_vec(), b"a".to_vec(), b"b".to_vec(), b"ab".to_vec(),
+            b"aa".to_vec(), b"X\"x:".to_vec(), b"a\"!".to_vec(),
+            b"\"!".to_vec(), b"Xab!".to_vec(), b" ".to_vec(),
+            b"\\u00".to_vec(), b"\\\"".to_vec(), vec![0xc2], vec![0xc2, 0xa0],
+        ];
+        let vocab = Vocab::new(words.into_iter().enumerate().map(|(i,b)| (i as u32,b)).collect());
+        let virtual_child = Constraint::from_json_schema(
+            r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#, &vocab,
+        ).unwrap();
+        assert!(virtual_child.tokenizer.has_virtual_residual_runtime());
+        let epsilon_child = Constraint::compile(Grammar::glrm(r#"
+            start payload;
+            lexer group a ::= A;
+            lexer group b ::= B;
+            t A ::= "a"+;
+            t B ::= "ab"+;
+            nt payload ::= A | B;
+        "#), &vocab).unwrap();
+        let parent = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#,
+        ), &vocab).unwrap();
+        for (child, prefixes) in [
+            (virtual_child, vec!["", "X", "X\"", "X\"x:", "X\"x:a", "X\"x:a\"", "X\"x:a\"!"]),
+            (epsilon_child, vec!["", "X", "Xa", "Xab", "Xaa", "Xab!"]),
+        ] {
+            let composed = parent.bind_grammar_dynamic_boundary("payload", child).unwrap();
+            let loaded = Constraint::load(composed.save()).unwrap();
+            for constraint in [&composed, &loaded] {
+                for prefix in &prefixes {
+                    let mut state = constraint.start();
+                    state.commit_bytes(prefix.as_bytes()).unwrap();
+                    let mut expected = vec![0;constraint.mask_len()];
+                    state.fill_recursive_mask_by_exact_full_walk(&mut expected);
+                    let mut actual = vec![0;expected.len()];
+                    assert!(recursive_provider::fill(&state,&mut actual).unwrap());
+                    assert_eq!(actual, expected, "general recursive prefix {prefix:?}");
+                    assert!(try_fill_recursive_mask_shared(&state,&mut actual).unwrap());
+                    assert_eq!(actual, expected, "production shared prefix {prefix:?}");
                 }
             }
         }

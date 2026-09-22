@@ -13851,13 +13851,11 @@ impl<'a> ConstraintState<'a> {
         if self.constraint.uses_compact_segmented_parser_runtime() {
             match super::dynamic_mask::try_fill_recursive_mask_shared(self, buf) {
                 Ok(true) => return,
-                Ok(false) => {}
+                Ok(false) => panic!("recursive composition declined its shared mask provider"),
                 Err(error) => {
                     panic!("shared recursive dynamic mask generation failed: {error}");
                 }
             }
-            self.fill_recursive_mask_by_exact_full_walk(buf);
-            return;
         }
         super::dynamic_mask::fill_mask_dynamic(self, buf);
     }

@@ -55,6 +55,7 @@ type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 /// exclusions. Hashes only select buckets; they never prove equivalence.
 /// Once the state budget is exhausted, new frontiers keep using the original
 /// exact radix-edge evaluator. There is no compilation or persistent-cache cost.
+#[cfg(test)]
 struct RecursiveMaskTransitions {
     states: Vec<ParserStateMap>,
     rows: Vec<Box<[u32; 256]>>,
@@ -63,6 +64,7 @@ struct RecursiveMaskTransitions {
     byte_representatives: [u8; 256],
 }
 
+#[cfg(test)]
 #[derive(Clone)]
 enum RecursiveMaskFrontier {
     Cached(u32),
@@ -75,6 +77,7 @@ enum RecursiveMaskFrontier {
 /// CALL/RETURN and ignored-terminal routes also cannot distinguish the bytes.
 /// Bound the proof work; large, epsilon, or virtual lexers simply keep the
 /// identity alphabet. This is mask-local work, not constraint compilation.
+#[cfg(test)]
 fn recursive_mask_byte_representatives(constraint: &Constraint) -> [u8; 256] {
     let identity = std::array::from_fn(|byte| byte as u8);
     let Ok(Some(layout)) = constraint.recursive_parser_layout() else { return identity; };
@@ -120,6 +123,7 @@ fn recursive_mask_byte_representatives(constraint: &Constraint) -> [u8; 256] {
     result
 }
 
+#[cfg(test)]
 impl RecursiveMaskTransitions {
     const UNKNOWN: u32 = u32::MAX;
     const DEAD: u32 = u32::MAX - 1;
@@ -4871,7 +4875,11 @@ impl<'a> ConstraintState<'a> {
                     "segmented_boundary_needs_direct_dynamic",
                 );
                 if self.constraint.uses_compact_segmented_parser_runtime() {
-                    self.or_recursive_dynamic_full_walk_exact(buf);
+                    // Use the same shared provider walk as all-dynamic
+                    // composition, then union with the static contribution.
+                    let mut dynamic = vec![0u32; self.constraint.mask_len()];
+                    self.fill_mask_dynamic(&mut dynamic);
+                    for (out, value) in buf.iter_mut().zip(dynamic) { *out |= value; }
                 } else {
                     // The unified strict walker evaluates the complete exact
                     // composed language and ORs it with the already-computed A
@@ -4897,18 +4905,15 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Complete-vocabulary strict walk for recursive composition.
-    /// Recursive runtime state uses scoped leaf tokenizer/parser coordinates,
-    /// so it cannot be interpreted by the ordinary `(lexer state, parser GSS)`
-    /// full-walk backend. Walk every byte-backed vocabulary token through the
-    /// exact recursive commit prefix engine while sharing common prefixes;
-    /// special-token IDs remain pointwise because their semantics need not be
-    /// determined by their byte spelling. The result is the complete exact
-    /// recursive language and can either fill a mask or be ORed into a baseline.
+    /// Independent test oracle retained from the pre-unification recursive
+    /// walker. Production recursive masking uses the ordinary shared traversal
+    /// with finite/config scoped providers in dynamic_mask.
+    #[cfg(test)]
     fn or_recursive_dynamic_full_walk_exact(&self, buf: &mut [u32]) {
         self.or_recursive_dynamic_full_walk_exact_with_budget(buf, 256);
     }
 
+    #[cfg(test)]
     fn or_recursive_dynamic_full_walk_exact_with_budget(&self, buf: &mut [u32], state_budget: usize) {
         crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
             "or_recursive_dynamic_full_walk_exact",
@@ -5016,11 +5021,8 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    /// Fill the complete exact recursive mask through the same shared-prefix
-    /// vocabulary walk used by DynamicDirect boundary additions. This is the
-    /// authoritative fallback when the bounded segmented evaluator cannot
-    /// project a recursive GSS; it stays entirely in scoped provider
-    /// coordinates and does not use the transitional outer tokenizer/table.
+    /// Independent pre-unification mask oracle, compiled only for tests.
+    #[cfg(test)]
     pub(crate) fn fill_recursive_mask_by_exact_full_walk(&self, buf: &mut [u32]) {
         crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
             "fill_recursive_mask_by_exact_full_walk",
@@ -8462,21 +8464,16 @@ impl<'a> ConstraintState<'a> {
             }
             // Segmented projection is the common authoritative A/B path. A
             // recursive exceptional GSS must stay in the same scoped provider
-            // coordinate, so fall back to the complete-vocabulary recursive
-            // radix walk rather than escaping to the transitional outer
-            // parser/tokenizer. Historical materialized segmented runtimes use
-            // the ordinary strict dynamic full walker. Either fallback is a
+            // coordinate, so dynamic evaluation selects a scoped provider for
+            // the same shared walker rather than the transitional outer
+            // parser/tokenizer. This fallback is a
             // hidden dynamic mask on a claimed static path: trap loudly under
             // the strict-static flag instead of silently contributing exact
             // dynamic admissions.
             crate::compiler::boundary_transfer::strict_static_trap_dynamic(
                 "authoritative_segmented_projection_decline",
             );
-            if self.constraint.uses_compact_segmented_parser_runtime() {
-                self.fill_recursive_mask_by_exact_full_walk(mask);
-            } else {
-                self.fill_mask_dynamic(mask);
-            }
+            self.fill_mask_dynamic(mask);
             self.clear_late_grammar_placeholder_mask(mask);
             return;
         }
