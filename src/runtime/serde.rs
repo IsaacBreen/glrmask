@@ -5496,6 +5496,29 @@ fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
     constraint_serialized_weight_pool_with_ids(constraint).0
 }
 
+/// IDs in the same field/map order used by ConstraintSerde. Structural Weight
+/// values are placeholders when a packed non-DWA pool is present; interning
+/// those empty values would collapse distinct references to the same pool ID.
+fn packed_constraint_serialized_weight_ids(constraint: &Constraint) -> Option<Vec<u32>> {
+    let packed = constraint.packed_non_dwa_weights.as_ref()?;
+    let mut ids = Vec::new();
+    for key in constraint.parser_top_accept.keys() {
+        ids.push(packed.parser_top_accept[key]);
+    }
+    for (key, parts) in &constraint.parser_top_accept_parts {
+        let packed_parts = &packed.parser_top_accept_parts[key];
+        assert_eq!(parts.len(), packed_parts.len(), "packed acceptance-part count mismatch");
+        ids.extend_from_slice(packed_parts);
+    }
+    for key in constraint.direct_regular_l1_complete_by_terminal.keys() {
+        ids.push(packed.direct_regular_l1_complete_by_terminal[key]);
+    }
+    for key in constraint.possible_matches.keys() {
+        ids.push(packed.possible_matches[key]);
+    }
+    Some(ids)
+}
+
 fn constraint_serialized_weight_ranges_at_least(
     constraint: &Constraint,
     min_weight_ranges: usize,
@@ -5980,7 +6003,11 @@ impl Constraint {
             || rayon::join(
             || {
                 let branch_started = profile.then(std::time::Instant::now);
-                let weights = constraint_serialized_weight_pool(self);
+                let weights = if self.packed_non_dwa_weights.is_some() {
+                    Vec::new()
+                } else {
+                    constraint_serialized_weight_pool(self)
+                };
                 let (weight_pool, encoded) = rayon::join(
                     || {
                         let weights_started = profile.then(std::time::Instant::now);
@@ -6003,7 +6030,11 @@ impl Constraint {
                         // Rayon worker.  Packing WPL3 only reads the same
                         // immutable Weight slice and is independent once ids
                         // have been defined by stable slice order.
-                        crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
+                        if let Some(ids) = packed_constraint_serialized_weight_ids(self) {
+                            crate::ds::weight::begin_pooled_weight_serde_encode_ids(ids);
+                        } else {
+                            crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
+                        }
                         let previous_external =
                             crate::automata::weighted::dwa::set_external_serde(true);
                         let previous_external_table =
@@ -8157,6 +8188,43 @@ mod tests {
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::runtime::CommitTemplateDfas;
     use std::sync::Arc;
+
+    #[test]
+    fn packed_reencode_preserves_non_dwa_ids_after_cache_invalidation() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
+            (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
+            (7, b"a".to_vec()), (8, Vec::new()),
+        ]);
+        let original = Constraint::from_ebnf(
+            r#"start ::= @token(9) "b" | "a" "y""#,
+            &vocab,
+        ).unwrap();
+        let mut loaded = Constraint::load(original.save()).unwrap();
+        let packed = loaded.packed_non_dwa_weights.as_ref().unwrap();
+        let distinct_ids = packed.parser_top_accept.values()
+            .copied().collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct_ids.len() >= 2, "regression needs distinct packed references");
+
+        // Linking can invalidate a cached artifact while retaining its packed
+        // runtime pools. Re-serialization must preserve the sidecar IDs, not
+        // intern the empty structural Weight placeholders by pointer.
+        loaded.serialized_artifact_cache = None;
+        let again = Constraint::load(loaded.save()).unwrap();
+        assert_eq!(loaded.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept,
+                   again.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept);
+        for path in [&[][..], &[1], &[1, 3], &[9], &[9, 2]] {
+            let mut expected = original.start();
+            let mut actual = again.start();
+            for &id in path {
+                assert_eq!(expected.mask(), actual.mask());
+                expected.commit_token(id).unwrap();
+                actual.commit_token(id).unwrap();
+            }
+            assert_eq!(expected.mask(), actual.mask(), "after {path:?}");
+            assert_eq!(expected.is_accepting(), actual.is_accepting());
+        }
+    }
 
     fn tiny_constraint() -> Constraint {
         Constraint::from_glrm_grammar(
