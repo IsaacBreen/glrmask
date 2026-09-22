@@ -360,3 +360,74 @@ fn root_artifact_headers_are_bounded_and_cannot_enter_module_body() {
     fake_module.extend_from_slice(&bytes);
     assert!(Module::load(fake_module).is_err());
 }
+
+#[test]
+fn composed_dynamic_reference_does_not_admit_empty_byte_alias_without_special_path() {
+    use glrmask::__private::ConstraintStateExt;
+
+    let v = vocab();
+    let source = Grammar::from_glrm(
+        r#"glrm 1; start start; extern token MARK; nt start = MARK "b" | "a" "y";"#,
+    );
+    let constraint = source
+        .compile_module(&v)
+        .unwrap()
+        .bind("MARK", v.tokens([7, 8]).unwrap())
+        .unwrap()
+        .link()
+        .unwrap();
+
+    let mut state = constraint.start();
+    assert_eq!(state.mask(), state.fill_mask_dynamic_vec());
+    state.commit_token(1).unwrap();
+    // Token 8 has empty vocabulary bytes. Its exact MARK path is parser-dead
+    // here, so a radix-root endpoint must not make the byte path admit it.
+    assert!(!allowed(&state.mask(), 8));
+    assert_eq!(state.mask(), state.fill_mask_dynamic_vec());
+}
+
+#[test]
+fn one_shot_optimization_preserves_deferred_compiled_module_bindings() {
+    use glrmask::{BuildOptions, Optimization};
+
+    let v = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"a".to_vec()),
+        (2, b"b".to_vec()),
+        (3, b"y".to_vec()),
+        (4, b"xay".to_vec()),
+        (7, b"a".to_vec()),
+    ]);
+    let token_child = Grammar::from_glrm(
+        r#"glrm 1; start start; extern token MARK; nt start = MARK;"#,
+    )
+    .compile_module(&v)
+    .unwrap()
+    .bind("MARK", v.token(7).unwrap())
+    .unwrap();
+    let parent = Grammar::from_glrm(
+        r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
+    )
+    .bind("child", &token_child)
+    .unwrap();
+    let expected = Grammar::from_ebnf(r#"start ::= "x" @token(7) "y""#)
+        .compile(&v)
+        .unwrap();
+
+    for optimization in [Optimization::FastBuild, Optimization::Auto, Optimization::FastRuntime] {
+        let actual = parent
+            .compile_with(
+                &v,
+                BuildOptions::default().optimization(optimization),
+            )
+            .unwrap();
+        let mut actual_state = actual.start();
+        let mut expected_state = expected.start();
+        for token in [0, 7, 3] {
+            assert_eq!(actual_state.mask(), expected_state.mask());
+            actual_state.commit_token(token).unwrap();
+            expected_state.commit_token(token).unwrap();
+        }
+        assert_eq!(actual_state.is_accepting(), expected_state.is_accepting());
+    }
+}

@@ -1031,6 +1031,12 @@ impl DynamicConstraint {
         std::iter::once(&self.inner).chain(&self.alternatives).cloned().collect()
     }
 
+    pub(crate) fn into_constraints(self) -> Vec<Constraint> {
+        std::iter::once(self.inner)
+            .chain(self.alternatives)
+            .collect()
+    }
+
     pub(crate) fn constraints_mut(&mut self) -> impl Iterator<Item = &mut Constraint> {
         self.external_vocab_artifact_cache = None;
         std::iter::once(&mut self.inner).chain(&mut self.alternatives)

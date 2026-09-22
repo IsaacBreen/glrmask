@@ -19913,7 +19913,7 @@ pub(crate) fn compose_constraints(
         composed_table
             .table
             .set_embedded_end_token_ids(&embedded_end_token_ids);
-        let mut dynamic = crate::DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
+        let mut dynamic = crate::dynamic_constraint::DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             composed_table.table,
             terminal_display_names,
             tokenizer,

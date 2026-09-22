@@ -99,7 +99,7 @@ use crate::ds::weight::Weight;
 use crate::ds::u8set::U8Set;
 use crate::grammar::flat::{GrammarDef, Terminal, TerminalID};
 use crate::runtime::{Constraint, SpecialTokenTerminal};
-use crate::DynamicConstraint;
+use crate::dynamic_constraint::DynamicConstraint;
 use super::{macro_join, macro_join_if, macro_parallelism_disabled};
 
 fn env_flag_enabled(name: &str) -> bool {
@@ -6240,7 +6240,7 @@ fn compile_dynamic_owned_with_vocab_partition_impl(
                     let partition = crate::compiler::vocab_partition::compile_vocab_partition_owned(
                         partition_grammar,
                         vocab,
-                        crate::VocabPartitionStrategy::Automatic,
+                        crate::public_api::VocabPartitionStrategy::Automatic,
                     );
                     let partition_ms = elapsed_ms(partition_started);
                     let quotient_started = Instant::now();

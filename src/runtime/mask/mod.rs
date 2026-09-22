@@ -4465,7 +4465,10 @@ impl<'a> ConstraintState<'a> {
             }
         };
 
-        mark_node(0, !self.state.is_empty(), buf);
+        // A zero-byte vocabulary entry lives on the radix-trie root. It is not
+        // an ordinary model-token byte route because consuming it would make
+        // no byte progress. Explicit grammar special-token semantics for the
+        // same ID are handled pointwise below.
         for edge in trie.walk_edges() {
             let parent_depth = edge.parent_depth as usize;
             let child_depth = parent_depth + 1;
@@ -4501,12 +4504,31 @@ impl<'a> ConstraintState<'a> {
         pointwise_candidates.sort_unstable();
         pointwise_candidates.dedup();
         for token_id in pointwise_candidates {
-            if crate::runtime::commit::token_admissible_from_state_exact(
-                self.constraint,
-                &self.state,
-                &mut buffers,
-                token_id,
-            ) {
+            let admitted = if self
+                .constraint
+                .token_bytes_for_id(token_id)
+                .is_some_and(|bytes| bytes.is_empty())
+            {
+                // The byte trie represents an empty vocabulary token at its
+                // root. Exact special-token IDs with that spelling are
+                // deliberately pointwise: an empty byte spelling must not
+                // become a zero-progress alternate route that bypasses the
+                // parser's special-token terminal.
+                crate::runtime::commit::advance_special_token_paths(
+                    self.constraint,
+                    &self.state,
+                    token_id,
+                )
+                .is_some_and(|gss| !gss.is_empty())
+            } else {
+                crate::runtime::commit::token_admissible_from_state_exact(
+                    self.constraint,
+                    &self.state,
+                    &mut buffers,
+                    token_id,
+                )
+            };
+            if admitted {
                 set_original_mask_bit(buf, token_id);
             }
         }

@@ -24,7 +24,7 @@ use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
-use crate::DynamicConstraint;
+use crate::dynamic_constraint::DynamicConstraint;
 
 fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(ebnf::parse_ebnf_to_named(source)?)

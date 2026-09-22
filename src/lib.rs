@@ -1,37 +1,31 @@
 #![recursion_limit = "256"]
 
-//! Extremely fast grammar-constrained decoding for LLMs.
+//! Extremely fast grammar-constrained decoding for language models.
 //!
-//! # Pre-release compatibility policy
+//! GLRMask has three core immutable/reusable layers:
 //!
-//! GLRMask is still pre-release. Serialized constraint formats, internal runtime
-//! layouts, and compiler artifacts are **not** required to remain compatible
-//! with earlier development versions. Architecture, correctness, simplicity,
-//! and performance take priority over loading old artifacts. Compatibility code
-//! may be removed whenever it obstructs a cleaner design; do not preserve an old
-//! representation unless there is a separate current reason to keep it.
+//! - [`Grammar`] describes source grammar semantics and bindings.
+//! - [`Module`] stores reusable compiled machinery for one exact [`Vocab`]; it
+//!   may intentionally retain unresolved request-specific slots.
+//! - [`Constraint`] is closed and immediately runnable. Call [`Constraint::start`]
+//!   to create one mutable [`ConstraintState`] per generated sequence.
 //!
-//! GLRMask compiles a [`Grammar`] together with a model vocabulary into a reusable
-//! [`Constraint`]. A mutable [`ConstraintState`] tracks one generated sequence:
-//! obtain the next-token mask, sample a token, then commit that token to advance
-//! the parser state.
+//! `Grammar::bind` and `Module::bind` are immutable: they return a new value and
+//! leave the receiver reusable.
 //!
-//! [`DynamicConstraint`] compiles faster than [`Constraint`] and produces masks
-//! more slowly. [`DynamicConstraintState`] has the same decoding operations as
-//! [`ConstraintState`].
-//!
-//! # Quickstart
+//! # Quick start
 //!
 //! ```
-//! use glrmask::{Constraint, Grammar, Vocab};
+//! use glrmask::{Grammar, Vocab};
 //!
 //! let vocab = Vocab::new(vec![
 //!     (0, b"hello".to_vec()),
 //!     (1, b" ".to_vec()),
 //!     (2, b"world".to_vec()),
 //! ]);
-//! let grammar = Grammar::ebnf(r#"start ::= "hello" " " "world""#);
-//! let constraint = Constraint::compile(grammar, &vocab).unwrap();
+//! let constraint = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#)
+//!     .compile(&vocab)
+//!     .unwrap();
 //!
 //! let mut state = constraint.start();
 //! assert_ne!(state.mask()[0] & (1 << 0), 0);
@@ -42,34 +36,42 @@
 //! assert!(state.is_accepting());
 //! ```
 //!
-//! Masks in the Rust API are packed `u32` bitsets. Bit `token_id % 32` of word
+//! Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word
 //! `token_id / 32` indicates whether that token is allowed.
 //!
-//! # Grammar inputs
+//! # Typed bindings
 //!
-//! [`Grammar`] accepts JSON Schema, GLRM, Lark, or EBNF. GLRM source uses the
-//! literal `glrm 1;` header. Bind source subgrammars with
-//! [`Grammar::bind_grammar`]. Use [`ConstraintSpec::builder`] for exact-token or
-//! compiled-subgrammar bindings.
+//! Native GLRM can declare `extern grammar child;` and `extern token MARK;`.
+//! Both use [`Grammar::bind`]. Exact tokens come from [`Vocab::token`] or
+//! [`Vocab::tokens`], so a binding carries the vocabulary identity it belongs to
+//! rather than accepting an unqualified integer.
+//!
+//! A source grammar and a compiled child use the same operation. Source/mixed
+//! descriptions are compiled together by [`Grammar::compile`] or
+//! [`Grammar::compile_with`].
+//!
+//! # Cached parents
+//!
+//! Use [`Grammar::compile_module`] when a compiled parent will be reused. Bind
+//! compiled request-specific children or exact-token values with [`Module::bind`],
+//! then call [`Module::link`] or [`Module::link_with`]. Binding itself does not
+//! compile cross-component boundaries; final link options select the build/runtime
+//! trade-off.
+//!
+//! # Final options and termination
+//!
+//! [`BuildOptions`] belongs only to the final compile/link operation. In
+//! particular, `end_tokens` is generation-root policy: an end token is admitted
+//! only once the grammar is accepting and is not inherited if that constraint is
+//! later embedded as a child. [`Optimization`] expresses build/runtime intent
+//! without exposing GLRMask's internal engines.
 //!
 //! # Persistence
 //!
-//! Use [`Constraint::save`] and [`Constraint::load`] to cache compiled
-//! constraints across requests or process restarts.
-//!
-//! # GLRM external bindings
-//!
-//! GLRM declares exact model-token terminals with `extern token NAME;`. Bind
-//! their IDs with [`ConstraintSpecBuilder::bind_token`].
-//!
-//! GLRM declares child grammars with `extern grammar name;`. Bind a source child
-//! with [`Grammar::bind_grammar`], bind a source/spec/compiled child before
-//! compilation with [`ConstraintSpecBuilder::bind_grammar`], or compile an
-//! unresolved reusable parent and later attach a compiled child with
-//! [`Constraint::bind_grammar`].
-//!
-//! See the repository's Python guide and README for model integration examples,
-//! grammar syntax, special tokens, and benchmarks.
+//! [`Module::save`] / [`Module::load`] retain open compiled bindings. A
+//! [`Constraint`] has its own [`Constraint::save`] / [`Constraint::load`] artifact
+//! and remains embeddable after loading. Artifacts are pre-release formats and
+//! are not yet promised to remain compatible across GLRMask releases.
 
 #![deny(warnings)]
 #![allow(dead_code)]
@@ -88,13 +90,27 @@ pub(crate) mod runtime;
 mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
-pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-pub use runtime::{BoundaryTriggerDetail, Constraint, ConstraintState};
+pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
 pub use error::{Error, Result};
+pub use public_api::{BuildOptions, Grammar, Module, Optimization};
+
+/// Model token identifier.
+pub type TokenId = u32;
+
+/// Unstable compatibility surface for repository tooling and benchmark
+/// harnesses. It is deliberately absent from normal dependency builds.
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use runtime::BoundaryTriggerDetail;
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
 pub use public_api::{
-    BoundarySummaryPolicy, BuildOptions, ConstraintSpec, ConstraintSpecBuilder, Grammar, Module,
-    Optimization, VocabPartition, VocabPartitionStrategy,
+    BoundarySummaryPolicy, ConstraintSpec, ConstraintSpecBuilder, VocabPartition,
+    VocabPartitionStrategy,
 };
 
 #[cfg(test)]
