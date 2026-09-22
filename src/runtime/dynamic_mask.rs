@@ -39,6 +39,7 @@ type ParserStacks = LeveledGSS<u32, ()>;
 thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_CONFIG_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY: std::cell::Cell<usize> = const { std::cell::Cell::new(256) };
 }
 
 // Experimental one-byte coordinate for the overwhelmingly common scalar,
@@ -177,6 +178,12 @@ trait FullWalkTransitionTable {
 
     #[inline(always)]
     fn product_transition_cache_capacity(&self) -> usize { 0 }
+
+    /// Complete provider walks can defer output until the exact admitted and
+    /// rejected populations are known. This reuses the ordinary adaptive
+    /// emitter instead of touching every rejected token in a sparse mask.
+    #[inline(always)]
+    fn prefer_adaptive_output(&self) -> bool { false }
 
     fn scoped_reset_branches(
         &mut self,
@@ -686,7 +693,15 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
     fn parser_conditioned_dead_skip_default(&self) -> bool { true }
 
     #[inline(always)]
-    fn product_transition_cache_capacity(&self) -> usize { 256 }
+    fn product_transition_cache_capacity(&self) -> usize {
+        #[cfg(test)]
+        { return TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()); }
+        #[cfg(not(test))]
+        { 256 }
+    }
+
+    #[inline(always)]
+    fn prefer_adaptive_output(&self) -> bool { true }
 
     fn scoped_reset_branches(
         &mut self,
@@ -1712,6 +1727,8 @@ struct FullWalkManyTransitionCache {
     ids: FxHashMap<FullWalkManyState, u32>,
     states: Vec<FullWalkManyState>,
     rows: Vec<Box<[u32; 256]>>,
+    boundary_allowed: Vec<Option<bool>>,
+    stays_many: Vec<bool>,
     capacity: usize,
     profile: bool,
     calls: usize,
@@ -1730,6 +1747,8 @@ impl FullWalkManyTransitionCache {
             ids: FxHashMap::default(),
             states: Vec::new(),
             rows: Vec::new(),
+            boundary_allowed: Vec::new(),
+            stays_many: Vec::new(),
             capacity,
             profile: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             calls: 0,
@@ -1751,29 +1770,65 @@ impl FullWalkManyTransitionCache {
         let owned = state.clone();
         self.states.push(owned.clone());
         self.rows.push(Box::new([Self::UNKNOWN; 256]));
+        self.boundary_allowed.push(None);
+        self.stays_many.push(match state {
+            FullWalkManyState::Branches(branches) => {
+                // These shapes cannot use the scalar/two or same-parser merge
+                // lanes. Reaching the cached shape again need not inspect or
+                // copy its guards/frontier merely to rediscover that fact.
+                branches.iter().any(|b| !b.prune_guard.is_passed())
+                    || (branches.len() > 2 && branches.iter().skip(1)
+                        .any(|b| b.parser_node != branches[0].parser_node))
+            }
+            FullWalkManyState::ThreeSameParser { .. } => false,
+        });
         self.ids.insert(owned, id);
         Some(id)
     }
 
-    fn step<T: FullWalkTransitionTable>(
+    #[inline(always)]
+    fn cached_many_target(&mut self, source: u32, byte: u8) -> Option<u32> {
+        let row = self.rows.get(source as usize)?;
+        let target = row[byte as usize];
+        if !self.stays_many.get(target as usize).copied().unwrap_or(false) { return None; }
+        if self.profile { self.calls += 1; self.hits += 1; }
+        Some(target)
+    }
+
+    /// Advance a bounded, interned parser/lexer product by ID. Cached hits
+    /// carry only this ID through the ordinary vocabulary DFS. They must not
+    /// hash/clone the complete frontier again at every byte and trie branch.
+    /// A full cache retains the existing exact owned-state path, never an
+    /// approximate result or a dropped parser alternative.
+    fn step_handle<T: FullWalkTransitionTable>(
         &mut self,
+        current_id: u32,
         current: &FullWalkManyState,
         byte: u8,
         initial_lexer_state: u32,
         transitions: &mut T,
         parser_cache: &mut FullWalkParserCache,
         constraint: &Constraint,
-    ) -> FullWalkManyState {
+        uncached_output: &mut FullWalkManyState,
+    ) -> u32 {
         if self.profile {
             self.calls += 1;
+            let current = if current_id != Self::UNKNOWN {
+                &self.states[current_id as usize]
+            } else { current };
             self.max_branches = self.max_branches.max(match current {
                 FullWalkManyState::Branches(branches) => branches.len(),
                 FullWalkManyState::ThreeSameParser { .. } => 3,
             });
         }
-        let Some(source) = self.intern(current) else {
+        let source = if current_id != Self::UNKNOWN {
+            Some(current_id)
+        } else {
+            self.intern(current)
+        };
+        let Some(source) = source else {
             if self.profile { self.exhausted += 1; }
-            return full_walk_step_many_state(
+            *uncached_output = full_walk_step_many_state(
                 current,
                 byte,
                 initial_lexer_state,
@@ -1781,19 +1836,20 @@ impl FullWalkManyTransitionCache {
                 parser_cache,
                 constraint,
             );
+            return Self::UNKNOWN;
         };
         let cached = self.rows[source as usize][byte as usize];
         if cached == Self::DEAD {
             if self.profile { self.hits += 1; }
-            return FullWalkManyState::Branches(FullWalkBranches::new());
+            return Self::DEAD;
         }
         if cached != Self::UNKNOWN {
             if self.profile { self.hits += 1; }
-            return self.states[cached as usize].clone();
+            return cached;
         }
         if self.profile { self.misses += 1; }
         let next = full_walk_step_many_state(
-            current,
+            &self.states[source as usize],
             byte,
             initial_lexer_state,
             transitions,
@@ -1802,12 +1858,39 @@ impl FullWalkManyTransitionCache {
         );
         if matches!(&next, FullWalkManyState::Branches(branches) if branches.is_empty()) {
             self.rows[source as usize][byte as usize] = Self::DEAD;
-            return next;
+            return Self::DEAD;
         }
         if let Some(target) = self.intern(&next) {
             self.rows[source as usize][byte as usize] = target;
+            return target;
         }
-        next
+        *uncached_output = next;
+        Self::UNKNOWN
+    }
+
+    fn token_boundary_allowed<T: FullWalkTransitionTable>(
+        &mut self,
+        id: u32,
+        transitions: &mut T,
+        parser_cache: &mut FullWalkParserCache,
+        constraint: &Constraint,
+        initial_lexer_state: u32,
+    ) -> bool {
+        if let Some(result) = self.boundary_allowed[id as usize] { return result; }
+        let result = match &self.states[id as usize] {
+            FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
+                transitions.token_boundary_allowed(parser_cache, constraint,
+                    initial_lexer_state, branch.lexer_state, branch.parser_node)
+            }),
+            FullWalkManyState::ThreeSameParser { lexers, parser_node } => {
+                [lexers.0, lexers.1, lexers.2].into_iter().any(|lexer| {
+                    transitions.token_boundary_allowed(parser_cache, constraint,
+                        initial_lexer_state, lexer, *parser_node)
+                })
+            }
+        };
+        self.boundary_allowed[id as usize] = Some(result);
+        result
     }
 }
 
@@ -1900,6 +1983,11 @@ impl FullWalkParserCache {
         {
             return index as u32;
         }
+        self.push_stacks(stacks)
+    }
+
+    #[inline]
+    fn push_stacks(&mut self, stacks: ParserStacks) -> u32 {
         let id = self.nodes.len() as u32;
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
@@ -1965,7 +2053,10 @@ impl FullWalkParserCache {
         }
         let next = parser_child(constraint, &self.nodes[node_index].gss, terminal);
         let target = if let Some(gss) = next {
-            self.intern_stacks(gss)
+            // Ordinary parser transitions already have their own exact
+            // (parent node, terminal) cache. Preserve the original O(1) append;
+            // only recursive split/reset routing needs pointer interning.
+            self.push_stacks(gss)
         } else {
             Self::DEAD
         };
@@ -4277,12 +4368,14 @@ fn try_full_walk_mask_with_table<
             .and_then(|_| vocab.llg_master_trie())
             .map_or(trie, |slice| slice.trie())
     };
-    let deferred_output = vocab.is_grammar_quotiented()
+    let provider_adaptive_output = transitions.prefer_adaptive_output();
+    let deferred_output = (provider_adaptive_output || vocab.is_grammar_quotiented())
         && master_decision.is_none()
-        && state.constraint.ignore_terminal.is_none()
+        && direct_residual_slice.is_none()
+        && (provider_adaptive_output || (state.constraint.ignore_terminal.is_none()
         && root_branches
             .iter()
-            .all(|branch| branch.initial_prune_guard.is_passed());
+            .all(|branch| branch.initial_prune_guard.is_passed())));
     let hot_edge_lane_eligible = HOT_SINGLE_ROOT
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
@@ -4405,6 +4498,9 @@ fn try_full_walk_mask_with_table<
     let product_transition_cache_capacity = transitions.product_transition_cache_capacity();
     let mut many_transition_cache =
         FullWalkManyTransitionCache::new(product_transition_cache_capacity);
+    let mut stack_many_ids = if product_transition_cache_capacity != 0 {
+        vec![FullWalkManyTransitionCache::UNKNOWN; stack_len]
+    } else { Vec::new() };
     if root_branches.len() == 1 && root_branches[0].initial_prune_guard.is_passed() {
         stack_lexer[0] = root_branches[0].tokenizer_config;
         stack_parser[0] = root_parser_nodes[0];
@@ -4475,6 +4571,7 @@ fn try_full_walk_mask_with_table<
         FxHashMap::<VirtualResidualDirectCoordinate, bool>::default();
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
+    let mut current_many_id = FullWalkManyTransitionCache::UNKNOWN;
     let mut partition_root_slot = 0usize;
     let mut remaining_ops = walk_ops.iter();
     let profile_generic_work =
@@ -4539,12 +4636,19 @@ fn try_full_walk_mask_with_table<
             } else if scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT || scalar_lexer == FULL_WALK_LEXER_TWO {
                 current_two = unsafe { *stack_two.get_unchecked(parent_depth) };
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                current_many.clone_from(unsafe {
-                    stack_many
-                        .get_unchecked(parent_depth)
-                        .as_ref()
-                        .unwrap_unchecked()
-                });
+                if product_transition_cache_capacity != 0 {
+                    current_many_id = stack_many_ids[parent_depth];
+                }
+                if product_transition_cache_capacity == 0
+                    || current_many_id == FullWalkManyTransitionCache::UNKNOWN
+                {
+                    current_many.clone_from(unsafe {
+                        stack_many
+                            .get_unchecked(parent_depth)
+                            .as_ref()
+                            .unwrap_unchecked()
+                    });
+                }
             }
 
             if parent_depth == 0 && !op.consumes_byte() {
@@ -4570,6 +4674,11 @@ fn try_full_walk_mask_with_table<
         }
 
         if op.consumes_byte() {
+            if product_transition_cache_capacity != 0
+                && scalar_lexer != FULL_WALK_LEXER_MULTI
+            {
+                current_many_id = FullWalkManyTransitionCache::UNKNOWN;
+            }
             if profile_generic_work {
                 profile_byte_ops += 1;
                 if scalar_lexer == FULL_WALK_LEXER_DEAD {
@@ -5092,7 +5201,13 @@ fn try_full_walk_mask_with_table<
                         }
                     }
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                let next = if product_transition_cache_capacity == 0 {
+                if let Some(next_id) = (product_transition_cache_capacity != 0)
+                    .then(|| many_transition_cache.cached_many_target(current_many_id, byte))
+                    .flatten()
+                {
+                    current_many_id = next_id;
+                } else {
+                let mut owned_next = if product_transition_cache_capacity == 0 {
                     full_walk_step_many_state(
                         &current_many,
                         byte,
@@ -5101,16 +5216,22 @@ fn try_full_walk_mask_with_table<
                         &mut parser_cache,
                         state.constraint,
                     )
-                } else {
-                    many_transition_cache.step(
+                } else { FullWalkManyState::Branches(FullWalkBranches::new()) };
+                let next_id = if product_transition_cache_capacity != 0 {
+                    many_transition_cache.step_handle(
+                        current_many_id,
                         &current_many,
                         byte,
                         initial_lexer_state,
                         transitions,
                         &mut parser_cache,
                         state.constraint,
+                        &mut owned_next,
                     )
-                };
+                } else { FullWalkManyTransitionCache::UNKNOWN };
+                let next = if next_id < FullWalkManyTransitionCache::DEAD {
+                    &many_transition_cache.states[next_id as usize]
+                } else { &owned_next };
                 match next {
                     FullWalkManyState::Branches(next) => {
                         match next.as_slice() {
@@ -5178,27 +5299,32 @@ fn try_full_walk_mask_with_table<
                                     scalar_parser = parser_node;
                                 } else {
                                     scalar_lexer = FULL_WALK_LEXER_MULTI;
-                                    current_many = FullWalkManyState::Branches(next);
                                 }
                             }
                         }
                     }
-                    next @ FullWalkManyState::ThreeSameParser { lexers, parser_node } => {
+                    FullWalkManyState::ThreeSameParser { lexers, parser_node } => {
                         if let Some((lexer_state, parser_node)) =
                             full_walk_merge_three_same_parser(
                                 transitions,
                                 &mut triple_union_cache,
-                                lexers,
-                                parser_node,
+                                *lexers,
+                                *parser_node,
                             )
                         {
                             scalar_lexer = lexer_state;
                             scalar_parser = parser_node;
                         } else {
                             scalar_lexer = FULL_WALK_LEXER_MULTI;
-                            current_many = next;
                         }
                     }
+                }
+                if scalar_lexer == FULL_WALK_LEXER_MULTI {
+                    current_many_id = next_id;
+                    if next_id == FullWalkManyTransitionCache::UNKNOWN {
+                        current_many = owned_next;
+                    }
+                }
                 }
             }
         }
@@ -5286,7 +5412,14 @@ fn try_full_walk_mask_with_table<
                         current_two.1.1,
                     )
                 } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
-                    match &current_many {
+                    if product_transition_cache_capacity != 0
+                        && current_many_id != FullWalkManyTransitionCache::UNKNOWN
+                    {
+                        many_transition_cache.token_boundary_allowed(
+                            current_many_id, transitions, &mut parser_cache,
+                            state.constraint, initial_lexer_state,
+                        )
+                    } else { match &current_many {
                         FullWalkManyState::Branches(branches) => branches.iter().any(|branch| {
                             transitions.token_boundary_allowed(
                                 &mut parser_cache,
@@ -5318,7 +5451,7 @@ fn try_full_walk_mask_with_table<
                             lexers.2,
                             *parser_node,
                         ),
-                    }
+                    } }
                 } else {
                     false
                 };
@@ -5399,11 +5532,18 @@ fn try_full_walk_mask_with_table<
                         *stack_first_match_accepting.get_unchecked_mut(parent_depth + 1) = false;
                         *stack_first_match_side.get_unchecked_mut(parent_depth + 1) = None;
                     }
-                    let slot = stack_many.get_unchecked_mut(parent_depth + 1);
-                    if let Some(existing) = slot.as_mut() {
-                        existing.clone_from(&current_many);
-                    } else {
-                        *slot = Some(current_many.clone());
+                    if product_transition_cache_capacity != 0 {
+                        *stack_many_ids.get_unchecked_mut(parent_depth + 1) = current_many_id;
+                    }
+                    if product_transition_cache_capacity == 0
+                        || current_many_id == FullWalkManyTransitionCache::UNKNOWN
+                    {
+                        let slot = stack_many.get_unchecked_mut(parent_depth + 1);
+                        if let Some(existing) = slot.as_mut() {
+                            existing.clone_from(&current_many);
+                        } else {
+                            *slot = Some(current_many.clone());
+                        }
                     }
                 }
             }
@@ -5429,6 +5569,14 @@ fn try_full_walk_mask_with_table<
             }
             for marker in deferred_rejected_markers {
                 clear_dynamic_token_marker(vocab, marker, buf);
+            }
+        }
+        // Empty-byte aliases live at the root, outside the edge-marker stream.
+        // The eager output starts with these set; reproduce that exact root
+        // contribution when the positive adaptive emitter starts from zero.
+        if let Some(canonical) = trie.node(0).token_id {
+            for &(word, bits) in vocab.token_word_masks(canonical) {
+                if let Some(slot) = buf.get_mut(word as usize) { *slot |= bits; }
             }
         }
         if profile_generic_work {
@@ -8107,12 +8255,19 @@ mod tests {
 
     #[test]
     fn recursive_shared_full_walk_matches_existing_exact_walker() {
+        struct RestoreCacheCapacity(usize);
+        impl Drop for RestoreCacheCapacity {
+            fn drop(&mut self) {
+                TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(self.0));
+            }
+        }
+        let _restore = RestoreCacheCapacity(TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()));
         let mut words = vec![Vec::<u8>::new()];
         let mut layer = vec![Vec::<u8>::new()];
         for _ in 0..3 {
             let mut next = Vec::new();
             for prefix in layer {
-                for &byte in b"abcX[]! " {
+                for &byte in b"abcX[]! ()" {
                     let mut word = prefix.clone();
                     word.push(byte);
                     next.push(word);
@@ -8171,6 +8326,14 @@ mod tests {
                     b"X[]!",
                 ],
             ),
+            (
+                r#"glrm 1; start leaf; t SHORT = "a"; t LONG = /ab?/; nt leaf = LONG | SHORT "b";"#,
+                vec![b"".as_slice(), b"X[", b"X[a", b"X[ab", b"X[ab]", b"X[ab]!"],
+            ),
+            (
+                r#"glrm 1; start leaf; nt leaf = "(" leaf ")" | "a";"#,
+                vec![b"".as_slice(), b"X[", b"X[(", b"X[((a", b"X[((a)", b"X[((a))]", b"X[((a))]!"],
+            ),
         ] {
             let leaf = Constraint::compile(Grammar::glrm(leaf_source), &vocab).unwrap();
             let middle = Constraint::compile(Grammar::glrm(middle_source), &vocab)
@@ -8192,16 +8355,19 @@ mod tests {
                     let mut reference = vec![0u32; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut reference);
                     let mut shared = vec![0u32; constraint.mask_len()];
-                    assert!(
-                        try_fill_recursive_mask_shared(&state, &mut shared).unwrap(),
-                        "finite recursive fixture unexpectedly declined"
-                    );
-                    assert_eq!(
-                        shared,
-                        reference,
-                        "shared/full recursive mask mismatch leaf={leaf_source} prefix={:?}",
-                        String::from_utf8_lossy(prefix),
-                    );
+                    for capacity in [0, 1, 2, 256] {
+                        TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
+                        assert!(
+                            try_fill_recursive_mask_shared(&state, &mut shared).unwrap(),
+                            "finite recursive fixture unexpectedly declined"
+                        );
+                        assert_eq!(
+                            shared,
+                            reference,
+                            "shared/full recursive mask mismatch capacity={capacity} leaf={leaf_source} prefix={:?}",
+                            String::from_utf8_lossy(prefix),
+                        );
+                    }
                 }
             }
         }
