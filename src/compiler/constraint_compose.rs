@@ -17433,7 +17433,9 @@ fn build_boundary_repair(
                             if let Some(result) = deferred.get() {
                                 break result.as_ref().ok();
                             }
-                            std::thread::yield_now();
+                            if rayon::yield_now().is_none() {
+                                std::thread::yield_now();
+                            }
                         }
                     } else {
                         None
@@ -17681,7 +17683,9 @@ fn build_boundary_repair(
             if let Some(prepared) = deferred.get() {
                 break prepared;
             }
-            std::thread::yield_now();
+            if rayon::yield_now().is_none() {
+                std::thread::yield_now();
+            }
         };
         Some(prepared.as_ref().map_err(Clone::clone)?)
     } else {
@@ -19194,6 +19198,7 @@ fn build_composed_constraint_unfinalized(
     let token_bytes = vocab.entries_arc();
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint {
+            end_tokens: std::sync::Arc::from([]),
         runtime_backend: ConstraintRuntimeBackend::Static,
         static_dynamic_overlay: None,
         boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -20231,7 +20236,7 @@ pub(crate) fn compose_constraints(
         composed_table
             .table
             .set_embedded_end_token_ids(&embedded_end_token_ids);
-        let mut dynamic = crate::DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
+        let mut dynamic = crate::dynamic_constraint::DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             composed_table.table,
             terminal_display_names,
             tokenizer,
@@ -21531,7 +21536,9 @@ fn compose_constraints_owned_parent_impl(
                     if let Some(selected) = selected_boundary_tokens_cell.get() {
                         break selected.as_ref().map_err(Clone::clone)?.clone();
                     }
-                    std::thread::yield_now();
+                    if rayon::yield_now().is_none() {
+                        std::thread::yield_now();
+                    }
                 };
                 let selected_wait_ms = selected_wait_started_at.elapsed().as_secs_f64() * 1000.0;
                 let possible_matches_by_component = possible_matches_result?;

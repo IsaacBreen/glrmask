@@ -4,7 +4,7 @@ pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     glrmask_invariant::__private::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
 }
 
-#[derive(ThisError, Debug)]
+#[derive(ThisError, Debug, Clone)]
 pub enum Error {
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
@@ -39,6 +39,12 @@ impl From<glrmask_weighted_automata::Error> for Error {
         match error {
             glrmask_weighted_automata::Error::Compilation(message) => Self::Compilation(message),
         }
+    }
+}
+
+impl From<glrmask_vocab::ExactTokenError> for Error {
+    fn from(error: glrmask_vocab::ExactTokenError) -> Self {
+        Self::Compilation(error.to_string())
     }
 }
 

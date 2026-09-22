@@ -86,6 +86,14 @@ required-features = ["internal-api"]
 
 # Public API suites.
 [[test]]
+name = "final_public_api_review"
+path = "tests/final_public_api_review.rs"
+
+[[test]]
+name = "final_public_api"
+path = "tests/final_public_api.rs"
+
+[[test]]
 name = "integration"
 path = "tests/integration.rs"
 

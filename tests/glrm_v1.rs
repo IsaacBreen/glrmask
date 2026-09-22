@@ -1,4 +1,7 @@
-use glrmask::{Constraint, ConstraintSpec, DynamicConstraint, Grammar, Vocab};
+use glrmask::{
+    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Module, Optimization,
+    Vocab,
+};
 
 fn allowed(mask: &[u32], token_id: u32) -> bool {
     let word = token_id as usize / 32;
@@ -281,9 +284,17 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save()).unwrap();
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
 
-    let loaded_static_parent = Constraint::load(&static_parent.save()).unwrap();
+    let loaded_static_parent = Module::load(
+        Grammar::from_glrm(parent_source)
+            .compile_module(&vocab)
+            .unwrap()
+            .save(),
+    )
+    .unwrap();
     let loaded_static_bound = loaded_static_parent
-        .bind_grammar_dynamic_boundary("child", &dynamic_child)
+        .bind("child", &static_child)
+        .unwrap()
+        .link()
         .unwrap();
     assert_static_xy_matches(&reference, &loaded_static_bound);
 
@@ -306,28 +317,27 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
         (1, b"y".to_vec()),
         (2, b"xy".to_vec()),
     ]);
-    let parent = Constraint::compile(
-        Grammar::glrm(
-            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
-        ),
-        &vocab,
+    let parent = Grammar::from_glrm(
+        "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
     )
+    .compile_module(&vocab)
     .unwrap();
 
-    // The compiler realizes an unresolved grammar slot using a private exact
-    // token above the model vocabulary. That linker coordinate must never widen
-    // the public output mask, including after save/load cache reconstruction.
-    assert_eq!(parent.mask_len(), 1);
-    assert_eq!(parent.start().mask().len(), 1);
-    let loaded = Constraint::load(&parent.save()).unwrap();
-    assert_eq!(loaded.mask_len(), 1);
-    assert_eq!(loaded.start().mask().len(), 1);
-
-    let child = DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+    // An unresolved grammar slot belongs to Module, never Constraint. Its
+    // private linker coordinate survives Module persistence without becoming
+    // part of the public model-token mask.
+    let loaded = Module::load(parent.save()).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "y""#)
+        .compile(&vocab)
+        .unwrap();
     let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
     let bound = loaded
-        .bind_grammar_dynamic_boundary("child", &child)
+        .bind("child", &child)
+        .unwrap()
+        .link()
         .unwrap();
+    assert_eq!(bound.mask_len(), 1);
+    assert_eq!(bound.start().mask().len(), 1);
     assert_static_xy_matches(&reference, &bound);
 }
 
@@ -665,46 +675,35 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .build()
         .is_ok());
 
-    let unresolved_grammar_child = Grammar::glrm(
+    let unresolved_grammar_child = Grammar::from_glrm(
         "glrm 1; start start; extern grammar nested; nt start = nested;",
     );
-    let open = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+    let open = Grammar::from_glrm(parent)
+        .bind("child", unresolved_grammar_child)
         .unwrap()
-        .bind_grammar("child", unresolved_grammar_child)
+        .compile_module(&vocab)
         .unwrap()
-        .build()
-        .unwrap()
-        .compile()
-        .unwrap();
-    assert_eq!(open.mask_len(), 1);
+        ;
     // Independent open components may reuse the same private sentinel token
     // number. Terminal IDs, not those hidden token IDs, are the linker
     // coordinate; qualified nested slots must survive serialization and bind.
-    let open = Constraint::load(&open.save()).unwrap();
-    let leaf = Constraint::compile(Grammar::ebnf(r#"start ::= "x""#), &vocab).unwrap();
+    let open = Module::load(open.save()).unwrap();
+    let leaf = Grammar::from_ebnf(r#"start ::= "x""#)
+        .compile(&vocab)
+        .unwrap();
     let fully_bound = open
-        .bind_grammar_dynamic_boundary("child.nested", &leaf)
+        .bind("child.nested", &leaf)
+        .unwrap()
+        .link()
         .unwrap();
     let mut state = fully_bound.start();
     state.commit_token(0).unwrap();
     assert!(state.is_accepting());
 
-    let dynamic_open = ConstraintSpec::builder(Grammar::glrm(parent), &vocab)
+    let dynamic_fully_bound = open
+        .bind("child.nested", &leaf)
         .unwrap()
-        .bind_grammar(
-            "child",
-            Grammar::glrm(
-                "glrm 1; start start; extern grammar nested; nt start = nested;",
-            ),
-        )
-        .unwrap()
-        .build()
-        .unwrap()
-        .compile_dynamic()
-        .unwrap();
-    let dynamic_open = DynamicConstraint::load(&dynamic_open.save()).unwrap();
-    let dynamic_fully_bound = dynamic_open
-        .bind_grammar_dynamic_boundary("child.nested", &leaf)
+        .link_with(BuildOptions::default().optimization(Optimization::FastBuild))
         .unwrap();
     let mut state = dynamic_fully_bound.start();
     state.commit_token(0).unwrap();

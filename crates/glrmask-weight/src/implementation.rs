@@ -3990,12 +3990,20 @@ impl std::fmt::Display for Weight {
 
 const WEIGHT_ALL_SENTINEL: u32 = u32::MAX;
 
+enum PooledWeightSerdeEncoder {
+    ByPointer(FxHashMap<usize, u32>),
+    // Deferred decoding deliberately stores identical empty Weight values in
+    // the structural maps. Their identity lives in a separate packed-ID map,
+    // so re-encoding must use that map's ordered IDs rather than pointer keys.
+    OrderedIds { ids: Vec<u32>, next: usize },
+}
+
 thread_local! {
     /// Versioned constraint serialization can replace ordinary structural
     /// Weight serde with compact pool indices. The context is thread-local so
     /// normal serde users and legacy artifact versions retain the historical
     /// representation.
-    static POOLED_WEIGHT_SERDE_ENCODE: RefCell<Option<FxHashMap<usize, u32>>> =
+    static POOLED_WEIGHT_SERDE_ENCODE: RefCell<Option<PooledWeightSerdeEncoder>> =
         RefCell::new(None);
     static POOLED_WEIGHT_SERDE_DECODE: RefCell<Option<Vec<Weight>>> =
         RefCell::new(None);
@@ -4012,14 +4020,27 @@ pub fn begin_pooled_weight_serde_encode(weights: &[Weight]) {
         by_ptr.insert(weight.ptr_key(), index as u32);
     }
     POOLED_WEIGHT_SERDE_ENCODE.with(|slot| {
-        let previous = slot.borrow_mut().replace(by_ptr);
+        let previous = slot.borrow_mut().replace(PooledWeightSerdeEncoder::ByPointer(by_ptr));
+        assert!(previous.is_none(), "pooled Weight encode context must not nest");
+    });
+}
+
+/// Preserve already-packed weight IDs during a single serialization pass.
+///
+/// Supply one ID per Weight field, in serializer visitation order. Use
+/// serialize_into, not a serializer which visits values twice for sizing.
+pub fn begin_pooled_weight_serde_encode_ids(ids: Vec<u32>) {
+    POOLED_WEIGHT_SERDE_ENCODE.with(|slot| {
+        let previous = slot.borrow_mut().replace(PooledWeightSerdeEncoder::OrderedIds { ids, next: 0 });
         assert!(previous.is_none(), "pooled Weight encode context must not nest");
     });
 }
 
 pub fn end_pooled_weight_serde_encode() {
     POOLED_WEIGHT_SERDE_ENCODE.with(|slot| {
-        slot.borrow_mut().take();
+        if let Some(PooledWeightSerdeEncoder::OrderedIds { ids, next }) = slot.borrow_mut().take() {
+            assert_eq!(next, ids.len(), "packed Weight encode visitation count mismatch");
+        }
     });
 }
 
@@ -4052,9 +4073,14 @@ pub fn take_pooled_weight_serde_deferred_ids() -> Vec<u32> {
 
 fn pooled_weight_serde_encode_index(weight: &Weight) -> Option<u32> {
     POOLED_WEIGHT_SERDE_ENCODE.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .and_then(|by_ptr| by_ptr.get(&weight.ptr_key()).copied())
+        match slot.borrow_mut().as_mut()? {
+            PooledWeightSerdeEncoder::ByPointer(by_ptr) => by_ptr.get(&weight.ptr_key()).copied(),
+            PooledWeightSerdeEncoder::OrderedIds { ids, next } => {
+                let id = ids.get(*next).copied()?;
+                *next += 1;
+                Some(id)
+            }
+        }
     })
 }
 
@@ -5013,5 +5039,32 @@ impl<'de> Deserialize<'de> for Weight {
             return Ok(Self::all());
         }
         Ok(weight_from_serde_entries(serde_weight.entries))
+    }
+}
+
+#[cfg(test)]
+mod packed_reserialization_tests {
+    use super::*;
+
+    #[test]
+    fn packed_reserialization_preserves_distinct_ids_for_empty_placeholders() {
+        let placeholders = vec![Weight::empty(), Weight::empty(), Weight::empty()];
+        begin_pooled_weight_serde_encode_ids(vec![2, 0, 1]);
+        let mut bytes = Vec::new();
+        let result = bincode::serialize_into(&mut bytes, &placeholders);
+        end_pooled_weight_serde_encode();
+        result.unwrap();
+        assert_eq!(bincode::deserialize::<Vec<u32>>(&bytes).unwrap(), vec![2, 0, 1]);
+        assert!(!pooled_weight_serde_encode_enabled());
+    }
+
+    #[test]
+    fn packed_reserialization_rejects_missing_id_instead_of_reusing_empty_weight() {
+        begin_pooled_weight_serde_encode_ids(vec![0]);
+        let mut bytes = Vec::new();
+        let result = bincode::serialize_into(&mut bytes, &[Weight::empty(), Weight::empty()]);
+        end_pooled_weight_serde_encode();
+        assert!(result.is_err());
+        assert!(!pooled_weight_serde_encode_enabled());
     }
 }

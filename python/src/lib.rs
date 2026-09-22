@@ -16,6 +16,8 @@
 //! dependent relationship. The only handwritten `unsafe` in this file is the
 //! NumPy `i32` to `u32` bitmask view cast used by `fill_mask`.
 
+mod final_api;
+
 #[cfg(feature = "allocation-tracking")]
 mod allocation_tracking;
 
@@ -173,14 +175,17 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
 
     let mut entries = Vec::with_capacity(n_vocab as usize);
     let mut end_token_ids = Vec::new();
+    let mut exact_only_token_ids = Vec::new();
     for token_id in 0..n_vocab {
         if is_eog.call1((&llama_vocab, token_id))?.is_truthy()? {
             end_token_ids.push(token_id);
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
         let attrs: u32 = get_attr.call1((&llama_vocab, token_id))?.extract()?;
         if attrs & excluded_attrs != 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -197,6 +202,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             required
         };
         if capacity == 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -210,6 +216,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             )));
         }
         if length == 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -225,7 +232,10 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
         entries.push((token_id, raw[..length].to_vec()));
     }
 
-    Ok((glrmask::Vocab::new(entries), end_token_ids))
+    Ok((
+        glrmask::Vocab::new_with_exact_token_ids(entries, exact_only_token_ids),
+        end_token_ids,
+    ))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -574,6 +584,20 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
+    /// Resolve one exact token, preserving this complete vocabulary identity.
+    fn token(&self, id: u32) -> PyResult<final_api::PyExactToken> {
+        self.inner.token(id).map(|inner| final_api::PyExactToken { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Resolve a nonempty set of distinct exact token IDs.
+    fn tokens(&self, ids: Vec<u32>) -> PyResult<final_api::PyExactTokens> {
+        self.inner.tokens(ids).map(|inner| final_api::PyExactTokens { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    fn __len__(&self) -> usize { self.inner.len() }
+
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
@@ -767,116 +791,24 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    #[staticmethod]
-    #[pyo3(signature = (schema, vocab))]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::json_schema(schema),
-                &vocab.inner
-            ),
-            vocab,
-        )
+    /// Serialize the compiled body and final termination policy as bytes.
+    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        let bytes = py.allow_threads(|| self.inner.save());
+        PyBytes::new(py, &bytes)
     }
 
     #[staticmethod]
-    #[pyo3(signature = (lark_source, vocab))]
-    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::lark(lark_source),
-                &vocab.inner
-            ),
-            vocab,
-        )
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (glrm_source, vocab, subgrammars=None, bindings=None))]
-    fn from_glrm_grammar(
-        py: Python<'_>,
-        glrm_source: &str,
-        vocab: &PyVocab,
-        subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
-        bindings: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let mut builder = glrmask::ConstraintSpec::builder(
-            glrmask::Grammar::glrm(glrm_source),
-            &vocab.inner,
-        )
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        for (name, token_ids) in external_terminal_bindings_from_dict(bindings)? {
-            builder = builder
-                .bind_token(name, token_ids)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        }
-        if let Some(subgrammars) = subgrammars {
-            for (name, child) in subgrammars {
-                let child = child.borrow(py);
-                builder = builder
-                    .bind_grammar(name, Arc::clone(&child.inner))
-                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            }
-        }
-        let spec = builder
-            .build()
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        Self::from_constraint_result(
-            spec.compile(),
-            vocab,
-        )
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (ebnf_source, vocab))]
-    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::ebnf(ebnf_source),
-                &vocab.inner
-            ),
-            vocab,
-        )
-    }
-
-    /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
-    ///
-    /// The compiled parent retains its target vocabulary, so callers no longer
-    /// need to supply it again. `vocab` remains an optional compatibility
-    /// argument for callers using the previous Python API; when present it is
-    /// validated against the parent before binding.
-    #[pyo3(signature = (name, child, vocab=None))]
-    fn bind_grammar(
-        &self,
-        name: &str,
-        child: PyRef<'_, PyConstraint>,
-        vocab: Option<&PyVocab>,
-    ) -> PyResult<Self> {
-        if let Some(vocab) = vocab {
-            let mut validation = self.inner.as_ref().clone();
-            validation
-                .bind_vocab_exact(&vocab.inner)
-                .map_err(PyValueError::new_err)?;
-        }
-        let constraint = constraint_result(self.inner.bind_grammar(name, child.inner.as_ref()))?;
-        let max_token = constraint.max_original_token_id().unwrap_or(0);
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token,
-        })
-    }
-
-    fn save(&self) -> Vec<u8> {
-        self.inner.save()
-    }
-
-    #[staticmethod]
-    fn load(data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
-        let constraint = constraint_result(glrmask::Constraint::load_with_vocab(
-            data.to_vec(),
-            &vocab.inner,
-        ))?;
-        Self::from_constraint_result(Ok::<_, String>(constraint), vocab)
+    #[pyo3(signature = (data, vocab=None))]
+    fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
+        let data = data.to_vec();
+        let vocab = vocab.map(|vocab| vocab.inner.clone());
+        let loaded = py.allow_threads(move || match vocab {
+            Some(vocab) => glrmask::Constraint::load_with_vocab(data, &vocab),
+            None => glrmask::Constraint::load(data),
+        });
+        let inner = constraint_result(loaded)?;
+        let max_token = inner.max_original_token_id().unwrap_or(0);
+        Ok(Self { inner: Arc::new(inner), max_token })
     }
 
     fn start(&self) -> PyConstraintState {
@@ -1164,6 +1096,11 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
+    /// Whether an allowed final end token has completed this sequence.
+    fn is_terminated(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_terminated())
+    }
+
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1186,6 +1123,10 @@ impl PyConstraintState {
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
         };
+        let required = self.inner.borrow_owner().mask_len();
+        if buf.len() < required {
+            return Err(PyValueError::new_err(format!("mask needs at least {required} packed words")));
+        }
         self.inner.with_dependent(|_owner, state| state.fill_mask(buf));
         Ok(())
     }
@@ -1998,6 +1939,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // constraint.
     drop(PyArray1::<i32>::zeros(m.py(), 0, false).readwrite());
     glrmask::Constraint::warm_ti_pool();
+    final_api::register(m)?;
     m.add_class::<PyVocab>()?;
     m.add_class::<PyVocabPartition>()?;
     m.add_class::<PyConstraint>()?;
@@ -2008,12 +1950,14 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr(
         "__all__",
         [
+            "Grammar",
+            "Module",
+            "ExactToken",
+            "ExactTokens",
+            "Optimization",
             "Vocab",
-            "VocabPartition",
             "Constraint",
             "ConstraintState",
-            "DynamicConstraint",
-            "DynamicConstraintState",
             "_internal",
         ],
     )?;

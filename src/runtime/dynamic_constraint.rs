@@ -886,6 +886,7 @@ impl DynamicConstraint {
             .max()
             .unwrap_or(0);
         let inner = Constraint {
+            end_tokens: std::sync::Arc::from([]),
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -1028,6 +1029,12 @@ impl DynamicConstraint {
 
     pub(crate) fn clone_constraints(&self) -> Vec<Constraint> {
         std::iter::once(&self.inner).chain(&self.alternatives).cloned().collect()
+    }
+
+    pub(crate) fn into_constraints(self) -> Vec<Constraint> {
+        std::iter::once(self.inner)
+            .chain(self.alternatives)
+            .collect()
     }
 
     pub(crate) fn constraints_mut(&mut self) -> impl Iterator<Item = &mut Constraint> {

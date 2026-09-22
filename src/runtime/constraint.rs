@@ -824,7 +824,7 @@ impl TokenMaskCachePrebuild {
     }
 
     pub(crate) fn matches_constraint(&self, constraint: &Constraint) -> bool {
-        self.mask_words == constraint.mask_len()
+        self.mask_words == constraint.body_mask_len()
             && self.internal_token_buf_masks.len() == constraint.internal_token_count()
     }
 
@@ -1961,20 +1961,32 @@ impl Constraint {
     /// binding then lets repeated composition prove compatibility by `Arc` identity.
     #[doc(hidden)]
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
+        if let Some(existing) = self.late_bind_vocab.get()
+            && !existing.same_model_vocab(vocab)
+        {
+            return Err(
+                "constraint was not compiled for the supplied exact vocabulary".to_string(),
+            );
+        }
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
             self.late_bind_vocab = OnceLock::from(vocab.clone());
-            return Ok(());
+        } else {
+            if !self.token_bytes_match_vocab(vocab) {
+                return Err("constraint was not compiled for the supplied vocabulary".to_string());
+            }
+            self.token_bytes = entries;
+            // A successful exact bind establishes the precise public vocabulary
+            // for every later late-subgrammar bind as well. Keep the caller's
+            // already-built `Vocab` (and its pure derived-artifact cache) instead
+            // of reconstructing the same bytes again in `constraint_vocab()`.
+            self.late_bind_vocab = OnceLock::from(vocab.clone());
         }
-        if !self.token_bytes_match_vocab(vocab) {
-            return Err("constraint was not compiled for the supplied vocabulary".to_string());
+        if let Some(overlay) = self.static_dynamic_overlay.as_mut() {
+            for component in &mut overlay.segmented_parser_components {
+                Arc::make_mut(&mut component.constraint).bind_vocab_exact(vocab)?;
+            }
         }
-        self.token_bytes = entries;
-        // A successful exact bind establishes the precise public vocabulary
-        // for every later late-subgrammar bind as well. Keep the caller's
-        // already-built `Vocab` (and its pure derived-artifact cache) instead
-        // of reconstructing the same bytes again in `constraint_vocab()`.
-        self.late_bind_vocab = OnceLock::from(vocab.clone());
         Ok(())
     }
 
@@ -3429,6 +3441,7 @@ impl Constraint {
     #[cold]
     fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {
+            terminated: false,
             constraint: self,
             state: self.initial_state_map(),
             buffers: Default::default(),
@@ -4540,7 +4553,7 @@ impl Constraint {
             let mut safe_subtrees = vec![0u8; trie.node_count()];
             let mut source_reentry_safe_subtrees = vec![0u8; trie.node_count()];
             let mut common_future_masks = vec![0u64; trie.node_count()];
-            let mut safe_no_match_mask = vec![0u32; constraint.mask_len()];
+            let mut safe_no_match_mask = vec![0u32; constraint.body_mask_len()];
             fn advance_no_match_deterministic(
                 tokenizer: &Tokenizer,
                 fast_transitions: &FastTokenizerTransitions,
@@ -5835,7 +5848,7 @@ impl Constraint {
                 });
                 fusions.sort_unstable();
                 fusions.dedup();
-                let mut candidate_mask = vec![0u32; self.mask_len()];
+                let mut candidate_mask = vec![0u32; self.body_mask_len()];
                 for &(_, suffix_token) in &fusions {
                     let word = suffix_token as usize / 32;
                     if let Some(bits) = candidate_mask.get_mut(word) {
@@ -6238,7 +6251,7 @@ impl Constraint {
                 }
                 unknown_tokens = unresolved.into_iter().collect();
 
-                let mut unknown_mask = vec![0u32; self.mask_len()];
+                let mut unknown_mask = vec![0u32; self.body_mask_len()];
                 for &token_id in &unknown_tokens {
                     let word = token_id as usize / 32;
                     if let Some(bits) = unknown_mask.get_mut(word) {
@@ -6856,7 +6869,7 @@ impl Constraint {
                 root_rows.sort_unstable_by_key(|row| row.terminal);
                 let unknown_tokens = unresolved.into_iter().collect::<Vec<_>>();
 
-                let mut unknown_mask = vec![0u32; self.mask_len()];
+                let mut unknown_mask = vec![0u32; self.body_mask_len()];
                 for &token_id in &unknown_tokens {
                     let word = token_id as usize / 32;
                     if let Some(bits) = unknown_mask.get_mut(word) {
@@ -7824,7 +7837,7 @@ impl Constraint {
         if internal_token < self.heavy_token_dense_masks.len()
             && self.heavy_token_dense_masks[internal_token].is_some()
         {
-            return self.mask_len() as u64;
+            return self.body_mask_len() as u64;
         }
         if internal_token + 1 >= self.internal_token_buf_offsets.len() {
             return 0;
@@ -7847,7 +7860,7 @@ impl Constraint {
         }
 
         let n_set: usize = dense.iter().map(|w| w.count_ones() as usize).sum();
-        let buf_len = self.mask_len();
+        let buf_len = self.body_mask_len();
         if n_set >= n_internal && !all_mask.is_empty() {
             return buf_len as u64;
         }
@@ -8712,7 +8725,7 @@ impl Constraint {
         self.internal_token_buf_mask_count() == count
             && self.internal_token_buf_offsets.len() == count.saturating_add(1)
             && self.word_group_sparse_masks.len() == count.div_ceil(64)
-            && self.all_tokens_buf_mask.len() == self.mask_len()
+            && self.all_tokens_buf_mask.len() == self.body_mask_len()
     }
 
     #[inline]
@@ -8920,7 +8933,7 @@ impl Constraint {
             Self::compute_sparse_entry_prefix(&self.word_group_sparse_masks);
         self.quad_group_sparse_masks = quad_group_sparse_masks;
         self.byte_group_sparse_masks = byte_group_sparse_masks;
-        let mask_words = self.mask_len();
+        let mask_words = self.body_mask_len();
         let (quad_group_dense_masks, byte_group_dense_masks) =
             if rayon::current_num_threads() == 1 {
                 (
@@ -9022,11 +9035,11 @@ impl Constraint {
         self.total_internal_buf_cost = Self::compute_total_internal_buf_cost(
             &self.internal_token_buf_offsets,
             &self.heavy_token_dense_masks,
-            self.mask_len(),
+            self.body_mask_len(),
         );
 
         // Precompute heavy token stats for fast path decision in convert.
-        let buf_len = self.mask_len();
+        let buf_len = self.body_mask_len();
         let n_internal = if self.internal_token_buf_offsets.len() > 1 {
             self.internal_token_buf_offsets.len() - 1
         } else {
@@ -10082,7 +10095,7 @@ impl Constraint {
         } else {
             internal_count / block_size
         };
-        let mask_words = self.mask_len();
+        let mask_words = self.body_mask_len();
         let build_group = |group_id: usize| {
                 let group_start = group_id * block_size;
                 let group_end = (group_start + block_size).min(internal_count);
@@ -10317,7 +10330,7 @@ impl Constraint {
     }
 
     fn compute_all_tokens_buf_mask(&self) -> Box<[u32]> {
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         let mut combined = vec![0u32; buf_words];
         for group in &self.word_group_sparse_masks {
             for &(word_idx, mask) in group {
@@ -10328,7 +10341,7 @@ impl Constraint {
     }
 
     fn compute_word_group_prefix_buf_masks(&self) -> DenseBufMaskRows {
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         let rows = self.word_group_sparse_masks.len() + 1;
         let mut current = vec![0u32; buf_words];
         if DenseBufMaskRows::prefer_flat(rows, buf_words) {
@@ -10855,7 +10868,7 @@ impl Constraint {
         }
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some();
         let total_started = profile.then(std::time::Instant::now);
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         let direct_sparse = buf_words != 0
             && buf_words <= u16::MAX as usize
             && Self::direct_sparse_weight_buf_cache_enabled()
@@ -10992,7 +11005,7 @@ impl Constraint {
             }
         }
 
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         if buf_words == 0 {
             return (
                 FxHashMap::default(),
@@ -11075,7 +11088,7 @@ impl Constraint {
     /// A token with >THRESHOLD entries benefits from a sequential 16KB scan
     /// instead of thousands of indexed read-modify-writes.
     fn compute_heavy_token_dense_masks(&self) -> Vec<Option<Box<[u32]>>> {
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         if buf_words == 0 {
             return Vec::new();
         }
@@ -11109,7 +11122,7 @@ impl Constraint {
 
     pub(crate) fn rebuild_heavy_and_sliding_token_mask_caches(&mut self) {
         let n_word_groups = self.word_group_prefix_buf_masks.len().saturating_sub(1);
-        let buf_words = self.mask_len();
+        let buf_words = self.body_mask_len();
         let sliding_useful = [2usize, 4, 8, 16, 32].into_iter().any(|len| {
             n_word_groups >= len
                 && (0..=n_word_groups - len).any(|start| {
@@ -11163,7 +11176,7 @@ impl Constraint {
             .map(Box::<[u32]>::from)
             .unwrap_or_default();
 
-        let buf_len = self.mask_len();
+        let buf_len = self.body_mask_len();
         self.total_internal_buf_cost = Self::compute_total_internal_buf_cost(
             &self.internal_token_buf_offsets,
             &self.heavy_token_dense_masks,
@@ -11669,11 +11682,11 @@ impl Constraint {
         self.byte_group_sparse_masks = byte_group_sparse_masks;
         self.quad_group_dense_masks = Self::compute_heavy_group_dense_masks(
             &self.quad_group_sparse_masks,
-            self.mask_len(),
+            self.body_mask_len(),
         );
         self.byte_group_dense_masks = Self::compute_heavy_group_dense_masks(
             &self.byte_group_sparse_masks,
-            self.mask_len(),
+            self.body_mask_len(),
         );
         self.word_group_sparse_total_entries = word_group_sparse_total_entries;
         self.word_group_sparse_max_entries = word_group_sparse_max_entries;
@@ -11699,7 +11712,7 @@ impl Constraint {
         self.internal_token_buf_op_costs = Self::compute_internal_token_buf_op_costs(
             &self.internal_token_buf_offsets,
             &self.heavy_token_dense_masks,
-            self.mask_len(),
+            self.body_mask_len(),
         );
         self.word_group_buf_op_costs =
             Self::compute_word_group_buf_op_costs(&self.internal_token_buf_op_costs);
@@ -11947,6 +11960,7 @@ impl Constraint {
         }
         let state = self.initial_state_map();
         let mut state = ConstraintState {
+            terminated: false,
             constraint: self,
             state,
             buffers: Default::default(),
@@ -11962,6 +11976,7 @@ impl Constraint {
     pub(crate) fn start_dynamic(&self) -> ConstraintState<'_> {
         crate::runtime::initialize_hot_path_config();
         let mut state = ConstraintState {
+            terminated: false,
             constraint: self,
             state: self.initial_state_map(),
             buffers: crate::runtime::state::CommitBuffers::for_constraint(self),
@@ -11979,6 +11994,24 @@ impl Constraint {
             .map(|token_id| (token_id as usize / 32) + 1)
             .unwrap_or(0)
     }
+
+    pub(crate) fn body_mask_len(&self) -> usize {
+        self.body_max_original_token_id()
+            .map(|token_id| (token_id as usize / 32) + 1)
+            .unwrap_or(0)
+    }
+
+    /// Apply generation termination without changing the compiled body.
+    pub(crate) fn with_end_tokens(mut self, ids: &[u32]) -> crate::Result<Self> {
+        let mut ids = ids.to_vec();
+        ids.sort_unstable();
+        if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(crate::Error::Compilation("duplicate end-token ID".to_owned()));
+        }
+        self.end_tokens = Arc::from(ids);
+        Ok(self)
+    }
+
 
     #[inline]
     pub(crate) fn direct_regular_wide_frontier_index_for_gss(
@@ -12645,6 +12678,11 @@ impl Constraint {
     }
 
     pub(crate) fn max_original_token_id(&self) -> Option<u32> {
+        self.body_max_original_token_id().into_iter()
+            .chain(self.end_tokens.last().copied()).max()
+    }
+
+    pub(crate) fn body_max_original_token_id(&self) -> Option<u32> {
         self.token_bytes
             .keys()
             .next_back()
@@ -12677,7 +12715,7 @@ impl Constraint {
     /// makes persisted sparse mask fragments wider than `mask_len()`, which
     /// correctly excludes unresolved linker sentinels.
     pub(crate) fn sanitize_late_grammar_placeholder_token_domain(&mut self) -> bool {
-        if self.late_grammar_slots.is_empty() || !self.has_original_token_map() {
+        if self.late_grammar_slots.is_empty() {
             return false;
         }
 
@@ -12686,6 +12724,19 @@ impl Constraint {
             .iter()
             .map(|slot| slot.terminal_id)
             .collect::<BTreeSet<_>>();
+        self.sanitize_placeholder_terminal_token_domain(&placeholder_terminals)
+    }
+
+    /// Remove non-vocabulary compiler sentinel token IDs associated with an
+    /// explicit set of placeholder terminals.
+    pub(crate) fn sanitize_placeholder_terminal_token_domain(
+        &mut self,
+        placeholder_terminals: &BTreeSet<TerminalID>,
+    ) -> bool {
+        if placeholder_terminals.is_empty() || !self.has_original_token_map() {
+            return false;
+        }
+
         let mut placeholder_tokens = self
             .special_token_terminals
             .iter()
@@ -14171,7 +14222,7 @@ mod dense_internal_token_mask_tests {
                 let expected = initial | selected_image;
                 let buf_zeroed = initial == 0;
 
-                let mut profiled = vec![0u32; constraint.mask_len()];
+                let mut profiled = vec![0u32; constraint.body_mask_len()];
                 profiled[0] = initial;
                 constraint.or_internal_dense_to_buf(&dense, &mut profiled, buf_zeroed);
                 assert_eq!(
@@ -14181,7 +14232,7 @@ mod dense_internal_token_mask_tests {
                     constraint.internal_token_to_tokens,
                 );
 
-                let mut fast = vec![0u32; constraint.mask_len()];
+                let mut fast = vec![0u32; constraint.body_mask_len()];
                 fast[0] = initial;
                 constraint.or_internal_dense_to_buf_fast(&dense, &mut fast, buf_zeroed);
                 assert_eq!(
@@ -14191,7 +14242,7 @@ mod dense_internal_token_mask_tests {
                     constraint.internal_token_to_tokens,
                 );
 
-                let mut scratch_fast = vec![0u32; constraint.mask_len()];
+                let mut scratch_fast = vec![0u32; constraint.body_mask_len()];
                 scratch_fast[0] = initial;
                 let mut dirty_complement_scratch = Vec::new();
                 constraint.or_internal_dense_to_buf_fast_with_scratch(
@@ -14252,11 +14303,11 @@ mod dense_internal_token_mask_tests {
         let dirty_word = dirty_token as usize / 32;
         let dirty_bit = dirty_token as usize % 32;
 
-        let mut expected = vec![0u32; constraint.mask_len()];
+        let mut expected = vec![0u32; constraint.body_mask_len()];
         expected[dirty_word] |= 1u32 << dirty_bit;
         constraint.or_internal_dense_to_buf_fast(&dense, &mut expected, false);
 
-        let mut actual = vec![0u32; constraint.mask_len()];
+        let mut actual = vec![0u32; constraint.body_mask_len()];
         actual[dirty_word] |= 1u32 << dirty_bit;
         let mut scratch = Vec::new();
         constraint.or_internal_dense_to_buf_fast_with_scratch(
@@ -14269,7 +14320,7 @@ mod dense_internal_token_mask_tests {
         assert_eq!(actual, expected);
         assert_eq!(
             scratch.len(),
-            constraint.mask_len(),
+            constraint.body_mask_len(),
             "expected the replay-cost model to select dirty scratch complement conversion",
         );
     }

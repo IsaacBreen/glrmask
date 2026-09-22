@@ -12,7 +12,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from ._glrmask import Constraint, DynamicConstraint, _internal as _native_internal
+from ._glrmask import Constraint, DynamicConstraint, Grammar, _internal as _native_internal
 
 
 AUTO_POLICY_NAME = "tail200-v1"
@@ -228,7 +228,7 @@ class AutoConstraint:
         elif tier == "o2":
             inner = DynamicConstraint.from_json_schema(schema_text, vocab, vocab_partition=True)
         else:
-            inner = Constraint.from_json_schema(schema_text, vocab)
+            inner = Grammar.from_json_schema(schema_text).compile(vocab)
         return cls(inner, tier)
 
     @classmethod

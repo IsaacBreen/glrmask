@@ -14,10 +14,9 @@ vocab = glrmask.Vocab.from_dict(
         b"world": 2,
     }
 )
-constraint = glrmask.Constraint.from_ebnf(
-    'start ::= "hello" " " "world"',
-    vocab,
-)
+constraint = glrmask.Grammar.from_ebnf(
+    'start ::= "hello" " " "world"'
+).compile(vocab)
 state = constraint.start()
 
 assert state.mask().tolist() == [True, False, False]
@@ -26,7 +25,7 @@ assert state.mask().tolist() == [False, True, False]
 state.commit_token(1)
 assert state.mask().tolist() == [False, False, True]
 state.commit_token(2)
-assert state.is_finished()
+assert state.is_accepting()
 
 
 # Exercise the optional llama-cpp-python adapter without installing or loading a
@@ -91,16 +90,27 @@ sys.modules["llama_cpp"] = fake_llama_cpp
 
 llama_vocab = glrmask.Vocab.from_llama_cpp(fake_llm)
 assert llama_vocab.llama_cpp_end_token_ids == [3, 5]
-llama_constraint = glrmask.Constraint.from_ebnf(
-    'start ::= "a"',
+assert llama_vocab.token(2).id == 2  # control token: exact-only, no byte route
+control_constraint = (
+    glrmask.Grammar.from_glrm(
+        'glrm 1; start start; extern token CONTROL; nt start = CONTROL;'
+    )
+    .bind("CONTROL", llama_vocab.token(2))
+    .compile(llama_vocab)
+)
+assert control_constraint.start().mask(6).tolist() == [False, False, True, False, False, False]
+
+llama_constraint = glrmask.Grammar.from_ebnf(
+    'start ::= "a"'
+).compile(
     llama_vocab,
-    end_token_ids=llama_vocab.llama_cpp_end_token_ids,
+    end_tokens=llama_vocab.llama_cpp_end_token_ids,
 )
 llama_state = llama_constraint.start()
 assert llama_state.mask(6).tolist() == [True, False, False, False, False, False]
 llama_state.commit_token(0)
 assert llama_state.mask(6).tolist() == [False, False, False, True, False, True]
 llama_state.commit_token(3)
-assert llama_state.is_finished()
+assert llama_state.is_terminated()
 
 print("public Python API smoke test passed")
