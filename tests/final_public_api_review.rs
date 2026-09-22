@@ -300,3 +300,28 @@ fn review_empty_byte_exact_tokens_preserve_mask_and_commit_on_valid_prefixes() {
     let actual = source.compile_module(&v).unwrap().bind("MARK", v.tokens([7, 63]).unwrap()).unwrap().link().unwrap();
     compare_prefixes(&actual, &expected, &[0, 1, 3, 4, 7, 63], 3);
 }
+
+#[test]
+fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
+    let mut entries = vocab().iter().map(|(id, b)| (id, b.to_vec())).collect::<Vec<_>>();
+    for (id, bytes) in &mut entries {
+        if *id == 63 { bytes.clear(); }
+    }
+    let v = Vocab::new(entries);
+    let source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK \"b\" | \"a\" \"y\";");
+    let expected = source.bind("MARK", v.tokens([7, 63]).unwrap()).unwrap().compile(&v).unwrap();
+    // The parent is packed before the exact-token adapter is linked. A second
+    // serialization must preserve each packed pool ID, not deduplicate the
+    // intentionally-empty structural Weight placeholders.
+    let open = Module::load(source.compile_module(&v).unwrap().save()).unwrap();
+    let mut module = open.bind("MARK", v.tokens([7, 63]).unwrap()).unwrap();
+    for _ in 0..4 {
+        module = Module::load(module.save()).unwrap();
+        let mut actual = module.link().unwrap();
+        compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
+        for _ in 0..3 {
+            actual = Constraint::load(actual.save()).unwrap();
+            compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
+        }
+    }
+}
