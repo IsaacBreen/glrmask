@@ -410,17 +410,21 @@ fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
         .num_threads(1)
         .build()
         .unwrap();
-    let constraint = pool
-        .install(|| {
-            bound.link_with(
+    // Keep the linked Constraint and state inside the pool. The public API
+    // does not promise that every future runtime representation is Send;
+    // this regression is specifically about scheduler progress with one
+    // Rayon worker, not about moving a Constraint between threads.
+    pool.install(|| {
+        let constraint = bound
+            .link_with(
                 BuildOptions::default().optimization(Optimization::FastBuild),
             )
-        })
-        .unwrap();
-    let mut state = constraint.start();
-    assert!(allowed(&state.mask(), 3));
-    state.commit_token(3).unwrap();
-    assert!(state.is_accepting());
+            .unwrap();
+        let mut state = constraint.start();
+        assert!(allowed(&state.mask(), 3));
+        state.commit_token(3).unwrap();
+        assert!(state.is_accepting());
+    });
 }
 
 #[test]
