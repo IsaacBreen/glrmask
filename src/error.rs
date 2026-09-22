@@ -42,6 +42,12 @@ impl From<glrmask_weighted_automata::Error> for Error {
     }
 }
 
+impl From<glrmask_vocab::ExactTokenError> for Error {
+    fn from(error: glrmask_vocab::ExactTokenError) -> Self {
+        Self::Compilation(error.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

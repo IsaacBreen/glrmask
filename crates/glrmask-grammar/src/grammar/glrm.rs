@@ -802,6 +802,20 @@ pub fn external_declarations(
     })
 }
 
+/// Return explicit special-token IDs already present in a GLRM source.
+///
+/// This is used by compiled-module placeholder allocation so temporary
+/// linker-only IDs never collide with a source-level @token(...) terminal.
+#[doc(hidden)]
+pub fn special_token_ids(input: &str) -> Result<Vec<u32>, GlrMaskError> {
+    let tokens = Lexer::new(input).tokenize()?;
+    let mut parser = GlrmParser::new(tokens)?;
+    let scope = parser.parse_root_scope()?;
+    let mut ids = BTreeSet::new();
+    collect_scope_special_token_ids(&scope, &mut ids);
+    Ok(ids.into_iter().collect())
+}
+
 /// Parse GLRM containing `extern grammar name;` declarations.
 ///
 /// `first_placeholder_token_id` must lie outside the model vocabulary.

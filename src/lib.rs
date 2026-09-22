@@ -90,11 +90,11 @@ pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
 pub use runtime::{BoundaryTriggerDetail, Constraint, ConstraintState};
-pub use glrmask_vocab::Vocab;
+pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
 pub use error::{Error, Result};
 pub use public_api::{
-    BoundarySummaryPolicy, ConstraintSpec, ConstraintSpecBuilder, Grammar, VocabPartition,
-    VocabPartitionStrategy,
+    BoundarySummaryPolicy, BuildOptions, ConstraintSpec, ConstraintSpecBuilder, Grammar, Module,
+    Optimization, VocabPartition, VocabPartitionStrategy,
 };
 
 #[cfg(test)]

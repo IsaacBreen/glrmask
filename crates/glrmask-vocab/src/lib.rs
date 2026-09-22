@@ -6,6 +6,28 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex, OnceLock};
 
+/// Error returned when constructing a vocabulary-qualified exact-token value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExactTokenError {
+    message: String,
+}
+
+impl ExactTokenError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for ExactTokenError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ExactTokenError {}
+
 /// Model vocabulary used when compiling a grammar constraint.
 ///
 /// Entries map model token IDs to their exact byte sequences. Token IDs may be
@@ -14,6 +36,50 @@ pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     compiler_cache: Arc<VocabCompilerCache>,
     max_token_byte_len: OnceLock<usize>,
+}
+
+/// One exact model token, qualified by the Vocab it belongs to.
+///
+/// This is the value accepted by GLRMask grammar/module binding APIs. Carrying
+/// the vocabulary reference prevents a naked token ID from being accidentally
+/// attached to a grammar compiled for a different tokenizer.
+#[derive(Debug, Clone)]
+pub struct ExactToken {
+    vocab: Vocab,
+    id: u32,
+}
+
+impl ExactToken {
+    /// The exact model token ID.
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Whether this value belongs to exactly vocab's token-ID/byte mapping.
+    #[doc(hidden)]
+    pub fn targets(&self, vocab: &Vocab) -> bool {
+        self.vocab.entries == vocab.entries
+    }
+}
+
+/// Several exact model tokens, qualified by the Vocab they belong to.
+#[derive(Debug, Clone)]
+pub struct ExactTokens {
+    vocab: Vocab,
+    ids: Vec<u32>,
+}
+
+impl ExactTokens {
+    /// The exact model token IDs, sorted in ascending order.
+    pub fn ids(&self) -> &[u32] {
+        &self.ids
+    }
+
+    /// Whether this value belongs to exactly vocab's token-ID/byte mapping.
+    #[doc(hidden)]
+    pub fn targets(&self, vocab: &Vocab) -> bool {
+        self.vocab.entries == vocab.entries
+    }
 }
 
 #[derive(Default)]
@@ -90,6 +156,50 @@ impl Vocab {
             compiler_cache: Arc::new(VocabCompilerCache::default()),
             max_token_byte_len,
         }
+    }
+
+    /// Resolve one exact model token for use in a grammar/module binding.
+    pub fn token(&self, token_id: u32) -> Result<ExactToken, ExactTokenError> {
+        if !self.entries.contains_key(&token_id) {
+            return Err(ExactTokenError::new(format!(
+                "token ID {token_id} is not present in this vocabulary",
+            )));
+        }
+        Ok(ExactToken {
+            vocab: self.clone(),
+            id: token_id,
+        })
+    }
+
+    /// Resolve a non-empty set of exact model tokens for one binding.
+    pub fn tokens(
+        &self,
+        token_ids: impl IntoIterator<Item = u32>,
+    ) -> Result<ExactTokens, ExactTokenError> {
+        let mut ids = token_ids.into_iter().collect::<Vec<_>>();
+        if ids.is_empty() {
+            return Err(ExactTokenError::new(
+                "exact-token binding must contain at least one token ID",
+            ));
+        }
+        ids.sort_unstable();
+        for pair in ids.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(ExactTokenError::new(format!(
+                    "exact-token binding contains duplicate token ID {}",
+                    pair[0],
+                )));
+            }
+        }
+        if let Some(&missing) = ids.iter().find(|&&id| !self.entries.contains_key(&id)) {
+            return Err(ExactTokenError::new(format!(
+                "token ID {missing} is not present in this vocabulary",
+            )));
+        }
+        Ok(ExactTokens {
+            vocab: self.clone(),
+            ids,
+        })
     }
 
     /// Maximum byte length of any token in this vocabulary.
@@ -240,5 +350,15 @@ mod tests {
         let cloned = vocab.clone();
         assert!(Arc::ptr_eq(&vocab.compiler_cache, &cloned.compiler_cache));
         assert_eq!(cloned.compiler_cache.artifacts.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn exact_tokens_validate_membership_and_duplicates() {
+        let vocab = Vocab::new(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
+        assert_eq!(vocab.token(2).unwrap().id(), 2);
+        assert_eq!(vocab.tokens([7, 2]).unwrap().ids(), &[2, 7]);
+        assert!(vocab.token(3).is_err());
+        assert!(vocab.tokens([]).is_err());
+        assert!(vocab.tokens([2, 2]).is_err());
     }
 }

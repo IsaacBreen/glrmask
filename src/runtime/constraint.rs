@@ -12546,7 +12546,7 @@ impl Constraint {
     /// makes persisted sparse mask fragments wider than `mask_len()`, which
     /// correctly excludes unresolved linker sentinels.
     pub(crate) fn sanitize_late_grammar_placeholder_token_domain(&mut self) -> bool {
-        if self.late_grammar_slots.is_empty() || !self.has_original_token_map() {
+        if self.late_grammar_slots.is_empty() {
             return false;
         }
 
@@ -12555,6 +12555,19 @@ impl Constraint {
             .iter()
             .map(|slot| slot.terminal_id)
             .collect::<BTreeSet<_>>();
+        self.sanitize_placeholder_terminal_token_domain(&placeholder_terminals)
+    }
+
+    /// Remove non-vocabulary compiler sentinel token IDs associated with an
+    /// explicit set of placeholder terminals.
+    pub(crate) fn sanitize_placeholder_terminal_token_domain(
+        &mut self,
+        placeholder_terminals: &BTreeSet<TerminalID>,
+    ) -> bool {
+        if placeholder_terminals.is_empty() || !self.has_original_token_map() {
+            return false;
+        }
+
         let mut placeholder_tokens = self
             .special_token_terminals
             .iter()

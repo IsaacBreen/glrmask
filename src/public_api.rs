@@ -7,16 +7,118 @@ use crate::compiler::constraint_compose::{
     compose_constraints_owned_parent_segmented_shared,
 };
 use crate::runtime::Constraint as RuntimeConstraint;
-use crate::{BoundaryTriggerDetail, DynamicConstraint, Error, Result, Vocab};
+use crate::{
+    BoundaryTriggerDetail, DynamicConstraint, Error, ExactToken, ExactTokens, Result, Vocab,
+};
 
-/// Grammar source with optional source-level subgrammar bindings.
+/// Preferred build/runtime trade-off.
 ///
-/// [`Grammar::bind_grammar`] binds source children. Use [`ConstraintSpecBuilder`]
-/// for exact tokens or compiled child constraints.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// These variants express caller intent rather than exposing GLRMask's
+/// internal static/dynamic implementation choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Optimization {
+    /// Let GLRMask choose automatically.
+    #[default]
+    Auto,
+    /// Prefer low compile/link latency.
+    FastBuild,
+    /// Prefer lower per-token masking latency, accepting more build work.
+    FastRuntime,
+}
+
+/// Options that apply only when producing a final runnable constraint.
+#[derive(Debug, Clone, Default)]
+pub struct BuildOptions {
+    end_tokens: Vec<u32>,
+    optimization: Optimization,
+}
+
+impl BuildOptions {
+    /// Configure tokens that may terminate generation once the final
+    /// constraint is accepting.
+    pub fn end_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
+        self.end_tokens = ids.into_iter().collect();
+        self
+    }
+
+    /// Select the preferred build/runtime trade-off.
+    pub fn optimization(mut self, optimization: Optimization) -> Self {
+        self.optimization = optimization;
+        self
+    }
+
+    pub(crate) fn end_token_ids(&self) -> &[u32] {
+        &self.end_tokens
+    }
+
+    pub(crate) fn optimization_value(&self) -> Optimization {
+        self.optimization
+    }
+}
+
+/// Reusable compiled grammar machinery for one exact vocabulary.
+///
+/// A module may retain unresolved external grammar slots. It is deliberately
+/// not runnable; call link after all required slots have been bound.
+#[derive(Debug, Clone)]
+pub struct Module {
+    inner: Arc<RuntimeConstraint>,
+    late_token_slots: Vec<ModuleTokenSlot>,
+}
+
+#[derive(Debug, Clone)]
+struct ModuleTokenSlot {
+    name: String,
+    terminal_id: u32,
+    placeholder_token_id: u32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum GrammarValue<'a> {
+    Source(Grammar<'a>),
+    Module(Module),
+    StaticOwned(Arc<RuntimeConstraint>),
+    ExactToken(ExactToken),
+    ExactTokens(ExactTokens),
+}
+
+impl GrammarValue<'_> {
+    fn extern_kind(&self) -> ExternKind {
+        match self {
+            Self::ExactToken(_) | Self::ExactTokens(_) => ExternKind::Token,
+            Self::Source(_)
+            | Self::Module(_)
+            | Self::StaticOwned(_) => ExternKind::Grammar,
+        }
+    }
+}
+
+#[doc(hidden)]
+pub(crate) trait IntoGrammarValue<'a> {
+    fn into_grammar_value(self) -> GrammarValue<'a>;
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ModuleValue<'a> {
+    Module(Module),
+    StaticBorrowed(&'a RuntimeConstraint),
+    StaticOwned(Arc<RuntimeConstraint>),
+    ExactToken(ExactToken),
+    ExactTokens(ExactTokens),
+}
+
+#[doc(hidden)]
+pub(crate) trait IntoModuleValue<'a> {
+    fn into_module_value(self) -> ModuleValue<'a>;
+}
+
+/// Grammar description with immutable source, compiled-child, or exact-token
+/// bindings.
+#[derive(Debug, Clone)]
 pub struct Grammar<'a> {
     source: GrammarSource<'a>,
-    grammar_bindings: BTreeMap<String, Grammar<'a>>,
+    bindings: BTreeMap<String, GrammarValue<'a>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,38 +135,177 @@ impl<'a> Grammar<'a> {
     pub fn json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source)) }
     pub fn glrm(source: &'a str) -> Self { Self::new(GrammarSource::Glrm(source)) }
 
+    /// Create a grammar from EBNF source.
+    pub fn from_ebnf(source: &'a str) -> Self { Self::ebnf(source) }
+
+    /// Create a grammar from Lark source.
+    pub fn from_lark(source: &'a str) -> Self { Self::lark(source) }
+
+    /// Create a grammar from JSON Schema text.
+    pub fn from_json_schema(source: &'a str) -> Self { Self::json_schema(source) }
+
+    /// Create a grammar from native GLRM source.
+    pub fn from_glrm(source: &'a str) -> Self { Self::glrm(source) }
+
     fn new(source: GrammarSource<'a>) -> Self {
-        Self { source, grammar_bindings: BTreeMap::new() }
+        Self { source, bindings: BTreeMap::new() }
     }
 
-    /// Bind an `extern grammar NAME;` to another source grammar.
+    /// Bind a declared slot to a source grammar, compiled module/constraint, or
+    /// vocabulary-qualified exact-token value.
     ///
-    /// Use [`ConstraintSpecBuilder::bind_grammar`] for compiled children.
-    pub fn bind_grammar(mut self, name: impl AsRef<str>, grammar: Grammar<'a>) -> Result<Self> {
+    /// Binding is immutable: the original grammar remains usable.
+    #[allow(private_bounds)]
+    pub fn bind<T>(&self, name: impl AsRef<str>, value: T) -> Result<Self>
+    where
+        T: IntoGrammarValue<'a>,
+    {
         let name = name.as_ref();
         let GrammarSource::Glrm(source) = self.source else {
             return Err(Error::Compilation(
-                "source-level subgrammar bindings require a GLRM parent grammar".to_owned(),
+                "external bindings require a GLRM parent grammar".to_owned(),
             ));
         };
         let declarations = crate::grammar::glrm::external_declarations(source)?;
-        if declarations.token_names.iter().any(|declared| declared == name) {
+        let value = value.into_grammar_value();
+        let expected = value.extern_kind();
+        let declared_as_expected = match expected {
+            ExternKind::Token => declarations.token_names.iter().any(|declared| declared == name),
+            ExternKind::Grammar => declarations
+                .grammar_names
+                .iter()
+                .any(|declared| declared == name),
+        };
+        let declared_as_other = match expected {
+            ExternKind::Token => declarations
+                .grammar_names
+                .iter()
+                .any(|declared| declared == name),
+            ExternKind::Grammar => declarations.token_names.iter().any(|declared| declared == name),
+        };
+        if !declared_as_expected {
+            if declared_as_other {
+                return Err(Error::Compilation(format!(
+                    "external {name:?} has kind {}, not {}",
+                    expected.opposite_name(),
+                    expected.name(),
+                )));
+            }
             return Err(Error::Compilation(format!(
-                "external {name:?} has kind token, not grammar",
+                "no external {} named {name:?} is declared",
+                expected.name(),
             )));
         }
-        if !declarations.grammar_names.iter().any(|declared| declared == name) {
+        if self.bindings.contains_key(name) {
             return Err(Error::Compilation(format!(
-                "no external grammar named {name:?} is declared",
+                "external {name:?} was bound more than once",
             )));
         }
-        if self.grammar_bindings.contains_key(name) {
+        let mut next = self.clone();
+        next.bindings.insert(name.to_owned(), value);
+        Ok(next)
+    }
+
+    /// Compatibility spelling for source-only grammar binding.
+    #[doc(hidden)]
+    pub fn bind_grammar(self, name: impl AsRef<str>, grammar: Grammar<'a>) -> Result<Self> {
+        self.bind(name, grammar)
+    }
+
+    /// Compile this complete grammar description into a runnable constraint.
+    pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
+        self.compile_with(vocab, BuildOptions::default())
+    }
+
+    /// Compile this complete grammar description with final build options.
+    pub fn compile_with(
+        &self,
+        vocab: &Vocab,
+        options: BuildOptions,
+    ) -> Result<RuntimeConstraint> {
+        if !options.end_token_ids().is_empty() {
+            return Err(Error::Compilation(
+                "final end-token policy is not yet available through BuildOptions".to_owned(),
+            ));
+        }
+        let _optimization = options.optimization_value();
+        let spec = ConstraintSpec::builder(self.clone(), vocab)?.build()?;
+        if let Some(name) = spec.unbound_grammar_names.first() {
             return Err(Error::Compilation(format!(
-                "external grammar {name:?} was bound more than once",
+                "external grammar {name:?} is unbound; compile_module() if an open compiled artifact is intended",
             )));
         }
-        self.grammar_bindings.insert(name.to_owned(), grammar);
-        Ok(self)
+        let constraint = spec.compile()?;
+        ensure_runnable_constraint(&constraint)?;
+        Ok(constraint)
+    }
+
+    /// Compile reusable local machinery while allowing unresolved grammar
+    /// or exact-token slots to remain open.
+    pub fn compile_module(&self, vocab: &Vocab) -> Result<Module> {
+        let mut builder = ConstraintSpec::builder(self.clone(), vocab)?;
+        let unbound_tokens = builder
+            .declared_tokens
+            .iter()
+            .filter(|name| !builder.token_bindings.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut placeholder_ids = BTreeMap::<String, u32>::new();
+        if !unbound_tokens.is_empty() {
+            let mut reserved = BTreeSet::<u32>::new();
+            if let GrammarSource::Glrm(source) = builder.grammar.source {
+                reserved.extend(crate::grammar::glrm::special_token_ids(source)?);
+            }
+            reserved.extend(
+                builder
+                    .token_bindings
+                    .values()
+                    .flat_map(|ids| ids.iter().copied()),
+            );
+            for name in unbound_tokens {
+                let placeholder = crate::import::external_placeholder_token_id_avoiding(
+                    vocab,
+                    reserved.iter().copied(),
+                )?;
+                reserved.insert(placeholder);
+                builder
+                    .token_bindings
+                    .insert(name.clone(), vec![placeholder]);
+                placeholder_ids.insert(name, placeholder);
+            }
+        }
+        let spec = builder.build()?;
+        let mut constraint = spec.compile()?;
+        let mut late_token_slots = Vec::with_capacity(placeholder_ids.len());
+        for (name, placeholder_token_id) in placeholder_ids {
+            let terminals = constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| special.token_id == placeholder_token_id)
+                .map(|special| special.terminal_id)
+                .collect::<BTreeSet<_>>();
+            if terminals.len() != 1 {
+                return Err(Error::Compilation(format!(
+                    "compiled external token {name:?} did not resolve to exactly one hidden terminal",
+                )));
+            }
+            late_token_slots.push(ModuleTokenSlot {
+                name,
+                terminal_id: *terminals.iter().next().expect("length checked"),
+                placeholder_token_id,
+            });
+        }
+        let placeholder_terminals = late_token_slots
+            .iter()
+            .map(|slot| slot.terminal_id)
+            .collect::<BTreeSet<_>>();
+        if constraint.sanitize_placeholder_terminal_token_domain(&placeholder_terminals) {
+            constraint.rebuild_runtime_caches();
+        }
+        Ok(Module {
+            inner: Arc::new(constraint),
+            late_token_slots,
+        })
     }
 
     fn glrm_source(&self) -> Option<&'a str> {
@@ -74,9 +315,105 @@ impl<'a> Grammar<'a> {
         }
     }
 
-    fn into_source_only_and_bindings(self) -> (Self, BTreeMap<String, Grammar<'a>>) {
-        let Self { source, grammar_bindings } = self;
-        (Self::new(source), grammar_bindings)
+    fn into_source_only_and_bindings(self) -> (Self, BTreeMap<String, GrammarValue<'a>>) {
+        let Self { source, bindings } = self;
+        (Self::new(source), bindings)
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for Grammar<'a> {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::Source(self)
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for &Grammar<'a> {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::Source(self.clone())
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for Module {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::Module(self)
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for &Module {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::Module(self.clone())
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for &RuntimeConstraint {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::StaticOwned(Arc::new(self.clone()))
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for RuntimeConstraint {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::StaticOwned(Arc::new(self))
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for Arc<RuntimeConstraint> {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::StaticOwned(self)
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for ExactToken {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::ExactToken(self)
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for ExactTokens {
+    fn into_grammar_value(self) -> GrammarValue<'a> {
+        GrammarValue::ExactTokens(self)
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for Module {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::Module(self)
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for &'a Module {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::Module(self.clone())
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for &'a RuntimeConstraint {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::StaticBorrowed(self)
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for RuntimeConstraint {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::StaticOwned(Arc::new(self))
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for Arc<RuntimeConstraint> {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::StaticOwned(self)
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for ExactToken {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::ExactToken(self)
+    }
+}
+
+impl<'a> IntoModuleValue<'a> for ExactTokens {
+    fn into_module_value(self) -> ModuleValue<'a> {
+        ModuleValue::ExactTokens(self)
     }
 }
 
@@ -127,9 +464,9 @@ impl VocabPartition {
     ) -> Result<Self> {
         let profile = crate::compiler::pipeline::compile_top_profile_enabled();
         let total_started = profile.then(Instant::now);
-        if !grammar.grammar_bindings.is_empty() {
+        if !grammar.bindings.is_empty() {
             return Err(Error::Compilation(
-                "vocabulary partition analysis does not yet support bound subgrammars".to_owned(),
+                "vocabulary partition analysis does not yet support bound grammar values".to_owned(),
             ));
         }
         let source_kind = match grammar.source {
@@ -598,23 +935,77 @@ impl<'a> ConstraintSpecBuilder<'a> {
             .iter()
             .cloned()
             .collect::<BTreeSet<_>>();
-        for name in source_bindings.keys() {
-            if !declared_grammars.contains(name) {
-                return Err(Error::Compilation(format!(
-                    "source-level binding was supplied for unknown external grammar {name:?}",
-                )));
+        let declared_tokens = declarations
+            .token_names
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut token_bindings = BTreeMap::new();
+        let mut grammar_bindings = BTreeMap::new();
+        for (name, value) in source_bindings {
+            match value {
+                GrammarValue::ExactToken(token) => {
+                    if !declared_tokens.contains(&name) {
+                        return Err(Error::Compilation(format!(
+                            "exact-token binding was supplied for unknown external token {name:?}",
+                        )));
+                    }
+                    if !token.targets(vocab) {
+                        return Err(Error::Compilation(format!(
+                            "external token {name:?} was built for an incompatible vocabulary",
+                        )));
+                    }
+                    token_bindings.insert(name, vec![token.id()]);
+                }
+                GrammarValue::ExactTokens(tokens) => {
+                    if !declared_tokens.contains(&name) {
+                        return Err(Error::Compilation(format!(
+                            "exact-token binding was supplied for unknown external token {name:?}",
+                        )));
+                    }
+                    if !tokens.targets(vocab) {
+                        return Err(Error::Compilation(format!(
+                            "external token {name:?} was built for an incompatible vocabulary",
+                        )));
+                    }
+                    token_bindings.insert(name, tokens.ids().to_vec());
+                }
+                GrammarValue::Source(child) => {
+                    if !declared_grammars.contains(&name) {
+                        return Err(Error::Compilation(format!(
+                            "source binding was supplied for unknown external grammar {name:?}",
+                        )));
+                    }
+                    grammar_bindings.insert(name, GrammarBinding::Source(child));
+                }
+                GrammarValue::Module(module) => {
+                    if !declared_grammars.contains(&name) {
+                        return Err(Error::Compilation(format!(
+                            "module binding was supplied for unknown external grammar {name:?}",
+                        )));
+                    }
+                    grammar_bindings.insert(
+                        name,
+                        GrammarBinding::StaticOwned(Arc::clone(&module.inner)),
+                    );
+                }
+                GrammarValue::StaticOwned(child) => {
+                    if !declared_grammars.contains(&name) {
+                        return Err(Error::Compilation(format!(
+                            "compiled binding was supplied for unknown external grammar {name:?}",
+                        )));
+                    }
+                    grammar_bindings.insert(name, GrammarBinding::StaticOwned(child));
+                }
             }
         }
         Ok(Self {
             grammar,
             vocab,
-            declared_tokens: declarations.token_names.into_iter().collect(),
+            declared_tokens,
             declared_grammars,
-            token_bindings: BTreeMap::new(),
-            grammar_bindings: source_bindings
-                .into_iter()
-                .map(|(name, grammar)| (name, GrammarBinding::Source(grammar)))
-                .collect(),
+            token_bindings,
+            grammar_bindings,
             boundary_trigger_detail: BoundaryTriggerDetail::None,
             boundary_summary_policy: BoundarySummaryPolicy::LazyOnCompose,
         })
@@ -1150,7 +1541,7 @@ impl DynamicConstraint {
     /// partition-optimized constraint can be composed with ordinary static or
     /// dynamic constraints without changing the public token coordinate.
     pub fn compile_with_vocab_partition(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
-        if !grammar.grammar_bindings.is_empty() {
+        if !grammar.bindings.is_empty() {
             return Err(Error::Compilation(
                 "compile_with_vocab_partition does not yet compile source-level bound subgrammars; compile the components first and bind the compiled constraints"
                     .to_owned(),
@@ -1216,6 +1607,186 @@ fn constraint_vocab(constraint: &RuntimeConstraint) -> Vocab {
             )
         })
         .clone()
+}
+
+fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
+    if let Some(slot) = constraint.late_grammar_slots.first() {
+        return Err(Error::Compilation(format!(
+            "external grammar {:?} is still unbound",
+            slot.name,
+        )));
+    }
+    Ok(())
+}
+
+fn bind_module_exact_tokens(
+    module: &Module,
+    name: &str,
+    token_ids: &[u32],
+) -> Result<Module> {
+    let Some(slot_index) = module
+        .late_token_slots
+        .iter()
+        .position(|slot| slot.name == name)
+    else {
+        if module
+            .inner
+            .late_grammar_slots
+            .iter()
+            .any(|slot| slot.name == name)
+        {
+            return Err(Error::Compilation(format!(
+                "external {name:?} has kind grammar, not token",
+            )));
+        }
+        return Err(Error::Compilation(format!(
+            "no unresolved external token named {name:?} is present in this module",
+        )));
+    };
+    if token_ids.is_empty() {
+        return Err(Error::Compilation(format!(
+            "external token {name:?} must bind at least one exact token ID",
+        )));
+    }
+
+    let slot = module.late_token_slots[slot_index].clone();
+    let mut constraint = module.inner.as_ref().clone();
+    constraint.special_token_terminals.retain(|special| {
+        !(special.terminal_id == slot.terminal_id
+            && special.token_id == slot.placeholder_token_id)
+    });
+    for &token_id in token_ids {
+        constraint
+            .special_token_terminals
+            .push(crate::runtime::SpecialTokenTerminal {
+                terminal_id: slot.terminal_id,
+                token_id,
+            });
+    }
+    constraint
+        .special_token_terminals
+        .sort_unstable_by_key(|special| (special.terminal_id, special.token_id));
+    constraint.special_token_terminals.dedup();
+    constraint.serialized_artifact_cache = None;
+    constraint.boundary_candidate_summary = std::sync::OnceLock::new();
+    constraint.rebuild_runtime_caches();
+
+    let mut late_token_slots = module.late_token_slots.clone();
+    late_token_slots.remove(slot_index);
+    Ok(Module {
+        inner: Arc::new(constraint),
+        late_token_slots,
+    })
+}
+
+impl Module {
+    /// Bind one compiled grammar child or vocabulary-qualified exact-token
+    /// value. Source grammars are intentionally not accepted on this compiled
+    /// path.
+    #[allow(private_bounds)]
+    pub fn bind<'a, T>(&self, name: impl AsRef<str>, value: T) -> Result<Self>
+    where
+        T: IntoModuleValue<'a>,
+    {
+        let name = name.as_ref();
+        let constraint = match value.into_module_value() {
+            ModuleValue::Module(child) => {
+                if !child.late_token_slots.is_empty() {
+                    return Err(Error::Compilation(
+                        "a module with unresolved exact-token slots must bind those slots before it is embedded"
+                            .to_owned(),
+                    ));
+                }
+                bind_static_parent_grammar(
+                    self.inner.as_ref(),
+                    name,
+                    Arc::clone(&child.inner),
+                    SegmentedBoundaryBackend::StaticParserDwa,
+                )?
+            }
+            ModuleValue::StaticBorrowed(child) => bind_static_parent_grammar(
+                self.inner.as_ref(),
+                name,
+                child,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )?,
+            ModuleValue::StaticOwned(child) => bind_static_parent_grammar(
+                self.inner.as_ref(),
+                name,
+                child,
+                SegmentedBoundaryBackend::StaticParserDwa,
+            )?,
+            ModuleValue::ExactToken(token) => {
+                let vocab = constraint_vocab(self.inner.as_ref());
+                if !token.targets(&vocab) {
+                    return Err(Error::Compilation(format!(
+                        "external token {name:?} was built for an incompatible vocabulary",
+                    )));
+                }
+                return bind_module_exact_tokens(self, name, &[token.id()]);
+            }
+            ModuleValue::ExactTokens(tokens) => {
+                let vocab = constraint_vocab(self.inner.as_ref());
+                if !tokens.targets(&vocab) {
+                    return Err(Error::Compilation(format!(
+                        "external token {name:?} was built for an incompatible vocabulary",
+                    )));
+                }
+                return bind_module_exact_tokens(self, name, tokens.ids());
+            }
+        };
+        Ok(Self {
+            inner: Arc::new(constraint),
+            late_token_slots: self.late_token_slots.clone(),
+        })
+    }
+
+    /// Finish a fully bound module as a runnable constraint.
+    pub fn link(&self) -> Result<RuntimeConstraint> {
+        self.link_with(BuildOptions::default())
+    }
+
+    /// Finish a fully bound module with final build options.
+    pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
+        if !options.end_token_ids().is_empty() {
+            return Err(Error::Compilation(
+                "final end-token policy is not yet available through BuildOptions".to_owned(),
+            ));
+        }
+        let _optimization = options.optimization_value();
+        if let Some(slot) = self.late_token_slots.first() {
+            return Err(Error::Compilation(format!(
+                "external token {:?} is still unbound",
+                slot.name,
+            )));
+        }
+        ensure_runnable_constraint(self.inner.as_ref())?;
+        Ok(self.inner.as_ref().clone())
+    }
+
+    /// Serialize this compiled module.
+    pub fn save(&self) -> Vec<u8> {
+        self.inner.save()
+    }
+
+    /// Load a compiled artifact as a module. Open grammar slots remain open.
+    pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(RuntimeConstraint::load(bytes)?),
+            late_token_slots: Vec::new(),
+        })
+    }
+
+    /// Load a compiled artifact while sharing an existing exact vocabulary.
+    pub fn load_with_vocab<'b>(
+        bytes: impl Into<std::borrow::Cow<'b, [u8]>>,
+        vocab: &Vocab,
+    ) -> Result<Self> {
+        Ok(Self {
+            inner: Arc::new(RuntimeConstraint::load_with_vocab(bytes, vocab)?),
+            late_token_slots: Vec::new(),
+        })
+    }
 }
 
 const FIRST_SAVE_TEMPLATE_STATE_PRIME_THRESHOLD: usize = 100_000;
