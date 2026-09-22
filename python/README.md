@@ -93,6 +93,12 @@ vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
 ```
 
+`from_llama_cpp()` keeps EOG, control, unused, and empty-piece IDs as
+**exact-only** model tokens even though they are omitted from the byte
+vocabulary. They can therefore be used with `vocab.token(id)` /
+`vocab.tokens(ids)` without inventing fake bytes, while EOG IDs can be supplied
+directly as `end_tokens`.
+
 Use `vocab.token(id)` or `vocab.tokens(ids)` for `extern token` bindings. These values retain the complete vocabulary identity; a binding from an incompatible vocabulary is rejected even if its numeric ID happens to match.
 
 ```python

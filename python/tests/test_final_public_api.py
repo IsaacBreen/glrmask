@@ -28,6 +28,14 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
         "AutoConstraint",
     ]:
         assert not hasattr(glrmask, name), name
+    for name in [
+        "from_json_schema",
+        "from_glrm_grammar",
+        "from_lark",
+        "from_ebnf",
+        "bind_grammar",
+    ]:
+        assert not hasattr(glrmask.Constraint, name), name
 
 
 def test_json_schema_constructor_accepts_text_and_objects():

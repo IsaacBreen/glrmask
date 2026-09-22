@@ -2,6 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, SegmentedBoundaryBackend,
     compose_constraints_owned_parent_segmented_shared,
@@ -259,6 +261,7 @@ impl<'a> Grammar<'a> {
         let (local_grammar, source_bindings) = self.clone().into_source_only_and_bindings();
         let mut builder = ConstraintSpec::builder(local_grammar, vocab)?;
         let mut bindings = BTreeMap::<String, ModuleBinding>::new();
+        let mut source_children = Vec::<(String, Grammar<'a>)>::new();
         for (name, value) in source_bindings {
             match value {
                 GrammarValue::ExactToken(token) => {
@@ -278,10 +281,7 @@ impl<'a> Grammar<'a> {
                     builder.token_bindings.insert(name, tokens.ids().to_vec());
                 }
                 GrammarValue::Source(child) => {
-                    bindings.insert(
-                        name,
-                        ModuleBinding::Module(Box::new(child.compile_module(vocab)?)),
-                    );
+                    source_children.push((name, child));
                 }
                 GrammarValue::Module(child) => {
                     if !child.targets_vocab(vocab) {
@@ -335,7 +335,21 @@ impl<'a> Grammar<'a> {
         spec.allow_open_source_tokens = true;
         spec.automatic_boundary_selection = true;
         spec.open_token_placeholders = placeholder_ids.clone();
-        let constraint = spec.compile()?;
+        let (constraint, source_modules) = rayon::join(
+            || spec.compile(),
+            || {
+                source_children
+                    .into_par_iter()
+                    .map(|(name, child)| {
+                        Ok((name, ModuleBinding::Module(Box::new(child.compile_module(vocab)?))))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            },
+        );
+        let constraint = constraint?;
+        for (name, binding) in source_modules? {
+            bindings.insert(name, binding);
+        }
         let module = Module {
             inner: Arc::new(constraint),
             token_slots: placeholder_ids.keys().cloned().collect(),
@@ -892,18 +906,31 @@ impl<'a> ConstraintSpec<'a> {
 
     fn compile_static_uncached(&self) -> Result<RuntimeConstraint> {
         let token_bindings = self.token_binding_refs();
-        let mut parent = if let Some(source) = self.grammar.glrm_source() {
-            RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
-                source, &[], self.vocab, &token_bindings, &[],
-            )?
-        } else {
-            compile_static_source(&self.grammar, self.vocab, &token_bindings)?
+        let compile_parent = || {
+            if let Some(source) = self.grammar.glrm_source() {
+                RuntimeConstraint::from_glrm_grammar_with_subgrammars_bindings_and_end_tokens(
+                    source, &[], self.vocab, &token_bindings, &[],
+                )
+            } else {
+                compile_static_source(&self.grammar, self.vocab, &token_bindings)
+            }
         };
-        self.register_open_token_placeholders(&mut parent)?;
         if self.grammar_bindings.is_empty() {
+            let mut parent = compile_parent()?;
+            self.register_open_token_placeholders(&mut parent)?;
             return Ok(parent);
         }
-        let children = self.compile_children(ChildCompileMode::Static)?;
+
+        // Parent-local compilation and child-local compilation have no
+        // semantic dependency. Run them in the same Rayon pool and join only
+        // before boundary construction, which genuinely needs both artifacts.
+        let (parent, children) = rayon::join(
+            compile_parent,
+            || self.compile_children(ChildCompileMode::Static),
+        );
+        let mut parent = parent?;
+        self.register_open_token_placeholders(&mut parent)?;
+        let children = children?;
         let children = prepare_compiled_children(
             children, self.vocab, SegmentedBoundaryBackend::StaticParserDwa,
         )?;
@@ -959,13 +986,19 @@ impl<'a> ConstraintSpec<'a> {
         let source = self.grammar.glrm_source().ok_or_else(|| {
             Error::Compilation("external grammar bindings require a GLRM grammar".to_owned())
         })?;
-        let parents = DynamicConstraint::from_glrm_grammar_with_subgrammars_and_bindings(
-            source,
-            &[],
-            self.vocab,
-            &token_bindings,
-        )?;
-        let children = self.compile_children(ChildCompileMode::Dynamic)?;
+        let (parents, children) = rayon::join(
+            || {
+                DynamicConstraint::from_glrm_grammar_with_subgrammars_and_bindings(
+                    source,
+                    &[],
+                    self.vocab,
+                    &token_bindings,
+                )
+            },
+            || self.compile_children(ChildCompileMode::Dynamic),
+        );
+        let parents = parents?;
+        let children = children?;
         let children = prepare_compiled_children(
             children,
             self.vocab,
@@ -997,16 +1030,20 @@ impl<'a> ConstraintSpec<'a> {
         &self,
         mode: ChildCompileMode,
     ) -> Result<Vec<(String, CompiledChild<'_>)>> {
-        self.grammar_bindings
-            .iter()
-            .map(|(name, binding)| Ok((name.clone(), binding.compile(
-                self.vocab, mode, self.allow_open_source_tokens,
-            )?)))
+        let bindings = self.grammar_bindings.iter().collect::<Vec<_>>();
+        bindings
+            .par_iter()
+            .map(|(name, binding)| {
+                Ok((
+                    (*name).clone(),
+                    binding.compile(self.vocab, mode, self.allow_open_source_tokens)?,
+                ))
+            })
             .collect()
     }
 
     fn targets(&self, vocab: &Vocab) -> bool {
-        self.vocab.entries_map() == vocab.entries_map()
+        self.vocab.same_model_vocab(vocab)
     }
 }
 
@@ -1276,7 +1313,13 @@ impl CompiledChild<'_> {
 }
 
 fn static_constraint_targets(constraint: &RuntimeConstraint, vocab: &Vocab) -> bool {
-    constraint.token_bytes_match_vocab(vocab)
+    constraint
+        .late_bind_vocab
+        .get()
+        .map_or_else(
+            || constraint.token_bytes_match_vocab(vocab),
+            |compiled_vocab| compiled_vocab.same_model_vocab(vocab),
+        )
 }
 
 impl GrammarBinding<'_> {
@@ -1816,6 +1859,7 @@ fn boundary_for_optimization(
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ModuleArtifactManifest {
+    exact_only_token_ids: Vec<u32>,
     token_slots: Vec<String>,
     bindings: Vec<(String, ModuleBindingArtifact)>,
 }
@@ -1827,7 +1871,7 @@ enum ModuleBindingArtifact {
     ExactTokens(Vec<u32>),
 }
 
-const MODULE_MAGIC: &[u8; 8] = b"GLRMOD02";
+const MODULE_MAGIC: &[u8; 8] = b"GLRMOD03";
 const MODULE_HEADER_LEN: usize = 16;
 
 impl Module {
@@ -1889,7 +1933,7 @@ impl Module {
                     static_constraint_targets(child.as_ref(), vocab)
                 }
                 ModuleBinding::ExactTokens(ids) => {
-                    ids.iter().all(|&id| vocab.get(id).is_some())
+                    ids.iter().all(|&id| vocab.contains_exact_token_id(id))
                 }
             })
     }
@@ -1925,7 +1969,9 @@ impl Module {
                     }
                     let mut previous = None;
                     for &id in ids.iter() {
-                        if vocab.get(id).is_none() || previous.is_some_and(|value| value >= id) {
+                        if !vocab.contains_exact_token_id(id)
+                            || previous.is_some_and(|value| value >= id)
+                        {
                             return Err(Error::Serialization(format!(
                                 "module exact-token binding {name:?} is invalid for its vocabulary",
                             )));
@@ -2068,19 +2114,22 @@ impl Module {
             return Ok(self.inner.as_ref().clone());
         }
         let vocab = constraint_vocab(self.inner.as_ref());
-        let mut raw_children = Vec::<(String, RuntimeConstraint)>::with_capacity(self.bindings.len());
-        for (name, binding) in &self.bindings {
-            let mut child = match binding {
-                ModuleBinding::Module(module) => module.materialize(optimization)?,
-                ModuleBinding::Constraint(constraint) => constraint.as_ref().clone(),
-                ModuleBinding::ExactTokens(ids) => {
-                    compile_exact_token_adapter(&vocab, ids.as_ref())?
-                }
-            };
-            // Standalone termination is root policy, never an embedded body.
-            child.end_tokens = Arc::from([]);
-            raw_children.push((name.clone(), child));
-        }
+        let binding_entries = self.bindings.iter().collect::<Vec<_>>();
+        let raw_children = binding_entries
+            .par_iter()
+            .map(|(name, binding)| {
+                let mut child = match binding {
+                    ModuleBinding::Module(module) => module.materialize(optimization)?,
+                    ModuleBinding::Constraint(constraint) => constraint.as_ref().clone(),
+                    ModuleBinding::ExactTokens(ids) => {
+                        compile_exact_token_adapter(&vocab, ids.as_ref())?
+                    }
+                };
+                // Standalone termination is root policy, never an embedded body.
+                child.end_tokens = Arc::from([]);
+                Ok(((*name).clone(), child))
+            })
+            .collect::<Result<Vec<_>>>()?;
         let probe_children = raw_children
             .iter()
             .map(|(name, child)| (name.clone(), Arc::new(child.clone())))
@@ -2142,6 +2191,9 @@ impl Module {
             })
             .collect();
         ModuleArtifactManifest {
+            exact_only_token_ids: constraint_vocab(self.inner.as_ref())
+                .exact_only_token_ids()
+                .collect(),
             token_slots: self.token_slots.iter().cloned().collect(),
             bindings,
         }
@@ -2151,7 +2203,10 @@ impl Module {
     pub fn save(&self) -> Vec<u8> {
         let manifest = bincode::serialize(&self.artifact_manifest())
             .expect("in-memory module manifest is serializable");
-        let body = self.inner.save();
+        // Open-module vocabulary metadata lives in this manifest. Keep the
+        // embedded constraint bytes as the raw compiled body rather than
+        // wrapping them in the closed-root vocabulary/policy envelope.
+        let body = self.inner.save_body();
         let mut bytes = Vec::with_capacity(MODULE_HEADER_LEN + manifest.len() + body.len());
         bytes.extend_from_slice(MODULE_MAGIC);
         bytes.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
@@ -2161,9 +2216,30 @@ impl Module {
     }
 
     fn from_artifact_parts(
-        inner: RuntimeConstraint,
+        mut inner: RuntimeConstraint,
         manifest: ModuleArtifactManifest,
     ) -> Result<Self> {
+        let mut previous = None;
+        for &id in &manifest.exact_only_token_ids {
+            if inner.token_bytes_for_id(id).is_some()
+                || previous.is_some_and(|value| value >= id)
+            {
+                return Err(Error::Serialization(
+                    "module exact-only token domain is invalid".to_owned(),
+                ));
+            }
+            previous = Some(id);
+        }
+        let vocab = Vocab::new_with_exact_token_ids(
+            inner
+                .token_bytes_iter()
+                .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                .collect(),
+            manifest.exact_only_token_ids.iter().copied(),
+        );
+        inner
+            .bind_vocab_exact(&vocab)
+            .map_err(Error::Serialization)?;
         let mut token_slots = BTreeSet::new();
         for name in manifest.token_slots {
             if name.is_empty() || !token_slots.insert(name) {
@@ -2229,9 +2305,11 @@ impl Module {
             .map_err(|error| Error::Serialization(format!("invalid module manifest: {error}")))?;
         let inner = match bytes {
             std::borrow::Cow::Owned(mut bytes) => {
-                RuntimeConstraint::load(bytes.split_off(body_start))?
+                RuntimeConstraint::load_body_artifact(bytes.split_off(body_start))?
             }
-            std::borrow::Cow::Borrowed(bytes) => RuntimeConstraint::load(&bytes[body_start..])?,
+            std::borrow::Cow::Borrowed(bytes) => {
+                RuntimeConstraint::load_body_artifact(&bytes[body_start..])?
+            }
         };
         Self::from_artifact_parts(inner, manifest)
     }
@@ -2247,7 +2325,7 @@ impl Module {
                     .bind_vocab_exact(vocab)
                     .map_err(Error::Serialization)?,
                 ModuleBinding::ExactTokens(ids) => {
-                    if ids.iter().any(|&id| vocab.get(id).is_none()) {
+                    if ids.iter().any(|&id| !vocab.contains_exact_token_id(id)) {
                         return Err(Error::Serialization(
                             "module exact-token binding is incompatible with supplied vocabulary"
                                 .to_owned(),
@@ -2562,7 +2640,7 @@ mod tests {
         .bind_grammar("child", Grammar::ebnf(r#"start ::= "a""#))
         .unwrap();
         let error = VocabPartition::compile(grammar, &vocab).unwrap_err();
-        assert!(error.to_string().contains("bound subgrammars"));
+        assert!(error.to_string().contains("bound grammar values"));
     }
 
     #[test]
@@ -3437,7 +3515,7 @@ mod tests {
             .expect("parent token trigger must be built")
             .contains(&2));
 
-        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
         let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
@@ -3501,7 +3579,7 @@ mod tests {
             crate::runtime::BoundaryTrigger::Exact(_)
         ));
 
-        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
         let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
@@ -3632,7 +3710,7 @@ mod tests {
         let child = RuntimeConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab)
             .unwrap();
 
-        let mut loaded = RuntimeConstraint::load(parent.save()).unwrap();
+        let mut loaded = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         loaded.build_exact_boundary_trigger().unwrap();
         assert!(matches!(
@@ -3644,7 +3722,7 @@ mod tests {
             "trigger upgrade should not force materialization of the heavy parser-cache section",
         );
 
-        let reloaded = RuntimeConstraint::load(loaded.save()).unwrap();
+        let reloaded = RuntimeConstraint::load_body_artifact(loaded.save()).unwrap();
         let bound = reloaded
             .bind_grammar_dynamic_boundary("child", child)
             .unwrap();
@@ -4780,7 +4858,7 @@ mod tests {
             .iter()
             .all(|component| component.global_to_local_parser_state.is_empty()));
 
-        let loaded_half = RuntimeConstraint::load(&half.save()).unwrap();
+        let loaded_half = RuntimeConstraint::load_body_artifact(half.save()).unwrap();
         let loaded_half_overlay = loaded_half.static_dynamic_overlay.as_ref().unwrap();
         let loaded_half_layout = loaded_half.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(
@@ -5065,7 +5143,7 @@ mod tests {
             !parent.composition_reset_tokens_by_terminal.is_empty(),
             "late-bind parent compilation should precompute reset-token composition metadata",
         );
-        let mut cached_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let mut cached_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
         cached_parent
             .materialize_composition_metadata_for_compilation()
             .unwrap();
@@ -5241,7 +5319,7 @@ mod tests {
             "fresh compilation should retain the supplied vocabulary for later binds",
         );
 
-        let loaded_parent = RuntimeConstraint::load(parent.save()).unwrap();
+        let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
         assert!(
             loaded_parent.late_bind_vocab.get().is_none(),
             "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
@@ -5255,7 +5333,7 @@ mod tests {
             .unwrap();
         assert_eq!(first.start().mask(), second.start().mask());
 
-        let loaded = RuntimeConstraint::load(loaded_parent.save()).unwrap();
+        let loaded = RuntimeConstraint::load_body_artifact(loaded_parent.save()).unwrap();
         assert!(
             loaded.late_bind_vocab.get().is_none(),
             "late-bind vocabulary memoization is runtime-only and must not enter the wire format",
@@ -5405,7 +5483,7 @@ mod cached_parent_main_tests {
             .any(|slot| slot.name == "payload"));
 
         let saved = parent.save();
-        let loaded = RuntimeConstraint::load(&saved).unwrap();
+        let loaded = RuntimeConstraint::load_body_artifact(&saved).unwrap();
         let loaded_with_a = loaded.bind_grammar("payload", &child_a).unwrap();
         assert!(accepts(&loaded_with_a, b"<a>"));
         assert!(!accepts(&loaded_with_a, b"<b>"));

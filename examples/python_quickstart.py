@@ -11,13 +11,11 @@ import glrmask
 llm = Llama(model_path="model.gguf", logits_all=True)
 vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
-end_tokens = set(end_token_ids)
 
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
-constraint = glrmask.Constraint.from_json_schema(
-    schema,
+constraint = glrmask.Grammar.from_json_schema(schema).compile(
     vocab,
-    end_token_ids=end_token_ids,
+    end_tokens=end_token_ids,
 )
 state = constraint.start()
 
@@ -39,7 +37,7 @@ for _ in range(64):
     state.commit_token(token)
     generated.append(token)
 
-    if token in end_tokens:
+    if state.is_terminated():
         break
 
 print(llm.detokenize(generated).decode())

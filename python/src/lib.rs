@@ -175,14 +175,17 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
 
     let mut entries = Vec::with_capacity(n_vocab as usize);
     let mut end_token_ids = Vec::new();
+    let mut exact_only_token_ids = Vec::new();
     for token_id in 0..n_vocab {
         if is_eog.call1((&llama_vocab, token_id))?.is_truthy()? {
             end_token_ids.push(token_id);
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
         let attrs: u32 = get_attr.call1((&llama_vocab, token_id))?.extract()?;
         if attrs & excluded_attrs != 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -199,6 +202,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             required
         };
         if capacity == 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -212,6 +216,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             )));
         }
         if length == 0 {
+            exact_only_token_ids.push(token_id);
             continue;
         }
 
@@ -227,7 +232,10 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
         entries.push((token_id, raw[..length].to_vec()));
     }
 
-    Ok((glrmask::Vocab::new(entries), end_token_ids))
+    Ok((
+        glrmask::Vocab::new_with_exact_token_ids(entries, exact_only_token_ids),
+        end_token_ids,
+    ))
 }
 
 fn constraint_result<T, E: std::fmt::Display>(result: Result<T, E>) -> PyResult<T> {
@@ -783,114 +791,6 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    #[staticmethod]
-    #[pyo3(signature = (schema, vocab))]
-    fn from_json_schema(schema: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::json_schema(schema),
-                &vocab.inner
-            ),
-            vocab,
-        )
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (lark_source, vocab))]
-    fn from_lark(lark_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::lark(lark_source),
-                &vocab.inner
-            ),
-            vocab,
-        )
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (glrm_source, vocab, subgrammars=None, bindings=None))]
-    fn from_glrm_grammar(
-        py: Python<'_>,
-        glrm_source: &str,
-        vocab: &PyVocab,
-        subgrammars: Option<BTreeMap<String, Py<PyConstraint>>>,
-        bindings: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        // Compatibility-only constructor. Preserve two historical behaviors
-        // intentionally absent from the final public Grammar API:
-        // - unresolved grammar slots may be returned in an open Constraint;
-        // - exact special IDs may lie outside the byte vocabulary.
-        //
-        // Compile the parent locally with those raw token bindings, then use
-        // the exact dynamic late-linker for supplied children. This also handles
-        // nullable children without reviving the old explicitly-static builder
-        // composition path.
-        let mut builder = glrmask::ConstraintSpec::builder(
-            glrmask::Grammar::glrm(glrm_source),
-            &vocab.inner,
-        )
-        .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        for (name, token_ids) in external_terminal_bindings_from_dict(bindings)? {
-            builder = builder
-                .bind_token(name, token_ids)
-                .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        }
-        let spec = builder
-            .build()
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        let mut constraint = spec
-            .compile()
-            .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        if let Some(subgrammars) = subgrammars {
-            for (name, child) in subgrammars {
-                let child = child.borrow(py);
-                constraint = constraint
-                    .bind_grammar_dynamic_boundary(name, Arc::clone(&child.inner))
-                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
-            }
-        }
-        Self::from_constraint_result(Ok::<_, glrmask::Error>(constraint), vocab)
-    }
-
-    #[staticmethod]
-    #[pyo3(signature = (ebnf_source, vocab))]
-    fn from_ebnf(ebnf_source: &str, vocab: &PyVocab) -> PyResult<Self> {
-        Self::from_constraint_result(
-            glrmask::Constraint::compile(
-                glrmask::Grammar::ebnf(ebnf_source),
-                &vocab.inner
-            ),
-            vocab,
-        )
-    }
-
-    /// Bind one unresolved `extern grammar NAME;` in this compiled constraint.
-    ///
-    /// The compiled parent retains its target vocabulary, so callers no longer
-    /// need to supply it again. `vocab` remains an optional compatibility
-    /// argument for callers using the previous Python API; when present it is
-    /// validated against the parent before binding.
-    #[pyo3(signature = (name, child, vocab=None))]
-    fn bind_grammar(
-        &self,
-        name: &str,
-        child: PyRef<'_, PyConstraint>,
-        vocab: Option<&PyVocab>,
-    ) -> PyResult<Self> {
-        if let Some(vocab) = vocab {
-            let mut validation = self.inner.as_ref().clone();
-            validation
-                .bind_vocab_exact(&vocab.inner)
-                .map_err(PyValueError::new_err)?;
-        }
-        let constraint = constraint_result(self.inner.bind_grammar(name, child.inner.as_ref()))?;
-        let max_token = constraint.max_original_token_id().unwrap_or(0);
-        Ok(Self {
-            inner: Arc::new(constraint),
-            max_token,
-        })
-    }
-
     /// Serialize the compiled body and final termination policy as bytes.
     fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
         let bytes = py.allow_threads(|| self.inner.save());

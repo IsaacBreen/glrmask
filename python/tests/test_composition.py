@@ -1,11 +1,23 @@
 import glrmask
 
 
+def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, optimization=None):
+    grammar = glrmask.Grammar.from_glrm(source)
+    for name, child in (subgrammars or {}).items():
+        grammar = grammar.bind(name, child)
+    kwargs = {}
+    if end_tokens is not None:
+        kwargs["end_tokens"] = end_tokens
+    if optimization is not None:
+        kwargs["optimization"] = optimization
+    return grammar.compile(vocab, **kwargs)
+
+
 def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"X", 1: b"ab!", 2: b"Xab!", 3: b"a", 4: b"b", 5: b"!"}
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         '''
         glrm 1;
         start child;
@@ -13,7 +25,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         ''',
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -23,7 +35,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         vocab,
         subgrammars={"payload": child},
     )
-    inline = glrmask.Constraint.from_glrm_grammar(
+    inline = _glrm(
         '''
         glrm 1;
         start document;
@@ -49,7 +61,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"X", 1: b"ab!", 2: b"a", 3: b"b", 4: b"!"}
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         '''
         glrm 1;
         start child;
@@ -57,7 +69,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         ''',
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -67,7 +79,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         vocab,
         subgrammars={"payload": child},
     )
-    monolithic = glrmask.Constraint.from_glrm_grammar(
+    monolithic = _glrm(
         '''
         glrm 1;
         start document;
@@ -97,7 +109,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"X!", 1: b"Xa!", 2: b"X", 3: b"a", 4: b"!"}
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         '''
         glrm 1;
         start child;
@@ -106,7 +118,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         ''',
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -116,7 +128,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         vocab,
         subgrammars={"payload": child},
     )
-    monolithic = glrmask.Constraint.from_glrm_grammar(
+    monolithic = _glrm(
         '''
         glrm 1;
         start document;
@@ -141,7 +153,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"X!", 1: b"Xa!", 2: b"X", 3: b"a", 4: b"!"}
     )
-    leaf = glrmask.Constraint.from_glrm_grammar(
+    leaf = _glrm(
         '''
         glrm 1;
         start leaf;
@@ -149,7 +161,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         ''',
         vocab,
     )
-    middle = glrmask.Constraint.from_glrm_grammar(
+    middle = _glrm(
         '''
         glrm 1;
         start middle;
@@ -160,7 +172,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         subgrammars={"leaf": leaf},
     )
     middle = glrmask.Constraint.load(middle.save(), vocab)
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -170,7 +182,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         vocab,
         subgrammars={"middle": middle},
     )
-    monolithic = glrmask.Constraint.from_glrm_grammar(
+    monolithic = _glrm(
         '''
         glrm 1;
         start document;
@@ -204,7 +216,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
             7: b"a!",
         }
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         '''
         glrm 1;
         start child;
@@ -212,7 +224,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         ''',
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -224,7 +236,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         vocab,
         subgrammars={"payload": child},
     )
-    monolithic = glrmask.Constraint.from_glrm_grammar(
+    monolithic = _glrm(
         '''
         glrm 1;
         start document;
@@ -258,7 +270,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
             6: b">",
         }
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         '''
         glrm 1;
         start child;
@@ -266,7 +278,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         ''',
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         '''
         glrm 1;
         start document;
@@ -277,7 +289,7 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         vocab,
         subgrammars={"left": child, "right": child},
     )
-    monolithic = glrmask.Constraint.from_glrm_grammar(
+    monolithic = _glrm(
         '''
         glrm 1;
         start document;
@@ -303,7 +315,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"Xa!", 1: b"X", 2: b"a", 3: b"!"}
     )
-    child = glrmask.Constraint.from_glrm_grammar(
+    child = _glrm(
         """
         glrm 1;
         start child;
@@ -311,7 +323,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         """,
         vocab,
     )
-    composed = glrmask.Constraint.from_glrm_grammar(
+    composed = _glrm(
         """
         glrm 1;
         start document;
@@ -350,26 +362,25 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         3: b"b",
         4: b"x",
     })
-    parent = glrmask.Constraint.from_glrm_grammar(
+    parent = glrmask.Grammar.from_glrm(
         """
         glrm 1;
         extern grammar payload;
         start document;
         nt document = "x" | "<" payload ">";
-        """,
-        vocab,
-    )
-    child_a = glrmask.Constraint.from_glrm_grammar(
+        """
+    ).compile_module(vocab)
+    child_a = _glrm(
         'glrm 1; start value; nt value = "a";',
         vocab,
     )
-    child_b = glrmask.Constraint.from_glrm_grammar(
+    child_b = _glrm(
         'glrm 1; start value; nt value = "b";',
         vocab,
     )
 
-    with_a = parent.bind_grammar("payload", child_a, vocab)
-    with_b = parent.bind_grammar("payload", child_b, vocab)
+    with_a = parent.bind("payload", child_a).link()
+    with_b = parent.bind("payload", child_b).link()
 
     state = with_a.start()
     state.commit_token(0)
@@ -383,8 +394,8 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     state.commit_token(1)
     assert state.is_accepting()
 
-    loaded_parent = glrmask.Constraint.load(parent.save(), vocab)
-    loaded_with_a = loaded_parent.bind_grammar("payload", child_a, vocab)
+    loaded_parent = glrmask.Module.load(parent.save(), vocab=vocab)
+    loaded_with_a = loaded_parent.bind("payload", child_a).link()
     state = loaded_with_a.start()
     state.commit_token(0)
     state.commit_token(2)

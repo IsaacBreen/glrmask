@@ -26,7 +26,8 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 
-const ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT1";
+const PREVIOUS_ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT1";
+const ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT2";
 
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
@@ -3284,7 +3285,10 @@ fn segmented_runtime_artifact_v24_ref(
         .segmented_parser_components
         .iter()
         .map(|component| SegmentedParserComponentV24Ref {
-            constraint_artifact: component.constraint.save(),
+            // Segmented components are embeddable bodies, not generation
+            // roots. They may intentionally retain linker slots, so never
+            // wrap them in the closed-root policy/vocabulary envelope.
+            constraint_artifact: component.constraint.save_body(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
@@ -3398,7 +3402,10 @@ fn segmented_runtime_artifact_ref(
         .segmented_parser_components
         .iter()
         .map(|component| RecursiveSegmentedParserComponentV27Ref {
-            constraint_artifact: component.constraint.save(),
+            // Recursive segmented components are likewise internal bodies.
+            // The outer root/module artifact carries exact-vocabulary identity
+            // and rebinds it recursively after load.
+            constraint_artifact: component.constraint.save_body(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
@@ -3659,7 +3666,7 @@ fn restore_segmented_runtime_v22(
                 component.root_entry_terminals.len(),
             )));
         }
-        let child = Constraint::load(component.constraint_artifact)?;
+        let child = Constraint::load_body_artifact(component.constraint_artifact)?;
         if component
             .terminal_offset
             .checked_add(child.table.num_terminals)
@@ -4261,7 +4268,7 @@ fn restore_recursive_segmented_runtime_v27(
         .components
         .into_par_iter()
         .map(|component| {
-            let child = Constraint::load(&component.constraint_artifact)?;
+            let child = Constraint::load_body_artifact(&component.constraint_artifact)?;
             Ok::<_, crate::GlrMaskError>((component, child))
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -5799,12 +5806,23 @@ impl Constraint {
     /// Current artifacts use a compact sectioned representation and retain
     /// runtime-native sections where doing so materially reduces load latency.
     pub fn save(&self) -> Vec<u8> {
-        if self.end_tokens.is_empty() { return self.save_body(); }
+        let exact_only_token_ids = self
+            .late_bind_vocab
+            .get()
+            .map(|vocab| vocab.exact_only_token_ids().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if self.end_tokens.is_empty() && exact_only_token_ids.is_empty() {
+            return self.save_body();
+        }
         let body = self.save_body();
-        let mut bytes = Vec::with_capacity(12 + self.end_tokens.len() * 4 + body.len());
+        let mut bytes = Vec::with_capacity(
+            16 + (self.end_tokens.len() + exact_only_token_ids.len()) * 4 + body.len(),
+        );
         bytes.extend_from_slice(ROOT_POLICY_MAGIC);
         bytes.extend_from_slice(&(self.end_tokens.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(exact_only_token_ids.len() as u32).to_le_bytes());
         for &id in self.end_tokens.iter() { bytes.extend_from_slice(&id.to_le_bytes()); }
+        for id in exact_only_token_ids { bytes.extend_from_slice(&id.to_le_bytes()); }
         bytes.extend_from_slice(&body);
         bytes
     }
@@ -6677,7 +6695,69 @@ impl Constraint {
     /// runtime structures retain zero-copy views into persistent backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
         let bytes = bytes.into();
-        if !bytes.starts_with(ROOT_POLICY_MAGIC) { return Self::load_body(bytes); }
+        if bytes.starts_with(PREVIOUS_ROOT_POLICY_MAGIC) {
+            return Self::load_previous_root_policy(bytes);
+        }
+        if !bytes.starts_with(ROOT_POLICY_MAGIC) {
+            let body = Self::load_body(bytes)?;
+            if !body.late_grammar_slots.is_empty() {
+                return Err(crate::Error::Serialization(
+                    "constraint artifact has unresolved slots; load it as a Module instead"
+                        .to_owned(),
+                ));
+            }
+            return Ok(body);
+        }
+        if bytes.len() < 16 {
+            return Err(crate::Error::Serialization("truncated root policy header".to_owned()));
+        }
+        let end_count =
+            u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        let exact_count =
+            u32::from_le_bytes(bytes[12..16].try_into().expect("header checked")) as usize;
+        let metadata_count = end_count.checked_add(exact_count)
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy counts".to_owned()))?;
+        let start = metadata_count.checked_mul(4).and_then(|len| 16usize.checked_add(len))
+            .filter(|&start| start < bytes.len())
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
+        let end_ids = bytes[16..16 + end_count * 4].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+            .collect::<Vec<_>>();
+        let exact_ids = bytes[16 + end_count * 4..start].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+            .collect::<Vec<_>>();
+        if end_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || exact_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(crate::Error::Serialization("noncanonical root vocabulary policy".to_owned()));
+        }
+        let mut body = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body(Cow::Owned(bytes.split_off(start)))?,
+            Cow::Borrowed(bytes) => Self::load_body(Cow::Borrowed(&bytes[start..]))?,
+        };
+        if !body.late_grammar_slots.is_empty() {
+            return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
+        }
+        if exact_ids.iter().any(|&id| body.token_bytes_for_id(id).is_some()) {
+            return Err(crate::Error::Serialization(
+                "root exact-only token domain overlaps byte vocabulary".to_owned(),
+            ));
+        }
+        if !exact_ids.is_empty() {
+            let vocab = crate::Vocab::new_with_exact_token_ids(
+                body.token_bytes_iter()
+                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                    .collect(),
+                exact_ids,
+            );
+            body.bind_vocab_exact(&vocab)
+                .map_err(crate::Error::Serialization)?;
+        }
+        body.with_end_tokens(&end_ids)
+            .map_err(|error| crate::Error::Serialization(error.to_string()))
+    }
+
+    fn load_previous_root_policy(bytes: Cow<'_, [u8]>) -> crate::Result<Self> {
         if bytes.len() < 12 {
             return Err(crate::Error::Serialization("truncated root policy header".to_owned()));
         }
@@ -6708,6 +6788,17 @@ impl Constraint {
             }
             Cow::Borrowed(bytes) => Self::load_impl(bytes, None),
         }
+    }
+
+    /// Load an embeddable compiled body without enforcing the public
+    /// closed-root invariant.
+    ///
+    /// Only Module and segmented-runtime persistence use this. Public callers
+    /// must use `Constraint::load`, which rejects unresolved slots.
+    pub(crate) fn load_body_artifact<'a>(
+        bytes: impl Into<Cow<'a, [u8]>>,
+    ) -> crate::Result<Self> {
+        Self::load_body(bytes.into())
     }
 
     /// Load a compiled constraint and bind it to an already-existing exact

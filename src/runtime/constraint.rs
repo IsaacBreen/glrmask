@@ -1842,20 +1842,32 @@ impl Constraint {
     /// binding then lets repeated composition prove compatibility by `Arc` identity.
     #[doc(hidden)]
     pub(crate) fn bind_vocab_exact(&mut self, vocab: &crate::Vocab) -> Result<(), String> {
+        if let Some(existing) = self.late_bind_vocab.get()
+            && !existing.same_model_vocab(vocab)
+        {
+            return Err(
+                "constraint was not compiled for the supplied exact vocabulary".to_string(),
+            );
+        }
         let entries = vocab.entries_arc();
         if Arc::ptr_eq(&self.token_bytes, &entries) {
             self.late_bind_vocab = OnceLock::from(vocab.clone());
-            return Ok(());
+        } else {
+            if !self.token_bytes_match_vocab(vocab) {
+                return Err("constraint was not compiled for the supplied vocabulary".to_string());
+            }
+            self.token_bytes = entries;
+            // A successful exact bind establishes the precise public vocabulary
+            // for every later late-subgrammar bind as well. Keep the caller's
+            // already-built `Vocab` (and its pure derived-artifact cache) instead
+            // of reconstructing the same bytes again in `constraint_vocab()`.
+            self.late_bind_vocab = OnceLock::from(vocab.clone());
         }
-        if !self.token_bytes_match_vocab(vocab) {
-            return Err("constraint was not compiled for the supplied vocabulary".to_string());
+        if let Some(overlay) = self.static_dynamic_overlay.as_mut() {
+            for component in &mut overlay.segmented_parser_components {
+                Arc::make_mut(&mut component.constraint).bind_vocab_exact(vocab)?;
+            }
         }
-        self.token_bytes = entries;
-        // A successful exact bind establishes the precise public vocabulary
-        // for every later late-subgrammar bind as well. Keep the caller's
-        // already-built `Vocab` (and its pure derived-artifact cache) instead
-        // of reconstructing the same bytes again in `constraint_vocab()`.
-        self.late_bind_vocab = OnceLock::from(vocab.clone());
         Ok(())
     }
 

@@ -349,7 +349,7 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
         if !reserved.contains(&candidate)
-            && !vocab.iter().any(|(token_id, _)| token_id == candidate)
+            && !vocab.contains_exact_token_id(candidate)
         {
             return Ok(candidate);
         }

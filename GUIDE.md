@@ -167,6 +167,12 @@ let _constraint = grammar.compile(vocab)?;
 
 `Vocab::token(...)` and `Vocab::tokens(...)` retain the complete vocabulary identity. A value from an incompatible vocabulary is rejected even if the bound numeric ID happens to exist in both vocabularies.
 
+Model control/tool tokens do not need fake byte spellings. When constructing a
+Rust vocabulary manually, use `Vocab::new_with_exact_token_ids(byte_entries,
+exact_only_ids)` for IDs that are valid exact-token bindings but must never
+enter the byte language. Python's `Vocab.from_llama_cpp()` records omitted
+control/EOG/empty-piece IDs this way automatically.
+
 ### Cached parents with `Module`
 
 Use `compile_module` when a compiled parent will be reused with request-specific children. A `Module` may remain open, can be saved and loaded, and is deliberately not runnable.

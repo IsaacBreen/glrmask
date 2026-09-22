@@ -2011,19 +2011,21 @@ pub(crate) fn compile_signed_shard_parser(
     );
     let minimize_order = "descending";
     let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
-    eprintln!(
-        "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} candidates={} kept_internals={} cells_outer_before={} cells_inner_before={} project_ms={project_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_order={minimize_order} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
-        library.ordinary_terms,
-        arena.states().len(),
-        arena.num_transitions(),
-        resolved_reverse_topo.map(|layers| layers.len()).unwrap_or(usize::MAX),
-        candidates.len(),
-        kept_count,
-        cells_outer_before,
-        cells_inner_before,
-        parser_dwa.num_states(),
-        parser_dwa.num_transitions(),
-    );
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!(
+            "[glrmask/profile][signed_shard_compose] start_component={start_component} terms={} signed_states={signed_states} signed_transitions={signed_transitions} ordinary_appended={ordinary_appended_states} control_appended={control_appended_states} no_controls={no_controls_diagnostic} resolved_states={} resolved_transitions={} reverse_topo={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} candidates={} kept_internals={} cells_outer_before={} cells_inner_before={} project_ms={project_ms:.3} pre_hash_states={pre_hash_states} pre_hash_trans={pre_hash_trans} pre_hash_acyclic={pre_hash_acyclic} hashcons_ms={hashcons_ms:.3} post_hash_states={post_hash_states} post_hash_trans={post_hash_trans} minimize_order={minimize_order} minimize_ms={minimize_ms:.3} parser_states={} parser_trans={}",
+            library.ordinary_terms,
+            arena.states().len(),
+            arena.num_transitions(),
+            resolved_reverse_topo.map(|layers| layers.len()).unwrap_or(usize::MAX),
+            candidates.len(),
+            kept_count,
+            cells_outer_before,
+            cells_inner_before,
+            parser_dwa.num_states(),
+            parser_dwa.num_transitions(),
+        );
+    }
     #[cfg(test)]
     trace_signed_shard_parser_words(start_component, &parser_dwa, context.total_scoped_states);
     Ok(SignedShardOutput {

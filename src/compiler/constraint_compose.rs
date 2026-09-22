@@ -17433,7 +17433,9 @@ fn build_boundary_repair(
                             if let Some(result) = deferred.get() {
                                 break result.as_ref().ok();
                             }
-                            std::thread::yield_now();
+                            if rayon::yield_now().is_none() {
+                                std::thread::yield_now();
+                            }
                         }
                     } else {
                         None
@@ -17681,7 +17683,9 @@ fn build_boundary_repair(
             if let Some(prepared) = deferred.get() {
                 break prepared;
             }
-            std::thread::yield_now();
+            if rayon::yield_now().is_none() {
+                std::thread::yield_now();
+            }
         };
         Some(prepared.as_ref().map_err(Clone::clone)?)
     } else {
@@ -21159,7 +21163,9 @@ fn compose_constraints_owned_parent_impl(
                     if let Some(selected) = selected_boundary_tokens_cell.get() {
                         break selected.as_ref().map_err(Clone::clone)?.clone();
                     }
-                    std::thread::yield_now();
+                    if rayon::yield_now().is_none() {
+                        std::thread::yield_now();
+                    }
                 };
                 let selected_wait_ms = selected_wait_started_at.elapsed().as_secs_f64() * 1000.0;
                 let possible_matches_by_component = possible_matches_result?;

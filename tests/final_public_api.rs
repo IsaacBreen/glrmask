@@ -180,6 +180,13 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     let module = Grammar::from_glrm(TOKEN_HOST).compile_module(&v).unwrap();
     let bytes = module.save();
     assert!(Constraint::load(bytes.clone()).is_err());
+    let manifest_len =
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()) as usize;
+    let body_start = 16 + manifest_len;
+    assert!(
+        Constraint::load(&bytes[body_start..]).is_err(),
+        "an open Module body must not be loadable as a public Constraint",
+    );
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
     assert!(Module::load(constraint.save()).is_err());
     for length in [0, 1, 8, 15, 16, bytes.len() - 1] {
@@ -362,6 +369,61 @@ fn root_artifact_headers_are_bounded_and_cannot_enter_module_body() {
 }
 
 #[test]
+fn public_constraint_load_rejects_an_open_module_body() {
+    let v = vocab();
+    let module = Grammar::from_glrm(
+        r#"glrm 1; start start; extern grammar CHILD; nt start = CHILD;"#,
+    )
+    .compile_module(&v)
+    .unwrap();
+    let bytes = module.save();
+    assert!(bytes.starts_with(b"GLRMOD03"));
+    let manifest_len =
+        u64::from_le_bytes(bytes[8..16].try_into().expect("module header")) as usize;
+    let body_start = 16 + manifest_len;
+    assert!(body_start < bytes.len());
+    assert!(glrmask::Constraint::load(&bytes[body_start..]).is_err());
+    assert!(Module::load(bytes).is_ok());
+}
+
+#[test]
+fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
+    use glrmask::{BuildOptions, Optimization};
+
+    let v = Vocab::new(vec![
+        (0, b"x".to_vec()),
+        (1, b"a".to_vec()),
+        (2, b"y".to_vec()),
+        (3, b"xay".to_vec()),
+    ]);
+    let host = Grammar::from_glrm(
+        r#"glrm 1; start start; extern grammar CHILD; nt start = "x" CHILD "y";"#,
+    )
+    .compile_module(&v)
+    .unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a""#)
+        .compile(&v)
+        .unwrap();
+    let bound = host.bind("CHILD", &child).unwrap();
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let constraint = pool
+        .install(|| {
+            bound.link_with(
+                BuildOptions::default().optimization(Optimization::FastBuild),
+            )
+        })
+        .unwrap();
+    let mut state = constraint.start();
+    assert!(allowed(&state.mask(), 3));
+    state.commit_token(3).unwrap();
+    assert!(state.is_accepting());
+}
+
+#[test]
 fn composed_dynamic_reference_does_not_admit_empty_byte_alias_without_special_path() {
     use glrmask::__private::ConstraintStateExt;
 
@@ -430,4 +492,63 @@ fn one_shot_optimization_preserves_deferred_compiled_module_bindings() {
         }
         assert_eq!(actual_state.is_accepting(), expected_state.is_accepting());
     }
+}
+
+#[test]
+fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
+    let vocab = Vocab::new_with_exact_token_ids(
+        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
+        [2, 77],
+    );
+    let source = Grammar::from_glrm(
+        r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
+    );
+
+    let open = source.compile_module(&vocab).unwrap();
+    let loaded_open = Module::load(open.save()).unwrap();
+    let bound = loaded_open
+        .bind("CONTROL", vocab.token(2).unwrap())
+        .unwrap();
+    let constraint = bound.link().unwrap();
+
+    let mut state = constraint.start();
+    state.commit_token(0).unwrap();
+    assert!(allowed(&state.mask(), 2));
+    assert!(!allowed(&state.mask(), 77));
+    state.commit_token(2).unwrap();
+    state.commit_token(1).unwrap();
+    assert!(state.is_accepting());
+
+    let loaded = glrmask::Constraint::load(constraint.save()).unwrap();
+    let mut state = loaded.start();
+    state.commit_token(0).unwrap();
+    assert!(allowed(&state.mask(), 2));
+    state.commit_token(2).unwrap();
+    state.commit_token(1).unwrap();
+    assert!(state.is_accepting());
+
+    let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+    assert!(Module::load_with_vocab(open.save(), &missing_domain).is_err());
+    assert!(glrmask::Constraint::load_with_vocab(constraint.save(), &missing_domain).is_err());
+}
+
+#[test]
+fn exact_only_ids_never_enter_the_byte_language() {
+    let vocab = Vocab::new_with_exact_token_ids(
+        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
+        [77],
+    );
+    let plain = Grammar::from_ebnf(r#"start ::= "x" "y""#)
+        .compile(&vocab)
+        .unwrap();
+    assert!(!allowed(&plain.start().mask(), 77));
+
+    let special = Grammar::from_glrm(
+        r#"glrm 1; start start; extern token CONTROL; nt start = CONTROL;"#,
+    )
+    .bind("CONTROL", vocab.token(77).unwrap())
+    .unwrap()
+    .compile(&vocab)
+    .unwrap();
+    assert!(allowed(&special.start().mask(), 77));
 }
