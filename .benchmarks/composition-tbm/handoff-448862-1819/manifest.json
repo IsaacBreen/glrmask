@@ -1,0 +1,27 @@
+{
+    "base":  "f5108d6c3ccfc08df649291c702bb0a203767f4d",
+    "branch":  "perf/composition-tbm-win-20260922",
+    "time":  "2026-09-22T18:19:00.0687794+08:00",
+    "files":  [
+                  {
+                      "git_blob":  "a06989905b2cdbb32f57647543d2cadc448949dd",
+                      "path":  "src/public_api.rs",
+                      "sha256":  "3D324DEA2D312EFEE9B343ACDE12FEE334FD645826A4B4C3657B90EA14F6C64C"
+                  },
+                  {
+                      "git_blob":  "11e63284457e87d87f27892364a9ab9a5583761c",
+                      "path":  "src/runtime/mask/mod.rs",
+                      "sha256":  "8FAB06DB044CDDD3C88E6129686497A33EA24B208A97CB6730D845A9586602BA"
+                  },
+                  {
+                      "git_blob":  "f07fb55ce43cc930912d0a09d9eca0a181214d0b",
+                      "path":  "src/runtime/state.rs",
+                      "sha256":  "653C3B6472D98316CA125CEBCAEBA463ACC1A546DB26ED52571DA62105081E46"
+                  },
+                  {
+                      "git_blob":  "a82914deebb33626f8f1003cb7dd149c993df868",
+                      "path":  "examples/composition_tbm_probe.rs",
+                      "sha256":  "0285E2DDAF2DAFDD7ABC237B9E60C7E54899DA6160555F26C3C827C05B432714"
+                  }
+              ]
+}

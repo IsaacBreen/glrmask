@@ -398,6 +398,12 @@ impl Default for CommitBuffers {
 }
 
 impl CommitBuffers {
+    /// Finite recursive mask probes use exact queue/lexer advancement, not the
+    /// speculative flat-commit pool. Other callers retain their existing pool.
+    pub(crate) fn for_finite_recursive_mask() -> Self {
+        Self::with_flat_frontier_preallocation(0)
+    }
+
     fn with_flat_frontier_preallocation(preallocated_gss: usize) -> Self {
         Self {
             advance_result_cache: FxHashMap::default(),

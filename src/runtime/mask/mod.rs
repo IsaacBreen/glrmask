@@ -48,6 +48,159 @@ use self::queue::{mask_queue_mode, MaskQueue};
 type DenseTokenMaskCache = FxHashMap<usize, Arc<[u64]>>;
 type DenseMaskGSS = LeveledGSS<u32, DenseMaskAcc>;
 
+/// Mask-local exact byte-transition reuse for recursive composition. Full
+/// structural equality includes scoped lexer keys, parser stacks, and delayed
+/// exclusions. Hashes only select buckets; they never prove equivalence.
+/// Once the state budget is exhausted, new frontiers keep using the original
+/// exact radix-edge evaluator. There is no compilation or persistent-cache cost.
+struct RecursiveMaskTransitions {
+    states: Vec<ParserStateMap>,
+    rows: Vec<Box<[u32; 256]>>,
+    buckets: FxHashMap<u64, SmallVec<[u32; 2]>>,
+    max_states: usize,
+    byte_representatives: [u8; 256],
+}
+
+#[derive(Clone)]
+enum RecursiveMaskFrontier {
+    Cached(u32),
+    Uncached(ParserStateMap),
+}
+
+/// An exact alphabet congruence over every intact leaf lexer. Equal columns
+/// reach identical states (and hence identical matches/futures) from *all*
+/// lexer states, including resets and exclusion continuations. Thus zero-width
+/// CALL/RETURN and ignored-terminal routes also cannot distinguish the bytes.
+/// Bound the proof work; large, epsilon, or virtual lexers simply keep the
+/// identity alphabet. This is mask-local work, not constraint compilation.
+fn recursive_mask_byte_representatives(constraint: &Constraint) -> [u8; 256] {
+    let identity = std::array::from_fn(|byte| byte as u8);
+    let Ok(Some(layout)) = constraint.recursive_parser_layout() else { return identity; };
+    const MAX_LEXER_STATES: usize = 256;
+    if layout.leaves.is_empty() || layout.total_tokenizer_states as usize > MAX_LEXER_STATES {
+        return identity;
+    }
+    let mut leaves = Vec::with_capacity(layout.leaves.len());
+    let mut state_count = 0usize;
+    for index in 0..layout.leaves.len() {
+        let Some(leaf) = constraint.recursive_leaf_constraint(index) else { return identity; };
+        if leaf.tokenizer.has_any_virtual_runtime() || leaf.tokenizer_has_epsilon_transitions {
+            return identity;
+        }
+        state_count += leaf.tokenizer.num_states() as usize;
+        if state_count > MAX_LEXER_STATES { return identity; }
+        leaves.push(leaf);
+    }
+    let mut rows = Vec::with_capacity(state_count);
+    for leaf in leaves {
+        for state in 0..leaf.tokenizer.num_states() {
+            rows.push(std::array::from_fn::<u32, 256, _>(|byte|
+                leaf.tokenizer_fast_transitions.transition(&leaf.tokenizer, state, byte as u8)));
+        }
+    }
+    use std::hash::{Hash, Hasher};
+    let mut buckets = FxHashMap::<u64, SmallVec<[u8; 2]>>::default();
+    let mut result = identity;
+    for byte in 0..256 {
+        let mut hash = rustc_hash::FxHasher::default();
+        for row in &rows { row[byte].hash(&mut hash); }
+        let bucket = buckets.entry(hash.finish()).or_default();
+        // Compare complete columns after hashing: collisions cannot merge
+        // inequivalent bytes. One matrix allocation avoids 256 column Vecs.
+        if let Some(&representative) = bucket.iter().find(|&&representative|
+            rows.iter().all(|row| row[byte] == row[representative as usize]))
+        {
+            result[byte] = representative;
+        } else {
+            bucket.push(byte as u8);
+        }
+    }
+    result
+}
+
+impl RecursiveMaskTransitions {
+    const UNKNOWN: u32 = u32::MAX;
+    const DEAD: u32 = u32::MAX - 1;
+
+    fn new(max_states: usize, byte_representatives: [u8; 256]) -> Self {
+        Self {
+            states: Vec::new(), rows: Vec::new(), buckets: FxHashMap::default(),
+            max_states, byte_representatives,
+        }
+    }
+
+    fn intern(&mut self, state: &ParserStateMap) -> Option<u32> {
+        use std::hash::{Hash, Hasher};
+        let mut hash = rustc_hash::FxHasher::default();
+        for (lexer, gss) in &state.entries {
+            lexer.hash(&mut hash);
+            gss.max_depth().hash(&mut hash);
+        }
+        let hash = hash.finish();
+        if let Some(ids) = self.buckets.get(&hash) {
+            for &id in ids {
+                if self.states[id as usize] == *state {
+                    return Some(id);
+                }
+            }
+        }
+        if self.states.len() >= self.max_states {
+            return None;
+        }
+        let id = self.states.len() as u32;
+        self.states.push(state.clone());
+        self.rows.push(Box::new([Self::UNKNOWN; 256]));
+        self.buckets.entry(hash).or_default().push(id);
+        Some(id)
+    }
+
+    fn advance(
+        &mut self,
+        constraint: &Constraint,
+        parent: &RecursiveMaskFrontier,
+        buffers: &mut CommitBuffers,
+        bytes: &[u8],
+    ) -> Option<RecursiveMaskFrontier> {
+        let mut id = match parent {
+            RecursiveMaskFrontier::Cached(id) => *id,
+            RecursiveMaskFrontier::Uncached(state) => {
+                return crate::runtime::commit::advance_bytes_from_state_exact(
+                    constraint, state, buffers, bytes,
+                ).map(RecursiveMaskFrontier::Uncached);
+            }
+        };
+        for (offset, &byte) in bytes.iter().enumerate() {
+            let column = self.byte_representatives[byte as usize] as usize;
+            let cached = self.rows[id as usize][column];
+            if cached == Self::DEAD {
+                return None;
+            }
+            if cached != Self::UNKNOWN {
+                id = cached;
+                continue;
+            }
+            let next = crate::runtime::commit::advance_bytes_from_state_exact(
+                constraint, &self.states[id as usize], buffers, std::slice::from_ref(&byte),
+            );
+            let Some(next) = next else {
+                self.rows[id as usize][column] = Self::DEAD;
+                return None;
+            };
+            let Some(next_id) = self.intern(&next) else {
+                // Budget exhaustion changes only caching, not admission or
+                // traversal coverage. Finish this edge exactly, without a
+                // second vocabulary walk or loss of any live alternative.
+                return crate::runtime::commit::advance_bytes_from_state_exact(
+                    constraint, &next, buffers, &bytes[offset + 1..],
+                ).map(RecursiveMaskFrontier::Uncached);
+            };
+            self.rows[id as usize][column] = next_id;
+            id = next_id;
+        }
+        Some(RecursiveMaskFrontier::Cached(id))
+    }
+}
+
 const DELTA_SEED_MIN_SAVINGS: u64 = 2048;
 const MASK_SINGLE_PATH_DIRECT_MAX_DEPTH: u32 = 64;
 const MASK_SINGLE_PATH_DIRECT_INLINE_PATH_CAPACITY: usize = 64;
@@ -2000,6 +2153,181 @@ mod tests {
             let mut profiled = vec![0u32; poisoned.mask_len()];
             actual.fill_mask_profiled(&mut profiled);
             assert_eq!(profiled, expected_mask);
+        }
+    }
+
+    /// The former recursive walker deliberately scanned dead descendants.
+    /// Keep that independent control flow as a regression oracle for DFS jumps.
+    fn recursive_unpruned_reference(state: &super::ConstraintState<'_>) -> Vec<u32> {
+        let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+        let trie = vocab.trie.as_ref();
+        let mut buffers = super::CommitBuffers::default();
+        let mut output = vec![0u32; state.constraint.mask_len()];
+        let mut stack = vec![None; usize::from(trie.full_walk_max_parent_depth()) + 2];
+        stack[0] = Some(state.state.clone());
+        let mark = |node, output: &mut [u32]| {
+            if let Some(canonical) = trie.node(node).token_id {
+                for &id in vocab.token_ids(canonical).unwrap() {
+                    if !state.constraint.has_special_token_id(id) {
+                        super::set_original_mask_bit(output, id);
+                    }
+                }
+            }
+        };
+        if !state.state.is_empty() {
+            mark(0, &mut output);
+        }
+        for edge in trie.walk_edges() {
+            let depth = edge.parent_depth as usize;
+            let next = stack[depth].as_ref().and_then(|parent| {
+                crate::runtime::commit::advance_bytes_from_state_exact(
+                    state.constraint, parent, &mut buffers, trie.walk_edge_bytes(edge),
+                )
+            });
+            if next.is_some() {
+                mark(edge.child, &mut output);
+            }
+            stack[depth + 1] = next;
+        }
+        for special in &state.constraint.special_token_terminals {
+            if !state.constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+                && crate::runtime::commit::token_admissible_from_state_exact(
+                    state.constraint, &state.state, &mut buffers, special.token_id,
+                )
+            {
+                super::set_original_mask_bit(&mut output, special.token_id);
+            }
+        }
+        output
+    }
+
+    #[test]
+    fn recursive_dead_subtree_jumps_match_unpruned_and_pointwise_oracles() {
+        // Large dead families share ancestors with live siblings. Duplicate
+        // byte spellings, an empty token, and a special-token spelling within
+        // a dead byte family exercise independent endpoint/semantic routing.
+        let mut entries = vec![
+            (0, b"X".to_vec()), (1, b"[".to_vec()), (2, b"a".to_vec()),
+            (3, b"]".to_vec()), (4, b"!".to_vec()), (5, b"a]!".to_vec()),
+            (6, b"[a]!".to_vec()), (7, b"X[a]!".to_vec()),
+            (8, b"X[]!".to_vec()), (9, Vec::new()), (10, b"a".to_vec()),
+            (11, b"qdead-special".to_vec()), (12, b"qdead-special".to_vec()),
+            (13, b"]!".to_vec()), (14, b"[]!".to_vec()),
+        ];
+        for i in 0..512u32 {
+            entries.push((32 + i, format!("qdead-{i:04}-suffix").into_bytes()));
+            entries.push((600 + i, format!("X[ab-{i:04}-suffix").into_bytes()));
+        }
+        let ids: Vec<u32> = entries.iter().map(|(id, _)| *id).chain([9001]).collect();
+        let vocab = Vocab::new(entries);
+        for nullable in [false, true] {
+            let leaf_source = if nullable {
+                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\"? | SPECIAL;"
+            } else {
+                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\" | SPECIAL;"
+            };
+            let leaf = crate::ConstraintSpec::builder(Grammar::glrm(leaf_source), &vocab)
+                .unwrap().bind_token("SPECIAL", [11, 9001]).unwrap()
+                .build().unwrap().compile().unwrap();
+            let middle_parent = Constraint::compile(Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ), &vocab).unwrap();
+            let middle = middle_parent.bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
+            let outer_parent = Constraint::compile(Grammar::glrm(
+                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
+            ), &vocab).unwrap();
+            let bound = outer_parent.bind_grammar_dynamic_boundary("middle", middle).unwrap();
+            let loaded = Constraint::load(bound.save()).unwrap();
+            for constraint in [&bound, &loaded] {
+                assert!(constraint.uses_compact_segmented_parser_runtime());
+                let check = |state: &super::ConstraintState<'_>| {
+                    let mut actual = vec![0u32; constraint.mask_len()];
+                    state.fill_recursive_mask_by_exact_full_walk(&mut actual);
+                    assert_eq!(actual, recursive_unpruned_reference(state), "nullable={nullable}");
+                    for budget in [0, 1, 2] {
+                        let mut bounded = vec![0u32; constraint.mask_len()];
+                        state.or_recursive_dynamic_full_walk_exact_with_budget(&mut bounded, budget);
+                        assert_eq!(bounded, actual, "cache budget={budget}, nullable={nullable}");
+                    }
+                    let mut buffers = super::CommitBuffers::default();
+                    for &id in &ids {
+                        let exact = crate::runtime::commit::token_admissible_from_state_exact(
+                            constraint, &state.state, &mut buffers, id,
+                        );
+                        let allowed = actual[id as usize / 32] & (1 << (id % 32)) != 0;
+                        assert_eq!(allowed, exact, "token={id}, nullable={nullable}");
+                    }
+                    assert_eq!(state.mask(), actual);
+                };
+                for prefix in [b"".as_slice(), b"X", b"X[", b"X[a", b"X[a]", b"X[a]!"] {
+                    let mut state = constraint.start();
+                    state.commit_bytes(prefix).unwrap();
+                    check(&state);
+                }
+                for special in [11, 9001] {
+                    let mut state = constraint.start();
+                    state.commit_bytes(b"X[").unwrap();
+                    let mask = state.mask();
+                    assert_ne!(mask[special / 32] & (1 << (special % 32)), 0);
+                    assert_eq!(mask[0] & (1 << 12), 0, "byte alias has no special route");
+                    state.commit_token(special as u32).unwrap();
+                    check(&state);
+                    state.commit_bytes(b"]!").unwrap();
+                    check(&state);
+                }
+                if nullable {
+                    let mut state = constraint.start();
+                    state.commit_bytes(b"X[]!").unwrap();
+                    check(&state);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_transition_cache_matches_radix_on_text_and_ambiguity() {
+        let mut words = vec![Vec::<u8>::new()];
+        let mut layer = vec![Vec::<u8>::new()];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for prefix in layer {
+                for &byte in b"abcX[]! " {
+                    let mut word = prefix.clone();
+                    word.push(byte);
+                    next.push(word);
+                }
+            }
+            words.extend(next.iter().cloned());
+            layer = next;
+        }
+        let vocab = Vocab::new(words.into_iter().enumerate()
+            .map(|(id, bytes)| (id as u32, bytes)).collect::<Vec<_>>());
+        for leaf_source in [
+            "glrm 1; start leaf; t TEXT = /[a-c ]{1,8}/; nt leaf = TEXT;",
+            "glrm 1; start leaf; t WORD = /[a-c]{1,4}/; nt leaf = WORD | WORD WORD;",
+            "glrm 1; start leaf; ignore WS; t WS = \" \"+; t WORD = /[a-c]{1,4}/; nt leaf = WORD;",
+        ] {
+            let leaf = Constraint::compile(Grammar::glrm(leaf_source), &vocab).unwrap();
+            let middle = Constraint::compile(Grammar::glrm(
+                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+            ), &vocab).unwrap().bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
+            let bound = Constraint::compile(Grammar::glrm(
+                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
+            ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
+            let alphabet = super::recursive_mask_byte_representatives(&bound);
+            assert_eq!(alphabet[b'a' as usize], alphabet[b'b' as usize]);
+            assert_eq!(alphabet[b'b' as usize], alphabet[b'c' as usize]);
+            assert_ne!(alphabet[b'a' as usize], alphabet[b']' as usize]);
+            for prefix in [b"".as_slice(), b"X", b"X[", b"X[a", b"X[abc", b"X[abc]", b"X[abc]!"] {
+                let mut state = bound.start();
+                state.commit_bytes(prefix).unwrap();
+                let expected = recursive_unpruned_reference(&state);
+                for budget in [0, 2, 256] {
+                    let mut actual = vec![0u32; bound.mask_len()];
+                    state.or_recursive_dynamic_full_walk_exact_with_budget(&mut actual, budget);
+                    assert_eq!(actual, expected, "prefix={prefix:?} budget={budget} leaf={leaf_source}");
+                }
+            }
         }
     }
 
@@ -4431,16 +4759,34 @@ impl<'a> ConstraintState<'a> {
     /// determined by their byte spelling. The result is the complete exact
     /// recursive language and can either fill a mask or be ORed into a baseline.
     fn or_recursive_dynamic_full_walk_exact(&self, buf: &mut [u32]) {
+        self.or_recursive_dynamic_full_walk_exact_with_budget(buf, 256);
+    }
+
+    fn or_recursive_dynamic_full_walk_exact_with_budget(&self, buf: &mut [u32], state_budget: usize) {
         crate::compiler::boundary_transfer::strict_static_trap_dynamic_for_state(
             "or_recursive_dynamic_full_walk_exact",
             self.constraint.uses_dynamic_runtime(),
         );
-        let mut buffers = CommitBuffers::default();
         let vocab = self.constraint.dynamic_mask_vocab_for_runtime();
         let trie = vocab.trie.as_ref();
         let stack_len = usize::from(trie.full_walk_max_parent_depth()).saturating_add(2);
         let mut state_stack = vec![None; stack_len.max(1)];
-        state_stack[0] = Some(self.state.clone());
+        let alphabet = if state_budget == 0 { std::array::from_fn(|byte| byte as u8) }
+            else { recursive_mask_byte_representatives(self.constraint) };
+        // A proved finite deterministic leaf alphabet cannot produce a wide
+        // epsilon frontier. The recursive queue does not use speculative flat
+        // commits, so it needs no eager pool of 256 flat-frontier GSS objects.
+        // Keep the established scratch policy for unproved/virtual lexers.
+        let mut buffers = if alphabet.iter().enumerate().any(|(i, &b)| i != b as usize) {
+            CommitBuffers::for_finite_recursive_mask()
+        } else {
+            CommitBuffers::default()
+        };
+        let mut transitions = RecursiveMaskTransitions::new(state_budget, alphabet);
+        state_stack[0] = Some(match transitions.intern(&self.state) {
+            Some(id) => RecursiveMaskFrontier::Cached(id),
+            None => RecursiveMaskFrontier::Uncached(self.state.clone()),
+        });
 
         let mark_node = |node: u32, live: bool, buf: &mut [u32]| {
             if !live {
@@ -4464,11 +4810,13 @@ impl<'a> ConstraintState<'a> {
         };
 
         mark_node(0, !self.state.is_empty(), buf);
-        for edge in trie.walk_edges() {
+        let edges = trie.walk_edges();
+        let mut edge_index = 0;
+        while let Some(edge) = edges.get(edge_index) {
             let parent_depth = edge.parent_depth as usize;
             let child_depth = parent_depth + 1;
             let child_state = state_stack[parent_depth].as_ref().and_then(|parent| {
-                crate::runtime::commit::advance_bytes_from_state_exact(
+                transitions.advance(
                     self.constraint,
                     parent,
                     &mut buffers,
@@ -4477,10 +4825,21 @@ impl<'a> ConstraintState<'a> {
             });
             let live = child_state.is_some();
             state_stack[child_depth] = child_state;
-            // Deliberately inspect every vocabulary endpoint even after a dead
-            // prefix; unlike the retired candidate walker there is no subtree
-            // jump based on liveness or boundary metadata.
+            if !live {
+                // Exact byte advancement has rejected this prefix. Previously
+                // its descendants were still visited, but their absent parent
+                // states suppressed every semantic advance and token mark.
+                // Skip precisely that same work using the existing DFS jump;
+                // no boundary-candidate or lexer-liveness approximation is
+                // involved. The next edge's parent is an already-live ancestor,
+                // so stale deeper stack slots cannot be read before replacement.
+                // Special-token routes remain independent and are probed below.
+                debug_assert!(edge.subtree_end as usize > edge_index);
+                edge_index = edge.subtree_end as usize;
+                continue;
+            }
             mark_node(edge.child, live, buf);
+            edge_index += 1;
         }
 
         // Special-token semantics can add a parser path independent of the
