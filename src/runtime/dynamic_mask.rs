@@ -3702,7 +3702,7 @@ fn try_full_walk_mask_with_table<
                     {
                         return false;
                     }
-                    if std::env::var_os("GLRMASK_EXPERIMENT_DEMAND_TERMINAL_PROOF").is_some()
+                    if std::env::var_os("GLRMASK_DISABLE_DEMAND_TERMINAL_PROOF").is_none()
                         && !vocab.is_grammar_quotiented()
                     {
                         // This path already consumes projected bounded-radius
@@ -3860,7 +3860,7 @@ fn try_full_walk_mask_with_table<
                 let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(500);
+                    .unwrap_or(1000);
                 let profitable = residual_ops.is_some_and(|residual| {
                     residual.saturating_mul(1000)
                         <= ordinary_ops.saturating_mul(max_permille)
@@ -3947,7 +3947,7 @@ fn try_full_walk_mask_with_table<
             )
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(500);
+            .unwrap_or(1000);
             let residual_ops = vocab.llg_master_residual_ops(safe_radius, false);
             let profitable = residual_ops.is_some_and(|residual| {
                 residual.saturating_mul(1000)

@@ -1434,9 +1434,8 @@ fn precollapse_master_decision(
             // unrelated to this exact lexer source. Byte support is not a
             // liveness certificate. Refuse impossible candidates BEFORE any
             // per-terminal construction; this only removes an acceleration.
-            let filter_source_live = std::env::var_os(
-                "GLRMASK_EXPERIMENT_PROOF_SOURCE_LIVE_GATE",
-            ).is_some();
+            let filter_source_live =
+                std::env::var_os("GLRMASK_DISABLE_PROOF_SOURCE_LIVE_GATE").is_none();
             let eligible = admitted
                 .iter_ones()
                 .map(|terminal| terminal as TerminalID)
@@ -1551,7 +1550,7 @@ fn precollapse_master_decision(
             // consuming explicitly/prepared quotients when present, but do not
             // synthesize them online for the O2 runtime.
             if needs_quotient && !eligible.is_empty() && !vocab.is_grammar_quotiented() {
-                if std::env::var_os("GLRMASK_EXPERIMENT_DEMAND_TERMINAL_PROOF").is_some() {
+                if std::env::var_os("GLRMASK_DISABLE_DEMAND_TERMINAL_PROOF").is_none() {
                     // The admitted candidate list is already exact. Preparing all
                     // broad terminals here puts unrelated grammar-wide work on a
                     // single mask's cold path. Reuse the existing per-terminal
@@ -5267,9 +5266,8 @@ fn try_full_walk_mask_with_table_from_initial<
                 let admitted = parser_cache.admitted(state.constraint, root_parser_nodes[0]);
                 let mut candidates = SmallVec::<[TerminalID; 4]>::new();
                 let lexer_state = root_branches[0].tokenizer_config;
-                let filter_first_bytes = std::env::var_os(
-                    "GLRMASK_EXPERIMENT_GENERIC_MASTER_FIRST_BYTES",
-                ).is_some();
+                let filter_first_bytes =
+                    std::env::var_os("GLRMASK_DISABLE_GENERIC_MASTER_FIRST_BYTES").is_none();
                 let first_bytes = filter_first_bytes.then(|| safe_plus.first_bytes());
                 let exact_source = root_branches[0].exact_tokenizer_state;
                 for terminal in admitted.iter_ones().map(|terminal| terminal as TerminalID) {
@@ -5524,7 +5522,7 @@ fn try_full_walk_mask_with_table_from_initial<
     // body envelope that cannot finish its terminal on a safe-string atom.
     static SAFE_ENVELOPE_UPPER_ENABLED: OnceLock<bool> = OnceLock::new();
     let mut safe_envelope_upper = if *SAFE_ENVELOPE_UPPER_ENABLED.get_or_init(|| {
-        std::env::var_os("GLRMASK_EXPERIMENT_SAFE_ENVELOPE_UPPER").is_some()
+        std::env::var_os("GLRMASK_DISABLE_SAFE_ENVELOPE_UPPER").is_none()
     }) && HOT_SINGLE_ROOT && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
         && vocab.llg_master_trie().is_some()
@@ -5602,7 +5600,7 @@ fn try_full_walk_mask_with_table_from_initial<
         let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(500);
+            .unwrap_or(1000);
         let ordinary_ops = trie.full_walk_ops().len();
         let profitable = safe_interval_work(decision)
             .is_some_and(|residual_ops| {

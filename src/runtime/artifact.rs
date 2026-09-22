@@ -6948,8 +6948,9 @@ impl DynamicMaskVocab {
         }
 
         let state_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_STATE_CAP")
-            .ok().and_then(|value| value.parse::<usize>().ok());
-        let built = if let Some(state_cap) = state_cap {
+            .ok().and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(2048);
+        let built = if std::env::var_os("GLRMASK_DISABLE_DEMAND_PROOF_CAP").is_none() {
             let edge_cap = std::env::var("GLRMASK_EXPERIMENT_DEMAND_PROOF_EDGE_CAP")
                 .ok().and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or_else(|| state_cap.saturating_mul(128));
