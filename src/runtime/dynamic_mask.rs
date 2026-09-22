@@ -438,9 +438,23 @@ struct RecursiveFullWalkCell {
 /// epsilon-free leaves. Virtual/epsilon leaves decline to the established
 /// recursive exact walker until their config/subset representation is wired
 /// through the same interface.
+#[derive(Clone, Copy)]
+struct RecursiveFullWalkLeaf<'a> {
+    constraint: &'a Constraint,
+    lexer_offset: u32,
+    lexer_count: u32,
+    terminal_offset: u32,
+    terminal_count: u32,
+    reset: u32,
+}
+
 struct RecursiveFullWalkTransitions<'a> {
     constraint: &'a Constraint,
     total_states: usize,
+    // Resolve the immutable composition tree once per mask, not several times
+    // per byte/finalizer/guard. Offsets are the authoritative layout's exact
+    // coordinates, so this view requires no DFA or vocabulary preprocessing.
+    leaves: SmallVec<[RecursiveFullWalkLeaf<'a>; 4]>,
     token_boundary_cache: FxHashMap<(u32, u32), bool>,
     parser_advance_cache: FxHashMap<(u32, TerminalID), SmallVec<[(u32, u32); 4]>>,
 }
@@ -451,15 +465,26 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
         if layout.leaves.is_empty() {
             return None;
         }
+        let mut leaves = SmallVec::new();
         for leaf_index in 0..layout.leaves.len() {
             let leaf = constraint.recursive_leaf_constraint(leaf_index)?;
             if leaf.tokenizer_has_epsilon_transitions || leaf.tokenizer.has_any_virtual_runtime() {
                 return None;
             }
+            leaves.push(RecursiveFullWalkLeaf {
+                constraint: leaf,
+                lexer_offset: layout.leaf_tokenizer_state_offsets[leaf_index],
+                lexer_count: leaf.tokenizer.num_states(),
+                terminal_offset: layout.outer_terminal_count
+                    .checked_add(layout.leaf_terminal_offsets[leaf_index])?,
+                terminal_count: leaf.table.num_terminals,
+                reset: constraint.recursive_tokenizer_reset_state(leaf_index)?,
+            });
         }
         Some(Self {
             constraint,
             total_states: layout.total_tokenizer_states as usize,
+            leaves,
             token_boundary_cache: FxHashMap::default(),
             parser_advance_cache: FxHashMap::default(),
         })
@@ -467,10 +492,12 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
 
     #[inline(always)]
     fn leaf_local(&self, state: u32) -> Option<(usize, u32, &'a Constraint)> {
-        let (leaf_index, local_state) =
-            self.constraint.recursive_tokenizer_leaf_state(state)?;
-        let leaf = self.constraint.recursive_leaf_constraint(leaf_index)?;
-        Some((leaf_index, local_state, leaf))
+        if state as usize >= self.total_states { return None; }
+        let index = self.leaves.partition_point(|leaf| leaf.lexer_offset <= state)
+            .checked_sub(1)?;
+        let leaf = &self.leaves[index];
+        let local = state - leaf.lexer_offset;
+        (local < leaf.lexer_count).then_some((index, local, leaf.constraint))
     }
 
     #[inline]
@@ -478,13 +505,11 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
         let Some((leaf_index, local_state, leaf)) = self.leaf_local(state) else {
             return SmallVec::new();
         };
+        let base = self.leaves[leaf_index].terminal_offset;
         leaf.tokenizer
             .matched_terminals_slice(local_state)
             .iter()
-            .filter_map(|&terminal| {
-                self.constraint
-                    .recursive_terminal_scoped_id(leaf_index, terminal)
-            })
+            .map(|&terminal| base + terminal)
             .collect()
     }
 }
@@ -509,15 +534,13 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
                 has_finalizer: false,
             };
         }
-        let Some(target) = self
-            .constraint
-            .recursive_tokenizer_scoped_state(leaf_index, local_target)
-        else {
+        if local_target >= self.leaves[leaf_index].lexer_count {
             return RecursiveFullWalkCell {
                 target: u32::MAX,
                 has_finalizer: false,
             };
-        };
+        }
+        let target = self.leaves[leaf_index].lexer_offset + local_target;
         RecursiveFullWalkCell {
             target,
             has_finalizer: leaf
@@ -539,8 +562,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
 
     #[inline(always)]
     fn root_state(&mut self, state: u32) -> Result<u32, String> {
-        self.constraint
-            .recursive_tokenizer_leaf_state(state)
+        self.leaf_local(state)
             .map(|_| state)
             .ok_or_else(|| format!("recursive full-walk root state {state} is not scoped"))
     }
@@ -552,9 +574,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         _vocab: &DynamicMaskVocab,
     ) -> Result<u32, String> {
         debug_assert!(std::ptr::eq(constraint, self.constraint));
-        constraint
-            .recursive_tokenizer_reset_state(0)
-            .ok_or_else(|| "recursive full-walk root leaf has no tokenizer reset".to_owned())
+        Ok(self.leaves[0].reset)
     }
 
     #[inline]
@@ -571,19 +591,13 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
 
     #[inline]
     fn single_finalizer_continues(&mut self, state: u32) -> bool {
-        let Some((leaf_index, local_state, leaf)) = self.leaf_local(state) else {
+        let Some((_, local_state, leaf)) = self.leaf_local(state) else {
             return false;
         };
         let [local_terminal] = leaf.tokenizer.matched_terminals_slice(local_state) else {
             return false;
         };
-        let Some(runtime_terminal) = self
-            .constraint
-            .recursive_terminal_scoped_id(leaf_index, *local_terminal)
-        else {
-            return false;
-        };
-        self.future_contains(state, runtime_terminal)
+        leaf.tokenizer.possible_future_terminals(local_state).contains(*local_terminal as usize)
     }
 
     #[inline]
@@ -593,16 +607,19 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
 
     #[inline(always)]
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
-        self.constraint
-            .recursive_tokenizer_future_scoped_terminals(state)
-            .is_some_and(|future| future.contains(terminal as usize))
+        let Some((index, local_state, leaf)) = self.leaf_local(state) else { return false; };
+        let Some(local_terminal) = terminal.checked_sub(self.leaves[index].terminal_offset)
+        else { return false; };
+        local_terminal < self.leaves[index].terminal_count
+            && leaf.tokenizer.possible_future_terminals(local_state).contains(local_terminal as usize)
     }
 
     #[inline(always)]
     fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        self.constraint
-            .recursive_tokenizer_future_scoped_terminals(state)
-            .is_some_and(|future| !terminals.is_disjoint(&future))
+        let Some((index, local_state, leaf)) = self.leaf_local(state) else { return false; };
+        let offset = self.leaves[index].terminal_offset as usize;
+        leaf.tokenizer.possible_future_terminals(local_state).iter_ones()
+            .any(|local| terminals.contains(offset + local))
     }
 
     #[inline]
@@ -623,7 +640,8 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
         parser_node: u32,
     ) -> bool {
         debug_assert!(std::ptr::eq(constraint, self.constraint));
-        if constraint.recursive_tokenizer_is_reset_state(lexer_state) {
+        let Some((index, _, _)) = self.leaf_local(lexer_state) else { return false; };
+        if self.leaves[index].reset == lexer_state {
             return true;
         }
         let key = (lexer_state, parser_node);
@@ -655,7 +673,10 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
     #[inline(always)]
     fn terminal_is_ignore(&self, constraint: &Constraint, terminal: TerminalID) -> bool {
         debug_assert!(std::ptr::eq(constraint, self.constraint));
-        constraint.recursive_terminal_is_ignore(terminal)
+        let Some(index) = self.leaves.partition_point(|leaf| leaf.terminal_offset <= terminal)
+            .checked_sub(1) else { return false; };
+        let leaf = &self.leaves[index];
+        leaf.constraint.ignore_terminal == Some(terminal - leaf.terminal_offset)
     }
 
     #[inline(always)]
@@ -701,9 +722,10 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
                 constraint.partition_recursive_parser_gss_by_active_leaf(&advanced)
         {
             for (leaf_index, partition) in partitions {
-                let Some(reset) = constraint.recursive_tokenizer_reset_state(leaf_index) else {
+                let Some(leaf) = self.leaves.get(leaf_index) else {
                     continue;
                 };
+                let reset = leaf.reset;
                 let stacks = partition.apply(|_| ());
                 let node = parser_cache.intern_stacks(stacks);
                 if !result.contains(&(reset, node)) {
@@ -1691,6 +1713,12 @@ struct FullWalkManyTransitionCache {
     states: Vec<FullWalkManyState>,
     rows: Vec<Box<[u32; 256]>>,
     capacity: usize,
+    profile: bool,
+    calls: usize,
+    hits: usize,
+    misses: usize,
+    exhausted: usize,
+    max_branches: usize,
 }
 
 impl FullWalkManyTransitionCache {
@@ -1703,6 +1731,12 @@ impl FullWalkManyTransitionCache {
             states: Vec::new(),
             rows: Vec::new(),
             capacity,
+            profile: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
+            calls: 0,
+            hits: 0,
+            misses: 0,
+            exhausted: 0,
+            max_branches: 0,
         }
     }
 
@@ -1730,7 +1764,15 @@ impl FullWalkManyTransitionCache {
         parser_cache: &mut FullWalkParserCache,
         constraint: &Constraint,
     ) -> FullWalkManyState {
+        if self.profile {
+            self.calls += 1;
+            self.max_branches = self.max_branches.max(match current {
+                FullWalkManyState::Branches(branches) => branches.len(),
+                FullWalkManyState::ThreeSameParser { .. } => 3,
+            });
+        }
         let Some(source) = self.intern(current) else {
+            if self.profile { self.exhausted += 1; }
             return full_walk_step_many_state(
                 current,
                 byte,
@@ -1742,11 +1784,14 @@ impl FullWalkManyTransitionCache {
         };
         let cached = self.rows[source as usize][byte as usize];
         if cached == Self::DEAD {
+            if self.profile { self.hits += 1; }
             return FullWalkManyState::Branches(FullWalkBranches::new());
         }
         if cached != Self::UNKNOWN {
+            if self.profile { self.hits += 1; }
             return self.states[cached as usize].clone();
         }
+        if self.profile { self.misses += 1; }
         let next = full_walk_step_many_state(
             current,
             byte,
@@ -1763,6 +1808,15 @@ impl FullWalkManyTransitionCache {
             self.rows[source as usize][byte as usize] = target;
         }
         next
+    }
+}
+
+impl Drop for FullWalkManyTransitionCache {
+    fn drop(&mut self) {
+        if self.profile && self.capacity != 0 {
+            eprintln!("[glrmask/profile][many_product_cache] states={} calls={} hits={} misses={} exhausted={} max_branches={}",
+                self.states.len(), self.calls, self.hits, self.misses, self.exhausted, self.max_branches);
+        }
     }
 }
 
