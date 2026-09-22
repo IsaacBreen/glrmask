@@ -1,5 +1,7 @@
 ﻿pub(crate) mod profile;
 pub(crate) mod queue;
+mod static_dwa_walk;
+use static_dwa_walk::{StackWalkEvent, walk_single_stack};
 
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
@@ -404,6 +406,42 @@ fn materialize_single_path_seed_intersection(
         any |= word != 0;
     });
     any
+}
+
+/// Same dense/range intersection for ordinary and boundary single-stack masks.
+/// The lookup closure specializes away when no precomputed dense row is present.
+#[inline]
+fn intersect_static_dense_with_weight<'w, 'm>(
+    dense: &mut Vec<u64>,
+    aux: &mut Vec<u64>,
+    internal_tsid: u32,
+    weight: RuntimeWeightRef<'w>,
+    dense_mask: impl FnOnce(RuntimeTokenSetRef<'w>) -> Option<&'m [u64]>,
+) -> bool {
+    if weight.is_full() {
+        return dense.iter().any(|&word| word != 0);
+    }
+
+    let Some(token_set) = weight.token_set_for_tsid(internal_tsid) else {
+        dense.fill(0);
+        return false;
+    };
+    if let Some(mask) = dense_mask(token_set) {
+        let mut any = false;
+        for (idx, dense_word) in dense.iter_mut().enumerate() {
+            *dense_word &= mask.get(idx).copied().unwrap_or(0);
+            any |= *dense_word != 0;
+        }
+        return any;
+    }
+
+    aux.clear();
+    aux.resize(dense.len(), 0);
+    DenseMaskAcc::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
+        aux[word_idx] |= dense[word_idx] & token_mask;
+    });
+    std::mem::swap(dense, aux);
+    dense.iter().any(|&word| word != 0)
 }
 
 pub(crate) fn indexed_dag_mask_enabled() -> bool {
@@ -5441,7 +5479,8 @@ impl<'a> ConstraintState<'a> {
         accepts_empty_stack: bool,
         buf: &mut [u32],
     ) -> bool {
-        fn accepted_for_stack(
+        #[cfg(test)]
+        fn reference_accepted_for_stack(
             dwa: &crate::automata::weighted_u32::dwa::DWA,
             top_first: &[u32],
         ) -> Weight {
@@ -5488,6 +5527,76 @@ impl<'a> ConstraintState<'a> {
             accepted
         }
 
+        fn accepted_dense_for_stack(
+            dwa: &crate::automata::weighted_u32::dwa::DWA,
+            tsid: u32,
+            token_count: usize,
+            top_first: &[u32],
+        ) -> Vec<u64> {
+            let mut path = vec![u64::MAX; token_count.div_ceil(64)];
+            if token_count % 64 != 0 {
+                *path.last_mut().expect("nonempty token universe") =
+                    (1u64 << (token_count % 64)) - 1;
+            }
+            let mut accepted = vec![0; path.len()];
+            let mut aux = Vec::new();
+            // Boundary token IDs belong to this shard, not to the outer
+            // constraint. Reuse the normal dense/range primitives but never
+            // consult a cache keyed in the outer token coordinate.
+            let precomputed = DenseTokenMaskCache::default();
+            walk_single_stack::<false, _>(
+                dwa.start_state(), top_first,
+                |state| dwa.states().get(state as usize)?.final_weight.as_ref(),
+                |state, parser| {
+                    let row = &dwa.states().get(state as usize)?.transitions;
+                    row.get(&encode_positive_label(parser))
+                        .or_else(|| row.get(&DEFAULT_LABEL))
+                        .map(|(target, weight)| (*target, weight))
+                },
+                |event| {
+                    match event {
+                        StackWalkEvent::Final(weight) => {
+                            let weight = RuntimeWeightRef::Materialized(weight);
+                            if weight.is_full() {
+                                for (out, &bits) in accepted.iter_mut().zip(&path) {
+                                    *out |= bits;
+                                }
+                            } else if let Some(tokens) = weight.token_set_for_tsid(tsid) {
+                                DenseMaskAcc::or_dense_and_runtime_token_set_into(
+                                    &path, tokens, &precomputed, &mut accepted,
+                                );
+                            }
+                        }
+                        StackWalkEvent::Intersect(weight) => {
+                            return intersect_static_dense_with_weight(
+                                &mut path, &mut aux, tsid,
+                                RuntimeWeightRef::Materialized(weight), |_| None,
+                            );
+                        }
+                        StackWalkEvent::Top(_) => unreachable!("top hook is compiled out"),
+                    }
+                    true
+                },
+            );
+            #[cfg(test)]
+            {
+                // Independent pre-refactor symbolic walk: compare the whole
+                // private mask before outer eligibility filtering can hide a
+                // traversal, TSID, or padding error.
+                let reference = reference_accepted_for_stack(dwa, top_first);
+                let mut expected = vec![0u64; accepted.len()];
+                for token in 0..token_count {
+                    if reference.is_full() || reference.token_set_for_tsid_ref(tsid)
+                        .is_some_and(|tokens| tokens.contains(token as u32))
+                    {
+                        expected[token / 64] |= 1u64 << (token % 64);
+                    }
+                }
+                assert_eq!(accepted, expected, "boundary shared walk tsid={tsid} stack={top_first:?}");
+            }
+            accepted
+        }
+
         fn accepted_mask_for_stack(
             dwa: &crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
             tsid: u32,
@@ -5496,43 +5605,33 @@ impl<'a> ConstraintState<'a> {
             if tsid >= dwa.tsid_count as u32 {
                 return 0;
             }
-            let mut state_id = dwa.start_state();
             let mut path_mask = dwa.all_token_mask();
             let mut accepted = 0u64;
-            let accumulate_final = |state_id: u32, path_mask: u64, accepted: &mut u64| {
-                let Some(state) = dwa.states.get(state_id as usize) else {
-                    return;
-                };
-                if state.final_weight != 0 {
-                    *accepted |= path_mask & dwa.weight_mask(state.final_weight, tsid);
-                }
-            };
-            accumulate_final(state_id, path_mask, &mut accepted);
-            for &parser_state in top_first {
-                let label = encode_positive_label(parser_state);
-                let Some(state) = dwa.states.get(state_id as usize) else {
-                    break;
-                };
-                let edge = state
-                    .transitions
-                    .iter()
-                    .find(|(edge_label, _, _)| *edge_label == label)
-                    .or_else(|| {
-                        state
-                            .transitions
-                            .iter()
-                            .find(|(edge_label, _, _)| *edge_label == DEFAULT_LABEL)
-                    });
-                let Some(&(_, target, weight)) = edge else {
-                    break;
-                };
-                path_mask &= dwa.weight_mask(weight, tsid);
-                if path_mask == 0 {
-                    break;
-                }
-                state_id = target;
-                accumulate_final(state_id, path_mask, &mut accepted);
-            }
+            walk_single_stack::<false, _>(
+                dwa.start_state(), top_first,
+                |state| {
+                    let weight = dwa.states.get(state as usize)?.final_weight;
+                    (weight != 0).then(|| dwa.weight_mask(weight, tsid))
+                },
+                |state, parser| {
+                    let row = &dwa.states.get(state as usize)?.transitions;
+                    let label = encode_positive_label(parser);
+                    row.iter().find(|(key, _, _)| *key == label)
+                        .or_else(|| row.iter().find(|(key, _, _)| *key == DEFAULT_LABEL))
+                        .map(|&(_, target, weight)| (target, dwa.weight_mask(weight, tsid)))
+                },
+                |event| {
+                    match event {
+                        StackWalkEvent::Final(weight) => accepted |= path_mask & weight,
+                        StackWalkEvent::Intersect(weight) => {
+                            path_mask &= weight;
+                            return path_mask != 0;
+                        }
+                        StackWalkEvent::Top(_) => unreachable!("top hook is compiled out"),
+                    }
+                    true
+                },
+            );
             accepted
         }
 
@@ -5697,20 +5796,22 @@ impl<'a> ConstraintState<'a> {
                         phase_admit_ns += elapsed_ns(mark);
                     }
                 } else {
-                    let walk_mark = single_started.is_some().then(Instant::now);
-                    let accepted = accepted_for_stack(parser_dwa, top_first);
-                    if let Some(mark) = walk_mark {
-                        phase_walk_ns += elapsed_ns(mark);
-                    }
-                    let admit_mark = single_started.is_some().then(Instant::now);
                     let mut debug_internal = Vec::new();
                     let mut debug_originals = Vec::new();
                     for &boundary_tsid in &boundary_tsids {
-                        let Some(tokens) = accepted.token_set_for_tsid_ref(boundary_tsid) else {
-                            continue;
-                        };
-                        for range in tokens.ranges() {
-                            for internal_token in range {
+                        let walk_mark = single_started.is_some().then(Instant::now);
+                        let accepted = accepted_dense_for_stack(
+                            parser_dwa, boundary_tsid,
+                            boundary.internal_token_to_originals.len(), top_first,
+                        );
+                        if let Some(mark) = walk_mark {
+                            phase_walk_ns += elapsed_ns(mark);
+                        }
+                        let admit_mark = single_started.is_some().then(Instant::now);
+                        for (word_index, mut bits) in accepted.into_iter().enumerate() {
+                            while bits != 0 {
+                                let internal_token = (word_index * 64) as u32 + bits.trailing_zeros();
+                                bits &= bits - 1;
                                 let Some(originals) = boundary
                                     .internal_token_to_originals
                                     .get(internal_token as usize)
@@ -5735,9 +5836,9 @@ impl<'a> ConstraintState<'a> {
                                 }
                             }
                         }
-                    }
-                    if let Some(mark) = admit_mark {
-                        phase_admit_ns += elapsed_ns(mark);
+                        if let Some(mark) = admit_mark {
+                            phase_admit_ns += elapsed_ns(mark);
+                        }
                     }
                     if debug_boundary {
                         debug_internal.sort_unstable();
@@ -6239,72 +6340,67 @@ impl<'a> ConstraintState<'a> {
                 let representative_path = stack_plans[plan_index].representative_path;
                 let stack = &paths[representative_path].2;
                 let ops_start = plan_ops.len();
-                let mut dwa_state_id = self.constraint.runtime_parser_dwa_start_state();
-                let mut stack_idx = 0usize;
-
-                loop {
-                    if let Some(final_weight) =
-                        self.constraint.runtime_parser_dwa_final_weight(dwa_state_id)
-                    {
-                        if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                            plans_complete = false;
-                            break 'build_plans;
-                        }
-                        plan_ops.push(SinglePathDirectPlanOp::Merge(final_weight));
-                    }
-
-                    let Some(&parser_state) = stack.get(stack_idx) else {
-                        break;
-                    };
-                    stack_idx += 1;
-
-                    let positive_label = encode_positive_label(parser_state);
-                    if stack_idx == 1 {
-                        let has_direct_regular_acceptance = self
-                            .constraint
-                            .direct_regular_wide_acceptance_for_parser_state(parser_state)
-                            .is_some()
-                            || self
-                                .constraint
-                                .for_each_direct_regular_l1_acceptance(parser_state, |_| {});
-                        if has_direct_regular_acceptance {
-                            plans_complete = false;
-                            break 'build_plans;
-                        }
-                        if let Some(accept_weight) =
-                            self.constraint.runtime_parser_top_accept(positive_label)
-                        {
-                            if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                                plans_complete = false;
-                                break 'build_plans;
-                            }
-                            plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
-                        }
-                        let accept_parts =
-                            self.constraint.runtime_parser_top_accept_parts(positive_label);
-                        if !accept_parts.is_empty() {
-                            for accept_weight in accept_parts {
+                walk_single_stack::<true, _>(
+                    self.constraint.runtime_parser_dwa_start_state(),
+                    stack,
+                    |state| self.constraint.runtime_parser_dwa_final_weight(state),
+                    |state, parser| self.constraint.runtime_parser_dwa_transition(state, parser),
+                    |event| {
+                        match event {
+                            StackWalkEvent::Final(final_weight) => {
                                 if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
                                     plans_complete = false;
-                                    break 'build_plans;
+                                    return false;
                                 }
-                                plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
+                                plan_ops.push(SinglePathDirectPlanOp::Merge(final_weight));
+                            }
+                            StackWalkEvent::Top(parser_state) => {
+                                let positive_label = encode_positive_label(parser_state);
+                                let has_direct_regular_acceptance = self
+                                    .constraint
+                                    .direct_regular_wide_acceptance_for_parser_state(parser_state)
+                                    .is_some()
+                                    || self
+                                        .constraint
+                                        .for_each_direct_regular_l1_acceptance(parser_state, |_| {});
+                                if has_direct_regular_acceptance {
+                                    plans_complete = false;
+                                    return false;
+                                }
+                                if let Some(accept_weight) =
+                                    self.constraint.runtime_parser_top_accept(positive_label)
+                                {
+                                    if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                                        plans_complete = false;
+                                        return false;
+                                    }
+                                    plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
+                                }
+                                let accept_parts =
+                                    self.constraint.runtime_parser_top_accept_parts(positive_label);
+                                if !accept_parts.is_empty() {
+                                    for accept_weight in accept_parts {
+                                        if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                                            plans_complete = false;
+                                            return false;
+                                        }
+                                        plan_ops.push(SinglePathDirectPlanOp::Merge(accept_weight));
+                                    }
+                                }
+                            }
+                            StackWalkEvent::Intersect(weight) => {
+                                if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
+                                    plans_complete = false;
+                                    return false;
+                                }
+                                plan_ops.push(SinglePathDirectPlanOp::Intersect(weight));
                             }
                         }
-                    }
-
-                    let Some((target, weight)) = self
-                        .constraint
-                        .runtime_parser_dwa_transition(dwa_state_id, parser_state)
-                    else {
-                        break;
-                    };
-                    if plan_ops.len() == MASK_SINGLE_PATH_DIRECT_MAX_PLAN_OPS {
-                        plans_complete = false;
-                        break 'build_plans;
-                    }
-                    plan_ops.push(SinglePathDirectPlanOp::Intersect(weight));
-                    dwa_state_id = target;
+                        true
+                    },
+                );
+                if !plans_complete {
+                    break 'build_plans;
                 }
 
                 stack_plans[plan_index].ops_start = ops_start;
@@ -6432,63 +6528,22 @@ impl<'a> ConstraintState<'a> {
                     continue;
                 }
 
-                let mut dwa_state_id = self.constraint.runtime_parser_dwa_start_state();
-                let mut stack_idx = 0usize;
-
-                loop {
-                    if let Some(final_weight) =
-                        self.constraint.runtime_parser_dwa_final_weight(dwa_state_id)
-                    {
-                        used_direct_final = true;
-                        let dense = if dense_is_seed {
-                            seed_base.as_ref()
-                        } else {
-                            single_path_acc.as_slice()
-                        };
-                        self.merge_single_path_final_weight_to_internal(
-                            final_weight,
-                            internal_tsid,
-                            dense,
-                            precomputed,
-                            &mut merged,
-                            Some(&mut *buf),
-                            &mut direct_buf_dirty,
-                        );
-                    }
-
-                    let Some(&parser_state) = stack.get(stack_idx) else {
-                        break;
-                    };
-                    stack_idx += 1;
-
-                    let positive_label = encode_positive_label(parser_state);
-                    if stack_idx == 1 {
-                        let dense = if dense_is_seed {
-                            seed_base.as_ref()
-                        } else {
-                            single_path_acc.as_slice()
-                        };
-                        let mut used_equivalent_wide_summary = false;
-                        if let Some(summary) = self
-                            .constraint
-                            .direct_regular_wide_acceptance_for_parser_state(parser_state)
-                            && let Some(accepted) = summary.dense_by_tsid.get(internal_tsid)
-                        {
-                            let n = dense.len().min(accepted.len()).min(merged.len());
-                            for word in 0..n {
-                                merged[word] |= dense[word] & accepted[word];
-                            }
-                            used_direct_final = true;
-                            used_equivalent_wide_summary = true;
-                        }
-
-                        if !used_equivalent_wide_summary {
-                            if let Some(accept_weight) =
-                                self.constraint.runtime_parser_top_accept(positive_label)
-                            {
+                walk_single_stack::<true, _>(
+                    self.constraint.runtime_parser_dwa_start_state(),
+                    stack,
+                    |state| self.constraint.runtime_parser_dwa_final_weight(state),
+                    |state, parser| self.constraint.runtime_parser_dwa_transition(state, parser),
+                    |event| {
+                        match event {
+                            StackWalkEvent::Final(final_weight) => {
                                 used_direct_final = true;
+                                let dense = if dense_is_seed {
+                                    seed_base.as_ref()
+                                } else {
+                                    single_path_acc.as_slice()
+                                };
                                 self.merge_single_path_final_weight_to_internal(
-                                    accept_weight,
+                                    final_weight,
                                     internal_tsid,
                                     dense,
                                     precomputed,
@@ -6497,71 +6552,103 @@ impl<'a> ConstraintState<'a> {
                                     &mut direct_buf_dirty,
                                 );
                             }
-                            let accept_parts =
-                                self.constraint.runtime_parser_top_accept_parts(positive_label);
-                            if !accept_parts.is_empty() {
-                                used_direct_final = true;
-                                for accept_weight in accept_parts {
-                                    self.merge_single_path_final_weight_to_internal(
-                                        accept_weight,
-                                        internal_tsid,
-                                        dense,
-                                        precomputed,
-                                        &mut merged,
-                                        Some(&mut *buf),
-                                        &mut direct_buf_dirty,
+                            StackWalkEvent::Top(parser_state) => {
+                                let positive_label = encode_positive_label(parser_state);
+                                let dense = if dense_is_seed {
+                                    seed_base.as_ref()
+                                } else {
+                                    single_path_acc.as_slice()
+                                };
+                                let mut used_equivalent_wide_summary = false;
+                                if let Some(summary) = self
+                                    .constraint
+                                    .direct_regular_wide_acceptance_for_parser_state(parser_state)
+                                    && let Some(accepted) = summary.dense_by_tsid.get(internal_tsid)
+                                {
+                                    let n = dense.len().min(accepted.len()).min(merged.len());
+                                    for word in 0..n {
+                                        merged[word] |= dense[word] & accepted[word];
+                                    }
+                                    used_direct_final = true;
+                                    used_equivalent_wide_summary = true;
+                                }
+
+                                if !used_equivalent_wide_summary {
+                                    if let Some(accept_weight) =
+                                        self.constraint.runtime_parser_top_accept(positive_label)
+                                    {
+                                        used_direct_final = true;
+                                        self.merge_single_path_final_weight_to_internal(
+                                            accept_weight,
+                                            internal_tsid,
+                                            dense,
+                                            precomputed,
+                                            &mut merged,
+                                            Some(&mut *buf),
+                                            &mut direct_buf_dirty,
+                                        );
+                                    }
+                                    let accept_parts =
+                                        self.constraint.runtime_parser_top_accept_parts(positive_label);
+                                    if !accept_parts.is_empty() {
+                                        used_direct_final = true;
+                                        for accept_weight in accept_parts {
+                                            self.merge_single_path_final_weight_to_internal(
+                                                accept_weight,
+                                                internal_tsid,
+                                                dense,
+                                                precomputed,
+                                                &mut merged,
+                                                Some(&mut *buf),
+                                                &mut direct_buf_dirty,
+                                            );
+                                        }
+                                    }
+                                    let used_l1 = self.constraint.for_each_direct_regular_l1_acceptance(
+                                        parser_state,
+                                        |accept_weight| {
+                                            self.merge_single_path_final_weight_to_internal(
+                                                accept_weight,
+                                                internal_tsid,
+                                                dense,
+                                                precomputed,
+                                                &mut merged,
+                                                Some(&mut *buf),
+                                                &mut direct_buf_dirty,
+                                            );
+                                        },
                                     );
+                                    used_direct_final |= used_l1;
                                 }
                             }
-                            let used_l1 = self.constraint.for_each_direct_regular_l1_acceptance(
-                                parser_state,
-                                |accept_weight| {
-                                    self.merge_single_path_final_weight_to_internal(
-                                        accept_weight,
-                                        internal_tsid,
-                                        dense,
-                                        precomputed,
-                                        &mut merged,
-                                        Some(&mut *buf),
-                                        &mut direct_buf_dirty,
-                                    );
-                                },
-                            );
-                            used_direct_final |= used_l1;
-                        }
-                    }
-
-                    let Some((target, weight)) = self
-                        .constraint
-                        .runtime_parser_dwa_transition(dwa_state_id, parser_state)
-                    else {
-                        break;
-                    };
-
-                    if dense_is_seed {
-                        if !weight.is_full() {
-                            if !materialize_single_path_seed_intersection(
-                                seed_base,
-                                &mut single_path_acc,
-                                internal_tsid,
-                                weight,
-                                self.constraint,
-                            ) {
-                                break;
+                            StackWalkEvent::Intersect(weight) => {
+                                if dense_is_seed {
+                                    if !weight.is_full() {
+                                        if !materialize_single_path_seed_intersection(
+                                            seed_base,
+                                            &mut single_path_acc,
+                                            internal_tsid,
+                                            weight,
+                                            self.constraint,
+                                        ) {
+                                            return false;
+                                        }
+                                        dense_is_seed = false;
+                                    }
+                                } else if !Self::intersect_single_path_dense_with_weight_in_place(
+                                    &mut single_path_acc,
+                                    &mut single_path_aux,
+                                    internal_tsid,
+                                    weight,
+                                    self.constraint,
+                                ) {
+                                    return false;
+                                }
                             }
-                            dense_is_seed = false;
                         }
-                    } else if !Self::intersect_single_path_dense_with_weight_in_place(
-                        &mut single_path_acc,
-                        &mut single_path_aux,
-                        internal_tsid,
-                        weight,
-                        self.constraint,
-                    ) {
-                        break;
-                    }
-                    dwa_state_id = target;
-                }
+                        true
+                    },
+                );
             }
         }
         if !used_direct_final && !self.is_accepting() {
@@ -6665,30 +6752,8 @@ impl<'a> ConstraintState<'a> {
         weight: RuntimeWeightRef<'_>,
         constraint: &Constraint,
     ) -> bool {
-        if weight.is_full() {
-            return dense.iter().any(|&word| word != 0);
-        }
-
-        let Some(token_set) = weight.token_set_for_tsid(internal_tsid) else {
-            dense.fill(0);
-            return false;
-        };
-        if let Some(mask) = constraint.runtime_token_set_dense_mask(token_set) {
-            let mut any = false;
-            for (idx, dense_word) in dense.iter_mut().enumerate() {
-                *dense_word &= mask.get(idx).copied().unwrap_or(0);
-                any |= *dense_word != 0;
-            }
-            return any;
-        }
-
-        aux.clear();
-        aux.resize(dense.len(), 0);
-        DenseMaskAcc::for_each_runtime_token_range_word(token_set, dense.len(), |word_idx, token_mask| {
-            aux[word_idx] |= dense[word_idx] & token_mask;
-        });
-        std::mem::swap(dense, aux);
-        dense.iter().any(|&word| word != 0)
+        intersect_static_dense_with_weight(dense, aux, internal_tsid, weight,
+            |tokens| constraint.runtime_token_set_dense_mask(tokens))
     }
 
     fn merge_single_path_final_weight_to_internal(
