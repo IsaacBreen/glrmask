@@ -494,6 +494,10 @@ impl<'a> ConstraintSpec<'a> {
     pub fn compile_dynamic(&self) -> Result<DynamicConstraint> {
         let mut constraint = self.compile_dynamic_uncached()?;
         for component in constraint.constraints_mut() {
+            // Retain the supplied shared vocabulary, just as static compilation
+            // does. Reconstructing it from every token's bytes on the first bind
+            // costs more than compiling many small dynamic components.
+            let _ = component.late_bind_vocab.set(self.vocab.clone());
             component
                 .build_boundary_trigger(self.boundary_trigger_detail)
                 .map_err(Error::Compilation)?;
@@ -1354,10 +1358,12 @@ where
 {
     let parents = parent.clone_constraints();
     require_late_grammar_slot(&parents, name)?;
-    let first = parents.first().ok_or_else(|| {
+    parents.first().ok_or_else(|| {
         Error::Compilation("dynamic parent has no alternatives".to_owned())
     })?;
-    let vocab = constraint_vocab(first);
+    // Cache on the retained parent, not a temporary clone discarded after this
+    // bind. Loaded constraints must reconstruct the vocabulary at most once.
+    let vocab = constraint_vocab(&parent.inner);
     if !parents
         .iter()
         .all(|alternative| static_constraint_targets(alternative, &vocab))
@@ -4164,6 +4170,35 @@ mod tests {
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
         }
+    }
+
+    #[test]
+    fn dynamic_late_bind_vocab_cache_is_shared_reused_and_not_serialized() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec()),
+        ]);
+        let parent = DynamicConstraint::compile(
+            Grammar::glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child;"),
+            &vocab,
+        ).unwrap();
+        let child = DynamicConstraint::compile(Grammar::ebnf(r#"start ::= "y""#), &vocab).unwrap();
+        let retained = parent.inner.late_bind_vocab.get().expect("retain supplied vocabulary");
+        assert!(Arc::ptr_eq(&retained.entries_arc(), &vocab.entries_arc()));
+
+        let loaded = DynamicConstraint::load(&parent.save()).unwrap();
+        assert!(loaded.inner.late_bind_vocab.get().is_none());
+        let first = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
+        let first_backing = loaded.inner.late_bind_vocab.get()
+            .expect("prime retained loaded parent, not a throwaway clone").entries_arc();
+        let second = loaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
+        assert!(Arc::ptr_eq(
+            &first_backing, &loaded.inner.late_bind_vocab.get().unwrap().entries_arc(),
+        ));
+        assert_eq!(first.start().mask(), second.start().mask());
+        let reloaded = DynamicConstraint::load(&loaded.save()).unwrap();
+        assert!(reloaded.inner.late_bind_vocab.get().is_none(), "cache stays off wire");
+        let rebound = reloaded.bind_grammar_dynamic_boundary("child", &child).unwrap();
+        assert_eq!(first.start().mask(), rebound.start().mask());
     }
 
     #[test]
