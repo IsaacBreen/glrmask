@@ -390,31 +390,29 @@ fn public_constraint_load_rejects_an_open_module_body() {
 fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
     use glrmask::{BuildOptions, Optimization};
 
-    let v = Vocab::new(vec![
-        (0, b"x".to_vec()),
-        (1, b"a".to_vec()),
-        (2, b"y".to_vec()),
-        (3, b"xay".to_vec()),
-    ]);
-    let host = Grammar::from_glrm(
-        r#"glrm 1; start start; extern grammar CHILD; nt start = "x" CHILD "y";"#,
-    )
-    .compile_module(&v)
-    .unwrap();
-    let child = Grammar::from_ebnf(r#"start ::= "a""#)
-        .compile(&v)
-        .unwrap();
-    let bound = host.bind("CHILD", &child).unwrap();
-
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
         .unwrap();
-    // Keep the linked Constraint and state inside the pool. The public API
-    // does not promise that every future runtime representation is Send;
-    // this regression is specifically about scheduler progress with one
-    // Rayon worker, not about moving a Constraint between threads.
+    // Build and consume the whole runtime inside the pool. The public API does
+    // not promise that Module/Constraint are Send; this regression is about
+    // scheduler progress with one Rayon worker, not cross-thread transport.
     pool.install(|| {
+        let v = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"y".to_vec()),
+            (3, b"xay".to_vec()),
+        ]);
+        let host = Grammar::from_glrm(
+            r#"glrm 1; start start; extern grammar CHILD; nt start = "x" CHILD "y";"#,
+        )
+        .compile_module(&v)
+        .unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "a""#)
+            .compile(&v)
+            .unwrap();
+        let bound = host.bind("CHILD", &child).unwrap();
         let constraint = bound
             .link_with(
                 BuildOptions::default().optimization(Optimization::FastBuild),
