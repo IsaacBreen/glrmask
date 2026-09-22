@@ -4897,10 +4897,64 @@ pub fn stack_may_advance_on_with_provider<P: ParserActionProvider>(
         return false;
     }
     let closed = close_provider_control_stacks(provider, stack);
-    for top in closed.peek_values() {
+    let tops = closed.peek_values();
+    provider_closed_symbol_may_advance(provider, &closed, &tops, symbol)
+}
+
+/// Exact set admission using the same provider action/advance machinery as
+/// scalar admission. The frontier is closed once for the whole candidate set,
+/// not once per lexer-future terminal. No grammar flattening or new tables are
+/// required, and ordinary table-based admission remains unchanged.
+pub fn stack_may_advance_on_any_with_provider<P: ParserActionProvider>(
+    provider: &P,
+    stack: &ParserGSS,
+    symbols: impl IntoIterator<Item = P::Symbol>,
+) -> bool {
+    if stack.is_empty() {
+        return false;
+    }
+    let closed = close_provider_control_stacks(provider, stack);
+    let tops = closed.peek_values();
+    symbols.into_iter().any(|symbol| {
+        provider_closed_symbol_may_advance(provider, &closed, &tops, symbol)
+    })
+}
+
+/// Visit candidate keys whose provider symbols admit an exact continuation.
+/// Multiple symbols may share a key (for a scoped alias); callers can union
+/// the reported keys. Closure and stack-top inspection are reused for the
+/// complete batch, while predecessor-feasible reductions use the unchanged
+/// canonical provider traversal.
+pub fn for_each_admitted_symbol_with_provider<P: ParserActionProvider, K>(
+    provider: &P,
+    stack: &ParserGSS,
+    symbols: impl IntoIterator<Item = (K, P::Symbol)>,
+    mut admit: impl FnMut(K),
+) {
+    if stack.is_empty() {
+        return;
+    }
+    let closed = close_provider_control_stacks(provider, stack);
+    let tops = closed.peek_values();
+    for (key, symbol) in symbols {
+        if provider_closed_symbol_may_advance(provider, &closed, &tops, symbol) {
+            admit(key);
+        }
+    }
+}
+
+fn provider_closed_symbol_may_advance<P: ParserActionProvider>(
+    provider: &P,
+    closed: &ParserGSS,
+    tops: &[u32],
+    symbol: P::Symbol,
+) -> bool {
+    let mut has_action = false;
+    for &top in tops {
         let Some(provided) = provider.action(top, symbol) else {
             continue;
         };
+        has_action = true;
         if !provided.extra_stack_shifts.is_empty() {
             continue;
         }
@@ -4926,7 +4980,7 @@ pub fn stack_may_advance_on_with_provider<P: ParserActionProvider>(
             ProvidedActionRef::Call { .. } | ProvidedActionRef::Return { .. } => {}
         }
     }
-    !advance_stacks_with_provider(provider, closed, symbol).is_empty()
+    has_action && !advance_stacks_with_provider(provider, closed.clone(), symbol).is_empty()
 }
 
 /// Provider equivalent of `stacks_finished`: after zero-width closure, report
@@ -5911,6 +5965,26 @@ mod tests {
                 expect,
                 "reference disagrees with expected (fixture wrong? {case})"
             );
+            assert_eq!(
+                super::stack_may_advance_on_any_with_provider(provider, stack, [symbol]),
+                expect,
+                "batched singleton differs ({case})"
+            );
+            assert_eq!(
+                super::stack_may_advance_on_any_with_provider(provider, stack, [symbol, symbol]),
+                expect,
+                "batched duplicate differs ({case})"
+            );
+            assert!(!super::stack_may_advance_on_any_with_provider(
+                provider, stack, std::iter::empty::<P::Symbol>(),
+            ));
+            let mut admitted = Vec::new();
+            super::for_each_admitted_symbol_with_provider(
+                provider, stack, [(0u32, symbol),(1u32, symbol)],
+                |key| admitted.push(key),
+            );
+            assert_eq!(admitted, if expect { vec![0,1] } else { vec![] },
+                "batched exact admission differs ({case})");
         }
 
         // Plain zero-pop shift: sufficient fast path, true.

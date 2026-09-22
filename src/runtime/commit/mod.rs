@@ -1778,16 +1778,7 @@ fn batched_end_state_admitted_terminals(
     if non_initial <= 1 {
         return None;
     }
-    if constraint.uses_compact_segmented_parser_runtime() {
-        let mut admitted = crate::ds::bitset::BitSet::new(candidates.len());
-        for terminal in candidates.iter_ones() {
-            if constraint
-                .compact_segmented_parser_may_advance_on(gss, terminal as u32)
-                .unwrap_or(false)
-            {
-                admitted.set(terminal);
-            }
-        }
+    if let Some(admitted) = constraint.compact_segmented_parser_admitted_terminals(gss, &candidates) {
         return Some(admitted);
     }
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
@@ -1852,16 +1843,7 @@ pub(crate) fn exact_admitted_terminals_for_candidates(
     gss: &ParserGSS,
     candidates: &crate::ds::bitset::BitSet,
 ) -> crate::ds::bitset::BitSet {
-    if constraint.uses_compact_segmented_parser_runtime() {
-        let mut admitted = crate::ds::bitset::BitSet::new(candidates.len());
-        for terminal in candidates.iter_ones() {
-            if constraint
-                .compact_segmented_parser_may_advance_on(gss, terminal as u32)
-                .unwrap_or(false)
-            {
-                admitted.set(terminal);
-            }
-        }
+    if let Some(admitted) = constraint.compact_segmented_parser_admitted_terminals(gss, candidates) {
         return admitted;
     }
     if let Some(direct) = constraint.direct_regular_admissible_terminals(gss) {
@@ -8992,6 +8974,50 @@ mod tests {
                     }
                     assert!(actual.is_accepting());
                     assert!(bytewise.is_accepting());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn recursive_batched_admission_matches_scalar_provider_reference() {
+        use crate::ds::bitset::BitSet;
+        let vocab = Vocab::new(b"[ab]! ".iter().enumerate()
+            .map(|(id,byte)|(id as u32,vec![*byte])).collect());
+        for source in [
+            r#"start child; t WORD ::= /[ab]+/; nt child ::= WORD;"#,
+            r#"start child; ignore WS; t WS ::= " "+; t WORD ::= /[ab]+/; nt child ::= WORD?;"#,
+            r#"start child; t A ::= "a"; t AB ::= "ab"; nt child ::= (A | AB)*;"#,
+        ] {
+            let child = Constraint::compile(Grammar::glrm(source), &vocab).unwrap();
+            let middle = Constraint::compile(Grammar::glrm(
+                r#"start middle; extern grammar child; nt middle ::= "[" child "]";"#,
+            ), &vocab).unwrap().bind_grammar_dynamic_boundary("child", child).unwrap();
+            let outer = Constraint::compile(Grammar::glrm(
+                r#"start outer; extern grammar middle; nt outer ::= middle "!";"#,
+            ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
+            let loaded = Constraint::load(outer.save()).unwrap();
+            for constraint in [&outer, &loaded] {
+                for prefix in ["", "[", "[a", "[ab", "[ab]", "[ab]!", "[ ", "[]"] {
+                    let mut state = constraint.start();
+                    if state.commit_bytes(prefix.as_bytes()).is_err() {continue;}
+                    let runtime = state.constraint;
+                    let count = runtime_terminal_count(runtime);
+                    for (_, gss) in state.state.iter() {
+                        for stride in [1,2,3] {
+                            let mut candidates=BitSet::new(count);
+                            for terminal in (0..count).step_by(stride) {candidates.set(terminal);}
+                            let actual=runtime.compact_segmented_parser_admitted_terminals(gss,&candidates).unwrap();
+                            let mut expected=BitSet::new(count);
+                            for terminal in candidates.iter_ones() {
+                                if runtime.compact_segmented_parser_may_advance_on(gss,terminal as u32).unwrap() {
+                                    expected.set(terminal);
+                                }
+                            }
+                            assert_eq!(actual,expected,"prefix={prefix} stride={stride} source={source}");
+                            assert_eq!(runtime.compact_segmented_parser_may_advance_on_any(gss,&candidates),Some(!expected.is_empty()));
+                        }
+                    }
                 }
             }
         }

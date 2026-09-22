@@ -21,7 +21,9 @@ use crate::compiler::glr::parser::{
     DisjointComponentActionProvider, ParserComponentTableSource, ParserGSS, ScopedParserSymbol,
     advance_provider_control_closed_stacks, close_provider_control_stacks,
     materialize_control_eliminated_scoped_provider_table,
-    stack_may_advance_on_with_provider, stacks_finished_with_provider,
+    stack_may_advance_on_with_provider, stack_may_advance_on_any_with_provider,
+    for_each_admitted_symbol_with_provider,
+    stacks_finished_with_provider,
 };
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity, subgrammar_child_return_pop};
 use crate::compiler::stages::id_map_and_terminal_dwa::classify::{
@@ -3330,15 +3332,47 @@ impl Constraint {
         if !self.uses_compact_segmented_parser_runtime() {
             return None;
         }
-        for terminal in terminals.iter_ones() {
-            if self
-                .compact_segmented_parser_may_advance_on(stack, terminal as u32)
-                .unwrap_or(false)
-            {
-                return Some(true);
-            }
+        let layout = self.recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables { root: self, layout: &layout };
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables, &layout.links, &layout.leaf_state_offsets,
+        ).expect("validated compact segmented parser metadata");
+        let symbols = terminals.iter_ones().flat_map(|terminal| {
+            let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
+            self.recursive_parser_symbols_for_runtime_terminal(
+                &layout, terminal as u32, &mut symbols,
+            );
+            symbols
+        });
+        Some(stack_may_advance_on_any_with_provider(&provider, stack, symbols))
+    }
+
+    pub(crate) fn compact_segmented_parser_admitted_terminals(
+        &self,
+        stack: &ParserGSS,
+        candidates: &BitSet,
+    ) -> Option<BitSet> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
         }
-        Some(false)
+        let layout = self.recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables { root: self, layout: &layout };
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables, &layout.links, &layout.leaf_state_offsets,
+        ).expect("validated compact segmented parser metadata");
+        let symbols = candidates.iter_ones().flat_map(|terminal| {
+            let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
+            self.recursive_parser_symbols_for_runtime_terminal(
+                &layout, terminal as u32, &mut symbols,
+            );
+            symbols.into_iter().map(move |symbol| (terminal, symbol))
+        });
+        let mut admitted = BitSet::new(candidates.len());
+        for_each_admitted_symbol_with_provider(&provider, stack, symbols,
+            |terminal| admitted.set(terminal));
+        Some(admitted)
     }
 
     pub(crate) fn compact_segmented_parser_is_finished(
