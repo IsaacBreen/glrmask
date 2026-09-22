@@ -1719,6 +1719,23 @@ fn runtime_terminal_count(constraint: &Constraint) -> usize {
         .unwrap_or(constraint.table.num_terminals as usize)
 }
 
+/// An unfinished ignore lexeme is a valid byte prefix even though completing
+/// it will not shift a parser terminal. Lexer-continuation tests must retain
+/// that route independently of the parser's ordinary terminal admission.
+#[inline]
+fn runtime_future_contains_ignore(
+    constraint: &Constraint,
+    future: &crate::ds::bitset::BitSet,
+) -> bool {
+    if constraint.uses_compact_segmented_parser_runtime() {
+        future.iter_ones().any(|terminal| {
+            constraint.recursive_terminal_is_ignore(terminal as u32)
+        })
+    } else {
+        constraint.ignore_terminal.is_some_and(|terminal| future.contains(terminal as usize))
+    }
+}
+
 #[inline]
 fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
     if runtime_tokenizer_is_reset_state(constraint, end_state) {
@@ -1727,6 +1744,7 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
     let future = runtime_tokenizer_future_terminals(constraint, end_state)
         .expect("runtime tokenizer end state must belong to its active coordinate");
     parser_may_advance_on_any(constraint, gss, future.as_ref())
+        || runtime_future_contains_ignore(constraint, future.as_ref())
 }
 
 /// For a tokenizer execution that produced several end states against the same
@@ -1950,12 +1968,14 @@ fn end_state_may_advance_from_row_words(
     if runtime_tokenizer_is_reset_state(constraint, end_state) {
         return true;
     }
-    runtime_tokenizer_future_terminals(constraint, end_state)
-        .expect("runtime tokenizer end state must belong to its active coordinate")
+    let future = runtime_tokenizer_future_terminals(constraint, end_state)
+        .expect("runtime tokenizer end state must belong to its active coordinate");
+    future
         .words()
         .iter()
         .zip(admitted_words.iter())
         .any(|(&future, admitted)| (future & *admitted) != 0)
+        || runtime_future_contains_ignore(constraint, future.as_ref())
 }
 
 /// Cached exact-set version of `batched_end_state_admitted_terminals`.
@@ -2013,7 +2033,8 @@ fn cached_single_end_state_may_advance(
     {
         let entry = &cache[index];
         if future.is_subset_of_extended(&entry.tested) {
-            return !future.is_disjoint(&entry.admitted);
+            return !future.is_disjoint(&entry.admitted)
+                || runtime_future_contains_ignore(constraint, future);
         }
         if let Some((_, result)) = entry
             .boolean_queries
@@ -2023,7 +2044,8 @@ fn cached_single_end_state_may_advance(
             return *result;
         }
     }
-    let result = parser_may_advance_on_any(constraint, gss, future);
+    let result = parser_may_advance_on_any(constraint, gss, future)
+        || runtime_future_contains_ignore(constraint, future);
     let entry = &mut cache[index];
     if entry.boolean_queries.len() >= PARSER_ADMISSION_BOOLEAN_CACHE_CAPACITY {
         entry.boolean_queries.remove(0);
@@ -2044,6 +2066,7 @@ fn end_state_may_advance_from_cache_entry(
     let future = runtime_tokenizer_future_terminals(constraint, end_state)
         .expect("runtime tokenizer end state must belong to its active coordinate");
     !entry.admitted.is_disjoint_prefix(future.as_ref())
+        || runtime_future_contains_ignore(constraint, future.as_ref())
 }
 
 
@@ -2062,6 +2085,7 @@ fn end_state_may_advance_with_batch(
             let future = runtime_tokenizer_future_terminals(constraint, end_state)
                 .expect("runtime tokenizer end state must belong to its active coordinate");
             !admitted.is_disjoint_prefix(future.as_ref())
+                || runtime_future_contains_ignore(constraint, future.as_ref())
         }
         None => end_state_may_advance(constraint, gss, end_state),
     }
@@ -2082,6 +2106,7 @@ fn wide_frontier_end_state_may_advance(
         .iter()
         .zip(constraint.tokenizer.possible_future_terminals(end_state).words())
         .any(|(actionable, future)| (*actionable & *future) != 0)
+        || runtime_future_contains_ignore(constraint, constraint.tokenizer.possible_future_terminals(end_state))
 }
 
 enum ActionableTerminals {
@@ -3498,6 +3523,9 @@ fn language_end_state_may_advance(
     end_state: u32,
 ) -> Option<bool> {
     if end_state == constraint.runtime_commit_initial_state() {
+        return Some(true);
+    }
+    if runtime_future_contains_ignore(constraint, constraint.tokenizer.possible_future_terminals(end_state)) {
         return Some(true);
     }
     for terminal in constraint
@@ -6440,6 +6468,9 @@ fn flat_stack_may_advance_on_any(
     scratch: &mut FlatActionScratch,
 ) -> Option<bool> {
     let top = *stack.last()?;
+    if runtime_future_contains_ignore(constraint, terminals) {
+        return Some(true);
+    }
     if constraint.table.admission_policy == AdmissionPolicy::RowPresenceExact {
         return Some(constraint.table.advance_row_intersects(top, terminals));
     }
@@ -6559,8 +6590,11 @@ fn try_commit_multi_state_lexer_only(
     }
 
     let mut output = SmallVec::<[(u32, usize); INLINE_PARSER_STATE_CAPACITY]>::new();
+    // The answer depends on BOTH the parser language and the matches produced
+    // by this lexer lane. Two lexer states can share one immutable GSS while
+    // producing different terminal matches for the same bytes.
     let mut actionable_cache =
-        SmallVec::<[(usize, bool); INLINE_PARSER_STATE_CAPACITY]>::new();
+        SmallVec::<[(usize, u32, bool); INLINE_PARSER_STATE_CAPACITY]>::new();
     let mut input_index = 0usize;
     while input_index < state.entries.len() {
         let tokenizer_state = state.entries[input_index].0;
@@ -6591,8 +6625,9 @@ fn try_commit_multi_state_lexer_only(
             if !tokenizer_scratch.matches.is_empty() {
                 let has_actionable_match = actionable_cache
                     .iter()
-                    .find_map(|&(cached_gss, cached_result)| {
-                        (cached_gss == gss_key).then_some(cached_result)
+                    .find_map(|&(cached_gss, cached_lexer, cached_result)| {
+                        (cached_gss == gss_key && cached_lexer == tokenizer_state)
+                            .then_some(cached_result)
                     })
                     .unwrap_or_else(|| {
                         let actionable = ActionableTerminals::from_gss(constraint, gss);
@@ -6600,7 +6635,7 @@ fn try_commit_multi_state_lexer_only(
                             is_actionable_terminal(actionable.as_ref(), constraint, matched.id)
                         });
                         if actionable_cache.len() < actionable_cache.capacity() {
-                            actionable_cache.push((gss_key, result));
+                            actionable_cache.push((gss_key, tokenizer_state, result));
                         }
                         result
                     });
@@ -8138,6 +8173,10 @@ impl<'a> ConstraintState<'a> {
         };
         let mask_state_unchanged = previous_state == self.state
             || (self.constraint.uses_dynamic_runtime()
+                // Ordinary tokenizer quotients cannot interpret scoped
+                // recursive composition IDs. Only exact state equality above
+                // is currently proved for retaining a composed result.
+                && !self.constraint.uses_compact_segmented_parser_runtime()
                 && (self.dynamic_mask_projection_state_eq(&previous_state, &self.state)
                     || (std::env::var_os(
                         "GLRMASK_DISABLE_DYNAMIC_MASK_PARSER_RELATIVE_COMMIT_REUSE",
@@ -8880,6 +8919,83 @@ mod tests {
 
     type CanonicalCommitState =
         Vec<(u32, Vec<(Vec<u32>, Vec<(u32, Vec<u32>)>)>)>;
+
+    #[test]
+    fn lexer_only_actionable_cache_keeps_distinct_lexer_lanes() {
+        let vocab = Vocab::new(vec![
+            (0, b"ab".to_vec()), (1, b"cd".to_vec()),
+            (2, b"abcd".to_vec()), (3, b"abx".to_vec()),
+            (4, b"zabc".to_vec()),
+        ]);
+        let compiled = Constraint::compile(Grammar::glrm(r#"
+            start document;
+            lexer group first ::= A, C;
+            lexer group second ::= B;
+            t A ::= "abx";
+            t C ::= "abc";
+            t B ::= "abcd";
+            nt document ::= A | B | "z" C;
+        "#), &vocab).unwrap();
+        for constraint in [&compiled, &Constraint::load(compiled.save()).unwrap()] {
+            let mut state = constraint.start();
+            state.commit_bytes(b"ab").unwrap();
+            let mut reference = state.state.clone();
+            assert!(commit_token_no_fast_path_reference(constraint, &mut reference, 1).is_ok());
+            let mut actual = state.state.clone();
+            let mut scratch = CommitBuffers::default();
+            assert!(commit_token_impl(constraint, &mut actual, &mut scratch, 1).is_ok(),
+                "lexer lanes sharing parser stacks must not share actionable-match answers");
+            assert_commit_fast_path_equivalence(constraint, state.state.clone(), 1, &actual, true);
+        }
+    }
+
+    #[test]
+    fn unfinished_ignore_prefixes_survive_all_commit_paths() {
+        let fragments: &[&[u8]] = &[
+            b"a", b"+", b"b", b"//", b"/////", b"line", b"\n",
+            b"/*", b"/***", b"body", b"*/", b" /*unfinished", b"//line\n+b",
+        ];
+        let vocab = Vocab::new(fragments.iter().enumerate()
+            .map(|(id, bytes)| (id as u32, bytes.to_vec())).collect());
+        for partitions in ["", "lexer group words ::= WORD; lexer group trivia ::= WS;"] {
+            let source = format!(r#"
+                start document;
+                {partitions}
+                ignore WS;
+                t WS ::= " "+ | "//" [^\n]* "\n" | "/*" ([^*] | "*" [^/])* "*/";
+                t WORD ::= /[a-z]+/;
+                nt document ::= WORD ("+" WORD)*;
+            "#);
+            let built = Constraint::compile(Grammar::glrm(&source), &vocab).unwrap();
+            let loaded = Constraint::load(built.save()).unwrap();
+            for constraint in [&built, &loaded] {
+                for ids in [
+                    vec![0,4,5,6,1,2],
+                    vec![0,7,9,10,1,2],
+                    vec![0,8,9,10,1,2],
+                    vec![0,11,10,1,2],
+                    vec![0,12],
+                ] {
+                    let mut actual = constraint.start();
+                    let mut bytewise = constraint.start();
+                    for token in ids {
+                        let before = actual.state.clone();
+                        assert!(token_in_mask(&actual.mask(), token),
+                            "ignore prefix absent from mask partitions={partitions} token={token}");
+                        let mut reference = before.clone();
+                        assert!(commit_token_no_fast_path_reference(constraint, &mut reference, token).is_ok(),
+                            "general queue must retain unfinished ignore token={token}");
+                        actual.commit_token(token).unwrap();
+                        assert_commit_fast_path_equivalence(constraint, before, token, &actual.state, true);
+                        for byte in fragments[token as usize] { bytewise.commit_bytes(&[*byte]).unwrap(); }
+                        assert_eq!(actual.mask(), bytewise.mask(), "token-vs-byte prefix token={token}");
+                    }
+                    assert!(actual.is_accepting());
+                    assert!(bytewise.is_accepting());
+                }
+            }
+        }
+    }
 
     #[test]
     fn unchanged_runtime_state_preserves_fill_mask_cache() {

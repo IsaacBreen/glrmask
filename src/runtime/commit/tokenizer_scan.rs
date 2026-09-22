@@ -19,10 +19,16 @@ pub(crate) struct ReusableTokenizerExecScratch {
 
 impl Default for ReusableTokenizerExecScratch {
     fn default() -> Self {
+        Self::with_capacity(512)
+    }
+}
+
+impl ReusableTokenizerExecScratch {
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            states: Vec::with_capacity(512),
-            next_states: Vec::with_capacity(512),
-            matches: Vec::with_capacity(512),
+            states: Vec::with_capacity(capacity),
+            next_states: Vec::with_capacity(capacity),
+            matches: Vec::with_capacity(capacity),
         }
     }
 }

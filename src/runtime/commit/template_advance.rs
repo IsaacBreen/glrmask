@@ -85,11 +85,34 @@ impl std::fmt::Debug for TemplateAdvanceRuntime {
 }
 
 impl TemplateAdvanceRuntime {
+    /// Read-only mask shadows do not execute template commits. Keep a valid
+    /// empty runtime without eagerly allocating the unused memo row reserve.
+    pub(crate) fn for_mask_only_shadow() -> Self {
+        Self::with_budget_and_capacity(
+            LANGUAGE_QUEUE_MAX_SEMANTIC_NODES,
+            LANGUAGE_QUEUE_MAX_SOURCE_KEYS,
+            LANGUAGE_QUEUE_MAX_UNION_ENTRIES,
+            LANGUAGE_QUEUE_MAX_TEMPLATE_PRODUCTS,
+            0,
+        )
+    }
+
     fn with_budget(
         max_semantic_nodes: usize,
         max_source_keys: usize,
         max_union_entries: usize,
         max_template_products: usize,
+    ) -> Self {
+        Self::with_budget_and_capacity(max_semantic_nodes, max_source_keys,
+            max_union_entries, max_template_products, 256)
+    }
+
+    fn with_budget_and_capacity(
+        max_semantic_nodes: usize,
+        max_source_keys: usize,
+        max_union_entries: usize,
+        max_template_products: usize,
+        memo_capacity: usize,
     ) -> Self {
         Self {
             interner: GssSemanticKeyInterner::with_budget(
@@ -97,7 +120,7 @@ impl TemplateAdvanceRuntime {
                 max_source_keys,
                 max_union_entries,
             ),
-            memo_rows: Vec::with_capacity(256),
+            memo_rows: Vec::with_capacity(memo_capacity),
             memo_entries: 0,
             component_cache: FxHashMap::default(),
             calls: 0,

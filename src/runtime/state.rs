@@ -402,7 +402,7 @@ impl CommitBuffers {
     /// Do not construct the speculative flat-commit GSS pool for each mask.
     /// Keep ordinary ConstraintState/commit allocation policy unchanged.
     pub(crate) fn for_mask_only_shadow() -> Self {
-        Self::with_flat_frontier_preallocation(0)
+        Self::with_allocation_policy::<true>(0)
     }
 
     /// Finite recursive mask probes use exact queue/lexer advancement, not the
@@ -412,9 +412,13 @@ impl CommitBuffers {
     }
 
     fn with_flat_frontier_preallocation(preallocated_gss: usize) -> Self {
+        Self::with_allocation_policy::<false>(preallocated_gss)
+    }
+
+    fn with_allocation_policy<const MASK_ONLY: bool>(preallocated_gss: usize) -> Self {
         Self {
             advance_result_cache: FxHashMap::default(),
-            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(256),
+            semantic_frontier_keys: GssSemanticKeyInterner::with_capacity(if MASK_ONLY { 0 } else { 256 }),
             admission_cache: SmallVec::new(),
             parser_relative_mask_eq_cache: SmallVec::new(),
             pending_state: FxHashMap::default(),
@@ -423,20 +427,21 @@ impl CommitBuffers {
             exec_results: FxHashMap::default(),
             small_exec_result: crate::automata::lexer::tokenizer::TokenizerExecResult {
                 end_state: crate::automata::lexer::tokenizer::TokenizerStateSet::new(),
-                matches: Vec::with_capacity(8),
+                matches: Vec::with_capacity(if MASK_ONLY { 0 } else { 8 }),
             },
             reusable_tokenizer_exec:
-                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
             prune_tokenizer_exec:
-                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::default(),
+                crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
             small_queue: crate::runtime::commit::SmallCommitQueueScratch::default(),
             flat_frontier:
                 crate::runtime::commit::FlatFrontierScratch::with_preallocated_gss(preallocated_gss),
-            linear_stack_original: Vec::with_capacity(LINEAR_STACK_RESERVE),
-            linear_stack_work: Vec::with_capacity(LINEAR_STACK_RESERVE),
+            linear_stack_original: Vec::with_capacity(if MASK_ONLY { 0 } else { LINEAR_STACK_RESERVE }),
+            linear_stack_work: Vec::with_capacity(if MASK_ONLY { 0 } else { LINEAR_STACK_RESERVE }),
             processing_queue: Vec::new(),
             template_advance_runtime:
-                crate::runtime::commit::TemplateAdvanceRuntime::default(),
+                if MASK_ONLY { crate::runtime::commit::TemplateAdvanceRuntime::for_mask_only_shadow() }
+                else { crate::runtime::commit::TemplateAdvanceRuntime::default() },
         }
     }
 

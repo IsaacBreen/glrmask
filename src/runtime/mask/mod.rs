@@ -2091,6 +2091,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn segmented_static_result_cache_tracks_exact_scoped_state() {
+        let vocab = Vocab::new(vec![
+            (0, b"[".to_vec()), (1, b"a".to_vec()), (2, b"]".to_vec()),
+            (3, b"!".to_vec()), (4, b"[aa]!".to_vec()), (5, b" ".to_vec()),
+        ]);
+        let child = Constraint::compile(Grammar::glrm(
+            r#"start child; ignore WS; t WS ::= " "+; t WORD ::= /[a-z]+/; nt child ::= WORD;"#
+        ), &vocab).unwrap();
+        let parent = Constraint::compile(Grammar::glrm(
+            r#"start document; extern grammar child; nt document ::= "[" child "]!";"#
+        ), &vocab).unwrap();
+        let bound = parent.bind_grammar("child", child).unwrap();
+        assert!(bound.uses_compact_segmented_parser_runtime());
+        let loaded = Constraint::load(bound.save()).unwrap();
+        for constraint in [&bound, &loaded] {
+            let mut state = constraint.start();
+            let mut unchanged_cache_reuses = 0;
+            for token in [0,1,1,1,5,2,3] {
+                let mask = state.mask();
+                assert!(mask_contains(&mask, token));
+                let mut cached = vec![0; mask.len()];
+                assert!(state.try_fill_mask_from_cache(&mut cached));
+                assert_eq!(cached, mask);
+                let before = state.state.clone();
+                state.commit_token(token).unwrap();
+                if before == state.state {
+                    assert!(state.try_fill_mask_from_cache(&mut cached));
+                    unchanged_cache_reuses += 1;
+                } else {
+                    assert!(!state.try_fill_mask_from_cache(&mut cached));
+                }
+                assert_eq!(state.mask(), state.clone().mask(), "cached/fresh token={token}");
+            }
+            assert!(unchanged_cache_reuses > 0, "fixture must exercise a repeated-state cache hit");
+            assert!(state.is_accepting());
+            assert!(state.commit_token(0).is_err());
+            assert!(state.mask().iter().all(|&word| word == 0), "failed commit invalidates cache");
+            assert_eq!(state.mask(), state.clone().mask());
+        }
+    }
+
 
     fn exact_start_trigger_contains(constraint: &Constraint, token: u32) -> bool {
         let crate::runtime::BoundaryTrigger::Exact(dwa) = &constraint.boundary_trigger else {
@@ -8405,9 +8447,17 @@ impl<'a> ConstraintState<'a> {
             return;
         }
         if authoritative_segmented {
+            // The ordinary generation cache is valid for the complete
+            // composed mask too. Commit retains it only when the exact
+            // scoped parser/lexer state (including exclusions) is unchanged.
+            if self.try_fill_mask_from_cache(mask) {
+                self.clear_late_grammar_placeholder_mask(mask);
+                return;
+            }
             if self.try_fill_mask_segmented_single_paths(mask) {
                 self.update_control_special_token_mask(mask);
                 self.clear_late_grammar_placeholder_mask(mask);
+                self.store_mask_cache_reuse_dense(mask);
                 return;
             }
             // Segmented projection is the common authoritative A/B path. A
