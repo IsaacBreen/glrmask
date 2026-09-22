@@ -249,6 +249,7 @@ pub mod __private {
 
         fn bind_vocab_exact(&mut self, vocab: &Vocab) -> std::result::Result<(), String>;
         fn prepare_for_composition(&mut self, vocab: &Vocab) -> Result<()>;
+        fn prepare_for_dynamic_composition(&mut self, vocab: &Vocab) -> Result<()>;
 
         fn num_parser_states(&self) -> u32;
         fn num_terminals(&self) -> u32;
@@ -282,6 +283,11 @@ pub mod __private {
         fn compose_compiled_subgrammars_dynamic(
             self,
             children: &[(&str, &Constraint)],
+            vocab: &Vocab,
+        ) -> Result<Self>;
+        fn compose_compiled_subgrammars_dynamic_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
             vocab: &Vocab,
         ) -> Result<Self>;
     }
@@ -358,6 +364,12 @@ pub mod __private {
 
         fn prepare_for_composition(&mut self, vocab: &Vocab) -> Result<()> {
             self.prepare_for_composition_internal(vocab)
+        }
+
+        fn prepare_for_dynamic_composition(&mut self, vocab: &Vocab) -> Result<()> {
+            Constraint::bind_vocab_exact(self, vocab).map_err(Error::Compilation)?;
+            self.materialize_composition_link_metadata_for_compilation()
+                .map_err(Error::Compilation)
         }
 
         fn compose_compiled_subgrammars(
@@ -489,6 +501,55 @@ pub mod __private {
             compose_constraints_owned_parent_segmented(
                 self,
                 &inputs,
+                vocab,
+                SegmentedBoundaryBackend::Dynamic,
+            )
+            .map(|composition| composition.constraint)
+            .map_err(Error::Compilation)
+        }
+
+
+        fn compose_compiled_subgrammars_dynamic_shared(
+            self,
+            children: &[(&str, std::sync::Arc<Constraint>)],
+            vocab: &Vocab,
+        ) -> Result<Self> {
+            use crate::compiler::constraint_compose::{
+                CompiledSubgrammarInput, SegmentedBoundaryBackend,
+                compose_constraints_owned_parent_segmented_shared,
+            };
+            use std::collections::BTreeSet;
+            use std::sync::Arc;
+
+            let mut inputs = Vec::with_capacity(children.len());
+            let mut shared = Vec::with_capacity(children.len());
+            let mut seen = BTreeSet::new();
+            for (name, child) in children {
+                let placeholder_terminal = self
+                    .terminal_display_names
+                    .iter()
+                    .position(|candidate| candidate == name)
+                    .ok_or_else(|| {
+                        Error::Compilation(format!(
+                            "parent has no subgrammar placeholder terminal {name:?}",
+                        ))
+                    })? as u32;
+                if !seen.insert(placeholder_terminal) {
+                    return Err(Error::Compilation(format!(
+                        "parent placeholder terminal {name:?} was supplied more than once",
+                    )));
+                }
+                inputs.push(CompiledSubgrammarInput {
+                    placeholder_terminal,
+                    additional_placeholder_terminals: &[],
+                    constraint: child.as_ref(),
+                });
+                shared.push(Arc::clone(child));
+            }
+            compose_constraints_owned_parent_segmented_shared(
+                self,
+                &inputs,
+                &shared,
                 vocab,
                 SegmentedBoundaryBackend::Dynamic,
             )

@@ -299,16 +299,28 @@ impl MaskScratch {
         let mut segmented_component_initial_states = Vec::new();
         let mut segmented_component_initial_masks = Vec::new();
         if let Some(overlay) = constraint.static_dynamic_overlay.as_ref() {
-            segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
-            segmented_component_initial_states.reserve(overlay.segmented_parser_components.len());
-            segmented_component_initial_masks.reserve(overlay.segmented_parser_components.len());
-            for component in &overlay.segmented_parser_components {
-                let source = component.constraint.as_ref();
-                segmented_component_scratch.push(Arc::new(Mutex::new(
-                    MaskScratch::for_constraint(source),
-                )));
-                segmented_component_initial_states.push(source.initial_state_map());
-                segmented_component_initial_masks.push(source.start().mask());
+            let authoritative_dynamic_direct = overlay.segmented_mask_authoritative
+                && !overlay.segmented_parser_components.is_empty()
+                && overlay.segmented_parser_components.iter().all(|component| {
+                    component.boundary.as_ref().is_some_and(|shard| {
+                        matches!(
+                            shard.backend,
+                            crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                        )
+                    })
+                });
+            if !authoritative_dynamic_direct {
+                segmented_component_scratch.reserve(overlay.segmented_parser_components.len());
+                segmented_component_initial_states.reserve(overlay.segmented_parser_components.len());
+                segmented_component_initial_masks.reserve(overlay.segmented_parser_components.len());
+                for component in &overlay.segmented_parser_components {
+                    let source = component.constraint.as_ref();
+                    segmented_component_scratch.push(Arc::new(Mutex::new(
+                        MaskScratch::for_constraint(source),
+                    )));
+                    segmented_component_initial_states.push(source.initial_state_map());
+                    segmented_component_initial_masks.push(source.start().mask());
+                }
             }
         }
         Self {

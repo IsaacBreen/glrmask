@@ -19489,6 +19489,325 @@ fn prepared_constraint_for_segmented_composition(
     Ok(Some(prepared))
 }
 
+
+fn recursive_component_tokenizer_span(constraint: &Constraint) -> Result<u32, String> {
+    Ok(constraint
+        .recursive_parser_layout()?
+        .map_or(constraint.tokenizer.num_states(), |layout| layout.total_tokenizer_states))
+}
+
+fn merged_special_token_terminals_recursive_fast(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    terminal_offsets: &[u32],
+) -> Vec<SpecialTokenTerminal> {
+    let bound_parent_slots = children
+        .iter()
+        .flat_map(CompiledSubgrammarInput::placeholder_terminals)
+        .collect::<BTreeSet<_>>();
+    let mut merged = parent
+        .special_token_terminals
+        .iter()
+        .filter(|special| {
+            !bound_parent_slots.contains(&special.terminal_id)
+                && !parent.is_late_grammar_placeholder_terminal(special.terminal_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for (child_index, child) in children.iter().enumerate() {
+        let offset = terminal_offsets[child_index + 1];
+        merged.extend(
+            child
+                .constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| {
+                    !child
+                        .constraint
+                        .is_late_grammar_placeholder_terminal(special.terminal_id)
+                })
+                .map(|special| SpecialTokenTerminal {
+                    terminal_id: offset + special.terminal_id,
+                    token_id: special.token_id,
+                }),
+        );
+    }
+    merged.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    merged.dedup_by_key(|special| (special.token_id, special.terminal_id));
+    merged
+}
+
+fn compose_dynamic_recursive_shared_fast(
+    mut parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: &[Arc<Constraint>],
+    vocab: &Vocab,
+) -> Result<ConstraintComposition, String> {
+    let started_at = Instant::now();
+    if children.len() != shared_children.len() {
+        return Err("dynamic recursive shared child/component count mismatch".into());
+    }
+    for (index, (input, shared)) in children.iter().zip(shared_children).enumerate() {
+        if !std::ptr::eq(input.constraint, shared.as_ref()) {
+            return Err(format!(
+                "dynamic recursive shared child {index} does not match borrowed composition input"
+            ));
+        }
+    }
+    if children.is_empty() {
+        return Err("constraint composition requires at least one child".into());
+    }
+    parent.materialize_composition_link_metadata_for_compilation()?;
+    let components = std::iter::once(&parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    let component_count = components.len();
+    let vocab_check_started_at = Instant::now();
+    for (component_index, constraint) in components.iter().enumerate() {
+        if !constraint.token_bytes_match_vocab(vocab) {
+            return Err(format!(
+                "component {component_index} was not compiled for the supplied vocabulary",
+            ));
+        }
+    }
+    let vocab_check_ms = vocab_check_started_at.elapsed().as_secs_f64() * 1000.0;
+    let placeholder_started_at = Instant::now();
+    let component_end_token_ids = components
+        .iter()
+        .flat_map(|constraint| constraint.table.embedded_end_token_ids())
+        .collect::<BTreeSet<_>>();
+    validate_compiled_subgrammar_placeholders(
+        &parent,
+        children,
+        vocab,
+        &component_end_token_ids,
+    )?;
+    let placeholder_ms = placeholder_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let terminal_checks_started_at = Instant::now();
+    let mut terminal_offsets = Vec::with_capacity(components.len());
+    let mut next_terminal = 0u32;
+    for component in &components {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal
+            .checked_add(component.table.num_terminals)
+            .ok_or_else(|| "dynamic recursive terminal coordinate overflow".to_owned())?;
+    }
+    let global_ignores = component_ignores_are_globally_erasable(&parent, children);
+    let merged_ignores = merged_ignore_terminals(
+        &parent,
+        children,
+        &terminal_offsets,
+        global_ignores,
+    );
+    if merged_ignores.canonical.is_some() {
+        return Err(
+            "dynamic recursive fast path does not yet support globally-erased ignore aliases"
+                .to_owned(),
+        );
+    }
+    if children
+        .iter()
+        .any(|child| child.constraint.composition_start_nullable().unwrap_or(true))
+    {
+        return Err("dynamic recursive fast path does not yet support nullable children".into());
+    }
+    let terminal_checks_ms = terminal_checks_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let tokenizer_span_started_at = Instant::now();
+    let mut tokenizer_state_offsets = Vec::with_capacity(components.len());
+    let mut next_tokenizer_state = 0u32;
+    for component in &components {
+        tokenizer_state_offsets.push(next_tokenizer_state);
+        next_tokenizer_state = next_tokenizer_state
+            .checked_add(recursive_component_tokenizer_span(component)?)
+            .ok_or_else(|| "dynamic recursive tokenizer coordinate overflow".to_owned())?;
+    }
+    let tokenizer_span_ms = tokenizer_span_started_at.elapsed().as_secs_f64() * 1000.0;
+    let links_started_at = Instant::now();
+    let segmented_parser_links = build_segmented_parser_links(children)?;
+    let links_ms = links_started_at.elapsed().as_secs_f64() * 1000.0;
+    let validate_layout_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if segmented_parser_links.is_empty() {
+        return Err("dynamic recursive fast path requires at least one linker control".into());
+    }
+
+    let metadata_started_at = Instant::now();
+    let terminal_display_names = merged_terminal_display_names(&parent, children);
+    debug_assert_eq!(terminal_display_names.len(), next_terminal as usize);
+    let special_token_terminals = merged_special_token_terminals_recursive_fast(
+        &parent,
+        children,
+        &terminal_offsets,
+    );
+    let live_special_token_ids = special_token_terminals
+        .iter()
+        .map(|special| special.token_id)
+        .collect::<BTreeSet<_>>();
+    let embedded_end_token_ids = component_end_token_ids
+        .intersection(&live_special_token_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let metadata_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let shell_started_at = Instant::now();
+    // The live recursive runtime never executes this outer table. Keep only
+    // enough root grammar metadata for nullable/end-token facts and the global
+    // terminal coordinate; exact LR behavior remains in the retained leaves.
+    let shell_rules = parent.table.rules.first().cloned().into_iter().collect::<Vec<_>>();
+    let shell_table = crate::compiler::glr::table::GLRTable {
+        action: Vec::new(),
+        goto: Vec::new(),
+        num_states: 0,
+        num_terminals: next_terminal,
+        num_rules: shell_rules.len() as u32,
+        rules: shell_rules,
+        nonterminal_display_names: parent.table.nonterminal_display_names.clone(),
+        construction: parent.table.construction,
+        admission_policy: parent.table.admission_policy,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        control_terminals: BTreeSet::new(),
+        skip_terminals: BTreeSet::new(),
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    let composed_table = ComposedTable {
+        table: shell_table,
+        terminal_offsets: terminal_offsets.clone(),
+        placeholder_terminals: children
+            .iter()
+            .flat_map(CompiledSubgrammarInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(index, child)| {
+                std::iter::repeat_n(index + 1, 1 + child.additional_placeholder_terminals.len())
+            })
+            .collect(),
+        state_relations: vec![Vec::new(); component_count],
+        boundary_nonterminals: BTreeSet::new(),
+        control_terminals: BTreeSet::new(),
+        appended_parent_action_terminals: BTreeSet::new(),
+    };
+    let shell_ms = shell_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let coordinator_started_at = Instant::now();
+    let root_tokenizer = parent.tokenizer.clone();
+    let root_fast_transitions = parent.tokenizer_fast_transitions.clone();
+    let id_map = InternalIdMap {
+        // DynamicDirect never consumes the coordinator TSID quotient. Keep a
+        // one-class placeholder so serialized recursive compatibility metadata
+        // can use a compact constant relation without building the old global
+        // state/token partition.
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: vec![0],
+            internal_to_originals: Vec::new(),
+            representative_original_ids: Vec::new(),
+        },
+        vocab_tokens: ManyToOneIdMap::empty(),
+        deferred_vocab_singleton_original_ids: None,
+    };
+    let mut result = build_composed_constraint_unfinalized(
+        composed_table,
+        root_tokenizer,
+        tokenizer_state_offsets.clone(),
+        DWA::new(1, 0),
+        Vec::new(),
+        Default::default(),
+        id_map,
+        vec![None; next_terminal as usize],
+        special_token_terminals,
+        embedded_end_token_ids,
+        terminal_display_names,
+        None,
+        None,
+        Vec::new(),
+        root_fast_transitions,
+        true,
+        true,
+        vocab,
+    );
+    let coordinator_ms = coordinator_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let publish_started_at = Instant::now();
+    drop(components);
+    let mut segmented_components = Vec::with_capacity(component_count);
+    segmented_components.push(crate::runtime::SegmentedParserComponent {
+        constraint: Arc::new(parent),
+        boundary: None,
+        tokenizer_state_offset: tokenizer_state_offsets[0],
+        terminal_offset: terminal_offsets[0],
+        global_terminal_aliases: Vec::new(),
+        local_tsid_to_global_tsids: Vec::new(),
+        root_disallowed_terminal: None,
+        global_to_local_parser_state: Vec::new(),
+    });
+    for (child_index, child) in shared_children.iter().enumerate() {
+        let component_index = child_index + 1;
+        segmented_components.push(crate::runtime::SegmentedParserComponent {
+            constraint: Arc::clone(child),
+            boundary: None,
+            tokenizer_state_offset: tokenizer_state_offsets[component_index],
+            terminal_offset: terminal_offsets[component_index],
+            global_terminal_aliases: Vec::new(),
+            local_tsid_to_global_tsids: Vec::new(),
+            root_disallowed_terminal: None,
+            global_to_local_parser_state: Vec::new(),
+        });
+    }
+    let overlay = result
+        .constraint
+        .static_dynamic_overlay
+        .get_or_insert_with(Default::default);
+    overlay.terminal_offsets = terminal_offsets;
+    overlay.tokenizer_state_offsets = tokenizer_state_offsets;
+    overlay.segmented_parser_components = segmented_components;
+    overlay.segmented_parser_links = segmented_parser_links;
+    overlay.segmented_parser_state_offsets.clear();
+    overlay.segmented_mask_authoritative = true;
+    overlay.segmented_static_baseline = false;
+    overlay.segmented_component_union_root_dispatch.clear();
+    overlay.segmented_boundary_parser = None;
+    overlay.segmented_boundary_terminal_trie = None;
+    install_dynamic_direct_boundary_shards(overlay, None);
+    // Empty bytes are an explicit "provider-native only" marker. Dynamic
+    // recomposition consumes the retained component tree directly. Static or
+    // legacy compiler views may reconstruct from the provider in a later path.
+    let _ = overlay
+        .recursive_compiler_table
+        .set(Arc::<[u8]>::from(Vec::<u8>::new().into_boxed_slice()));
+    let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let layout_started_at = Instant::now();
+    let layout = result
+        .constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "dynamic recursive fast path failed to derive recursive layout".to_owned())?;
+    let layout_ms = layout_started_at.elapsed().as_secs_f64() * 1000.0;
+    let relation_started_at = Instant::now();
+    // Authoritative DynamicDirect execution never consumes an outer recursive
+    // TSID quotient. Leave it entirely absent in the live coordinator; the
+    // serializer emits legacy compatibility rows only if/when save() is called.
+    let relation_ms = relation_started_at.elapsed().as_secs_f64() * 1000.0;
+    result.constraint.clear_recursive_legacy_boundary_start_states();
+    result.constraint.clear_recursive_legacy_parser_state_projections();
+    result.constraint.serialized_artifact_cache = None;
+
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_dynamic_recursive_shared_fast] components={} terminals={} scoped_tokenizer_states={} vocab_check_ms={vocab_check_ms:.3} placeholder_ms={placeholder_ms:.3} terminal_checks_ms={terminal_checks_ms:.3} tokenizer_span_ms={tokenizer_span_ms:.3} links_ms={links_ms:.3} validate_layout_ms={validate_layout_ms:.3} metadata_ms={metadata_ms:.3} shell_ms={shell_ms:.3} coordinator_ms={coordinator_ms:.3} publish_ms={publish_ms:.3} layout_ms={layout_ms:.3} relation_ms={relation_ms:.3} total_ms={:.3}",
+            component_count,
+            next_terminal,
+            layout.total_tokenizer_states,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(result)
+}
+
 fn detach_recursive_component_compiler_views(constraint: &mut Constraint) -> Result<(), String> {
     if !constraint.uses_compact_segmented_parser_runtime() {
         return Ok(());
@@ -20452,6 +20771,60 @@ fn compose_constraints_owned_parent_impl(
 ) -> Result<ConstraintComposition, String> {
     let direct_dynamic_boundary =
         explicit_segmented_boundary == Some(SegmentedBoundaryBackend::Dynamic);
+    if direct_dynamic_boundary {
+        if let Some(shared_children) = shared_children {
+            let children_link_ready = shared_children.iter().all(|child| {
+                child.deferred_composition_metadata_blob.is_none()
+                    || child.composition_link_metadata_materialized
+            });
+            let nullable_child = children
+                .iter()
+                .any(|child| child.constraint.composition_start_nullable().unwrap_or(true));
+            let terminal_offsets = {
+                let mut offsets = Vec::with_capacity(children.len() + 1);
+                let mut next = 0u32;
+                for constraint in std::iter::once(&parent)
+                    .chain(children.iter().map(|child| child.constraint))
+                {
+                    offsets.push(next);
+                    next = match next.checked_add(constraint.table.num_terminals) {
+                        Some(next) => next,
+                        None => return Err("dynamic recursive terminal coordinate overflow".into()),
+                    };
+                }
+                offsets
+            };
+            let global_ignores = component_ignores_are_globally_erasable(&parent, children);
+            let has_global_ignore_alias = merged_ignore_terminals(
+                &parent,
+                children,
+                &terminal_offsets,
+                global_ignores,
+            )
+            .canonical
+            .is_some();
+            if children_link_ready && !nullable_child && !has_global_ignore_alias {
+                return compose_dynamic_recursive_shared_fast(
+                    parent,
+                    children,
+                    shared_children,
+                    vocab,
+                );
+            }
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_dynamic_recursive_shared_fast] declined=true children_link_ready={} nullable_child={} global_ignore_alias={}",
+                    children_link_ready,
+                    nullable_child,
+                    has_global_ignore_alias,
+                );
+            }
+        } else if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_dynamic_recursive_shared_fast] declined=true reason=borrowed_child_requires_owned_arc"
+            );
+        }
+    }
     let outer_started_at = Instant::now();
     let phase_started_at = Instant::now();
     if explicit_segmented_boundary.is_none() {
@@ -23179,6 +23552,125 @@ mod tests {
             &vocab,
             4,
             "segmented-dynamic-vs-segmented-static",
+        );
+    }
+
+
+    #[test]
+    fn dynamic_recursive_shared_fast_matches_borrowed_and_reload() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"Xa".to_vec()),
+            (5, b"b!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let shared_child = Arc::new(child.clone());
+        let placeholder_terminal = terminal(&parent, "SUB");
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: shared_child.as_ref(),
+        }];
+        let fast = compose_constraints_owned_parent_segmented_shared(
+            parent.clone(),
+            &inputs,
+            &[Arc::clone(&shared_child)],
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .unwrap()
+        .constraint;
+        let borrowed = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(fast.uses_compact_segmented_parser_runtime());
+        let overlay = fast.static_dynamic_overlay.as_ref().unwrap();
+        assert!(
+            overlay
+                .recursive_tokenizer_internal_tsids
+                .get()
+                .is_none(),
+            "all-DynamicDirect fast coordinator should omit the redundant recursive TSID relation",
+        );
+        assert!(
+            overlay
+                .segmented_parser_components
+                .iter()
+                .all(|component| component.global_to_local_parser_state.is_empty()),
+            "fast coordinator should not retain materialized composed-state projections",
+        );
+
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &fast,
+            &borrowed,
+            &vocab,
+            4,
+            "dynamic-shared-fast-vs-borrowed",
+        );
+
+        let bytes = fast.save();
+        let reloaded = Constraint::load_with_vocab(&bytes, &vocab).unwrap();
+        assert!(reloaded.uses_compact_segmented_parser_runtime());
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &fast,
+            &reloaded,
+            &vocab,
+            4,
+            "dynamic-shared-fast-vs-reload",
+        );
+
+        // A later static-boundary link is allowed to reconstruct compiler-only
+        // flattened views on demand from the retained recursive component tree.
+        // The fast dynamic build itself must never pay this cost.
+        let outer_parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t OUTER ::= @token(998);
+                nt document ::= "X" OUTER "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let static_outer = outer_parent
+            .compose_linked_children_for_test(&[("OUTER", &fast)], &vocab)
+            .unwrap();
+        let dynamic_outer = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t OUTER ::= @token(998);
+                nt document ::= "X" OUTER "!";
+            "#,
+            &vocab,
+        )
+        .unwrap()
+        .compose_linked_children_for_test_dynamic(&[("OUTER", &fast)], &vocab)
+        .unwrap();
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &static_outer,
+            &dynamic_outer,
+            &vocab,
+            4,
+            "dynamic-shared-fast-static-upgrade-vs-dynamic",
         );
     }
 
