@@ -7740,7 +7740,7 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    fn lookahead_factored_mask_shadow(&self) -> Option<Self> {
+    fn lookahead_factored_mask_shadow(&self) -> Option<Box<Self>> {
         if self.constraint.static_dynamic_overlay.is_none()
             || std::env::var_os("GLRMASK_EXPERIMENT_MASK_LOOKAHEAD_FACTOR").is_none()
         {
@@ -7852,7 +7852,23 @@ impl<'a> ConstraintState<'a> {
             return None;
         }
 
-        let mut shadow = self.clone();
+        // This is a mask-only speculative view. Do not clone the full
+        // ConstraintState: its Clone intentionally rebuilds a complete
+        // MaskScratch tree (including nested component initial masks), and
+        // returning that large state by value also creates a large caller
+        // return slot even when this experiment is disabled. Deep recursive
+        // composition can therefore overflow the test/runtime thread stack
+        // before the early `None` is observed. A boxed shallow shadow needs
+        // only fresh commit scratch and can safely reuse the caller's mask
+        // scratch sequentially.
+        let mut shadow = Box::new(ConstraintState {
+            constraint: self.constraint,
+            state: self.state.clone(),
+            buffers: CommitBuffers::for_constraint(self.constraint),
+            generation: self.generation,
+            mask_cache: Mutex::new(None),
+            mask_scratch: Arc::clone(&self.mask_scratch),
+        });
         for (tokenizer_state, factored) in additions {
             shadow
                 .state

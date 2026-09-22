@@ -820,6 +820,53 @@ pub(crate) struct FragmentLibrary {
     pub templates_ms: f64,
 }
 
+/// Link-scoped exact transfer cache prepared for the union of terminals
+/// demanded by one batch of boundary shards. Ordinary terminals are
+/// characterized once per owning component; Entry/Finish controls are
+/// instantiated once per link. Per-shard template compilation then selects
+/// from this immutable map without repeating parser-table characterization.
+pub(crate) struct PreparedFragmentTransfers {
+    ordinary: BTreeMap<TerminalID, TerminalCharacterization>,
+    controls: BTreeMap<TerminalID, TerminalCharacterization>,
+    pub entry_keys: Vec<TerminalID>,
+    pub finish_keys: Vec<TerminalID>,
+    pub prepare_ms: f64,
+}
+
+/// Concurrent link-scoped transfer cache for the production component
+/// pipeline. Fixed Entry/Finish controls are prepared once. Ordinary terminal
+/// characterization is lazy and batched by owning component on first demand;
+/// separate owners use separate locks so independent shard pipelines do not
+/// serialize on unrelated parser tables.
+pub(crate) struct FragmentTransferCache {
+    ordinary_by_owner:
+        Vec<std::sync::Mutex<BTreeMap<TerminalID, TerminalCharacterization>>>,
+    special: std::sync::Mutex<BTreeMap<TerminalID, TerminalCharacterization>>,
+    global_ignore_identity: std::sync::Mutex<Option<TerminalCharacterization>>,
+    controls: BTreeMap<TerminalID, TerminalCharacterization>,
+    entry_keys: Vec<TerminalID>,
+    finish_keys: Vec<TerminalID>,
+    pub prepare_ms: f64,
+}
+
+impl FragmentTransferCache {
+    pub(crate) fn new(context: &SignedLinkContext) -> Result<Self, String> {
+        let empty = vec![false; context.num_terminals as usize];
+        let prepared = prepare_fragment_transfers(context, &empty)?;
+        Ok(Self {
+            ordinary_by_owner: (0..context.state_offsets.len())
+                .map(|_| std::sync::Mutex::new(BTreeMap::new()))
+                .collect(),
+            special: std::sync::Mutex::new(BTreeMap::new()),
+            global_ignore_identity: std::sync::Mutex::new(None),
+            controls: prepared.controls,
+            entry_keys: prepared.entry_keys,
+            finish_keys: prepared.finish_keys,
+            prepare_ms: prepared.prepare_ms,
+        })
+    }
+}
+
 fn entry_fragment_key(num_terminals: u32, link_index: usize) -> Result<TerminalID, String> {
     (num_terminals as usize)
         .checked_add(2 * link_index)
@@ -1055,34 +1102,122 @@ pub(crate) fn build_fragment_library(
     emitted: &[bool],
     start_component: u32,
 ) -> Result<FragmentLibrary, String> {
-    let templates_started = Instant::now();
-    let mut combined: BTreeMap<TerminalID, TerminalCharacterization> = BTreeMap::new();
-    let mut ordinary_terms = 0usize;
+    let prepared = prepare_fragment_transfers(context, emitted)?;
+    let mut library = build_fragment_library_from_prepared(
+        context,
+        &prepared,
+        emitted,
+        start_component,
+    )?;
+    library.templates_ms += prepared.prepare_ms;
+    Ok(library)
+}
+
+/// Prepare exact ordinary/control transfers for the union demand of a link.
+/// Normal terminals are grouped by owner so the existing characterization
+/// engine scans each local parser table once for all demanded terminals.
+pub(crate) fn prepare_fragment_transfers(
+    context: &SignedLinkContext,
+    emitted_union: &[bool],
+) -> Result<PreparedFragmentTransfers, String> {
+    let started = Instant::now();
+    if emitted_union.len() < context.num_terminals as usize {
+        return Err(format!(
+            "signed link transfer demand has {} terminals, expected at least {}",
+            emitted_union.len(), context.num_terminals,
+        ));
+    }
+    let mut ordinary = BTreeMap::<TerminalID, TerminalCharacterization>::new();
     // Uniformly globally erasable ignores share one scoped identity covering
-    // every component; build it at most once per library.
+    // every component; build it at most once per link transfer batch.
     let mut global_ignore_identity: Option<TerminalCharacterization> = None;
-    for (terminal, demanded) in emitted.iter().enumerate() {
+    let mut ordinary_by_owner = BTreeMap::<u32, Vec<(TerminalID, TerminalID)>>::new();
+    for (terminal, demanded) in emitted_union.iter().enumerate() {
         if !demanded {
             continue;
         }
         let terminal = terminal as TerminalID;
         if (terminal as usize) >= context.num_terminals as usize {
             return Err(format!(
-                "signed link shard {start_component} emits terminal {terminal} outside the composed domain {}",
+                "signed link transfer demand emits terminal {terminal} outside the composed domain {}",
                 context.num_terminals,
             ));
         }
-        let transfer =
-            scoped_transfer_for_terminal(context, terminal, &mut global_ignore_identity)?;
-        #[cfg(test)]
-        trace_transfer_characterization(context, terminal, &transfer);
-        combined.insert(terminal, transfer);
-        ordinary_terms += 1;
+        if context.unbound_slots.contains(&terminal) {
+            ordinary.insert(terminal, empty_transfer());
+            continue;
+        }
+        let (owner, local) = context.terminal_owner(terminal)?;
+        let table = context.component_table(owner)?;
+        let owner_ignore = context
+            .ignore_terminals
+            .get(owner as usize)
+            .copied()
+            .flatten()
+            == Some(local);
+        if owner_ignore {
+            let transfer = if context.global_ignores {
+                if global_ignore_identity.is_none() {
+                    global_ignore_identity = Some(build_global_ignore_identity(context)?);
+                }
+                global_ignore_identity
+                    .as_ref()
+                    .expect("global ignore identity was just built")
+                    .clone()
+            } else {
+                scope_characterization(
+                    &identity_transfer(table.num_states),
+                    &context.injection(owner)?,
+                )?
+            };
+            ordinary.insert(terminal, transfer);
+            continue;
+        }
+        if local >= table.num_terminals {
+            return Err(format!(
+                "signed link terminal {terminal} resolves to local {local} outside component {owner} domain {}",
+                table.num_terminals,
+            ));
+        }
+        ordinary_by_owner
+            .entry(owner)
+            .or_default()
+            .push((terminal, local));
     }
+    for (owner, terminals) in ordinary_by_owner {
+        let table = context.component_table(owner)?;
+        let mut selected = vec![false; table.num_terminals as usize];
+        for &(_, local) in &terminals {
+            selected[local as usize] = true;
+        }
+        let characterized = characterize_selected_terminals_for_terminal_count(
+            table,
+            table.num_terminals,
+            &selected,
+        );
+        let injection = context.injection(owner)?;
+        for (terminal, local) in terminals {
+            let transfer = match characterized.get(&local) {
+                Some(characterization) => scope_characterization(characterization, &injection)?,
+                None => {
+                    let has_action =
+                        (0..table.num_states).any(|state| table.action(state, local).is_some());
+                    if has_action {
+                        return Err(format!(
+                            "signed link terminal {terminal} (component {owner} local {local}) has parser actions but no characterization",
+                        ));
+                    }
+                    empty_transfer()
+                }
+            };
+            ordinary.insert(terminal, transfer);
+        }
+    }
+
+    let mut controls = BTreeMap::<TerminalID, TerminalCharacterization>::new();
     let mut entry_keys = Vec::with_capacity(context.links.len());
     let mut finish_keys = Vec::with_capacity(context.links.len());
     for (link_index, link) in context.links.iter().enumerate() {
-        // Slot Entry: local slot characterization, scoped, plus child start.
         let parent_table = context.component_table(link.parent_component)?;
         let mut slot_selected = vec![false; parent_table.num_terminals as usize];
         slot_selected[link.slot_terminal as usize] = true;
@@ -1111,9 +1246,8 @@ pub(crate) fn build_fragment_library(
             ),
             &entry.characterization,
         );
-        combined.insert(entry_key, entry.characterization);
+        controls.insert(entry_key, entry.characterization);
         entry_keys.push(entry_key);
-        // Child Finish under this link's endpoint policy.
         let child_table = context.component_table(link.child_component)?;
         let (finish, has_local_eof_effects) =
             instantiate_finish(child_table, link, &child_injection)?;
@@ -1132,8 +1266,49 @@ pub(crate) fn build_fragment_library(
             ));
         }
         let finish_key = finish_fragment_key(context.num_terminals, link_index)?;
-        combined.insert(finish_key, finish.characterization);
+        controls.insert(finish_key, finish.characterization);
         finish_keys.push(finish_key);
+    }
+
+    Ok(PreparedFragmentTransfers {
+        ordinary,
+        controls,
+        entry_keys,
+        finish_keys,
+        prepare_ms: started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+/// Compile one shard's template subset from link-scoped prepared transfers.
+pub(crate) fn build_fragment_library_from_prepared(
+    context: &SignedLinkContext,
+    prepared: &PreparedFragmentTransfers,
+    emitted: &[bool],
+    start_component: u32,
+) -> Result<FragmentLibrary, String> {
+    let templates_started = Instant::now();
+    let mut combined = prepared.controls.clone();
+    let mut ordinary_terms = 0usize;
+    for (terminal, demanded) in emitted.iter().enumerate() {
+        if !demanded {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        if (terminal as usize) >= context.num_terminals as usize {
+            return Err(format!(
+                "signed link shard {start_component} emits terminal {terminal} outside the composed domain {}",
+                context.num_terminals,
+            ));
+        }
+        let transfer = prepared.ordinary.get(&terminal).ok_or_else(|| {
+            format!(
+                "signed link shard {start_component} demands terminal {terminal} absent from prepared transfer union"
+            )
+        })?;
+        #[cfg(test)]
+        trace_transfer_characterization(context, terminal, transfer);
+        combined.insert(terminal, transfer.clone());
+        ordinary_terms += 1;
     }
     let templates = Templates::from_characterizations(&combined);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
@@ -1150,8 +1325,156 @@ pub(crate) fn build_fragment_library(
     }
     Ok(FragmentLibrary {
         templates,
-        entry_keys,
-        finish_keys,
+        entry_keys: prepared.entry_keys.clone(),
+        finish_keys: prepared.finish_keys.clone(),
+        ordinary_terms,
+        templates_ms,
+    })
+}
+
+/// Compile one shard's fragment library from the concurrent link cache.
+/// Missing ordinary transfers are characterized in owner batches and cached
+/// in scoped coordinates. No semantic merge is performed: cache hits are
+/// byte-for-byte the same scoped characterization a standalone build would
+/// have produced.
+pub(crate) fn build_fragment_library_cached(
+    context: &SignedLinkContext,
+    cache: &FragmentTransferCache,
+    emitted: &[bool],
+    start_component: u32,
+) -> Result<FragmentLibrary, String> {
+    let templates_started = Instant::now();
+    let mut combined = cache.controls.clone();
+    let mut by_owner = BTreeMap::<u32, Vec<(TerminalID, TerminalID)>>::new();
+    let mut special_terminals = Vec::<TerminalID>::new();
+    let mut ordinary_terms = 0usize;
+    for (terminal, &demanded) in emitted.iter().enumerate() {
+        if !demanded {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        if terminal >= context.num_terminals {
+            return Err(format!(
+                "signed link shard {start_component} emits terminal {terminal} outside the composed domain {}",
+                context.num_terminals,
+            ));
+        }
+        ordinary_terms += 1;
+        if context.unbound_slots.contains(&terminal) {
+            special_terminals.push(terminal);
+            continue;
+        }
+        let (owner, local) = context.terminal_owner(terminal)?;
+        let owner_ignore = context
+            .ignore_terminals
+            .get(owner as usize)
+            .copied()
+            .flatten()
+            == Some(local);
+        if owner_ignore {
+            special_terminals.push(terminal);
+        } else {
+            by_owner.entry(owner).or_default().push((terminal, local));
+        }
+    }
+
+    if !special_terminals.is_empty() {
+        let mut special_cache = cache
+            .special
+            .lock()
+            .map_err(|_| "signed link special-transfer cache poisoned".to_string())?;
+        let mut global_ignore = cache
+            .global_ignore_identity
+            .lock()
+            .map_err(|_| "signed link global-ignore cache poisoned".to_string())?;
+        for terminal in special_terminals {
+            if !special_cache.contains_key(&terminal) {
+                let transfer =
+                    scoped_transfer_for_terminal(context, terminal, &mut global_ignore)?;
+                special_cache.insert(terminal, transfer);
+            }
+            let transfer = special_cache
+                .get(&terminal)
+                .expect("special transfer inserted above");
+            #[cfg(test)]
+            trace_transfer_characterization(context, terminal, transfer);
+            combined.insert(terminal, transfer.clone());
+        }
+    }
+
+    for (owner, terminals) in by_owner {
+        let owner_index = owner as usize;
+        let owner_cache = cache.ordinary_by_owner.get(owner_index).ok_or_else(|| {
+            format!("signed link terminal owner {owner} lies outside transfer cache")
+        })?;
+        let mut owner_cache = owner_cache
+            .lock()
+            .map_err(|_| format!("signed link owner {owner} transfer cache poisoned"))?;
+        let table = context.component_table(owner)?;
+        let missing = terminals
+            .iter()
+            .filter(|(_, local)| !owner_cache.contains_key(local))
+            .map(|&(_, local)| local)
+            .collect::<BTreeSet<_>>();
+        if !missing.is_empty() {
+            let mut selected = vec![false; table.num_terminals as usize];
+            for &local in &missing {
+                if local >= table.num_terminals {
+                    return Err(format!(
+                        "signed link local terminal {local} lies outside component {owner} domain {}",
+                        table.num_terminals,
+                    ));
+                }
+                selected[local as usize] = true;
+            }
+            let characterized = characterize_selected_terminals_for_terminal_count(
+                table,
+                table.num_terminals,
+                &selected,
+            );
+            let injection = context.injection(owner)?;
+            for local in missing {
+                let transfer = match characterized.get(&local) {
+                    Some(characterization) => {
+                        scope_characterization(characterization, &injection)?
+                    }
+                    None => {
+                        let has_action = (0..table.num_states)
+                            .any(|state| table.action(state, local).is_some());
+                        if has_action {
+                            return Err(format!(
+                                "signed link terminal local {local} in component {owner} has parser actions but no characterization",
+                            ));
+                        }
+                        empty_transfer()
+                    }
+                };
+                owner_cache.insert(local, transfer);
+            }
+        }
+        for (terminal, local) in terminals {
+            let transfer = owner_cache
+                .get(&local)
+                .expect("owner transfer characterized or cached above");
+            #[cfg(test)]
+            trace_transfer_characterization(context, terminal, transfer);
+            combined.insert(terminal, transfer.clone());
+        }
+    }
+
+    let templates = Templates::from_characterizations(&combined);
+    let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
+    for (&key, fragment) in &templates.by_terminal_nwa {
+        if !fragment.is_acyclic() {
+            return Err(format!(
+                "signed link fragment {key} is cyclic; bounded flat closure cannot use it",
+            ));
+        }
+    }
+    Ok(FragmentLibrary {
+        templates,
+        entry_keys: cache.entry_keys.clone(),
+        finish_keys: cache.finish_keys.clone(),
         ordinary_terms,
         templates_ms,
     })

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use crate::automata::weighted::nwa::{NWA, NWAState as NWAStateType};
+use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::grammar::flat::TerminalID;
 use crate::ds::bitset::BitSet;
 use crate::ds::weight::Weight;
@@ -377,17 +378,17 @@ pub fn prune_non_coreachable_states(nwa: &mut NWA) -> bool {
 /// deterministic (BFS over deterministically-ordered edges).
 pub fn filter_nwa_to_crossing_paths(
     nwa: &NWA,
-    terminal_offsets: &[u32],
-    start_component: usize,
+    ownership: &super::super::scope::BoundaryOwnership,
+    start_component: super::super::scope::ImmediateComponentId,
 ) -> NWA {
-    let owner = |label: i32| -> usize {
+    let owner = |label: i32| -> super::super::scope::ImmediateComponentId {
         assert!(
             label >= 0,
             "crossing filter: non-terminal label {label}",
         );
-        terminal_offsets
-            .partition_point(|&offset| offset <= label as u32)
-            .saturating_sub(1)
+        ownership
+            .owner_of_terminal(label as u32)
+            .unwrap_or_else(|| panic!("crossing filter: terminal {label} has no owner"))
     };
     let mut states: Vec<NWAStateType> = Vec::new();
     let mut ids: HashMap<(u32, bool), u32> = HashMap::new();
@@ -455,6 +456,50 @@ pub fn filter_nwa_to_crossing_paths(
         }
     }
     NWA::from_parts(states, starts)
+}
+
+/// DWA form of the same exact seen-crossing product. Boundary construction
+/// applies the NWA filter to L2P before determinization; this final filter also
+/// covers ordinary L1/split-L1 families after they are reconciled.
+pub fn filter_dwa_to_crossing_paths(
+    dwa: &DWA,
+    ownership: &super::super::scope::BoundaryOwnership,
+    start_component: super::super::scope::ImmediateComponentId,
+) -> DWA {
+    let mut states = vec![DWAState::default()];
+    let mut ids = HashMap::<(u32, bool), u32>::new();
+    let mut payloads = vec![(dwa.start_state(), false)];
+    let mut queue = VecDeque::from([0u32]);
+    ids.insert((dwa.start_state(), false), 0);
+
+    while let Some(out) = queue.pop_front() {
+        let (source, seen) = payloads[out as usize];
+        let source_state = &dwa.states()[source as usize];
+        if seen {
+            states[out as usize].final_weight = source_state.final_weight.clone();
+        }
+        for (&label, (target, weight)) in &source_state.transitions {
+            assert!(label >= 0, "crossing filter: non-terminal label {label}");
+            let owner = ownership
+                .owner_of_terminal(label as u32)
+                .unwrap_or_else(|| panic!("crossing filter: terminal {label} has no owner"));
+            let key = (*target, seen || owner != start_component);
+            let next = if let Some(&id) = ids.get(&key) {
+                id
+            } else {
+                let id = states.len() as u32;
+                ids.insert(key, id);
+                states.push(DWAState::default());
+                payloads.push(key);
+                queue.push_back(id);
+                id
+            };
+            states[out as usize]
+                .transitions
+                .insert(label, (next, weight.clone()));
+        }
+    }
+    DWA::from_parts(states, 0)
 }
 
 // ─── Collapse always-allowed ─────────────────────────────────────────────────

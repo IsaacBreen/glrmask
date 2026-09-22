@@ -49,7 +49,8 @@ const PREVIOUS_BOUNDARY_SHARDED_CONSTRAINT_VERSION: u16 = 23;
 const PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION: u16 = 24;
 const PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION: u16 = 27;
 const PREVIOUS_STATIC_PROJECTION_CONSTRAINT_VERSION: u16 = 28;
-const CONSTRAINT_VERSION: u16 = 29;
+const PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION: u16 = 29;
+const CONSTRAINT_VERSION: u16 = 30;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -81,6 +82,8 @@ const V28_SECTION_MAGIC: [u8; 4] = *b"S28\0";
 const V28_SECTION_HEADER_LEN: usize = V28_SECTION_MAGIC.len() + 11 * 8;
 const V29_SECTION_MAGIC: [u8; 4] = *b"S29\0";
 const V29_SECTION_HEADER_LEN: usize = V29_SECTION_MAGIC.len() + 11 * 8;
+const V30_SECTION_MAGIC: [u8; 4] = *b"S30\0";
+const V30_SECTION_HEADER_LEN: usize = V30_SECTION_MAGIC.len() + 11 * 8;
 const CURRENT_RUNTIME_MAGIC: [u8; 4] = *b"R29\0";
 const CURRENT_RUNTIME_HEADER_LEN: usize = CURRENT_RUNTIME_MAGIC.len() + 2 * 8;
 const PREVIOUS_STATIC_RESIDUAL_MASK_MAGIC: [u8; 4] = *b"SRM2";
@@ -102,6 +105,7 @@ fn uses_external_runtime_sections(version: u16) -> bool {
     matches!(
         version,
         CONSTRAINT_VERSION
+            | PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION
             | PREVIOUS_STATIC_PROJECTION_CONSTRAINT_VERSION
             | PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION
             | PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION
@@ -545,8 +549,9 @@ const PREVIOUS_COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP1";
 const PREVIOUS_COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ1";
 const COMPOSITION_METADATA_RAW_MAGIC: [u8; 4] = *b"CMP2";
 const COMPOSITION_METADATA_ZSTD_MAGIC: [u8; 4] = *b"CMZ2";
-const PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS3";
-const COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS4";
+const PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS3";
+const PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS4";
+const COMPOSITION_METADATA_SPLIT_MAGIC: [u8; 4] = *b"CMS5";
 const COMPOSITION_METADATA_HEADER_LEN: usize = 12;
 const COMPOSITION_METADATA_SPLIT_HEADER_LEN: usize = 40;
 const COMPOSITION_METADATA_COMPRESS_MIN_BYTES: usize = 64 * 1024;
@@ -591,6 +596,174 @@ fn restore_boundary_trigger(trigger: BoundaryTriggerWire) -> crate::runtime::Bou
     }
 }
 
+#[derive(Serialize, Deserialize)]
+enum BoundaryOriginalTokenSetWire {
+    Empty,
+    Sparse(Vec<u32>),
+    AllByteTokensAtLeastTwo,
+}
+
+#[derive(Serialize, Deserialize)]
+enum BoundaryCandidateSummaryWire {
+    Unknown {
+        reason: u8,
+    },
+    Known {
+        algorithm_version: u16,
+        component_semantics: [u8; 32],
+        public_interface: [u8; 32],
+        vocabulary: [u8; 32],
+        tokens: BoundaryOriginalTokenSetWire,
+        precision: u8,
+    },
+}
+
+fn summary_unavailable_code(reason: &crate::runtime::SummaryUnavailable) -> u8 {
+    match reason {
+        crate::runtime::SummaryUnavailable::Disabled => 0,
+        crate::runtime::SummaryUnavailable::Deferred => 1,
+        crate::runtime::SummaryUnavailable::LegacyArtifact => 2,
+        crate::runtime::SummaryUnavailable::MissingGrammarMetadata => 3,
+        crate::runtime::SummaryUnavailable::UnsupportedFiniteLexer => 4,
+        crate::runtime::SummaryUnavailable::InvalidatedBinding => 5,
+        crate::runtime::SummaryUnavailable::FingerprintMismatch => 6,
+        crate::runtime::SummaryUnavailable::MalformedMetadata => 7,
+    }
+}
+
+fn summary_unavailable_from_code(code: u8) -> Result<crate::runtime::SummaryUnavailable, String> {
+    Ok(match code {
+        0 => crate::runtime::SummaryUnavailable::Disabled,
+        1 => crate::runtime::SummaryUnavailable::Deferred,
+        2 => crate::runtime::SummaryUnavailable::LegacyArtifact,
+        3 => crate::runtime::SummaryUnavailable::MissingGrammarMetadata,
+        4 => crate::runtime::SummaryUnavailable::UnsupportedFiniteLexer,
+        5 => crate::runtime::SummaryUnavailable::InvalidatedBinding,
+        6 => crate::runtime::SummaryUnavailable::FingerprintMismatch,
+        7 => crate::runtime::SummaryUnavailable::MalformedMetadata,
+        other => return Err(format!("invalid boundary summary unavailable code {other}")),
+    })
+}
+
+fn summary_precision_code(precision: crate::runtime::SummaryPrecision) -> u8 {
+    match precision {
+        crate::runtime::SummaryPrecision::RegularUpperBound => 0,
+        crate::runtime::SummaryPrecision::ContextRefinedUpperBound => 1,
+        crate::runtime::SummaryPrecision::BudgetWidenedUpperBound => 2,
+    }
+}
+
+fn summary_precision_from_code(code: u8) -> Result<crate::runtime::SummaryPrecision, String> {
+    Ok(match code {
+        0 => crate::runtime::SummaryPrecision::RegularUpperBound,
+        1 => crate::runtime::SummaryPrecision::ContextRefinedUpperBound,
+        2 => crate::runtime::SummaryPrecision::BudgetWidenedUpperBound,
+        other => return Err(format!("invalid boundary summary precision code {other}")),
+    })
+}
+
+fn boundary_candidate_summary_wire(constraint: &Constraint) -> BoundaryCandidateSummaryWire {
+    let summary = constraint.boundary_candidate_summary.get();
+    match summary {
+        None => BoundaryCandidateSummaryWire::Unknown {
+            reason: summary_unavailable_code(&crate::runtime::SummaryUnavailable::Deferred),
+        },
+        Some(crate::runtime::BoundaryCandidateSummary::Unknown { reason }) => {
+            BoundaryCandidateSummaryWire::Unknown {
+                reason: summary_unavailable_code(reason),
+            }
+        }
+        Some(crate::runtime::BoundaryCandidateSummary::Known {
+            fingerprint,
+            tokens,
+            precision,
+        }) => {
+            let tokens = match tokens {
+                crate::runtime::OriginalTokenSet::Empty => BoundaryOriginalTokenSetWire::Empty,
+                crate::runtime::OriginalTokenSet::AllByteTokensAtLeastTwo => {
+                    BoundaryOriginalTokenSetWire::AllByteTokensAtLeastTwo
+                }
+                crate::runtime::OriginalTokenSet::Sparse(ids) => {
+                    BoundaryOriginalTokenSetWire::Sparse(ids.to_vec())
+                }
+                crate::runtime::OriginalTokenSet::Dense(_) => {
+                    BoundaryOriginalTokenSetWire::Sparse(
+                        tokens.canonical_ids(constraint.token_bytes_iter()),
+                    )
+                }
+            };
+            BoundaryCandidateSummaryWire::Known {
+                algorithm_version: fingerprint.algorithm_version,
+                component_semantics: fingerprint.component_semantics,
+                public_interface: fingerprint.public_interface,
+                vocabulary: fingerprint.vocabulary,
+                tokens,
+                precision: summary_precision_code(*precision),
+            }
+        }
+    }
+}
+
+fn legacy_boundary_candidate_summary_wire() -> BoundaryCandidateSummaryWire {
+    BoundaryCandidateSummaryWire::Unknown {
+        reason: summary_unavailable_code(&crate::runtime::SummaryUnavailable::LegacyArtifact),
+    }
+}
+
+fn restore_boundary_candidate_summary(
+    wire: BoundaryCandidateSummaryWire,
+    constraint: &Constraint,
+) -> Result<crate::runtime::BoundaryCandidateSummary, String> {
+    match wire {
+        BoundaryCandidateSummaryWire::Unknown { reason } => {
+            Ok(crate::runtime::BoundaryCandidateSummary::Unknown {
+                reason: summary_unavailable_from_code(reason)?,
+            })
+        }
+        BoundaryCandidateSummaryWire::Known {
+            algorithm_version,
+            component_semantics,
+            public_interface,
+            vocabulary,
+            tokens,
+            precision,
+        } => {
+            let tokens = match tokens {
+                BoundaryOriginalTokenSetWire::Empty => crate::runtime::OriginalTokenSet::Empty,
+                BoundaryOriginalTokenSetWire::AllByteTokensAtLeastTwo => {
+                    crate::runtime::OriginalTokenSet::AllByteTokensAtLeastTwo
+                }
+                BoundaryOriginalTokenSetWire::Sparse(ids) => {
+                    if ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+                        return Err(
+                            "boundary summary sparse token IDs are not strictly sorted/unique"
+                                .to_owned(),
+                        );
+                    }
+                    for &id in &ids {
+                        if constraint.token_bytes_for_id(id).is_none() {
+                            return Err(format!(
+                                "boundary summary token ID {id} is outside the artifact vocabulary"
+                            ));
+                        }
+                    }
+                    crate::runtime::OriginalTokenSet::Sparse(Arc::from(ids.into_boxed_slice()))
+                }
+            };
+            Ok(crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: crate::runtime::BoundaryCandidateFingerprint {
+                    algorithm_version,
+                    component_semantics,
+                    public_interface,
+                    vocabulary,
+                },
+                tokens,
+                precision: summary_precision_from_code(precision)?,
+            })
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct ConstraintCompositionLinkMetadataRef<'a> {
     composition_reset_tokens_by_terminal: &'a [Vec<u32>],
@@ -598,6 +771,7 @@ struct ConstraintCompositionLinkMetadataRef<'a> {
     composition_grammar_summary:
         &'a Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWireRef<'a>,
+    boundary_candidate_summary: BoundaryCandidateSummaryWire,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -606,10 +780,19 @@ struct ConstraintCompositionLinkMetadata {
     unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWire,
+    boundary_candidate_summary: BoundaryCandidateSummaryWire,
 }
 
 #[derive(Serialize, Deserialize)]
 struct PreviousConstraintCompositionLinkMetadata {
+    composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
+    unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
+    composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
+    boundary_trigger: BoundaryTriggerWire,
+}
+
+#[derive(Serialize, Deserialize)]
+struct PreviousPreviousConstraintCompositionLinkMetadata {
     composition_reset_tokens_by_terminal: Vec<Vec<u32>>,
     unbound_grammar_placeholders: BTreeMap<String, TerminalID>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
@@ -664,6 +847,7 @@ struct ConstraintCompositionMetadata {
         Vec<Option<crate::compiler::stages::templates::characterize::TerminalCharacterization>>,
     composition_grammar_summary: Option<crate::runtime::artifact::CompositionGrammarSummary>,
     boundary_trigger: BoundaryTriggerWire,
+    boundary_candidate_summary: BoundaryCandidateSummaryWire,
 }
 
 struct CompositionMetadataSplitParts<'a> {
@@ -742,7 +926,8 @@ fn split_composition_metadata_parts(
 ) -> Result<CompositionMetadataSplitParts<'_>, String> {
     if input.len() < COMPOSITION_METADATA_SPLIT_HEADER_LEN
         || !(input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
-            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC))
+            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC))
     {
         return Err("invalid split composition metadata section".to_owned());
     }
@@ -803,6 +988,7 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         && constraint.composition_parser_characterizations_by_terminal.is_empty()
         && constraint.composition_grammar_summary.is_none()
         && constraint.boundary_trigger.is_none()
+        && constraint.boundary_candidate_summary.get().is_none()
     {
         return Vec::new();
     }
@@ -815,6 +1001,7 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
         unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
+        boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
     })
     .expect("composition link metadata serialization should succeed");
     let cache_raw = bincode::serialize(&ConstraintCompositionCacheMetadataRef {
@@ -851,6 +1038,7 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
         unbound_grammar_placeholders: &constraint.unbound_grammar_placeholders,
         composition_grammar_summary: &constraint.composition_grammar_summary,
         boundary_trigger: boundary_trigger_wire_ref(&constraint.boundary_trigger),
+        boundary_candidate_summary: boundary_candidate_summary_wire(constraint),
     })
     .expect("composition link metadata serialization should succeed");
     let (link_raw_len, link_wire, link_compressed) =
@@ -859,6 +1047,7 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
     let input = blob.as_slice();
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
     {
         let parts = split_composition_metadata_parts(input)
             .expect("loaded deferred composition metadata must remain structurally valid");
@@ -901,6 +1090,7 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
     }
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
     {
         split_composition_metadata_parts(input)?;
         return Ok(());
@@ -943,10 +1133,12 @@ fn decode_composition_link_metadata(
             unbound_grammar_placeholders: BTreeMap::new(),
             composition_grammar_summary: None,
             boundary_trigger: BoundaryTriggerWire::None,
+            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
         });
     }
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
     {
         let parts = split_composition_metadata_parts(input)?;
         let raw = decode_composition_metadata_part(
@@ -957,13 +1149,25 @@ fn decode_composition_link_metadata(
         if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
             return bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string());
         }
-        let old: PreviousConstraintCompositionLinkMetadata =
+        if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
+            let old: PreviousConstraintCompositionLinkMetadata =
+                bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
+            return Ok(ConstraintCompositionLinkMetadata {
+                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
+                composition_grammar_summary: old.composition_grammar_summary,
+                boundary_trigger: old.boundary_trigger,
+                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
+            });
+        }
+        let old: PreviousPreviousConstraintCompositionLinkMetadata =
             bincode::deserialize(raw.as_ref()).map_err(|err| err.to_string())?;
         return Ok(ConstraintCompositionLinkMetadata {
             composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
             unbound_grammar_placeholders: old.unbound_grammar_placeholders,
             composition_grammar_summary: old.composition_grammar_summary,
             boundary_trigger: BoundaryTriggerWire::None,
+            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
         });
     }
     // CMP1/CMP2 predate the split and can only be decoded as one object.
@@ -973,6 +1177,7 @@ fn decode_composition_link_metadata(
         unbound_grammar_placeholders: metadata.unbound_grammar_placeholders,
         composition_grammar_summary: metadata.composition_grammar_summary,
         boundary_trigger: metadata.boundary_trigger,
+        boundary_candidate_summary: metadata.boundary_candidate_summary,
     })
 }
 
@@ -986,10 +1191,12 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
             composition_parser_characterizations_by_terminal: Vec::new(),
             composition_grammar_summary: None,
             boundary_trigger: BoundaryTriggerWire::None,
+            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
         });
     }
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
     {
         let parts = split_composition_metadata_parts(input)?;
         let link_raw = decode_composition_metadata_part(
@@ -1005,14 +1212,25 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
         let link = if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC) {
             bincode::deserialize::<ConstraintCompositionLinkMetadata>(link_raw.as_ref())
                 .map_err(|err| err.to_string())?
-        } else {
+        } else if input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC) {
             let old: PreviousConstraintCompositionLinkMetadata =
                 bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
             ConstraintCompositionLinkMetadata {
                 composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
                 unbound_grammar_placeholders: old.unbound_grammar_placeholders,
                 composition_grammar_summary: old.composition_grammar_summary,
+                boundary_trigger: old.boundary_trigger,
+                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
+            }
+        } else {
+            let old: PreviousPreviousConstraintCompositionLinkMetadata =
+                bincode::deserialize(link_raw.as_ref()).map_err(|err| err.to_string())?;
+            ConstraintCompositionLinkMetadata {
+                composition_reset_tokens_by_terminal: old.composition_reset_tokens_by_terminal,
+                unbound_grammar_placeholders: old.unbound_grammar_placeholders,
+                composition_grammar_summary: old.composition_grammar_summary,
                 boundary_trigger: BoundaryTriggerWire::None,
+                boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
             }
         };
         let cache: ConstraintCompositionCacheMetadata =
@@ -1026,6 +1244,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
                 cache.composition_parser_characterizations_by_terminal,
             composition_grammar_summary: link.composition_grammar_summary,
             boundary_trigger: link.boundary_trigger,
+            boundary_candidate_summary: link.boundary_candidate_summary,
         });
     }
     let raw_len = usize::try_from(u64::from_le_bytes(input[4..12].try_into().unwrap()))
@@ -1055,6 +1274,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
                 old.composition_parser_characterizations_by_terminal,
             composition_grammar_summary: old.composition_grammar_summary,
             boundary_trigger: BoundaryTriggerWire::None,
+            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
         })
     } else {
         let old: PreTriggerConstraintCompositionMetadata =
@@ -1067,6 +1287,7 @@ fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMeta
                 old.composition_parser_characterizations_by_terminal,
             composition_grammar_summary: old.composition_grammar_summary,
             boundary_trigger: BoundaryTriggerWire::None,
+            boundary_candidate_summary: legacy_boundary_candidate_summary_wire(),
         })
     }
 }
@@ -3158,7 +3379,7 @@ fn segmented_runtime_artifact_ref(
         return segmented_runtime_artifact_v24_ref(constraint)
             .map(SegmentedRuntimeArtifactV27Ref::LegacyV24);
     }
-    constraint
+    let layout = constraint
         .recursive_parser_layout()
         .expect("validated recursive runtime must derive its parser layout before serialization")
         .expect("provider-native segmented runtime must have a recursive parser layout");
@@ -3167,6 +3388,29 @@ fn segmented_runtime_artifact_ref(
         .recursive_compiler_table
         .get()
         .expect("recursive runtime must retain its compiler table blob");
+    if overlay.recursive_tokenizer_internal_tsids.get().is_none() {
+        let compatibility_omission = recursive_compiler_table.is_empty()
+            && !overlay.segmented_parser_components.is_empty()
+            && overlay.segmented_parser_components.iter().all(|component| {
+                component.boundary.as_ref().is_some_and(|shard| {
+                    matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect
+                    )
+                })
+            });
+        if !compatibility_omission {
+            panic!("recursive runtime must retain its scoped tokenizer TSID relation");
+        }
+        // Wire compatibility only: old v27 readers require one row per scoped
+        // tokenizer state. The live DynamicDirect coordinator never consumes
+        // this quotient, so materialize the historical all-zero relation only
+        // when serialization is explicitly requested.
+        overlay
+            .recursive_tokenizer_internal_tsids
+            .set(Arc::new(vec![vec![0u32]; layout.total_tokenizer_states as usize]))
+            .expect("recursive serializer compatibility relation initialized twice");
+    }
     let recursive_tokenizer_internal_tsids = overlay
         .recursive_tokenizer_internal_tsids
         .get()
@@ -4887,38 +5131,41 @@ fn v27_sections(
     ))
 }
 
-fn v29_sections(
-    payload: &[u8],
+fn eleven_section_payload<'a>(
+    payload: &'a [u8],
+    magic: &[u8; 4],
+    header_len: usize,
+    version_label: &str,
 ) -> Result<
     (
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
-        &[u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
+        &'a [u8],
     ),
     String,
 > {
-    if payload.len() < V29_SECTION_HEADER_LEN || !payload.starts_with(&V29_SECTION_MAGIC) {
-        return Err("invalid v29 constraint section header".to_owned());
+    if payload.len() < header_len || !payload.starts_with(magic) {
+        return Err(format!("invalid {version_label} constraint section header"));
     }
-    let mut pos = V29_SECTION_MAGIC.len();
+    let mut pos = magic.len();
     let mut take_len = || {
         let end = pos + 8;
         let value = u64::from_le_bytes(
             payload[pos..end]
                 .try_into()
-                .expect("v29 section length has fixed width"),
+                .expect("constraint section length has fixed width"),
         );
         pos = end;
         usize::try_from(value)
-            .map_err(|_| "v29 section length does not fit this platform".to_owned())
+            .map_err(|_| format!("{version_label} section length does not fit this platform"))
     };
     let lengths = [
         take_len()?,
@@ -4933,14 +5180,14 @@ fn v29_sections(
         take_len()?,
         take_len()?,
     ];
-    let total = lengths.iter().try_fold(V29_SECTION_HEADER_LEN, |sum, &len| {
+    let total = lengths.iter().try_fold(header_len, |sum, &len| {
         sum.checked_add(len)
-            .ok_or_else(|| "v29 constraint section lengths overflow".to_owned())
+            .ok_or_else(|| format!("{version_label} constraint section lengths overflow"))
     })?;
     if total != payload.len() {
-        return Err("invalid v29 constraint section lengths".to_owned());
+        return Err(format!("invalid {version_label} constraint section lengths"));
     }
-    let mut pos = V29_SECTION_HEADER_LEN;
+    let mut pos = header_len;
     let mut next = |len: usize| {
         let section = &payload[pos..pos + len];
         pos += len;
@@ -4959,6 +5206,48 @@ fn v29_sections(
         next(lengths[9]),
         next(lengths[10]),
     ))
+}
+
+fn v30_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    eleven_section_payload(payload, &V30_SECTION_MAGIC, V30_SECTION_HEADER_LEN, "v30")
+}
+
+fn v29_sections(
+    payload: &[u8],
+) -> Result<
+    (
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+        &[u8],
+    ),
+    String,
+> {
+    eleven_section_payload(payload, &V29_SECTION_MAGIC, V29_SECTION_HEADER_LEN, "v29")
 }
 
 
@@ -5463,6 +5752,13 @@ impl Constraint {
             metadata.composition_parser_characterizations_by_terminal;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
         self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
+        if self.boundary_candidate_summary.get().is_none() {
+            let summary = restore_boundary_candidate_summary(
+                metadata.boundary_candidate_summary,
+                self,
+            )?;
+            let _ = self.boundary_candidate_summary.set(summary);
+        }
         self.composition_link_metadata_materialized = true;
         self.deferred_composition_metadata_blob = None;
         Ok(())
@@ -5485,6 +5781,13 @@ impl Constraint {
         self.unbound_grammar_placeholders = metadata.unbound_grammar_placeholders;
         self.composition_grammar_summary = metadata.composition_grammar_summary;
         self.boundary_trigger = restore_boundary_trigger(metadata.boundary_trigger);
+        if self.boundary_candidate_summary.get().is_none() {
+            let summary = restore_boundary_candidate_summary(
+                metadata.boundary_candidate_summary,
+                self,
+            )?;
+            let _ = self.boundary_candidate_summary.set(summary);
+        }
         self.composition_link_metadata_materialized = true;
         Ok(())
     }
@@ -5991,7 +6294,7 @@ impl Constraint {
         let token_mask_cache_wire = token_mask_cache.as_slice();
         let composition_metadata_wire = composition_metadata.as_slice();
         let internal_token_buf_masks_absolute_start = CONSTRAINT_HEADER_LEN
-            + V29_SECTION_HEADER_LEN
+            + V30_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -6018,7 +6321,7 @@ impl Constraint {
         let internal_token_buf_masks_section_len = internal_token_buf_masks_leading_padding
             + internal_token_buf_masks_wire.len();
         let token_mask_cache_absolute_start = CONSTRAINT_HEADER_LEN
-            + V29_SECTION_HEADER_LEN
+            + V30_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -6038,7 +6341,7 @@ impl Constraint {
         let token_mask_cache_section_len =
             token_mask_cache_leading_padding + token_mask_cache_wire.len();
         let assemble_started = profile.then(std::time::Instant::now);
-        let payload_len = V29_SECTION_HEADER_LEN
+        let payload_len = V30_SECTION_HEADER_LEN
             + weight_pool_wire.len()
             + dwa_wire_len
             + table_wire.len()
@@ -6070,7 +6373,7 @@ impl Constraint {
             unsafe {
                 bytes.set_len(total_len);
             }
-            let header_len = CONSTRAINT_HEADER_LEN + V29_SECTION_HEADER_LEN;
+            let header_len = CONSTRAINT_HEADER_LEN + V30_SECTION_HEADER_LEN;
             let (header, mut body) = bytes.split_at_mut(header_len);
             let mut pos = 0usize;
             header[pos..pos + CONSTRAINT_MAGIC.len()].copy_from_slice(&CONSTRAINT_MAGIC);
@@ -6079,8 +6382,8 @@ impl Constraint {
             pos += 2;
             header[pos..pos + 8].copy_from_slice(&(payload_len as u64).to_le_bytes());
             pos += 8;
-            header[pos..pos + V29_SECTION_MAGIC.len()].copy_from_slice(&V29_SECTION_MAGIC);
-            pos += V29_SECTION_MAGIC.len();
+            header[pos..pos + V30_SECTION_MAGIC.len()].copy_from_slice(&V30_SECTION_MAGIC);
+            pos += V30_SECTION_MAGIC.len();
             for len in [
                 weight_pool_wire.len(),
                 dwa_wire_len,
@@ -6279,7 +6582,7 @@ impl Constraint {
         bytes.extend_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
         let payload_len_offset = bytes.len();
         bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&V29_SECTION_MAGIC);
+        bytes.extend_from_slice(&V30_SECTION_MAGIC);
         bytes.extend_from_slice(&(weight_pool_wire.len() as u64).to_le_bytes());
         let dwa_len_offset = bytes.len();
         bytes.extend_from_slice(&(dwa.len() as u64).to_le_bytes());
@@ -6414,6 +6717,7 @@ impl Constraint {
                 | PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION
                 | PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION
                 | PREVIOUS_STATIC_PROJECTION_CONSTRAINT_VERSION
+                | PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION
                 | CONSTRAINT_VERSION
         ) {
             let decompress_started = profile.then(std::time::Instant::now);
@@ -6538,6 +6842,22 @@ impl Constraint {
                 composition_metadata_section,
             ) =
                 if version == CONSTRAINT_VERSION {
+                    let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v30_sections(serialized)
+                        .map_err(crate::GlrMaskError::Serialization)?;
+                    (
+                        weight,
+                        dwa,
+                        table,
+                        core,
+                        Some(runtime),
+                        Some(token_bytes),
+                        Some(original_map),
+                        Some(tokenizer),
+                        Some(internal_masks),
+                        Some(token_mask_cache),
+                        Some(composition_metadata),
+                    )
+                } else if version == PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION {
                     let (weight, dwa, table, core, runtime, token_bytes, original_map, tokenizer, internal_masks, token_mask_cache, composition_metadata) = v29_sections(serialized)
                         .map_err(crate::GlrMaskError::Serialization)?;
                     (
@@ -6822,7 +7142,9 @@ impl Constraint {
                                         return Ok(None);
                                     };
                                     let started = profile.then(std::time::Instant::now);
-                                    let result = if version == CONSTRAINT_VERSION {
+                                    let result = if version == CONSTRAINT_VERSION
+                                        || version == PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION
+                                    {
                                         current_backing
                                             .as_ref()
                                             .ok_or_else(|| bincode::Error::new(bincode::ErrorKind::Custom("current runtime has no artifact backing".to_owned())))
@@ -7840,6 +8162,13 @@ impl Constraint {
                 Some(owned_artifact.unwrap_or_else(|| std::sync::Arc::new(bytes.to_vec())))
             });
         }
+        if version != CONSTRAINT_VERSION && constraint.boundary_candidate_summary.get().is_none() {
+            let _ = constraint.boundary_candidate_summary.set(
+                crate::runtime::BoundaryCandidateSummary::Unknown {
+                    reason: crate::runtime::SummaryUnavailable::LegacyArtifact,
+                },
+            );
+        }
         Ok(constraint)
     }
 }
@@ -7867,6 +8196,15 @@ mod tests {
             ]),
         )
         .unwrap()
+    }
+
+    fn sample_boundary_fingerprint() -> crate::runtime::BoundaryCandidateFingerprint {
+        crate::runtime::BoundaryCandidateFingerprint {
+            algorithm_version: 77,
+            component_semantics: [7; 32],
+            public_interface: [8; 32],
+            vocabulary: [9; 32],
+        }
     }
 
     fn ignored_constraint() -> Constraint {
@@ -8605,7 +8943,45 @@ mod tests {
 
     #[test]
     #[ignore = "pre-release: historical artifact compatibility is not a release requirement"]
-    fn previous_split_composition_metadata_wire_defaults_trigger_to_none() {
+    fn previous_previous_split_composition_metadata_wire_defaults_trigger_to_none() {
+        let constraint = tiny_constraint();
+        let link = PreviousPreviousConstraintCompositionLinkMetadata {
+            composition_reset_tokens_by_terminal: constraint
+                .composition_reset_tokens_by_terminal
+                .clone(),
+            unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
+            composition_grammar_summary: constraint.composition_grammar_summary.clone(),
+        };
+        let cache = ConstraintCompositionCacheMetadata {
+            composition_parser_templates_by_terminal: constraint
+                .composition_parser_templates_by_terminal
+                .clone(),
+            composition_parser_characterizations_by_terminal: constraint
+                .composition_parser_characterizations_by_terminal
+                .clone(),
+        };
+        let link_raw = bincode::serialize(&link).unwrap();
+        let cache_raw = bincode::serialize(&cache).unwrap();
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC);
+        wire.extend_from_slice(&0u32.to_le_bytes());
+        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(link_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&(cache_raw.len() as u64).to_le_bytes());
+        wire.extend_from_slice(&link_raw);
+        wire.extend_from_slice(&cache_raw);
+
+        let decoded = decode_composition_metadata(&wire).unwrap();
+        assert!(matches!(decoded.boundary_trigger, BoundaryTriggerWire::None));
+        assert_eq!(
+            decoded.composition_grammar_summary,
+            constraint.composition_grammar_summary,
+        );
+    }
+
+    #[test]
+    fn previous_split_composition_metadata_wire_preserves_trigger_and_defaults_summary() {
         let constraint = tiny_constraint();
         let link = PreviousConstraintCompositionLinkMetadata {
             composition_reset_tokens_by_terminal: constraint
@@ -8613,6 +8989,7 @@ mod tests {
                 .clone(),
             unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
             composition_grammar_summary: constraint.composition_grammar_summary.clone(),
+            boundary_trigger: BoundaryTriggerWire::Tokens(vec![1, 3]),
         };
         let cache = ConstraintCompositionCacheMetadata {
             composition_parser_templates_by_terminal: constraint
@@ -8635,11 +9012,17 @@ mod tests {
         wire.extend_from_slice(&cache_raw);
 
         let decoded = decode_composition_metadata(&wire).unwrap();
-        assert!(matches!(decoded.boundary_trigger, BoundaryTriggerWire::None));
-        assert_eq!(
-            decoded.composition_grammar_summary,
-            constraint.composition_grammar_summary,
-        );
+        assert!(matches!(
+            decoded.boundary_trigger,
+            BoundaryTriggerWire::Tokens(ref ids) if ids == &[1, 3]
+        ));
+        assert!(matches!(
+            decoded.boundary_candidate_summary,
+            BoundaryCandidateSummaryWire::Unknown { reason }
+                if reason == summary_unavailable_code(
+                    &crate::runtime::SummaryUnavailable::LegacyArtifact
+                )
+        ));
     }
 
     #[test]
@@ -8657,6 +9040,170 @@ mod tests {
             .materialize_composition_link_metadata_for_compilation()
             .unwrap();
         assert_eq!(loaded.boundary_trigger.token_summary(), Some(&[1u32, 3u32][..]));
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_boundary_candidate_summary() {
+        let constraint = tiny_constraint();
+        constraint
+            .boundary_candidate_summary
+            .set(crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: crate::runtime::BoundaryCandidateFingerprint {
+                    algorithm_version: 7,
+                    component_semantics: [1; 32],
+                    public_interface: [2; 32],
+                    vocabulary: [3; 32],
+                },
+                tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
+                    vec![0u32, 2u32].into_boxed_slice(),
+                )),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            })
+            .unwrap();
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        assert!(loaded.boundary_candidate_summary.get().is_none());
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        let summary = loaded
+            .boundary_candidate_summary
+            .get()
+            .expect("summary must materialize from CMS5");
+        match summary {
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint,
+                tokens,
+                precision,
+            } => {
+                assert_eq!(fingerprint.algorithm_version, 7);
+                assert_eq!(fingerprint.component_semantics, [1; 32]);
+                assert_eq!(fingerprint.public_interface, [2; 32]);
+                assert_eq!(fingerprint.vocabulary, [3; 32]);
+                assert_eq!(tokens.canonical_ids(loaded.token_bytes_iter()), vec![0, 2]);
+                assert_eq!(*precision, crate::runtime::SummaryPrecision::RegularUpperBound);
+            }
+            other => panic!("unexpected materialized summary: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn current_constraint_artifact_preserves_empty_all_and_unknown_boundary_summaries() {
+        let mut dense = crate::ds::bitset::BitSet::new(3);
+        dense.set(0);
+        dense.set(2);
+        for summary in [
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Empty,
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Dense(Arc::new(dense)),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::AllByteTokensAtLeastTwo,
+                precision: crate::runtime::SummaryPrecision::BudgetWidenedUpperBound,
+            },
+            crate::runtime::BoundaryCandidateSummary::Unknown {
+                reason: crate::runtime::SummaryUnavailable::Deferred,
+            },
+        ] {
+            let constraint = tiny_constraint();
+            constraint.boundary_candidate_summary.set(summary.clone()).unwrap();
+            let mut loaded = Constraint::load(&constraint.save()).unwrap();
+            loaded
+                .materialize_composition_link_metadata_for_compilation()
+                .unwrap();
+            let restored = loaded
+                .boundary_candidate_summary
+                .get()
+                .expect("CMS5 summary must materialize");
+            match (&summary, restored) {
+                (
+                    crate::runtime::BoundaryCandidateSummary::Known { tokens: expected, .. },
+                    crate::runtime::BoundaryCandidateSummary::Known { tokens: actual, .. },
+                ) => assert_eq!(
+                    expected.canonical_ids(constraint.token_bytes_iter()),
+                    actual.canonical_ids(loaded.token_bytes_iter()),
+                ),
+                (
+                    crate::runtime::BoundaryCandidateSummary::Unknown { reason: expected },
+                    crate::runtime::BoundaryCandidateSummary::Unknown { reason: actual },
+                ) => assert_eq!(expected, actual),
+                pair => panic!("summary variant changed across CMS5 roundtrip: {pair:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn current_boundary_summary_preserves_duplicate_byte_token_ids() {
+        let vocab = Vocab::new(vec![
+            (10, b"ab".to_vec()),
+            (11, b"ab".to_vec()),
+            (12, b"a".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start doc;
+                nt doc ::= "a";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        constraint
+            .boundary_candidate_summary
+            .set(crate::runtime::BoundaryCandidateSummary::Known {
+                fingerprint: sample_boundary_fingerprint(),
+                tokens: crate::runtime::OriginalTokenSet::Sparse(Arc::from(
+                    vec![10u32, 11u32].into_boxed_slice(),
+                )),
+                precision: crate::runtime::SummaryPrecision::RegularUpperBound,
+            })
+            .unwrap();
+        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        loaded
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap();
+        let crate::runtime::BoundaryCandidateSummary::Known { tokens, .. } = loaded
+            .boundary_candidate_summary
+            .get()
+            .expect("duplicate-ID summary must materialize")
+        else {
+            panic!("duplicate-ID summary changed variant");
+        };
+        assert_eq!(tokens.canonical_ids(loaded.token_bytes_iter()), vec![10, 11]);
+    }
+
+    #[test]
+    fn v29_artifact_without_composition_metadata_loads_legacy_unknown_summary() {
+        let mut constraint = tiny_constraint();
+        constraint.composition_reset_tokens_by_terminal.clear();
+        constraint.unbound_grammar_placeholders.clear();
+        constraint.composition_parser_templates_by_terminal.clear();
+        constraint
+            .composition_parser_characterizations_by_terminal
+            .clear();
+        constraint.composition_grammar_summary = None;
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::None;
+        let mut saved = constraint.save();
+        let (_, _, _, _, _, _, _, _, _, _, composition) =
+            v30_sections(&saved[CONSTRAINT_HEADER_LEN..]).unwrap();
+        assert!(composition.is_empty(), "legacy-empty fixture must have no CMS section");
+        saved[8..10].copy_from_slice(&PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION.to_le_bytes());
+        saved[CONSTRAINT_HEADER_LEN..CONSTRAINT_HEADER_LEN + 4]
+            .copy_from_slice(&V29_SECTION_MAGIC);
+
+        let loaded = Constraint::load(&saved).unwrap();
+        assert!(matches!(
+            loaded.boundary_candidate_summary.get(),
+            Some(crate::runtime::BoundaryCandidateSummary::Unknown {
+                reason: crate::runtime::SummaryUnavailable::LegacyArtifact
+            })
+        ));
+        assert_eq!(loaded.save(), saved, "unchanged v29 artifact must resave byte-for-byte");
     }
 
     #[test]

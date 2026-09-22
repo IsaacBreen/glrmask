@@ -18499,14 +18499,14 @@ pub(crate) fn merged_leaf_ignore_terminals(
     }
 }
 
-/// Recursively clear boundary shards inside nested segmented components.
+/// Recursively clear boundary shards inside a nested component selected for
+/// the conservative legacy replacement lane.
 ///
-/// A nested static link publishes one shard per top-level component over the
-/// full leaf-expanded link context; the outer block shard covers block-inner
-/// crossings, so inner overlays must carry no shards. Inner compositions may
-/// have installed exact dynamic (or static) shards of their own; leaving them
-/// would trip the strict-static trap (or double-cover) on a claimed static
-/// path. Operates on this composition's own overlay copies (`Arc::make_mut`
+/// That lane builds the outer shard over full vocabulary with per-leaf
+/// ownership, so it explicitly subsumes the replaced block's inner repair.
+/// Certified-static blocks do not use this helper: their inner static shards
+/// remain load-bearing and coexist with the summary-restricted outer block
+/// shard. Operates on this composition's own overlay copies (`Arc::make_mut`
 /// detaches shared children), never on the caller's input constraints.
 pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint) {
     let Some(overlay) = constraint.static_dynamic_overlay.as_mut() else {
@@ -18526,6 +18526,43 @@ pub(crate) fn clear_nested_segmented_boundary_shards(constraint: &mut Constraint
         }
         clear_nested_segmented_boundary_shards(inner);
     }
+}
+
+/// Clear retained nested boundary shards only for top-level components whose
+/// outer walk deliberately used the legacy leaf-crossing predicate. Components
+/// compiled under true block ownership retain their already-static inner
+/// shards; those retained contributions are the proof that lets the outer
+/// repair omit block-internal crossings.
+pub(crate) fn clear_selected_nested_segmented_boundary_shards(
+    constraint: &mut Constraint,
+    selected: &BitSet,
+) -> Result<(), String> {
+    if selected.is_zero() {
+        return Ok(());
+    }
+    let overlay = constraint
+        .static_dynamic_overlay
+        .as_mut()
+        .ok_or_else(|| "nested shard clearing requires a segmented overlay".to_string())?;
+    for index in selected.iter() {
+        let component = overlay
+            .segmented_parser_components
+            .get_mut(index)
+            .ok_or_else(|| format!("nested shard clearing references component {index} outside overlay"))?;
+        let inner = std::sync::Arc::make_mut(&mut component.constraint);
+        if inner.static_dynamic_overlay.is_none() {
+            continue;
+        }
+        install_published_static_boundary_shards(
+            inner
+                .static_dynamic_overlay
+                .as_mut()
+                .expect("nested segmented component requires overlay for shard clearing"),
+            Vec::new(),
+        )?;
+        clear_nested_segmented_boundary_shards(inner);
+    }
+    Ok(())
 }
 
 fn merged_original_token_ids(
@@ -19160,6 +19197,7 @@ fn build_composed_constraint_unfinalized(
         runtime_backend: ConstraintRuntimeBackend::Static,
         static_dynamic_overlay: None,
         boundary_trigger: crate::runtime::BoundaryTrigger::None,
+        boundary_candidate_summary: std::sync::OnceLock::new(),
         late_grammar_slots: Vec::new(),
         late_bind_vocab: OnceLock::from(vocab.clone()),
         scoped_ignore_only_tokens: Vec::new(),
@@ -19449,6 +19487,325 @@ fn prepared_constraint_for_segmented_composition(
     // likewise stays dynamic and deliberately has no parser DWA to rebuild.
     debug_assert_eq!(prepared.uses_dynamic_runtime(), source.uses_dynamic_runtime());
     Ok(Some(prepared))
+}
+
+
+fn recursive_component_tokenizer_span(constraint: &Constraint) -> Result<u32, String> {
+    Ok(constraint
+        .recursive_parser_layout()?
+        .map_or(constraint.tokenizer.num_states(), |layout| layout.total_tokenizer_states))
+}
+
+fn merged_special_token_terminals_recursive_fast(
+    parent: &Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    terminal_offsets: &[u32],
+) -> Vec<SpecialTokenTerminal> {
+    let bound_parent_slots = children
+        .iter()
+        .flat_map(CompiledSubgrammarInput::placeholder_terminals)
+        .collect::<BTreeSet<_>>();
+    let mut merged = parent
+        .special_token_terminals
+        .iter()
+        .filter(|special| {
+            !bound_parent_slots.contains(&special.terminal_id)
+                && !parent.is_late_grammar_placeholder_terminal(special.terminal_id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    for (child_index, child) in children.iter().enumerate() {
+        let offset = terminal_offsets[child_index + 1];
+        merged.extend(
+            child
+                .constraint
+                .special_token_terminals
+                .iter()
+                .filter(|special| {
+                    !child
+                        .constraint
+                        .is_late_grammar_placeholder_terminal(special.terminal_id)
+                })
+                .map(|special| SpecialTokenTerminal {
+                    terminal_id: offset + special.terminal_id,
+                    token_id: special.token_id,
+                }),
+        );
+    }
+    merged.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    merged.dedup_by_key(|special| (special.token_id, special.terminal_id));
+    merged
+}
+
+fn compose_dynamic_recursive_shared_fast(
+    mut parent: Constraint,
+    children: &[CompiledSubgrammarInput<'_>],
+    shared_children: &[Arc<Constraint>],
+    vocab: &Vocab,
+) -> Result<ConstraintComposition, String> {
+    let started_at = Instant::now();
+    if children.len() != shared_children.len() {
+        return Err("dynamic recursive shared child/component count mismatch".into());
+    }
+    for (index, (input, shared)) in children.iter().zip(shared_children).enumerate() {
+        if !std::ptr::eq(input.constraint, shared.as_ref()) {
+            return Err(format!(
+                "dynamic recursive shared child {index} does not match borrowed composition input"
+            ));
+        }
+    }
+    if children.is_empty() {
+        return Err("constraint composition requires at least one child".into());
+    }
+    parent.materialize_composition_link_metadata_for_compilation()?;
+    let components = std::iter::once(&parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    let component_count = components.len();
+    let vocab_check_started_at = Instant::now();
+    for (component_index, constraint) in components.iter().enumerate() {
+        if !constraint.token_bytes_match_vocab(vocab) {
+            return Err(format!(
+                "component {component_index} was not compiled for the supplied vocabulary",
+            ));
+        }
+    }
+    let vocab_check_ms = vocab_check_started_at.elapsed().as_secs_f64() * 1000.0;
+    let placeholder_started_at = Instant::now();
+    let component_end_token_ids = components
+        .iter()
+        .flat_map(|constraint| constraint.table.embedded_end_token_ids())
+        .collect::<BTreeSet<_>>();
+    validate_compiled_subgrammar_placeholders(
+        &parent,
+        children,
+        vocab,
+        &component_end_token_ids,
+    )?;
+    let placeholder_ms = placeholder_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let terminal_checks_started_at = Instant::now();
+    let mut terminal_offsets = Vec::with_capacity(components.len());
+    let mut next_terminal = 0u32;
+    for component in &components {
+        terminal_offsets.push(next_terminal);
+        next_terminal = next_terminal
+            .checked_add(component.table.num_terminals)
+            .ok_or_else(|| "dynamic recursive terminal coordinate overflow".to_owned())?;
+    }
+    let global_ignores = component_ignores_are_globally_erasable(&parent, children);
+    let merged_ignores = merged_ignore_terminals(
+        &parent,
+        children,
+        &terminal_offsets,
+        global_ignores,
+    );
+    if merged_ignores.canonical.is_some() {
+        return Err(
+            "dynamic recursive fast path does not yet support globally-erased ignore aliases"
+                .to_owned(),
+        );
+    }
+    if children
+        .iter()
+        .any(|child| child.constraint.composition_start_nullable().unwrap_or(true))
+    {
+        return Err("dynamic recursive fast path does not yet support nullable children".into());
+    }
+    let terminal_checks_ms = terminal_checks_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let tokenizer_span_started_at = Instant::now();
+    let mut tokenizer_state_offsets = Vec::with_capacity(components.len());
+    let mut next_tokenizer_state = 0u32;
+    for component in &components {
+        tokenizer_state_offsets.push(next_tokenizer_state);
+        next_tokenizer_state = next_tokenizer_state
+            .checked_add(recursive_component_tokenizer_span(component)?)
+            .ok_or_else(|| "dynamic recursive tokenizer coordinate overflow".to_owned())?;
+    }
+    let tokenizer_span_ms = tokenizer_span_started_at.elapsed().as_secs_f64() * 1000.0;
+    let links_started_at = Instant::now();
+    let segmented_parser_links = build_segmented_parser_links(children)?;
+    let links_ms = links_started_at.elapsed().as_secs_f64() * 1000.0;
+    let validate_layout_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+    if segmented_parser_links.is_empty() {
+        return Err("dynamic recursive fast path requires at least one linker control".into());
+    }
+
+    let metadata_started_at = Instant::now();
+    let terminal_display_names = merged_terminal_display_names(&parent, children);
+    debug_assert_eq!(terminal_display_names.len(), next_terminal as usize);
+    let special_token_terminals = merged_special_token_terminals_recursive_fast(
+        &parent,
+        children,
+        &terminal_offsets,
+    );
+    let live_special_token_ids = special_token_terminals
+        .iter()
+        .map(|special| special.token_id)
+        .collect::<BTreeSet<_>>();
+    let embedded_end_token_ids = component_end_token_ids
+        .intersection(&live_special_token_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let metadata_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let shell_started_at = Instant::now();
+    // The live recursive runtime never executes this outer table. Keep only
+    // enough root grammar metadata for nullable/end-token facts and the global
+    // terminal coordinate; exact LR behavior remains in the retained leaves.
+    let shell_rules = parent.table.rules.first().cloned().into_iter().collect::<Vec<_>>();
+    let shell_table = crate::compiler::glr::table::GLRTable {
+        action: Vec::new(),
+        goto: Vec::new(),
+        num_states: 0,
+        num_terminals: next_terminal,
+        num_rules: shell_rules.len() as u32,
+        rules: shell_rules,
+        nonterminal_display_names: parent.table.nonterminal_display_names.clone(),
+        construction: parent.table.construction,
+        admission_policy: parent.table.admission_policy,
+        advance: Vec::new(),
+        unconditional_advance: Vec::new(),
+        forwarded_shifts: FxHashSet::default(),
+        control_terminals: BTreeSet::new(),
+        skip_terminals: BTreeSet::new(),
+        guarded_shift_index: Vec::new(),
+        direct_regular_wide_frontiers: Vec::new(),
+    };
+    let composed_table = ComposedTable {
+        table: shell_table,
+        terminal_offsets: terminal_offsets.clone(),
+        placeholder_terminals: children
+            .iter()
+            .flat_map(CompiledSubgrammarInput::placeholder_terminals)
+            .collect(),
+        placeholder_component_indices: children
+            .iter()
+            .enumerate()
+            .flat_map(|(index, child)| {
+                std::iter::repeat_n(index + 1, 1 + child.additional_placeholder_terminals.len())
+            })
+            .collect(),
+        state_relations: vec![Vec::new(); component_count],
+        boundary_nonterminals: BTreeSet::new(),
+        control_terminals: BTreeSet::new(),
+        appended_parent_action_terminals: BTreeSet::new(),
+    };
+    let shell_ms = shell_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let coordinator_started_at = Instant::now();
+    let root_tokenizer = parent.tokenizer.clone();
+    let root_fast_transitions = parent.tokenizer_fast_transitions.clone();
+    let id_map = InternalIdMap {
+        // DynamicDirect never consumes the coordinator TSID quotient. Keep a
+        // one-class placeholder so serialized recursive compatibility metadata
+        // can use a compact constant relation without building the old global
+        // state/token partition.
+        tokenizer_states: ManyToOneIdMap {
+            original_to_internal: vec![0],
+            internal_to_originals: Vec::new(),
+            representative_original_ids: Vec::new(),
+        },
+        vocab_tokens: ManyToOneIdMap::empty(),
+        deferred_vocab_singleton_original_ids: None,
+    };
+    let mut result = build_composed_constraint_unfinalized(
+        composed_table,
+        root_tokenizer,
+        tokenizer_state_offsets.clone(),
+        DWA::new(1, 0),
+        Vec::new(),
+        Default::default(),
+        id_map,
+        vec![None; next_terminal as usize],
+        special_token_terminals,
+        embedded_end_token_ids,
+        terminal_display_names,
+        None,
+        None,
+        Vec::new(),
+        root_fast_transitions,
+        true,
+        true,
+        vocab,
+    );
+    let coordinator_ms = coordinator_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let publish_started_at = Instant::now();
+    drop(components);
+    let mut segmented_components = Vec::with_capacity(component_count);
+    segmented_components.push(crate::runtime::SegmentedParserComponent {
+        constraint: Arc::new(parent),
+        boundary: None,
+        tokenizer_state_offset: tokenizer_state_offsets[0],
+        terminal_offset: terminal_offsets[0],
+        global_terminal_aliases: Vec::new(),
+        local_tsid_to_global_tsids: Vec::new(),
+        root_disallowed_terminal: None,
+        global_to_local_parser_state: Vec::new(),
+    });
+    for (child_index, child) in shared_children.iter().enumerate() {
+        let component_index = child_index + 1;
+        segmented_components.push(crate::runtime::SegmentedParserComponent {
+            constraint: Arc::clone(child),
+            boundary: None,
+            tokenizer_state_offset: tokenizer_state_offsets[component_index],
+            terminal_offset: terminal_offsets[component_index],
+            global_terminal_aliases: Vec::new(),
+            local_tsid_to_global_tsids: Vec::new(),
+            root_disallowed_terminal: None,
+            global_to_local_parser_state: Vec::new(),
+        });
+    }
+    let overlay = result
+        .constraint
+        .static_dynamic_overlay
+        .get_or_insert_with(Default::default);
+    overlay.terminal_offsets = terminal_offsets;
+    overlay.tokenizer_state_offsets = tokenizer_state_offsets;
+    overlay.segmented_parser_components = segmented_components;
+    overlay.segmented_parser_links = segmented_parser_links;
+    overlay.segmented_parser_state_offsets.clear();
+    overlay.segmented_mask_authoritative = true;
+    overlay.segmented_static_baseline = false;
+    overlay.segmented_component_union_root_dispatch.clear();
+    overlay.segmented_boundary_parser = None;
+    overlay.segmented_boundary_terminal_trie = None;
+    install_dynamic_direct_boundary_shards(overlay, None);
+    // Empty bytes are an explicit "provider-native only" marker. Dynamic
+    // recomposition consumes the retained component tree directly. Static or
+    // legacy compiler views may reconstruct from the provider in a later path.
+    let _ = overlay
+        .recursive_compiler_table
+        .set(Arc::<[u8]>::from(Vec::<u8>::new().into_boxed_slice()));
+    let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
+
+    let layout_started_at = Instant::now();
+    let layout = result
+        .constraint
+        .recursive_parser_layout_for_pending_root()?
+        .ok_or_else(|| "dynamic recursive fast path failed to derive recursive layout".to_owned())?;
+    let layout_ms = layout_started_at.elapsed().as_secs_f64() * 1000.0;
+    let relation_started_at = Instant::now();
+    // Authoritative DynamicDirect execution never consumes an outer recursive
+    // TSID quotient. Leave it entirely absent in the live coordinator; the
+    // serializer emits legacy compatibility rows only if/when save() is called.
+    let relation_ms = relation_started_at.elapsed().as_secs_f64() * 1000.0;
+    result.constraint.clear_recursive_legacy_boundary_start_states();
+    result.constraint.clear_recursive_legacy_parser_state_projections();
+    result.constraint.serialized_artifact_cache = None;
+
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][constraint_dynamic_recursive_shared_fast] components={} terminals={} scoped_tokenizer_states={} vocab_check_ms={vocab_check_ms:.3} placeholder_ms={placeholder_ms:.3} terminal_checks_ms={terminal_checks_ms:.3} tokenizer_span_ms={tokenizer_span_ms:.3} links_ms={links_ms:.3} validate_layout_ms={validate_layout_ms:.3} metadata_ms={metadata_ms:.3} shell_ms={shell_ms:.3} coordinator_ms={coordinator_ms:.3} publish_ms={publish_ms:.3} layout_ms={layout_ms:.3} relation_ms={relation_ms:.3} total_ms={:.3}",
+            component_count,
+            next_terminal,
+            layout.total_tokenizer_states,
+            started_at.elapsed().as_secs_f64() * 1000.0,
+        );
+    }
+    Ok(result)
 }
 
 fn detach_recursive_component_compiler_views(constraint: &mut Constraint) -> Result<(), String> {
@@ -20414,6 +20771,60 @@ fn compose_constraints_owned_parent_impl(
 ) -> Result<ConstraintComposition, String> {
     let direct_dynamic_boundary =
         explicit_segmented_boundary == Some(SegmentedBoundaryBackend::Dynamic);
+    if direct_dynamic_boundary {
+        if let Some(shared_children) = shared_children {
+            let children_link_ready = shared_children.iter().all(|child| {
+                child.deferred_composition_metadata_blob.is_none()
+                    || child.composition_link_metadata_materialized
+            });
+            let nullable_child = children
+                .iter()
+                .any(|child| child.constraint.composition_start_nullable().unwrap_or(true));
+            let terminal_offsets = {
+                let mut offsets = Vec::with_capacity(children.len() + 1);
+                let mut next = 0u32;
+                for constraint in std::iter::once(&parent)
+                    .chain(children.iter().map(|child| child.constraint))
+                {
+                    offsets.push(next);
+                    next = match next.checked_add(constraint.table.num_terminals) {
+                        Some(next) => next,
+                        None => return Err("dynamic recursive terminal coordinate overflow".into()),
+                    };
+                }
+                offsets
+            };
+            let global_ignores = component_ignores_are_globally_erasable(&parent, children);
+            let has_global_ignore_alias = merged_ignore_terminals(
+                &parent,
+                children,
+                &terminal_offsets,
+                global_ignores,
+            )
+            .canonical
+            .is_some();
+            if children_link_ready && !nullable_child && !has_global_ignore_alias {
+                return compose_dynamic_recursive_shared_fast(
+                    parent,
+                    children,
+                    shared_children,
+                    vocab,
+                );
+            }
+            if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][constraint_dynamic_recursive_shared_fast] declined=true children_link_ready={} nullable_child={} global_ignore_alias={}",
+                    children_link_ready,
+                    nullable_child,
+                    has_global_ignore_alias,
+                );
+            }
+        } else if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][constraint_dynamic_recursive_shared_fast] declined=true reason=borrowed_child_requires_owned_arc"
+            );
+        }
+    }
     let outer_started_at = Instant::now();
     let phase_started_at = Instant::now();
     if explicit_segmented_boundary.is_none() {
@@ -20466,6 +20877,70 @@ fn compose_constraints_owned_parent_impl(
         .collect::<Vec<_>>();
     let normalize_inputs_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let children = normalized_children.as_slice();
+    // Compute the reusable bounded interface-tail envelope while the semantic
+    // parent/child graph is still explicit. This is intentionally before any
+    // flattening: child summaries compose through typed calls, so known parent
+    // postambles survive without a raw lexer-state × parser-history product.
+    let boundary_tail_prepared = {
+        let bindings = children
+            .iter()
+            .flat_map(|child| {
+                child
+                    .placeholder_terminals()
+                    .map(move |slot| (slot, child.constraint))
+            })
+            .collect::<Vec<_>>();
+        match crate::compiler::boundary_tail::build_composition_boundary_tail_r2(
+            &parent,
+            &bindings,
+            vocab,
+        ) {
+            Ok(probe) => {
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][boundary_tail_prepare] level=2 candidates={} exit_last1={} exit_pairs={} fp_iters={} widened={} child_ms={:.3} summary_ms={:.3} map_ms={:.3}",
+                        probe.candidate_ids.len(),
+                        probe.exit_last1_count,
+                        probe.exit_pair_count,
+                        probe.fixed_point_iterations,
+                        probe.fixed_point_widened,
+                        probe.child_summary_ms,
+                        probe.summary_ms,
+                        probe.map_ms,
+                    );
+                }
+                Some((probe.candidate_ids, probe.fixed_point_widened, 2u8))
+            }
+            Err(r2_error) => match crate::compiler::boundary_tail::build_composition_boundary_tail_r1(
+                &parent,
+                &bindings,
+                vocab,
+            ) {
+                Ok(probe) => {
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][boundary_tail_prepare] level=1 candidates={} exit_bytes={} fp_iters={} widened={} summary_ms={:.3} map_ms={:.3} r2_unavailable={r2_error:?}",
+                            probe.candidate_ids.len(),
+                            probe.exit_byte_count,
+                            probe.fixed_point_iterations,
+                            probe.fixed_point_widened,
+                            probe.summary_ms,
+                            probe.map_ms,
+                        );
+                    }
+                    Some((probe.candidate_ids, probe.fixed_point_widened, 1u8))
+                }
+                Err(r1_error) => {
+                    if compose_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][boundary_tail_prepare] unavailable r2={r2_error:?} r1={r1_error:?}"
+                        );
+                    }
+                    None
+                }
+            },
+        }
+    };
     // A packed child must be materialized into a compiler-owned clone, so the
     // shared-Arc optimization can no longer refer to the exact compiler input.
     let shared_children = if materialized_any_child {
@@ -22169,13 +22644,10 @@ fn compose_constraints_owned_parent_impl(
                             Some(&walk.boundary_tokens_by_start_component),
                         );
                     }
-                    // Nested static links cover block-inner crossings with the
-                    // outer block shards; inner overlays must carry no shards
-                    // (their own exact dynamic/static shards would trip the
-                    // strict-static trap on a claimed static path).
-                    if walk.has_nested_components {
-                        clear_nested_segmented_boundary_shards(&mut result.constraint);
-                    }
+                    clear_selected_nested_segmented_boundary_shards(
+                        &mut result.constraint,
+                        &walk.clear_nested_boundary_components,
+                    )?;
                 }
             }
         }
@@ -22316,6 +22788,23 @@ fn compose_constraints_owned_parent_impl(
                 components_have_no_runtime_product,
             )
         });
+        if let Some((candidate_ids, widened, level)) = boundary_tail_prepared.as_ref() {
+            if let Err(error) = crate::compiler::boundary_candidates::install_precomputed_boundary_candidate_ids(
+                &mut result.constraint,
+                vocab,
+                candidate_ids,
+                *widened,
+            ) {
+                if compose_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_tail_install] level={level} skipped={error:?}");
+                }
+            } else if compose_profile_enabled() {
+                eprintln!(
+                    "[glrmask/profile][boundary_tail_install] level={level} candidates={} installed=true",
+                    candidate_ids.len(),
+                );
+            }
+        }
         detach_recursive_component_compiler_views(&mut result.constraint)?;
         result.constraint.detach_recursive_outer_table()?;
         result.constraint.detach_recursive_outer_tokenizer()?;
@@ -22811,6 +23300,23 @@ fn compose_constraints_owned_parent_impl(
         );
     }
     result.constraint.rebuild_runtime_caches();
+    if let Some((candidate_ids, widened, level)) = boundary_tail_prepared {
+        if let Err(error) = crate::compiler::boundary_candidates::install_precomputed_boundary_candidate_ids(
+            &mut result.constraint,
+            vocab,
+            &candidate_ids,
+            widened,
+        ) {
+            if compose_profile_enabled() {
+                eprintln!("[glrmask/profile][boundary_tail_install] level={level} skipped={error:?}");
+            }
+        } else if compose_profile_enabled() {
+            eprintln!(
+                "[glrmask/profile][boundary_tail_install] level={level} candidates={} installed=true",
+                candidate_ids.len(),
+            );
+        }
+    }
     let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;
     if compose_profile_enabled() {
         eprintln!(
@@ -23046,6 +23552,125 @@ mod tests {
             &vocab,
             4,
             "segmented-dynamic-vs-segmented-static",
+        );
+    }
+
+
+    #[test]
+    fn dynamic_recursive_shared_fast_matches_borrowed_and_reload() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"b".to_vec()),
+            (3, b"!".to_vec()),
+            (4, b"Xa".to_vec()),
+            (5, b"b!".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t SUB ::= @token(999);
+                nt document ::= "X" SUB "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"
+                start child;
+                nt child ::= "a" "b";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let shared_child = Arc::new(child.clone());
+        let placeholder_terminal = terminal(&parent, "SUB");
+        let inputs = [CompiledSubgrammarInput {
+            placeholder_terminal,
+            additional_placeholder_terminals: &[],
+            constraint: shared_child.as_ref(),
+        }];
+        let fast = compose_constraints_owned_parent_segmented_shared(
+            parent.clone(),
+            &inputs,
+            &[Arc::clone(&shared_child)],
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .unwrap()
+        .constraint;
+        let borrowed = parent
+            .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
+            .unwrap();
+
+        assert!(fast.uses_compact_segmented_parser_runtime());
+        let overlay = fast.static_dynamic_overlay.as_ref().unwrap();
+        assert!(
+            overlay
+                .recursive_tokenizer_internal_tsids
+                .get()
+                .is_none(),
+            "all-DynamicDirect fast coordinator should omit the redundant recursive TSID relation",
+        );
+        assert!(
+            overlay
+                .segmented_parser_components
+                .iter()
+                .all(|component| component.global_to_local_parser_state.is_empty()),
+            "fast coordinator should not retain materialized composed-state projections",
+        );
+
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &fast,
+            &borrowed,
+            &vocab,
+            4,
+            "dynamic-shared-fast-vs-borrowed",
+        );
+
+        let bytes = fast.save();
+        let reloaded = Constraint::load_with_vocab(&bytes, &vocab).unwrap();
+        assert!(reloaded.uses_compact_segmented_parser_runtime());
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &fast,
+            &reloaded,
+            &vocab,
+            4,
+            "dynamic-shared-fast-vs-reload",
+        );
+
+        // A later static-boundary link is allowed to reconstruct compiler-only
+        // flattened views on demand from the retained recursive component tree.
+        // The fast dynamic build itself must never pay this cost.
+        let outer_parent = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t OUTER ::= @token(998);
+                nt document ::= "X" OUTER "!";
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let static_outer = outer_parent
+            .compose_linked_children_for_test(&[("OUTER", &fast)], &vocab)
+            .unwrap();
+        let dynamic_outer = Constraint::from_glrm_grammar(
+            r#"
+                start document;
+                t OUTER ::= @token(998);
+                nt document ::= "X" OUTER "!";
+            "#,
+            &vocab,
+        )
+        .unwrap()
+        .compose_linked_children_for_test_dynamic(&[("OUTER", &fast)], &vocab)
+        .unwrap();
+        assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+            &static_outer,
+            &dynamic_outer,
+            &vocab,
+            4,
+            "dynamic-shared-fast-static-upgrade-vs-dynamic",
         );
     }
 
@@ -25385,6 +26010,14 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
 
         // Exhaust the small reachable token-prefix graph.  We compare masks
         // rather than the inline lowering's trivia-only completion artifact;
@@ -25627,6 +26260,14 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
             .static_dynamic_overlay
@@ -25667,12 +26308,7 @@ table: &child.table,
             &[0, 5, 6, 2, 6, 3, 6, 5, 1][..],
             &[0, 2, 10][..],
         ] {
-            let mut states = [
-                composed.start(),
-                composed_dynamic.start(),
-                loaded.start(),
-                monolithic.start(),
-            ];
+            let mut states = make_states();
             for &token in sequence {
                 let masks: Vec<Vec<u32>> =
                     states.iter().map(|state| state.mask()).collect();
@@ -25697,9 +26333,7 @@ table: &child.table,
         // must agree across routes.
         for sequence in [&[0u32, 1][..], &[0, 2, 4, 1][..], &[12][..], &[11][..], &[0, 2, 5, 3, 1][..]] {
             let mut rejects = Vec::new();
-            for mut state in
-                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-            {
+            for mut state in make_states() {
                 rejects.push(replay_first_rejection(
                     &mut |token| state.commit_token(token).is_ok(),
                     sequence,
@@ -25807,6 +26441,18 @@ table: &child.table,
             .compose_linked_children_for_test_dynamic(&[("SUB", &child)], &vocab)
             .unwrap();
         let loaded = Constraint::load(&composed.save()).unwrap();
+        // Keep the large ConstraintState objects off this test function's
+        // stack. Several four-state inline arrays were enough to exceed the
+        // default Rust test-thread stack on macOS before the first statement
+        // executed, despite the runtime code itself being fine.
+        let make_states = || {
+            let mut states = Vec::with_capacity(4);
+            states.push(composed.start());
+            states.push(composed_dynamic.start());
+            states.push(loaded.start());
+            states.push(monolithic.start());
+            states
+        };
         // Real StaticParser shards installed (not fallback-only).
         let overlay = composed
             .static_dynamic_overlay
@@ -25851,12 +26497,7 @@ table: &child.table,
             &[4, 2, 1][..],
             &[4, 9, 1][..],
         ] {
-            let mut states = [
-                composed.start(),
-                composed_dynamic.start(),
-                loaded.start(),
-                monolithic.start(),
-            ];
+            let mut states = make_states();
             for &token in sequence {
                 let masks: Vec<Vec<u32>> =
                     states.iter().map(|state| state.mask()).collect();
@@ -25877,9 +26518,7 @@ table: &child.table,
         }
         // `Xab` remains extendible on every route: commit 6, then 2, then 1,
         // and assert acceptance (Xaba! is valid).
-        for mut state in
-            [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-        {
+        for mut state in make_states() {
             for &token in &[6u32, 2, 1] {
                 state.commit_token(token).unwrap_or_else(|error| {
                     panic!("Xab extension rejected at {token}: {error}")
@@ -25890,9 +26529,7 @@ table: &child.table,
         // Rejected: completed `Xab!` only.
         for sequence in [&[14u32][..], &[0, 2, 3, 1][..], &[6, 1][..], &[4, 3, 1][..], &[0, 8, 1][..]] {
             let mut rejects = Vec::new();
-            for mut state in
-                [composed.start(), composed_dynamic.start(), loaded.start(), monolithic.start()]
-            {
+            for mut state in make_states() {
                 rejects.push(replay_first_rejection(
                     &mut |token| state.commit_token(token).is_ok(),
                     sequence,
@@ -28146,7 +28783,12 @@ table: &child.table,
             for &token in &node.path {
                 st.commit_token(token).expect("static replay");
             }
-            if st.mask() != node.mask {
+            let actual = st.mask();
+            if actual != node.mask {
+                eprintln!(
+                    "[glrmask/test][public_nested_static_mismatch] path={:?} dynamic={:?} static={:?}",
+                    node.path, node.mask, actual,
+                );
                 mismatches += 1;
             }
         }
@@ -29041,9 +29683,10 @@ table: &child.table,
                 "multi-slot binds must not produce terminal aliases",
             );
         }
-        // Static shard authority: both tops hold StaticParser shards, no
-        // redundant global boundary parser, and the parent-block inner overlay
-        // carries no shards of its own.
+        // Static shard authority: both tops hold StaticParser shards and no
+        // redundant global boundary parser. The already-composed parent block
+        // retains its own static inner repair: under immediate block ownership
+        // the outer shard omits block-internal crossings by construction.
         {
             let overlay = stage3
                 .static_dynamic_overlay
@@ -29075,12 +29718,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the extension",
             );
         }
         // Byte-prefix differential (single-byte commits).
@@ -29441,10 +30091,12 @@ table: &child.table,
         )
         .expect("bind2 dynamic")
         .constraint;
-        // Static shard authority: both tops hold StaticParser shards, no
-        // redundant global boundary parser, and the parent-block inner overlay
-        // carries no shards of its own (outer block shards cover block-inner
-        // crossings).
+        // Static shard authority: both tops hold StaticParser shards and no
+        // redundant global boundary parser. The already-composed parent block
+        // retains its own static inner repair: under immediate block ownership
+        // the new outer shard deliberately omits block-internal crossings, so
+        // those retained shards are load-bearing coverage rather than duplicate
+        // work.
         {
             let overlay = stage2
                 .static_dynamic_overlay
@@ -29476,12 +30128,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the extension",
             );
         }
         // Byte-prefix differential (single-byte commits).
@@ -30956,8 +31615,8 @@ table: &child.table,
         .expect("dynamic extend after load")
         .constraint;
         // Static shard authority on the post-serde extend: both tops hold
-        // StaticParser shards, no redundant global boundary parser, and the
-        // parent-block inner overlay carries no shards of its own.
+        // StaticParser shards and no redundant global boundary parser. The
+        // loaded parent block retains its own static inner repair.
         {
             let overlay = stage2
                 .static_dynamic_overlay
@@ -30989,12 +31648,19 @@ table: &child.table,
                 inner
                     .segmented_parser_components
                     .iter()
-                    .all(|component| component.boundary.is_none()),
-                "parent-block overlay must carry no shards",
+                    .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    ))),
+                "parent-block overlay must retain only static inner shards",
             );
             assert!(
-                inner.segmented_boundary_shards.is_empty(),
-                "parent-block overlay shard list must be cleared",
+                !inner.segmented_boundary_shards.is_empty()
+                    && inner.segmented_boundary_shards.iter().all(|shard| matches!(
+                        shard.backend,
+                        crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                    )),
+                "parent-block overlay static shard list must survive the post-serde extension",
             );
         }
         // Byte-prefix differential (single-byte commits).
@@ -35015,21 +35681,40 @@ table: &dispatch.table,
             });
             // Phase 2 step 2 verification knob: NWA-level crossing filter
             // inside the entry point (before determinize/minimize).
-            let nwa_filter = std::env::var("PHASE1_NWAFILT")
+            let nwa_filter_enabled = std::env::var("PHASE1_NWAFILT")
                 .map(|value| value != "0")
-                .unwrap_or(false)
-                .then_some(nwa_crossing)
-                .flatten()
-                .map(|(terminal_offsets, start_component)| {
-                    tdwa::l2p::L2pCrossingFilter { terminal_offsets, start_component }
-                });
+                .unwrap_or(false);
+            let nwa_ownership = if nwa_filter_enabled {
+                nwa_crossing.map(|(terminal_offsets, _)| {
+                    tdwa::scope::BoundaryOwnership::flat(
+                        terminal_offsets,
+                        grammar.num_terminals,
+                    )
+                    .expect("phase1 crossing ownership")
+                })
+            } else {
+                None
+            };
+            let nwa_filter = match (nwa_crossing, nwa_ownership.as_ref()) {
+                (Some((_, start_component)), Some(ownership)) => {
+                    Some(tdwa::l2p::L2pCrossingFilter {
+                        ownership,
+                        start_component: tdwa::scope::ImmediateComponentId(
+                            start_component as u32,
+                        ),
+                    })
+                }
+                _ => None,
+            };
             let shard_options = if shared.is_some() || nwa_filter.is_some() {
                 Some(tdwa::l2p::L2pShardBuildOptions {
                     shared_equivalence: shared.as_ref(),
                     skip_ti_discovery: shared.is_some(),
+                    ti_candidate_groups: None,
                     crossing_filter: nwa_filter,
                     skip_core_compact: false,
                     follow_transparent: None,
+                    initial_state_domain_is_exact: false,
                 })
             } else {
                 None

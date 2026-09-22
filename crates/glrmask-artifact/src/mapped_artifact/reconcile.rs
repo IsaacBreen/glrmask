@@ -288,6 +288,19 @@ fn many_to_one_id_map_refines(
 }
 
 pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> InternalIdMap {
+    build_common_internal_id_map_impl(inputs, false)
+}
+
+pub(super) fn build_common_internal_id_map_preserving_unmapped_tokenizer(
+    inputs: &[&InternalIdMap],
+) -> InternalIdMap {
+    build_common_internal_id_map_impl(inputs, true)
+}
+
+fn build_common_internal_id_map_impl(
+    inputs: &[&InternalIdMap],
+    allow_unmapped_tokenizer: bool,
+) -> InternalIdMap {
     let num_tokenizer_states = inputs
         .iter()
         .map(|input| input.tokenizer_states.original_to_internal.len())
@@ -312,7 +325,7 @@ pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> Interna
                     inputs,
                     num_tokenizer_states,
                     |input| &input.tokenizer_states,
-                    false,
+                    allow_unmapped_tokenizer,
                 )
             },
             || {
@@ -330,7 +343,7 @@ pub(super) fn build_common_internal_id_map(inputs: &[&InternalIdMap]) -> Interna
                 inputs,
                 num_tokenizer_states,
                 |input| &input.tokenizer_states,
-                false,
+                allow_unmapped_tokenizer,
             ),
             build_common_many_to_one_id_map(
                 inputs,

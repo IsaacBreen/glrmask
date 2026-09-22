@@ -281,6 +281,20 @@ impl VocabPartition {
 }
 
 /// A grammar, vocabulary, and complete set of extern bindings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BoundarySummaryPolicy {
+    /// Do not prepare or persist the static-composition candidate summary.
+    Disabled,
+    /// Prepare the summary only when a later static composition actually needs
+    /// it. This is the default so ordinary standalone compilation pays no tax.
+    #[default]
+    LazyOnCompose,
+    /// Prepare the bounded conservative summary during component compilation so
+    /// later composition can consume it without first-touch analysis.
+    BoundedPrepare,
+}
+
+/// A grammar, vocabulary, and complete set of extern bindings.
 #[derive(Debug, Clone)]
 pub struct ConstraintSpec<'a> {
     grammar: Grammar<'a>,
@@ -289,6 +303,7 @@ pub struct ConstraintSpec<'a> {
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     unbound_grammar_names: Vec<String>,
     boundary_trigger_detail: BoundaryTriggerDetail,
+    boundary_summary_policy: BoundarySummaryPolicy,
 }
 
 /// Builder for [`ConstraintSpec`].
@@ -301,6 +316,7 @@ pub struct ConstraintSpecBuilder<'a> {
     token_bindings: BTreeMap<String, Vec<u32>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     boundary_trigger_detail: BoundaryTriggerDetail,
+    boundary_summary_policy: BoundarySummaryPolicy,
 }
 
 /// Internal input accepted by [`ConstraintSpecBuilder::bind_grammar`].
@@ -400,6 +416,22 @@ impl<'a> ConstraintSpec<'a> {
         if !constraint.late_grammar_slots.is_empty() {
             constraint.ensure_composition_reset_tokens_by_terminal();
         }
+        match self.boundary_summary_policy {
+            BoundarySummaryPolicy::Disabled => {
+                let _ = constraint.boundary_candidate_summary.set(
+                    crate::runtime::BoundaryCandidateSummary::Unknown {
+                        reason: crate::runtime::SummaryUnavailable::Disabled,
+                    },
+                );
+            }
+            BoundarySummaryPolicy::LazyOnCompose => {}
+            BoundarySummaryPolicy::BoundedPrepare => {
+                crate::compiler::boundary_candidates::prepare_boundary_candidate_summary(
+                    &constraint,
+                    self.vocab,
+                );
+            }
+        }
         // Keep first-save latency bounded without charging serialization to
         // every ordinary compile. Static virtual-residual constraints can carry
         // very large runtime sections, while exceptionally large parser-template
@@ -465,6 +497,22 @@ impl<'a> ConstraintSpec<'a> {
             component
                 .build_boundary_trigger(self.boundary_trigger_detail)
                 .map_err(Error::Compilation)?;
+            match self.boundary_summary_policy {
+                BoundarySummaryPolicy::Disabled => {
+                    let _ = component.boundary_candidate_summary.set(
+                        crate::runtime::BoundaryCandidateSummary::Unknown {
+                            reason: crate::runtime::SummaryUnavailable::Disabled,
+                        },
+                    );
+                }
+                BoundarySummaryPolicy::LazyOnCompose => {}
+                BoundarySummaryPolicy::BoundedPrepare => {
+                    crate::compiler::boundary_candidates::prepare_boundary_candidate_summary(
+                        component,
+                        self.vocab,
+                    );
+                }
+            }
         }
         Ok(constraint)
     }
@@ -568,6 +616,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
                 .map(|(name, grammar)| (name, GrammarBinding::Source(grammar)))
                 .collect(),
             boundary_trigger_detail: BoundaryTriggerDetail::None,
+            boundary_summary_policy: BoundarySummaryPolicy::LazyOnCompose,
         })
     }
 
@@ -578,6 +627,14 @@ impl<'a> ConstraintSpecBuilder<'a> {
     /// ordinary masking.
     pub fn boundary_trigger_detail(mut self, detail: BoundaryTriggerDetail) -> Self {
         self.boundary_trigger_detail = detail;
+        self
+    }
+
+    /// Configure preparation of the grammar-aware static composition boundary
+    /// candidate summary. This is independent of [`BoundaryTriggerDetail`],
+    /// which controls dynamic-runtime trigger metadata.
+    pub fn boundary_summary_policy(mut self, policy: BoundarySummaryPolicy) -> Self {
+        self.boundary_summary_policy = policy;
         self
     }
 
@@ -658,6 +715,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
             grammar_bindings: self.grammar_bindings,
             unbound_grammar_names,
             boundary_trigger_detail: self.boundary_trigger_detail,
+            boundary_summary_policy: self.boundary_summary_policy,
         })
     }
 

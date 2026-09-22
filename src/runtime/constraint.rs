@@ -1535,20 +1535,26 @@ impl Constraint {
         {
             return Ok(false);
         }
-        let relation = self
+        let overlay = self
             .static_dynamic_overlay
             .as_ref()
-            .and_then(|overlay| overlay.recursive_tokenizer_internal_tsids.get())
-            .cloned()
-            .ok_or_else(|| {
+            .ok_or_else(|| "recursive compiler tokenizer reconstruction requires overlay".to_owned())?;
+        let provider_native = overlay
+            .recursive_compiler_table
+            .get()
+            .is_some_and(|blob| blob.is_empty());
+        let relation = overlay.recursive_tokenizer_internal_tsids.get().cloned();
+        if !provider_native {
+            let relation = relation.as_ref().ok_or_else(|| {
                 "recursive compiler tokenizer reconstruction has no persisted state/TSID relation"
                     .to_owned()
             })?;
-        if relation.len() != expected_states {
-            return Err(format!(
-                "recursive compiler tokenizer TSID relation has {} rows for {expected_states} states",
-                relation.len(),
-            ));
+            if relation.len() != expected_states {
+                return Err(format!(
+                    "recursive compiler tokenizer TSID relation has {} rows for {expected_states} states",
+                    relation.len(),
+                ));
+            }
         }
         let tokenizer = self.rebuild_recursive_compiler_tokenizer()?;
         if tokenizer.num_states() as usize != expected_states {
@@ -1558,30 +1564,53 @@ impl Constraint {
             ));
         }
 
-        let tsid_count = self.internal_tsid_count();
-        let mut state_to_internal_tsid = Vec::with_capacity(expected_states);
-        let mut internal_tsid_to_states = vec![Vec::<u32>::new(); tsid_count];
-        let mut state_internal_tsid_offsets = Vec::with_capacity(expected_states + 1);
-        let mut state_internal_tsids = Vec::<u32>::new();
-        state_internal_tsid_offsets.push(0);
-        for (state, row) in relation.iter().enumerate() {
-            let Some(&primary) = row.first() else {
-                return Err(format!(
-                    "recursive compiler tokenizer state {state} has no internal TSID"
-                ));
-            };
-            state_to_internal_tsid.push(primary);
-            for &tsid in row {
-                if tsid as usize >= tsid_count {
-                    return Err(format!(
-                        "recursive compiler tokenizer state {state} references TSID {tsid}/{tsid_count}"
-                    ));
+        let (state_to_internal_tsid, internal_tsid_to_states, state_internal_tsid_offsets, state_internal_tsids) =
+            if provider_native {
+                // The fast DynamicDirect coordinator intentionally stores no
+                // outer quotient because live recursive execution never uses
+                // it. A later static/compiler analysis can safely over-refine
+                // to the exact raw-state identity coordinate on demand.
+                (
+                    (0..expected_states as u32).collect::<Vec<_>>(),
+                    Vec::new(),
+                    vec![u32::MAX],
+                    Vec::new(),
+                )
+            } else {
+                let relation = relation
+                    .as_ref()
+                    .expect("non-provider-native recursive compiler tokenizer requires relation");
+                let tsid_count = self.internal_tsid_count();
+                let mut state_to_internal_tsid = Vec::with_capacity(expected_states);
+                let mut internal_tsid_to_states = vec![Vec::<u32>::new(); tsid_count];
+                let mut state_internal_tsid_offsets = Vec::with_capacity(expected_states + 1);
+                let mut state_internal_tsids = Vec::<u32>::new();
+                state_internal_tsid_offsets.push(0);
+                for (state, row) in relation.iter().enumerate() {
+                    let Some(&primary) = row.first() else {
+                        return Err(format!(
+                            "recursive compiler tokenizer state {state} has no internal TSID"
+                        ));
+                    };
+                    state_to_internal_tsid.push(primary);
+                    for &tsid in row {
+                        if tsid as usize >= tsid_count {
+                            return Err(format!(
+                                "recursive compiler tokenizer state {state} references TSID {tsid}/{tsid_count}"
+                            ));
+                        }
+                        internal_tsid_to_states[tsid as usize].push(state as u32);
+                        state_internal_tsids.push(tsid);
+                    }
+                    state_internal_tsid_offsets.push(state_internal_tsids.len() as u32);
                 }
-                internal_tsid_to_states[tsid as usize].push(state as u32);
-                state_internal_tsids.push(tsid);
-            }
-            state_internal_tsid_offsets.push(state_internal_tsids.len() as u32);
-        }
+                (
+                    state_to_internal_tsid,
+                    internal_tsid_to_states,
+                    state_internal_tsid_offsets,
+                    state_internal_tsids,
+                )
+            };
 
         self.tokenizer = tokenizer;
         self.state_to_internal_tsid = state_to_internal_tsid;
@@ -1600,6 +1629,91 @@ impl Constraint {
         self.terminal_live_states = self.compute_terminal_live_states();
         self.tokenizer_fast_transitions = Self::compute_tokenizer_fast_transitions_for(&self.tokenizer);
         Ok(true)
+    }
+
+
+    /// Reconstruct the exact compiler-only flattened table from the retained
+    /// recursive component tree. Provider-native DynamicDirect coordinators
+    /// intentionally omit their historical flattened compiler blob at build
+    /// time; a later static/legacy composition is allowed to pay this cost on
+    /// demand without changing the live recursive runtime representation.
+    fn rebuild_recursive_compiler_table_from_components(&self) -> Result<GLRTable, String> {
+        let overlay = self
+            .static_dynamic_overlay
+            .as_ref()
+            .ok_or_else(|| "recursive compiler-table reconstruction requires overlay".to_owned())?;
+        if overlay.segmented_parser_components.is_empty() {
+            return Err("recursive compiler-table reconstruction has no components".to_owned());
+        }
+
+        let mut prepared = Vec::<Constraint>::with_capacity(overlay.segmented_parser_components.len());
+        for component in &overlay.segmented_parser_components {
+            let mut constraint = component.constraint.as_ref().clone();
+            constraint.prepare_recursive_compiler_table_for_composition()?;
+            prepared.push(constraint);
+        }
+
+        let mut slots_by_child = vec![Vec::<u32>::new(); prepared.len()];
+        for (link_index, link) in overlay.segmented_parser_links.iter().enumerate() {
+            if link.parent_component != 0 {
+                return Err(format!(
+                    "recursive compiler-table reconstruction link {link_index} has non-root parent component {}",
+                    link.parent_component,
+                ));
+            }
+            let child = link.child_component as usize;
+            if child == 0 || child >= prepared.len() {
+                return Err(format!(
+                    "recursive compiler-table reconstruction link {link_index} references invalid child {child}",
+                ));
+            }
+            slots_by_child[child].push(link.slot_terminal);
+        }
+        for slots in &mut slots_by_child {
+            slots.sort_unstable();
+            slots.dedup();
+        }
+
+        let mut child_rules = Vec::with_capacity(prepared.len().saturating_sub(1));
+        for child in prepared.iter().skip(1) {
+            child_rules.push(child.retained_table_rules()?);
+        }
+        let parent_rules = prepared[0].retained_table_rules()?;
+        let mut table_inputs = Vec::with_capacity(prepared.len().saturating_sub(1));
+        for component_index in 1..prepared.len() {
+            let slots = &slots_by_child[component_index];
+            let Some((&placeholder_terminal, additional_placeholder_terminals)) = slots.split_first()
+            else {
+                return Err(format!(
+                    "recursive compiler-table reconstruction component {component_index} has no linker slot",
+                ));
+            };
+            let child = &prepared[component_index];
+            table_inputs.push(crate::compiler::glr::table::SubgrammarTableInput {
+                placeholder_terminal,
+                additional_placeholder_terminals,
+                table: &child.table,
+                ignore_terminal: child.ignore_terminal,
+                start_nullable: child.composition_start_nullable()?,
+            });
+        }
+
+        let composed = crate::compiler::glr::table::compose_subgrammar_tables_explicit_with_rules(
+            &prepared[0].table,
+            parent_rules,
+            prepared[0].ignore_terminal,
+            &table_inputs,
+            &child_rules,
+        )?;
+        let mut table = composed.table;
+        if table.num_terminals != self.table.num_terminals {
+            return Err(format!(
+                "rebuilt recursive compiler table has {} terminals, grammar shell has {}",
+                table.num_terminals, self.table.num_terminals,
+            ));
+        }
+        table.set_embedded_end_token_ids(&self.table.embedded_end_token_ids());
+        Ok(table)
     }
 
     /// Materialize the exact flattened parser table used only by later
@@ -1625,14 +1739,19 @@ impl Constraint {
             .ok_or_else(|| {
                 "recursive composition has no packed compiler table".to_owned()
             })?;
-        let table = crate::compiler::glr::table::artifact_serde::from_compact_bytes(blob.as_ref())?;
+        let provider_native = blob.is_empty();
+        let table = if provider_native {
+            self.rebuild_recursive_compiler_table_from_components()?
+        } else {
+            crate::compiler::glr::table::artifact_serde::from_compact_bytes(blob.as_ref())?
+        };
         if table.num_terminals != self.table.num_terminals {
             return Err(format!(
                 "recursive compiler table has {} terminals, grammar shell has {}",
                 table.num_terminals, self.table.num_terminals,
             ));
         }
-        if table.num_rules != self.table.num_rules {
+        if !provider_native && table.num_rules != self.table.num_rules {
             return Err(format!(
                 "recursive compiler table has {} rules, grammar shell has {}",
                 table.num_rules, self.table.num_rules,
@@ -2535,9 +2654,21 @@ impl Constraint {
         if self.uses_compact_segmented_parser_runtime() {
             let layout = self.recursive_parser_layout_ref()?;
             if tokenizer_state < layout.total_tokenizer_states {
-                return self
-                    .static_dynamic_overlay
-                    .as_ref()?
+                let overlay = self.static_dynamic_overlay.as_ref()?;
+                let provider_native_compiler_view = overlay
+                    .recursive_compiler_table
+                    .get()
+                    .is_some_and(|blob| blob.is_empty())
+                    && self.state_to_internal_tsid.len() == layout.total_tokenizer_states as usize;
+                if provider_native_compiler_view {
+                    return Some(
+                        self.internal_tsids_for_state(tokenizer_state)
+                            .iter()
+                            .copied()
+                            .collect(),
+                    );
+                }
+                return overlay
                     .recursive_tokenizer_internal_tsids
                     .get()?
                     .get(tokenizer_state as usize)

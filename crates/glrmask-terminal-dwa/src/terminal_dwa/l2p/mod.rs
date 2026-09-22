@@ -60,15 +60,18 @@ use nwa_builder::{
 use terminal_interchangeability::{
     active_terminals_for_partition, binary_transport_modes_from_witnesses,
     canonicalize_transport_mode_states, coalesced_disallowed_follows,
-    discover_one_round_with_transport_witnesses_in_context, fold_one_round_partition,
+    discover_one_round_with_transport_witnesses_in_context,
+    discover_one_round_with_transport_witnesses_in_context_permitted,
+    fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
     restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
     TiDiscoveryContext,
 };
-use postprocess::{
+pub use postprocess::{
     apply_disallowed_follow_constraints, canonicalize_acyclic_nwa, collapse_always_allowed,
-    filter_nwa_to_crossing_paths, max_structural_label_depth_to_final, prune_non_coreachable_states,
+    filter_dwa_to_crossing_paths, filter_nwa_to_crossing_paths,
+    max_structural_label_depth_to_final, prune_non_coreachable_states,
 };
 
 fn l2p_timing_profile_enabled() -> bool {
@@ -612,8 +615,8 @@ pub struct SharedL2pEquivalence {
 /// table's `terminal_offsets` (exactly one owner per terminal).
 #[derive(Debug, Clone, Copy)]
 pub struct L2pCrossingFilter<'a> {
-    pub terminal_offsets: &'a [u32],
-    pub start_component: usize,
+    pub ownership: &'a super::scope::BoundaryOwnership,
+    pub start_component: super::scope::ImmediateComponentId,
 }
 
 /// Optional per-build overrides for boundary-shard L2P builds. `None`
@@ -628,6 +631,11 @@ pub struct L2pShardBuildOptions<'a> {
     /// Skip terminal-interchangeability discovery rounds (exact: TI-off is
     /// the baseline construction; discovery aborts on shard inputs).
     pub skip_ti_discovery: bool,
+    /// Optional caller-certified candidate families for witnessed terminal
+    /// interchangeability.  Discovery may merge only within these families;
+    /// every accepted merge still requires the ordinary exact transport
+    /// witness. `None` retains the ordinary broad-discovery behavior.
+    pub ti_candidate_groups: Option<&'a [Vec<TerminalID>]>,
     /// Apply the NWA-level crossing filter before determinize/minimize.
     pub crossing_filter: Option<L2pCrossingFilter<'a>>,
     /// Skip the core TSID/token compaction and keep the Step-1 coordinate
@@ -644,6 +652,163 @@ pub struct L2pShardBuildOptions<'a> {
     /// canonical global ignore is tracked separately through
     /// `ignore_terminal`, which controls more than follow pruning.
     pub follow_transparent: Option<&'a BitSet>,
+    /// The incoming state map is the complete checked token-start domain, not
+    /// an incomplete quotient whose unmapped raw states should be reintroduced.
+    /// Each represented class is exact for this boundary build (the scoped
+    /// path currently supplies singletons), so the preliminary
+    /// restricted-observation pass must preserve that sparse domain.
+    pub initial_state_domain_is_exact: bool,
+}
+
+/// Deliberately narrow TI candidates for scoped boundary builds.
+///
+/// This is only a cheap pre-certificate for *which pairs may be attempted*;
+/// the exact TI oracle still proves every transport.  We require identical
+/// retained terminal-expression shape, immediate-component ownership, follow
+/// rows, and scoped-ignore policy, and exclude protected/special shift
+/// terminals. Expression *shape* is intentionally weaker than expression
+/// equality: byte-identical definitions are already merged by the ordinary
+/// compiler, while TI is useful for symmetric definitions such as same-length
+/// literals. Shape is only a candidate filter; the exact transport witness is
+/// still mandatory.
+/// These conditions preserve the lexical crossing predicate before raw labels
+/// are restored by witnessed transport.
+pub fn scoped_terminal_interchangeability_candidate_groups(
+    tokenizer: &Tokenizer,
+    active_terminals: &[bool],
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    ignore_terminal: Option<TerminalID>,
+    scope: &super::scope::BoundaryAnalysisScope,
+) -> Vec<Vec<TerminalID>> {
+    fn same_candidate_shape(
+        left: &crate::automata::lexer::ast::Expr,
+        right: &crate::automata::lexer::ast::Expr,
+    ) -> bool {
+        use crate::automata::lexer::ast::Expr;
+        match (left, right) {
+            (Expr::U8Seq(left), Expr::U8Seq(right)) => left.len() == right.len(),
+            // Distinct character classes can have very different overlap
+            // structure, so keep this narrow unless they are literally equal.
+            (Expr::U8Class(left), Expr::U8Class(right)) => left == right,
+            (Expr::Dfa(left), Expr::Dfa(right)) => left == right,
+            (
+                Expr::Intersect {
+                    expr: left_expr,
+                    intersect: left_intersect,
+                },
+                Expr::Intersect {
+                    expr: right_expr,
+                    intersect: right_intersect,
+                },
+            ) => {
+                same_candidate_shape(left_expr, right_expr)
+                    && same_candidate_shape(left_intersect, right_intersect)
+            }
+            (Expr::Seq(left), Expr::Seq(right)) | (Expr::Choice(left), Expr::Choice(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| same_candidate_shape(left, right))
+            }
+            (
+                Expr::Exclude {
+                    expr: left_expr,
+                    exclude: left_exclude,
+                },
+                Expr::Exclude {
+                    expr: right_expr,
+                    exclude: right_exclude,
+                },
+            ) => {
+                same_candidate_shape(left_expr, right_expr)
+                    && same_candidate_shape(left_exclude, right_exclude)
+            }
+            (
+                Expr::Repeat {
+                    expr: left_expr,
+                    min: left_min,
+                    max: left_max,
+                },
+                Expr::Repeat {
+                    expr: right_expr,
+                    min: right_min,
+                    max: right_max,
+                },
+            ) => {
+                left_min == right_min
+                    && left_max == right_max
+                    && same_candidate_shape(left_expr, right_expr)
+            }
+            (Expr::Shared(left), Expr::Shared(right)) => same_candidate_shape(left, right),
+            (Expr::Shared(left), right) => same_candidate_shape(left, right),
+            (left, Expr::Shared(right)) => same_candidate_shape(left, right),
+            (Expr::Epsilon, Expr::Epsilon) => true,
+            _ => false,
+        }
+    }
+
+    let Some(exprs) = tokenizer.terminal_exprs() else {
+        return Vec::new();
+    };
+    let follows_equal = |left: TerminalID, right: TerminalID| {
+        match (
+            disallowed_follows.get(&left),
+            disallowed_follows.get(&right),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            (Some(left), None) => left.is_zero(),
+            (None, Some(right)) => right.is_zero(),
+            (None, None) => true,
+        }
+    };
+    let is_transparent = |terminal: TerminalID| {
+        scope
+            .follow_transparent()
+            .is_some_and(|bits| bits.get(terminal as usize))
+    };
+    let mut groups = Vec::<Vec<TerminalID>>::new();
+    for terminal in 0..active_terminals.len() {
+        if !active_terminals[terminal] {
+            continue;
+        }
+        let terminal = terminal as TerminalID;
+        if Some(terminal) == ignore_terminal
+            || is_transparent(terminal)
+            || grammar.protected_shift_terminals.get(terminal as usize)
+        {
+            continue;
+        }
+        let Some(expr) = exprs.get(terminal as usize) else {
+            continue;
+        };
+        let owner = scope.owner_of_terminal(terminal);
+        if owner.is_none() {
+            continue;
+        }
+        let mut placed = false;
+        for group in &mut groups {
+            let representative = group[0];
+            if scope.owner_of_terminal(representative) == owner
+                && exprs
+                    .get(representative as usize)
+                    .is_some_and(|representative_expr| {
+                        same_candidate_shape(representative_expr, expr)
+                    })
+                && follows_equal(representative, terminal)
+            {
+                group.push(terminal);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            groups.push(vec![terminal]);
+        }
+    }
+    groups.retain(|group| group.len() >= 2);
+    groups
 }
 
 /// Run only the Step 1 equivalence analysis for a shard build, with the exact
@@ -867,7 +1032,10 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // The pre-TI quotient and representative-core token-position partition are
     // two wrappers over the same C map. Build the positional analysis once.
     let (global_state_quotient, token_position_partition) =
-        if l2p_global_token_position_enabled() && matches!(partition_label, "p7" | "p8") {
+        if shard_options.is_none()
+            && l2p_global_token_position_enabled()
+            && matches!(partition_label, "p7" | "p8")
+        {
             match equivalence_analysis::state_equivalence::global_token_position::
                 compute_global_token_position_state_views(
                     tokenizer,
@@ -946,12 +1114,24 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let mut round_count = 0usize;
                     let mut first_round_class_count = None;
                     loop {
-                        let round = discover_one_round_with_transport_witnesses_in_context(
-                            tokenizer,
-                            &active,
-                            &discovery_context,
-                            ignore_terminal,
-                        );
+                        let round = if let Some(permitted_groups) =
+                            shard_options.and_then(|options| options.ti_candidate_groups)
+                        {
+                            discover_one_round_with_transport_witnesses_in_context_permitted(
+                                tokenizer,
+                                &active,
+                                &discovery_context,
+                                ignore_terminal,
+                                Some(permitted_groups),
+                            )
+                        } else {
+                            discover_one_round_with_transport_witnesses_in_context(
+                                tokenizer,
+                                &active,
+                                &discovery_context,
+                                ignore_terminal,
+                            )
+                        };
                         let next_active =
                             active_terminals_for_partition(&round.partition, active.len());
                         let next_classes = fold_one_round_partition(&classes, &round.partition);
@@ -1161,8 +1341,21 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         .as_ref()
         .map(|seed| &seed.state_map)
         .or(initial_state_map);
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        if let Some(map) = equivalence_initial_state_map {
+            eprintln!(
+                "SCOPED_L2P_EQ_INPUT partition={} ti_seed={} o2i={:?} classes={:?} reps={:?}",
+                partition_label,
+                ti_restricted_observation_seed.is_some(),
+                map.original_to_internal,
+                map.internal_to_originals,
+                map.representative_original_ids,
+            );
+        }
+    }
     let equivalence_initial_state_map_has_stable_restricted_observation =
-        ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
+        shard_options.is_some_and(|options| options.initial_state_domain_is_exact)
+        || ti_restricted_observation_seed.as_ref().is_some_and(|seed| {
             equivalence_active_groups
                 .is_some_and(|active| active == seed.active_terminals.as_ref())
                 && relevant_bytes == seed.relevant_bytes
@@ -1176,7 +1369,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // run itself (same tokenizer, vocab, follows, grammar scope, active set),
     // computed once per link — a cache, not a shortcut, so the note above
     // still holds. The id_map boundary below reports 0 ms for the reuse.
-    let (simplified_id_map, equiv_profile) = match shared_equivalence {
+    let (mut simplified_id_map, equiv_profile) = match shared_equivalence {
         Some(shared) => (shared.id_map.clone(), shared.profile.clone()),
         None => analyze_equivalences(
             partition_label,
@@ -1208,6 +1401,20 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             prebuilt_token_trie,
         ),
     };
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        eprintln!(
+            "SCOPED_L2P_EQ partition={} o2i={:?} classes={:?} reps={:?}",
+            partition_label,
+            simplified_id_map.tokenizer_states.original_to_internal,
+            simplified_id_map.tokenizer_states.internal_to_originals,
+            simplified_id_map.tokenizer_states.representative_original_ids,
+        );
+    }
+    if shard_options.is_some_and(|options| options.initial_state_domain_is_exact) {
+        super::scope::complete_with_continuation_singletons(
+            &mut simplified_id_map.tokenizer_states,
+        );
+    }
 
     if id_map_only {
         let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1451,7 +1658,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let nwa_states_before = nwa.states().len();
                     nwa = filter_nwa_to_crossing_paths(
                         &nwa,
-                        filter.terminal_offsets,
+                        filter.ownership,
                         filter.start_component,
                     );
                     prune_non_coreachable_states(&mut nwa);
@@ -1460,7 +1667,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                         eprintln!(
                             "[glrmask/profile][l2p_crossing_filter] partition={} start_component={} nwa_states_before={} nwa_states_after={} total_ms={:.3}",
                             partition_label,
-                            filter.start_component,
+                            filter.start_component.0,
                             nwa_states_before,
                             nwa.states().len(),
                             elapsed_ms,
@@ -1844,6 +2051,15 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     } else {
         (core_dwa, core_id_map, core_dwa_stats_after_compact)
     };
+    if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        eprintln!(
+            "SCOPED_L2P_OUT partition={} o2i={:?} classes={:?} reps={:?}",
+            partition_label,
+            id_map.tokenizer_states.original_to_internal,
+            id_map.tokenizer_states.internal_to_originals,
+            id_map.tokenizer_states.representative_original_ids,
+        );
+    }
     let ti_post_dwa_total_ms = ti_post_dwa_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -2114,7 +2330,18 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
 
 #[cfg(test)]
 mod ti_mre_tests {
-    use std::{env, ffi::OsString, sync::Mutex};
+    use std::{collections::BTreeMap, env, ffi::OsString, sync::{Arc, Mutex}};
+
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex_monolithic;
+    use crate::automata::lexer::Lexer;
+    use crate::compiler::stages::equiv_types::ManyToOneIdMap;
+    use crate::grammar::flat::{Rule, Symbol};
+    use crate::Vocab;
+    use super::{
+        build_l2p_id_map_and_terminal_dwa_mode, AnalyzedGrammar, L2pShardBuildOptions,
+        TerminalColoring,
+    };
 
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -2145,6 +2372,96 @@ mod ti_mre_tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn scoped_witnessed_ti_strict_reference_matches_singleton_construction() {
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+        ];
+        let tokenizer = build_regex_monolithic(&expressions).into_tokenizer(
+            3,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let grammar = AnalyzedGrammar::from_composed_rules(
+            vec![
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1), Symbol::Terminal(2)],
+                },
+            ],
+            3,
+            vec!["A".into(), "B".into(), "X".into()],
+            vec!["doc".into(), "augmented".into()],
+            1,
+        );
+        let vocab = Vocab::new(vec![
+            (0, b"ax".to_vec()),
+            (1, b"aax".to_vec()),
+            (2, b"x".to_vec()),
+        ]);
+        let active = vec![true, true, true];
+        let state_count = tokenizer.num_states() as usize;
+        let raw_ids = (0..state_count as u32).collect::<Vec<_>>();
+        let initial_state_map = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+            raw_ids.clone(),
+            raw_ids,
+        );
+        let seed_filter = vec![true; state_count];
+        let permitted = vec![vec![0, 1]];
+        let options = L2pShardBuildOptions {
+            shared_equivalence: None,
+            skip_ti_discovery: false,
+            ti_candidate_groups: Some(&permitted),
+            crossing_filter: None,
+            skip_core_compact: true,
+            follow_transparent: None,
+            initial_state_domain_is_exact: true,
+        };
+        let output = build_l2p_id_map_and_terminal_dwa_mode(
+            "scoped_ti_mre",
+            &tokenizer,
+            &vocab,
+            &TerminalColoring::identity(3),
+            false,
+            None,
+            &grammar,
+            &vec![Vec::new(); 3],
+            &active,
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&initial_state_map),
+            false,
+            Some(&seed_filter),
+            Some(&options),
+        )
+        .expect("scoped witnessed TI fixture must build");
+        assert!(!output.dwa.states().is_empty());
     }
 
     #[test]

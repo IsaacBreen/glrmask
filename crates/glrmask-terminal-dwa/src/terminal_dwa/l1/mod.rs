@@ -565,6 +565,28 @@ fn prefer_exact_profiles_over_projected_l1(
 }
 
 #[inline]
+fn initial_state_map_contains_original(
+    initial_state_map: Option<&ManyToOneIdMap>,
+    original: u32,
+) -> bool {
+    initial_state_map.is_none_or(|map| {
+        map.original_to_internal
+            .get(original as usize)
+            .copied()
+            .is_some_and(|internal| internal != u32::MAX)
+    })
+}
+
+#[inline]
+fn initial_state_map_is_sparse(initial_state_map: Option<&ManyToOneIdMap>) -> bool {
+    initial_state_map.is_some_and(|map| {
+        map.original_to_internal
+            .iter()
+            .any(|&internal| internal == u32::MAX)
+    })
+}
+
+#[inline]
 fn should_use_fast_projected_l1_id_map(
     partition_label: &str,
     vocab_count: usize,
@@ -1043,7 +1065,7 @@ pub fn build_l1_id_map_and_terminal_dwa(
         partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
         ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
         initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
-        subset_parent_order, false,
+        subset_parent_order, false, false,
     )
 }
 
@@ -1062,13 +1084,14 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
     shared_generic_nfa_topology: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTopology>,
     shared_generic_nfa_trie: Option<&super::l2p::equivalence_analysis::state_equivalence::nfa::TokenBoundedAnalysisTrie>,
     subset_parent_order: Option<&L1IdentityVocabOrder>,
+    initial_state_domain_is_exact: bool,
     id_map_only: bool,
 ) -> Option<LocalIdMapTerminalDwa> {
     let input = implementations::BuildInput {
         partition_label, tokenizer, vocab, terminal_coloring, use_terminal_coloring,
         ignore_terminal, grammar, active_terminals, flat_trans, transitions_by_byte,
         initial_state_map, shared_generic_nfa_topology, shared_generic_nfa_trie,
-        subset_parent_order, id_map_only,
+        subset_parent_order, initial_state_domain_is_exact, id_map_only,
     };
     if id_map_only {
         // Vocabulary-partition compilation consumes only the exact L1 token
@@ -1083,11 +1106,14 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
                 ids,
             )
         });
-        let id_map = InternalIdMap {
+        let mut id_map = InternalIdMap {
             tokenizer_states,
             vocab_tokens: result.vocab_map,
             deferred_vocab_singleton_original_ids: None,
         };
+        if initial_state_domain_is_exact {
+            super::scope::complete_with_continuation_singletons(&mut id_map.tokenizer_states);
+        }
         return Some(LocalIdMapTerminalDwa {
             dwa: DWA::new(id_map.num_tsids(), id_map.max_internal_token_id()),
             id_map,
@@ -1098,7 +1124,13 @@ pub fn build_l1_id_map_and_terminal_dwa_mode(
             },
         });
     }
-    implementations::build_from_env(input)
+    let mut result = implementations::build_from_env(input)?;
+    if initial_state_domain_is_exact {
+        super::scope::complete_with_continuation_singletons(
+            &mut result.id_map.tokenizer_states,
+        );
+    }
+    Some(result)
 }
 
 /// Build an L1 id_map and terminal DWA for the given vocab and terminal set.
@@ -1141,8 +1173,12 @@ fn build_l1_id_map_and_terminal_dwa_production_impl(
 
     let total_started_at = Instant::now();
     let id_map_started_at = Instant::now();
+    let sparse_initial_scope = initial_state_map_is_sparse(initial_state_map);
     let (mut id_map, vocab_order, _state_to_rep, id_map_profile, exact_profile_reuse) =
-        if generic_epsilon_nfa && l1_generic_nfa_exact_profiles_enabled() {
+        if generic_epsilon_nfa
+            && l1_generic_nfa_exact_profiles_enabled()
+            && !sparse_initial_scope
+        {
             build_l1_generic_nfa_exact_id_map_impl(
                 tokenizer,
                 vocab,
@@ -1228,6 +1264,17 @@ fn build_l1_id_map_and_terminal_dwa_production_impl(
     let tsids_after_compact = mapped_dwa.id_map().num_tsids();
     let tokens_after_compact = mapped_dwa.id_map().num_internal_tokens();
     let (dwa, id_map) = mapped_dwa.into_parts();
+    if initial_state_map_is_sparse(initial_state_map)
+        && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some()
+    {
+        eprintln!(
+            "SCOPED_L1_OUT partition={} o2i={:?} classes={:?} reps={:?}",
+            partition_label,
+            id_map.tokenizer_states.original_to_internal,
+            id_map.tokenizer_states.internal_to_originals,
+            id_map.tokenizer_states.representative_original_ids,
+        );
+    }
     let compact_tsid_shrink_pct = if tsids_before_compact > 0 {
         (tsids_before_compact as f64 - tsids_after_compact as f64) * 100.0
             / tsids_before_compact as f64
@@ -1872,7 +1919,9 @@ fn build_l1_generic_nfa_exact_id_map_impl<'a>(
         raw_representatives.len() as u32,
         raw_representatives,
     );
-    tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    if initial_state_map_contains_original(initial_state_map, tokenizer.initial_state_id()) {
+        tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    }
 
     let view_profile_ids = std::mem::take(&mut exact_profile_reuse.representative_profile_ids);
     let view_direct_signatures = Arc::clone(&exact_profile_reuse.direct_state_to_terminal_signature);
@@ -2011,7 +2060,9 @@ fn build_l1_generic_nfa_fallback_id_map<'a>(
             ids,
         )
     });
-    tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    if initial_state_map_contains_original(initial_state_map, tokenizer.initial_state_id()) {
+        tokenizer_states.isolate_original(tokenizer.initial_state_id());
+    }
     let state_to_rep = state_to_representative_vector(&tokenizer_states, num_states);
     let exact_reps = tokenizer_states.num_internal_ids() as usize;
 
@@ -2104,6 +2155,32 @@ impl<'a> L1NfaPowerset<'a> {
                 .execute_from_state_end_only(&[], raw_state)
                 .to_vec(),
         )
+    }
+
+    fn start_config_scoped(&mut self, raw_state: u32, state_map: &ManyToOneIdMap) -> u32 {
+        if raw_state == self.tokenizer.initial_state_id()
+            && let Some(dispatch_roots) = self.tokenizer.deterministic_dispatch_roots()
+        {
+            let mut states = Vec::<u32>::new();
+            for &root in dispatch_roots {
+                if state_map
+                    .original_to_internal
+                    .get(root as usize)
+                    .copied()
+                    .is_none_or(|internal| internal == u32::MAX)
+                {
+                    continue;
+                }
+                states.extend(
+                    self.tokenizer
+                        .execute_from_state_end_only(&[], root)
+                        .iter()
+                        .copied(),
+                );
+            }
+            return self.intern(states);
+        }
+        self.start_config(raw_state)
     }
 
     #[inline]
@@ -2220,7 +2297,7 @@ fn build_l1_generic_nfa_terminal_dwa(
         .iter_representative_ids()
         .enumerate()
     {
-        let start_config = scanner.start_config(raw_state);
+        let start_config = scanner.start_config_scoped(raw_state, &id_map.tokenizer_states);
         if start_config != L1_NFA_DEAD_CONFIG {
             tsids_by_start_config
                 .entry(start_config)
@@ -2370,7 +2447,12 @@ fn build_l1_id_map<'a>(
         let mut tokenizer_states = initial_state_map
             .expect("checked by should_use_fast_projected_l1_id_map")
             .clone();
-        if tokenizer.has_scalar_deterministic_dispatch() {
+        if tokenizer.has_scalar_deterministic_dispatch()
+            && initial_state_map_contains_original(
+                initial_state_map,
+                tokenizer.initial_state_id(),
+            )
+        {
             tokenizer_states.isolate_original(tokenizer.initial_state_id());
         }
         let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
@@ -2533,7 +2615,9 @@ fn build_l1_id_map<'a>(
         state_representatives.len() as u32,
         state_representatives,
     );
-    if tokenizer.has_scalar_deterministic_dispatch() {
+    if tokenizer.has_scalar_deterministic_dispatch()
+        && initial_state_map_contains_original(initial_state_map, tokenizer.initial_state_id())
+    {
         tokenizer_states.isolate_original(tokenizer.initial_state_id());
     }
     let state_to_rep = state_to_representative_vector(&tokenizer_states, num_dfa_states);
@@ -5746,14 +5830,19 @@ fn build_l1_terminal_dwa(
             && let Some(dispatch_roots) = scalar_dispatch_roots
         {
             for &dispatch_root in dispatch_roots {
+                // A scoped boundary map deliberately omits reset-dispatch
+                // roots owned only by other immediate components.  The
+                // ordinary L1 builder historically expanded the global reset
+                // to every dispatch root, which turns a component-local token
+                // start into the link-wide post-commit reset.  Keep only roots
+                // represented by this analysis domain.  Unscoped maps cover
+                // every root, so ordinary compilation is unchanged.
+                let root_internal = id_map.tokenizer_states.original_to_internal
+                    [dispatch_root as usize];
+                if root_internal == u32::MAX {
+                    continue;
+                }
                 let start_state = if let Some(reuse) = dispatch_profile_reuse {
-                    let root_internal = id_map.tokenizer_states.original_to_internal
-                        [dispatch_root as usize];
-                    assert_ne!(
-                        root_internal,
-                        u32::MAX,
-                        "deterministic dispatch root missing from L1 tokenizer-state map"
-                    );
                     *reuse
                         .profile_representatives_by_internal
                         .get(root_internal as usize)

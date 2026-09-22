@@ -84,6 +84,134 @@ impl BoundaryTrigger {
     }
 }
 
+/// Stable identity of the inputs that make a boundary-candidate summary
+/// reusable.  The four pieces are intentionally separate so diagnostics can
+/// distinguish stale component semantics, interface changes, and vocabulary
+/// mismatches instead of treating every miss as an opaque hash failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct BoundaryCandidateFingerprint {
+    pub(crate) algorithm_version: u16,
+    pub(crate) component_semantics: [u8; 32],
+    pub(crate) public_interface: [u8; 32],
+    pub(crate) vocabulary: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SummaryPrecision {
+    RegularUpperBound,
+    ContextRefinedUpperBound,
+    BudgetWidenedUpperBound,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SummaryUnavailable {
+    Disabled,
+    Deferred,
+    LegacyArtifact,
+    MissingGrammarMetadata,
+    UnsupportedFiniteLexer,
+    InvalidatedBinding,
+    FingerprintMismatch,
+    MalformedMetadata,
+}
+
+/// Original/model-token ID set used by boundary summaries.  Sparse is the
+/// canonical wire form; Dense is useful when a component legitimately retains
+/// a large irregular set.  `AllByteTokensAtLeastTwo` is the safe top element
+/// for the proper-prefix question: one-byte tokens can never contain a
+/// non-empty proper byte prefix.
+#[derive(Debug, Clone)]
+pub(crate) enum OriginalTokenSet {
+    Empty,
+    Sparse(Arc<[u32]>),
+    Dense(Arc<BitSet>),
+    AllByteTokensAtLeastTwo,
+}
+
+impl OriginalTokenSet {
+    pub(crate) fn from_sorted_unique(ids: Vec<u32>, max_token_id: u32) -> Self {
+        if ids.is_empty() {
+            return Self::Empty;
+        }
+        // Dense becomes cheaper only when the set is genuinely dense. Keep a
+        // deliberately conservative crossover because Sparse is also the
+        // canonical persisted representation.
+        let dense_words = (max_token_id as usize + 64) / 64;
+        if ids.len() > dense_words.saturating_mul(3) {
+            let mut bits = BitSet::new(max_token_id as usize + 1);
+            for id in ids {
+                bits.set(id as usize);
+            }
+            Self::Dense(Arc::new(bits))
+        } else {
+            Self::Sparse(Arc::from(ids.into_boxed_slice()))
+        }
+    }
+
+    pub(crate) fn contains(&self, token_id: u32, bytes: &[u8]) -> bool {
+        match self {
+            Self::Empty => false,
+            Self::Sparse(ids) => ids.binary_search(&token_id).is_ok(),
+            Self::Dense(bits) => {
+                (token_id as usize) < bits.len() && bits.get(token_id as usize)
+            }
+            Self::AllByteTokensAtLeastTwo => bytes.len() >= 2,
+        }
+    }
+
+    pub(crate) fn canonical_ids<'a>(
+        &'a self,
+        tokens: impl Iterator<Item = (u32, &'a [u8])>,
+    ) -> Vec<u32> {
+        match self {
+            Self::Empty => Vec::new(),
+            Self::Sparse(ids) => ids.to_vec(),
+            Self::Dense(bits) => bits.iter_ones().map(|id| id as u32).collect(),
+            Self::AllByteTokensAtLeastTwo => tokens
+                .filter_map(|(id, bytes)| (bytes.len() >= 2).then_some(id))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum BoundaryCandidateSummary {
+    Unknown { reason: SummaryUnavailable },
+    Known {
+        fingerprint: BoundaryCandidateFingerprint,
+        tokens: OriginalTokenSet,
+        precision: SummaryPrecision,
+    },
+}
+
+impl Default for BoundaryCandidateSummary {
+    fn default() -> Self {
+        Self::Unknown {
+            reason: SummaryUnavailable::Deferred,
+        }
+    }
+}
+
+impl BoundaryCandidateSummary {
+    pub(crate) fn known_tokens_for(
+        &self,
+        fingerprint: &BoundaryCandidateFingerprint,
+    ) -> Option<&OriginalTokenSet> {
+        match self {
+            Self::Known {
+                fingerprint: actual,
+                tokens,
+                ..
+            } if actual == fingerprint => Some(tokens),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn is_known(&self) -> bool {
+        matches!(self, Self::Known { .. })
+    }
+}
+
 /// Small composition-time grammar summary retained with a compiled component.
 ///
 /// For a nonnullable child, substituting the child's language for a parent
@@ -9775,6 +9903,12 @@ pub struct Constraint {
     /// Ordinary static/dynamic compilation leaves this at `None` so there is
     /// no trigger construction cost unless explicitly requested in the future.
     pub(crate) boundary_trigger: BoundaryTrigger,
+    /// Grammar-aware proper-prefix model-token summary used only by static
+    /// composition boundary preparation.  It is intentionally independent of
+    /// `boundary_trigger`: the latter is a dynamic-runtime accelerator with a
+    /// different observation contract.  The lock permits lazy preparation by
+    /// composition without mutating the immutable constraint API.
+    pub(crate) boundary_candidate_summary: OnceLock<BoundaryCandidateSummary>,
     /// Named, compiler-generated linker terminals for unresolved
     /// `extern grammar` declarations. The token IDs backing these terminals
     /// are deliberately private and outside the model vocabulary; callers
@@ -10144,6 +10278,8 @@ pub(crate) struct ConstraintSerde {
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     #[serde(skip, default)]
     pub(crate) boundary_trigger: BoundaryTrigger,
+    #[serde(skip, default)]
+    pub(crate) boundary_candidate_summary: OnceLock<BoundaryCandidateSummary>,
     #[serde(skip, default)]
     pub(crate) late_grammar_slots: Vec<LateGrammarSlot>,
     #[serde(skip, default)]

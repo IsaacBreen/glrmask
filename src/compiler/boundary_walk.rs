@@ -20,6 +20,7 @@ use smallvec::SmallVec;
 
 use crate::automata::lexer::tokenizer::{Lexer, Tokenizer};
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::weighted_u32::minimize_acyclic::minimize_acyclic_owned;
 use crate::automata::weighted_u32::terminal_automaton::TerminalAutomaton;
 use crate::compiler::constraint_compose::{
     CompiledSubgrammarInput, PublishedStaticBoundaryShard, WalkBoundaryShardWork,
@@ -100,8 +101,8 @@ fn trace_boundary_terminal_dwa_words(label: &str, dwa: &DWA, num_terminals: usiz
 pub(crate) struct BoundaryWalkInputs<'a> {
     /// Merged (disjoint-union) tokenizer of the composition being linked.
     pub merged_tokenizer: &'a Tokenizer,
-    /// Full model vocabulary (no `T_i` restriction: Phase 1 showed trie
-    /// restriction loses via the minimize pathology).
+    /// Original-ID model-token candidate subset for this immediate component.
+    /// Unknown summaries are widened by the caller to the full vocabulary.
     pub vocab: &'a Vocab,
     /// Analyzed composed grammar (for always-allowed follows + the walk's
     /// terminal observation scope).
@@ -115,16 +116,8 @@ pub(crate) struct BoundaryWalkInputs<'a> {
     /// enforced by the parser-shard scoped identity transfers. The canonical
     /// global ignore is tracked separately through `ignore_terminal`.
     pub follow_transparent_ignores: Option<&'a BitSet>,
-    /// Composed table terminal offsets (terminal ownership per component).
-    pub terminal_offsets: &'a [u32],
-    /// Start component `i` (parent = 0, children in order).
-    pub component_index: usize,
-    /// `Commit_i`: token-start states of component `i` as merged-tokenizer
-    /// raw state ids (`tokenizer.num_states()` entries). The production
-    /// convention is all states of component `i` (see
-    /// `commit_states_for_component`): a sound superset of the true runtime
-    /// commit states.
-    pub commit_states: &'a [bool],
+    /// Checked initial/reset/ownership scope for this boundary shard.
+    pub scope: &'a tdwa::scope::BoundaryAnalysisScope,
     /// Retain non-crossing paths (bypass the NWA-level crossing filter).
     /// The link sets this only for the parent shard when a child can be
     /// traversed zero-width (nullable start): the composed parser then
@@ -133,8 +126,6 @@ pub(crate) struct BoundaryWalkInputs<'a> {
     /// component mask covers every dropped path); see
     /// `BoundaryShardLinkInputs::retain_parent_non_crossing_paths`.
     pub retain_non_crossing_paths: bool,
-    /// Link-once shared equivalence for the merged tokenizer (step 1).
-    pub shared_equivalence: &'a tdwa::l2p::SharedL2pEquivalence,
     /// Prebuilt flat transition table for the merged tokenizer, shared across
     /// shards. Built on demand when `None`.
     pub flat_trans: Option<&'a Arc<[u32]>>,
@@ -151,6 +142,13 @@ pub(crate) struct BoundaryWalkInputs<'a> {
 /// determinize minus minimize) + determinize + minimize.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BoundaryWalkProfile {
+    pub input_tokens: usize,
+    pub candidate_tokens: usize,
+    pub initial_states: usize,
+    pub continuation_reset_states: usize,
+    pub tokenizer_classes: usize,
+    pub token_classes: usize,
+    pub lexical_accepted_tokens: usize,
     pub setup_ms: f64,
     pub walk_ms: f64,
     pub id_map_ms: f64,
@@ -206,9 +204,6 @@ pub(crate) fn build_boundary_terminal_dwa(
     let tokenizer = inputs.merged_tokenizer;
     let num_terms = inputs.grammar.num_terminals as usize;
     let coloring = tdwa::types::TerminalColoring::identity(num_terms);
-    let always_allowed =
-        tdwa::grammar_helpers::compute_always_allowed_follows(inputs.grammar);
-    let active = vec![true; num_terms];
     let owned_flat;
     let flat: &Arc<[u32]> = match inputs.flat_trans {
         Some(flat) => flat,
@@ -217,63 +212,64 @@ pub(crate) fn build_boundary_terminal_dwa(
             &owned_flat
         }
     };
-    let crossing = tdwa::l2p::L2pCrossingFilter {
-        terminal_offsets: inputs.terminal_offsets,
-        start_component: inputs.component_index,
-    };
-    let shard_options = tdwa::l2p::L2pShardBuildOptions {
-        shared_equivalence: Some(inputs.shared_equivalence),
-        skip_ti_discovery: true,
-        crossing_filter: if inputs.retain_non_crossing_paths {
-            None
-        } else {
-            Some(crossing)
-        },
-        // The shard parser indexes (parser-stack x tsid); compaction would
-        // merge stack-distinguishable states and over-admit (inner-6).
-        skip_core_compact: true,
-        follow_transparent: inputs.follow_transparent_ignores,
-    };
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
     let walk_started = Instant::now();
-    let result = tdwa::l2p::build_l2p_id_map_and_terminal_dwa_mode(
-        "boundary_shard",
+    let (mapped, tdwa_profile) = tdwa::build_scoped_boundary_id_map_and_terminal_dwa(
         tokenizer,
         inputs.vocab,
         &coloring,
-        false,
         inputs.ignore_terminal,
         inputs.grammar,
-        &always_allowed,
-        &active,
         inputs.disallowed_follows,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(flat),
-        None,
-        None,
-        false,
-        Some(inputs.commit_states),
-        Some(&shard_options),
-    )?;
+        Arc::clone(flat),
+        inputs.scope,
+    );
+    let (automaton, id_map) = mapped.into_parts();
+    let mut dwa = match automaton {
+        TerminalAutomaton::Dwa(dwa) => dwa,
+        TerminalAutomaton::TokenDeterministicNwa(_) | TerminalAutomaton::EpsilonNwa(_) => {
+            unreachable!("scoped boundary family builder publishes one DWA")
+        }
+    };
+    // The scoped ordinary-family pipeline can retain structurally live
+    // terminal paths whose token/TSID weights have no complete original-token
+    // witness.  Such an automaton denotes the empty boundary language even
+    // though it still has transitions.  Canonicalize it here so callers do
+    // not carry dead terminal structure into template/parser construction and
+    // so the empty-shard representation remains stable across family choices.
+    let lexical_accepted_tokens = accepted_original_tokens(&dwa, &id_map).len();
+    let final_minimize_started = Instant::now();
+    if lexical_accepted_tokens == 0 {
+        dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
+    } else if dwa.num_states() > 1 && dwa.is_acyclic() {
+        // Family/partition reconciliation is language-preserving but can leave
+        // thousands of structurally distinct states whose weighted suffix
+        // languages are identical. Boundary shards are always acyclic; one
+        // final exact weighted minimization restores the canonical compact
+        // relation before signed parser substitution.
+        dwa = minimize_acyclic_owned(dwa);
+    }
+    let final_minimize_ms = final_minimize_started.elapsed().as_secs_f64() * 1000.0;
     let walk_ms = walk_started.elapsed().as_secs_f64() * 1000.0;
     let profile = BoundaryWalkProfile {
+        input_tokens: inputs.vocab.len(),
+        candidate_tokens: inputs.vocab.len(),
+        initial_states: inputs.scope.initial_states().len(),
+        continuation_reset_states: inputs.scope.reset_states().len(),
+        tokenizer_classes: id_map.num_tsids() as usize,
+        token_classes: id_map.num_internal_tokens() as usize,
+        lexical_accepted_tokens,
         setup_ms,
         walk_ms,
-        id_map_ms: result.profile.id_map_ms,
-        terminal_dwa_ms: result.profile.terminal_dwa_ms,
-        compact_ms: result.profile.compact_ms,
-        determinize_ms: result.profile.determinize_ms,
-        minimize_ms: result.profile.minimize_ms,
+        id_map_ms: tdwa_profile.id_map_ms,
+        terminal_dwa_ms: tdwa_profile.terminal_dwa_ms + final_minimize_ms,
+        compact_ms: tdwa_profile.compact_ms,
+        determinize_ms: tdwa_profile.determinize_ms,
+        minimize_ms: tdwa_profile.minimize_ms + final_minimize_ms,
     };
     Some(BoundaryWalkOutput {
-        dwa: result.dwa,
-        id_map: result.id_map,
+        dwa,
+        id_map,
         profile,
     })
 }
@@ -317,8 +313,16 @@ pub(crate) struct BoundaryShardLinkInputs<'a> {
     /// global ignore is tracked separately through `ignore_terminal`.
     pub follow_transparent_ignores: Option<&'a BitSet>,
     pub terminal_offsets: &'a [u32],
+    /// Optional leaf-to-immediate ownership for nested links. `None` means the
+    /// terminal offset blocks are themselves the immediate components.
+    pub leaf_to_immediate: Option<&'a [tdwa::scope::ImmediateComponentId]>,
     pub tokenizer_offsets: &'a [u32],
     pub component_state_counts: &'a [u32],
+    /// Per-immediate-component original token whitelist. `None` for one entry
+    /// means summary unavailable => full-vocabulary widening; `Some(empty)` is
+    /// a proved empty candidate domain. `None` for the outer option preserves
+    /// the full-vocabulary reference path used by low-level tests.
+    pub candidate_tokens_by_component: Option<&'a [Option<Vec<u32>>]>,
     /// Retain non-crossing paths in the PARENT shard (component 0). Child
     /// shards always filter. The filter drops exactly the single-component
     /// paths, and a dropped path gaps the mask only if the composed table
@@ -356,7 +360,11 @@ pub(crate) struct BuiltBoundaryShardWalk {
 /// block-crossing gaps, mirroring the proven nested fixture).
 pub(crate) struct BoundaryShardWalkPlan {
     pub start_component: usize,
-    pub filter_component: usize,
+    /// Ownership class used only by the lexical crossing predicate. This is
+    /// deliberately distinct from `start_component`: staged nested fallback
+    /// may use a concrete root-leaf owner while publication still targets one
+    /// immediate/top-level component.
+    pub crossing_owner: tdwa::scope::ImmediateComponentId,
     pub commit_states: Vec<bool>,
     pub retain_non_crossing_paths: bool,
 }
@@ -395,9 +403,9 @@ pub(crate) struct BoundaryShardLinkProfile {
 }
 
 /// Opt-in (`GLRMASK_PROFILE_COMPOSE`/`GLRMASK_PROFILE_COMPILE`) coherent
-/// breakdown of one flat static-link call. `total_ms` and the stage walls
-/// (`setup`, `link_context`, `walks`, `templates`, `parser_dwa`, `publish`)
-/// are INCLUSIVE monotonic-`Instant` walls. `walks_ms` is the wall of the
+/// breakdown of one flat static-link call. `total_ms`, `setup`,
+/// `link_context`, `walks`, `transfer_prepare`, and `shard_pipeline` are
+/// INCLUSIVE monotonic-`Instant` walls. `walks_ms` is the wall of the
 /// shard-walk fan-out, which runs via `rayon` `par_iter` unless
 /// `GLRMASK_DISABLE_MACRO_PARALLELISM` is set — so per-shard rows may sum
 /// above it from genuine thread overlap. Separately, per-shard
@@ -407,19 +415,28 @@ pub(crate) struct BoundaryShardLinkProfile {
 /// printed subfields must never be summed into a "per-shard walk total".
 /// The per-shard line therefore prints the raw subfields with an explicit
 /// inclusive labeling — do not sum them and do not treat any sum as elapsed
-/// time. `residual_ms` is `total - accounted` (setup + context +
-/// walks wall + templates + parser-DWA + publish walls): genuinely
-/// uninstrumented work, never a second count of an exclusive leaf.
+/// time. Per-shard template/parser/publish fields are work diagnostics and may
+/// overlap; they are not part of `accounted_ms`. `residual_ms` is `total -
+/// accounted` using only non-overlapping stage walls.
 pub(crate) struct WalkStaticLinkBreakdown {
     pub total_ms: f64,
     pub nested: bool,
     pub num_components: usize,
     pub setup_ms: f64,
+    pub link_context_ms: f64,
+    pub tokenizer_merge_ms: f64,
+    pub grammar_analysis_ms: f64,
+    pub candidate_summary_ms: f64,
     pub shared_flat_ms: f64,
-    pub shared_equiv_ms: f64,
-    pub walk_ms: f64,
+    /// End-to-end wall from per-component lexical walk through publication.
+    /// Component items may overlap under macro parallelism.
+    pub component_pipeline_wall_ms: f64,
+    pub transfer_prepare_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub templates_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub parser_dwa_ms: f64,
+    /// Sum of per-shard work durations; not a critical-path wall.
     pub publish_ms: f64,
     pub accounted_ms: f64,
     pub residual_ms: f64,
@@ -430,8 +447,8 @@ pub(crate) struct WalkStaticLinkBreakdown {
 /// profile is the existing `BoundaryWalkProfile` reported as-is (its
 /// `walk_ms` is the inclusive L2P-call wall and `terminal_dwa_ms` includes
 /// `determinize_ms` + `minimize_ms` — never sum the row), the parser-DWA
-/// templates/publish walls are true per-shard `Instant` walls (serial loop),
-/// and `slot` names the grammar placeholder bound at this link
+/// templates/parser/publish fields are true per-shard `Instant` work
+/// durations and may overlap with other rows. `slot` names the grammar placeholder bound at this link
 /// (`link.parent_component -> link.child_component` via that slot terminal).
 pub(crate) struct WalkStaticLinkShardBreakdown {
     pub start_component: usize,
@@ -439,18 +456,109 @@ pub(crate) struct WalkStaticLinkShardBreakdown {
     pub child_component: u32,
     pub slot_terminal: u32,
     pub walk: BoundaryWalkProfile,
+    pub summary_ms: f64,
+    pub summary_history_positions: usize,
+    pub summary_initial_frontier_pairs: usize,
+    pub summary_byte_steps: usize,
+    pub summary_peak_frontier_pairs: usize,
+    pub summary_widened_subtrees: usize,
     pub templates_ms: f64,
     pub parser_dwa_ms: f64,
     pub publish_ms: f64,
 }
 
-/// Build every boundary shard walk for a link: one shared equivalence, then
-/// one standard walk per component (in parallel unless macro parallelism is
-/// disabled). Components with empty crossing sets are skipped (the runtime
-/// skips missing shards). Returns `None` only when the vocab is empty.
-pub(crate) fn build_boundary_shard_walks(
+fn boundary_analysis_json_enabled() -> bool {
+    std::env::var_os("GLRMASK_BOUNDARY_ANALYSIS_JSON").is_some()
+}
+
+fn emit_boundary_analysis_json(breakdown: &WalkStaticLinkBreakdown) {
+    if !boundary_analysis_json_enabled() {
+        return;
+    }
+    let shards = breakdown
+        .per_shard
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "start_component": row.start_component,
+                "parent_component": row.parent_component,
+                "child_component": row.child_component,
+                "slot_terminal": row.slot_terminal,
+                "tokens": {
+                    "original": row.walk.input_tokens,
+                    "reusable_summary_candidates": row.walk.candidate_tokens,
+                    "lexical_accepted": row.walk.lexical_accepted_tokens,
+                },
+                "states": {
+                    "initial_raw": row.walk.initial_states,
+                    "continuation_reset": row.walk.continuation_reset_states,
+                    "tokenizer_classes": row.walk.tokenizer_classes,
+                    "token_classes": row.walk.token_classes,
+                },
+                "summary": {
+                    "ms": row.summary_ms,
+                    "history_positions": row.summary_history_positions,
+                    "initial_frontier_pairs": row.summary_initial_frontier_pairs,
+                    "byte_steps": row.summary_byte_steps,
+                    "peak_frontier_pairs": row.summary_peak_frontier_pairs,
+                    "widened_subtrees": row.summary_widened_subtrees,
+                },
+                "timing_ms": {
+                    "walk_setup": row.walk.setup_ms,
+                    "walk_inclusive": row.walk.walk_ms,
+                    "id_map": row.walk.id_map_ms,
+                    "terminal_dwa_inclusive": row.walk.terminal_dwa_ms,
+                    "compact": row.walk.compact_ms,
+                    "determinize": row.walk.determinize_ms,
+                    "minimize": row.walk.minimize_ms,
+                    "templates": row.templates_ms,
+                    "parser_dwa": row.parser_dwa_ms,
+                    "publish": row.publish_ms,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let record = serde_json::json!({
+        "schema": "glrmask.boundary-analysis.v1",
+        "nested": breakdown.nested,
+        "components": breakdown.num_components,
+        "timing_ms": {
+            "total": breakdown.total_ms,
+            "setup": breakdown.setup_ms,
+            "link_context": breakdown.link_context_ms,
+            "tokenizer_merge": breakdown.tokenizer_merge_ms,
+            "grammar_analysis": breakdown.grammar_analysis_ms,
+            "candidate_summary": breakdown.candidate_summary_ms,
+            "shared_flat": breakdown.shared_flat_ms,
+            "component_pipeline_wall": breakdown.component_pipeline_wall_ms,
+            "transfer_prepare": breakdown.transfer_prepare_ms,
+            "templates_work": breakdown.templates_ms,
+            "parser_dwa_work": breakdown.parser_dwa_ms,
+            "publish_work": breakdown.publish_ms,
+            "accounted": breakdown.accounted_ms,
+            "residual": breakdown.residual_ms,
+        },
+        "shards": shards,
+    });
+    eprintln!(
+        "[glrmask/boundary-analysis] {}",
+        serde_json::to_string(&record).expect("boundary analysis record serialization")
+    );
+}
+
+/// Build every boundary shard walk for a link through the ordinary terminal
+/// partition/family pipeline, independently scoped per immediate component.
+/// Components with a proved empty candidate domain or empty crossing set are
+/// skipped (the runtime skips missing shards). Returns `None` only when the
+/// model vocabulary itself is empty.
+fn map_boundary_shard_walks_with<R, F>(
     inputs: &BoundaryShardLinkInputs,
-) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
+    consume: &F,
+) -> Result<Option<(Vec<(usize, R)>, BoundaryShardLinkProfile)>, String>
+where
+    R: Send,
+    F: Fn(BuiltBoundaryShardWalk) -> Result<R, String> + Sync,
+{
     use rayon::prelude::*;
 
     let flat_started = Instant::now();
@@ -470,52 +578,42 @@ pub(crate) fn build_boundary_shard_walks(
             inputs.disallowed_follows,
         );
     }
-    let active = vec![true; num_terms];
-    let shared_started = Instant::now();
-    let conservative_disallowed_storage;
-    let shared_disallowed = if let Some(conservative) =
-        compute_conservative_follow_disallowed(inputs.disallowed_follows, inputs.follow_transparent_ignores)
-    {
-        conservative_disallowed_storage = conservative;
-        &conservative_disallowed_storage
-    } else {
-        inputs.disallowed_follows
-    };
-    let shared = tdwa::l2p::compute_shared_l2p_equivalence(
-        "boundary_shard",
-        inputs.merged_tokenizer,
-        inputs.vocab,
-        inputs.ignore_terminal,
-        inputs.grammar,
-        &active,
-        shared_disallowed,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        Some(&flat),
-        None,
-        None,
-    )?;
-    let shared_wall_ms = shared_started.elapsed().as_secs_f64() * 1000.0;
     let link_profile = BoundaryShardLinkProfile {
-        shared_id_map_ms: shared.id_map_ms,
-        shared_wall_ms,
-        shared_tsids: shared.id_map.num_tsids() as usize,
-        shared_itokens: shared.id_map.num_internal_tokens() as usize,
+        shared_id_map_ms: 0.0,
+        shared_wall_ms: 0.0,
+        shared_tsids: 0,
+        shared_itokens: 0,
         flat_ms,
         per_shard: Vec::new(),
     };
     let num_components = inputs.component_state_counts.len();
+    let ownership = Arc::new(match inputs.leaf_to_immediate {
+        Some(leaf_to_immediate) => {
+            let owner_count = leaf_to_immediate
+                .iter()
+                .map(|owner| owner.0)
+                .max()
+                .map_or(0, |owner| owner.saturating_add(1));
+            tdwa::scope::BoundaryOwnership::from_leaf_layout(
+                inputs.terminal_offsets,
+                inputs.grammar.num_terminals,
+                leaf_to_immediate,
+                owner_count,
+            )
+        }
+        None => tdwa::scope::BoundaryOwnership::flat(
+            inputs.terminal_offsets,
+            inputs.grammar.num_terminals,
+        ),
+    }
+    .expect("checked boundary link layout must define complete terminal ownership"));
     // Walk plans: explicit (nested) or derived per component (flat, unchanged).
     let plans: Vec<BoundaryShardWalkPlan> = match &inputs.walk_plans {
         Some(plans) => plans
             .iter()
             .map(|plan| BoundaryShardWalkPlan {
                 start_component: plan.start_component,
-                filter_component: plan.filter_component,
+                crossing_owner: plan.crossing_owner,
                 commit_states: plan.commit_states.clone(),
                 retain_non_crossing_paths: plan.retain_non_crossing_paths,
             })
@@ -523,7 +621,7 @@ pub(crate) fn build_boundary_shard_walks(
         None => (0..num_components)
             .map(|index| BoundaryShardWalkPlan {
                 start_component: index,
-                filter_component: index,
+                crossing_owner: tdwa::scope::ImmediateComponentId(index as u32),
                 commit_states: commit_states_for_component(
                     inputs.tokenizer_offsets,
                     inputs.component_state_counts[index],
@@ -535,25 +633,82 @@ pub(crate) fn build_boundary_shard_walks(
             })
             .collect(),
     };
-    // `None` means "empty crossing set, skip"; walk failure is impossible
-    // (the shared equivalence above proves the vocab is nonempty).
+    if let Some(candidate_sets) = inputs.candidate_tokens_by_component {
+        assert_eq!(
+            candidate_sets.len(),
+            plans.len(),
+            "boundary candidate sets must cover every planned start component",
+        );
+    }
+    // `None` means "empty crossing set, skip"; each component lane owns its
+    // scoped equivalence/terminal construction independently.
     let build_one = |plan: &BoundaryShardWalkPlan| -> Option<BuiltBoundaryShardWalk> {
-        let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
+        let candidate_storage;
+        let candidate_vocab = match inputs
+            .candidate_tokens_by_component
+            .and_then(|sets| sets.get(plan.start_component))
+        {
+            Some(Some(ids)) => {
+                if ids.is_empty() {
+                    return None;
+                }
+                let entries = ids
+                    .iter()
+                    .filter_map(|&id| {
+                        inputs
+                            .vocab
+                            .entries_map()
+                            .get(&id)
+                            .map(|bytes| (id, bytes.clone()))
+                    })
+                    .collect::<Vec<_>>();
+                if entries.len() != ids.len() {
+                    panic!("boundary candidate summary contains token IDs outside vocabulary");
+                }
+                candidate_storage = Vocab::new(entries);
+                &candidate_storage
+            }
+            Some(None) | None => inputs.vocab,
+        };
+        let initial_states = tdwa::scope::InitialStateDomain::from_mask(
+            inputs.merged_tokenizer.num_states() as usize,
+            plan.commit_states.clone(),
+        )
+        .expect("boundary walk plan must contain a nonempty checked initial-state domain");
+        let scope = tdwa::scope::BoundaryAnalysisScope::new(
+            initial_states,
+            inputs
+                .merged_tokenizer
+                .deterministic_reset_states()
+                .into_iter()
+                .collect(),
+            Arc::clone(&ownership),
+            plan.crossing_owner,
+            !plan.retain_non_crossing_paths,
+            inputs.follow_transparent_ignores.cloned(),
+        )
+        .expect("boundary walk scope must agree with the checked merged layout");
+        let mut output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
             merged_tokenizer: inputs.merged_tokenizer,
-            vocab: inputs.vocab,
+            vocab: candidate_vocab,
             grammar: inputs.grammar,
             disallowed_follows: inputs.disallowed_follows,
             ignore_terminal: inputs.ignore_terminal,
             follow_transparent_ignores: inputs.follow_transparent_ignores,
-            terminal_offsets: inputs.terminal_offsets,
-            component_index: plan.filter_component,
-            commit_states: &plan.commit_states,
-            shared_equivalence: &shared,
+            scope: &scope,
             flat_trans: Some(&flat),
             retain_non_crossing_paths: plan.retain_non_crossing_paths,
         })
-        .expect("nonempty-vocab shard walks must produce a DWA");
+        .expect("nonempty candidate-vocab shard walks must produce a DWA");
+        // `build_boundary_terminal_dwa` sees the already restricted model-token
+        // subset.  Preserve both sides of the funnel in the link-level profile:
+        // full original model vocabulary before reusable-summary restriction,
+        // then the exact candidate subset presented to the ordinary family
+        // pipeline for this component.
+        output.profile.input_tokens = inputs.vocab.len();
+        output.profile.candidate_tokens = candidate_vocab.len();
         let candidate_tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
+        output.profile.lexical_accepted_tokens = candidate_tokens.len();
         #[cfg(test)]
         if std::env::var_os("GLRMASK_DEBUG_A_WITNESS").is_some() {
             let emitted = boundary_emitted_terminals(
@@ -566,9 +721,8 @@ pub(crate) fn build_boundary_shard_walks(
                 .filter_map(|(terminal, &present)| present.then_some(terminal))
                 .collect::<Vec<_>>();
             eprintln!(
-                "[A-walk] start_component={} filter_component={} retain_non_crossing={} candidate_count={} token0_present={} token3_present={} candidates={:?} emitted_terminals={:?}",
+                "[A-walk] start_component={} retain_non_crossing={} candidate_count={} token0_present={} token3_present={} candidates={:?} emitted_terminals={:?}",
                 plan.start_component,
-                plan.filter_component,
                 plan.retain_non_crossing_paths,
                 candidate_tokens.len(),
                 candidate_tokens.contains(&0),
@@ -586,29 +740,66 @@ pub(crate) fn build_boundary_shard_walks(
             candidate_tokens,
         })
     };
-    let mut built: Vec<BuiltBoundaryShardWalk> = if crate::compiler::macro_parallelism_disabled()
-    {
+    let build_and_consume = |plan: &BoundaryShardWalkPlan| -> Result<
+        Option<(usize, R, BoundaryWalkProfile)>,
+        String,
+    > {
+        let Some(shard) = build_one(plan) else {
+            return Ok(None);
+        };
+        let start_component = shard.start_component;
+        let profile = shard.output.profile.clone();
+        let value = consume(shard)?;
+        Ok(Some((start_component, value, profile)))
+    };
+    let mut completed = if crate::compiler::macro_parallelism_disabled() {
         let mut timings = Vec::with_capacity(plans.len());
-        let built: Vec<Option<BuiltBoundaryShardWalk>> = plans
+        let built = plans
             .iter()
             .map(|plan| {
                 let started = Instant::now();
-                let result = build_one(plan);
+                let result = build_and_consume(plan);
                 timings.push(started.elapsed().as_secs_f64() * 1000.0);
                 result
             })
-            .collect();
-        crate::compiler::report_macro_item_timings("boundary_walk_shard_walks", &timings);
-        built.into_iter().flatten().collect()
+            .collect::<Result<Vec<_>, String>>()?;
+        crate::compiler::report_macro_item_timings("boundary_walk_component_pipelines", &timings);
+        built.into_iter().flatten().collect::<Vec<_>>()
     } else {
-        plans.par_iter().map(build_one).collect::<Vec<_>>().into_iter().flatten().collect()
+        plans
+            .par_iter()
+            .map(build_and_consume)
+            .collect::<Result<Vec<_>, String>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
     };
-    built.sort_by_key(|shard| shard.start_component);
+    completed.sort_by_key(|(start_component, _, _)| *start_component);
     let mut link_profile = link_profile;
-    for shard in &built {
-        link_profile.per_shard.push((shard.start_component, shard.output.profile.clone()));
+    for (start_component, _, profile) in &completed {
+        link_profile.per_shard.push((*start_component, profile.clone()));
     }
-    Some((built, link_profile))
+    let values = completed
+        .into_iter()
+        .map(|(start_component, value, _)| (start_component, value))
+        .collect();
+    Ok(Some((values, link_profile)))
+}
+
+/// Reference/test wrapper that stops after the scoped lexical walk. Production
+/// uses `map_boundary_shard_walks_with` so each component can continue into its
+/// parser pipeline immediately on the same worker.
+pub(crate) fn build_boundary_shard_walks(
+    inputs: &BoundaryShardLinkInputs,
+) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
+    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard))
+        .expect("identity boundary-walk consumer cannot fail")
+        .map(|(built, profile)| {
+            (
+                built.into_iter().map(|(_, shard)| shard).collect(),
+                profile,
+            )
+        })
 }
 
 /// Inputs for a production static boundary link over one composition.
@@ -647,10 +838,13 @@ pub(crate) struct WalkStaticLinkOutput {
     /// total. Pinned alongside the tokenizer layout after install.
     pub expected_leaf_terminal_offsets: Vec<u32>,
     pub expected_total_leaf_terminals: u32,
-    /// True when the link expanded a composed parent block or nested children
-    /// to leaves. The install site recursively clears inner-overlay shards in
-    /// this case (the outer block shards cover block-inner crossings).
-    pub has_nested_components: bool,
+    /// Top-level component indices whose nested retained boundary coverage is
+    /// not statically certified. Their outer shard deliberately uses the
+    /// legacy root-leaf crossing predicate, so it covers block-inner crossings
+    /// and the installing runtime must clear those inner shards. Components
+    /// absent from this set use true block ownership and retain their inner
+    /// static shards as part of the coverage proof.
+    pub clear_nested_boundary_components: BitSet,
 }
 
 /// One visited composed node during leaf expansion: its overlay plus the
@@ -1121,7 +1315,7 @@ pub(crate) fn dynamic_fallback_walk_link_output(num_components: usize) -> WalkSt
         expected_total_tokenizer_states: 0,
         expected_leaf_terminal_offsets: Vec::new(),
         expected_total_leaf_terminals: 0,
-        has_nested_components: false,
+        clear_nested_boundary_components: BitSet::new(num_components),
     }
 }
 
@@ -1306,8 +1500,8 @@ fn link_provider_boundary_table(
 
 /// Build every static boundary shard for one production link: a packed splice
 /// (rules + terminal layout only), the signed-transfer link context over
-/// intact local tables, a merged tokenizer, one shared equivalence, one
-/// standard crossing-filtered walk per component, then per-shard signed-NWA
+/// intact local tables, a merged tokenizer, one independently scoped ordinary
+/// terminal-DWA lane per component, then per-shard signed-NWA
 /// compilation (scoped ordinary transfers + Entry/Finish exports, exact
 /// negative resolution, table-free normalization) and publication. This
 /// mirrors the gate's `link_and_time` walks; no provider-materialized table
@@ -1411,6 +1605,7 @@ pub(crate) fn build_walk_static_boundary_link(
 
     // Merged tokenizer + ignores (mirror the gate's low_level_compose).
     let link_setup_started = Instant::now();
+    let tokenizer_merge_started = Instant::now();
     let terminal_names = merged_terminal_display_names(parent, children);
     let tokenizer_inputs: Vec<(&Tokenizer, u32)> = std::iter::once(parent)
         .chain(children.iter().map(|child| child.constraint))
@@ -1440,8 +1635,10 @@ pub(crate) fn build_walk_static_boundary_link(
     }
     let ignores =
         merged_ignore_terminals(parent, children, &composed.terminal_offsets, global_ignores);
+    let tokenizer_merge_ms = tokenizer_merge_started.elapsed().as_secs_f64() * 1000.0;
 
     // Grammar + pairwise follows over the non-emptied composed rules.
+    let grammar_analysis_started = Instant::now();
     let augmented_start = composed
         .table
         .rules
@@ -1456,6 +1653,7 @@ pub(crate) fn build_walk_static_boundary_link(
         augmented_start,
     );
     let disallowed = compute_disallowed_follows(&grammar);
+    let grammar_analysis_ms = grammar_analysis_started.elapsed().as_secs_f64() * 1000.0;
     let component_state_counts: Vec<u32> = tokenizer_inputs
         .iter()
         .map(|(tokenizer, _)| tokenizer.num_states())
@@ -1480,77 +1678,71 @@ pub(crate) fn build_walk_static_boundary_link(
         expected_total_tokenizer_states: expected_total,
         expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
         expected_total_leaf_terminals: expansion.num_terminals,
-        has_nested_components: false,
+        clear_nested_boundary_components: BitSet::new(num_components),
     };
     let retain_parent_non_crossing_paths = children
         .iter()
         .any(|child| child.constraint.table.embedded_start_nullable());
+    let candidate_summary_started = Instant::now();
+    let candidate_summary_profiles = std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .map(|component| {
+            let started = Instant::now();
+            let (ids, stats) =
+                crate::compiler::boundary_candidates::boundary_candidate_ids(component, vocab);
+            (ids, stats, started.elapsed().as_secs_f64() * 1000.0)
+        })
+        .collect::<Vec<_>>();
+    let candidate_tokens_by_component = candidate_summary_profiles
+        .iter()
+        .map(|(ids, _, _)| ids.clone())
+        .collect::<Vec<_>>();
+    let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
     let link_setup_ms = link_setup_started.elapsed().as_secs_f64() * 1000.0;
-    let walks_started = Instant::now();
-    let Some((built, link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-        merged_tokenizer: &merged,
-        vocab,
-        grammar: &grammar,
-        disallowed_follows: &disallowed,
-        ignore_terminal: ignores.canonical,
-        follow_transparent_ignores: Some(&ignores.scoped),
-        terminal_offsets: &composed.terminal_offsets,
-        tokenizer_offsets: &tokenizer_offsets,
-        component_state_counts: &component_state_counts,
-        retain_parent_non_crossing_paths,
-        walk_plans: None,
-    }) else {
-        // Empty vocab: nothing can cross; pure component masks, no shards.
-        return Ok(empty_output());
-    };
-    let walks_ms = walks_started.elapsed().as_secs_f64() * 1000.0;
-
-    // Signed-transfer shard publication: scoped ordinary transfers +
-    // Entry/Finish exports composed in the control-aware signed NWA, exact
-    // negative resolution, table-free normalization. No provider table, no
-    // elimination; unbound slots carry empty-language semantics inside the
-    // fragment library.
-    let mut published = Vec::new();
-    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
-    let mut shard_rows: Vec<WalkStaticLinkShardBreakdown> = Vec::new();
-    let mut templates_ms = 0.0f64;
-    let mut parser_dwa_ms = 0.0f64;
-    let mut publish_ms = 0.0f64;
-    for shard in built {
-        tokens_by_component[shard.start_component] =
-            shard.candidate_tokens.iter().copied().collect();
-        if !effective.contains(shard.start_component) {
-            continue;
+    let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
+        &signed_context,
+    )?;
+    let transfer_prepare_ms = transfer_cache.prepare_ms;
+    struct ProcessedShard {
+        start_component: usize,
+        candidates: Vec<u32>,
+        published: Option<PublishedStaticBoundaryShard>,
+        row: Option<WalkStaticLinkShardBreakdown>,
+    }
+    let process_shard = |shard: BuiltBoundaryShardWalk| -> Result<ProcessedShard, String> {
+        let start_component = shard.start_component;
+        let candidates = shard.candidate_tokens.iter().copied().collect::<Vec<_>>();
+        if !effective.contains(start_component) {
+            return Ok(ProcessedShard {
+                start_component,
+                candidates,
+                published: None,
+                row: None,
+            });
         }
-        // Slot identity for this shard's link (flat links: the single outer
-        // link whose child_component matches this shard's start component).
         let (slot_parent, slot_child, slot_terminal) = signed_context
             .links
             .iter()
-            .find(|link| link.child_component as usize == shard.start_component)
+            .find(|link| link.child_component as usize == start_component)
             .map(|link| (link.parent_component, link.child_component, link.slot_terminal))
-            .unwrap_or((u32::MAX, shard.start_component as u32, u32::MAX));
-        let walk_profile = link_profile
-            .per_shard
-            .iter()
-            .find(|(component, _)| *component == shard.start_component)
-            .map(|(_, profile)| profile.clone())
-            .unwrap_or_default();
-        // Accumulated profile is NOT an elapsed wall (see struct docs): the
-        // raw subfields are printed as-reported; no summed per-shard walk
-        // total is constructed (any such sum would double-count
-        // determinize/minimize inside terminal_dwa_ms).
-        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
+            .unwrap_or((u32::MAX, start_component as u32, u32::MAX));
+        let walk_profile = shard.output.profile.clone();
+        let (_, summary_stats, summary_ms) = &candidate_summary_profiles[start_component];
+        let emitted = boundary_emitted_terminals(
+            &shard.output.dwa,
+            composed.table.num_terminals as usize,
+        );
         let templates_started = Instant::now();
-        let library = crate::compiler::boundary_transfer::build_fragment_library(
+        let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
             &signed_context,
+            &transfer_cache,
             &emitted,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         let shard_templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
         #[cfg(test)]
         trace_boundary_terminal_dwa_words(
-            &format!("component{}", shard.start_component),
+            &format!("component{start_component}"),
             &shard.output.dwa,
             composed.table.num_terminals as usize,
         );
@@ -1560,52 +1752,100 @@ pub(crate) fn build_walk_static_boundary_link(
             &library,
             &shard.output.dwa,
             &shard.output.id_map,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
         let shard_parser_ms = parser_started.elapsed().as_secs_f64() * 1000.0;
         let work = WalkBoundaryShardWork {
-            start_component: shard.start_component as u32,
+            start_component: start_component as u32,
             terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
-            candidate_tokens: shard
-                .candidate_tokens
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into(),
+            candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
         let publish_started = Instant::now();
-        let (one, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
+        let (published, publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
             work,
             compiled,
             &tokenizer_offsets,
             &component_state_counts,
         )?;
         let shard_publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
-        templates_ms += shard_templates_ms;
-        parser_dwa_ms += shard_parser_ms;
-        publish_ms += shard_publish_ms;
         let _ = publish_profile;
-        shard_rows.push(WalkStaticLinkShardBreakdown {
-            start_component: shard.start_component,
-            parent_component: slot_parent,
-            child_component: slot_child,
-            slot_terminal: slot_terminal,
-            walk: walk_profile,
-            templates_ms: shard_templates_ms,
-            parser_dwa_ms: shard_parser_ms,
-            publish_ms: shard_publish_ms,
-        });
-        published.push(one);
+        Ok(ProcessedShard {
+            start_component,
+            candidates,
+            published: Some(published),
+            row: Some(WalkStaticLinkShardBreakdown {
+                start_component,
+                parent_component: slot_parent,
+                child_component: slot_child,
+                slot_terminal,
+                walk: walk_profile,
+                summary_ms: *summary_ms,
+                summary_history_positions: summary_stats.history_positions,
+                summary_initial_frontier_pairs: summary_stats.initial_frontier_pairs,
+                summary_byte_steps: summary_stats.byte_steps,
+                summary_peak_frontier_pairs: summary_stats.peak_frontier_pairs,
+                summary_widened_subtrees: summary_stats.widened_subtrees,
+                templates_ms: shard_templates_ms,
+                parser_dwa_ms: shard_parser_ms,
+                publish_ms: shard_publish_ms,
+            }),
+        })
+    };
+    let component_pipeline_started = Instant::now();
+    let Some((processed, link_profile)) = map_boundary_shard_walks_with(
+        &BoundaryShardLinkInputs {
+            merged_tokenizer: &merged,
+            vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: ignores.canonical,
+            follow_transparent_ignores: Some(&ignores.scoped),
+            terminal_offsets: &composed.terminal_offsets,
+            leaf_to_immediate: None,
+            tokenizer_offsets: &tokenizer_offsets,
+            component_state_counts: &component_state_counts,
+            candidate_tokens_by_component: Some(&candidate_tokens_by_component),
+            retain_parent_non_crossing_paths,
+            walk_plans: None,
+        },
+        &process_shard,
+    )? else {
+        return Ok(empty_output());
+    };
+    let component_pipeline_wall_ms =
+        component_pipeline_started.elapsed().as_secs_f64() * 1000.0;
+    let mut processed = processed
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    processed.sort_by_key(|item| item.start_component);
+    let mut published = Vec::new();
+    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
+    let mut shard_rows = Vec::<WalkStaticLinkShardBreakdown>::new();
+    for item in processed {
+        tokens_by_component[item.start_component] = item.candidates;
+        if let Some(one) = item.published {
+            published.push(one);
+        }
+        if let Some(row) = item.row {
+            shard_rows.push(row);
+        }
     }
     published.sort_by_key(|shard| shard.start_component);
+    let templates_ms = shard_rows.iter().map(|row| row.templates_ms).sum::<f64>();
+    let parser_dwa_ms = shard_rows.iter().map(|row| row.parser_dwa_ms).sum::<f64>();
+    let publish_ms = shard_rows.iter().map(|row| row.publish_ms).sum::<f64>();
     let total_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
-    let accounted_ms = link_setup_ms + link_context_ms + walks_ms + templates_ms + parser_dwa_ms + publish_ms;
+    let accounted_ms = link_setup_ms
+        + link_context_ms
+        + transfer_prepare_ms
+        + component_pipeline_wall_ms;
     if compose_profile_enabled() {
         eprintln!(
-            "[glrmask/profile][walk_static_link_breakdown] nested=false components={} total_ms={total_ms:.3} setup_ms={link_setup_ms:.3} link_context_ms={link_context_ms:.3} walks_ms={walks_ms:.3} shared_flat_ms={:.3} shared_equiv_ms={:.3} templates_ms={templates_ms:.3} parser_dwa_ms={parser_dwa_ms:.3} publish_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
+            "[glrmask/profile][walk_static_link_breakdown] nested=false components={} total_ms={total_ms:.3} setup_ms={link_setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={residual_ms:.3}",
             num_components,
             link_profile.flat_ms,
-            link_profile.shared_wall_ms,
             residual_ms = total_ms - accounted_ms,
         );
         for row in &shard_rows {
@@ -1630,14 +1870,18 @@ pub(crate) fn build_walk_static_boundary_link(
         // Assembled only when profiling is on: with all profile env off the
         // per-shard row vec is still pushed (pointer clones, no weight work)
         // but never moved into the breakdown struct.
-        let _breakdown = WalkStaticLinkBreakdown {
+        let breakdown = WalkStaticLinkBreakdown {
             total_ms,
             nested: false,
             num_components,
             setup_ms: link_setup_ms,
+            link_context_ms,
+            tokenizer_merge_ms,
+            grammar_analysis_ms,
+            candidate_summary_ms,
             shared_flat_ms: link_profile.flat_ms,
-            shared_equiv_ms: link_profile.shared_wall_ms,
-            walk_ms: walks_ms,
+            component_pipeline_wall_ms,
+            transfer_prepare_ms,
             templates_ms,
             parser_dwa_ms,
             publish_ms,
@@ -1645,7 +1889,28 @@ pub(crate) fn build_walk_static_boundary_link(
             residual_ms: total_ms - accounted_ms,
             per_shard: shard_rows,
         };
-        let _ = _breakdown.total_ms;
+        emit_boundary_analysis_json(&breakdown);
+    } else if boundary_analysis_json_enabled() {
+        let breakdown = WalkStaticLinkBreakdown {
+            total_ms,
+            nested: false,
+            num_components,
+            setup_ms: link_setup_ms,
+            link_context_ms,
+            tokenizer_merge_ms,
+            grammar_analysis_ms,
+            candidate_summary_ms,
+            shared_flat_ms: link_profile.flat_ms,
+            component_pipeline_wall_ms,
+            transfer_prepare_ms,
+            templates_ms,
+            parser_dwa_ms,
+            publish_ms,
+            accounted_ms,
+            residual_ms: total_ms - accounted_ms,
+            per_shard: shard_rows,
+        };
+        emit_boundary_analysis_json(&breakdown);
     }
     Ok(WalkStaticLinkOutput {
         published_shards: published,
@@ -1656,7 +1921,7 @@ pub(crate) fn build_walk_static_boundary_link(
         expected_total_tokenizer_states: expected_total,
         expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
         expected_total_leaf_terminals: expansion.num_terminals,
-        has_nested_components: false,
+        clear_nested_boundary_components: BitSet::new(num_components),
     })
 }
 
@@ -2020,6 +2285,27 @@ fn nested_unbound_slot_terminals(
     Ok(unbound)
 }
 
+/// Whether every retained boundary contribution below this component is
+/// already static (or absent because no repair is needed). Only such a block
+/// may omit its internal leaf crossings from a new outer shard: those paths
+/// are then covered by the retained component runtime itself. A dynamic inner
+/// shard fails this proof and forces the staged legacy crossing predicate at
+/// the outer link.
+fn retained_internal_static_boundary_coverage(component: &Constraint) -> bool {
+    let Some(overlay) = component.static_dynamic_overlay.as_ref() else {
+        return true;
+    };
+    overlay.segmented_parser_components.iter().all(|child| {
+        let local_static = child.boundary.as_ref().is_none_or(|shard| {
+            matches!(
+                shard.backend,
+                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+            )
+        });
+        local_static && retained_internal_static_boundary_coverage(&child.constraint)
+    })
+}
+
 /// Nested production static link: the flat pipeline over recursively expanded
 /// intact leaves with the full multi-level link set (see the flat function
 /// for the pipeline stages). One walk per top-level component; publication
@@ -2028,6 +2314,7 @@ fn build_walk_static_boundary_link_nested(
     inputs: &WalkStaticLinkInputs,
     expansion: &NestedLinkExpansion<'_>,
 ) -> Result<WalkStaticLinkOutput, String> {
+    let link_total_started = Instant::now();
     let vocab = inputs.vocab;
     let num_components = inputs.children.len() + 1;
     let leaves = &expansion.leaves;
@@ -2083,6 +2370,8 @@ fn build_walk_static_boundary_link_nested(
             ));
         }
     }
+    let pre_context_setup_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
+    let link_context_started = Instant::now();
     let signed_context = crate::compiler::boundary_transfer::build_signed_link_context_from_parts(
         leaves.iter().map(|leaf| &leaf.table).collect(),
         leaves.iter().map(|leaf| leaf.ignore_terminal).collect(),
@@ -2092,6 +2381,8 @@ fn build_walk_static_boundary_link_nested(
         global_ignores,
         unbound.into_iter().collect(),
     )?;
+    let link_context_ms = link_context_started.elapsed().as_secs_f64() * 1000.0;
+    let post_context_setup_started = Instant::now();
 
     // Packed recursive splice (rules + layout only) for grammar analysis and
     // the coordinator-layout pin. The splice packs link-tree DFS order, which
@@ -2128,6 +2419,7 @@ fn build_walk_static_boundary_link_nested(
     }
 
     // Merged tokenizer + names + ignores over leaves.
+    let tokenizer_merge_started = Instant::now();
     let terminal_names = merged_leaf_terminal_display_names(leaves);
     let tokenizer_inputs: Vec<(&Tokenizer, u32)> = leaves
         .iter()
@@ -2157,8 +2449,10 @@ fn build_walk_static_boundary_link_nested(
     }
     let ignores =
         merged_leaf_ignore_terminals(leaves, &expansion.leaf_terminal_offsets, global_ignores);
+    let tokenizer_merge_ms = tokenizer_merge_started.elapsed().as_secs_f64() * 1000.0;
 
     // Grammar + pairwise follows over the spliced rules.
+    let grammar_analysis_started = Instant::now();
     let augmented_start = composed
         .table
         .rules
@@ -2173,6 +2467,7 @@ fn build_walk_static_boundary_link_nested(
         augmented_start,
     );
     let disallowed = compute_disallowed_follows(&grammar);
+    let grammar_analysis_ms = grammar_analysis_started.elapsed().as_secs_f64() * 1000.0;
     let leaf_state_counts: Vec<u32> = tokenizer_inputs
         .iter()
         .map(|(tokenizer, _)| tokenizer.num_states())
@@ -2188,6 +2483,56 @@ fn build_walk_static_boundary_link_nested(
             .ok_or_else(|| "scoped tokenizer state count overflow".to_string())?;
     }
 
+    let top_components = std::iter::once(inputs.parent)
+        .chain(inputs.children.iter().map(|child| child.constraint))
+        .collect::<Vec<_>>();
+    debug_assert_eq!(top_components.len(), num_components);
+    let retained_static_coverage = top_components
+        .iter()
+        .enumerate()
+        .map(|(top, component)| {
+            expansion.top_leaf_ranges[top].len() <= 1
+                || retained_internal_static_boundary_coverage(component)
+        })
+        .collect::<Vec<_>>();
+    let candidate_summary_started = Instant::now();
+    let candidate_summary_profiles = top_components
+        .iter()
+        .map(|component| {
+            let started = Instant::now();
+            let (ids, stats) =
+                crate::compiler::boundary_candidates::boundary_candidate_ids(component, vocab);
+            (ids, stats, started.elapsed().as_secs_f64() * 1000.0)
+        })
+        .collect::<Vec<_>>();
+    let mut candidate_tokens_by_component = candidate_summary_profiles
+        .iter()
+        .map(|(ids, _, _)| ids.clone())
+        .collect::<Vec<_>>();
+    let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
+    for top in 0..num_components {
+        if expansion.top_leaf_ranges[top].len() > 1 && !retained_static_coverage[top] {
+            // Staged legacy fallback: the outer shard is replacing an inner
+            // dynamic/uncertified repair, so it must cover that block's leaf-
+            // internal crossings as well as its outward interface. W_C is only
+            // an outward-interface summary and therefore cannot prune this
+            // replacement lane (e.g. token `mg` crosses mid -> grandchild but
+            // never exits the block). Widen to the full vocabulary and use the
+            // legacy per-leaf ownership predicate below.
+            candidate_tokens_by_component[top] = None;
+        }
+    }
+    let mut clear_nested_boundary_components = BitSet::new(num_components);
+    for (top, (&covered, range)) in retained_static_coverage
+        .iter()
+        .zip(&expansion.top_leaf_ranges)
+        .enumerate()
+    {
+        if range.len() > 1 && !covered {
+            clear_nested_boundary_components.set(top);
+        }
+    }
+
     let empty_output = || WalkStaticLinkOutput {
         published_shards: Vec::new(),
         boundary_tokens_by_start_component: vec![Vec::new(); num_components],
@@ -2197,7 +2542,7 @@ fn build_walk_static_boundary_link_nested(
         expected_total_tokenizer_states: expected_total,
         expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
         expected_total_leaf_terminals: expansion.num_terminals,
-        has_nested_components: true,
+        clear_nested_boundary_components: clear_nested_boundary_components.clone(),
     };
     // Nullable starts are checked over non-parent tops only: with a composed
     // parent, top 0 spans several leaves and a leaf-0 skip would wrongly probe
@@ -2208,13 +2553,25 @@ fn build_walk_static_boundary_link_nested(
         .skip(1)
         .flatten()
         .any(|&leaf_index| leaves[leaf_index].table.embedded_start_nullable());
-    // One walk plan per top-level component: blocks walk from their root leaf
-    // with the union of the block leaves' commit states.
+    // One walk plan per top-level component. A block with retained static
+    // internal coverage gets one immediate-component ownership class for all
+    // of its leaves. Otherwise keep each leaf in its own class (the legacy
+    // conservative predicate), so the new outer shard continues to cover the
+    // block's internal crossings before those uncertified inner shards are
+    // cleared at install time.
     let total_states = merged.num_states() as usize;
     let mut walk_plans = Vec::with_capacity(num_components);
+    let mut leaf_to_immediate = vec![tdwa::scope::ImmediateComponentId(u32::MAX); leaves.len()];
     for top in 0..num_components {
         let mut commit = vec![false; total_states];
+        let root_leaf = expansion.top_root_leaves[top] as usize;
+        let crossing_owner = tdwa::scope::ImmediateComponentId(root_leaf as u32);
         for &leaf_index in &expansion.top_leaf_ranges[top] {
+            leaf_to_immediate[leaf_index] = if retained_static_coverage[top] {
+                crossing_owner
+            } else {
+                tdwa::scope::ImmediateComponentId(leaf_index as u32)
+            };
             let start = tokenizer_offsets[leaf_index] as usize;
             let end = start + leaf_state_counts[leaf_index] as usize;
             if end > commit.len() {
@@ -2226,76 +2583,212 @@ fn build_walk_static_boundary_link_nested(
         }
         walk_plans.push(BoundaryShardWalkPlan {
             start_component: top,
-            filter_component: expansion.top_root_leaves[top] as usize,
+            crossing_owner,
             commit_states: commit,
-            retain_non_crossing_paths: retain_parent_non_crossing_paths && top == 0,
+            // Immediate terminal ownership is not, by itself, a proof that a
+            // token path stayed inside a nested block. The block may complete
+            // through zero-width returns and re-enter at another call site
+            // before the next visible terminal (e.g. g -> RETURN -> CALL -> m).
+            // The component summary is exactly the proper-prefix outward-event
+            // witness for that case. For those candidate tokens, keep the
+            // lexical non-crossing paths and let the signed parser decide
+            // whether an actual outer repair exists. A proved-empty summary
+            // can still use the narrower block-ownership predicate; Unknown
+            // widens, never prunes.
+            retain_non_crossing_paths: (retain_parent_non_crossing_paths && top == 0)
+                || (retained_static_coverage[top]
+                    && expansion.top_leaf_ranges[top].len() > 1
+                    && candidate_tokens_by_component[top]
+                        .as_ref()
+                        .is_none_or(|tokens| !tokens.is_empty())),
         });
     }
-    let Some((built, _link_profile)) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-        merged_tokenizer: &merged,
-        vocab,
-        grammar: &grammar,
-        disallowed_follows: &disallowed,
-        ignore_terminal: ignores.canonical,
-        follow_transparent_ignores: Some(&ignores.scoped),
-        terminal_offsets: &expansion.leaf_terminal_offsets,
-        tokenizer_offsets: &tokenizer_offsets,
-        component_state_counts: &leaf_state_counts,
-        retain_parent_non_crossing_paths,
-        walk_plans: Some(walk_plans),
-    }) else {
-        // Empty vocab: nothing can cross; pure component masks, no shards.
-        return Ok(empty_output());
-    };
-
-    // Signed-transfer shard publication over the leaf context, one shard per
-    // top-level component.
-    let mut published = Vec::new();
-    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
-    for shard in built {
-        tokens_by_component[shard.start_component] =
-            shard.candidate_tokens.iter().copied().collect();
-        if !effective.contains(shard.start_component) {
-            continue;
+    if leaf_to_immediate
+        .iter()
+        .any(|owner| owner.0 == u32::MAX)
+    {
+        return Err("nested boundary ownership did not cover every leaf".to_string());
+    }
+    let setup_ms = pre_context_setup_ms
+        + post_context_setup_started.elapsed().as_secs_f64() * 1000.0;
+    let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
+        &signed_context,
+    )?;
+    let transfer_prepare_ms = transfer_cache.prepare_ms;
+    struct ProcessedNestedShard {
+        start_component: usize,
+        candidates: Vec<u32>,
+        published: Option<PublishedStaticBoundaryShard>,
+        row: Option<WalkStaticLinkShardBreakdown>,
+    }
+    let process_shard = |shard: BuiltBoundaryShardWalk| -> Result<ProcessedNestedShard, String> {
+        let start_component = shard.start_component;
+        let candidates = shard.candidate_tokens.iter().copied().collect::<Vec<_>>();
+        if !effective.contains(start_component) {
+            return Ok(ProcessedNestedShard {
+                start_component,
+                candidates,
+                published: None,
+                row: None,
+            });
         }
-        let emitted = boundary_emitted_terminals(&shard.output.dwa, composed.table.num_terminals as usize);
-        let library = crate::compiler::boundary_transfer::build_fragment_library(
-            &signed_context,
-            &emitted,
-            shard.start_component as u32,
-        )?;
-        #[cfg(test)]
-        trace_boundary_terminal_dwa_words(
-            &format!("component{}", shard.start_component),
+        let (slot_parent, slot_child, slot_terminal) = signed_context
+            .links
+            .iter()
+            .find(|link| {
+                expansion
+                    .top_leaf_ranges
+                    .get(start_component)
+                    .is_some_and(|range| range.contains(&(link.child_component as usize)))
+            })
+            .map(|link| (link.parent_component, link.child_component, link.slot_terminal))
+            .unwrap_or((u32::MAX, start_component as u32, u32::MAX));
+        let walk_profile = shard.output.profile.clone();
+        let (_, summary_stats, summary_ms) = &candidate_summary_profiles[start_component];
+        let emitted = boundary_emitted_terminals(
             &shard.output.dwa,
             composed.table.num_terminals as usize,
         );
+        let templates_started = Instant::now();
+        let library = crate::compiler::boundary_transfer::build_fragment_library_cached(
+            &signed_context,
+            &transfer_cache,
+            &emitted,
+            start_component as u32,
+        )?;
+        let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(test)]
+        trace_boundary_terminal_dwa_words(
+            &format!("component{start_component}"),
+            &shard.output.dwa,
+            composed.table.num_terminals as usize,
+        );
+        let parser_started = Instant::now();
         let compiled = crate::compiler::boundary_transfer::compile_signed_shard_parser(
             &signed_context,
             &library,
             &shard.output.dwa,
             &shard.output.id_map,
-            shard.start_component as u32,
+            start_component as u32,
         )?;
+        let parser_dwa_ms = parser_started.elapsed().as_secs_f64() * 1000.0;
         let work = WalkBoundaryShardWork {
-            start_component: shard.start_component as u32,
+            start_component: start_component as u32,
             terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
             id_map: shard.output.id_map,
-            candidate_tokens: shard
-                .candidate_tokens
-                .into_iter()
-                .collect::<Vec<_>>()
-                .into(),
+            candidate_tokens: Arc::from(candidates.clone().into_boxed_slice()),
         };
-        let (one, _publish_profile) = crate::compiler::boundary_transfer::publish_signed_shard(
-            work,
-            compiled,
-            &tokenizer_offsets,
-            &leaf_state_counts,
-        )?;
-        published.push(one);
+        let publish_started = Instant::now();
+        let (published, _publish_profile) =
+            crate::compiler::boundary_transfer::publish_signed_shard(
+                work,
+                compiled,
+                &tokenizer_offsets,
+                &leaf_state_counts,
+            )?;
+        let publish_ms = publish_started.elapsed().as_secs_f64() * 1000.0;
+        Ok(ProcessedNestedShard {
+            start_component,
+            candidates,
+            published: Some(published),
+            row: Some(WalkStaticLinkShardBreakdown {
+                start_component,
+                parent_component: slot_parent,
+                child_component: slot_child,
+                slot_terminal,
+                walk: walk_profile,
+                summary_ms: *summary_ms,
+                summary_history_positions: summary_stats.history_positions,
+                summary_initial_frontier_pairs: summary_stats.initial_frontier_pairs,
+                summary_byte_steps: summary_stats.byte_steps,
+                summary_peak_frontier_pairs: summary_stats.peak_frontier_pairs,
+                summary_widened_subtrees: summary_stats.widened_subtrees,
+                templates_ms,
+                parser_dwa_ms,
+                publish_ms,
+            }),
+        })
+    };
+    let component_pipeline_started = Instant::now();
+    let Some((processed, link_profile)) = map_boundary_shard_walks_with(
+        &BoundaryShardLinkInputs {
+            merged_tokenizer: &merged,
+            vocab,
+            grammar: &grammar,
+            disallowed_follows: &disallowed,
+            ignore_terminal: ignores.canonical,
+            follow_transparent_ignores: Some(&ignores.scoped),
+            terminal_offsets: &expansion.leaf_terminal_offsets,
+            leaf_to_immediate: Some(&leaf_to_immediate),
+            tokenizer_offsets: &tokenizer_offsets,
+            component_state_counts: &leaf_state_counts,
+            candidate_tokens_by_component: Some(&candidate_tokens_by_component),
+            retain_parent_non_crossing_paths,
+            walk_plans: Some(walk_plans),
+        },
+        &process_shard,
+    )? else {
+        return Ok(empty_output());
+    };
+    let component_pipeline_wall_ms =
+        component_pipeline_started.elapsed().as_secs_f64() * 1000.0;
+    let mut processed = processed
+        .into_iter()
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    processed.sort_by_key(|item| item.start_component);
+    let mut published = Vec::new();
+    let mut tokens_by_component: Vec<Vec<u32>> = vec![Vec::new(); num_components];
+    let mut shard_rows = Vec::<WalkStaticLinkShardBreakdown>::new();
+    for item in processed {
+        tokens_by_component[item.start_component] = item.candidates;
+        if let Some(shard) = item.published {
+            published.push(shard);
+        }
+        if let Some(row) = item.row {
+            shard_rows.push(row);
+        }
     }
     published.sort_by_key(|shard| shard.start_component);
+    shard_rows.sort_by_key(|row| row.start_component);
+    let templates_ms = shard_rows.iter().map(|row| row.templates_ms).sum::<f64>();
+    let parser_dwa_ms = shard_rows.iter().map(|row| row.parser_dwa_ms).sum::<f64>();
+    let publish_ms = shard_rows.iter().map(|row| row.publish_ms).sum::<f64>();
+    let total_ms = link_total_started.elapsed().as_secs_f64() * 1000.0;
+    let accounted_ms = setup_ms
+        + link_context_ms
+        + transfer_prepare_ms
+        + component_pipeline_wall_ms;
+    if compose_profile_enabled() {
+        eprintln!(
+            "[glrmask/profile][walk_static_link_breakdown] nested=true components={} total_ms={total_ms:.3} setup_ms={setup_ms:.3} link_context_ms={link_context_ms:.3} component_pipeline_wall_ms={component_pipeline_wall_ms:.3} shared_flat_ms={:.3} transfer_prepare_ms={transfer_prepare_ms:.3} templates_work_ms={templates_ms:.3} parser_dwa_work_ms={parser_dwa_ms:.3} publish_work_ms={publish_ms:.3} accounted_ms={accounted_ms:.3} residual_ms={:.3}",
+            num_components,
+            link_profile.flat_ms,
+            total_ms - accounted_ms,
+        );
+    }
+    if compose_profile_enabled() || boundary_analysis_json_enabled() {
+        let breakdown = WalkStaticLinkBreakdown {
+            total_ms,
+            nested: true,
+            num_components,
+            setup_ms,
+            link_context_ms,
+            tokenizer_merge_ms,
+            grammar_analysis_ms,
+            candidate_summary_ms,
+            shared_flat_ms: link_profile.flat_ms,
+            component_pipeline_wall_ms,
+            transfer_prepare_ms,
+            templates_ms,
+            parser_dwa_ms,
+            publish_ms,
+            accounted_ms,
+            residual_ms: total_ms - accounted_ms,
+            per_shard: shard_rows,
+        };
+        emit_boundary_analysis_json(&breakdown);
+    }
     Ok(WalkStaticLinkOutput {
         published_shards: published,
         boundary_tokens_by_start_component: tokens_by_component,
@@ -2305,7 +2798,7 @@ fn build_walk_static_boundary_link_nested(
         expected_total_tokenizer_states: expected_total,
         expected_leaf_terminal_offsets: expansion.leaf_terminal_offsets.clone(),
         expected_total_leaf_terminals: expansion.num_terminals,
-        has_nested_components: true,
+        clear_nested_boundary_components,
     })
 }
 
@@ -2341,6 +2834,14 @@ mod tests {
             let original = std::env::var_os(key);
             unsafe {
                 std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
             }
             Self { key, original }
         }
@@ -2454,6 +2955,104 @@ mod tests {
         )
     }
 
+    #[test]
+    fn scoped_witnessed_ti_candidates_are_owner_and_policy_local() {
+        let _env_lock = crate::TEST_ENV_LOCK.lock().expect("test env lock poisoned");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+        let _no_small_skip = EnvVarGuard::set("GLRMASK_P0_TI_SKIP_MAX_TOKENIZER_STATES", "0");
+
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()),
+            (1, b"b".to_vec()),
+            (2, b"c".to_vec()),
+            (3, b"x".to_vec()),
+            (4, b"ax".to_vec()),
+            (5, b"bx".to_vec()),
+            (6, b"xa".to_vec()),
+            (7, b"xc".to_vec()),
+        ]);
+        let constraint = Constraint::from_glrm_grammar(
+            r#"
+                start doc;
+                t A ::= "a";
+                t B ::= "b";
+                t C ::= "c";
+                t X ::= "x";
+                nt doc ::= A X | B X | X C;
+            "#,
+            &vocab,
+        )
+        .unwrap();
+        let grammar = analyzed_grammar(&constraint.table, &constraint.terminal_display_names);
+        let disallowed = compute_disallowed_follows(&grammar);
+        let a = terminal_id(&constraint, "A");
+        let b = terminal_id(&constraint, "B");
+        let c = terminal_id(&constraint, "C");
+        assert_eq!([a, b, c], [0, 1, 2], "fixture relies on declared terminal order");
+
+        // Deliberately split the otherwise identical C into a second immediate
+        // owner.  The TI pre-certificate must never cross that ownership
+        // boundary, even though the lexical expression is byte-identical.
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(&[0, 2], grammar.num_terminals)
+                .expect("two-owner TI fixture"),
+        );
+        let initial = tdwa::scope::InitialStateDomain::from_mask(
+            constraint.tokenizer.num_states() as usize,
+            vec![true; constraint.tokenizer.num_states() as usize],
+        )
+        .expect("full test initial domain");
+        let mut resets = constraint
+            .tokenizer
+            .deterministic_reset_states()
+            .into_iter()
+            .collect::<Vec<_>>();
+        resets.sort_unstable();
+        resets.dedup();
+        let scope = tdwa::scope::BoundaryAnalysisScope::new(
+            initial,
+            resets,
+            ownership,
+            tdwa::scope::ImmediateComponentId(0),
+            true,
+            None,
+        )
+        .expect("TI fixture scope");
+        let active = vec![true; grammar.num_terminals as usize];
+        let groups = tdwa::l2p::scoped_terminal_interchangeability_candidate_groups(
+            &constraint.tokenizer,
+            &active,
+            &grammar,
+            &disallowed,
+            constraint.ignore_terminal,
+            &scope,
+        );
+        assert_eq!(groups, vec![vec![a, b]]);
+
+        // Exercise the actual scoped family pipeline.  If the witnessed A/B
+        // merge activates, strict-reference mode rebuilds this exact scope with
+        // TI suppressed and compares the completed weighted language in
+        // original tokenizer-state/token coordinates.
+        let flat: Arc<[u32]> =
+            Arc::from(tdwa::l1::build_flat_transition_table(&constraint.tokenizer));
+        let coloring = crate::compiler::stages::id_map_and_terminal_dwa::types::TerminalColoring::identity(
+            grammar.num_terminals as usize,
+        );
+        let (_artifact, _profile) = tdwa::build_scoped_boundary_id_map_and_terminal_dwa(
+            &constraint.tokenizer,
+            &vocab,
+            &coloring,
+            constraint.ignore_terminal,
+            &grammar,
+            &disallowed,
+            flat,
+            &scope,
+        );
+    }
+
     /// Step-4c boundary parser table: the control-free spliced composed table
     /// (the Phase-1 object — never the dynamic path's control-bearing
     /// recursive table) with every unbound slot terminal emptied. Controls
@@ -2552,36 +3151,6 @@ mod tests {
             .collect()
     }
 
-    fn shared_equivalence_for(
-        tokenizer: &Tokenizer,
-        vocab: &Vocab,
-        ignore_terminal: Option<u32>,
-        grammar: &AnalyzedGrammar,
-        active_terminals: &[bool],
-        disallowed: &BTreeMap<u32, BitSet>,
-        flat: &Arc<[u32]>,
-    ) -> tdwa::l2p::SharedL2pEquivalence {
-        tdwa::l2p::compute_shared_l2p_equivalence(
-            "boundary_shard_test",
-            tokenizer,
-            vocab,
-            ignore_terminal,
-            grammar,
-            active_terminals,
-            disallowed,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(flat),
-            None,
-            None,
-        )
-        .expect("shared equivalence must compute")
-    }
-
     #[test]
     fn toy_two_component_crossing_sets() {
         // Parent `doc ::= PA SUB PB` with child `item ::= CC CD` bound at SUB.
@@ -2635,18 +3204,45 @@ mod tests {
         let composed = low_level_compose(&parent, &children);
         let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
         let disallowed = compute_disallowed_follows(&grammar);
-        let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
-        let shared = shared_equivalence_for(
-            &composed.tokenizer,
-            &vocab,
-            composed.ignore_canonical,
-            &grammar,
-            &active,
-            &disallowed,
-            &flat,
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(
+                &composed.table.terminal_offsets,
+                grammar.num_terminals,
+            )
+            .expect("toy terminal ownership"),
         );
+        if std::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
+            for raw in composed.tokenizer_offsets[0]
+                ..composed.tokenizer_offsets[0] + parent.tokenizer.num_states()
+            {
+                eprintln!(
+                    "TOY_SCOPE raw={} matched={:?} future={:?}",
+                    raw,
+                    composed
+                        .tokenizer
+                        .matched_terminals_iter(raw)
+                        .collect::<Vec<_>>(),
+                    composed
+                        .tokenizer
+                        .possible_future_terminals_iter(raw)
+                        .collect::<Vec<_>>(),
+                );
+                for token_id in [2u32, 3, 4, 5, 9] {
+                    let bytes = vocab.get(token_id).unwrap();
+                    let exec = composed.tokenizer.execute_from_state(bytes, raw);
+                    eprintln!(
+                        "TOY_SCOPE raw={} token={} bytes={:?} matches={:?} end={:?}",
+                        raw,
+                        token_id,
+                        bytes,
+                        exec.matches,
+                        exec.end_state,
+                    );
+                }
+            }
+        }
         for (index, (num_states, expected)) in
             [(parent.tokenizer.num_states(), vec![4u32]), (child.tokenizer.num_states(), vec![5u32])]
                 .into_iter()
@@ -2658,6 +3254,23 @@ mod tests {
                 index,
                 composed.tokenizer.num_states() as usize,
             );
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    composed.tokenizer.num_states() as usize,
+                    commit.clone(),
+                )
+                .expect("toy initial-state domain"),
+                composed
+                    .tokenizer
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(index as u32),
+                true,
+                None,
+            )
+            .expect("toy boundary scope");
             let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &composed.tokenizer,
                 vocab: &vocab,
@@ -2665,14 +3278,20 @@ mod tests {
                 disallowed_follows: &disallowed,
                 ignore_terminal: composed.ignore_canonical,
                 follow_transparent_ignores: None,
-                terminal_offsets: &composed.table.terminal_offsets,
-                component_index: index,
-                commit_states: &commit,
-                shared_equivalence: &shared,
+                scope: &scope,
                 flat_trans: Some(&flat),
                 retain_non_crossing_paths: false,
             })
             .expect("toy shard walk must produce a DWA");
+            if std::env::var_os("GLRMASK_DEBUG_TOY_SCOPE").is_some() {
+                eprintln!(
+                    "TOY_SCOPE shard={} idmap_o2i={:?} idmap_classes={:?} reps={:?}",
+                    index,
+                    output.id_map.tokenizer_states.original_to_internal,
+                    output.id_map.tokenizer_states.internal_to_originals,
+                    output.id_map.tokenizer_states.representative_original_ids,
+                );
+            }
             assert!(output.dwa.is_acyclic(), "toy shard {index} DWA must be acyclic");
             let tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
             assert_eq!(
@@ -2764,28 +3383,15 @@ mod tests {
         let composed = &fixture.composed;
         let grammar = &fixture.grammar;
         let disallowed = &fixture.disallowed;
-        let active = vec![true; grammar.num_terminals as usize];
         let flat: Arc<[u32]> =
             Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
-        let shared_started = Instant::now();
-        let shared = shared_equivalence_for(
-            &composed.tokenizer,
-            vocab,
-            composed.ignore_canonical,
-            grammar,
-            &active,
-            disallowed,
-            &flat,
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::flat(
+                &composed.table.terminal_offsets,
+                grammar.num_terminals,
+            )
+            .expect("selected10 terminal ownership"),
         );
-        let shared_wall_ms = shared_started.elapsed().as_secs_f64() * 1000.0;
-        eprintln!(
-            "BOUNDARY_WALK shared id_map_ms={:.3} wall_ms={:.3} tsids={} itokens={}",
-            shared.id_map_ms,
-            shared_wall_ms,
-            shared.id_map.num_tsids(),
-            shared.id_map.num_internal_tokens(),
-        );
-
         // Frozen output of the independent Phase-1 MINBOUND B-A oracle for
         // this exact selected10 fixture. The original artifact is preserved
         // in the 2026-09-18 linker compaction with SHA-256
@@ -2805,6 +3411,23 @@ mod tests {
                 index,
                 composed.tokenizer.num_states() as usize,
             );
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    composed.tokenizer.num_states() as usize,
+                    commit.clone(),
+                )
+                .expect("selected10 initial-state domain"),
+                composed
+                    .tokenizer
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(index as u32),
+                true,
+                None,
+            )
+            .expect("selected10 boundary scope");
             let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &composed.tokenizer,
                 vocab,
@@ -2812,10 +3435,7 @@ mod tests {
                 disallowed_follows: disallowed,
                 ignore_terminal: composed.ignore_canonical,
                 follow_transparent_ignores: None,
-                terminal_offsets: &composed.table.terminal_offsets,
-                component_index: index,
-                commit_states: &commit,
-                shared_equivalence: &shared,
+                scope: &scope,
                 flat_trans: Some(&flat),
                 retain_non_crossing_paths: false,
             })
@@ -2845,6 +3465,13 @@ mod tests {
                 assert!(tokens.is_empty(), "core shard must be empty, got {}", tokens.len());
                 assert_eq!(output.dwa.num_states(), 1, "empty core shard DWA shape");
             } else {
+                if tokens != oracle {
+                    let missing = oracle.difference(&tokens).copied().collect::<Vec<_>>();
+                    let extra = tokens.difference(&oracle).copied().collect::<Vec<_>>();
+                    eprintln!(
+                        "BOUNDARY_WALK oracle_diff missing={missing:?} extra={extra:?}"
+                    );
+                }
                 assert_eq!(tokens.len(), 143, "dispatch shard token count");
                 assert_eq!(tokens, oracle, "dispatch shard must match the oracle set");
                 assert_eq!(
@@ -2861,6 +3488,82 @@ mod tests {
     #[ignore]
     fn selected10_boundary_walk_crossing() {
         run_selected10_boundary_walk_crossing();
+    }
+
+    /// Exact weighted-language gate for scoped vocabulary partitioning. The
+    /// full-vocabulary all-L2P build is the conservative reference. Reconcile
+    /// both private TSID/token quotients into one common coordinate before
+    /// asking the acyclic weighted-DWA equivalence checker for a distinguishing
+    /// terminal word.
+    #[test]
+    #[ignore]
+    fn selected10_partitioned_scoped_matches_full_weighted_relation() {
+        require_release_selected10_gate(
+            "selected10_partitioned_scoped_matches_full_weighted_relation",
+        );
+        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
+        let fixture = load_selected10_outer();
+        let component_state_counts = [
+            fixture.core.tokenizer.num_states(),
+            fixture.dispatch.tokenizer.num_states(),
+        ];
+        let build = || {
+            build_boundary_shard_walks(&BoundaryShardLinkInputs {
+                merged_tokenizer: &fixture.composed.tokenizer,
+                vocab: &fixture.vocab,
+                grammar: &fixture.grammar,
+                disallowed_follows: &fixture.disallowed,
+                ignore_terminal: fixture.composed.ignore_canonical,
+                follow_transparent_ignores: None,
+                terminal_offsets: &fixture.composed.table.terminal_offsets,
+                leaf_to_immediate: None,
+                tokenizer_offsets: &fixture.composed.tokenizer_offsets,
+                component_state_counts: &component_state_counts,
+                candidate_tokens_by_component: None,
+                retain_parent_non_crossing_paths: false,
+                walk_plans: None,
+            })
+            .expect("selected10 scoped boundary build")
+            .0
+        };
+
+        let full = {
+            let _full = EnvVarGuard::set("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB", "1");
+            build()
+        };
+        let partitioned = {
+            let _partitioned = EnvVarGuard::unset("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB");
+            build()
+        };
+        assert_eq!(full.len(), partitioned.len(), "nonempty shard set differs");
+        for (full, partitioned) in full.into_iter().zip(partitioned) {
+            let start_component = full.start_component;
+            assert_eq!(
+                start_component, partitioned.start_component,
+                "shard publication order differs",
+            );
+            let full = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
+                full.output.dwa,
+                full.output.id_map,
+            );
+            let partitioned = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
+                partitioned.output.dwa,
+                partitioned.output.id_map,
+            );
+            let reconciled: crate::compiler::stages::mapped_artifact::MappedArtifact<(DWA, DWA)> =
+                (full, partitioned).into();
+            let ((full, partitioned), _) = reconciled.into_parts();
+            match crate::automata::weighted_u32::equivalence::find_difference(
+                &full,
+                &partitioned,
+            ) {
+                Ok(None) => {}
+                Ok(Some(word)) => panic!(
+                    "partitioned scoped shard {start_component} changed weighted language at terminal word {word:?}",
+                ),
+                Err(error) => panic!("weighted equivalence checker failed: {error:?}"),
+            }
+        }
     }
 
     /// Durable two-stage strict acceptance gate for boundary shards. Arms the
@@ -3113,8 +3816,10 @@ mod tests {
             ignore_terminal: fixture.composed.ignore_canonical,
             follow_transparent_ignores: None,
             terminal_offsets: &fixture.composed.table.terminal_offsets,
+            leaf_to_immediate: None,
             tokenizer_offsets: &fixture.composed.tokenizer_offsets,
             component_state_counts: &component_state_counts,
+            candidate_tokens_by_component: None,
             // Core and dispatch schemas are never start-nullable.
             retain_parent_non_crossing_paths: false,
             walk_plans: None,
@@ -3789,8 +4494,10 @@ mod tests {
             ignore_terminal: composed.ignore_canonical,
             follow_transparent_ignores: None,
             terminal_offsets: &composed.table.terminal_offsets,
+            leaf_to_immediate: None,
             tokenizer_offsets: &composed.tokenizer_offsets,
             component_state_counts: &counts,
+            candidate_tokens_by_component: None,
             retain_parent_non_crossing_paths,
             walk_plans: None,
         })
@@ -4126,8 +4833,10 @@ mod tests {
             ignore_terminal: composed.ignore_canonical,
             follow_transparent_ignores: None,
             terminal_offsets: &composed.table.terminal_offsets,
+            leaf_to_immediate: None,
             tokenizer_offsets: &composed.tokenizer_offsets,
             component_state_counts: &counts,
+            candidate_tokens_by_component: None,
             retain_parent_non_crossing_paths: inputs
                 .iter()
                 .any(|child| child.constraint.table.embedded_start_nullable()),
@@ -4898,10 +5607,10 @@ mod tests {
     /// crossing filter — a path survives iff it touches a terminal outside
     /// the filter leaf, so the block walk keeps every leaf-crossing gap
     /// including g→m), each compiled with the full 3-leaf signed context and
-    /// installed on the dynamic nested composition (mid overlay shards
-    /// cleared: the outer block shard covers every block-start crossing, so
-    /// the inner dynamic shards are redundant and must not fire under the
-    /// strict trap).
+    /// installed on a nested composition whose mid+grandchild block is already
+    /// static. The retained inner shard covers genuinely block-internal repair;
+    /// the outer block shard covers outward completion/re-entry candidates and
+    /// must coexist with that inner static coverage under the strict trap.
     #[test]
     fn nested_static_link_depth_two_chain_matches_dynamic_and_ablates() {
         use crate::compiler::glr::parser::ScopedSubgrammarLink;
@@ -4979,21 +5688,16 @@ mod tests {
             top_shards: Vec<crate::compiler::constraint_compose::PublishedStaticBoundaryShard>,
         ) -> Constraint {
             let mut installed = base.clone();
-            {
-                let overlay = installed.static_dynamic_overlay.as_mut().expect("overlay");
-                assert_eq!(
-                    overlay.segmented_parser_components.len(),
-                    2,
-                    "nested install needs the dynamic 2-component top overlay",
-                );
-                let mid_arc = &mut overlay.segmented_parser_components[1].constraint;
-                let mid_mut = std::sync::Arc::make_mut(mid_arc);
-                install_published_static_boundary_shards(
-                    mid_mut.static_dynamic_overlay.as_mut().expect("mid overlay"),
-                    Vec::new(),
-                )
-                .expect("clear mid shards");
-            }
+            assert_eq!(
+                installed
+                    .static_dynamic_overlay
+                    .as_ref()
+                    .expect("overlay")
+                    .segmented_parser_components
+                    .len(),
+                2,
+                "nested install needs the 2-component top overlay",
+            );
             install_published_static_boundary_shards(
                 installed.static_dynamic_overlay.as_mut().expect("overlay"),
                 top_shards,
@@ -5087,6 +5791,21 @@ mod tests {
         )
         .expect("inner dynamic compose")
         .constraint;
+        let mid_static = compose_constraints_owned_parent_segmented(
+            mid.clone(),
+            &mid_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        )
+        .expect("inner static compose")
+        .constraint;
+        assert!(
+            mid_static
+                .static_dynamic_overlay
+                .as_ref()
+                .is_some_and(|overlay| !overlay.segmented_boundary_shards.is_empty()),
+            "inner static compose must install its boundary repair before nesting",
+        );
         let outer_inputs = [CompiledSubgrammarInput {
             placeholder_terminal: sub_p,
             additional_placeholder_terminals: &[],
@@ -5100,6 +5819,28 @@ mod tests {
         )
         .expect("outer dynamic compose")
         .constraint;
+        let outer_mixed_inputs = [CompiledSubgrammarInput {
+            placeholder_terminal: sub_p,
+            additional_placeholder_terminals: &[],
+            constraint: &mid_static,
+        }];
+        let outer_with_static_inner = compose_constraints_owned_parent_segmented(
+            parent.clone(),
+            &outer_mixed_inputs,
+            &vocab,
+            SegmentedBoundaryBackend::Dynamic,
+        )
+        .expect("outer dynamic compose over static inner block")
+        .constraint;
+        assert!(
+            outer_with_static_inner
+                .static_dynamic_overlay
+                .as_ref()
+                .and_then(|overlay| overlay.segmented_parser_components.get(1))
+                .and_then(|component| component.constraint.static_dynamic_overlay.as_ref())
+                .is_some_and(|overlay| !overlay.segmented_boundary_shards.is_empty()),
+            "outer dynamic wrapper must preserve the child's static internal boundary repair",
+        );
         assert!(
             outer_dyn.uses_compact_segmented_parser_runtime(),
             "nested dynamic composition must stay on the compact runtime",
@@ -5263,18 +6004,42 @@ mod tests {
         );
         let disallowed = compute_disallowed_follows(&grammar);
 
-        // Two top-level walks sharing one link equivalence: the parent walk
-        // (parent commit, parent-leaf filter) and the block walk (whole-block
-        // commit, mid-leaf filter). The filter keeps a path iff it touches a
-        // terminal outside the filter leaf, so the block walk keeps every
-        // leaf-crossing gap (m→g, g→m, g→x) while the parent walk keeps the
-        // outer entries (L→m, R→m).
-        let active = vec![true; num_terminals as usize];
+        // Two top-level walks under immediate-component ownership: the parent
+        // owns leaf 0 and the already-composed block owns leaves 1+2. Pure
+        // m↔g crossings are internal to the block and must not become outer
+        // boundary candidates; g→x/g→y still crosses the block boundary.
         let flat: Arc<[u32]> = Arc::from(tdwa::l1::build_flat_transition_table(&merged));
-        let shared =
-            shared_equivalence_for(&merged, &vocab, None, &grammar, &active, &disallowed, &flat);
+        let ownership = Arc::new(
+            tdwa::scope::BoundaryOwnership::from_leaf_layout(
+                &leaf_offsets,
+                num_terminals,
+                &[
+                    tdwa::scope::ImmediateComponentId(0),
+                    tdwa::scope::ImmediateComponentId(1),
+                    tdwa::scope::ImmediateComponentId(1),
+                ],
+                2,
+            )
+            .expect("nested block ownership"),
+        );
         let total_states = merged.num_states() as usize;
-        let run_walk = |component_index: usize, commit: &[bool]| {
+        let run_walk = |component_index: usize, commit: &[bool], retain_non_crossing: bool| {
+            let scope = tdwa::scope::BoundaryAnalysisScope::new(
+                tdwa::scope::InitialStateDomain::from_mask(
+                    total_states,
+                    commit.to_vec(),
+                )
+                .expect("nested initial-state domain"),
+                merged
+                    .deterministic_reset_states()
+                    .into_iter()
+                    .collect(),
+                Arc::clone(&ownership),
+                tdwa::scope::ImmediateComponentId(component_index as u32),
+                !retain_non_crossing,
+                None,
+            )
+            .expect("nested boundary scope");
             build_boundary_terminal_dwa(&BoundaryWalkInputs {
                 merged_tokenizer: &merged,
                 vocab: &vocab,
@@ -5282,11 +6047,8 @@ mod tests {
                 disallowed_follows: &disallowed,
                 ignore_terminal: None,
                 follow_transparent_ignores: None,
-                terminal_offsets: &leaf_offsets,
-                component_index,
-                commit_states: commit,
-                retain_non_crossing_paths: false,
-                shared_equivalence: &shared,
+                scope: &scope,
+                retain_non_crossing_paths: retain_non_crossing,
                 flat_trans: Some(&flat),
             })
             .expect("nonempty-vocab nested walks must produce a DWA")
@@ -5297,8 +6059,13 @@ mod tests {
         for (slot, extra) in commit_block.iter_mut().zip(commit_g.iter()) {
             *slot |= *extra;
         }
-        let walk_p = run_walk(0, &commit_p);
-        let walk_b = run_walk(1, &commit_block);
+        let walk_p = run_walk(0, &commit_p, false);
+        // The block can complete after `g` and immediately re-enter at the
+        // parent's second SUB call before `m`. Both visible terminals are
+        // block-owned, so the lexical ownership filter alone would miss GM.
+        // Production narrows this conservative lane to the block's summary
+        // candidates; this fixture uses the full tiny vocabulary deliberately.
+        let walk_b = run_walk(1, &commit_block, true);
         let cand_p = boundary_accepted_tokens(&walk_p.dwa, &walk_p.id_map);
         let cand_b = boundary_accepted_tokens(&walk_b.dwa, &walk_b.id_map);
         assert!(
@@ -5310,8 +6077,8 @@ mod tests {
             "block walk must cross (fused mg/gm/gx expected)",
         );
         assert!(
-            cand_b.contains(&GM) || cand_b.contains(&MG),
-            "block walk must cover an inner-boundary fused token, got {cand_b:?}",
+            cand_b.contains(&GM),
+            "block walk must retain zero-width completion/re-entry token GM, got {cand_b:?}",
         );
         assert!(
             cand_b.contains(&GX) || cand_b.contains(&GY),
@@ -5398,7 +6165,7 @@ mod tests {
             "nested link must publish exactly the parent and block shards",
         );
 
-        let installed = install_nested(&outer_dyn, vec![shard_p, shard_b]);
+        let installed = install_nested(&outer_with_static_inner, vec![shard_p, shard_b]);
         for (index, component) in installed
             .static_dynamic_overlay
             .as_ref()
@@ -5431,12 +6198,22 @@ mod tests {
             mid_installed
                 .segmented_parser_components
                 .iter()
-                .all(|component| component.boundary.is_none()),
-            "mid overlay must carry no shards (outer block shard covers block-start crossings)",
+                .all(|component| component.boundary.as_ref().is_none_or(|shard| matches!(
+                    shard.backend,
+                    crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+                ))),
+            "mid overlay must not acquire a dynamic internal boundary shard",
         );
         assert!(
-            mid_installed.segmented_boundary_shards.is_empty(),
-            "mid overlay shard list must be cleared",
+            !mid_installed.segmented_boundary_shards.is_empty(),
+            "mid overlay static shard list must survive the outer install",
+        );
+        assert!(
+            mid_installed.segmented_boundary_shards.iter().all(|shard| matches!(
+                shard.backend,
+                crate::runtime::SegmentedBoundaryShardBackend::StaticParser(_)
+            )),
+            "every retained inner shard must stay static",
         );
 
         // Curated reachable-prefix corpus (fast): prefixes of the two
@@ -5519,7 +6296,12 @@ mod tests {
             for &token in &node.path {
                 st.commit_token(token).expect("static replay");
             }
-            if st.mask() != node.mask {
+            let actual = st.mask();
+            if actual != node.mask {
+                eprintln!(
+                    "[glrmask/test][nested_static_mismatch] path={:?} dynamic={:?} static={:?}",
+                    node.path, node.mask, actual,
+                );
                 mismatches += 1;
             }
         }
@@ -5563,7 +6345,7 @@ mod tests {
         // be strict or the fixture is vacuous. (The R,R,E,E load-bearing
         // control proof lives in
         // `boundary_transfer::nested_ready_depth_four_is_load_bearing`.)
-        let ablated = install_nested(&outer_dyn, Vec::new());
+        let ablated = install_nested(&outer_with_static_inner, Vec::new());
         // Lockstep walk: at every shared prefix the shard-less mask must be
         // a subset of the dynamic mask; a prefix where the reference admits
         // a token the ablated mask lacks (or a final-mask difference) proves

@@ -398,6 +398,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
     terminal_filter: Option<&[bool]>,
+    boundary_scope: Option<&super::scope::BoundaryAnalysisScope>,
 ) -> Option<PartitionTerminalDwas> {
     let speculative = partition_label == "p2"
         && std::env::var_os("GLRMASK_SPECULATIVE_P2_L2P").is_some();
@@ -423,6 +424,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_ti_output_cache,
             shared_classify_cache,
             terminal_filter,
+            boundary_scope,
             None,
             None,
             None,
@@ -484,6 +486,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                         shared_ti_output_cache,
                         shared_classify_cache,
                         terminal_filter,
+                        boundary_scope,
                         Some(&lengths),
                         None,
                         None,
@@ -522,6 +525,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
             shared_ti_output_cache,
             shared_classify_cache,
             terminal_filter,
+            boundary_scope,
             None,
             Some(&callback),
             Some(&witness_mask),
@@ -571,6 +575,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
                 shared_ti_output_cache,
                 shared_classify_cache,
                 terminal_filter,
+                boundary_scope,
                 None,
                 None,
                 None,
@@ -626,6 +631,7 @@ pub(crate) fn build_partition_id_map_only(
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
     terminal_filter: Option<&[bool]>,
+    boundary_scope: Option<&super::scope::BoundaryAnalysisScope>,
 ) -> Option<PartitionTerminalDwas> {
     build_partition_id_map_and_terminal_dwa_impl(
         partition_label,
@@ -648,6 +654,7 @@ pub(crate) fn build_partition_id_map_only(
         shared_ti_output_cache,
         shared_classify_cache,
         terminal_filter,
+        boundary_scope,
         None,
         None,
         None,
@@ -701,6 +708,7 @@ pub(crate) fn build_partition_vocab_map_only(
         shared_ti_output_cache,
         shared_classify_cache,
         terminal_filter,
+        None,
     )?;
     partition_parts_vocab_map(vocab, &parts)
 }
@@ -749,6 +757,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     shared_ti_output_cache: Option<&super::l2p::SharedTiTokenizerOutputCache>,
     shared_classify_cache: Option<&super::classify::SharedClassifyCache>,
     terminal_filter: Option<&[bool]>,
+    boundary_scope: Option<&super::scope::BoundaryAnalysisScope>,
     precomputed_terminal_path_lengths: Option<&[TerminalPathLength]>,
     witness_probe_callback: Option<&dyn Fn(&BitSet)>,
     speculative_witness_mask: Option<&Mutex<Option<Vec<bool>>>>,
@@ -763,9 +772,11 @@ fn build_partition_id_map_and_terminal_dwa_impl(
     let pre_classify_setup_started_at = Instant::now();
     let num_terminals = grammar.num_terminals as u32;
     // Classify terminals into L1 (single-byte paths) vs L2+ by default.
-    // Set GLRMASK_FORCE_ALL_L2P=1 to skip L1 and route everything through L2P.
-    let force_all_l2p =
-        std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
+    // Scoped boundary analysis needs the complete terminal-word observation:
+    // after the first lexical commit it may reset into the whole current link,
+    // so the ordinary L1 shortcut is not a proved replacement for L2P here.
+    let force_all_l2p = boundary_scope.is_some()
+        || std::env::var("GLRMASK_FORCE_ALL_L2P").map_or(false, |v| v == "1");
 
     let pre_classify_setup_ms =
         pre_classify_setup_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -904,7 +915,9 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         None
     };
 
-    let use_l2p_vocab_split = has_l2p && split_l2p_vocab_enabled();
+    // Likewise, the split-off L2P-single shortcut is certified for ordinary
+    // local masking, not for the stronger scoped crossing relation.
+    let use_l2p_vocab_split = has_l2p && boundary_scope.is_none() && split_l2p_vocab_enabled();
     let l2p_vocab_split = use_l2p_vocab_split.then(|| {
         split_vocab_for_active_l2p_terminals(
             tokenizer,
@@ -1003,11 +1016,57 @@ fn build_partition_id_map_and_terminal_dwa_impl(
         .flatten();
 
     let effective_l2p_initial_state_map = initial_state_map;
+    if boundary_scope.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
+        if let Some(map) = initial_state_map {
+            eprintln!(
+                "SCOPED_PART_INPUT partition={} o2i={:?} classes={:?} reps={:?}",
+                partition_label,
+                map.original_to_internal,
+                map.internal_to_originals,
+                map.representative_original_ids,
+            );
+        }
+    }
+    let scoped_crossing_filter = boundary_scope.and_then(|scope| {
+        scope.require_crossing().then_some(super::l2p::L2pCrossingFilter {
+            ownership: scope.ownership(),
+            start_component: scope.start_component(),
+        })
+    });
+    let scoped_ti_candidate_groups = boundary_scope.map(|scope| {
+        super::l2p::scoped_terminal_interchangeability_candidate_groups(
+            tokenizer,
+            &l2p_mask,
+            grammar,
+            disallowed_follows,
+            ignore_terminal,
+            scope,
+        )
+    });
+    let scoped_l2p_options = boundary_scope.map(|scope| super::l2p::L2pShardBuildOptions {
+        shared_equivalence: None,
+        // Scoped boundary TI is attempted only for the narrow pre-certified
+        // families above; the ordinary exact witness oracle is still the
+        // authority for every actual merge.
+        skip_ti_discovery: scoped_ti_candidate_groups
+            .as_ref()
+            .is_none_or(|groups| groups.is_empty()),
+        ti_candidate_groups: scoped_ti_candidate_groups
+            .as_ref()
+            .map(Vec::as_slice),
+        crossing_filter: scoped_crossing_filter,
+        // The parser consumer indexes the scoped Step-1 TSID coordinate.
+        skip_core_compact: true,
+        follow_transparent: scope.follow_transparent(),
+        initial_state_domain_is_exact: true,
+    });
 
     // The split-off L1 branch observes only the L2P terminal set. Large lexer
     // components belonging exclusively to other terminals are exact empty
     // residuals for this branch and can be collapsed before token replay.
-    let split_l1_structural_state_map = (has_split_l1 && !combine_l1_single)
+    let split_l1_structural_state_map = (boundary_scope.is_none()
+        && has_split_l1
+        && !combine_l1_single)
         .then(|| {
             super::synthetic_state_map::inactive_dispatch_component_state_map(
                 tokenizer,
@@ -1050,12 +1109,12 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                 let source_states = initial_state_map
                     .map(ManyToOneIdMap::num_internal_ids)
                     .unwrap_or_else(|| tokenizer.num_states()) as usize;
-                let materialization_requested = structural_branch_tokenizer_selected(
+                let materialization_requested = boundary_scope.is_none() && (structural_branch_tokenizer_selected(
                     &branch_label,
                     vocab.len(),
                     active_terminal_count,
                     source_states,
-                ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                ) || materialize_branch_active_tokenizer_selected(&branch_label));
                 let state_map_requested = materialization_requested
                     || branch_active_state_map_selected(
                         &branch_label,
@@ -1063,22 +1122,24 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         active_terminal_count,
                         source_states,
                     );
-                let branch_state_map = inactive_component_branch_state_map(
-                    tokenizer,
-                    l1_build_mask,
-                    initial_state_map,
-                    &branch_label,
-                )
-                .or_else(|| {
-                    build_branch_active_state_map(
+                let branch_state_map = boundary_scope.is_none().then(|| {
+                    inactive_component_branch_state_map(
                         tokenizer,
-                        vocab,
                         l1_build_mask,
                         initial_state_map,
                         &branch_label,
-                        state_map_requested,
                     )
-                });
+                    .or_else(|| {
+                        build_branch_active_state_map(
+                            tokenizer,
+                            vocab,
+                            l1_build_mask,
+                            initial_state_map,
+                            &branch_label,
+                            state_map_requested,
+                        )
+                    })
+                }).flatten();
                 let materialized = materialization_requested
                     .then(|| {
                         branch_state_map.as_ref().and_then(|(map, _)| {
@@ -1109,6 +1170,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        false,
                         id_map_only,
                     );
                     if let Some(part) = result.as_mut() {
@@ -1139,6 +1201,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         None,
                         shared_l1_token_trie.as_deref(),
                         None,
+                        boundary_scope.is_some(),
                         id_map_only,
                     )
                 };
@@ -1191,8 +1254,8 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                         shared_l1_token_trie.as_deref(),
                         initial_state_map,
                         id_map_only,
-                        None,
-                        None,
+                        boundary_scope.map(|scope| scope.initial_states().keep_raw()),
+                        scoped_l2p_options.as_ref(),
                     );
                     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
                     return ((result, 0.0), (None, 0.0), elapsed_ms);
@@ -1245,12 +1308,12 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                             let source_states = effective_l2p_initial_state_map
                                 .map(ManyToOneIdMap::num_internal_ids)
                                 .unwrap_or_else(|| tokenizer.num_states()) as usize;
-                            let materialization_requested = structural_branch_tokenizer_selected(
+                            let materialization_requested = boundary_scope.is_none() && (structural_branch_tokenizer_selected(
                                 &branch_label,
                                 boundary_vocab.len(),
                                 active_terminal_count,
                                 source_states,
-                            ) || materialize_branch_active_tokenizer_selected(&branch_label);
+                            ) || materialize_branch_active_tokenizer_selected(&branch_label));
                             let state_map_requested = materialization_requested
                                 || branch_active_state_map_selected(
                                     &branch_label,
@@ -1258,22 +1321,24 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     active_terminal_count,
                                     source_states,
                                 );
-                            let branch_state_map = inactive_component_branch_state_map(
-                                    tokenizer,
-                                    &l2p_mask,
-                                    initial_state_map,
-                                    &branch_label,
-                                )
-                                .or_else(|| {
-                                    build_branch_active_state_map(
+                            let branch_state_map = boundary_scope.is_none().then(|| {
+                                inactive_component_branch_state_map(
                                         tokenizer,
-                                        &boundary_vocab,
                                         &l2p_mask,
                                         initial_state_map,
                                         &branch_label,
-                                        state_map_requested,
                                     )
-                                });
+                                    .or_else(|| {
+                                        build_branch_active_state_map(
+                                            tokenizer,
+                                            &boundary_vocab,
+                                            &l2p_mask,
+                                            initial_state_map,
+                                            &branch_label,
+                                            state_map_requested,
+                                        )
+                                    })
+                            }).flatten();
                             let materialized = materialization_requested
                                 .then(|| {
                                     branch_state_map.as_ref().and_then(|(map, _)| {
@@ -1317,8 +1382,8 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     shared_l1_token_trie.as_deref(),
                                     None,
                                     id_map_only,
-                                    None,
-                                    None,
+                                    boundary_scope.map(|scope| scope.initial_states().keep_raw()),
+                                    scoped_l2p_options.as_ref(),
                                 );
                                 if let Some(part) = result.as_mut() {
                                     part.id_map.tokenizer_states = materialized
@@ -1355,8 +1420,8 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                     shared_l1_token_trie.as_deref(),
                                     branch_initial_state_map,
                                     id_map_only,
-                                    None,
-                                    None,
+                                    boundary_scope.map(|scope| scope.initial_states().keep_raw()),
+                                    scoped_l2p_options.as_ref(),
                                 )
                             };
                             if let (Some(part), Some((_, map_ms))) =
@@ -1399,6 +1464,7 @@ fn build_partition_id_map_and_terminal_dwa_impl(
                                 None,
                                 shared_l1_token_trie.as_deref(),
                                 shared_l1_parent_order.as_deref(),
+                                boundary_scope.is_some(),
                                 id_map_only,
                             );
                             (result, started_at.elapsed().as_secs_f64() * 1000.0)
@@ -1670,6 +1736,7 @@ pub(super) fn build_partition_vocab_equivalence(
             flat_trans,
             transitions_by_byte: l1_transitions_by_byte,
             initial_state_map,
+            initial_state_domain_is_exact: false,
             shared_generic_nfa_topology: None,
             shared_generic_nfa_trie: None,
             subset_parent_order: None,
@@ -1757,6 +1824,7 @@ pub(super) fn build_partition_vocab_equivalence(
                 flat_trans,
                 transitions_by_byte: l1_transitions_by_byte,
                 initial_state_map,
+                initial_state_domain_is_exact: false,
                 shared_generic_nfa_topology: None,
                 shared_generic_nfa_trie: None,
                 subset_parent_order: None,
