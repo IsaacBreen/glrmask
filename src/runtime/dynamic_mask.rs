@@ -472,6 +472,8 @@ struct RecursiveFullWalkTransitions<'a> {
     parser_canonicalizer: RecursiveParserCanonicalizer,
 }
 
+
+
 #[derive(Default)]
 struct RecursiveParserCanonicalizer {
     semantic: Option<Box<RecursiveParserSemanticCache>>,
@@ -560,6 +562,7 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
             token_boundary_cache: FxHashMap::default(),
             parser_advance_cache: FxHashMap::default(),
             parser_canonicalizer: RecursiveParserCanonicalizer::default(),
+
         })
     }
 
@@ -1530,6 +1533,9 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     }
 
     fn future_contains(&mut self, state: u32, terminal: TerminalID) -> bool {
+        // Hot scalar IDs and ordinary config IDs can name the same residual.
+        // Normalize before BOTH lookup and insertion, not just insertion.
+        let state = self.generic_config_for_state(state);
         if let Some(&cached) = self.future_contains_cache.get(&(state, terminal)) {
             return cached;
         }
@@ -1539,7 +1545,6 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             *self.future_contains_by_terminal.entry(terminal).or_default() += 1;
             *self.future_contains_by_state.entry((state, terminal)).or_default() += 1;
         }
-        let state = self.generic_config_for_state(state);
         let result = self.config_future_contains_exact(state, terminal);
         self.future_contains_cache.insert((state, terminal), result);
         if let Some(started) = started {
@@ -9022,6 +9027,42 @@ mod tests {
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn full_walk_future_cache_normalizes_hot_and_generic_coordinates() {
+        let vocab = Vocab::new(vec![
+            (0, b"a".to_vec()), (1, b"bc".to_vec()), (2, b"xyz".to_vec()),
+        ]);
+        let constraint = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start s; t WORD = "abc"; t OTHER = "xyz"; nt s = WORD | OTHER;"#,
+        ), &vocab).unwrap();
+        let word = constraint.terminal_display_names.iter().position(|name| name == "WORD").unwrap() as u32;
+        let other = constraint.terminal_display_names.iter().position(|name| name == "OTHER").unwrap() as u32;
+        let mut scan = DynamicNfaScanCache::new(&constraint, None);
+        let raw = scan.transition(constraint.tokenizer.initial_state(), b'a');
+        assert_ne!(raw, u32::MAX);
+        // Hot scalar IDs are used by the ordinary lazy-config executor, not
+        // deterministic identity-config execution. Match that representation
+        // explicitly, as the missing-subset ordinary runtime path does.
+        scan.deterministic = false;
+        let mut table = FullWalkConfigTransitions::new(&mut scan, 3, 0);
+        table.hot_enabled = true;
+        table.profile = true;
+        let id = table.hot_scalar.intern(raw).unwrap();
+        let hot = FullWalkHotScalarCache::tagged(id);
+        let generic = table.generic_config_for_state(hot);
+        assert_ne!(hot, generic, "fixture must exercise two coordinate representations");
+        assert!(table.future_contains(hot, word));
+        assert_eq!(table.future_contains_calls, 1);
+        assert!(table.future_contains(hot, word));
+        assert!(table.future_contains(generic, word));
+        assert_eq!(table.future_contains_calls, 1, "both aliases must reuse the same positive result");
+        assert!(!table.future_contains(hot, other));
+        assert!(!table.future_contains(hot, other));
+        assert!(!table.future_contains(generic, other));
+        assert_eq!(table.future_contains_calls, 2, "negative results must be memoized too");
+        assert_eq!(table.future_contains_cache.len(), 2);
     }
 
     #[test]

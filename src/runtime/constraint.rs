@@ -22,7 +22,7 @@ use crate::compiler::glr::parser::{
     advance_provider_control_closed_stacks, close_provider_control_stacks,
     materialize_control_eliminated_scoped_provider_table,
     stack_may_advance_on_with_provider, stack_may_advance_on_any_with_provider,
-    for_each_admitted_symbol_with_provider,
+    for_each_admitted_symbol_with_provider, find_admitted_symbol_with_provider,
     stacks_finished_with_provider,
 };
 use crate::compiler::glr::table::{Action, GLRTable, TableAmbiguity, subgrammar_child_return_pop};
@@ -3373,6 +3373,36 @@ impl Constraint {
         for_each_admitted_symbol_with_provider(&provider, stack, symbols,
             |terminal| admitted.set(terminal));
         Some(admitted)
+    }
+
+    /// Exact existential intersection of parser admission and a caller's
+    /// terminal predicate. Candidate supports may over-approximate lexical
+    /// liveness: only a terminal passing BOTH checks can establish success.
+    pub(crate) fn compact_segmented_parser_may_advance_on_any_matching(
+        &self,
+        stack: &ParserGSS,
+        candidates: impl IntoIterator<Item = u32>,
+        mut matches: impl FnMut(u32) -> bool,
+    ) -> Option<bool> {
+        if !self.uses_compact_segmented_parser_runtime() {
+            return None;
+        }
+        let layout = self.recursive_parser_layout()
+            .expect("validated recursive compact parser metadata")?;
+        let tables = RecursiveSegmentedParserTables { root: self, layout: &layout };
+        let provider = DisjointComponentActionProvider::with_state_offsets(
+            &tables, &layout.links, &layout.leaf_state_offsets,
+        ).expect("validated compact segmented parser metadata");
+        let symbols = candidates.into_iter().flat_map(|terminal| {
+            let mut symbols = SmallVec::<[ScopedParserSymbol; 8]>::new();
+            self.recursive_parser_symbols_for_runtime_terminal(
+                &layout, terminal, &mut symbols,
+            );
+            symbols.into_iter().map(move |symbol| (terminal, symbol))
+        });
+        Some(find_admitted_symbol_with_provider(
+            &provider, stack, symbols, |&terminal| matches(terminal),
+        ).is_some())
     }
 
     pub(crate) fn compact_segmented_parser_is_finished(

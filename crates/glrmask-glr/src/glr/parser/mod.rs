@@ -4943,6 +4943,32 @@ pub fn for_each_admitted_symbol_with_provider<P: ParserActionProvider, K>(
     }
 }
 
+/// Find an exactly admitted candidate satisfying an additional predicate.
+/// Control closure and stack-top inspection happen once; the predicate is
+/// evaluated only for parser-admissible candidates and stops at the first
+/// witness. This lets a lexer defer expensive exact residual checks without
+/// admitting any token from an over-approximate support set alone.
+pub fn find_admitted_symbol_with_provider<P: ParserActionProvider, K>(
+    provider: &P,
+    stack: &ParserGSS,
+    symbols: impl IntoIterator<Item = (K, P::Symbol)>,
+    mut matches: impl FnMut(&K) -> bool,
+) -> Option<K> {
+    if stack.is_empty() {
+        return None;
+    }
+    let closed = close_provider_control_stacks(provider, stack);
+    let tops = closed.peek_values();
+    for (key, symbol) in symbols {
+        if provider_closed_symbol_may_advance(provider, &closed, &tops, symbol)
+            && matches(&key)
+        {
+            return Some(key);
+        }
+    }
+    None
+}
+
 fn provider_closed_symbol_may_advance<P: ParserActionProvider>(
     provider: &P,
     closed: &ParserGSS,
@@ -5985,6 +6011,21 @@ mod tests {
             );
             assert_eq!(admitted, if expect { vec![0,1] } else { vec![] },
                 "batched exact admission differs ({case})");
+            let mut predicate_calls = 0;
+            let found = super::find_admitted_symbol_with_provider(
+                provider, stack, [(0u32, symbol), (1u32, symbol)],
+                |&key| { predicate_calls += 1; key == 0 },
+            );
+            assert_eq!(found, expect.then_some(0), "lazy witness differs ({case})");
+            assert_eq!(predicate_calls, usize::from(expect),
+                "predicate must run only for admitted symbols and stop at a witness ({case})");
+            let found = super::find_admitted_symbol_with_provider(
+                provider, stack, [(0u32, symbol), (1u32, symbol)], |&key| key == 1,
+            );
+            assert_eq!(found, expect.then_some(1), "later lazy witness differs ({case})");
+            assert!(super::find_admitted_symbol_with_provider(
+                provider, stack, [(0u32, symbol)], |_| false,
+            ).is_none(), "parser admission alone must not satisfy the predicate ({case})");
         }
 
         // Plain zero-pop shift: sufficient fast path, true.

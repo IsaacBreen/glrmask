@@ -19,7 +19,7 @@ struct RecursiveConfigTransitions<'scan, 'constraint> {
     roots: FxHashMap<u32, u32>,
     resets: Vec<Option<u32>>,
     rows: Vec<Option<Box<[u64; 256]>>>,
-    futures: Vec<Option<BitSet>>,
+    candidate_futures: Vec<Option<BitSet>>,
     boundary: FxHashMap<(u32, u32), bool>,
     error: Option<String>,
 }
@@ -33,7 +33,7 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         self.states.push(ScopedConfig { leaf, local });
         self.ids.insert((leaf, local), id);
         self.rows.push(None);
-        self.futures.push(None);
+        self.candidate_futures.push(None);
         Ok(id)
     }
 
@@ -47,8 +47,10 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
         Ok(())
     }
 
-    fn exact_scoped_future(&mut self, state: u32) -> &BitSet {
-        if self.futures[state as usize].is_none() {
+    /// Cheap support only. A virtual residual may not actually extend every
+    /// terminal listed here; consumers must still call exact future_contains.
+    fn candidate_scoped_future(&mut self, state: u32) -> &BitSet {
+        if self.candidate_futures[state as usize].is_none() {
             let ScopedConfig { leaf, local } = self.states[state as usize];
             let descriptor = self.routing.leaves[leaf];
             let table = &mut self.tables[leaf];
@@ -61,18 +63,13 @@ impl<'scan, 'constraint> RecursiveConfigTransitions<'scan, 'constraint> {
             let terminal_count = self.routing.leaves.last().map_or(0, |last| {
                 last.terminal_offset as usize + last.terminal_count as usize
             });
-            let mut exact = BitSet::new(terminal_count);
+            let mut scoped_candidates = BitSet::new(terminal_count);
             for terminal in candidates.iter_ones() {
-                // In particular, retained virtual residual support may be an
-                // over-approximation. Ask the ordinary executor for exact
-                // liveness before allowing it to certify a token endpoint.
-                if table.future_contains(local, terminal as u32) {
-                    exact.set(descriptor.terminal_offset as usize + terminal);
-                }
+                scoped_candidates.set(descriptor.terminal_offset as usize + terminal);
             }
-            self.futures[state as usize] = Some(exact);
+            self.candidate_futures[state as usize] = Some(scoped_candidates);
         }
-        self.futures[state as usize].as_ref().expect("future initialized above")
+        self.candidate_futures[state as usize].as_ref().expect("candidates initialized above")
     }
 }
 
@@ -154,7 +151,10 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
     }
 
     fn future_intersects(&mut self, state: u32, terminals: &BitSet) -> bool {
-        !self.exact_scoped_future(state).is_disjoint(terminals)
+        let candidates = self.candidate_scoped_future(state).clone();
+        candidates.iter_ones().any(|terminal| {
+            terminals.contains(terminal) && self.future_contains(state, terminal as u32)
+        })
     }
 
     fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
@@ -229,10 +229,14 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         if let Some(&value) = self.boundary.get(&(lexer_state, parser_node)) { return value; }
         let ignored = self.routing.leaves[leaf].constraint.ignore_terminal
             .map(|terminal| self.routing.leaves[leaf].terminal_offset + terminal);
-        let future = self.exact_scoped_future(lexer_state);
-        let allowed = ignored.is_some_and(|terminal| future.contains(terminal as usize)) || {
+        let allowed = ignored.is_some_and(|terminal| self.future_contains(lexer_state, terminal)) || {
+            let candidates = self.candidate_scoped_future(lexer_state).clone();
             let gss = with_empty_accumulators(&parser_cache.nodes[parser_node as usize].gss);
-            constraint.compact_segmented_parser_may_advance_on_any(&gss, future).unwrap_or(false)
+            constraint.compact_segmented_parser_may_advance_on_any_matching(
+                &gss,
+                candidates.iter_ones().map(|terminal| terminal as u32),
+                |terminal| self.future_contains(lexer_state, terminal),
+            ).unwrap_or(false)
         };
         self.boundary.insert((lexer_state, parser_node), allowed);
         allowed
@@ -254,7 +258,7 @@ pub(super) fn fill(state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool,
     let mut provider = RecursiveConfigTransitions {
         routing, tables, states: Vec::new(), ids: FxHashMap::default(),
         roots: FxHashMap::default(), resets: vec![None; reset_count], rows: Vec::new(),
-        futures: Vec::new(), boundary: FxHashMap::default(), error: None,
+        candidate_futures: Vec::new(), boundary: FxHashMap::default(), error: None,
     };
     if let Some(start) = setup_start {
         eprintln!("[glrmask/profile][recursive_phases] setup_ns={}", start.elapsed().as_nanos());
