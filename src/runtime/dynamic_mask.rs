@@ -180,6 +180,9 @@ trait FullWalkTransitionTable {
     #[inline(always)]
     fn product_transition_cache_capacity(&self) -> usize { 0 }
 
+    #[inline(always)]
+    fn cache_two_branch_products(&self) -> bool { false }
+
     /// Complete provider walks can defer output until the exact admitted and
     /// rejected populations are known. This reuses the ordinary adaptive
     /// emitter instead of touching every rejected token in a sparse mask.
@@ -465,6 +468,61 @@ struct RecursiveFullWalkTransitions<'a> {
     leaves: SmallVec<[RecursiveFullWalkLeaf<'a>; 4]>,
     token_boundary_cache: FxHashMap<(u32, u32), bool>,
     parser_advance_cache: FxHashMap<(u32, TerminalID), SmallVec<[(u32, u32); 4]>>,
+    parser_canonicalizer: RecursiveParserCanonicalizer,
+}
+
+#[derive(Default)]
+struct RecursiveParserCanonicalizer {
+    semantic: Option<Box<RecursiveParserSemanticCache>>,
+}
+
+struct RecursiveParserSemanticCache {
+    keys: crate::ds::leveled_gss::GssSemanticKeyInterner<u32, ()>,
+    nodes: FxHashMap<u32, u32>,
+}
+
+impl RecursiveParserCanonicalizer {
+    fn intern(&mut self, stacks: ParserStacks, cache: &mut FullWalkParserCache) -> u32 {
+        self.intern_with_threshold(stacks, cache, 32)
+    }
+
+    fn intern_with_threshold(
+        &mut self,
+        stacks: ParserStacks,
+        cache: &mut FullWalkParserCache,
+        threshold: usize,
+    ) -> u32 {
+        if self.semantic.is_none() {
+            if cache.nodes.len() < threshold {
+                return cache.intern_stacks(stacks);
+            }
+            // Canonicalize exact finite stack languages, not pointer identity
+            // or just stack tops. Accumulators are unit here; exclusion guards
+            // remain correlated in FullWalkBranch and are never merged away.
+            let mut semantic = RecursiveParserSemanticCache {
+                keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(
+                    16_384, 8_192, 16_384,
+                ),
+                nodes: FxHashMap::default(),
+            };
+            for (index, node) in cache.nodes.iter().enumerate() {
+                let key = semantic.keys.key(&node.gss);
+                if semantic.keys.is_exhausted() { break; }
+                semantic.nodes.entry(key).or_insert(index as u32);
+            }
+            self.semantic = Some(Box::new(semantic));
+        }
+        let semantic = self.semantic.as_mut().expect("initialized above");
+        if semantic.keys.is_exhausted() { return cache.intern_stacks(stacks); }
+        let key = semantic.keys.key(&stacks);
+        // Budget exhaustion must never let the interner's sentinel represent
+        // a real parser language. The established exact path remains valid.
+        if semantic.keys.is_exhausted() { return cache.intern_stacks(stacks); }
+        if let Some(&node) = semantic.nodes.get(&key) { return node; }
+        let node = cache.push_stacks(stacks);
+        semantic.nodes.insert(key, node);
+        node
+    }
 }
 
 impl<'a> RecursiveFullWalkTransitions<'a> {
@@ -500,6 +558,7 @@ impl<'a> RecursiveFullWalkTransitions<'a> {
             leaves,
             token_boundary_cache: FxHashMap::default(),
             parser_advance_cache: FxHashMap::default(),
+            parser_canonicalizer: RecursiveParserCanonicalizer::default(),
         })
     }
 
@@ -748,7 +807,7 @@ impl FullWalkTransitionTable for RecursiveFullWalkTransitions<'_> {
                 };
                 let reset = leaf.reset;
                 let stacks = partition.apply(|_| ());
-                let node = parser_cache.intern_stacks(stacks);
+                let node = self.parser_canonicalizer.intern(stacks, parser_cache);
                 if !result.contains(&(reset, node)) {
                     result.push((reset, node));
                 }
@@ -1816,10 +1875,17 @@ enum FullWalkManyState {
 struct FullWalkManyTransitionCache {
     ids: FxHashMap<FullWalkManyState, u32>,
     states: Vec<FullWalkManyState>,
-    rows: Vec<Box<[u32; 256]>>,
+    // Product-state caches are deliberately bounded (currently <= 1024 for
+    // recursive providers), so u32 targets waste half of this hot table and
+    // double its cache footprint. Keep the public/internal state IDs as u32,
+    // but encode cached row targets compactly. Capacity is clamped to the
+    // representable exact range; hitting that cache bound only falls back to
+    // the existing owned-state path and never drops a branch.
+    rows: Vec<Box<[u16; 256]>>,
     boundary_allowed: Vec<Option<bool>>,
     stays_many: Vec<bool>,
     capacity: usize,
+    cache_two: bool,
     profile: bool,
     calls: usize,
     hits: usize,
@@ -1831,15 +1897,19 @@ struct FullWalkManyTransitionCache {
 impl FullWalkManyTransitionCache {
     const UNKNOWN: u32 = u32::MAX;
     const DEAD: u32 = u32::MAX - 1;
+    const ROW_UNKNOWN: u16 = u16::MAX;
+    const ROW_DEAD: u16 = u16::MAX - 1;
+    const ROW_MAX_ID: usize = (u16::MAX - 2) as usize;
 
-    fn new(capacity: usize) -> Self {
+    fn new(capacity: usize, cache_two: bool) -> Self {
         Self {
             ids: FxHashMap::default(),
             states: Vec::new(),
             rows: Vec::new(),
             boundary_allowed: Vec::new(),
             stays_many: Vec::new(),
-            capacity,
+            capacity: capacity.min(Self::ROW_MAX_ID + 1),
+            cache_two,
             profile: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             calls: 0,
             hits: 0,
@@ -1859,14 +1929,15 @@ impl FullWalkManyTransitionCache {
         let id = self.states.len() as u32;
         let owned = state.clone();
         self.states.push(owned.clone());
-        self.rows.push(Box::new([Self::UNKNOWN; 256]));
+        self.rows.push(Box::new([Self::ROW_UNKNOWN; 256]));
         self.boundary_allowed.push(None);
         self.stays_many.push(match state {
             FullWalkManyState::Branches(branches) => {
                 // These shapes cannot use the scalar/two or same-parser merge
                 // lanes. Reaching the cached shape again need not inspect or
                 // copy its guards/frontier merely to rediscover that fact.
-                branches.iter().any(|b| !b.prune_guard.is_passed())
+                (self.cache_two && branches.len() == 2)
+                    || branches.iter().any(|b| !b.prune_guard.is_passed())
                     || (branches.len() > 2 && branches.iter().skip(1)
                         .any(|b| b.parser_node != branches[0].parser_node))
             }
@@ -1879,7 +1950,11 @@ impl FullWalkManyTransitionCache {
     #[inline(always)]
     fn cached_many_target(&mut self, source: u32, byte: u8) -> Option<u32> {
         let row = self.rows.get(source as usize)?;
-        let target = row[byte as usize];
+        let encoded = row[byte as usize];
+        if encoded >= Self::ROW_DEAD {
+            return None;
+        }
+        let target = u32::from(encoded);
         if !self.stays_many.get(target as usize).copied().unwrap_or(false) { return None; }
         if self.profile { self.calls += 1; self.hits += 1; }
         Some(target)
@@ -1929,13 +2004,13 @@ impl FullWalkManyTransitionCache {
             return Self::UNKNOWN;
         };
         let cached = self.rows[source as usize][byte as usize];
-        if cached == Self::DEAD {
+        if cached == Self::ROW_DEAD {
             if self.profile { self.hits += 1; }
             return Self::DEAD;
         }
-        if cached != Self::UNKNOWN {
+        if cached != Self::ROW_UNKNOWN {
             if self.profile { self.hits += 1; }
-            return cached;
+            return u32::from(cached);
         }
         if self.profile { self.misses += 1; }
         let next = full_walk_step_many_state(
@@ -1947,11 +2022,12 @@ impl FullWalkManyTransitionCache {
             constraint,
         );
         if matches!(&next, FullWalkManyState::Branches(branches) if branches.is_empty()) {
-            self.rows[source as usize][byte as usize] = Self::DEAD;
+            self.rows[source as usize][byte as usize] = Self::ROW_DEAD;
             return Self::DEAD;
         }
         if let Some(target) = self.intern(&next) {
-            self.rows[source as usize][byte as usize] = target;
+            debug_assert!(target as usize <= Self::ROW_MAX_ID);
+            self.rows[source as usize][byte as usize] = target as u16;
             return target;
         }
         *uncached_output = next;
@@ -4509,8 +4585,9 @@ fn try_full_walk_mask_with_table<
    let mut pair_union_cache = FxHashMap::<(u32, u32), Option<u32>>::default();
     let mut triple_union_cache = FxHashMap::<(u32, u32, u32), Option<u32>>::default();
     let product_transition_cache_capacity = transitions.product_transition_cache_capacity();
+    let cache_two_branch_products = transitions.cache_two_branch_products();
     let mut many_transition_cache =
-        FullWalkManyTransitionCache::new(product_transition_cache_capacity);
+        FullWalkManyTransitionCache::new(product_transition_cache_capacity, cache_two_branch_products);
     let mut stack_many_ids = if product_transition_cache_capacity != 0 {
         vec![FullWalkManyTransitionCache::UNKNOWN; stack_len]
     } else { Vec::new() };
@@ -4683,6 +4760,21 @@ fn try_full_walk_mask_with_table<
                     );
                     continue;
                 }
+            }
+        }
+
+        if cache_two_branch_products && product_transition_cache_capacity != 0
+            && (scalar_lexer == FULL_WALK_LEXER_TWO || scalar_lexer == FULL_WALK_LEXER_TWO_DISTINCT)
+        {
+            let pair = FullWalkManyState::Branches(smallvec::smallvec![
+                FullWalkBranch { lexer_state: current_two.0.0, parser_node: current_two.0.1,
+                    prune_guard: FullWalkPruneGuard::Passed },
+                FullWalkBranch { lexer_state: current_two.1.0, parser_node: current_two.1.1,
+                    prune_guard: FullWalkPruneGuard::Passed },
+            ]);
+            if let Some(id) = many_transition_cache.intern(&pair) {
+                current_many_id = id;
+                scalar_lexer = FULL_WALK_LEXER_MULTI;
             }
         }
 
@@ -5277,7 +5369,10 @@ fn try_full_walk_mask_with_table<
                             [first, second]
                                 if first.prune_guard.is_passed() && second.prune_guard.is_passed() =>
                             {
-                                if let Some((lexer_state, parser_node)) =
+                                if cache_two_branch_products && next_id < FullWalkManyTransitionCache::DEAD {
+                                    scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                    current_many_id = next_id;
+                                } else if let Some((lexer_state, parser_node)) =
                                     full_walk_merge_two_same_parser(
                                         transitions,
                                         &mut pair_union_cache,
@@ -8399,6 +8494,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn recursive_parser_semantic_interning_preserves_exact_languages_and_exhaustion() {
+        let (mut cache, _) = FullWalkParserCache::from_roots(&DynamicBranches::new(), None);
+        let mut canonicalizer = RecursiveParserCanonicalizer::default();
+        let left = ParserStacks::from_single_stack(vec![0, 1, 2], ());
+        let left_again = ParserStacks::from_single_stack(vec![0, 1, 2], ());
+        assert!(!left.ptr_eq(&left_again));
+        let a = canonicalizer.intern_with_threshold(left.clone(), &mut cache, 0);
+        let b = canonicalizer.intern_with_threshold(left_again.clone(), &mut cache, 0);
+        assert_eq!(a, b, "different allocations of one language must share a node");
+        let right = ParserStacks::from_single_stack(vec![0, 1, 3], ());
+        let c = canonicalizer.intern_with_threshold(right.clone(), &mut cache, 0);
+        assert_ne!(a, c, "equal tops/prefixes are not an equality proof");
+        let union_a = left.merge(&right);
+        let union_b = right.merge(&left_again);
+        let u = canonicalizer.intern_with_threshold(union_a, &mut cache, 0);
+        let v = canonicalizer.intern_with_threshold(union_b, &mut cache, 0);
+        assert_eq!(u, v, "union construction order must not change the language key");
+        assert_ne!(u, a);
+        canonicalizer.semantic = Some(Box::new(RecursiveParserSemanticCache {
+            keys: crate::ds::leveled_gss::GssSemanticKeyInterner::with_budget(1, 1, 1),
+            nodes: FxHashMap::default(),
+        }));
+        let x = canonicalizer.intern_with_threshold(
+            ParserStacks::from_single_stack(vec![0, 4, 5], ()), &mut cache, 0,
+        );
+        let y = canonicalizer.intern_with_threshold(
+            ParserStacks::from_single_stack(vec![0, 4, 6], ()), &mut cache, 0,
+        );
+        assert!(canonicalizer.semantic.as_ref().unwrap().keys.is_exhausted());
+        assert_ne!(x, y, "exhaustion must not collapse distinct languages into sentinel zero");
     }
 
     #[test]

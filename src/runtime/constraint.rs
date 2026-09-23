@@ -3682,7 +3682,13 @@ impl Constraint {
             // source serialized. Rebuild vocabulary-only slice metadata before
             // any lazy lexer quotient tries to consume those proof languages.
             let slice_started = profile_runtime_mask.then(std::time::Instant::now);
-            self.prepare_llg_slice_leftovers(&mut vocab);
+            // Recursive masking uses scoped leaf lexers, not this transitional
+            // outer tokenizer. Its source-only projection/slice proofs cannot
+            // be used by the provider and must not be built on its first mask.
+            let recursive_provider = self.uses_compact_segmented_parser_runtime();
+            if !recursive_provider {
+                self.prepare_llg_slice_leftovers(&mut vocab);
+            }
             if let Some(started) = slice_started {
                 eprintln!(
                     "[glrmask/profile][dynamic_mask_first_use] slice_prepare_ms={:.3}",
@@ -3690,7 +3696,9 @@ impl Constraint {
                 );
             }
             let runtime_started = profile_runtime_mask.then(std::time::Instant::now);
-            self.prepare_dynamic_mask_runtime_artifacts(&mut vocab);
+            if !recursive_provider {
+                self.prepare_dynamic_mask_runtime_artifacts(&mut vocab);
+            }
             if let Some(started) = runtime_started {
                 eprintln!(
                     "[glrmask/profile][dynamic_mask_first_use] lexer_runtime_prepare_ms={:.3}",

@@ -159,7 +159,22 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
 
     fn merge_states(&mut self, states: &[u32]) -> Option<u32> {
         let first = *states.first()?;
-        states.iter().all(|&state| state == first).then_some(first)
+        if states.iter().all(|&state| state == first) { return Some(first); }
+        // The driver proves equal parser languages and discharged guards.
+        // Within one scoped leaf, use the ordinary exact lazy-subset union
+        // instead of carrying equivalent lexical lanes as separate branches.
+        let leaf = self.states.get(first as usize)?.leaf;
+        let mut locals = SmallVec::<[u32; 4]>::new();
+        for &state in states {
+            let state = self.states.get(state as usize)?;
+            if state.leaf != leaf { return None; }
+            locals.push(state.local);
+        }
+        let local = self.tables[leaf].merge_states(&locals)?;
+        match self.intern(leaf, local) {
+            Ok(state) => Some(state),
+            Err(error) => { self.fail(error); None }
+        }
     }
 
     #[inline(always)]
@@ -173,7 +188,17 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
     #[inline(always)]
     fn prefer_adaptive_output(&self) -> bool { true }
     #[inline(always)]
-    fn product_transition_cache_capacity(&self) -> usize { self.routing.product_transition_cache_capacity() }
+    fn product_transition_cache_capacity(&self) -> usize {
+        // General scoped lexer subsets need more distinct product frontiers
+        // than scalar finite leaves. Grow lazily, with a fixed upper bound;
+        // retain the exact test override for disabled/tiny/exhausted caches.
+        #[cfg(test)]
+        { self.routing.product_transition_cache_capacity() }
+        #[cfg(not(test))]
+        { 1024 }
+    }
+    #[inline(always)]
+    fn cache_two_branch_products(&self) -> bool { true }
 
     #[inline]
     fn terminal_is_ignore(&self, constraint: &Constraint, terminal: TerminalID) -> bool {
@@ -215,6 +240,8 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
 }
 
 pub(super) fn fill(state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool, String> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_RECURSIVE_PHASES").is_some();
+    let setup_start = profile.then(std::time::Instant::now);
     let routing = RecursiveFullWalkTransitions::new_for_parser_routing(state.constraint)
         .ok_or_else(|| "recursive composition has no valid scoped lexer/parser layout".to_owned())?;
     let mut scans = routing.leaves.iter()
@@ -229,7 +256,19 @@ pub(super) fn fill(state: &ConstraintState<'_>, buf: &mut [u32]) -> Result<bool,
         roots: FxHashMap::default(), resets: vec![None; reset_count], rows: Vec::new(),
         futures: Vec::new(), boundary: FxHashMap::default(), error: None,
     };
+    if let Some(start) = setup_start {
+        eprintln!("[glrmask/profile][recursive_phases] setup_ns={}", start.elapsed().as_nanos());
+    }
+    let walk_start = profile.then(std::time::Instant::now);
     let result = fill_recursive_mask_using(state, buf, &mut provider);
+    if let Some(start) = walk_start {
+        eprintln!("[glrmask/profile][recursive_phases] walk_ns={}", start.elapsed().as_nanos());
+    }
+    let finish_start = profile.then(std::time::Instant::now);
     provider.finish()?;
+    drop(scans);
+    if let Some(start) = finish_start {
+        eprintln!("[glrmask/profile][recursive_phases] finish_ns={}", start.elapsed().as_nanos());
+    }
     result
 }
