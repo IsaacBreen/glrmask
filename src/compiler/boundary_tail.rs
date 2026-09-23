@@ -694,6 +694,232 @@ pub(crate) fn build_boundary_tail_r1(
 
 }
 
+/// A finite cover of nonempty prefixes of every word in an expression's
+/// language. A cover word need not be a complete lexeme. `None` deliberately
+/// means unrestricted, including any nullable or unsupported expression.
+fn nonempty_entry_prefix_cover(expr: &Expr) -> Option<Vec<Vec<u8>>> {
+    if let Some(words) = finite_literal_words(expr, FINITE_EXPR_WORD_CAP) {
+        return (!words.is_empty() && words.iter().all(|word| !word.is_empty()))
+            .then_some(words);
+    }
+    match expr {
+        Expr::Shared(inner) => nonempty_entry_prefix_cover(inner),
+        Expr::Repeat { expr, min, .. } if *min > 0 => nonempty_entry_prefix_cover(expr),
+        Expr::Seq(parts) => {
+            for part in parts {
+                if let Some(words) = finite_literal_words(part, FINITE_EXPR_WORD_CAP) {
+                    if !words.is_empty() && words.iter().all(Vec::is_empty) {
+                        continue;
+                    }
+                }
+                return nonempty_entry_prefix_cover(part);
+            }
+            None
+        }
+        Expr::Choice(options) => {
+            let mut words = Vec::new();
+            for option in options {
+                words.extend(nonempty_entry_prefix_cover(option)?);
+                if words.len() > FINITE_EXPR_WORD_CAP {
+                    return None;
+                }
+            }
+            words.sort_unstable();
+            words.dedup();
+            (!words.is_empty()).then_some(words)
+        }
+        _ => None,
+    }
+}
+
+/// Upper-bound the first nonempty lexeme of an entered component. Syntactic
+/// nullable nonterminals expose later FIRST terminals. A byte-empty terminal,
+/// unresolved slot, or unsupported expression makes the entire entry unknown,
+/// so it cannot hide a subsequent first byte. All descendant ignores are
+/// included even when local policy would disallow them at this entry: extra
+/// candidates are safe, whereas forgetting an inherited/global ignore is not.
+fn component_entry_prefix_cover(constraint: &Constraint) -> Option<Vec<Vec<u8>>> {
+    if constraint.table.embedded_start_nullable() {
+        return None;
+    }
+    let rules = constraint.retained_table_rules().ok()?;
+    let first_rule = rules.first()?;
+    let mut by_lhs = BTreeMap::<NonterminalID, Vec<&Rule>>::new();
+    for rule in rules {
+        by_lhs.entry(rule.lhs).or_default().push(rule);
+    }
+    let mut nullable = BTreeSet::new();
+    loop {
+        let previous = nullable.len();
+        for rule in rules {
+            if rule.rhs.iter().all(|symbol| match symbol {
+                Symbol::Nonterminal(id) => nullable.contains(id),
+                Symbol::Terminal(_) => false,
+            }) {
+                nullable.insert(rule.lhs);
+            }
+        }
+        if nullable.len() == previous {
+            break;
+        }
+    }
+    if nullable.contains(&first_rule.lhs) {
+        return None;
+    }
+    let mut pending = vec![first_rule.lhs];
+    let mut seen = BTreeSet::new();
+    let mut first = BTreeSet::new();
+    while let Some(nonterminal) = pending.pop() {
+        if !seen.insert(nonterminal) {
+            continue;
+        }
+        for rule in by_lhs.get(&nonterminal)? {
+            for symbol in &rule.rhs {
+                match symbol {
+                    Symbol::Terminal(id) => {
+                        first.insert(*id);
+                        break;
+                    }
+                    Symbol::Nonterminal(id) => {
+                        pending.push(*id);
+                        if !nullable.contains(id) {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let outward = outward_terminals(constraint);
+    let mut prefixes = Vec::new();
+    for terminal in first {
+        // A placeholder may retain a synthetic byte expression for compiler
+        // coordinates. It does not constrain a future child's first bytes.
+        // Special/control terminals likewise must not be treated as lexemes.
+        if outward.contains(&terminal)
+            || constraint.table.control_terminals.contains(&terminal)
+            || constraint.special_token_terminals.iter()
+                .any(|special| special.terminal_id == terminal)
+        {
+            return None;
+        }
+        prefixes.extend(nonempty_entry_prefix_cover(
+            constraint.retained_terminal_expr(terminal)?,
+        )?);
+        if prefixes.len() > FINITE_EXPR_WORD_CAP {
+            return None;
+        }
+    }
+    let mut pending = vec![constraint];
+    let mut seen = BTreeSet::new();
+    while let Some(component) = pending.pop() {
+        // Local traversal dedup only; borrowed constraints remain alive for
+        // this entire query. No address-keyed result is retained or published.
+        if !seen.insert(component as *const Constraint as usize) {
+            continue;
+        }
+        for terminal in component.table.skip_terminals.iter().copied()
+            .chain(component.ignore_terminal)
+        {
+            prefixes.extend(nonempty_entry_prefix_cover(
+                component.retained_terminal_expr(terminal)?,
+            )?);
+            if prefixes.len() > FINITE_EXPR_WORD_CAP {
+                return None;
+            }
+        }
+        if let Some(overlay) = &component.static_dynamic_overlay {
+            pending.extend(overlay.segmented_parser_components.iter()
+                .map(|component| component.constraint.as_ref()));
+        }
+    }
+    prefixes.sort_unstable();
+    prefixes.dedup();
+    (!prefixes.is_empty()).then_some(prefixes)
+}
+
+pub(crate) struct RootCallCandidateResult {
+    pub(crate) candidate_ids: Vec<u32>,
+    pub(crate) exit_byte_count: usize,
+    pub(crate) entry_prefix_count: Option<usize>,
+    pub(crate) summary_ms: f64,
+    pub(crate) map_ms: f64,
+}
+
+/// Link-local root refinement, never reusable component metadata. A flat
+/// graph root has no caller: its first ownership crossing must be a CALL,
+/// not root completion. At the SAME positive proper-prefix cut, the remaining
+/// bytes must also be comparable with a prefix of an entered child's first
+/// lexeme. We union child entries, deliberately dropping call-site correlation
+/// in the widening direction. Full exact L2P equivalence still runs for every
+/// retained vocabulary entry; no approximate equivalence is substituted.
+pub(crate) fn build_root_call_candidates(
+    parent: &Constraint,
+    children: &[&Constraint],
+    call_terminals: &[TerminalID],
+    vocab: &crate::Vocab,
+) -> Result<RootCallCandidateResult, String> {
+    if parent.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+        !overlay.segmented_parser_components.is_empty()
+    }) {
+        return Err("root CALL refinement requires a flat parent component".to_owned());
+    }
+    let started = Instant::now();
+    // Use the actual link's terminal IDs, not only the parent's reusable
+    // placeholder metadata. A byte-backed special token can become a CALL
+    // when explicitly bound even if it was not an outward event beforehand.
+    let calls = call_terminals.iter().map(|&terminal| (terminal, BytePhaseSummary {
+        historical_productive: true,
+        normal: ByteLanguage::empty(),
+        event_from_entry: ByteLanguage::epsilon(),
+        tail_to_return: ByteLanguage::epsilon(),
+        tail_to_event: ByteLanguage::epsilon(),
+    })).collect();
+    let (module, _, _) = summarize_rules_module_r1(parent, &calls, &BTreeSet::new())?;
+    let language = module.tail_to_event;
+    let mut entries = Some(Vec::new());
+    for child in children {
+        let Some(prefixes) = component_entry_prefix_cover(child) else {
+            entries = None;
+            break;
+        };
+        let collected = entries.as_mut().expect("unknown entry stops iteration");
+        collected.extend(prefixes);
+        if collected.len() > FINITE_EXPR_WORD_CAP {
+            entries = None;
+            break;
+        }
+    }
+    if let Some(prefixes) = &mut entries {
+        prefixes.sort_unstable();
+        prefixes.dedup();
+    }
+    let summary_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let map_started = Instant::now();
+    let mut candidate_ids = Vec::new();
+    for (id, bytes) in vocab.iter() {
+        if (1..bytes.len()).any(|cut| {
+            language.bytes.contains(bytes[cut - 1]) && entries.as_ref().is_none_or(|prefixes| {
+                let suffix = &bytes[cut..];
+                prefixes.iter().any(|prefix| {
+                    suffix.starts_with(prefix) || prefix.starts_with(suffix)
+                })
+            })
+        }) {
+            candidate_ids.push(id);
+        }
+    }
+    candidate_ids.sort_unstable();
+    candidate_ids.dedup();
+    Ok(RootCallCandidateResult {
+        candidate_ids,
+        exit_byte_count: language.bytes.count(),
+        entry_prefix_count: entries.as_ref().map(Vec::len),
+        summary_ms,
+        map_ms: map_started.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PairSet {
     // Row indexed by first byte; each row contains possible second bytes.
@@ -1163,6 +1389,16 @@ mod tests {
         )
     }
 
+    fn probe_root_call_candidates(
+        parent: &Constraint,
+        children: &[&Constraint],
+        vocab: &crate::Vocab,
+    ) -> RootCallCandidateResult {
+        let call = parent.terminal_display_names.iter()
+            .position(|name| name == "SUB").expect("fixture CALL terminal") as u32;
+        build_root_call_candidates(parent, children, &[call], vocab).unwrap()
+    }
+
     #[test]
     fn r1_root_completion_is_strict_proper_prefix_and_preserves_duplicate_ids() {
         let vocab = vocab(&[(0, b"a"), (1, b"ab"), (2, b"ab"), (3, b"b")]);
@@ -1181,6 +1417,106 @@ mod tests {
         );
         assert!(probe.candidate_ids.contains(&1));
         assert!(probe.candidate_ids.contains(&2));
+    }
+
+    #[test]
+    fn root_call_candidates_match_exit_and_entry_at_the_same_cut() {
+        let vocab = vocab(&[
+            (0, b"a"), (1, b"ac"), (2, b"ac"), (3, b"ax"),
+            (4, b"bc"), (5, b"acatb"), (6, b"aac"), (7, b"xc"),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; t SUB ::= @token(999);
+               nt document ::= "a" SUB "b";"#, &vocab,
+        ).unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"start document; nt document ::= "cat";"#, &vocab,
+        ).unwrap();
+        let reusable = build_boundary_tail_r1(&parent, &vocab).unwrap();
+        let refined = probe_root_call_candidates(&parent, &[&child], &vocab);
+        assert_eq!(refined.entry_prefix_count, Some(1));
+        assert_eq!(refined.candidate_ids, vec![1, 2, 5, 6]);
+        assert!(reusable.candidate_ids.contains(&4),
+            "the reusable component must retain its possible outward RETURN");
+        assert_eq!(build_boundary_tail_r1(&parent, &vocab).unwrap().candidate_ids,
+            reusable.candidate_ids, "the root-local proof must not mutate reusable metadata");
+    }
+
+    #[test]
+    fn root_call_candidates_preserve_parent_and_entered_child_ignores() {
+        let vocab = vocab(&[
+            (0, b" cat"), (1, b" dog"), (2, b" \tcat"),
+            (3, b" \tdog"), (4, b" "), (5, b"c cat"),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; ignore WS; t WS ::= " "+;
+               t SUB ::= @token(999); nt document ::= SUB;"#, &vocab,
+        ).unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"start document; ignore TAB; t TAB ::= "\t"+;
+               nt document ::= "cat";"#, &vocab,
+        ).unwrap();
+        let result = probe_root_call_candidates(&parent, &[&child], &vocab);
+        assert!(result.candidate_ids.contains(&0));
+        assert!(result.candidate_ids.contains(&2));
+        assert!(result.candidate_ids.contains(&3),
+            "a conservative first-ignore prefix must not infer the later parser continuation");
+        assert!(!result.candidate_ids.contains(&1));
+        assert!(!result.candidate_ids.contains(&4));
+    }
+
+    #[test]
+    fn root_call_candidates_widen_unknown_and_nullable_entries() {
+        let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"a"), (3, b"bc")]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; t SUB ::= @token(999);
+               nt document ::= "a" SUB;"#, &vocab,
+        ).unwrap();
+        let nullable = Constraint::from_glrm_grammar(
+            r#"start document; nt document ::= "cat"?;"#, &vocab,
+        ).unwrap();
+        let unknown = Constraint::from_glrm_grammar(
+            r#"start document; t LATER ::= @token(998);
+               nt document ::= LATER;"#, &vocab,
+        ).unwrap();
+        for child in [&nullable, &unknown] {
+            let result = probe_root_call_candidates(&parent, &[child], &vocab);
+            assert_eq!(result.entry_prefix_count, None);
+            assert_eq!(result.candidate_ids, vec![0, 1]);
+        }
+    }
+
+    #[test]
+    fn root_call_candidates_include_both_sides_of_nullable_first_nonterminal() {
+        let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"ad"), (3, b"axy")]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; t SUB ::= @token(999);
+               nt document ::= "a" SUB;"#, &vocab,
+        ).unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"start document; nt document ::= "x"? "cat";"#, &vocab,
+        ).unwrap();
+        let result = probe_root_call_candidates(&parent, &[&child], &vocab);
+        assert!(result.candidate_ids.contains(&0));
+        assert!(result.candidate_ids.contains(&1));
+        assert!(result.candidate_ids.contains(&3));
+        if result.entry_prefix_count.is_some() {
+            assert!(!result.candidate_ids.contains(&2));
+        }
+    }
+
+    #[test]
+    fn root_call_candidates_use_actual_byte_backed_bound_slot() {
+        let vocab = vocab(&[(0, b"ac"), (1, b"ax"), (2, b"a"), (999, b"?")]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; t SUB ::= @token(999);
+               nt document ::= "a" SUB "b";"#, &vocab,
+        ).unwrap();
+        let child = Constraint::from_glrm_grammar(
+            r#"start document; nt document ::= "cat";"#, &vocab,
+        ).unwrap();
+        let result = probe_root_call_candidates(&parent, &[&child], &vocab);
+        assert_eq!(result.candidate_ids, vec![0]);
     }
 
     #[test]

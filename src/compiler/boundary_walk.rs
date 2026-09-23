@@ -1693,10 +1693,41 @@ pub(crate) fn build_walk_static_boundary_link(
             (ids, stats, started.elapsed().as_secs_f64() * 1000.0)
         })
         .collect::<Vec<_>>();
-    let candidate_tokens_by_component = candidate_summary_profiles
+    let mut candidate_tokens_by_component = candidate_summary_profiles
         .iter()
         .map(|(ids, _, _)| ids.clone())
         .collect::<Vec<_>>();
+    // A flat root has no outer RETURN, and its first crossing must enter one
+    // of these children. This additional proof is link-aware, so compute and
+    // apply it INSIDE the link timer and never install it on a reusable child
+    // or parent artifact. Global ignores and nullable-child non-crossing
+    // publication deliberately retain the existing conservative route.
+    let no_ignores = std::iter::once(parent)
+        .chain(children.iter().map(|child| child.constraint))
+        .all(|component| component.ignore_terminal.is_none()
+            && component.table.skip_terminals.is_empty());
+    if (!global_ignores || no_ignores) && !retain_parent_non_crossing_paths {
+        if let Some(existing) = candidate_tokens_by_component[0].as_mut() {
+            let entered = children.iter().map(|child| child.constraint).collect::<Vec<_>>();
+            let calls = children.iter().flat_map(|child| {
+                std::iter::once(child.placeholder_terminal)
+                    .chain(child.additional_placeholder_terminals.iter().copied())
+            }).collect::<Vec<_>>();
+            if let Ok(refined) = crate::compiler::boundary_tail::build_root_call_candidates(
+                parent, &entered, &calls, vocab,
+            ) {
+                let reusable_count = existing.len();
+                existing.retain(|id| refined.candidate_ids.binary_search(id).is_ok());
+                if compose_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][boundary_root_call_candidates] reusable={} filtered={} exit_bytes={} entry_prefixes={:?} summary_ms={:.3} map_ms={:.3}",
+                        reusable_count, existing.len(), refined.exit_byte_count,
+                        refined.entry_prefix_count, refined.summary_ms, refined.map_ms,
+                    );
+                }
+            }
+        }
+    }
     let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
     let link_setup_ms = link_setup_started.elapsed().as_secs_f64() * 1000.0;
     let transfer_cache = crate::compiler::boundary_transfer::FragmentTransferCache::new(
