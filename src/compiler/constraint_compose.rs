@@ -20771,6 +20771,45 @@ fn compose_constraints_owned_parent_impl(
 ) -> Result<ConstraintComposition, String> {
     let direct_dynamic_boundary =
         explicit_segmented_boundary == Some(SegmentedBoundaryBackend::Dynamic);
+    // Ownership and deferred link metadata are input preparation, not reasons
+    // to rebuild a recursive component's flattened compiler table/tokenizer.
+    // Retain already-prepared shared inputs unchanged; otherwise acquire the
+    // ownership we must retain anyway and decode only the small link section.
+    // This work stays INSIDE the binding call/timer. Borrowed/shared source
+    // constraints are never mutated, and their static masking backend stays
+    // packed. Nullable/global-ignore cases still take the exact general linker.
+    let prepared_dynamic_children = if direct_dynamic_boundary
+        && (shared_children.is_none()
+            || children.iter().any(|child| {
+                child.constraint.deferred_composition_metadata_blob.is_some()
+                    && !child.constraint.composition_link_metadata_materialized
+            }))
+    {
+        Some(children.iter().enumerate().map(|(index, input)| {
+            let mut child = shared_children.map_or_else(
+                || Arc::new(input.constraint.clone()),
+                |shared| Arc::clone(&shared[index]),
+            );
+            if child.deferred_composition_metadata_blob.is_some()
+                && !child.composition_link_metadata_materialized
+            {
+                Arc::make_mut(&mut child)
+                    .materialize_composition_link_metadata_for_compilation()?;
+            }
+            Ok(child)
+        }).collect::<Result<Vec<_>, String>>()?)
+    } else {
+        None
+    };
+    let prepared_dynamic_inputs = prepared_dynamic_children.as_ref().map(|owned| {
+        children.iter().zip(owned).map(|(input, child)| CompiledSubgrammarInput {
+            placeholder_terminal: input.placeholder_terminal,
+            additional_placeholder_terminals: input.additional_placeholder_terminals,
+            constraint: child.as_ref(),
+        }).collect::<Vec<_>>()
+    });
+    let children = prepared_dynamic_inputs.as_deref().unwrap_or(children);
+    let shared_children = prepared_dynamic_children.as_deref().or(shared_children);
     if direct_dynamic_boundary {
         if let Some(shared_children) = shared_children {
             let children_link_ready = shared_children.iter().all(|child| {
@@ -23555,6 +23594,73 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn dynamic_recursive_unprepared_inputs_use_minimal_shared_linker() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
+            (3, b"!".to_vec()), (4, b"Xa".to_vec()), (5, b"b!".to_vec()),
+            (6, b"Xab!".to_vec()), (7, b"XX".to_vec()), (8, b"c".to_vec()),
+        ]);
+        let parent = Constraint::from_glrm_grammar(
+            r#"start document; t SUB ::= @token(999); nt document ::= "X" SUB "!";"#,
+            &vocab,
+        ).unwrap();
+        let mut child = Constraint::from_glrm_grammar(
+            r#"start child; t A ::= "a"; t B ::= "b"; nt child ::= A B;"#, &vocab,
+        ).unwrap();
+        child.ensure_composition_reset_tokens_by_terminal();
+        child.serialized_artifact_cache = None;
+        let inner = parent.compose_linked_children_for_test_dynamic(
+            &[("SUB", &child)], &vocab,
+        ).unwrap();
+        let parent_bytes = parent.save();
+        for (expected_text, child_bytes) in [("Xab!", child.save()), ("XXab!!", inner.save())] {
+            let loaded_child = Arc::new(Constraint::load_with_vocab(&child_bytes, &vocab).unwrap());
+            let was_materialized = loaded_child.composition_link_metadata_materialized;
+            if expected_text == "Xab!" {
+                assert!(loaded_child.deferred_composition_metadata_blob.is_some());
+                assert!(!was_materialized, "ordinary loaded child must exercise deferred link preparation");
+            }
+            let reference = Constraint::from_glrm_grammar(
+                &format!("start document; nt document ::= {expected_text:?};"), &vocab,
+            ).unwrap();
+            for shared in [false, true] {
+                let loaded_parent = Constraint::load_with_vocab(&parent_bytes, &vocab).unwrap();
+                let inputs = [CompiledSubgrammarInput {
+                    placeholder_terminal: terminal(&loaded_parent, "SUB"),
+                    additional_placeholder_terminals: &[],
+                    constraint: loaded_child.as_ref(),
+                }];
+                let bound = if shared {
+                    compose_constraints_owned_parent_segmented_shared(
+                        loaded_parent, &inputs, &[Arc::clone(&loaded_child)], &vocab,
+                        SegmentedBoundaryBackend::Dynamic,
+                    )
+                } else {
+                    compose_constraints_owned_parent_segmented(
+                        loaded_parent, &inputs, &vocab, SegmentedBoundaryBackend::Dynamic,
+                    )
+                }.unwrap().constraint;
+                assert!(bound.uses_compact_segmented_parser_runtime());
+                assert_eq!(bound.table.num_states, 0, "binding must publish only the fast coordinator");
+                let overlay = bound.static_dynamic_overlay.as_ref().unwrap();
+                assert!(overlay.segmented_parser_components.iter().all(|component| {
+                    component.global_to_local_parser_state.is_empty()
+                }), "binding must not construct flattened parser projections");
+                assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+                    &bound, &reference, &vocab, 6, "unprepared dynamic link vs monolithic",
+                );
+                let restored = Constraint::load_with_vocab(bound.save(), &vocab).unwrap();
+                assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
+                    &restored, &reference, &vocab, 6, "unprepared dynamic link reload",
+                );
+                assert_eq!(loaded_child.composition_link_metadata_materialized, was_materialized,
+                    "preparing a retained child must not mutate the caller's shared/borrowed input");
+                assert_eq!(loaded_child.save(), child_bytes);
+            }
+        }
+    }
 
     #[test]
     fn dynamic_recursive_shared_fast_matches_borrowed_and_reload() {

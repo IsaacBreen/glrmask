@@ -4818,6 +4818,13 @@ mod tests {
         .expect("dynamic compose")
         .constraint;
 
+        // Publish the alternative shards into a real static coordinator. A
+        // DynamicDirect coordinator deliberately has no outer static seed-mask
+        // universe; swapping only its shard enum is not a backend conversion.
+        let static_shell = compose_constraints_owned_parent_segmented(
+            parent.clone(), &inputs, &vocab, SegmentedBoundaryBackend::StaticParserDwa,
+        ).expect("static coordinator for publication fixture").constraint;
+
         let composed = low_level_compose(&parent, &inputs);
         let grammar = analyzed_grammar(&composed.table.table, &composed.terminal_names);
         let disallowed = compute_disallowed_follows(&grammar);
@@ -4880,7 +4887,7 @@ mod tests {
             let (one, _) =
                 publish_walk_boundary_shard_work(work, table, &composed.tokenizer_offsets, &counts)
                     .expect("publish walk shard");
-            let mut installed = dynamic.clone();
+            let mut installed = static_shell.clone();
             install_published_static_boundary_shards(
                 installed.static_dynamic_overlay.as_mut().expect("overlay"),
                 vec![one],
@@ -6165,7 +6172,14 @@ mod tests {
             "nested link must publish exactly the parent and block shards",
         );
 
-        let installed = install_nested(&outer_with_static_inner, vec![shard_p, shard_b]);
+        // The manually published/ablated static shards need a genuine static
+        // coordinator, including its seed-mask universe. The dynamic reference
+        // above must stay provider-only rather than paying for unused static data.
+        let outer_static_shell = compose_constraints_owned_parent_segmented(
+            parent.clone(), &outer_mixed_inputs, &vocab,
+            SegmentedBoundaryBackend::StaticParserDwa,
+        ).expect("static coordinator for nested publication fixture").constraint;
+        let installed = install_nested(&outer_static_shell, vec![shard_p, shard_b]);
         for (index, component) in installed
             .static_dynamic_overlay
             .as_ref()
@@ -6345,7 +6359,7 @@ mod tests {
         // be strict or the fixture is vacuous. (The R,R,E,E load-bearing
         // control proof lives in
         // `boundary_transfer::nested_ready_depth_four_is_load_bearing`.)
-        let ablated = install_nested(&outer_with_static_inner, Vec::new());
+        let ablated = install_nested(&outer_static_shell, Vec::new());
         // Lockstep walk: at every shared prefix the shard-less mask must be
         // a subset of the dynamic mask; a prefix where the reference admits
         // a token the ablated mask lacks (or a final-mask difference) proves

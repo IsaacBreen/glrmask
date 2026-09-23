@@ -446,10 +446,10 @@ struct RecursiveFullWalkCell {
 /// here, outside the vocabulary traversal, so the walk itself need not know
 /// whether a state belongs to a monolithic tokenizer or a composed leaf.
 ///
-/// This first shared-engine lane deliberately accepts only finite,
-/// epsilon-free leaves. Virtual/epsilon leaves decline to the established
-/// recursive exact walker until their config/subset representation is wired
-/// through the same interface.
+/// This scalar shared-engine lane accepts finite, epsilon-free leaves.
+/// Virtual/epsilon leaves use `recursive_provider`'s config/subset adapter over
+/// the same vocabulary traversal. The independent recursive walker is test-only;
+/// unsupported provider initialization reports an error rather than falling back.
 #[derive(Clone, Copy)]
 struct RecursiveFullWalkLeaf<'a> {
     constraint: &'a Constraint,
