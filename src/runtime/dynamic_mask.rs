@@ -8757,7 +8757,7 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
         state.clear_late_grammar_placeholder_mask(buf);
         return Ok(true);
     }
-    if roots.len() == 1 {
+    let filled = if roots.len() == 1 {
         try_full_walk_mask_with_table_dispatch::<_, true>(
             state,
             vocab,
@@ -8775,7 +8775,22 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
             buf,
             transitions,
         )
+    }?;
+    if filled && let Some(canonical) = trie.node(0).token_id {
+        // A radix-root entry consumes no bytes. Current composition semantics
+        // admit such an ID only through its exact special-token terminal, not
+        // as a zero-progress byte alternative. Both adaptive output polarities
+        // and the eager baseline can contain root aliases, so remove their byte
+        // contribution before restoring independently admissible special IDs.
+        // Keep this domain adjustment outside the shared hot walk and outside
+        // the ordinary non-composition path.
+        for &(word, bits) in vocab.token_word_masks(canonical) {
+            if let Some(slot) = buf.get_mut(word as usize) { *slot &= !bits; }
+        }
+        update_special_token_mask(state, buf);
+        state.clear_late_grammar_placeholder_mask(buf);
     }
+    Ok(filled)
 }
 
 
@@ -11331,6 +11346,51 @@ nt start ::= A;
                     }
                 }
             }
+        }
+    }
+
+
+    #[test]
+    fn recursive_zero_byte_domain_preserves_only_live_exact_special_ids() {
+        let vocab = Vocab::new(vec![
+            (0, Vec::new()), (1, b"X".to_vec()), (2, b"a".to_vec()),
+            (3, b"!".to_vec()), (7, Vec::new()), (31, Vec::new()),
+            (40, b"a!".to_vec()),
+        ]);
+        let child = crate::ConstraintSpec::builder(Grammar::glrm(
+            r#"glrm 1; start child; extern token MARK; nt child = MARK "a" | "a";"#,
+        ), &vocab).unwrap().bind_token("MARK", [7]).unwrap()
+            .build().unwrap().compile().unwrap();
+        let parent = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#,
+        ), &vocab).unwrap();
+        let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
+        let loaded = Constraint::load(bound.save()).unwrap();
+        for constraint in [&bound, &loaded] {
+            for prefix in ["", "X", "Xa", "Xa!"] {
+                let mut state = constraint.start();
+                state.commit_bytes(prefix.as_bytes()).unwrap();
+                let mut oracle = vec![0; constraint.mask_len()];
+                state.fill_recursive_mask_by_exact_full_walk(&mut oracle);
+                let mut actual = vec![u32::MAX; oracle.len()];
+                assert!(recursive_provider::fill(&state, &mut actual).unwrap());
+                assert_eq!(actual, oracle, "config provider at {prefix:?}");
+                assert!(!token_allowed(&actual, 0), "unbound empty alias");
+                assert!(!token_allowed(&actual, 31), "second unbound empty alias");
+                assert_eq!(token_allowed(&actual, 7), prefix == "X",
+                    "empty exact ID requires a live MARK path at {prefix:?}");
+                for _ in 0..2 {
+                    assert!(try_fill_recursive_mask_shared(&state, &mut actual).unwrap());
+                    assert_eq!(actual, oracle, "shared/cache domain at {prefix:?}");
+                }
+                assert_eq!(state.mask(), oracle);
+            }
+            let mut state = constraint.start();
+            for token in [1, 7, 2, 3] {
+                assert!(token_allowed(&state.mask(), token));
+                state.commit_token(token).unwrap();
+            }
+            assert!(state.is_accepting());
         }
     }
 

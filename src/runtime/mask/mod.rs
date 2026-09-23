@@ -2302,9 +2302,8 @@ mod tests {
                 }
             }
         };
-        if !state.state.is_empty() {
-            mark(0, &mut output);
-        }
+        // The root's zero-byte aliases are not model-token byte transitions.
+        // Exact special-token paths for those IDs are evaluated below.
         for edge in trie.walk_edges() {
             let depth = edge.parent_depth as usize;
             let next = stack[depth].as_ref().and_then(|parent| {
@@ -2319,14 +2318,32 @@ mod tests {
         }
         for special in &state.constraint.special_token_terminals {
             if !state.constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                && crate::runtime::commit::token_admissible_from_state_exact(
-                    state.constraint, &state.state, &mut buffers, special.token_id,
-                )
+                && recursive_token_domain_reference(state, &mut buffers, special.token_id)
             {
                 super::set_original_mask_bit(&mut output, special.token_id);
             }
         }
         output
+    }
+
+    fn recursive_token_domain_reference(
+        state: &super::ConstraintState<'_>,
+        buffers: &mut super::CommitBuffers,
+        token_id: u32,
+    ) -> bool {
+        if state.constraint.token_bytes_for_id(token_id).is_some_and(|b| b.is_empty()) {
+            // commit_bytes(empty) is intentionally a no-op; it is not a proof
+            // of model-token admission. Match the explicit current public API
+            // contract without suppressing any nonempty or special-ID probes.
+            state.constraint.has_special_token_id(token_id)
+                && crate::runtime::commit::advance_special_token_paths(
+                    state.constraint, &state.state, token_id,
+                ).is_some_and(|gss| !gss.is_empty())
+        } else {
+            crate::runtime::commit::token_admissible_from_state_exact(
+                state.constraint, &state.state, buffers, token_id,
+            )
+        }
     }
 
     #[test]
@@ -2379,9 +2396,7 @@ mod tests {
                     }
                     let mut buffers = super::CommitBuffers::default();
                     for &id in &ids {
-                        let exact = crate::runtime::commit::token_admissible_from_state_exact(
-                            constraint, &state.state, &mut buffers, id,
-                        );
+                        let exact = recursive_token_domain_reference(state, &mut buffers, id);
                         let allowed = actual[id as usize / 32] & (1 << (id % 32)) != 0;
                         assert_eq!(allowed, exact, "token={id}, nullable={nullable}");
                     }
