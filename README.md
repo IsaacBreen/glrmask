@@ -30,9 +30,15 @@ cargo add glrmask
 
 ## Usage
 
-GLRMask compiles a grammar and vocabulary into a `Constraint`. The resulting `Constraint` can be serialized and cached for reuse across requests.
+GLRMask has three ordinary public layers:
 
-At runtime, call `constraint.start()` to initialize a `ConstraintState`. In the decoding loop, run `state.mask()` in parallel with the model’s forward pass so the mask is ready in time for sampling. Then apply the mask to the logits, sample a token, and call `state.commit_token(token_id)` to advance the state.
+- `Grammar` is a source or mixed description. It can contain source children, compiled children, and vocabulary-qualified exact-token bindings.
+- `Module` is reusable compiled machinery for one exact vocabulary. It may deliberately remain open and is not runnable.
+- `Constraint` is closed, rooted, and immediately runnable. `ConstraintState` is the mutable per-sequence state.
+
+Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `Module`; the original remains reusable.
+
+At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one marks the state terminated.
 
 ```text
 state = constraint.start()
@@ -45,11 +51,11 @@ while generating:
     logits = apply_mask(logits, mask)
     token_id = sample(logits)
     state.commit_token(token_id)
+    if state.is_terminated():
+        break
 ```
 
-For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` is a drop-in replacement for `Constraint` that starts much faster, but leaves more work in the token loop and hence generates masks more slowly.
-
-## Python quickstart
+### Python quickstart
 
 ```bash
 python -m pip install glrmask llama-cpp-python torch
@@ -63,165 +69,194 @@ from torch.distributions import Categorical
 
 import glrmask
 
-
 llm = Llama(model_path="model.gguf", logits_all=True)
 vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
-end_tokens = set(end_token_ids)
 
-get_logits = lambda: llm.scores[llm.n_tokens - 1]
-sample = lambda logits: Categorical(logits=from_numpy(logits)).sample().item()
+schema = {"type": "string", "enum": ["positive", "negative", "neutral"]}
+constraint = glrmask.Grammar.from_json_schema(schema).compile(
+    vocab,
+    end_tokens=end_token_ids,
+    optimization=glrmask.Optimization.AUTO,
+)
 
 prompt = "Classify this review: The story dragged badly. Sentiment: "
 input_tokens = llm.tokenize(prompt.encode())
-
-MAX_OUTPUT_TOKENS = 64
-
-schema = '{"type":"string","enum":["positive","negative","neutral"]}'
-constraint = glrmask.Constraint.from_json_schema(schema, vocab)
-
 llm.reset()
 llm.eval(input_tokens)
 
 state = constraint.start()
 generated = []
 
-for _ in range(MAX_OUTPUT_TOKENS):
-    logits = get_logits()
+for _ in range(64):
+    logits = llm.scores[llm.n_tokens - 1]
     mask = state.mask(llm.n_vocab())
-    if state.is_accepting():
-        mask[end_token_ids] = True
     logits[~mask] = -np.inf
+    token_id = Categorical(logits=from_numpy(logits)).sample().item()
 
-    token = sample(logits)
-    llm.eval([token])
-    generated.append(token)
-
-    if token in end_tokens:
+    llm.eval([token_id])
+    generated.append(token_id)
+    state.commit_token(token_id)
+    if state.is_terminated():
         break
-    state.commit_token(token)
 
 print(llm.detokenize(generated).decode())
 ```
 
-For comparison, here's what the decoding loop might look like without GLRMask:
+`state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass a size when the model's logits vector is wider than the constraint's natural token coordinate.
 
-```python
-llm.reset()
-llm.eval(input_tokens)
-
-generated = []
-
-for _ in range(MAX_OUTPUT_TOKENS):
-    logits = get_logits()
-    token = sample(logits)
-    llm.eval([token])
-    generated.append(token)
-
-    if token in end_tokens:
-        break
-```
-
-## Rust quickstart
-
-`Constraint` is the normal compiled Rust type:
+### Rust quickstart
 
 ```rust
-use glrmask::{Grammar, Constraint, Vocab};
+use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
 
 let vocab = Vocab::new(vec![
     (0, b"\"yes\"".to_vec()),
     (1, b"\"no\"".to_vec()),
+    (2, b"<eos>".to_vec()),
 ]);
 let schema = r#"{"type":"string","enum":["yes","no"]}"#;
-let constraint = Constraint::compile(Grammar::json_schema(schema), &vocab)?;
-let mut state = constraint.start();
+let constraint = Grammar::from_json_schema(schema).compile_with(
+    &vocab,
+    BuildOptions::default()
+        .end_tokens([2])
+        .optimization(Optimization::Auto),
+)?;
 
+let mut state = constraint.start();
 let mask = state.mask();
 state.commit_token(0)?;
-
-if state.is_accepting() {
-    // The current prefix may validly end here.
-}
-if state.is_rejected() {
-    // No valid continuation remains.
-}
+assert!(state.is_accepting());
 # Ok::<(), glrmask::Error>(())
 ```
 
-`DynamicConstraint::compile(...)` also accepts a `Grammar` and returns a `DynamicConstraint`. Its `start()` method returns a `DynamicConstraintState` with the same decoding methods as `ConstraintState`.
+Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.
 
-`Grammar::bind_grammar(...)` binds a child source grammar before a vocabulary is chosen:
+### Source, compiled, and exact-token bindings
+
+GLRM declares child slots with `extern grammar NAME;` and exact-token slots with `extern token NAME;`. `Grammar::bind` is the one operation for both source and compiled attachments:
 
 ```rust
-let grammar = Grammar::glrm(
-    "glrm 1; start start; extern grammar payload; nt start = payload;",
+use glrmask::{Grammar, Result, Vocab};
+
+# fn demo(vocab: &Vocab) -> Result<()> {
+let parent = Grammar::from_glrm(
+    "glrm 1; start document; extern grammar payload; nt document = payload;",
+);
+let source_child = Grammar::from_json_schema(r#"{"type":"null"}"#);
+let source_composition = parent.bind("payload", &source_child)?;
+
+let compiled_child = source_child.compile(vocab)?;
+let mixed_composition = parent.bind("payload", &compiled_child)?;
+
+let _a = source_composition.compile(vocab)?;
+let _b = mixed_composition.compile(vocab)?;
+# Ok(())
+# }
+```
+
+Exact token bindings come from the vocabulary rather than from naked IDs:
+
+```rust
+# use glrmask::{Grammar, Result, Vocab};
+# fn demo(vocab: &Vocab, tool_call_id: u32) -> Result<()> {
+let grammar = Grammar::from_glrm(
+    "glrm 1; start message; extern token TOOL_CALL; nt message = TOOL_CALL;",
+);
+let grammar = grammar.bind("TOOL_CALL", vocab.token(tool_call_id)?)?;
+let _constraint = grammar.compile(vocab)?;
+# Ok(())
+# }
+```
+
+`Vocab::token(...)` and `Vocab::tokens(...)` retain the complete vocabulary identity. A value from an incompatible vocabulary is rejected even if the bound numeric ID happens to exist in both vocabularies.
+
+Model control/tool tokens do not need fake byte spellings. When constructing a
+Rust vocabulary manually, use `Vocab::new_with_exact_token_ids(byte_entries,
+exact_only_ids)` for IDs that are valid exact-token bindings but must never
+enter the byte language. Python's `Vocab.from_llama_cpp()` records omitted
+control/EOG/empty-piece IDs this way automatically.
+
+### Cached parents with `Module`
+
+Use `compile_module` when a compiled parent will be reused with request-specific children. A `Module` may remain open, can be saved and loaded, and is deliberately not runnable.
+
+```rust
+# use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
+# fn demo(vocab: &Vocab) -> Result<()> {
+let parent = Grammar::from_glrm(
+    "glrm 1; start document; extern grammar payload; nt document = payload;",
+);
+let host = parent.compile_module(vocab)?;
+
+let child_a = Grammar::from_ebnf(r#"start ::= "a""#).compile(vocab)?;
+let child_b = Grammar::from_ebnf(r#"start ::= "b""#).compile(vocab)?;
+
+let a = host.bind("payload", &child_a)?;
+let b = host.bind("payload", &child_b)?;
+
+let _constraint_a = a.link_with(
+    BuildOptions::default().optimization(Optimization::FastRuntime),
+)?;
+let _constraint_b = b.link()?;
+# Ok(())
+# }
+```
+
+`Module::bind` is compiled-only: it accepts another `Module`, a `Constraint`, or an exact-token value. It does not parse or compile source children. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+
+Python uses the same lifecycle:
+
+```python
+parent = glrmask.Grammar.from_glrm(
+    'glrm 1; start document; extern grammar payload; nt document = payload;'
 )
-.bind_grammar("payload", Grammar::json_schema(r#"{\"type\":\"null\"}"#))?;
-
-let constraint = Constraint::compile(grammar, &vocab)?;
-# Ok::<(), glrmask::Error>(())
+host = parent.compile_module(vocab)
+child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
+constraint = host.bind("payload", child).link(
+    optimization=glrmask.Optimization.FAST_RUNTIME,
+)
 ```
 
-For exact token IDs or compiled child constraints, build a `ConstraintSpec`:
+### Build/runtime trade-off
 
-```rust
-use glrmask::{ConstraintSpec, Grammar, Constraint, Vocab};
+`Optimization` expresses intent rather than exposing internal engine names:
 
-let vocab = Vocab::new(vec![
-    (0, b"{".to_vec()),
-    (1, b"}".to_vec()),
-    (2, b"null".to_vec()),
-]);
-let child = Constraint::compile(
-    Grammar::json_schema(r#"{"type":"null"}"#),
-    &vocab,
-)?;
-let source = r#"
-glrm 1;
-start document;
-extern token CONTROL;
-extern grammar payload;
-nt document = CONTROL "{" payload "}";
-"#;
-let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)?
-    .bind_token("CONTROL", [32001])?
-    .bind_grammar("payload", &child)?
-    .build()?;
+- `AUTO` / `Auto`: let GLRMask choose.
+- `FAST_BUILD` / `FastBuild`: minimize compile/link work, leaving more work for runtime where useful.
+- `FAST_RUNTIME` / `FastRuntime`: spend more build work to favor lower mask latency where supported.
 
-let constraint = spec.compile()?;
-let dynamic_constraint = spec.compile_dynamic()?;
-let mut state = constraint.start();
-# Ok::<(), glrmask::Error>(())
+All three modes preserve accepted-language semantics and produce the same public `Constraint` type.
+
+### End tokens are final-root policy
+
+End-token policy belongs to the final `compile`/`compile_with` or `link`/`link_with` operation. It is not inherited when a completed `Constraint` is embedded as a child.
+
+```python
+constraint = grammar.compile(vocab, end_tokens=[eos_id])
+state = constraint.start()
+# eos_id is allowed only when the grammar body is accepting.
 ```
 
-`ConstraintSpecBuilder::bind_grammar(...)` accepts a `Grammar`, `ConstraintSpec`, `Constraint`, or `DynamicConstraint` child.
+A state reports `is_accepting()` for grammar-body acceptance, `is_rejected()` for an irrecoverable invalid prefix, and `is_terminated()` after an allowed final end token has been committed.
 
-If the parent grammar is expensive and the child changes frequently, compile the parent with its `extern grammar` left unresolved, cache that `Constraint`, and bind compiled children later:
+### Persistence
 
-```rust
-let mut parent = Constraint::compile(
-    Grammar::glrm(
-        "glrm 1; extern grammar payload; start document; nt document = payload;",
-    ),
-    &vocab,
-)?;
+Both compiled object types are serializable:
 
-let child_a = Constraint::compile(Grammar::json_schema(schema_a), &vocab)?;
-let child_b = Constraint::compile(Grammar::json_schema(schema_b), &vocab)?;
+```python
+module_bytes = host.save()
+host = glrmask.Module.load(module_bytes)
 
-let with_a = parent.bind_grammar("payload", &child_a, &vocab)?;
-let with_b = parent.bind_grammar("payload", &child_b, &vocab)?;
-# Ok::<(), glrmask::Error>(())
+constraint_bytes = constraint.save()
+constraint = glrmask.Constraint.load(constraint_bytes)
 ```
 
-The parent remains reusable. It can also be saved and loaded before binding; late binding consumes loaded parser automata and pooled weights directly from their packed representation, while small composition metadata is decoded lazily. A child passed to `Constraint::bind_grammar(...)` must already have all of its own external grammars bound.
+A loaded `Constraint` remains composable as a child. Its standalone end-token policy is stripped when embedded; its compiled grammar body is retained.
 
 ## Grammar formats
 
-Unfortunately, [there is no universally accepted EBNF dialect.](https://dwheeler.com/essays/dont-use-iso-14977-ebnf.html) In keeping with this tradition, GLRMask includes its own.
-
-GLRM is GLRMask's native grammar format. A grammar begins with `glrm 1;` and a `start` declaration:
+GLRMask accepts JSON Schema, GLRM, Lark, and EBNF. GLRM is the native composition format. A grammar begins with `glrm 1;` and a `start` declaration:
 
 ```glrm
 glrm 1;
@@ -231,64 +266,22 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Declarations use `=`, and epsilon is written as `eps`. Terminals and nonterminals can use `fa { ... }` bodies. Regexes use full-match semantics and reject unsupported or non-regular constructs. GLRMask also accepts Lark and EBNF.
+Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern grammar name;` slots have the same language semantics, including scope-local ignores.
 
-### Reusing compiled subgrammars
-
-Declare a compiled child with `extern grammar name;` and bind it by name:
+Special model-token IDs are declared with `extern token NAME;` and bound with vocabulary-qualified values:
 
 ```python
-payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
-
-document = glrmask.Constraint.from_glrm_grammar(
-    '''
-    glrm 1;
-    start document;
-    extern grammar payload;
-    nt document = "{" payload "}";
-    ''',
-    vocab,
-    subgrammars={"payload": payload},
-)
-```
-
-Inline `g name = { ... };` and externally bound `extern grammar name;` use the same language semantics, including scope-local ignores.
-
-## Special tokens
-
-Special tokens are declared by name and bound to their model token IDs outside the grammar:
-
-```python
-grammar = '''
+grammar = glrmask.Grammar.from_glrm('''
 glrm 1;
 start message;
 extern token TOOL_CALL;
-nt message = TOOL_CALL call;
-nt call = "lookup()";
-'''
-
-constraint = glrmask.Constraint.from_glrm_grammar(
-    grammar,
-    vocab,
-    bindings={"TOOL_CALL": tool_call_token_id},
-)
+nt message = TOOL_CALL "lookup()";
+''')
+constraint = grammar.bind("TOOL_CALL", vocab.token(tool_call_token_id)).compile(vocab)
 ```
 
-Bind the tool-call special token used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
+Lark and EBNF also support explicit `@token(<id>)` atoms when the numeric ID is deliberately part of the grammar source.
 
-End tokens are handled by the decoder. If the constraint is accepting, generation may stop without committing another token.
-
-```python
-mask = state.mask(model_vocab_size)
-if state.is_accepting():
-    mask[end_token_ids] = True
-
-token = sample_with_mask(logits, mask)
-if token in end_tokens:
-    stop_generation()
-else:
-    state.commit_token(token)
-```
 
 ## How it works
 

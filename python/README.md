@@ -43,38 +43,47 @@ vocab = glrmask.Vocab.from_dict({
     b"hello": 0,
     b" ": 1,
     b"world": 2,
+    b"<eos>": 3,
 })
-constraint = glrmask.Constraint.from_ebnf(
-    'start ::= "hello" " " "world"',
-    vocab,
-)
+constraint = glrmask.Grammar.from_ebnf(
+    'start ::= "hello" " " "world"'
+).compile(vocab, end_tokens=[3])
 state = constraint.start()
 
-assert state.mask().tolist() == [True, False, False]
+assert state.mask().tolist() == [True, False, False, False]
 state.commit_token(0)
-assert state.mask().tolist() == [False, True, False]
+assert state.mask().tolist() == [False, True, False, False]
 state.commit_token(1)
-assert state.mask().tolist() == [False, False, True]
 state.commit_token(2)
 assert state.is_accepting()
+assert state.mask()[3]
+state.commit_token(3)
+assert state.is_terminated()
 ```
 
-`state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass `state.mask(size)` when the model's logits vector is larger than the highest token ID in the vocabulary.
+`state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass `state.mask(size)` when the model's logits vector is wider than the constraint's natural token coordinate.
 
-## Core API
+## Public model
 
-### Vocabulary
+The ordinary API has four layers:
 
-Create a vocabulary from either token bytes to token IDs or token IDs to bytes:
+- `Grammar`: immutable source/mixed description.
+- `Module`: reusable compiled machinery for one exact vocabulary; it may intentionally remain open.
+- `Constraint`: closed, rooted, immediately runnable compiled constraint.
+- `ConstraintState`: mutable state for one generated sequence.
+
+`Grammar.bind(...)` and `Module.bind(...)` return new values and leave the receiver reusable.
+
+### Vocabulary and exact tokens
+
+Create a vocabulary from token bytes to IDs or IDs to bytes:
 
 ```python
 vocab = glrmask.Vocab.from_dict({b"yes": 0, b"no": 1})
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"yes", 1: b"no"})
 ```
 
-Tokens are matched by bytes, not decoded Unicode strings.
-
-For `llama-cpp-python`, construct the vocabulary directly from a `Llama` instance:
+For `llama-cpp-python`:
 
 ```python
 from llama_cpp import Llama
@@ -84,135 +93,146 @@ vocab = glrmask.Vocab.from_llama_cpp(llm)
 end_token_ids = vocab.llama_cpp_end_token_ids
 ```
 
-`Vocab.from_llama_cpp()` excludes EOG, control, unused, and empty-piece tokens from the byte vocabulary. Their IDs are available in `llama_cpp_end_token_ids` for the decoder.
+`from_llama_cpp()` keeps EOG, control, unused, and empty-piece IDs as
+**exact-only** model tokens even though they are omitted from the byte
+vocabulary. They can therefore be used with `vocab.token(id)` /
+`vocab.tokens(ids)` without inventing fake bytes, while EOG IDs can be supplied
+directly as `end_tokens`.
 
-### Compile a constraint
-
-`Constraint` supports JSON Schema, GLRM, Lark, and EBNF:
+Use `vocab.token(id)` or `vocab.tokens(ids)` for `extern token` bindings. These values retain the complete vocabulary identity; a binding from an incompatible vocabulary is rejected even if its numeric ID happens to match.
 
 ```python
-constraint = glrmask.Constraint.from_json_schema(schema, vocab)
-constraint = glrmask.Constraint.from_glrm_grammar(grammar, vocab)
-constraint = glrmask.Constraint.from_lark(grammar, vocab)
-constraint = glrmask.Constraint.from_ebnf(grammar, vocab)
+grammar = glrmask.Grammar.from_glrm('''
+glrm 1;
+start message;
+extern token TOOL_CALL;
+nt message = TOOL_CALL "lookup()";
+''')
+grammar = grammar.bind("TOOL_CALL", vocab.token(tool_call_token_id))
+constraint = grammar.compile(vocab)
 ```
 
-`from_glrm_grammar(...)` accepts compiled child constraints in `subgrammars` and exact token IDs in `bindings`. `DynamicConstraint.from_glrm_grammar(...)` accepts the same arguments.
+### Compile a grammar
 
-For an expensive parent whose child grammar changes frequently, leave the external grammar unresolved, cache the compiled parent, and bind children later:
+Construct descriptions with:
 
 ```python
-parent = glrmask.Constraint.from_glrm_grammar(
-    """
-    glrm 1;
-    extern grammar payload;
-    start document;
-    nt document = payload;
-    """,
-    vocab,
-)
-
-child = glrmask.Constraint.from_json_schema(schema, vocab)
-constraint = parent.bind_grammar("payload", child)
+glrmask.Grammar.from_json_schema(schema)
+glrmask.Grammar.from_glrm(grammar)
+glrmask.Grammar.from_lark(grammar)
+glrmask.Grammar.from_ebnf(grammar)
 ```
 
-`parent` remains reusable for later children, including after a save/load round trip. Loaded parser automata stay in their packed representation during the fast late-binding path.
-
-A compiled child is bound by name:
+Then compile a complete description:
 
 ```python
-payload = glrmask.Constraint.from_json_schema(payload_schema, vocab)
-
-constraint = glrmask.Constraint.from_glrm_grammar(
-    '''
-    glrm 1;
-    start document;
-    extern grammar payload;
-    nt document = "{" payload "}";
-    ''',
+constraint = grammar.compile(
     vocab,
-    subgrammars={"payload": payload},
+    end_tokens=end_token_ids,
+    optimization=glrmask.Optimization.AUTO,
 )
 ```
 
-Every constraint in a composition must use the same vocabulary.
+The intent-level optimization choices are:
 
-Parent and child constraints may use different `ignore` terminals. Equal ignore languages are shared; different ones stay scoped to their grammar.
+- `Optimization.AUTO`
+- `Optimization.FAST_BUILD`
+- `Optimization.FAST_RUNTIME`
+
+They preserve language semantics and all return the same `Constraint` type. They do not expose GLRMask's internal static/dynamic/O1/O2/O3 engines.
+
+### Bind source or compiled children
+
+A source child and a compiled child use the same immutable operation:
+
+```python
+parent = glrmask.Grammar.from_glrm('''
+glrm 1;
+start document;
+extern grammar payload;
+nt document = "{" payload "}";
+''')
+
+source_child = glrmask.Grammar.from_json_schema(payload_schema)
+a = parent.bind("payload", source_child).compile(vocab)
+
+compiled_child = source_child.compile(vocab)
+b = parent.bind("payload", compiled_child).compile(vocab)
+```
+
+All compiled components in one composition must target the same exact vocabulary mapping.
+
+### Cache an open parent with `Module`
+
+Use `compile_module` when a parent is reused across requests:
+
+```python
+host = parent.compile_module(vocab)
+child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
+
+bound = host.bind("payload", child)
+constraint = bound.link(optimization=glrmask.Optimization.FAST_RUNTIME)
+```
+
+`Module.bind` is compiled-only: accepted values are `Module`, `Constraint`, `ExactToken`, and `ExactTokens`. It does not parse or compile a source `Grammar`. Composition remains deferred until `link`, so the terminal optimization preference can choose the link strategy.
+
+Open modules are serializable:
+
+```python
+artifact = host.save()
+host = glrmask.Module.load(artifact)
+```
 
 ### Decode
 
-Call `constraint.start()` to create a new state for each generation run:
+Create one state per generated sequence:
 
 ```python
 state = constraint.start()
 
 while generating:
     mask = state.mask(model_vocab_size)
-    if state.is_accepting():
-        mask[end_token_ids] = True
-
     token_id = sample_with_mask(logits, mask)
-    if token_id in end_tokens:
-        break
     state.commit_token(token_id)
+    if state.is_terminated():
+        break
 ```
 
 The main state operations are:
 
 - `mask(size=None)`: return the allowed-token mask.
+- `fill_mask(words)`: fill a caller-owned packed `int32`/`uint32` buffer.
 - `commit_token(token_id)`: advance by one model token.
 - `commit_bytes(data)`: advance by raw bytes.
 - `forced()`: return a forced token sequence when one can be determined.
-- `is_accepting()`: report whether the current prefix may validly end here.
-- `is_rejected()`: report whether the current prefix is irrecoverably invalid.
+- `is_accepting()`: grammar-body acceptance at the current prefix.
+- `is_rejected()`: irrecoverably invalid prefix.
+- `is_terminated()`: an allowed final end token has been committed.
 
-## Cache compiled constraints
+### End tokens
 
-`Constraint` objects are immutable and reusable across requests. Serialize them with `save()` and restore them with `load()`:
+End tokens are final-root policy, not grammar-child semantics:
+
+```python
+constraint = grammar.compile(vocab, end_tokens=[eos_id])
+```
+
+An end token is allowed only when the grammar body is accepting. A child's previous end-token policy is not inherited when that compiled constraint is embedded in another grammar or module.
+
+### Constraint persistence
+
+`Constraint` objects are immutable/shareable and remain composable after loading:
 
 ```python
 artifact = constraint.save()
-constraint = glrmask.Constraint.load(artifact, vocab)
+constraint = glrmask.Constraint.load(artifact)
 ```
 
-For constraints that will not be reused enough to justify full compilation, `DynamicConstraint` is a drop-in replacement for `Constraint` that starts much faster, but leaves more work in the token loop and hence generates masks more slowly.
-
-```python
-constraint = glrmask.DynamicConstraint.from_json_schema(schema, vocab)
-state = constraint.start()
-```
-
-For a higher-build-cost dynamic mode, pass `vocab_partition=True`. This computes a
-grammar-specific vocabulary equivalence partition once and runs local dynamic mask
-generation over one representative per class while returning masks in the original
-model-token coordinate:
-
-```python
-constraint = glrmask.DynamicConstraint.from_json_schema(
-    schema, vocab, vocab_partition=True
-)
-```
-
-`DynamicConstraintState` has the same decoding methods as `ConstraintState`.
-
-For JSON Schema, `AutoConstraint` chooses among the ordinary dynamic mode (O1),
-the vocabulary-partitioned dynamic mode (O2), and the fully static compiler
-(O3) from cheap schema-shape features. It is intended for callers that want a
-better build-time/runtime-tail tradeoff without selecting a tier manually:
-
-```python
-constraint = glrmask.AutoConstraint.from_json_schema(schema, vocab)
-print(constraint.selected_tier)  # "o1", "o2", or "o3"
-state = constraint.start()
-```
-
-`AutoConstraint.save()` records the selected backend and `AutoConstraint.load()`
-restores that backend directly; loading does not rerun the policy. The current
-policy is exposed as `constraint.policy` for benchmark/reproducibility metadata.
+Passing `vocab=` to `Constraint.load` or `Module.load` is optional and validates/shares an already-existing exact vocabulary object.
 
 ## Grammar formats
 
-GLRM is GLRMask's native grammar format. A grammar begins with `glrm 1;` and a `start` declaration. Rules use `=`; regexes use full-match semantics, and unsupported or non-regular constructs are rejected:
+GLRMask accepts JSON Schema, GLRM, Lark, and EBNF. GLRM is the native composition format:
 
 ```glrm
 glrm 1;
@@ -221,26 +241,12 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Special tokens are declared by name in GLRM and bound to their model token IDs outside the grammar:
+External compiled children use `extern grammar NAME;`; exact model-token slots use `extern token NAME;`. Inline `g name = { ... };` grammars and externally bound child grammars have the same language semantics, including scope-local ignores.
 
-```python
-grammar = '''
-glrm 1;
-start message;
-extern token TOOL_CALL;
-nt message = TOOL_CALL call;
-nt call = "lookup()";
-'''
-constraint = glrmask.Constraint.from_glrm_grammar(
-    grammar,
-    vocab,
-    bindings={"TOOL_CALL": tool_call_token_id},
-)
-```
+Lark and EBNF also support explicit `@token(<id>)` atoms when a numeric model token ID is deliberately part of the grammar source.
 
-Bind the tool-call special token used by your model. Lark and EBNF use `@token(<id>)` for special tokens.
+The top-level package intentionally exposes intent-level `Optimization`, not the historical engine-specific dynamic/vocabulary-partition types. Repository experiments remain available through explicit internal/submodule imports and carry no public compatibility guarantee.
 
-See the [root README](../README.md#grammar-formats) for the fuller format overview.
 
 ## Source builds
 

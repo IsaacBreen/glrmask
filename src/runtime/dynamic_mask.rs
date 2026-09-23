@@ -13,8 +13,8 @@ use smallvec::SmallVec;
 
 use crate::automata::lexer::Lexer;
 use crate::automata::lexer::tokenizer::{
-    Tokenizer, TokenizerExecResult, TokenizerMatch, TokenizerStateSet,
-    VirtualResidualDirectCoordinate,
+    TerminalResidualDirectCoordinate, Tokenizer, TokenizerExecResult, TokenizerMatch,
+    TokenizerStateSet, VirtualResidualDirectCoordinate,
 };
 use crate::compiler::glr::accumulator::TerminalsDisallowed;
 use crate::compiler::glr::parser::{advance_stacks, stack_admissible_terminals, ParserGSS};
@@ -35,6 +35,34 @@ mod full_walk_dense;
 mod recursive_provider;
 
 type ParserStacks = LeveledGSS<u32, ()>;
+
+/// The current LR action row is a necessary condition for admitting a terminal
+/// when no zero-width control transitions can change the top first. It is only
+/// a candidate superset: stack-dependent reductions/guards still require the
+/// ordinary parser. A fully unconditional row additionally proves exactness.
+fn parser_row_projection_candidates(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+) -> Option<(BitSet, bool)> {
+    if constraint.uses_sparse_direct_regular_runtime()
+        || constraint.uses_compact_segmented_parser_runtime()
+        || !constraint.table.control_terminals.is_empty()
+    {
+        return None;
+    }
+    let top = stacks.single_top_value()?;
+    let row = constraint.table.advance_row(top)?;
+    let terminal_count = constraint.table.num_terminals as usize;
+    // The advance row may also contain EOF. Never put it in a lexer filter.
+    let mut candidates = BitSet::new(terminal_count);
+    for terminal in row.iter_ones().take_while(|&terminal| terminal < terminal_count) {
+        candidates.set(terminal);
+    }
+    let exact = constraint.table.unconditional_advance_row(top).is_some_and(|row| {
+        candidates.iter_ones().all(|terminal| row.contains(terminal))
+    });
+    Some((candidates, exact))
+}
 
 #[cfg(test)]
 thread_local! {
@@ -127,6 +155,19 @@ trait FullWalkTransitionTable {
         self.root_state(vocab.mask_runtime_state(constraint.tokenizer.initial_state()))
     }
 
+    #[inline(always)]
+    fn parser_projection_enabled(&self) -> bool { false }
+
+    #[inline(always)]
+    fn parser_initial_state(&mut self, initial: u32, _admitted: &BitSet) -> u32 {
+        initial
+    }
+
+    #[inline(always)]
+    fn small_future_terminals(&self, _state: u32) -> Option<SmallVec<[TerminalID; 4]>> {
+        None
+    }
+
     fn finalizer_code(&self, state: u32) -> u32;
 
     fn single_finalizer_continues(&mut self, state: u32) -> bool;
@@ -158,6 +199,13 @@ trait FullWalkTransitionTable {
     /// a singleton raw state. The direct first-match lane uses this only as a
     /// safety check before bypassing the generic subset/config representation.
     fn exact_raw_state(&self, state: u32) -> Option<u32>;
+
+    /// Exact set of bytes with at least one lexical successor from this runtime
+    /// coordinate. Implementations may decline when the coordinate is not
+    /// cheaply enumerable. Used only as a root-trie scheduler; token admission
+    /// remains with the ordinary exact walker.
+    #[inline(always)]
+    fn exact_next_bytes(&mut self, _state: u32) -> Option<U8Set> { None }
 
     #[inline(always)]
     fn terminal_is_ignore(&self, constraint: &Constraint, terminal: TerminalID) -> bool {
@@ -235,6 +283,15 @@ trait FullWalkTransitionTable {
     ) -> DirectPruneStep {
         DirectPruneStep::Dead
     }
+
+    #[inline(always)]
+    fn terminal_residual_prune_step(
+        &self,
+        _coordinate: TerminalResidualDirectCoordinate,
+        _byte: u8,
+    ) -> TerminalResidualPruneStep {
+        TerminalResidualPruneStep::Dead
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,6 +299,54 @@ enum DirectPruneStep {
     Dead,
     Matched,
     Live(VirtualResidualDirectCoordinate),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FirstMatchDirectCoordinate {
+    Virtual(VirtualResidualDirectCoordinate),
+    Physical(TerminalResidualDirectCoordinate),
+}
+
+impl FirstMatchDirectCoordinate {
+    #[inline(always)]
+    fn step(self, tokenizer: &Tokenizer, byte: u8) -> Option<Self> {
+        match self {
+            Self::Virtual(c) => tokenizer.virtual_residual_direct_coordinate_step(c, byte).map(Self::Virtual),
+            Self::Physical(c) => tokenizer.terminal_residual_direct_coordinate_step(c, byte).map(Self::Physical),
+        }
+    }
+    #[inline(always)]
+    fn accepting(self, tokenizer: &Tokenizer) -> Option<bool> {
+        match self {
+            Self::Virtual(c) => tokenizer.virtual_residual_direct_coordinate_accepting(c),
+            Self::Physical(c) => tokenizer.terminal_residual_direct_coordinate_accepting(c),
+        }
+    }
+    #[inline(always)]
+    fn has_future(self, tokenizer: &Tokenizer) -> Option<bool> {
+        match self {
+            Self::Virtual(c) => tokenizer.virtual_residual_direct_coordinate_has_future(c),
+            Self::Physical(c) => tokenizer.terminal_residual_direct_coordinate_has_future(c),
+        }
+    }
+    #[inline(always)]
+    fn raw_state(self, tokenizer: &Tokenizer) -> Option<u32> {
+        match self {
+            Self::Virtual(c) => tokenizer.virtual_residual_state_for_direct_coordinate(c),
+            Self::Physical(c) => Some(tokenizer.terminal_residual_direct_coordinate_raw_state(c)),
+        }
+    }
+    #[inline(always)]
+    fn physical(self) -> Option<TerminalResidualDirectCoordinate> {
+        match self { Self::Physical(c) => Some(c), Self::Virtual(_) => None }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalResidualPruneStep {
+    Dead,
+    Matched,
+    Live(TerminalResidualDirectCoordinate),
 }
 
 #[derive(Clone, Copy)]
@@ -1506,6 +1611,46 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         self.cache.config_for_raw_start(state)
     }
 
+    #[inline(always)]
+    fn parser_projection_enabled(&self) -> bool {
+        self.cache.parser_projection_enabled
+            && !self.cache.deterministic
+            && self.cache.use_constraint_fast_transitions
+    }
+
+    fn parser_initial_state(&mut self, initial: u32, admitted: &BitSet) -> u32 {
+        let source = self.cache.tokenizer().initial_state();
+        match self.cache.config_for_parser_admitted(source, admitted) {
+            Ok(Some(config)) => match self.cache.fresh_reset_config(config) {
+                Ok(reset) => reset,
+                Err(error) => {
+                    if self.error.is_none() { self.error = Some(error); }
+                    initial
+                }
+            },
+            Ok(None) => initial,
+            Err(error) => {
+                if self.error.is_none() { self.error = Some(error); }
+                initial
+            }
+        }
+    }
+
+    fn small_future_terminals(&self, state: u32) -> Option<SmallVec<[TerminalID; 4]>> {
+        if !self.parser_projection_enabled() {
+            return None;
+        }
+        let config = self.generic_config_for_state(state);
+        let futures = if let Some(raw) = self.cache.raw_state_for_config(config) {
+            self.cache.tokenizer().possible_future_terminals(raw)
+        } else {
+            &self.cache.config_futures[self.cache.config_index(config)?]
+        };
+        (futures.count_ones() <= 16).then(|| {
+            futures.iter_ones().map(|terminal| terminal as TerminalID).collect()
+        })
+    }
+
     fn finalizer_code(&self, state: u32) -> u32 {
         self.cache.config_finalizer_code(self.generic_config_for_state(state))
     }
@@ -1597,7 +1742,9 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
         lexer_state: u32,
         parser_node: u32,
     ) -> bool {
-        if lexer_state == initial_lexer_state {
+        if lexer_state == initial_lexer_state
+            || parser_cache.nodes[parser_node as usize].reset_lexer == Some(lexer_state)
+        {
             return true;
         }
         if let Some(hot_id) = FullWalkHotScalarCache::id(lexer_state) {
@@ -1615,6 +1762,12 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
     #[inline(always)]
     fn exact_raw_state(&self, state: u32) -> Option<u32> {
         self.hot_raw(state).or_else(|| self.cache.raw_state_for_config(state))
+    }
+
+    #[inline(always)]
+    fn exact_next_bytes(&mut self, state: u32) -> Option<U8Set> {
+        let state = self.generic_config_for_state(state);
+        Some(self.cache.config_next_bytes(state))
     }
 
     #[inline(always)]
@@ -1710,6 +1863,24 @@ impl FullWalkTransitionTable for FullWalkConfigTransitions<'_, '_> {
             DirectPruneStep::Dead
         }
     }
+
+    fn terminal_residual_prune_step(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+        byte: u8,
+    ) -> TerminalResidualPruneStep {
+        let tokenizer = self.cache.tokenizer();
+        let Some(target) = tokenizer.terminal_residual_direct_coordinate_step(coordinate, byte) else {
+            return TerminalResidualPruneStep::Dead;
+        };
+        if tokenizer.terminal_residual_direct_coordinate_accepting(target).unwrap_or(false) {
+            TerminalResidualPruneStep::Matched
+        } else if tokenizer.terminal_residual_direct_coordinate_has_future(target).unwrap_or(false) {
+            TerminalResidualPruneStep::Live(target)
+        } else {
+            TerminalResidualPruneStep::Dead
+        }
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -1722,6 +1893,7 @@ enum FullWalkPruneGuard {
 enum FullWalkPruneMemory {
     Exact(u32, TerminalID),
     Direct(VirtualResidualDirectCoordinate, TerminalID),
+    TerminalResidual(TerminalResidualDirectCoordinate, TerminalID),
 }
 
 impl FullWalkPruneGuard {
@@ -1788,6 +1960,16 @@ impl FullWalkPruneGuard {
                             if !next.contains(&memory) {
                                 next.push(memory);
                             }
+                        }
+                    }
+                }
+                FullWalkPruneMemory::TerminalResidual(coordinate, terminal) => {
+                    match transitions.terminal_residual_prune_step(coordinate, byte) {
+                        TerminalResidualPruneStep::Dead => {}
+                        TerminalResidualPruneStep::Matched => return None,
+                        TerminalResidualPruneStep::Live(target) => {
+                            let memory = FullWalkPruneMemory::TerminalResidual(target, terminal);
+                            if !next.contains(&memory) { next.push(memory); }
                         }
                     }
                 }
@@ -2078,6 +2260,7 @@ impl Drop for FullWalkManyTransitionCache {
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
+    reset_lexer: Option<u32>,
     token_boundary_allowed: Vec<u8>,
     children: SmallVec<[(TerminalID, u32); 16]>,
     last_child_terminal: TerminalID,
@@ -2120,6 +2303,7 @@ impl FullWalkParserCache {
             nodes.push(FullWalkParserNode {
                 gss: branch.gss.clone(),
                 admitted: None,
+                reset_lexer: None,
                 token_boundary_allowed: dense_lexer_state_count
                     .map_or_else(Vec::new, |count| vec![0; count]),
                 children: SmallVec::new(),
@@ -2164,6 +2348,7 @@ impl FullWalkParserCache {
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
             admitted: None,
+            reset_lexer: None,
             token_boundary_allowed: self
                 .dense_lexer_state_count
                 .map_or_else(Vec::new, |count| vec![0; count]),
@@ -2238,6 +2423,37 @@ impl FullWalkParserCache {
         (target != Self::DEAD).then_some(target)
     }
 
+    /// Every terminal reset starts the language admitted by the *new* parser
+    /// frontier, not the unconstrained union of every lexical terminal.
+    #[inline]
+    fn initial_lexer(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut impl FullWalkTransitionTable,
+        initial: u32,
+        node: u32,
+    ) -> u32 {
+        if !transitions.parser_projection_enabled() {
+            return initial;
+        }
+        if let Some(cached) = self.nodes[node as usize].reset_lexer {
+            return cached;
+        }
+        let mut admitted = parser_row_projection_candidates(
+            constraint, &self.nodes[node as usize].gss,
+        ).map_or_else(|| self.admitted(constraint, node).clone(), |(candidates, _)| candidates);
+        if let Some(ignore) = constraint.ignore_terminal {
+            admitted.set(ignore as usize);
+        }
+        let reset = if admitted.count_ones() <= 16 {
+            transitions.parser_initial_state(initial, &admitted)
+        } else {
+            initial
+        };
+        self.nodes[node as usize].reset_lexer = Some(reset);
+        reset
+    }
+
     fn admitted(&mut self, constraint: &Constraint, node: u32) -> &BitSet {
         let index = node as usize;
         if self.nodes[index].admitted.is_none() {
@@ -2258,6 +2474,24 @@ impl FullWalkParserCache {
             self.nodes[index].admitted = Some(admitted);
         }
         self.nodes[index].admitted.as_ref().unwrap()
+    }
+
+    /// For a small lexical future set, query only those actual terminals.
+    /// Reuse the same exact parser-child cache needed when one later finalizes;
+    /// do not convert/simulate the whole parser stack for every grammar terminal.
+    fn narrow_boundary_allowed<T: FullWalkTransitionTable>(
+        &mut self,
+        constraint: &Constraint,
+        transitions: &mut T,
+        lexer: u32,
+        parser: u32,
+    ) -> Option<bool> {
+        let candidates = transitions.small_future_terminals(lexer)?;
+        Some(candidates.into_iter().any(|terminal| {
+            transitions.future_contains(lexer, terminal)
+                && (Some(terminal) == constraint.ignore_terminal
+                    || self.advance(constraint, parser, terminal).is_some())
+        }))
     }
 
     #[inline(always)]
@@ -2350,12 +2584,13 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = constraint.ignore_terminal.is_some_and(|terminal| {
+        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
+            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
             transitions.future_contains(lexer_state, terminal)
         }) || transitions.future_intersects(
             lexer_state,
             self.admitted(constraint, parser_node),
-        );
+        ));
         unsafe {
             *self
                 .hot_token_boundary_allowed
@@ -2390,12 +2625,13 @@ impl FullWalkParserCache {
         if self.profile {
             self.profile_boundary_misses += 1;
         }
-        let allowed = constraint.ignore_terminal.is_some_and(|terminal| {
+        let allowed = self.narrow_boundary_allowed(constraint, transitions, lexer_state, parser_node)
+            .unwrap_or_else(|| constraint.ignore_terminal.is_some_and(|terminal| {
             transitions.future_contains(lexer_state, terminal)
         }) || transitions.future_intersects(
             lexer_state,
             self.admitted(constraint, parser_node),
-        );
+        ));
         unsafe { self.sparse_token_boundary_allowed.get_unchecked_mut(node) }
             .insert(lexer_state, if allowed { 2 } else { 1 });
         allowed
@@ -2445,7 +2681,12 @@ fn full_walk_terminal_reset_branches<T: FullWalkTransitionTable>(
     }
     let mut out = SmallVec::new();
     if let Some(next_parser) = parser_cache.advance(constraint, parser_node, terminal) {
-        out.push((initial_lexer_state, next_parser));
+        // Ordinary grammar lanes retain main's exact parser-conditioned reset.
+        // Scoped providers return above with their own per-component routes.
+        let reset = parser_cache.initial_lexer(
+            constraint, transitions, initial_lexer_state, next_parser,
+        );
+        out.push((reset, next_parser));
     }
     out
 }
@@ -2790,7 +3031,7 @@ fn full_walk_scalar_finalizer_hot_single(
     }
     if let Some(next_parser) = parser_cache.advance(constraint, parser_node, code) {
         let reset = FullWalkBranch {
-            lexer_state: initial_lexer_state,
+            lexer_state: parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser),
             parser_node: next_parser,
             prune_guard: if Some(code) == constraint.ignore_terminal {
                 FullWalkPruneGuard::Passed
@@ -2851,10 +3092,11 @@ fn full_walk_try_apply_plain_single_finalizer(
         return true;
     };
 
+    let reset_lexer = parser_cache.initial_lexer(constraint, transitions, initial_lexer_state, next_parser);
     if next_parser != parser_node {
         *scalar_lexer = two_distinct_marker;
         *current_two = (
-            (initial_lexer_state, next_parser),
+            (reset_lexer, next_parser),
             (target, parser_node),
         );
         return true;
@@ -2863,7 +3105,7 @@ fn full_walk_try_apply_plain_single_finalizer(
     // If both exact coordinates are identical there is only one branch. When
     // the parser is the same but lexer coordinates differ, leave the rare case
     // to the existing exact union logic below.
-    if initial_lexer_state == target {
+    if reset_lexer == target {
         *scalar_lexer = target;
         *scalar_parser = parser_node;
         return true;
@@ -3609,6 +3851,9 @@ const HOT_EDGE_LEXER_DEAD: u32 = u32::MAX;
 
 enum FullWalkHotLaneOutcome {
     Dead,
+    /// Scalar target reached without crossing a terminal finalizer. Safe for
+    /// the same parser-conditioned liveness test as the generic walker.
+    ScalarPlain(u32, u32),
     Scalar(u32, u32),
     Two((u32, u32), (u32, u32)),
     Decline,
@@ -3633,7 +3878,7 @@ fn full_walk_hot_lane_scalar_escape<T: FullWalkTransitionTable>(
     }
     let target = T::cell_target(cell);
     if !T::cell_has_finalizer(cell) {
-        return FullWalkHotLaneOutcome::Scalar(target, parser_node);
+        return FullWalkHotLaneOutcome::ScalarPlain(target, parser_node);
     }
 
     let mut lexer = target;
@@ -3816,6 +4061,22 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
     let mut last_boundary_allowed = false;
     let mut second_boundary_key = u64::MAX;
     let mut second_boundary_allowed = false;
+    let mut condition_consecutive_non_pruning = 0u32;
+    let condition_budget = config_scalar_conditioned_budget();
+    let condition_dead_skip = std::env::var_os(
+        "GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP",
+    )
+    .is_some() || condition_budget.is_some();
+    let condition_walk_enabled = std::env::var_os(
+        "GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED",
+    )
+    .is_some() || condition_dead_skip;
+    let condition_initial_only = std::env::var_os(
+        "GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_INITIAL_ONLY",
+    )
+    .is_some();
+    let condition_walk_enabled = condition_walk_enabled
+        && (!condition_initial_only || state.generation == 0);
 
     // `full_walk_all_consume()` proves there are no synthetic empty-edge
     // records. Each outer iteration therefore begins at a radix-edge START,
@@ -3847,11 +4108,13 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                 continue 'edge_walk;
             }
 
+            let mut plain_scalar_step = false;
             let outcome = if lexer < HOT_EDGE_LEXER_TWO_DISTINCT {
                 if let Some(hot_id) = transitions.hot_state_id(lexer) {
                     let next = transitions.hot_step(hot_id, byte);
                     if next < FULL_WALK_HOT_SLOW {
                         lexer = transitions.hot_state_from_id(next);
+                        plain_scalar_step = true;
                         None
                     } else if next == FULL_WALK_HOT_DEAD {
                         Some(FullWalkHotLaneOutcome::Dead)
@@ -3906,6 +4169,11 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                         );
                         continue 'edge_walk;
                     }
+                    FullWalkHotLaneOutcome::ScalarPlain(next_lexer, next_parser) => {
+                        lexer = next_lexer;
+                        parser = next_parser;
+                        plain_scalar_step = true;
+                    }
                     FullWalkHotLaneOutcome::Scalar(next_lexer, next_parser) => {
                         lexer = next_lexer;
                         parser = next_parser;
@@ -3919,6 +4187,44 @@ fn try_full_walk_hot_scalar_edges<T: FullWalkTransitionTable>(
                         two = (first, second);
                     }
                     FullWalkHotLaneOutcome::Decline => return Ok(None),
+                }
+            }
+
+            if plain_scalar_step && condition_walk_enabled {
+                let condition_active = match condition_budget {
+                    Some(max) => condition_consecutive_non_pruning < max,
+                    None => true,
+                };
+                if condition_active {
+                    if transitions.token_boundary_allowed(
+                        parser_cache,
+                        state.constraint,
+                        initial_lexer_state,
+                        lexer,
+                        parser,
+                    ) {
+                        condition_consecutive_non_pruning =
+                            condition_consecutive_non_pruning.saturating_add(1);
+                    } else {
+                        lexer = HOT_EDGE_LEXER_DEAD;
+                        if condition_dead_skip {
+                            let pruned = full_walk_skip_dead_subtree_generic(
+                                vocab,
+                                trie,
+                                walk_ops,
+                                &mut remaining_ops,
+                                &mut token_marker_index,
+                                buf,
+                            );
+                            if pruned > 0 {
+                                condition_consecutive_non_pruning = 0;
+                            } else {
+                                condition_consecutive_non_pruning =
+                                    condition_consecutive_non_pruning.saturating_add(1);
+                            }
+                            continue 'edge_walk;
+                        }
+                    }
                 }
             }
         }
@@ -4052,12 +4358,9 @@ fn try_full_walk_mask_with_table<
         root_branches,
         transitions.dense_state_count(),
     );
-    let first_match_root_candidate = if HOT_SINGLE_ROOT
+    let first_match_direct_root = if HOT_SINGLE_ROOT
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
-        // This lane consumes exact source-tokenizer state ids directly. A
-        // finite/determinized mask tokenizer has a different coordinate and
-        // must use the ordinary exact walker.
         && vocab.mask_runtime_tokenizer().is_none()
         && let Some(source) = root_branches[0].exact_tokenizer_state
         && vocab.mask_runtime_state(source) == source
@@ -4078,18 +4381,61 @@ fn try_full_walk_mask_with_table<
             .admitted(state.constraint, root_parser_nodes[0])
             .contains(terminal as usize)
     {
-        Some((source, root_parser_nodes[0], terminal))
+        state
+            .constraint
+            .tokenizer
+            .virtual_residual_direct_coordinate(source)
+            .map(|coordinate| {
+                (
+                    FirstMatchDirectCoordinate::Virtual(coordinate),
+                    root_parser_nodes[0],
+                    terminal,
+                )
+            })
     } else {
         None
     };
-    let first_match_direct_root =
-        first_match_root_candidate.and_then(|(source, parser_node, terminal)| {
-            state
-                .constraint
-                .tokenizer
-                .virtual_residual_direct_coordinate(source)
-                .map(|coordinate| (coordinate, parser_node, terminal))
-        });
+    // Ordinary product states can share several lexer terminals even when the
+    // parser admits exactly one of them. The retained product-trace sidecar
+    // maps such a physical source to the exact standalone-terminal residual.
+    // Use that coordinate directly until the first terminal match; all parser
+    // interaction before then is provably irrelevant.
+    let first_match_direct_root = first_match_direct_root.or_else(|| {
+        if std::env::var_os("GLRMASK_EXPERIMENT_PHYSICAL_FIRST_MATCH_DIRECT").is_none()
+            || !HOT_SINGLE_ROOT
+            || root_branches.len() != 1
+            || !root_branches[0].initial_prune_guard.is_passed()
+            || vocab.mask_runtime_tokenizer().is_some()
+            || state.constraint.ignore_terminal.is_some()
+        {
+            return None;
+        }
+        let source = root_branches[0].exact_tokenizer_state?;
+        if vocab.mask_runtime_state(source) != source
+            || transitions.exact_raw_state(root_branches[0].tokenizer_config) != Some(source)
+            || state.constraint.tokenizer.state_has_epsilon_transitions(source)
+        {
+            return None;
+        }
+        let parser_node = root_parser_nodes[0];
+        let admitted = parser_cache.admitted(state.constraint, parser_node);
+        let mut terminals = admitted
+            .iter_ones()
+            .filter_map(|terminal| TerminalID::try_from(terminal).ok());
+        let terminal = terminals.next()?;
+        if terminals.next().is_some() {
+            return None;
+        }
+        let coordinate = state
+            .constraint
+            .tokenizer
+            .terminal_residual_direct_coordinate(source, terminal)?;
+        Some((
+            FirstMatchDirectCoordinate::Physical(coordinate),
+            parser_node,
+            terminal,
+        ))
+    });
     // The config walker is the exact fallback for virtual residual coordinates
     // that were not materialized into a finite mask projection. Use the same
     // language-defined master slicer as the dense walker when one exact source
@@ -4175,6 +4521,27 @@ fn try_full_walk_mask_with_table<
                         && !transitions.matched_terminals(lexer_state).contains(&terminal)
                     {
                         return false;
+                    }
+                    if std::env::var_os("GLRMASK_DISABLE_DEMAND_TERMINAL_PROOF").is_none()
+                        && !vocab.is_grammar_quotiented()
+                    {
+                        // This path already consumes projected bounded-radius
+                        // proofs below, but must first prepare the relevant
+                        // terminal. Positive containment is the existing exact
+                        // quotient certificate. False/unknown never admits bits:
+                        // false proceeds to bounded radius, None to old fallback.
+                        vocab.prepare_runtime_projected_terminal_quotient(
+                            &state.constraint.tokenizer, terminal,
+                        );
+                        if let Some(result) = vocab.projected_terminal_slice_contained(
+                            terminal, source, slice.cache_id(), slice.dfa(),
+                        ) {
+                            if std::env::var_os("GLRMASK_DIAG_DEMAND_TERMINAL_PROOF").is_some() {
+                                eprintln!("[demand_terminal_proof] generation={} source={} terminal={} slice={} contained={}",
+                                    state.generation, source, terminal, slice.cache_id(), result);
+                            }
+                            return result;
+                        }
                     }
                     if let Some(cached) =
                         vocab.cached_direct_slice_contained(terminal, lexer_state, cache_id)
@@ -4313,7 +4680,7 @@ fn try_full_walk_mask_with_table<
                 let max_permille = std::env::var("GLRMASK_EXPERIMENT_CONFIG_MASTER_MAX_RESIDUAL_PERMILLE")
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
-                    .unwrap_or(500);
+                    .unwrap_or(1000);
                 let profitable = residual_ops.is_some_and(|residual| {
                     residual.saturating_mul(1000)
                         <= ordinary_ops.saturating_mul(max_permille)
@@ -4400,7 +4767,7 @@ fn try_full_walk_mask_with_table<
             )
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(500);
+            .unwrap_or(1000);
             let residual_ops = vocab.llg_master_residual_ops(safe_radius, false);
             let profitable = residual_ops.is_some_and(|residual| {
                 residual.saturating_mul(1000)
@@ -4431,6 +4798,9 @@ fn try_full_walk_mask_with_table<
     .is_some()
     {
         first_match_direct_root.and_then(|(coordinate, _, _)| {
+            let FirstMatchDirectCoordinate::Virtual(coordinate) = coordinate else {
+                return None;
+            };
             let slice = vocab.llg_slice_by_cache_id(OPTIONAL_SPACE_NONSPACE_SLICE)?;
             let work_limit = std::env::var(
                 "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_WORK_LIMIT",
@@ -4471,6 +4841,12 @@ fn try_full_walk_mask_with_table<
         && root_branches
             .iter()
             .all(|branch| branch.initial_prune_guard.is_passed())));
+    let legacy_hot_conditions_clear = std::env::var_os(
+        "GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED",
+    )
+    .is_none()
+        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP").is_none()
+        && config_scalar_conditioned_budget().is_none();
     let hot_edge_lane_eligible = HOT_SINGLE_ROOT
         && root_branches.len() == 1
         && root_branches[0].initial_prune_guard.is_passed()
@@ -4480,9 +4856,18 @@ fn try_full_walk_mask_with_table<
         && !deferred_output
         && transitions.hot_scalar_lane_enabled()
         && std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_none()
-        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED").is_none()
-        && std::env::var_os("GLRMASK_EXPERIMENT_CONFIG_SCALAR_CONDITIONED_DEAD_SKIP").is_none()
-        && config_scalar_conditioned_budget().is_none();
+        && (root_branches[0].parser_filtered_root || legacy_hot_conditions_clear);
+    if dynamic_mask_profile_enabled(state.generation) {
+        eprintln!(
+            "[glrmask/profile][hot_scalar_gate] generation={} eligible={} all_consume={} root_config={} exact_raw={:?} hot_id={:?}",
+            state.generation,
+            hot_edge_lane_eligible,
+            trie.full_walk_all_consume(),
+            root_branches.first().map_or(u32::MAX, |root| root.tokenizer_config),
+            root_branches.first().and_then(|root| transitions.exact_raw_state(root.tokenizer_config)),
+            root_branches.first().and_then(|root| transitions.hot_state_id(root.tokenizer_config)),
+        );
+    }
     if hot_edge_lane_eligible {
         match try_full_walk_hot_scalar_edges(
             state,
@@ -4533,17 +4918,27 @@ fn try_full_walk_mask_with_table<
         heap_lexer.resize(stack_len, FULL_WALK_LEXER_DEAD);
         heap_lexer.as_mut_slice()
     };
-    let mut inline_first_match_direct: [Option<VirtualResidualDirectCoordinate>; 256] =
-        [None; 256];
-    let mut heap_first_match_direct = Vec::<Option<VirtualResidualDirectCoordinate>>::new();
-    let stack_first_match_direct: &mut [Option<VirtualResidualDirectCoordinate>] =
+    let mut inline_parser_transparent = [false; 256];
+    let mut heap_parser_transparent = Vec::<bool>::new();
+    let stack_parser_transparent: &mut [bool] = if stack_len <= inline_parser_transparent.len() {
+        &mut inline_parser_transparent[..stack_len]
+    } else {
+        heap_parser_transparent.resize(stack_len, false);
+        heap_parser_transparent.as_mut_slice()
+    };
+    let mut inline_first_match_direct: [Option<FirstMatchDirectCoordinate>; 256] = [None; 256];
+    let mut heap_first_match_direct = Vec::<Option<FirstMatchDirectCoordinate>>::new();
+    let stack_first_match_direct: &mut [Option<FirstMatchDirectCoordinate>] =
         if stack_len <= inline_first_match_direct.len() {
             &mut inline_first_match_direct[..stack_len]
         } else {
             heap_first_match_direct.resize(stack_len, None);
             heap_first_match_direct.as_mut_slice()
         };
-    let defer_first_match_finalizer = DEFER_FIRST_MATCH_FINALIZER;
+    let defer_first_match_finalizer = DEFER_FIRST_MATCH_FINALIZER
+        || first_match_direct_root
+            .as_ref()
+            .is_some_and(|(coordinate, _, _)| coordinate.physical().is_some());
     // This lane is experimental and disabled in production. Do not eagerly
     // construct hundreds of `Option<FullWalkManyState>` stack slots on every
     // mask when it is off; the old inline storage was a measurable hot-path
@@ -4600,6 +4995,7 @@ fn try_full_walk_mask_with_table<
     if root_branches.len() == 1 && root_branches[0].initial_prune_guard.is_passed() {
         stack_lexer[0] = root_branches[0].tokenizer_config;
         stack_parser[0] = root_parser_nodes[0];
+        stack_parser_transparent[0] = root_branches[0].parser_filtered_transparent;
         if let Some((coordinate, _, _)) = first_match_direct_root {
             stack_first_match_direct[0] = Some(coordinate);
             if defer_first_match_finalizer {
@@ -4659,17 +5055,121 @@ fn try_full_walk_mask_with_table<
     let mut token_marker_index = 0usize;
     let mut scalar_lexer = FULL_WALK_LEXER_DEAD;
     let mut scalar_parser = 0u32;
-    let mut first_match_direct = None::<VirtualResidualDirectCoordinate>;
+    let mut first_match_direct = None::<FirstMatchDirectCoordinate>;
+    let mut parser_transparent = false;
     let mut first_match_direct_accepting = false;
     let mut first_match_side = None::<FullWalkManyState>;
     let first_match_terminal = first_match_direct_root.map(|(_, _, terminal)| terminal);
     let mut first_match_direct_future_cache =
-        FxHashMap::<VirtualResidualDirectCoordinate, bool>::default();
+        FxHashMap::<FirstMatchDirectCoordinate, bool>::default();
     let mut current_two = ((0u32, 0u32), (0u32, 0u32));
     let mut current_many = FullWalkManyState::Branches(FullWalkBranches::new());
     let mut current_many_id = FullWalkManyTransitionCache::UNKNOWN;
     let mut partition_root_slot = 0usize;
-    let mut remaining_ops = walk_ops.iter();
+
+    // Exact small root-byte scheduler for the generic full-walk backend.
+    // The filtered epsilon-NFA root and certified terminal-continuation roots
+    // often expose only one or two relevant first bytes even though the shared
+    // tokenizer contains hundreds of terminals. Walk only those disjoint root
+    // byte subtrees and rebuild the positive mask from zero.
+    static GENERIC_SINGLE_BYTE_ROOT_WALK_ENABLED: std::sync::OnceLock<bool> =
+        std::sync::OnceLock::new();
+    let sparse_root_walk_enabled = *GENERIC_SINGLE_BYTE_ROOT_WALK_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_SINGLE_BYTE_ROOT_WALK").is_none()
+    });
+    let sparse_root_bytes = if sparse_root_walk_enabled
+        && !deferred_output
+        && master_decision.is_none()
+        && direct_residual_slice.is_none()
+        && first_match_direct_root.is_none()
+        && root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed()
+        && vocab.mask_runtime_tokenizer().is_none()
+        && stack_lexer[0] < FULL_WALK_LEXER_TWO_DISTINCT
+        && trie.node(0).token_id.is_none()
+        && trie.has_full_walk_root_byte_index()
+    {
+        let root = &root_branches[0];
+        let mut bytes = None::<U8Set>;
+        if let (Some(source), Some(terminal)) = (
+            root.exact_tokenizer_state,
+            root.residual_continuation_terminal,
+        ) {
+            if transitions.exact_raw_state(stack_lexer[0]) == Some(source)
+                && let Some(coordinate) = state
+                    .constraint
+                    .tokenizer
+                    .terminal_residual_direct_coordinate(source, terminal)
+            {
+                let mut residual = U8Set::empty();
+                for raw in 0u16..=255 {
+                    let byte = raw as u8;
+                    if state
+                        .constraint
+                        .tokenizer
+                        .terminal_residual_direct_coordinate_step(coordinate, byte)
+                        .is_some()
+                    {
+                        residual.insert(byte);
+                    }
+                }
+                if !residual.is_empty() {
+                    bytes = Some(residual);
+                }
+            }
+        }
+        if bytes.is_none() && root.parser_filtered_root {
+            bytes = transitions.exact_next_bytes(stack_lexer[0]);
+        }
+        if bytes.is_none()
+            && let Some(source) = root.exact_tokenizer_state
+            && transitions.exact_raw_state(stack_lexer[0]) == Some(source)
+            && source < state.constraint.tokenizer.num_states()
+        {
+            let mut raw_bytes = U8Set::empty();
+            for (byte, _) in state.constraint.tokenizer.transitions_from(source) {
+                raw_bytes.insert(byte);
+            }
+            bytes = Some(raw_bytes);
+        }
+        bytes.filter(|bytes| !bytes.is_empty() && bytes.len() <= 8)
+    } else {
+        None
+    };
+    let mut sparse_root_ranges = SmallVec::<[(u32, u32, usize); 8]>::new();
+    if let Some(bytes) = sparse_root_bytes {
+        for raw in 0u16..=255 {
+            let byte = raw as u8;
+            if !bytes.contains(byte) {
+                continue;
+            }
+            if let Some(range) = trie.full_walk_root_byte_range(byte) {
+                sparse_root_ranges.push(range);
+            }
+        }
+        let scheduled_ops = sparse_root_ranges
+            .iter()
+            .map(|(start, end, _)| end.saturating_sub(*start) as usize)
+            .sum::<usize>();
+        if sparse_root_ranges.is_empty()
+            || scheduled_ops.saturating_mul(2) > walk_ops.len()
+        {
+            sparse_root_ranges.clear();
+        }
+    }
+    let sparse_positive_rebuild = !sparse_root_ranges.is_empty();
+    let mut sparse_root_range_index = 0usize;
+    let mut sparse_root_range_end = 0u32;
+    if sparse_positive_rebuild {
+        buf.fill(0);
+    }
+    let mut remaining_ops = if let Some(&(start, end, marker_start)) = sparse_root_ranges.first() {
+        sparse_root_range_end = end;
+        token_marker_index = marker_start;
+        walk_ops[start as usize..].iter()
+    } else {
+        walk_ops.iter()
+    };
     let profile_generic_work =
         std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some();
     let mut profile_byte_ops = 0usize;
@@ -4709,11 +5209,29 @@ fn try_full_walk_mask_with_table<
     });
     let condition_walk_enabled = condition_config_scalar
         && (!condition_initial_only || state.generation == 0);
-    while let Some(&op) = remaining_ops.next() {
+    loop {
+        if sparse_positive_rebuild {
+            let current_op = walk_ops.len() - remaining_ops.as_slice().len();
+            if current_op >= sparse_root_range_end as usize {
+                sparse_root_range_index += 1;
+                let Some(&(start, end, marker_start)) =
+                    sparse_root_ranges.get(sparse_root_range_index)
+                else {
+                    break;
+                };
+                sparse_root_range_end = end;
+                token_marker_index = marker_start;
+                remaining_ops = walk_ops[start as usize..].iter();
+            }
+        }
+        let Some(&op) = remaining_ops.next() else {
+            break;
+        };
         let parent_depth = op.parent_depth() as usize;
         if op.starts_edge() {
             scalar_lexer = unsafe { *stack_lexer.get_unchecked(parent_depth) };
             first_match_direct = unsafe { *stack_first_match_direct.get_unchecked(parent_depth) };
+            parser_transparent = unsafe { *stack_parser_transparent.get_unchecked(parent_depth) };
             if first_match_direct.is_some() && defer_first_match_finalizer {
                 first_match_direct_accepting =
                     unsafe { *stack_first_match_accepting.get_unchecked(parent_depth) };
@@ -4745,6 +5263,33 @@ fn try_full_walk_mask_with_table<
                             .unwrap_unchecked()
                     });
                 }
+            }
+
+            // A subtree whose parent configuration is already lexically dead
+            // cannot revive. Skip the entire structural edge/subtree immediately
+            // instead of replaying every byte with DEAD carried through.
+            if scalar_lexer == FULL_WALK_LEXER_DEAD && first_match_direct.is_none() {
+                let skipped = if deferred_output {
+                    let (child, count) = full_walk_skip_dead_subtree_generic_deferred(
+                        vocab, trie, walk_ops, &mut remaining_ops, &mut token_marker_index,
+                    );
+                    deferred_dead_subtrees.push(child);
+                    deferred_negative_work += count;
+                    count
+                } else if sparse_positive_rebuild {
+                    let (_, count) = full_walk_skip_dead_subtree_generic_deferred(
+                        vocab, trie, walk_ops, &mut remaining_ops, &mut token_marker_index,
+                    );
+                    count
+                } else {
+                    full_walk_skip_dead_subtree_generic(
+                        vocab, trie, walk_ops, &mut remaining_ops, &mut token_marker_index, buf,
+                    )
+                };
+                if profile_generic_work {
+                    profile_dead_subtree_original_tokens += skipped;
+                }
+                continue;
             }
 
             if parent_depth == 0 && !op.consumes_byte() {
@@ -4824,15 +5369,11 @@ fn try_full_walk_mask_with_table<
                             (!full_walk_many_state_is_empty(&advanced)).then_some(advanced);
                     }
 
-                    let target_coordinate = state
-                        .constraint
-                        .tokenizer
-                        .virtual_residual_direct_coordinate_step(source_coordinate, byte);
+                    let target_coordinate =
+                        source_coordinate.step(&state.constraint.tokenizer, byte);
                     if let Some(target_coordinate) = target_coordinate {
-                        let accepting = state
-                            .constraint
-                            .tokenizer
-                            .virtual_residual_direct_coordinate_accepting(target_coordinate)
+                        let accepting = target_coordinate
+                            .accepting(&state.constraint.tokenizer)
                             .unwrap_or(false);
                         first_match_direct = Some(target_coordinate);
                         first_match_direct_accepting = accepting;
@@ -4846,22 +5387,26 @@ fn try_full_walk_mask_with_table<
                             if let Some(next_parser) =
                                 parser_cache.advance(state.constraint, scalar_parser, terminal)
                             {
-                                let future = state
-                                    .constraint
-                                    .tokenizer
-                                    .virtual_residual_direct_coordinate_has_future(target_coordinate)
+                                let future = target_coordinate
+                                    .has_future(&state.constraint.tokenizer)
                                     .unwrap_or(false);
                                 let prune_guard = if future {
-                                    FullWalkPruneGuard::Pending(smallvec::smallvec![
-                                        FullWalkPruneMemory::Direct(target_coordinate, terminal)
-                                    ])
+                                    let memory = match target_coordinate {
+                                        FirstMatchDirectCoordinate::Virtual(coordinate) => {
+                                            FullWalkPruneMemory::Direct(coordinate, terminal)
+                                        }
+                                        FirstMatchDirectCoordinate::Physical(coordinate) => {
+                                            FullWalkPruneMemory::TerminalResidual(coordinate, terminal)
+                                        }
+                                    };
+                                    FullWalkPruneGuard::Pending(smallvec::smallvec![memory])
                                 } else {
                                     FullWalkPruneGuard::Passed
                                 };
                                 full_walk_many_state_push_branch(
                                     &mut first_match_side,
                                     FullWalkBranch {
-                                        lexer_state: initial_lexer_state,
+                                        lexer_state: parser_cache.initial_lexer(state.constraint, transitions, initial_lexer_state, next_parser),
                                         parser_node: next_parser,
                                         prune_guard,
                                     },
@@ -4880,10 +5425,8 @@ fn try_full_walk_mask_with_table<
                         }
                     }
                 } else {
-                let target_coordinate = state
-                    .constraint
-                    .tokenizer
-                    .virtual_residual_direct_coordinate_step(source_coordinate, byte);
+                let target_coordinate =
+                    source_coordinate.step(&state.constraint.tokenizer, byte);
                 let Some(target_coordinate) = target_coordinate else {
                     first_match_direct = None;
                     scalar_lexer = FULL_WALK_LEXER_DEAD;
@@ -4897,6 +5440,15 @@ fn try_full_walk_mask_with_table<
                         );
                         deferred_dead_subtrees.push(child);
                         deferred_negative_work += count;
+                        count
+                    } else if sparse_positive_rebuild {
+                        let (_, count) = full_walk_skip_dead_subtree_generic_deferred(
+                            vocab,
+                            trie,
+                            walk_ops,
+                            &mut remaining_ops,
+                            &mut token_marker_index,
+                        );
                         count
                     } else {
                         full_walk_skip_dead_subtree_generic(
@@ -4913,10 +5465,8 @@ fn try_full_walk_mask_with_table<
                     }
                     continue;
                 };
-                let accepting = state
-                    .constraint
-                    .tokenizer
-                    .virtual_residual_direct_coordinate_accepting(target_coordinate)
+                let accepting = target_coordinate
+                    .accepting(&state.constraint.tokenizer)
                     .unwrap_or(false);
                 if !accepting {
                     first_match_direct = Some(target_coordinate);
@@ -4930,10 +5480,8 @@ fn try_full_walk_mask_with_table<
                     if profile_generic_work {
                         profile_first_match_direct_finalizers += 1;
                     }
-                    let raw_source = state
-                        .constraint
-                        .tokenizer
-                        .virtual_residual_state_for_direct_coordinate(source_coordinate)
+                    let raw_source = source_coordinate
+                        .raw_state(&state.constraint.tokenizer)
                         .ok_or_else(|| {
                             "direct first-match coordinate could not materialize its source state"
                                 .to_owned()
@@ -4976,6 +5524,15 @@ fn try_full_walk_mask_with_table<
                         deferred_dead_subtrees.push(child);
                         deferred_negative_work += count;
                         count
+                    } else if sparse_positive_rebuild {
+                        let (_, count) = full_walk_skip_dead_subtree_generic_deferred(
+                            vocab,
+                            trie,
+                            walk_ops,
+                            &mut remaining_ops,
+                            &mut token_marker_index,
+                        );
+                        count
                     } else {
                         full_walk_skip_dead_subtree_generic(
                             vocab,
@@ -4994,6 +5551,7 @@ fn try_full_walk_mask_with_table<
                     let target = T::cell_target(cell);
                     if !T::cell_has_finalizer(cell) {
                         let condition_active = condition_walk_enabled
+                            && !parser_transparent
                             && match condition_budget {
                                 Some(max) => condition_consecutive_non_pruning < max,
                                 None => true,
@@ -5026,6 +5584,15 @@ fn try_full_walk_mask_with_table<
                                     deferred_dead_subtrees.push(child);
                                     deferred_negative_work += count;
                                     count
+                                } else if sparse_positive_rebuild {
+                                    let (_, count) = full_walk_skip_dead_subtree_generic_deferred(
+                                        vocab,
+                                        trie,
+                                        walk_ops,
+                                        &mut remaining_ops,
+                                        &mut token_marker_index,
+                                    );
+                                    count
                                 } else {
                                     full_walk_skip_dead_subtree_generic(
                                         vocab,
@@ -5046,6 +5613,7 @@ fn try_full_walk_mask_with_table<
                             }
                         }
                     } else {
+                        parser_transparent = false;
                         let direct_applied = HOT_SINGLE_ROOT
                             && full_walk_try_apply_plain_single_finalizer(
                                 target,
@@ -5458,10 +6026,8 @@ fn try_full_walk_mask_with_table<
                     let direct_allowed = if let Some(&cached) = first_match_direct_future_cache.get(&coordinate) {
                         cached
                     } else {
-                        let future = state
-                            .constraint
-                            .tokenizer
-                            .virtual_residual_direct_coordinate_has_future(coordinate)
+                        let future = coordinate
+                            .has_future(&state.constraint.tokenizer)
                             .unwrap_or(false);
                         first_match_direct_future_cache.insert(coordinate, future);
                         future
@@ -5504,7 +6070,7 @@ fn try_full_walk_mask_with_table<
                 } else if scalar_lexer == FULL_WALK_LEXER_DEAD {
                     false
                 } else if scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT {
-                    transitions.token_boundary_allowed(
+                    parser_transparent || transitions.token_boundary_allowed(
                             &mut parser_cache,
                             state.constraint,
                             initial_lexer_state,
@@ -5576,6 +6142,8 @@ fn try_full_walk_mask_with_table<
                     if deferred_output {
                         deferred_positive_work += dynamic_token_marker_original_count(vocab, token_marker);
                         deferred_allowed_markers.push(token_marker);
+                    } else if sparse_positive_rebuild {
+                        mark_dynamic_token_marker(vocab, token_marker, buf);
                     }
                 } else {
                     if profile_generic_work {
@@ -5597,7 +6165,7 @@ fn try_full_walk_mask_with_table<
                     if deferred_output {
                         deferred_negative_work += dynamic_token_marker_original_count(vocab, token_marker);
                         deferred_rejected_markers.push(token_marker);
-                    } else {
+                    } else if !sparse_positive_rebuild {
                         clear_dynamic_token_marker(vocab, token_marker, buf);
                     }
                 }
@@ -5813,6 +6381,19 @@ struct DynamicBranch {
     /// Synthetic projected/subset roots leave this unavailable and decline
     /// regex-partition containment.
     exact_tokenizer_state: Option<u32>,
+    /// True only when a root was restricted to exactly parser-admitted
+    /// terminals (not merely a row-presence superset). Such a root may use the
+    /// existing parser-conditioned scalar hot lane.
+    parser_filtered_root: bool,
+    /// Stronger proof: every matched/future terminal carried by the filtered
+    /// runtime config is parser-admitted. Until the first terminal finalizes,
+    /// parser-boundary checks are therefore redundant.
+    parser_filtered_transparent: bool,
+    /// A matched terminal whose finalize-now parser alternative is represented
+    /// by an exact initial-lexer sibling root in this same committed state.
+    /// When present, this branch is the lexer-continuation alternative and may
+    /// schedule vocabulary root bytes from the retained terminal residual.
+    residual_continuation_terminal: Option<TerminalID>,
     gss: ParserStacks,
     initial_prune_guard: InitialPruneGuard,
 }
@@ -5943,6 +6524,16 @@ struct DynamicNfaScanCache<'a> {
     max_collection_items: Option<usize>,
     config_ids: FxHashMap<Vec<u32>, u32>,
     configs: Vec<Box<[u32]>>,
+    // A restricted config denotes only paths ending at a terminal in its
+    // admitted set. The set is part of the hash-cons key: equal physical
+    // states with different admitted languages MUST NOT alias.
+    parser_projection_enabled: bool,
+    admitted_sets: Vec<BitSet>,
+    admitted_set_ids: FxHashMap<Vec<u64>, u32>,
+    admitted_config_ids: FxHashMap<(u32, Vec<u32>), u32>,
+    config_admitted: Vec<Option<u32>>,
+    fresh_reset_ids: FxHashMap<u32, u32>,
+    config_is_fresh_reset: Vec<bool>,
     transitions: Vec<Option<Box<[u32; 256]>>>,
     residual_configs: Vec<u32>,
     // Canonical union metadata for interned multi-state configs. These make a
@@ -6026,6 +6617,13 @@ impl<'a> DynamicNfaScanCache<'a> {
             max_collection_items: deadline.map(|_| 5_000_000),
             config_ids: FxHashMap::default(),
             configs: Vec::new(),
+            parser_projection_enabled: std::env::var_os("GLRMASK_DISABLE_PARSER_LEXER_PROJECTION").is_none(),
+            admitted_sets: Vec::new(),
+            admitted_set_ids: FxHashMap::default(),
+            admitted_config_ids: FxHashMap::default(),
+            config_admitted: Vec::new(),
+            fresh_reset_ids: FxHashMap::default(),
+            config_is_fresh_reset: Vec::new(),
             transitions: Vec::new(),
             residual_configs: Vec::new(),
             config_matched: Vec::new(),
@@ -6130,6 +6728,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         }
         self.config_ids.insert(states.clone(), id);
         self.configs.push(states.into_boxed_slice());
+        self.config_admitted.push(None);
+        self.config_is_fresh_reset.push(false);
         self.transitions.push(None);
         self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
         self.config_matched.push(matched);
@@ -6158,6 +6758,73 @@ impl<'a> DynamicNfaScanCache<'a> {
 
     fn config_for_mask_root(&mut self, state: u32) -> Result<u32, String> {
         self.config_for_raw_start(state)
+    }
+
+    /// Restrict a lexer root to the parser-admitted terminal language. The
+    /// projection persists through byte transitions, until a terminal finalizes
+    /// and its new parser frontier supplies a new root. The disabled path keeps
+    /// the historical fresh-root-only physical-state filter for A/B validation.
+    fn config_for_parser_admitted(
+        &mut self,
+        state: u32,
+        admitted: &BitSet,
+    ) -> Result<Option<u32>, String> {
+        if self.parser_projection_enabled && !self.deterministic {
+            let filter = if let Some(&id) = self.admitted_set_ids.get(admitted.words()) {
+                id
+            } else {
+                self.check_growth(self.admitted_sets.len(), 1)?;
+                let id = self.admitted_sets.len() as u32;
+                self.admitted_sets.push(admitted.clone());
+                self.admitted_set_ids.insert(admitted.words().to_vec(), id);
+                id
+            };
+            let states = self.tokenizer.singleton_epsilon_closure(state).into_vec();
+            let config = self.intern_admitted_config(states, filter)?;
+            return Ok((config != DYNAMIC_NFA_CONFIG_DEAD).then_some(config));
+        }
+        if self.deterministic || !self.tokenizer.state_has_epsilon_transitions(state) {
+            return Ok(None);
+        }
+        let closure = self.tokenizer.singleton_epsilon_closure(state);
+        let mut filtered = Vec::<u32>::with_capacity(closure.len());
+        for member in closure {
+            let matched = self.tokenizer.matched_terminal_bitset(member);
+            if !matched.is_disjoint(admitted) {
+                filtered.push(member);
+                continue;
+            }
+            if self.tokenizer.possible_future_terminals(member).is_disjoint(admitted) {
+                continue;
+            }
+            // Epsilon-only dispatch states contribute no byte transition after
+            // their closure has been expanded; retaining them would only widen
+            // config metadata back to unrelated terminals.
+            if self.tokenizer.transitions_from(member).next().is_some() {
+                filtered.push(member);
+            }
+        }
+        if filtered.is_empty() {
+            return Ok(None);
+        }
+        self.intern_config(filtered).map(Some)
+    }
+
+    fn config_terminals_subset_of(&self, config: u32, terminals: &BitSet) -> bool {
+        if !self.deterministic && self.raw_state_for_config(config).is_none() {
+            let index = self.config_index(config).expect("known config");
+            return self.config_matched[index].is_subset(terminals)
+                && self.config_futures[index].is_subset(terminals);
+        }
+        for index in 0..self.config_len(config) {
+            let state = self.config_state(config, index);
+            if !self.tokenizer.matched_terminal_bitset(state).is_subset(terminals)
+                || !self.tokenizer.possible_future_terminals(state).is_subset(terminals)
+            {
+                return false;
+            }
+        }
+        true
     }
 
     /// Expand one runtime configuration into its exact epsilon-closed physical
@@ -6189,6 +6856,112 @@ impl<'a> DynamicNfaScanCache<'a> {
         Ok(())
     }
 
+
+    /// Lazy right-trimming of a labeled lexer to one admitted terminal set A.
+    ///
+    /// For a state q, retain precisely the output colors in A. A state with
+    /// neither a current A-finalizer nor a future A-finalizer is dead. Deleting
+    /// it cannot remove a prefix of a word in an admitted terminal language.
+    /// The same A follows every byte transition; parser advancement creates a
+    /// separate reset branch with its own A. Maximal-munch memories remain
+    /// attached to their original language, independently of that reset.
+    ///
+    /// This is part of the lexer transition, not a second per-byte oracle.
+    /// Both projected configs and their transitions are hash-consed/cached.
+    fn intern_admitted_config(
+        &mut self,
+        mut states: Vec<u32>,
+        filter: u32,
+    ) -> Result<u32, String> {
+        self.check_growth(0, states.len())?;
+        let admitted = &self.admitted_sets[filter as usize];
+        states.retain(|&member| {
+            let matched = self.tokenizer.matched_terminal_bitset(member);
+            if !matched.is_disjoint(admitted) {
+                return true;
+            }
+            if self.tokenizer.possible_future_terminals(member).is_disjoint(admitted) {
+                return false;
+            }
+            // The input is epsilon-closed. A pure epsilon dispatcher need not
+            // be carried into the next byte transition as well as its closure.
+            !self.tokenizer.state_has_epsilon_transitions(member)
+                || self.tokenizer.transitions_from(member).next().is_some()
+        });
+        if states.is_empty() {
+            return Ok(DYNAMIC_NFA_CONFIG_DEAD);
+        }
+        states.sort_unstable();
+        states.dedup();
+        let key = (filter, states);
+        if let Some(&cached) = self.admitted_config_ids.get(&key) {
+            return Ok(cached);
+        }
+        let mut matched = BitSet::new(self.tokenizer.num_terminals() as usize);
+        let mut futures = BitSet::new(self.tokenizer.num_terminals() as usize);
+        for &member in &key.1 {
+            matched.union_with(self.tokenizer.matched_terminal_bitset(member));
+            futures.union_with(self.tokenizer.possible_future_terminals(member));
+        }
+        if matched.is_subset(admitted) && futures.is_subset(admitted) {
+            // All reachable outputs are already admitted. Return to the
+            // existing raw/hot lane without retaining a redundant product.
+            let states = key.1.clone();
+            let result = self.intern_config(states)?;
+            self.admitted_config_ids.insert(key, result);
+            return Ok(result);
+        }
+        matched.intersect_with(admitted);
+        futures.intersect_with(admitted);
+        self.check_growth(self.configs.len(), 1)?;
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err("dynamic lexer projected configuration-id namespace exhausted".to_owned());
+        }
+        let result = self.configs.len() as u32;
+        self.configs.push(key.1.clone().into_boxed_slice());
+        self.config_admitted.push(Some(filter));
+        self.config_is_fresh_reset.push(false);
+        self.transitions.push(None);
+        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
+        self.config_matched.push(matched);
+        self.config_futures.push(futures);
+        self.admitted_config_ids.insert(key, result);
+        Ok(result)
+    }
+
+    /// A parser reset accepts the token ending *at this boundary*, even when
+    /// no next terminal is admissible. Keep that epsilon acceptance out of the
+    /// ordinary projected-config interner: a consumed-byte lexer loop returning
+    /// to the same physical state must not acquire boundary acceptance. Every
+    /// byte transition from this wrapper lands in a non-fresh configuration.
+    fn fresh_reset_config(&mut self, config: u32) -> Result<u32, String> {
+        if let Some(&reset) = self.fresh_reset_ids.get(&config) {
+            return Ok(reset);
+        }
+        let (states, matched, futures, admitted) = if let Some(raw) = self.raw_state_for_config(config) {
+            (vec![raw].into_boxed_slice(),
+             self.tokenizer.matched_terminal_bitset(raw).clone(),
+             self.tokenizer.possible_future_terminals(raw).clone(), None)
+        } else {
+            let index = self.config_index(config).ok_or_else(|| "unknown projected reset config".to_owned())?;
+            (self.configs[index].clone(), self.config_matched[index].clone(),
+             self.config_futures[index].clone(), self.config_admitted[index])
+        };
+        self.check_growth(self.configs.len(), 1)?;
+        if self.configs.len() >= DYNAMIC_NFA_RAW_CONFIG_TAG as usize {
+            return Err("dynamic lexer reset configuration-id namespace exhausted".to_owned());
+        }
+        let reset = self.configs.len() as u32;
+        self.configs.push(states);
+        self.config_admitted.push(admitted);
+        self.config_is_fresh_reset.push(true);
+        self.transitions.push(None);
+        self.residual_configs.push(DYNAMIC_NFA_CONFIG_UNKNOWN);
+        self.config_matched.push(matched);
+        self.config_futures.push(futures);
+        self.fresh_reset_ids.insert(config, reset);
+        Ok(reset)
+    }
 
     fn step_config(&mut self, config: u32, byte: u8) -> Result<Option<u32>, String> {
         if self.profile_transition_work {
@@ -6253,6 +7026,14 @@ impl<'a> DynamicNfaScanCache<'a> {
                     }
                 }
                 if target != u32::MAX {
+                    if self.config_admitted[config_index].is_some() {
+                        // Do not first intern the unrestricted closure only
+                        // to discard it while constructing the projection.
+                        let closure = self.tokenizer.singleton_epsilon_closure(target);
+                        self.check_growth(targets.len(), closure.len())?;
+                        targets.extend(closure);
+                        continue;
+                    }
                     let target_config = self.config_for_raw_start(target)?;
                     if let Some(target_state) = self.raw_state_for_config(target_config) {
                         self.check_growth(targets.len(), 1)?;
@@ -6269,6 +7050,8 @@ impl<'a> DynamicNfaScanCache<'a> {
         };
         let target = if closed_targets.is_empty() {
             DYNAMIC_NFA_CONFIG_DEAD
+        } else if let Some(filter) = self.config_admitted[config_index] {
+            self.intern_admitted_config(closed_targets, filter)?
         } else {
             self.intern_config(closed_targets)?
         };
@@ -6292,6 +7075,9 @@ impl<'a> DynamicNfaScanCache<'a> {
                 .then_some(config));
         }
         let config_index = self.config_index(config).ok_or_else(|| "unknown dynamic residual config".to_owned())?;
+        if self.config_admitted[config_index].is_some() {
+            return Ok((!self.config_futures[config_index].is_empty()).then_some(config));
+        }
         let cached = self.residual_configs[config_index];
         if cached != DYNAMIC_NFA_CONFIG_UNKNOWN {
             return Ok((cached != DYNAMIC_NFA_CONFIG_DEAD).then_some(cached));
@@ -6441,6 +7227,13 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminal: TerminalID,
     ) -> Result<bool, String> {
+        if !self.deterministic && self.raw_state_for_config(config).is_none()
+            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
+            && !self.config_futures[self.config_index(config).expect("known config")]
+                .contains(terminal as usize)
+        {
+            return Ok(false);
+        }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
             if let Some(owner_terminal) = self.tokenizer.virtual_residual_terminal_for_state(state) {
@@ -6480,6 +7273,12 @@ impl<'a> DynamicNfaScanCache<'a> {
         config: u32,
         terminals: &BitSet,
     ) -> Result<bool, String> {
+        if !self.deterministic && self.raw_state_for_config(config).is_none()
+            && self.config_admitted[self.config_index(config).expect("known config")].is_some()
+            && terminals.is_disjoint(&self.config_futures[self.config_index(config).expect("known config")])
+        {
+            return Ok(false);
+        }
         for index in 0..self.config_len(config) {
             let state = self.config_state(config, index);
             if let Some(owner_terminal) = self.tokenizer.virtual_residual_terminal_for_state(state) {
@@ -6511,6 +7310,25 @@ impl<'a> DynamicNfaScanCache<'a> {
         if self.deterministic {
             return Ok(rest.iter().all(|&state| state == first).then_some(first));
         }
+        if rest.iter().all(|&config| config == first) {
+            return Ok(Some(first));
+        }
+        if configs.iter().any(|&config| {
+            self.config_index(config).is_some_and(|index| self.config_is_fresh_reset[index])
+        }) {
+            // A union of physical lexer members alone cannot represent the
+            // fresh branch's epsilon acceptance. Preserve the branches instead.
+            return Ok(None);
+        }
+        let filter_for = |config| {
+            self.config_index(config).and_then(|index| self.config_admitted[index])
+        };
+        let filter = filter_for(first);
+        if rest.iter().any(|&config| filter_for(config) != filter) {
+            // Erasing a branch's terminal restriction would invalidate the
+            // projected-state invariant. Keep differing languages separate.
+            return Ok(None);
+        }
         let mut states = Vec::<u32>::new();
         for &config in configs {
             if let Some(state) = self.raw_state_for_config(config) {
@@ -6529,7 +7347,12 @@ impl<'a> DynamicNfaScanCache<'a> {
         if states.is_empty() {
             return Ok(None);
         }
-        self.intern_config(states).map(Some)
+        if let Some(filter) = filter {
+            let result = self.intern_admitted_config(states, filter)?;
+            Ok((result != DYNAMIC_NFA_CONFIG_DEAD).then_some(result))
+        } else {
+            self.intern_config(states).map(Some)
+        }
     }
 
     fn config_next_bytes(&self, config: u32) -> U8Set {
@@ -7730,6 +8553,12 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
     for (&lexer_state, gss) in state.state.iter() {
         for (stacks, terminals_disallowed) in gss.partition_by_accumulator() {
             roots.push(DynamicBranch {
+                // Scoped provider coordinates already own their parser/lexer
+                // coupling. Ordinary flattened-root optimizations must not
+                // infer a separate projection from the coordinator shell.
+                parser_filtered_root: false,
+                parser_filtered_transparent: false,
+                residual_continuation_terminal: None,
                 tokenizer_config: transitions.root_state(lexer_state)?,
                 // Scoped recursive states are not source states of the outer
                 // tokenizer. Keeping this None also disables ordinary-only
@@ -7852,7 +8681,7 @@ fn fill_mask_dynamic_impl(
     additive_static_baseline: bool,
     candidate_mask: Option<&[u32]>,
 ) -> Result<(), String> {
-    let required = state.constraint.mask_len();
+    let required = state.constraint.body_mask_len();
     assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
     let (buf, tail) = buf.split_at_mut(required);
     tail.fill(0);
@@ -8086,6 +8915,22 @@ fn fill_mask_dynamic_impl(
                 let root_admissible = admitted_for(&stacks);
                 let root_admissible_fingerprint = bitset_fingerprint(&root_admissible);
                 let root_admissible_count = root_admissible.count_ones();
+                if root_admissible_count <= 16 {
+                    let names = root_admissible
+                        .iter_ones()
+                        .map(|terminal| {
+                            let terminal = terminal as TerminalID;
+                            (
+                                terminal,
+                                state.constraint.terminal_display_name(terminal).unwrap_or("<unnamed>"),
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    eprintln!(
+                        "[glrmask/profile][dynamic_seed_admitted] generation={} tokenizer_state={} terminals={:?}",
+                        state.generation, tokenizer_state, names
+                    );
+                }
                 let diagnostic_terminals = std::env::var(
                     "GLRMASK_PROFILE_DYNAMIC_RELEVANT_TERMINALS",
                 )
@@ -8185,6 +9030,26 @@ fn fill_mask_dynamic_impl(
                         stack,
                     );
                 }
+                let matched_named = state
+                    .constraint
+                    .tokenizer
+                    .matched_terminals_iter(tokenizer_state)
+                    .map(|terminal| (terminal, state.constraint.terminal_display_name(terminal).unwrap_or("<unnamed>")))
+                    .collect::<Vec<_>>();
+                let future_named = state
+                    .constraint
+                    .tokenizer
+                    .possible_future_terminals_iter(tokenizer_state)
+                    .take(16)
+                    .map(|terminal| (terminal, state.constraint.terminal_display_name(terminal).unwrap_or("<unnamed>")))
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "[glrmask/profile][dynamic_seed_lexical_sets] generation={} tokenizer_state={} matched={:?} futures_first16={:?}",
+                    state.generation, tokenizer_state, matched_named, future_named
+                );
+                if let Some(expr) = state.constraint.tokenizer.terminal_expr(79) {
+                    eprintln!("[glrmask/profile][terminal79_expr] {:?}", expr);
+                }
                 eprintln!(
                     "[glrmask/profile][dynamic_seed] generation={} tokenizer_state={} initial={} stack_paths={} exclusions={} transitions={} matched={} futures={}",
                     state.generation,
@@ -8211,15 +9076,143 @@ fn fill_mask_dynamic_impl(
                         .count(),
                 );
             }
-            let tokenizer_config =
-                lexer_scan_cache.config_for_mask_root(projected_tokenizer_state)?;
+            // Project fresh starts and resets, but preserve an existing
+            // continuation root's exact raw coordinate. That coordinate enables
+            // the retained-terminal residual scheduler and established hot paths;
+            // wrapping it in a new product would trade those wins away.
+            let (tokenizer_config, parser_filtered_root, parser_filtered_transparent) = if tokenizer_state == exact_initial_tsid
+                && projected_tokenizer_state == initial_tsid
+                // The initial maximal-munch guard is an independent token-set
+                // subtraction below. Narrow the positive lexer language first
+                // and leave the guard unchanged: (L intersect A) minus blocked.
+                // In particular, the finalized sibling of an extendable number
+                // carries a Pending guard; excluding it forfeits the main win.
+                && (initial_prune_guard.is_passed()
+                    || (lexer_scan_cache.parser_projection_enabled && !lexer_scan_cache.deterministic))
+                && vocab.mask_runtime_tokenizer().is_none()
+            {
+                let row_candidates = lexer_scan_cache.parser_projection_enabled
+                    .then(|| parser_row_projection_candidates(state.constraint, &stacks))
+                    .flatten();
+                let (mut admitted, exact_admission) = row_candidates.unwrap_or_else(|| {
+                    let parser_gss = with_empty_accumulators(&stacks);
+                    let admitted = state.constraint.direct_regular_admissible_terminals(&parser_gss)
+                        .unwrap_or_else(|| {
+                            let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
+                            super::commit::exact_admitted_terminals_for_candidates(
+                                state.constraint, &parser_gss, &candidates,
+                            )
+                        });
+                    (admitted, true)
+                });
+                if let Some(ignore) = state.constraint.ignore_terminal {
+                    admitted.set(ignore as usize);
+                }
+                if admitted.count_ones() <= 16 {
+                    if let Some(filtered) = lexer_scan_cache
+                        .config_for_parser_admitted(projected_tokenizer_state, &admitted)?
+                    {
+                        let transparent = exact_admission
+                            && lexer_scan_cache.config_terminals_subset_of(filtered, &admitted);
+                        (filtered, exact_admission, transparent)
+                    } else {
+                        (
+                            lexer_scan_cache.config_for_mask_root(projected_tokenizer_state)?,
+                            false,
+                            false,
+                        )
+                    }
+                } else {
+                    (
+                        lexer_scan_cache.config_for_mask_root(projected_tokenizer_state)?,
+                        false,
+                        false,
+                    )
+                }
+            } else {
+                (
+                    lexer_scan_cache.config_for_mask_root(projected_tokenizer_state)?,
+                    false,
+                    false,
+                )
+            };
             root_branches.push(DynamicBranch {
                 tokenizer_config,
                 exact_tokenizer_state: Some(tokenizer_state),
+                parser_filtered_root,
+                parser_filtered_transparent,
+                residual_continuation_terminal: None,
                 gss: stacks,
                 initial_prune_guard,
             });
     }
+    // A committed model token can leave both (a) a lexer continuation state
+    // for a terminal that matched at the token boundary and (b) the parser-
+    // advanced initial lexer state for finalizing that same terminal now.
+    // Certify that relationship structurally before allowing residual-byte
+    // scheduling on the continuation branch. This avoids assuming that an
+    // arbitrary initial-state sibling covers the same parser alternative.
+    if root_branches.len() <= 16 {
+        let initial = exact_initial_tsid;
+        let snapshot = root_branches
+            .iter()
+            .map(|branch| {
+                (
+                    branch.exact_tokenizer_state,
+                    branch.gss.clone(),
+                )
+            })
+            .collect::<SmallVec<[(Option<u32>, ParserStacks); 16]>>();
+        for branch in &mut root_branches {
+            let Some(source) = branch.exact_tokenizer_state else {
+                continue;
+            };
+            if source == initial || !branch.initial_prune_guard.is_passed() {
+                continue;
+            }
+            let mut certified = None::<TerminalID>;
+            let mut ambiguous = false;
+            for terminal in state.constraint.tokenizer.matched_terminals_iter(source) {
+                if Some(terminal) == state.constraint.ignore_terminal {
+                    continue;
+                }
+                let Some(coordinate) = state
+                    .constraint
+                    .tokenizer
+                    .terminal_residual_direct_coordinate(source, terminal)
+                else {
+                    continue;
+                };
+                if !state
+                    .constraint
+                    .tokenizer
+                    .terminal_residual_direct_coordinate_has_future(coordinate)
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                let Some(advanced) = parser_child(state.constraint, &branch.gss, terminal) else {
+                    continue;
+                };
+                let sibling_exists = snapshot
+                    .iter()
+                    .any(|(candidate_state, candidate_gss)| {
+                        *candidate_state == Some(initial) && *candidate_gss == advanced
+                    });
+                if !sibling_exists {
+                    continue;
+                }
+                if certified.replace(terminal).is_some() {
+                    ambiguous = true;
+                    break;
+                }
+            }
+            if !ambiguous {
+                branch.residual_continuation_terminal = certified;
+            }
+        }
+    }
+
     let root_profile_ms = root_profile_start
         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
@@ -8320,7 +9313,7 @@ mod tests {
     }
 
     fn direct_mask(state: &ConstraintState<'_>) -> Vec<u32> {
-        let mut mask = vec![0u32; state.constraint.mask_len()];
+        let mut mask = vec![0u32; state.constraint.body_mask_len()];
         state.fill_mask_dynamic(&mut mask);
         mask
     }
@@ -8950,7 +9943,7 @@ mod tests {
         let (hash, query) = dynamic_mask_lookup_query(&state).unwrap();
         let owned_key = query.to_owned_state_key();
         let dyn_vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-        let mut mask_buf = vec![0u32; state.constraint.mask_len()];
+        let mut mask_buf = vec![0u32; state.constraint.body_mask_len()];
         dyn_vocab.cache_mask(owned_key, hash, &mask_buf, false);
 
         let start = std::time::Instant::now();
@@ -9177,7 +10170,7 @@ nt start ::= A B | B A;
         )
         .unwrap();
         let state = dynamic.inner.start();
-        let mut exact = vec![0u32; dynamic.inner.mask_len()];
+        let mut exact = vec![0u32; dynamic.inner.body_mask_len()];
         fill_mask_dynamic(&state, &mut exact);
 
         let mut additive = vec![0u32; exact.len()];

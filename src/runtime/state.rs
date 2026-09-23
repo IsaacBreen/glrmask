@@ -326,7 +326,7 @@ impl MaskScratch {
         Self {
             merged_dense: Vec::with_capacity(dense_words),
             chain_merged_dense: Vec::with_capacity(dense_words),
-            output_buf: Vec::with_capacity(constraint.mask_len()),
+            output_buf: Vec::with_capacity(constraint.body_mask_len()),
             // Allocate and touch these before any timed runtime operation. The
             // direct kernel clears/reuses them without changing capacity.
             single_path_aux_dense: vec![0; dense_words],
@@ -502,6 +502,7 @@ impl CommitBuffers {
 /// Obtain a mask, sample a permitted token, and commit it to advance the state.
 /// Create separate states for concurrently generated sequences.
 pub struct ConstraintState<'a> {
+    pub(crate) terminated: bool,
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: ParserStateMap,
     pub(crate) buffers: CommitBuffers,
@@ -518,6 +519,7 @@ pub struct ConstraintState<'a> {
 impl<'a> Clone for ConstraintState<'a> {
     fn clone(&self) -> Self {
         ConstraintState {
+            terminated: self.terminated,
             constraint: self.constraint,
             state: self.state.clone(),
             buffers: CommitBuffers::for_constraint(self.constraint),
@@ -531,6 +533,7 @@ impl<'a> Clone for ConstraintState<'a> {
 impl<'a> std::fmt::Debug for ConstraintState<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConstraintState")
+            .field("terminated", &self.terminated)
             .field("state_len", &self.state.len())
             .field("mask_cached", &self.mask_cache.lock().unwrap().is_some())
             .finish()
@@ -560,6 +563,9 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
+    /// Whether an allowed end token has completed this sequence.
+    pub fn is_terminated(&self) -> bool { self.terminated }
+
     /// Return whether the committed prefix has been irrecoverably rejected.
     pub fn is_rejected(&self) -> bool {
         self.state.is_empty()
@@ -569,6 +575,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// An accepting prefix may still admit additional tokens.
     pub fn is_accepting(&self) -> bool {
+        if self.terminated { return true; }
         if self.constraint.uses_compact_segmented_parser_runtime() {
             let Some(root_reset) = self.constraint.recursive_tokenizer_reset_state(0) else {
                 return false;
@@ -668,8 +675,9 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
+        if !self.constraint.end_tokens.is_empty() { return self.mask(); }
         if dynamic {
-            let mut mask = vec![0u32; self.constraint.mask_len()];
+            let mut mask = vec![0u32; self.constraint.body_mask_len()];
             self.fill_mask_dynamic(&mut mask);
             mask
         } else {

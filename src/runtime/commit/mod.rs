@@ -8654,10 +8654,31 @@ impl<'a> ConstraintState<'a> {
         self.commit_token_raw(token_id).map_err(crate::Error::State)
     }
 
+    /// Return Some when root termination policy handles this commitment.
+    fn commit_end_token(&mut self, token_id: u32) -> Option<Result<(), String>> {
+        if self.terminated {
+            return Some(Err("sequence has already terminated".to_owned()));
+        }
+        if self.constraint.end_tokens.binary_search(&token_id).is_err() {
+            return None;
+        }
+        if self.is_accepting() {
+            self.terminated = true;
+        } else {
+            // Like a known but grammatically invalid token, early EOS rejects
+            // the sequence instead of being consumed through its byte spelling.
+            self.state = Default::default();
+        }
+        self.generation = self.generation.wrapping_add(1);
+        *self.mask_cache.lock().unwrap() = None;
+        Some(Ok(()))
+    }
+
     pub(crate) fn commit_token_raw(
         &mut self,
         token_id: u32,
     ) -> Result<(), String> {
+        if let Some(result) = self.commit_end_token(token_id) { return result; }
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
         if !self.knows_token_id(token_id) {
@@ -8685,6 +8706,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn commit_token_dynamic(&mut self, token_id: u32) -> Result<(), String> {
+        if let Some(result) = self.commit_end_token(token_id) { return result; }
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
         if !self.knows_token_id(token_id) {
@@ -8716,6 +8738,12 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn commit_token_timed_ns(&mut self, token_id: u32) -> Result<u64, String> {
+        if self.terminated || !self.constraint.end_tokens.is_empty() {
+            let policy_started = std::time::Instant::now();
+            if let Some(result) = self.commit_end_token(token_id) {
+                return result.map(|()| policy_started.elapsed().as_nanos() as u64);
+            }
+        }
         use std::time::Instant;
 
         let constraint = self.constraint;
@@ -8745,6 +8773,9 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn commit_token_profiled(&mut self, token_id: u32) -> Result<CommitProfile, String> {
+        if let Some(result) = self.commit_end_token(token_id) {
+            return result.map(|()| CommitProfile::default());
+        }
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
@@ -8810,6 +8841,9 @@ impl<'a> ConstraintState<'a> {
         &mut self,
         token_id: u32,
     ) -> Result<(Vec<PerAdvanceEntry>, Vec<(u32, Vec<Vec<u32>>)>, CommitProfile), String> {
+        if let Some(result) = self.commit_end_token(token_id) {
+            return result.map(|()| (Vec::new(), final_stacks(&self.state), CommitProfile::default()));
+        }
         let constraint = self.constraint;
         let bytes = token_bytes_for_id(constraint, token_id);
         let has_special = constraint.has_special_token_id(token_id);
@@ -8884,6 +8918,9 @@ impl<'a> ConstraintState<'a> {
     }
 
     pub(crate) fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if self.terminated {
+            return Err("sequence has already terminated".to_owned());
+        }
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
         let result = clear_state_on_commit_error(&mut self.state, result);

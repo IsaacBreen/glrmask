@@ -26,6 +26,9 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Arc;
 
+const PREVIOUS_ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT1";
+const ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT2";
+
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
@@ -1663,7 +1666,7 @@ fn encode_token_mask_cache(constraint: &Constraint) -> Vec<u8> {
     if !constraint.token_mask_caches_ready() {
         return Vec::new();
     }
-    let mask_words = constraint.mask_len();
+    let mask_words = constraint.body_mask_len();
     let prefix_rows = constraint.word_group_prefix_buf_masks.len();
     let word_groups = constraint.word_group_sparse_masks.len();
     let word_entries = constraint
@@ -3282,7 +3285,10 @@ fn segmented_runtime_artifact_v24_ref(
         .segmented_parser_components
         .iter()
         .map(|component| SegmentedParserComponentV24Ref {
-            constraint_artifact: component.constraint.save(),
+            // Segmented components are embeddable bodies, not generation
+            // roots. They may intentionally retain linker slots, so never
+            // wrap them in the closed-root policy/vocabulary envelope.
+            constraint_artifact: component.constraint.save_body(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
@@ -3419,7 +3425,10 @@ fn segmented_runtime_artifact_ref(
         .segmented_parser_components
         .iter()
         .map(|component| RecursiveSegmentedParserComponentV27Ref {
-            constraint_artifact: component.constraint.save(),
+            // Recursive segmented components are likewise internal bodies.
+            // The outer root/module artifact carries exact-vocabulary identity
+            // and rebinds it recursively after load.
+            constraint_artifact: component.constraint.save_body(),
             tokenizer_state_offset: component.tokenizer_state_offset,
             terminal_offset: component.terminal_offset,
             global_terminal_aliases: &component.global_terminal_aliases,
@@ -3680,7 +3689,7 @@ fn restore_segmented_runtime_v22(
                 component.root_entry_terminals.len(),
             )));
         }
-        let child = Constraint::load(component.constraint_artifact)?;
+        let child = Constraint::load_body_artifact(component.constraint_artifact)?;
         if component
             .terminal_offset
             .checked_add(child.table.num_terminals)
@@ -4282,7 +4291,7 @@ fn restore_recursive_segmented_runtime_v27(
         .components
         .into_par_iter()
         .map(|component| {
-            let child = Constraint::load(&component.constraint_artifact)?;
+            let child = Constraint::load_body_artifact(&component.constraint_artifact)?;
             Ok::<_, crate::GlrMaskError>((component, child))
         })
         .collect::<crate::Result<Vec<_>>>()?;
@@ -5519,6 +5528,29 @@ fn constraint_serialized_weight_pool(constraint: &Constraint) -> Vec<Weight> {
     constraint_serialized_weight_pool_with_ids(constraint).0
 }
 
+/// IDs in the same field/map order used by ConstraintSerde. Structural Weight
+/// values are placeholders when a packed non-DWA pool is present; interning
+/// those empty values would collapse distinct references to the same pool ID.
+fn packed_constraint_serialized_weight_ids(constraint: &Constraint) -> Option<Vec<u32>> {
+    let packed = constraint.packed_non_dwa_weights.as_ref()?;
+    let mut ids = Vec::new();
+    for key in constraint.parser_top_accept.keys() {
+        ids.push(packed.parser_top_accept[key]);
+    }
+    for (key, parts) in &constraint.parser_top_accept_parts {
+        let packed_parts = &packed.parser_top_accept_parts[key];
+        assert_eq!(parts.len(), packed_parts.len(), "packed acceptance-part count mismatch");
+        ids.extend_from_slice(packed_parts);
+    }
+    for key in constraint.direct_regular_l1_complete_by_terminal.keys() {
+        ids.push(packed.direct_regular_l1_complete_by_terminal[key]);
+    }
+    for key in constraint.possible_matches.keys() {
+        ids.push(packed.possible_matches[key]);
+    }
+    Some(ids)
+}
+
 fn constraint_serialized_weight_ranges_at_least(
     constraint: &Constraint,
     min_weight_ranges: usize,
@@ -5733,7 +5765,7 @@ impl Constraint {
         if self.serialized_artifact_cache.is_some() {
             return;
         }
-        let bytes = self.save();
+        let bytes = self.save_body();
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
@@ -5797,6 +5829,28 @@ impl Constraint {
     /// Current artifacts use a compact sectioned representation and retain
     /// runtime-native sections where doing so materially reduces load latency.
     pub fn save(&self) -> Vec<u8> {
+        let exact_only_token_ids = self
+            .late_bind_vocab
+            .get()
+            .map(|vocab| vocab.exact_only_token_ids().collect::<Vec<_>>())
+            .unwrap_or_default();
+        if self.end_tokens.is_empty() && exact_only_token_ids.is_empty() {
+            return self.save_body();
+        }
+        let body = self.save_body();
+        let mut bytes = Vec::with_capacity(
+            16 + (self.end_tokens.len() + exact_only_token_ids.len()) * 4 + body.len(),
+        );
+        bytes.extend_from_slice(ROOT_POLICY_MAGIC);
+        bytes.extend_from_slice(&(self.end_tokens.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(exact_only_token_ids.len() as u32).to_le_bytes());
+        for &id in self.end_tokens.iter() { bytes.extend_from_slice(&id.to_le_bytes()); }
+        for id in exact_only_token_ids { bytes.extend_from_slice(&id.to_le_bytes()); }
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    pub(crate) fn save_body(&self) -> Vec<u8> {
         if let Some(bytes) = &self.serialized_artifact_cache {
             return clone_serialized_artifact(bytes.as_slice());
         }
@@ -6003,7 +6057,11 @@ impl Constraint {
             || rayon::join(
             || {
                 let branch_started = profile.then(std::time::Instant::now);
-                let weights = constraint_serialized_weight_pool(self);
+                let weights = if self.packed_non_dwa_weights.is_some() {
+                    Vec::new()
+                } else {
+                    constraint_serialized_weight_pool(self)
+                };
                 let (weight_pool, encoded) = rayon::join(
                     || {
                         let weights_started = profile.then(std::time::Instant::now);
@@ -6026,7 +6084,11 @@ impl Constraint {
                         // Rayon worker.  Packing WPL3 only reads the same
                         // immutable Weight slice and is independent once ids
                         // have been defined by stable slice order.
-                        crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
+                        if let Some(ids) = packed_constraint_serialized_weight_ids(self) {
+                            crate::ds::weight::begin_pooled_weight_serde_encode_ids(ids);
+                        } else {
+                            crate::ds::weight::begin_pooled_weight_serde_encode(&weights);
+                        }
                         let previous_external =
                             crate::automata::weighted::dwa::set_external_serde(true);
                         let previous_external_table =
@@ -6655,13 +6717,111 @@ impl Constraint {
     /// accepted; current-format artifacts copy borrowed input once because
     /// runtime structures retain zero-copy views into persistent backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
-        match bytes.into() {
+        let bytes = bytes.into();
+        if bytes.starts_with(PREVIOUS_ROOT_POLICY_MAGIC) {
+            return Self::load_previous_root_policy(bytes);
+        }
+        if !bytes.starts_with(ROOT_POLICY_MAGIC) {
+            let body = Self::load_body(bytes)?;
+            if !body.late_grammar_slots.is_empty() {
+                return Err(crate::Error::Serialization(
+                    "constraint artifact has unresolved slots; load it as a Module instead"
+                        .to_owned(),
+                ));
+            }
+            return Ok(body);
+        }
+        if bytes.len() < 16 {
+            return Err(crate::Error::Serialization("truncated root policy header".to_owned()));
+        }
+        let end_count =
+            u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        let exact_count =
+            u32::from_le_bytes(bytes[12..16].try_into().expect("header checked")) as usize;
+        let metadata_count = end_count.checked_add(exact_count)
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy counts".to_owned()))?;
+        let start = metadata_count.checked_mul(4).and_then(|len| 16usize.checked_add(len))
+            .filter(|&start| start < bytes.len())
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
+        let end_ids = bytes[16..16 + end_count * 4].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+            .collect::<Vec<_>>();
+        let exact_ids = bytes[16 + end_count * 4..start].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked")))
+            .collect::<Vec<_>>();
+        if end_ids.windows(2).any(|pair| pair[0] >= pair[1])
+            || exact_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(crate::Error::Serialization("noncanonical root vocabulary policy".to_owned()));
+        }
+        let mut body = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body(Cow::Owned(bytes.split_off(start)))?,
+            Cow::Borrowed(bytes) => Self::load_body(Cow::Borrowed(&bytes[start..]))?,
+        };
+        if !body.late_grammar_slots.is_empty() {
+            return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
+        }
+        if exact_ids.iter().any(|&id| body.token_bytes_for_id(id).is_some()) {
+            return Err(crate::Error::Serialization(
+                "root exact-only token domain overlaps byte vocabulary".to_owned(),
+            ));
+        }
+        if !exact_ids.is_empty() {
+            let vocab = crate::Vocab::new_with_exact_token_ids(
+                body.token_bytes_iter()
+                    .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
+                    .collect(),
+                exact_ids,
+            );
+            body.bind_vocab_exact(&vocab)
+                .map_err(crate::Error::Serialization)?;
+        }
+        body.with_end_tokens(&end_ids)
+            .map_err(|error| crate::Error::Serialization(error.to_string()))
+    }
+
+    fn load_previous_root_policy(bytes: Cow<'_, [u8]>) -> crate::Result<Self> {
+        if bytes.len() < 12 {
+            return Err(crate::Error::Serialization("truncated root policy header".to_owned()));
+        }
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        let start = count.checked_mul(4).and_then(|len| 12usize.checked_add(len))
+            .filter(|&start| start < bytes.len())
+            .ok_or_else(|| crate::Error::Serialization("invalid root policy length".to_owned()))?;
+        let ids: Vec<u32> = bytes[12..start].chunks_exact(4)
+            .map(|chunk| u32::from_le_bytes(chunk.try_into().expect("chunk width checked"))).collect();
+        if count == 0 || ids.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(crate::Error::Serialization("noncanonical end-token policy".to_owned()));
+        }
+        let body = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body(Cow::Owned(bytes.split_off(start)))?,
+            Cow::Borrowed(bytes) => Self::load_body(Cow::Borrowed(&bytes[start..]))?,
+        };
+        if !body.late_grammar_slots.is_empty() {
+            return Err(crate::Error::Serialization("root artifact has unresolved slots".to_owned()));
+        }
+        body.with_end_tokens(&ids).map_err(|error| crate::Error::Serialization(error.to_string()))
+    }
+
+    fn load_body(bytes: Cow<'_, [u8]>) -> crate::Result<Self> {
+        match bytes {
             Cow::Owned(bytes) => {
                 let backing = std::sync::Arc::new(bytes);
                 Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)))
             }
             Cow::Borrowed(bytes) => Self::load_impl(bytes, None),
         }
+    }
+
+    /// Load an embeddable compiled body without enforcing the public
+    /// closed-root invariant.
+    ///
+    /// Only Module and segmented-runtime persistence use this. Public callers
+    /// must use `Constraint::load`, which rejects unresolved slots.
+    pub(crate) fn load_body_artifact<'a>(
+        bytes: impl Into<Cow<'a, [u8]>>,
+    ) -> crate::Result<Self> {
+        Self::load_body(bytes.into())
     }
 
     /// Load a compiled constraint and bind it to an already-existing exact
@@ -8180,6 +8340,43 @@ mod tests {
     use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
     use crate::runtime::CommitTemplateDfas;
     use std::sync::Arc;
+
+    #[test]
+    fn packed_reencode_preserves_non_dwa_ids_after_cache_invalidation() {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
+            (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
+            (7, b"a".to_vec()), (8, Vec::new()),
+        ]);
+        let original = Constraint::from_ebnf(
+            r#"start ::= @token(9) "b" | "a" "y""#,
+            &vocab,
+        ).unwrap();
+        let mut loaded = Constraint::load(original.save()).unwrap();
+        let packed = loaded.packed_non_dwa_weights.as_ref().unwrap();
+        let distinct_ids = packed.parser_top_accept.values()
+            .copied().collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct_ids.len() >= 2, "regression needs distinct packed references");
+
+        // Linking can invalidate a cached artifact while retaining its packed
+        // runtime pools. Re-serialization must preserve the sidecar IDs, not
+        // intern the empty structural Weight placeholders by pointer.
+        loaded.serialized_artifact_cache = None;
+        let again = Constraint::load(loaded.save()).unwrap();
+        assert_eq!(loaded.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept,
+                   again.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept);
+        for path in [&[][..], &[1], &[1, 3], &[9], &[9, 2]] {
+            let mut expected = original.start();
+            let mut actual = again.start();
+            for &id in path {
+                assert_eq!(expected.mask(), actual.mask());
+                expected.commit_token(id).unwrap();
+                actual.commit_token(id).unwrap();
+            }
+            assert_eq!(expected.mask(), actual.mask(), "after {path:?}");
+            assert_eq!(expected.is_accepting(), actual.is_accepting());
+        }
+    }
 
     fn tiny_constraint() -> Constraint {
         Constraint::from_glrm_grammar(

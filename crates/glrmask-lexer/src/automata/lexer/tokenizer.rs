@@ -881,6 +881,17 @@ pub struct TerminalExclusionContinuation {
     pub right_max_remaining: Option<u32>,
 }
 
+/// Exact standalone-terminal residual coordinate paired with the raw combined
+/// tokenizer state that produced it. Runtime direct walkers use this only when
+/// the compiler-retained product-trace sidecar proves the mapping.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerminalResidualDirectCoordinate {
+    raw_state: u32,
+    terminal: TerminalID,
+    residual_state: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct TerminalResidualCoordinates {
     offsets: Arc<[u32]>,
@@ -9217,6 +9228,105 @@ impl Tokenizer {
         self.terminal_residual_coordinates.as_deref()
     }
 
+    /// Exact retained standalone-terminal residual for one physical combined
+    /// tokenizer state. Returns `None` when the compiler did not retain an
+    /// unambiguous coordinate or when the terminal is dead at this state.
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate(
+        &self,
+        state: u32,
+        terminal: TerminalID,
+    ) -> Option<TerminalResidualDirectCoordinate> {
+        if state >= self.num_states() || self.state_has_epsilon_transitions(state) {
+            return None;
+        }
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let row = coordinates.row(state)?;
+        let index = row
+            .binary_search_by_key(&terminal, |&(candidate, _)| candidate)
+            .ok()?;
+        let residual_state = row[index].1;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(terminal)?;
+        let live = dfa.finalizers(residual_state).contains(group as usize)
+            || dfa
+                .possible_future_group_ids(residual_state)
+                .contains(group as usize);
+        live.then_some(TerminalResidualDirectCoordinate {
+            raw_state: state,
+            terminal,
+            residual_state,
+        })
+    }
+
+    /// Advance a retained physical terminal-residual coordinate by one byte.
+    /// The direct path is accepted only when the raw combined tokenizer target
+    /// and the compile-time residual sidecar continue to agree exactly.
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_step(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+        byte: u8,
+    ) -> Option<TerminalResidualDirectCoordinate> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        let residual_target = dfa.step(coordinate.residual_state, byte)?;
+        let live = dfa.finalizers(residual_target).contains(group as usize)
+            || dfa
+                .possible_future_group_ids(residual_target)
+                .contains(group as usize);
+        if !live {
+            return None;
+        }
+        let raw_target = self.step(coordinate.raw_state, byte)?;
+        if self.state_has_epsilon_transitions(raw_target) {
+            return None;
+        }
+        let row = coordinates.row(raw_target)?;
+        let index = row
+            .binary_search_by_key(&coordinate.terminal, |&(candidate, _)| candidate)
+            .ok()?;
+        if row[index].1 != residual_target {
+            return None;
+        }
+        Some(TerminalResidualDirectCoordinate {
+            raw_state: raw_target,
+            terminal: coordinate.terminal,
+            residual_state: residual_target,
+        })
+    }
+
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_accepting(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> Option<bool> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        Some(dfa.finalizers(coordinate.residual_state).contains(group as usize))
+    }
+
+    #[doc(hidden)]
+    pub fn terminal_residual_direct_coordinate_has_future(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> Option<bool> {
+        let coordinates = self.terminal_residual_coordinates.as_deref()?;
+        let (dfa, group) = coordinates.terminal_dfa_and_group(coordinate.terminal)?;
+        Some(
+            dfa.possible_future_group_ids(coordinate.residual_state)
+                .contains(group as usize),
+        )
+    }
+
+    #[doc(hidden)]
+    #[inline]
+    pub fn terminal_residual_direct_coordinate_raw_state(
+        &self,
+        coordinate: TerminalResidualDirectCoordinate,
+    ) -> u32 {
+        coordinate.raw_state
+    }
+
     /// Exact compile-time exclusion certificate for a raw tokenizer state and
     /// terminal. `Some` is returned only when the partitioned compiler retained
     /// an unambiguous top-level `Exclude(left, right)` product coordinate and
@@ -10971,6 +11081,25 @@ impl Tokenizer {
             )
     }
 
+    /// Exact whole-atom length ceiling for one virtual residual, if its
+    /// finite code envelope and closing suffix establish that certificate.
+    #[doc(hidden)]
+    pub fn virtual_residual_safe_atom_length_upper_bound(
+        &self,
+        state: u32,
+        slice_start: u32,
+        slice_class_count: usize,
+        slice_byte_to_class: &[u8; 256],
+        slice_transitions: &[u32],
+        slice_accepting: &[bool],
+        slice_can_reach_accepting: &[bool],
+    ) -> Option<u32> {
+        self.virtual_residual_runtime_for_state(state)?.safe_atom_length_upper_bound(
+            state, slice_start, slice_class_count, slice_byte_to_class,
+            slice_transitions, slice_accepting, slice_can_reach_accepting,
+        )
+    }
+
     #[doc(hidden)]
     pub fn virtual_residual_parser_transparent_byte_dfa_repeat_radius(
         &self,
@@ -12007,6 +12136,65 @@ impl Tokenizer {
     /// construction for an ordinary deterministic component.
     fn scalar_physical_component_root(&self, root: u32) -> bool {
         self.scalar_physical_component_states(root).is_some()
+    }
+
+    /// Discover a complete small physical component, or decline before large
+    /// traversal/quotient scratch allocation. Each distinct state is queued at
+    /// most once; byte edges are charged before visiting their targets.
+    fn scalar_physical_component_states_bounded(
+        &self,
+        root: u32,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<Vec<u32>> {
+        if state_limit == 0 { return None; }
+        let mut seen = FxHashSet::<u32>::default();
+        let mut pending = vec![root];
+        seen.insert(root);
+        let mut transition_work = 0usize;
+        while let Some(state) = pending.pop() {
+            if state >= self.num_states()
+                || self.state_is_virtual_runtime(state)
+                || self.state_has_epsilon_transitions(state)
+            { return None; }
+            for (_, target) in self.transitions_from(state) {
+                if transition_work >= transition_limit { return None; }
+                transition_work += 1;
+                if !seen.contains(&target) {
+                    if seen.len() >= state_limit { return None; }
+                    seen.insert(target);
+                    pending.push(target);
+                }
+            }
+        }
+        let mut states = seen.into_iter().collect::<Vec<_>>();
+        states.sort_unstable();
+        Some(states)
+    }
+
+    /// An optional acceleration only: None means use the normal exact walker.
+    /// Importantly there is NO expression-compiler or retained-coordinate
+    /// fallback here: those would defeat the cold-construction ceiling.
+    /// Accepted components use the unchanged exact quotient constructor.
+    #[doc(hidden)]
+    pub fn build_terminal_projected_quotient_for_containment_bounded(
+        &self,
+        terminal: TerminalID,
+        state_limit: usize,
+        transition_limit: usize,
+    ) -> Option<TerminalProjectedQuotient> {
+        // The existing constructor creates a source-coordinate map. Bound
+        // this independent allocation too, even for a tiny selected component.
+        const MAX_SOURCE_MAP_STATES: u32 = 1 << 20;
+        if terminal >= self.num_terminals
+            || state_limit == 0
+            || self.num_states() > MAX_SOURCE_MAP_STATES
+        { return None; }
+        let root = self.terminal_dispatch_root_candidate(terminal)?;
+        let states = self.scalar_physical_component_states_bounded(
+            root, state_limit, transition_limit,
+        )?;
+        self.terminal_live_subautomaton_quotient_from_component(terminal, &states)
     }
 
     fn scalar_physical_component_states(&self, root: u32) -> Option<Vec<u32>> {
@@ -14420,6 +14608,46 @@ mod tests {
             num_terminals,
             Some(Arc::from(exprs.into_boxed_slice())),
         )
+    }
+
+
+    #[test]
+    fn coldcap_component_limits_are_exact_and_cycles_are_deduplicated() {
+        let t = Tokenizer::from_parts(one_byte_component(b'a'), 1, None);
+        let full = t.scalar_physical_component_states(0).unwrap();
+        assert_eq!(full, vec![0, 1]);
+        assert!(t.scalar_physical_component_states_bounded(0, 0, 10).is_none());
+        assert!(t.scalar_physical_component_states_bounded(0, 1, 10).is_none());
+        assert!(t.scalar_physical_component_states_bounded(0, 2, 0).is_none());
+        assert_eq!(t.scalar_physical_component_states_bounded(0, 2, 1), Some(full));
+        let looped = tokenizer_from_exprs(vec![plus(bytes(&[b'a', b'b', b'c']))]);
+        let root = looped.start_state();
+        let states = looped.scalar_physical_component_states(root).unwrap();
+        let edges = states.iter().map(|&s| looped.transitions_from(s).count()).sum();
+        assert_eq!(looped.scalar_physical_component_states_bounded(root, states.len(), edges), Some(states));
+    }
+
+    #[test]
+    fn coldcap_accepted_quotient_is_identical_to_unbounded_constructor() {
+        let t = Tokenizer::from_parts(one_byte_component(b'a'), 1, None);
+        let old = t.build_terminal_projected_quotients_for_containment_candidates(&[0]);
+        let new = t.build_terminal_projected_quotient_for_containment_bounded(0, 2, 1).unwrap();
+        assert_eq!(old.len(), 1);
+        assert_eq!(new.full_states, old[0].1.full_states);
+        assert_eq!(new.projected_states, old[0].1.projected_states);
+        assert_eq!(new.byte_to_class, old[0].1.byte_to_class);
+        assert_eq!(new.class_representatives, old[0].1.class_representatives);
+        assert_eq!(new.class_targets, old[0].1.class_targets);
+        assert!(t.build_terminal_projected_quotient_for_containment_bounded(0, 1, 1).is_none());
+        assert!(t.build_terminal_projected_quotient_for_containment_bounded(7, 2, 1).is_none());
+    }
+
+    #[test]
+    fn coldcap_rejects_epsilon_component_without_partial_certificate() {
+        let mut dfa = one_byte_component(b'a');
+        dfa.add_epsilon_transition(0, 1);
+        let t = Tokenizer::from_parts(dfa, 1, None);
+        assert!(t.scalar_physical_component_states_bounded(0, 100, 1000).is_none());
     }
 
     fn one_byte_component(byte: u8) -> DFA {

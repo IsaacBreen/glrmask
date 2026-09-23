@@ -24,7 +24,7 @@ use crate::grammar::factoring::factor_named_grammar;
 use crate::grammar::flat::GrammarDef;
 use crate::compiler::glr::table::GlrTableConstruction;
 use crate::runtime::Constraint;
-use crate::DynamicConstraint;
+use crate::dynamic_constraint::DynamicConstraint;
 
 fn parse_ebnf_to_named(source: &str) -> crate::Result<ast::NamedGrammar> {
     Ok(ebnf::parse_ebnf_to_named(source)?)
@@ -349,7 +349,7 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
         if !reserved.contains(&candidate)
-            && !vocab.iter().any(|(token_id, _)| token_id == candidate)
+            && !vocab.contains_exact_token_id(candidate)
         {
             return Ok(candidate);
         }

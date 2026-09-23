@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use crate::{Vocab, VocabPartitionStrategy};
+use crate::public_api::VocabPartitionStrategy;
+use crate::Vocab;
 use crate::automata::lexer::Lexer;
 use crate::compiler::glr::analysis::AnalyzedGrammar;
 use crate::compiler::grammar::transforms::prepare_grammar_for_vocab_partition;
