@@ -195,7 +195,7 @@ impl FullWalkTransitionTable for RecursiveConfigTransitions<'_, '_> {
         #[cfg(test)]
         { self.routing.product_transition_cache_capacity() }
         #[cfg(not(test))]
-        { 1024 }
+        { 2048 }
     }
     #[inline(always)]
     fn cache_two_branch_products(&self) -> bool { true }

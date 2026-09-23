@@ -41,6 +41,7 @@ thread_local! {
     static TEST_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_CONFIG_FULL_WALK_USES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY: std::cell::Cell<usize> = const { std::cell::Cell::new(256) };
+    static TEST_RECURSIVE_PERSISTENT_MASK_CACHE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
 }
 
 // Experimental one-byte coordinate for the overwhelmingly common scalar,
@@ -7267,6 +7268,19 @@ pub(crate) fn dynamic_mask_cache_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("GLRMASK_DISABLE_DYNAMIC_MASK_CACHE").is_none())
 }
 
+#[inline(always)]
+fn recursive_persistent_mask_cache_enabled() -> bool {
+    #[cfg(test)]
+    {
+        return TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.get())
+            && dynamic_mask_cache_enabled();
+    }
+    #[cfg(not(test))]
+    {
+        dynamic_mask_cache_enabled()
+    }
+}
+
 #[derive(Clone)]
 struct TransientPath {
     arena_start: u32,
@@ -7473,13 +7487,14 @@ fn dynamic_mask_lookup_query(
         entries: SmallVec::new(),
     };
     let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
-    let virtual_dense_cache_enabled = env_flag(
+    let recursive = state.constraint.uses_compact_segmented_parser_runtime();
+    let virtual_dense_cache_enabled = !recursive && env_flag(
         "GLRMASK_EXPERIMENT_DYNAMIC_VIRTUAL_DENSE_CACHE_KEY",
         true,
     );
     let max_token_byte_len = virtual_dense_cache_enabled.then(|| vocab.max_token_byte_len());
-    let observation_cache_enabled =
-        std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
+    let observation_cache_enabled = !recursive
+        && std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_none()
             && vocab.has_terminal_observation_classes()
             && !state.constraint.tokenizer.has_any_virtual_runtime()
             // Static/dynamic composition can defer parser terminals and repair
@@ -7527,7 +7542,12 @@ fn dynamic_mask_lookup_query(
         // `(matched, possible-future)` pair. Equal precomputed exact quotient
         // classes therefore have the same next-token mask; after a finalization
         // both executions enter the same parser child and common lexer reset.
-        let lexer_key = if virtual_dense_cache_enabled
+        // Recursive IDs already include the active-leaf namespace. Do not
+        // interpret them using the outer tokenizer or its ordinary quotients.
+        // Stack paths and correlated exclusions use the same exact key builder.
+        let lexer_key = if recursive {
+            DynamicMaskLexerStateKey::RecursiveExact(tokenizer_state)
+        } else if virtual_dense_cache_enabled
             && let Some(coordinate) = state
                 .constraint
                 .tokenizer
@@ -7651,10 +7671,43 @@ pub(crate) fn try_fill_recursive_mask_shared(
     if !state.constraint.uses_compact_segmented_parser_runtime() {
         return Ok(false);
     }
-    let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) else {
-        return recursive_provider::fill(state, buf);
+    let required = state.constraint.mask_len();
+    assert!(buf.len() >= required, "mask buffer is smaller than constraint mask");
+    let (mask, tail) = buf.split_at_mut(required);
+    tail.fill(0);
+    let vocab = state.constraint.dynamic_mask_vocab_for_runtime();
+    let lookup_query = recursive_persistent_mask_cache_enabled()
+        .then(|| dynamic_mask_lookup_query(state))
+        .flatten();
+    if let Some((hash, ref query)) = lookup_query
+        && vocab.copy_cached_mask_with_predicate(
+            hash,
+            |candidate| query.matches_state(candidate),
+            mask,
+        )
+    {
+        return Ok(true);
+    }
+
+    let started = lookup_query
+        .as_ref()
+        .map(|_| std::time::Instant::now());
+    let filled = if let Some(mut transitions) = RecursiveFullWalkTransitions::new(state.constraint) {
+        fill_recursive_mask_using(state, mask, &mut transitions)?
+    } else {
+        recursive_provider::fill(state, mask)?
     };
-    fill_recursive_mask_using(state, buf, &mut transitions)
+    if filled
+        && let Some((hash, ref query)) = lookup_query
+    {
+        vocab.cache_mask(
+            query.to_owned_state_key(),
+            hash,
+            mask,
+            started.is_some_and(|started| started.elapsed().as_micros() < 20),
+        );
+    }
+    Ok(filled)
 }
 
 fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
@@ -8267,6 +8320,27 @@ mod tests {
         mask
     }
 
+    /// Check the independent oracle, natural probation/store path, and a
+    /// genuine cached hit. A hit must not run the vocabulary walker again.
+    fn assert_recursive_persistent_roundtrip(state: &ConstraintState<'_>) {
+        let mut expected = vec![0; state.constraint.mask_len()];
+        state.fill_recursive_mask_by_exact_full_walk(&mut expected);
+        let mut output = vec![u32::MAX; expected.len() + 3];
+        for _ in 0..2 {
+            assert!(try_fill_recursive_mask_shared(state, &mut output).unwrap());
+            assert_eq!(&output[..expected.len()], expected.as_slice());
+            assert!(output[expected.len()..].iter().all(|&word| word == 0));
+        }
+        assert!(dynamic_mask_state_has_cached_result(state));
+        let walks = TEST_FULL_WALK_USES.with(|count| count.get());
+        output.fill(u32::MAX);
+        assert!(try_fill_recursive_mask_shared(state, &mut output).unwrap());
+        assert_eq!(TEST_FULL_WALK_USES.with(|count| count.get()), walks,
+            "cached recursive mask must not walk the vocabulary");
+        assert_eq!(&output[..expected.len()], expected.as_slice());
+        assert!(output[expected.len()..].iter().all(|&word| word == 0));
+    }
+
     #[test]
     fn recursive_full_walk_transition_provider_matches_exact_leaf_execution() {
         let vocab = Vocab::new(vec![
@@ -8371,13 +8445,19 @@ mod tests {
 
     #[test]
     fn recursive_shared_full_walk_matches_existing_exact_walker() {
-        struct RestoreCacheCapacity(usize);
+        // Exercise the byte-walk at every capacity, rather than satisfying
+        // later iterations from a persistent result produced by the first.
+        struct RestoreCacheCapacity(usize, bool);
         impl Drop for RestoreCacheCapacity {
             fn drop(&mut self) {
                 TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(self.0));
+                TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|v| v.set(self.1));
             }
         }
-        let _restore = RestoreCacheCapacity(TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()));
+        let _restore = RestoreCacheCapacity(
+            TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()),
+            TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|v| v.replace(false)),
+        );
         let mut words = vec![Vec::<u8>::new()];
         let mut layer = vec![Vec::<u8>::new()];
         for _ in 0..3 {
@@ -8471,7 +8551,7 @@ mod tests {
                     let mut reference = vec![0u32; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut reference);
                     let mut shared = vec![0u32; constraint.mask_len()];
-                    for capacity in [0, 1, 2, 256] {
+                    for capacity in [0, 1, 2, 256, 2048] {
                         TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
                         assert!(
                             try_fill_recursive_mask_shared(&state, &mut shared).unwrap(),
@@ -8530,6 +8610,138 @@ mod tests {
     }
 
     #[test]
+    fn recursive_persistent_mask_cache_uses_exact_scoped_state_key() {
+        struct Restore(bool);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.set(self.0));
+            }
+        }
+        let _restore =
+            Restore(TEST_RECURSIVE_PERSISTENT_MASK_CACHE.with(|enabled| enabled.replace(true)));
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()),
+            (1, b"[".to_vec()),
+            (2, b"a".to_vec()),
+            (3, b"b".to_vec()),
+            (4, b"]".to_vec()),
+            (5, b"!".to_vec()),
+            (6, b"ab".to_vec()),
+            (7, b"a]!".to_vec()),
+        ]);
+        let leaf = Constraint::compile(
+            Grammar::glrm(r#"glrm 1; start leaf; t WORD = /[ab]{1,4}/; nt leaf = WORD;"#),
+            &vocab,
+        )
+        .unwrap();
+        let middle = Constraint::compile(
+            Grammar::glrm(
+                r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#,
+            ),
+            &vocab,
+        )
+        .unwrap()
+        .bind_grammar_dynamic_boundary("leaf", leaf)
+        .unwrap();
+        let bound = Constraint::compile(
+            Grammar::glrm(
+                r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#,
+            ),
+            &vocab,
+        )
+        .unwrap()
+        .bind_grammar_dynamic_boundary("middle", middle)
+        .unwrap();
+        let mut state = bound.start_dynamic();
+        state.commit_bytes(b"X[a").unwrap();
+        let (hash, query) = dynamic_mask_lookup_query(&state).expect("recursive key");
+        let key = query.to_owned_state_key();
+        assert!(matches!(
+            key.first().map(|entry| entry.0),
+            Some(DynamicMaskLexerStateKey::RecursiveExact(_))
+        ));
+        let mut ordinary_coordinate = key.clone();
+        if let Some(entry) = ordinary_coordinate.first_mut()
+            && let DynamicMaskLexerStateKey::RecursiveExact(id) = entry.0
+        {
+            entry.0 = DynamicMaskLexerStateKey::Exact(id);
+        }
+        assert_eq!(crate::runtime::artifact::dynamic_mask_state_key_hash(&key), hash);
+        assert!(!query.matches_state(&ordinary_coordinate),
+            "ordinary and scoped recursive coordinates must be distinguished even on hash collision");
+
+        assert_recursive_persistent_roundtrip(&state);
+        let loaded = Constraint::load(bound.save()).unwrap();
+        let mut loaded_state = loaded.start_dynamic();
+        loaded_state.commit_bytes(b"X[a").unwrap();
+        assert_recursive_persistent_roundtrip(&loaded_state);
+
+        // A colliding hash is only a bucket hint; exact equality remains
+        // mandatory before a cached payload can be returned.
+        let dyn_vocab = bound.dynamic_mask_vocab_for_runtime();
+        let mut actual = vec![0; bound.mask_len()];
+        assert!(!dyn_vocab.copy_cached_mask_with_predicate(
+            hash, |candidate| candidate == &ordinary_coordinate, &mut actual));
+
+        // Query-only synthetic states test key guards without asking the
+        // runtime to execute artificial parser states or exclusions.
+        let mut excluded = state.clone();
+        for (&lexer, gss) in state.state.iter() {
+            excluded.state.insert(lexer, gss.apply(|_| TerminalsDisallowed::new()
+                .try_with_insert_inline(lexer, 0).unwrap()));
+        }
+        let (_, excluded_query) = dynamic_mask_lookup_query(&excluded).unwrap();
+        assert!(!excluded_query.matches_state(&key), "exclusions are part of the exact key");
+
+        let (&lexer, _) = state.state.iter().next().unwrap();
+        let mut too_deep = state.clone();
+        too_deep.state.clear();
+        too_deep.state.insert(lexer, ParserGSS::from_single_stack(
+            vec![0; DYNAMIC_MASK_CACHE_MAX_DEPTH as usize + 1], TerminalsDisallowed::new()));
+        assert!(dynamic_mask_lookup_query(&too_deep).is_none(),
+            "a depth-limited key must decline rather than cache a truncated stack");
+
+        state.commit_bytes(b"b").unwrap();
+        let (next_hash, next_query) =
+            dynamic_mask_lookup_query(&state).expect("next recursive key");
+        assert!(
+            next_hash != hash || !next_query.matches_state(&query.to_owned_state_key()),
+            "a changed exact recursive state must not alias the cached predecessor",
+        );
+    }
+
+    #[test]
+    fn recursive_persistent_cache_isolated_between_bindings() {
+        let vocab = Vocab::new(vec![
+            (0, b"X".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
+            (3, b"!".to_vec()), (4, b"a!".to_vec()), (5, b"b!".to_vec()),
+        ]);
+        let parent = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start root; extern grammar child; nt root = "X" child "!";"#), &vocab).unwrap();
+        let a = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start leaf; nt leaf = "a";"#), &vocab).unwrap();
+        let b = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start leaf; nt leaf = "b";"#), &vocab).unwrap();
+        let bound_a = parent.bind_grammar_dynamic_boundary("child", a).unwrap();
+        let bound_b = parent.bind_grammar_dynamic_boundary("child", b).unwrap();
+        let mut state_a = bound_a.start_dynamic();
+        let mut state_b = bound_b.start_dynamic();
+        state_a.commit_bytes(b"X").unwrap();
+        state_b.commit_bytes(b"X").unwrap();
+        for _ in 0..3 {
+            assert_recursive_persistent_roundtrip(&state_a);
+            assert_recursive_persistent_roundtrip(&state_b);
+        }
+        let mut mask_a = vec![0; bound_a.mask_len()];
+        let mut mask_b = vec![0; bound_b.mask_len()];
+        try_fill_recursive_mask_shared(&state_a, &mut mask_a).unwrap();
+        try_fill_recursive_mask_shared(&state_b, &mut mask_b).unwrap();
+        assert_ne!(mask_a, mask_b);
+        assert!(token_allowed(&mask_a, 1) && !token_allowed(&mask_a, 2));
+        assert!(token_allowed(&mask_b, 2) && !token_allowed(&mask_b, 1));
+    }
+
+    #[test]
     fn recursive_shared_config_covers_virtual_and_epsilon_leaves() {
         let words: Vec<Vec<u8>> = vec![
             b"".to_vec(), b"X".to_vec(), b"!".to_vec(), b"\"".to_vec(),
@@ -8571,6 +8783,7 @@ mod tests {
                     assert_eq!(actual, expected, "general recursive prefix {prefix:?}");
                     assert!(try_fill_recursive_mask_shared(&state,&mut actual).unwrap());
                     assert_eq!(actual, expected, "production shared prefix {prefix:?}");
+                    assert_recursive_persistent_roundtrip(&state);
                 }
             }
         }
@@ -8635,6 +8848,9 @@ mod tests {
             if let Some(entry) = perturbed_key.first_mut() {
                 entry.0 = match entry.0 {
                     DynamicMaskLexerStateKey::Exact(id) => DynamicMaskLexerStateKey::Exact(id + 9999),
+                    DynamicMaskLexerStateKey::RecursiveExact(id) => {
+                        DynamicMaskLexerStateKey::RecursiveExact(id + 9999)
+                    }
                     DynamicMaskLexerStateKey::MaskProjection { state, initial } => {
                         DynamicMaskLexerStateKey::MaskProjection { state: state + 9999, initial }
                     }

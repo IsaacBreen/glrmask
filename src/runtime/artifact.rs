@@ -2796,6 +2796,10 @@ pub(crate) struct DirectRegularDynamicFrontierCacheEntry {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum DynamicMaskLexerStateKey {
     Exact(u32),
+    /// Exact scoped tokenizer coordinate used by recursive/provider-native
+    /// composition. Keep it distinct from the ordinary tokenizer coordinate:
+    /// both are u32 IDs but belong to different state spaces.
+    RecursiveExact(u32),
     /// Exact lexer coordinate consumed by dynamic mask execution. Distinct
     /// source/runtime lexer states may map here when their complete one-model-
     /// token continuation languages are identical. Preserve whether the source
