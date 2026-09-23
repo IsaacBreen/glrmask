@@ -1,4 +1,6 @@
-//! Repeat a raw static mask at an exact real-trace state, with full history.
+//! Repeat a raw mask at an exact real-trace state, with full history.
+//! Set PROBE_DYNAMIC=1 to explicitly force the dynamic engine (including its
+//! bridge Vec allocation), rather than dispatching a static artifact to static.
 //! Usage: VOCAB ARTIFACT TRACES TRACE STEP OUTPUT [REPEATS=501]
 //! State cloning and correctness checks are outside the mask timer. Each clone
 //! drops the state-local result cache; no cold observations are discarded.
@@ -51,6 +53,8 @@ fn vocab(path: &Path) -> Result<Vocab, Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let force_dynamic = std::env::var_os("PROBE_DYNAMIC").is_some();
+    eprintln!("MASK_MODE {}", if force_dynamic { "forced-dynamic" } else { "artifact-dispatch" });
     let args: Vec<_> = std::env::args().collect();
     assert!(args.len() >= 7, "VOCAB ARTIFACT TRACES TRACE STEP OUTPUT [REPEATS]");
     let vocabulary = vocab(Path::new(&args[1]))?;
@@ -64,14 +68,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for trace in traces.iter().take(selected) {
         let mut state = constraint.start();
         for &token in &trace.token_ids {
-            state.fill_mask(&mut mask);
+            if force_dynamic { mask = state.fill_mask_dynamic_vec(); } else { state.fill_mask(&mut mask); }
             state.commit_token(token)?;
         }
-        state.fill_mask(&mut mask);
+        if force_dynamic { mask = state.fill_mask_dynamic_vec(); } else { state.fill_mask(&mut mask); }
     }
     let mut template = constraint.start();
     for &token in &traces[selected].token_ids[..step] {
-        template.fill_mask(&mut mask);
+        if force_dynamic { mask = template.fill_mask_dynamic_vec(); } else { template.fill_mask(&mut mask); }
         template.commit_token(token)?;
     }
     eprintln!("STATE trace={selected} step={step} roots={} paths={}",
@@ -84,7 +88,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let state = clone.as_ref().unwrap_or(&template);
         let cpu_started = thread_cpu_ns();
         let started = Instant::now();
-        state.fill_mask(black_box(&mut mask));
+        if force_dynamic {
+            mask = black_box(state).fill_mask_dynamic_vec();
+        } else {
+            state.fill_mask(black_box(&mut mask));
+        }
         let elapsed = started.elapsed().as_nanos();
         let cpu_elapsed = thread_cpu_ns().saturating_sub(cpu_started);
         if let Some(expected) = &expected {
@@ -97,6 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out, "{sample},{},{elapsed},{cpu_elapsed},{hash:016x}", sample == 0)?;
     }
     out.flush()?;
+    if !force_dynamic {
     let state = template.clone();
     let profile = state.fill_mask_profiled(&mut mask);
     eprintln!("PROFILE total={} cached={} single={} seed={} lookup={} apply={} accumulate={} queue_pop={} loop={} finalize={}",
@@ -104,6 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         profile.seed_decompose_ns, profile.transition_lookup_ns,
         profile.transition_apply_ns, profile.token_accumulation_ns,
         profile.queue_pop_ns, profile.loop_decompose_ns, profile.finalize_ns);
+    }
     println!("EXACT_HISTORY completed trace={selected} step={step} samples={repeats}");
     Ok(())
 }
