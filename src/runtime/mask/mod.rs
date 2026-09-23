@@ -1292,8 +1292,10 @@ impl DenseMaskAcc {
 //   with each incoming edge weight is exact.
 // - The top-stack start-component/empty-stack filter applies only to the
 //   first label (or the empty stack); deeper recursion is filter-free.
+#[cfg(test)]
 type BoundaryDagGroupMap = FxHashMap<u32, Weight>;
 
+#[cfg(test)]
 struct BoundaryWeightDagEvaluator<'a> {
     dwa: &'a crate::automata::weighted_u32::dwa::DWA,
     dag: &'a IndexedLeveledGss<u32, TerminalsDisallowed>,
@@ -1307,6 +1309,7 @@ struct BoundaryWeightDagEvaluator<'a> {
     weight_intersections: u64,
 }
 
+#[cfg(test)]
 impl<'a> BoundaryWeightDagEvaluator<'a> {
     fn new(
         dwa: &'a crate::automata::weighted_u32::dwa::DWA,
@@ -1700,6 +1703,7 @@ impl<'a> BoundaryWeightDagEvaluator<'a> {
 // per-(weight-id, TSID) u64 token masks for one fixed TSID. Bitwise AND
 // distributes over OR exactly as Weight intersection distributes over union,
 // so the same memoized grouping argument applies.
+#[cfg(test)]
 struct BoundaryMask64DagEvaluator<'a> {
     dwa: &'a crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
     tsid: u32,
@@ -1711,6 +1715,7 @@ struct BoundaryMask64DagEvaluator<'a> {
     dwa_steps: u64,
 }
 
+#[cfg(test)]
 impl<'a> BoundaryMask64DagEvaluator<'a> {
     fn new(
         dwa: &'a crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
@@ -3853,6 +3858,168 @@ fn enqueue_parser_state_transition(
     );
 }
 
+/// One exact weighted-GSS queue traversal for ordinary and boundary parser
+/// DWAs. Namespace selection and weight representation are supplied outside
+/// the traversal; queue scheduling, decomposition and profiling are shared.
+/// Closures are monomorphised, so ordinary lookup/intersection fast paths keep
+/// their existing implementation rather than acquiring virtual dispatch.
+/// Inline the executor into each provider so extracting the shared loop does
+/// not leave the ordinary hot path behind an additional closure-call boundary.
+#[inline(always)]
+fn walk_static_dwa_gss_queue<W>(
+    queue: &mut MaskQueue,
+    profile: &mut Option<MaskInnerProfileStats>,
+    mut final_weight: impl FnMut(u32) -> Option<W>,
+    mut transition: impl FnMut(u32, u32) -> Option<(u32, W)>,
+    mut accumulate: impl FnMut(W, &DenseMaskGSS),
+    mut enqueue: impl FnMut(&mut MaskQueue, u32, W, &DenseMaskGSS, &mut Option<MaskInnerProfileStats>),
+) {
+    loop {
+        let popped = queue.pop_next();
+        if let Some(profile) = profile.as_mut() {
+            profile.queue_pop_ns = queue.debug_stats().pop_total_ns;
+        }
+        let Some((wa_state, gss)) = popped else { break; };
+        if let Some(weight) = final_weight(wa_state) {
+            let started = profile.as_ref().map(|_| Instant::now());
+            accumulate(weight, &gss);
+            if let (Some(profile), Some(started)) = (profile.as_mut(), started) {
+                profile.token_accumulation_ns += elapsed_ns(started);
+            }
+        }
+        let decompose_started = profile.as_ref().map(|_| Instant::now());
+        gss.for_each_decomposed(|parser_state, popped| {
+            let callback_started = profile.as_ref().map(|_| Instant::now());
+            queue.record_loop_decompose_callback();
+            let lookup_started = profile.as_ref().map(|_| Instant::now());
+            let edge = transition(wa_state, parser_state);
+            if let (Some(profile), Some(started)) = (profile.as_mut(), lookup_started) {
+                profile.transition_lookup_ns += elapsed_ns(started);
+            }
+            if let Some((target, weight)) = edge {
+                queue.record_parser_dwa_transition_enqueue();
+                enqueue(queue, target, weight, &popped, profile);
+            }
+            if let (Some(profile), Some(started)) = (profile.as_mut(), callback_started) {
+                profile.loop_decompose_callback_ns += elapsed_ns(started);
+            }
+        });
+        if let (Some(profile), Some(started)) = (profile.as_mut(), decompose_started) {
+            profile.loop_decompose_total_ns += elapsed_ns(started);
+        }
+    }
+}
+
+fn boundary_queue_seed(
+    stacks: &LeveledGSS<u32, ()>,
+    seed: &DenseMaskAcc,
+    top_live: &impl Fn(Option<u32>) -> bool,
+) -> DenseMaskGSS {
+    let dense = stacks.apply(|_| seed.clone());
+    let mut filtered = if top_live(None) { dense.isolate(None) } else { DenseMaskGSS::empty() };
+    dense.for_each_decomposed(|top, popped| {
+        if top_live(Some(top)) {
+            filtered = filtered.merge(&popped.push(top));
+        }
+    });
+    filtered
+}
+
+fn merge_boundary_dense_result(output: &mut Option<DenseMaskAcc>, incoming: Option<DenseMaskAcc>) {
+    if let Some(incoming) = incoming {
+        if let Some(output) = output.as_mut() { output.merge_in_place(&incoming); }
+        else { *output = Some(incoming); }
+    }
+}
+
+/// Provider adapter for private, materialized boundary-DWA weights. The graph
+/// traversal and dense intersection/cache machinery are the ordinary engine's.
+fn boundary_weight_mask_via_shared_queue(
+    dwa: &crate::automata::weighted_u32::dwa::DWA,
+    tsids: &[u32],
+    token_count: usize,
+    stacks: &LeveledGSS<u32, ()>,
+    top_live: &impl Fn(Option<u32>) -> bool,
+) -> Option<DenseMaskAcc> {
+    if token_count == 0 || tsids.is_empty() { return None; }
+    let mut full = vec![u64::MAX; token_count.div_ceil(64)];
+    if token_count % 64 != 0 { *full.last_mut().unwrap() = (1u64 << (token_count % 64)) - 1; }
+    let seed = DenseMaskAcc::from_dense_arc_for_tsids(tsids, Arc::from(full))?;
+    let mut queue = MaskQueue::new();
+    queue.enqueue(dwa.start_state(), boundary_queue_seed(stacks, &seed, top_live));
+    let precomputed = DenseTokenMaskCache::default();
+    let mut transition_cache = FxHashMap::default();
+    let mut intersection_cache = DenseTokenSetIntersectionSmallCache::new();
+    let mut output = None;
+    walk_static_dwa_gss_queue(
+        &mut queue,
+        &mut None,
+        |state| dwa.states().get(state as usize).and_then(|row| row.final_weight.as_ref())
+            .map(RuntimeWeightRef::Materialized),
+        |state, parser| {
+            let row = &dwa.states().get(state as usize)?.transitions;
+            row.get(&encode_positive_label(parser)).or_else(|| row.get(&DEFAULT_LABEL))
+                .map(|(target, weight)| (*target, RuntimeWeightRef::Materialized(weight)))
+        },
+        |weight, gss| {
+            gss.for_each_acc(|acc| {
+                merge_boundary_dense_result(&mut output,
+                    acc.intersect_with_runtime_weight_reuse(weight, &precomputed));
+            });
+        },
+        |queue, target, weight, popped, profile| {
+            enqueue_weighted_transition(queue, popped, target, weight, &precomputed,
+                &mut transition_cache, &mut intersection_cache, profile);
+        },
+    );
+    output
+}
+
+/// The small boundary representation supplies one-word intersections to the
+/// same traversal. It does not have an independent GSS/DWA walk.
+fn boundary_mask64_via_shared_queue(
+    dwa: &crate::compiler::stages::parser_dwa::SmallBoundaryDwa,
+    tsid: u32,
+    stacks: &LeveledGSS<u32, ()>,
+    top_live: &impl Fn(Option<u32>) -> bool,
+) -> Option<DenseMaskAcc> {
+    if tsid >= dwa.tsid_count as u32 { return None; }
+    let full = dwa.all_token_mask();
+    let seed = DenseMaskAcc::from_dense(tsid, vec![full])?;
+    let mut queue = MaskQueue::new();
+    queue.enqueue(dwa.start_state(), boundary_queue_seed(stacks, &seed, top_live));
+    let intersect = |acc: &DenseMaskAcc, mask: u64| {
+        debug_assert_eq!(acc.0.len(), 1);
+        let (tsid, words) = acc.0.first()?;
+        debug_assert_eq!(words.len(), 1);
+        DenseMaskAcc::from_dense(*tsid, vec![words[0] & mask])
+    };
+    let mut output = None;
+    walk_static_dwa_gss_queue(
+        &mut queue,
+        &mut None,
+        |state| {
+            let weight = dwa.states.get(state as usize)?.final_weight;
+            (weight != 0).then(|| dwa.weight_mask(weight, tsid))
+        },
+        |state, parser| {
+            let row = &dwa.states.get(state as usize)?.transitions;
+            let label = encode_positive_label(parser);
+            row.iter().find(|(key, _, _)| *key == label)
+                .or_else(|| row.iter().find(|(key, _, _)| *key == DEFAULT_LABEL))
+                .map(|&(_, target, weight)| (target, dwa.weight_mask(weight, tsid)))
+        },
+        |mask, gss| {
+            gss.for_each_acc(|acc| merge_boundary_dense_result(&mut output, intersect(acc, mask)));
+        },
+        |queue, target, mask, popped, _profile| {
+            if mask == full { queue.enqueue(target, popped.clone()); }
+            else if mask != 0 { queue.enqueue(target, popped.apply_and_prune(|acc| intersect(acc, mask))); }
+        },
+    );
+    output
+}
+
 impl<'a> ConstraintState<'a> {
     fn or_segmented_component_mask(&self, output: &mut [u32], component_mask: &[u32]) {
         // Retained components can carry private linker sentinel IDs (and other
@@ -5578,6 +5745,66 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
+    fn or_boundary_dag_via_shared_queue(
+        &self,
+        boundary: &crate::runtime::SegmentedBoundaryParser,
+        parser_dwa: &crate::automata::weighted_u32::dwa::DWA,
+        recursive_parser: bool,
+        boundary_tsids: &[u32],
+        global_tokenizer_state: u32,
+        gss: &ParserGSS,
+        top_live: &impl Fn(Option<u32>) -> bool,
+        buf: &mut [u32],
+    ) -> bool {
+        let started = std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some().then(Instant::now);
+        let mut group_count = 0;
+        for (stacks, accumulator) in gss.partition_by_accumulator() {
+            group_count += 1;
+            let Some(allowed) = self.terminals_disallowed_to_dense_acc(
+                &accumulator, global_tokenizer_state,
+            ) else { return false; };
+            // Partition by exact exclusion accumulator BEFORE evaluation, so
+            // accepted language and output eligibility remain correlated.
+            // Partitioning operates on the compact GSS, never enumerating a
+            // bounded list of individual stacks.
+            let accepted = if !recursive_parser {
+                if let Some(compact) = boundary.compact_parser_dwa.as_ref() {
+                    boundary_mask64_via_shared_queue(compact, boundary_tsids[0], &stacks, top_live)
+                } else {
+                    boundary_weight_mask_via_shared_queue(parser_dwa, boundary_tsids,
+                        boundary.internal_token_to_originals.len(), &stacks, top_live)
+                }
+            } else {
+                boundary_weight_mask_via_shared_queue(parser_dwa, boundary_tsids,
+                    boundary.internal_token_to_originals.len(), &stacks, top_live)
+            };
+            let Some(accepted) = accepted else { continue; };
+            for (_, dense) in &accepted.0 {
+                for (word, &bits) in dense.iter().enumerate() {
+                    let mut bits = bits;
+                    while bits != 0 {
+                        let internal = word * 64 + bits.trailing_zeros() as usize;
+                        bits &= bits - 1;
+                        let Some(originals) = boundary.internal_token_to_originals.get(internal)
+                            else { return false; };
+                        for &original in originals {
+                            let Some(outer_internal) = self.constraint.original_token_internal_at(original)
+                                .filter(|&token| token != u32::MAX) else { continue; };
+                            if allowed.0.iter().any(|(_, dense)| {
+                                dense.get(outer_internal as usize / 64)
+                                    .is_some_and(|word| word & (1u64 << (outer_internal % 64)) != 0)
+                            }) { set_original_mask_bit(buf, original); }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(started) = started {
+            eprintln!("[glrmask/profile][static_boundary_dag] backend=shared_queue groups={group_count} total_ns={} complete=true", elapsed_ns(started));
+        }
+        true
+    }
+
     /// Evaluate the private-coordinate deterministic boundary parser DWA over
     /// the current composed parser GSS.  The boundary machine is fully
     /// determinized and negative-free before publication; only the top-level
@@ -6001,6 +6228,16 @@ impl<'a> ConstraintState<'a> {
                         true
                     }
                 };
+                #[cfg(test)]
+                let mut reference_mask = buf.to_vec();
+                let shared_complete = self.or_boundary_dag_via_shared_queue(
+                    boundary, parser_dwa, recursive_parser, &boundary_tsids,
+                    global_tokenizer_state, gss, &top_live, buf,
+                );
+                #[cfg(test)]
+                {
+                let buf = reference_mask.as_mut_slice();
+                let mut complete = true;
                 let dag = gss.indexed_dag();
                 let profile_static =
                     std::env::var_os("GLRMASK_PROFILE_STATIC_BOUNDARY").is_some();
@@ -6081,7 +6318,13 @@ impl<'a> ConstraintState<'a> {
                         );
                     }
                 }
-                true
+                assert_eq!(shared_complete, complete, "shared boundary queue completeness differs from DAG oracle");
+                }
+                #[cfg(test)]
+                if shared_complete {
+                    assert_eq!(buf, reference_mask.as_slice(), "shared boundary queue mask differs from exact DAG oracle");
+                }
+                shared_complete
             };
             if !traversal_complete || !complete {
                 return false;
@@ -7723,68 +7966,35 @@ impl<'a> ConstraintState<'a> {
             &mut profile,
         );
 
-        loop {
-            let popped = queue.pop_next();
-            if let Some(profile) = profile.as_mut() {
-                profile.queue_pop_ns = queue.debug_stats().pop_total_ns;
-            }
-
-            let Some((wa_state, gss)) = popped else {
-                break;
-            };
-
-            if let Some(final_weight) = self.constraint.runtime_parser_dwa_final_weight(wa_state) {
-                let accumulate_start = if profile.is_some() {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
+        walk_static_dwa_gss_queue(
+            &mut queue,
+            &mut profile,
+            |state| self.constraint.runtime_parser_dwa_final_weight(state),
+            |state, parser| self.constraint.runtime_parser_dwa_transition(state, parser),
+            |final_weight, gss| {
                 direct_buf_used = true;
                 direct_buf_possible &= self.merge_final_weight_for_gss(
                     final_weight,
-                    &gss,
+                    gss,
                     precomputed,
                     &mut merged,
                     &mut direct_buf,
                     &mut direct_buf_dirty,
                 );
-                if let (Some(profile), Some(start)) = (profile.as_mut(), accumulate_start) {
-                    profile.token_accumulation_ns += elapsed_ns(start);
-                }
-            }
-
-            let loop_decompose_start = if profile.is_some() {
-                Some(Instant::now())
-            } else {
-                None
-            };
-            gss.for_each_decomposed(|parser_state, popped| {
-                let callback_start = if profile.is_some() {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                queue.record_loop_decompose_callback();
-                enqueue_parser_state_transition(
-                    self.constraint,
-                    &mut queue,
-                    wa_state,
-                    parser_state,
-                    &popped,
+            },
+            |queue, target, weight, popped, profile| {
+                enqueue_weighted_transition(
+                    queue,
+                    popped,
+                    target,
+                    weight,
                     precomputed,
                     &mut transition_gss_cache,
                     &mut transition_intersection_cache,
-                    &mut profile,
+                    profile,
                 );
-                if let (Some(profile), Some(start)) = (profile.as_mut(), callback_start) {
-                    profile.loop_decompose_callback_ns += elapsed_ns(start);
-                }
-            });
-
-            if let (Some(profile), Some(start)) = (profile.as_mut(), loop_decompose_start) {
-                profile.loop_decompose_total_ns += elapsed_ns(start);
-            }
-        }
+            },
+        );
 
         if mask_queue_debug_enabled() {
             let debug = queue.debug_stats();
@@ -9016,5 +9226,100 @@ mod boundary_dag_exact_tests {
             without_empty.is_empty(),
             "rejecting the empty stack drops its group"
         );
+    }
+
+    #[test]
+    fn shared_queue_boundary_providers_match_dag_oracles_with_correlated_groups() {
+        let mut stacks = adversarial_stacks();
+        for (index, (_, acc)) in stacks.iter_mut().enumerate() {
+            if index % 2 == 0 { *acc = acc.clone().with_insert(7,9); }
+        }
+        stacks.push((Vec::new(), TerminalsDisallowed::new()));
+        let compact = adversarial_compact_dwa();
+        let generic = compact.to_generic_dwa();
+        for gss in [ParserGSS::from_stacks(&stacks), ParserGSS::empty()] {
+            for filter in 0..3 {
+                let top_live = |top: Option<u32>| match filter {
+                    0 => true,
+                    1 => top.is_some_and(|value| value != 14),
+                    _ => false,
+                };
+                for (language, accumulator) in gss.partition_by_accumulator() {
+                    let original = language.apply(|_| accumulator.clone());
+                    let dag = original.indexed_dag();
+                    let mut oracle = BoundaryMask64DagEvaluator::new(&compact,0,&dag);
+                    let expected = oracle.eval_root(&top_live).values().fold(0,|a,b|a|b);
+                    let compact_actual = super::boundary_mask64_via_shared_queue(&compact,0,&language,&top_live)
+                        .map_or(0,|a|a.0.iter().fold(0,|bits,(_,w)|bits|w[0]));
+                    let generic_actual = super::boundary_weight_mask_via_shared_queue(
+                        &generic,&[0],compact.token_count as usize,&language,&top_live,
+                    ).map_or(0,|a|a.0.iter().fold(0,|bits,(_,w)|bits|w[0]));
+                    assert_eq!(compact_actual,expected,"compact group={accumulator:?} filter={filter}");
+                    assert_eq!(generic_actual,expected,"generic group={accumulator:?} filter={filter}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shared_boundary_queue_keeps_tokenizer_coordinates_separate() {
+        let mut compact = adversarial_compact_dwa();
+        compact.tsid_count = 2;
+        for (index, weight) in compact.weights.iter_mut().enumerate() {
+            // Distinct per-coordinate languages, including a transition which
+            // is dead only in coordinate 1. Merging coordinates would admit
+            // tokens that the independent per-coordinate oracle rejects.
+            weight[1] = if index == 3 {
+                0
+            } else {
+                ((weight[0] << 1) | (weight[0] >> 5)) & 0b11_1111
+            };
+        }
+        let generic = compact.to_generic_dwa();
+        let mut stacks = adversarial_stacks();
+        stacks.push((Vec::new(), TerminalsDisallowed::new()));
+        for (index, (_, accumulator)) in stacks.iter_mut().enumerate() {
+            if index % 3 == 0 {
+                *accumulator = accumulator.clone().with_insert(7, 9);
+            }
+        }
+        let gss = ParserGSS::from_stacks(&stacks);
+        for filter in 0..3 {
+            let top_live = |top: Option<u32>| match filter {
+                0 => true,
+                1 => top.is_some_and(|value| value != 14),
+                _ => false,
+            };
+            for (language, accumulator) in gss.partition_by_accumulator() {
+                let original = language.apply(|_| accumulator.clone());
+                let dag = original.indexed_dag();
+                for coordinates in [&[0, 1][..], &[1][..]] {
+                    let actual = super::boundary_weight_mask_via_shared_queue(
+                        &generic,
+                        coordinates,
+                        compact.token_count as usize,
+                        &language,
+                        &top_live,
+                    );
+                    for tsid in 0..2 {
+                        let expected = if coordinates.contains(&tsid) {
+                            let mut oracle = BoundaryMask64DagEvaluator::new(
+                                &compact, tsid, &dag,
+                            );
+                            oracle.eval_root(&top_live).values().fold(0, |a, b| a | b)
+                        } else {
+                            0
+                        };
+                        let observed = actual.as_ref().map_or(0, |allowed| {
+                            allowed.0.iter()
+                                .filter(|(coordinate, _)| *coordinate == tsid)
+                                .fold(0, |bits, (_, words)| bits | words[0])
+                        });
+                        assert_eq!(observed, expected,
+                            "coordinate={tsid} selected={coordinates:?} group={accumulator:?} filter={filter}");
+                    }
+                }
+            }
+        }
     }
 }
