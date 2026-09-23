@@ -5106,9 +5106,16 @@ fn try_full_walk_mask_with_table<
     let product_transition_cache_capacity = transitions.product_transition_cache_capacity();
     let cache_two_branch_products = transitions.cache_two_branch_products();
     let cache_single_branch_products = transitions.cache_single_branch_products();
-    let mut many_transition_cache = FullWalkManyTransitionCache::new(
-        product_transition_cache_capacity, cache_two_branch_products, cache_single_branch_products,
-    );
+    // Ordinary providers have no product cache. Do not construct its maps,
+    // row/alphabet vectors, profile state, or large stack frame for them. The
+    // scoped cache remains per-mask and exact; indirection changes storage,
+    // not a transition, admission proof, or the capacity-exhaustion fallback.
+    let mut many_transition_cache = (product_transition_cache_capacity != 0).then(|| {
+        Box::new(FullWalkManyTransitionCache::new(
+            product_transition_cache_capacity, cache_two_branch_products,
+            cache_single_branch_products,
+        ))
+    });
     let mut stack_many_ids = if product_transition_cache_capacity != 0 {
         vec![FullWalkManyTransitionCache::UNKNOWN; stack_len]
     } else { Vec::new() };
@@ -5442,7 +5449,7 @@ fn try_full_walk_mask_with_table<
                 FullWalkBranch { lexer_state: scalar_lexer, parser_node: scalar_parser,
                     prune_guard: FullWalkPruneGuard::Passed },
             ]);
-            if let Some(id) = many_transition_cache.intern(&single) {
+            if let Some(id) = many_transition_cache.as_mut().unwrap().intern(&single) {
                 current_many_id = id;
                 scalar_lexer = FULL_WALK_LEXER_MULTI;
             }
@@ -5457,7 +5464,7 @@ fn try_full_walk_mask_with_table<
                 FullWalkBranch { lexer_state: current_two.1.0, parser_node: current_two.1.1,
                     prune_guard: FullWalkPruneGuard::Passed },
             ]);
-            if let Some(id) = many_transition_cache.intern(&pair) {
+            if let Some(id) = many_transition_cache.as_mut().unwrap().intern(&pair) {
                 current_many_id = id;
                 scalar_lexer = FULL_WALK_LEXER_MULTI;
             }
@@ -6015,7 +6022,7 @@ fn try_full_walk_mask_with_table<
                     }
             } else if scalar_lexer == FULL_WALK_LEXER_MULTI {
                 if let Some(next_id) = (product_transition_cache_capacity != 0)
-                    .then(|| many_transition_cache.cached_many_target(current_many_id, byte))
+                    .then(|| many_transition_cache.as_mut().unwrap().cached_many_target(current_many_id, byte))
                     .flatten()
                 {
                     current_many_id = next_id;
@@ -6031,7 +6038,7 @@ fn try_full_walk_mask_with_table<
                     )
                 } else { FullWalkManyState::Branches(FullWalkBranches::new()) };
                 let next_id = if product_transition_cache_capacity != 0 {
-                    many_transition_cache.step_handle(
+                    many_transition_cache.as_mut().unwrap().step_handle(
                         current_many_id,
                         &current_many,
                         byte,
@@ -6044,7 +6051,7 @@ fn try_full_walk_mask_with_table<
                     )
                 } else { FullWalkManyTransitionCache::UNKNOWN };
                 let next = if next_id < FullWalkManyTransitionCache::DEAD {
-                    &many_transition_cache.states[next_id as usize]
+                    &many_transition_cache.as_ref().unwrap().states[next_id as usize]
                 } else { &owned_next };
                 match next {
                     FullWalkManyState::Branches(next) => {
@@ -6157,7 +6164,7 @@ fn try_full_walk_mask_with_table<
                 // Products with no known self-loop cannot prove a nonempty
                 // suffix alphabet. Avoid loading trie/edge/byte-set metadata
                 // at every endpoint for those changing products.
-                && many_transition_cache.has_self_loop[current_many_id as usize]
+                && many_transition_cache.as_ref().unwrap().has_self_loop[current_many_id as usize]
                 && first_match_direct.is_none()
             {
                 let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
@@ -6165,7 +6172,7 @@ fn try_full_walk_mask_with_table<
                 // At END the whole compressed edge is consumed, so the cached
                 // subtree alphabet covers exactly the remaining suffix bytes.
                 if trie.node(child).child_len != 0
-                    && many_transition_cache.admits_stable_alphabet(
+                    && many_transition_cache.as_mut().unwrap().admits_stable_alphabet(
                         current_many_id, trie.subtree_bytes(child), initial_lexer_state,
                         transitions, &mut parser_cache, state.constraint,
                     )
@@ -6267,7 +6274,7 @@ fn try_full_walk_mask_with_table<
                     if product_transition_cache_capacity != 0
                         && current_many_id != FullWalkManyTransitionCache::UNKNOWN
                     {
-                        many_transition_cache.token_boundary_allowed(
+                        many_transition_cache.as_mut().unwrap().token_boundary_allowed(
                             current_many_id, transitions, &mut parser_cache,
                             state.constraint, initial_lexer_state,
                         )
