@@ -232,6 +232,12 @@ trait FullWalkTransitionTable {
     #[inline(always)]
     fn cache_two_branch_products(&self) -> bool { false }
 
+    /// A scoped/config provider can retain singleton parser/lexer products in
+    /// the same exact cache rather than repeatedly rebuilding its scalar lane.
+    /// Ordinary providers keep their specialised scalar/hot traversal instead.
+    #[inline(always)]
+    fn cache_single_branch_products(&self) -> bool { false }
+
     /// Complete provider walks can defer output until the exact admitted and
     /// rejected populations are known. This reuses the ordinary adaptive
     /// emitter instead of touching every rejected token in a sparse mask.
@@ -2071,9 +2077,14 @@ struct FullWalkManyTransitionCache {
     // the existing owned-state path and never drops a branch.
     rows: Vec<Box<[u16; 256]>>,
     boundary_allowed: Vec<Option<bool>>,
+    // Exact byte classifications for each retained product: (self-loop,
+    // non-self-loop). Unknown bytes can be evaluated through step_handle.
+    loop_alphabets: Vec<([u64; 4], [u64; 4])>,
+    has_self_loop: Vec<bool>,
     stays_many: Vec<bool>,
     capacity: usize,
     cache_two: bool,
+    cache_single: bool,
     profile: bool,
     calls: usize,
     hits: usize,
@@ -2089,15 +2100,18 @@ impl FullWalkManyTransitionCache {
     const ROW_DEAD: u16 = u16::MAX - 1;
     const ROW_MAX_ID: usize = (u16::MAX - 2) as usize;
 
-    fn new(capacity: usize, cache_two: bool) -> Self {
+    fn new(capacity: usize, cache_two: bool, cache_single: bool) -> Self {
         Self {
             ids: FxHashMap::default(),
             states: Vec::new(),
             rows: Vec::new(),
             boundary_allowed: Vec::new(),
+            loop_alphabets: Vec::new(),
+            has_self_loop: Vec::new(),
             stays_many: Vec::new(),
             capacity: capacity.min(Self::ROW_MAX_ID + 1),
             cache_two,
+            cache_single,
             profile: std::env::var_os("GLRMASK_PROFILE_DYNAMIC_CONFIG_TRANSITIONS").is_some(),
             calls: 0,
             hits: 0,
@@ -2119,12 +2133,15 @@ impl FullWalkManyTransitionCache {
         self.states.push(owned.clone());
         self.rows.push(Box::new([Self::ROW_UNKNOWN; 256]));
         self.boundary_allowed.push(None);
+        self.loop_alphabets.push(([0; 4], [0; 4]));
+        self.has_self_loop.push(false);
         self.stays_many.push(match state {
             FullWalkManyState::Branches(branches) => {
                 // These shapes cannot use the scalar/two or same-parser merge
                 // lanes. Reaching the cached shape again need not inspect or
                 // copy its guards/frontier merely to rediscover that fact.
-                (self.cache_two && branches.len() == 2)
+                (self.cache_single && branches.len() == 1)
+                    || (self.cache_two && branches.len() == 2)
                     || branches.iter().any(|b| !b.prune_guard.is_passed())
                     || (branches.len() > 2 && branches.iter().skip(1)
                         .any(|b| b.parser_node != branches[0].parser_node))
@@ -2133,6 +2150,48 @@ impl FullWalkManyTransitionCache {
         });
         self.ids.insert(owned, id);
         Some(id)
+    }
+
+    #[inline]
+    fn store_transition(&mut self, source: u32, byte: u8, target: u16) {
+        debug_assert_ne!(target, Self::ROW_UNKNOWN);
+        self.rows[source as usize][byte as usize] = target;
+        let (loops, nonloops) = &mut self.loop_alphabets[source as usize];
+        let mask = 1u64 << (byte & 63);
+        if u32::from(target) == source {
+            self.has_self_loop[source as usize] = true;
+            loops[byte as usize >> 6] |= mask;
+        } else {
+            nonloops[byte as usize >> 6] |= mask;
+        }
+    }
+
+    #[inline]
+    fn cached_loop_alphabet(&self, source: u32, alphabet: [u64; 4]) -> Option<bool> {
+        let (loops, nonloops) = self.loop_alphabets.get(source as usize)?;
+        if alphabet.iter().zip(nonloops).any(|(a, b)| a & b != 0) {
+            Some(false)
+        } else if alphabet.iter().zip(loops).all(|(a, b)| a & !b == 0) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
+    /// Prove a stable product using only transitions the normal walk has
+    /// already evaluated. Completing rows speculatively can be expensive on
+    /// large parser products, so an unknown byte simply declines this proof.
+    /// If every suffix byte is a self-loop and the boundary admits, induction
+    /// proves every descendant token admissible without visiting its edges.
+    fn admits_stable_alphabet<T: FullWalkTransitionTable>(
+        &mut self, id: u32, alphabet: [u64; 4], initial_lexer_state: u32,
+        transitions: &mut T, parser_cache: &mut FullWalkParserCache,
+        constraint: &Constraint,
+    ) -> bool {
+        self.cached_loop_alphabet(id, alphabet) == Some(true)
+            && self.token_boundary_allowed(
+                id, transitions, parser_cache, constraint, initial_lexer_state,
+            )
     }
 
     #[inline(always)]
@@ -2163,6 +2222,7 @@ impl FullWalkManyTransitionCache {
         parser_cache: &mut FullWalkParserCache,
         constraint: &Constraint,
         uncached_output: &mut FullWalkManyState,
+        condition_single: bool,
     ) -> u32 {
         if self.profile {
             self.calls += 1;
@@ -2210,12 +2270,37 @@ impl FullWalkManyTransitionCache {
             constraint,
         );
         if matches!(&next, FullWalkManyState::Branches(branches) if branches.is_empty()) {
-            self.rows[source as usize][byte as usize] = Self::ROW_DEAD;
+            self.store_transition(source, byte, Self::ROW_DEAD);
+            return Self::DEAD;
+        }
+        // Preserve the existing scalar parser-conditioned dead-prefix proof
+        // when keeping a singleton as a product ID. It depends only on this
+        // exact parser/lexer state, so both the transition and admission may
+        // be memoized for the remainder of this one mask invocation.
+        let single_admitted = if self.cache_single && condition_single {
+            match &next {
+                FullWalkManyState::Branches(branches) => match branches.as_slice() {
+                    [branch] if branch.prune_guard.is_passed() => Some(
+                        transitions.token_boundary_allowed(
+                            parser_cache, constraint, initial_lexer_state,
+                            branch.lexer_state, branch.parser_node,
+                        ),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            }
+        } else { None };
+        if single_admitted == Some(false) {
+            self.store_transition(source, byte, Self::ROW_DEAD);
             return Self::DEAD;
         }
         if let Some(target) = self.intern(&next) {
             debug_assert!(target as usize <= Self::ROW_MAX_ID);
-            self.rows[source as usize][byte as usize] = target as u16;
+            self.store_transition(source, byte, target as u16);
+            if let Some(admitted) = single_admitted {
+                self.boundary_allowed[target as usize] = Some(admitted);
+            }
             return target;
         }
         *uncached_output = next;
@@ -2255,6 +2340,38 @@ impl Drop for FullWalkManyTransitionCache {
                 self.states.len(), self.calls, self.hits, self.misses, self.exhausted, self.max_branches);
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn singleton_product_cache_keeps_exact_keys_and_capacity() {
+    let one = |lexer_state, parser_node| FullWalkManyState::Branches(smallvec::smallvec![
+        FullWalkBranch { lexer_state, parser_node, prune_guard: FullWalkPruneGuard::Passed },
+    ]);
+    let mut cache = FullWalkManyTransitionCache::new(2, true, true);
+    let a = cache.intern(&one(7, 3)).unwrap();
+    let b = cache.intern(&one(8, 3)).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(cache.intern(&one(7, 3)), Some(a));
+    assert!(cache.stays_many[a as usize]);
+    assert!(cache.intern(&one(7, 4)).is_none(), "different parser must not alias a full cache");
+    cache.store_transition(a, b'x', b as u16);
+    assert_eq!(cache.cached_many_target(a, b'x'), Some(b));
+    let alphabet = |bytes: &[u8]| {
+        let mut alphabet = [0u64; 4];
+        for &byte in bytes { alphabet[byte as usize >> 6] |= 1u64 << (byte & 63); }
+        alphabet
+    };
+    cache.store_transition(a, b'a', a as u16);
+    cache.store_transition(a, 0xc2, a as u16);
+    assert_eq!(cache.cached_loop_alphabet(a, alphabet(&[b'a', 0xc2])), Some(true));
+    assert_eq!(cache.cached_loop_alphabet(a, alphabet(b"ax")), Some(false));
+    assert_eq!(cache.cached_loop_alphabet(a, alphabet(b"az")), None);
+    assert_eq!(cache.cached_loop_alphabet(b, alphabet(b"a")), None);
+    let mut ordinary = FullWalkManyTransitionCache::new(2, true, false);
+    let id = ordinary.intern(&one(7, 3)).unwrap();
+    assert!(!ordinary.stays_many[id as usize], "ordinary scalar lane stays unchanged");
+    assert!(FullWalkManyTransitionCache::new(0, true, true).intern(&one(7, 3)).is_none());
 }
 
 struct FullWalkParserNode {
@@ -4894,6 +5011,7 @@ fn try_full_walk_mask_with_table<
     let mut deferred_allowed_markers = Vec::<u64>::new();
     let mut deferred_rejected_markers = Vec::<u64>::new();
     let mut deferred_dead_subtrees = Vec::<u32>::new();
+    let mut deferred_admitted_subtrees = Vec::<u32>::new();
     let mut deferred_positive_work = 0usize;
     let mut deferred_negative_work = 0usize;
     // Scalar is overwhelmingly dominant. Encode dead/multi directly in the
@@ -4987,8 +5105,10 @@ fn try_full_walk_mask_with_table<
     let mut triple_union_cache = FxHashMap::<(u32, u32, u32), Option<u32>>::default();
     let product_transition_cache_capacity = transitions.product_transition_cache_capacity();
     let cache_two_branch_products = transitions.cache_two_branch_products();
-    let mut many_transition_cache =
-        FullWalkManyTransitionCache::new(product_transition_cache_capacity, cache_two_branch_products);
+    let cache_single_branch_products = transitions.cache_single_branch_products();
+    let mut many_transition_cache = FullWalkManyTransitionCache::new(
+        product_transition_cache_capacity, cache_two_branch_products, cache_single_branch_products,
+    );
     let mut stack_many_ids = if product_transition_cache_capacity != 0 {
         vec![FullWalkManyTransitionCache::UNKNOWN; stack_len]
     } else { Vec::new() };
@@ -5183,6 +5303,7 @@ fn try_full_walk_mask_with_table<
     let mut profile_blocked_dead_endpoints = 0usize;
     let mut profile_blocked_original_tokens = 0usize;
     let mut profile_dead_subtree_original_tokens = 0usize;
+    let mut profile_admitted_subtree_original_tokens = 0usize;
     let mut profile_first_match_direct_byte_ops = 0usize;
     let mut profile_first_match_direct_finalizers = 0usize;
     let mut profile_first_match_direct_endpoints = 0usize;
@@ -5311,6 +5432,19 @@ fn try_full_walk_mask_with_table<
                     );
                     continue;
                 }
+            }
+        }
+
+        if cache_single_branch_products && product_transition_cache_capacity != 0
+            && scalar_lexer < FULL_WALK_LEXER_TWO_DISTINCT && first_match_direct.is_none()
+        {
+            let single = FullWalkManyState::Branches(smallvec::smallvec![
+                FullWalkBranch { lexer_state: scalar_lexer, parser_node: scalar_parser,
+                    prune_guard: FullWalkPruneGuard::Passed },
+            ]);
+            if let Some(id) = many_transition_cache.intern(&single) {
+                current_many_id = id;
+                scalar_lexer = FULL_WALK_LEXER_MULTI;
             }
         }
 
@@ -5906,6 +6040,7 @@ fn try_full_walk_mask_with_table<
                         &mut parser_cache,
                         state.constraint,
                         &mut owned_next,
+                        condition_walk_enabled,
                     )
                 } else { FullWalkManyTransitionCache::UNKNOWN };
                 let next = if next_id < FullWalkManyTransitionCache::DEAD {
@@ -5937,8 +6072,13 @@ fn try_full_walk_mask_with_table<
                                 continue;
                             }
                             [branch] if branch.prune_guard.is_passed() => {
-                                scalar_lexer = branch.lexer_state;
-                                scalar_parser = branch.parser_node;
+                                if cache_single_branch_products && next_id < FullWalkManyTransitionCache::DEAD {
+                                    scalar_lexer = FULL_WALK_LEXER_MULTI;
+                                    current_many_id = next_id;
+                                } else {
+                                    scalar_lexer = branch.lexer_state;
+                                    scalar_parser = branch.parser_node;
+                                }
                             }
                             [first, second]
                                 if first.prune_guard.is_passed() && second.prune_guard.is_passed() =>
@@ -6012,6 +6152,38 @@ fn try_full_walk_mask_with_table<
         }
 
         if op.ends_edge() {
+            if cache_single_branch_products && scalar_lexer == FULL_WALK_LEXER_MULTI
+                && current_many_id < FullWalkManyTransitionCache::DEAD
+                // Products with no known self-loop cannot prove a nonempty
+                // suffix alphabet. Avoid loading trie/edge/byte-set metadata
+                // at every endpoint for those changing products.
+                && many_transition_cache.has_self_loop[current_many_id as usize]
+                && first_match_direct.is_none()
+            {
+                let op_index = walk_ops.len() - remaining_ops.as_slice().len() - 1;
+                let (child, _) = trie.full_walk_dead_subtree(op_index);
+                // At END the whole compressed edge is consumed, so the cached
+                // subtree alphabet covers exactly the remaining suffix bytes.
+                if trie.node(child).child_len != 0
+                    && many_transition_cache.admits_stable_alphabet(
+                        current_many_id, trie.subtree_bytes(child), initial_lexer_state,
+                        transitions, &mut parser_cache, state.constraint,
+                    )
+                {
+                    let original_count = vocab.subtree_original_tokens_for(trie, child).len();
+                    if deferred_output {
+                        deferred_positive_work += original_count;
+                        deferred_admitted_subtrees.push(child);
+                    }
+                    if profile_generic_work {
+                        profile_admitted_subtree_original_tokens += original_count;
+                    }
+                    full_walk_skip_admitted_subtree_generic(
+                        trie, walk_ops, &mut remaining_ops, &mut token_marker_index,
+                    );
+                    continue;
+                }
+            }
             if op.child_is_token() {
                 if profile_generic_work {
                     profile_token_endpoints += 1;
@@ -6237,6 +6409,13 @@ fn try_full_walk_mask_with_table<
             for marker in deferred_allowed_markers {
                 mark_dynamic_token_marker(vocab, marker, buf);
             }
+            for child in deferred_admitted_subtrees {
+                for &canonical in trie.subtree_tokens(child) {
+                    for &(word, bits) in vocab.token_word_masks(canonical) {
+                        if let Some(slot) = buf.get_mut(word as usize) { *slot |= bits; }
+                    }
+                }
+            }
         } else {
             let all_words = vocab.all_original_token_words();
             let copy_len = buf.len().min(all_words.len());
@@ -6272,7 +6451,7 @@ fn try_full_walk_mask_with_table<
     }
     if profile_generic_work {
         eprintln!(
-            "[glrmask/profile][generic_walk_work] byte_ops={} scalar_byte_ops={} two_byte_ops={} multi_byte_ops={} dead_byte_ops={} token_endpoints={} allowed_endpoints={} blocked_endpoints={} blocked_dead_endpoints={} blocked_original_tokens={} dead_subtree_original_tokens={} boundary_calls={} boundary_hits={} boundary_misses={} admitted_builds={} parser_nodes={} first_match_direct_bytes={} first_match_direct_finalizers={} first_match_direct_endpoints={}",
+            "[glrmask/profile][generic_walk_work] byte_ops={} scalar_byte_ops={} two_byte_ops={} multi_byte_ops={} dead_byte_ops={} token_endpoints={} allowed_endpoints={} blocked_endpoints={} blocked_dead_endpoints={} blocked_original_tokens={} dead_subtree_original_tokens={} admitted_subtree_original_tokens={} boundary_calls={} boundary_hits={} boundary_misses={} admitted_builds={} parser_nodes={} first_match_direct_bytes={} first_match_direct_finalizers={} first_match_direct_endpoints={}",
             profile_byte_ops,
             profile_scalar_byte_ops,
             profile_two_byte_ops,
@@ -6284,6 +6463,7 @@ fn try_full_walk_mask_with_table<
             profile_blocked_dead_endpoints,
             profile_blocked_original_tokens,
             profile_dead_subtree_original_tokens,
+            profile_admitted_subtree_original_tokens,
             parser_cache.profile_boundary_calls,
             parser_cache.profile_boundary_hits,
             parser_cache.profile_boundary_misses,
@@ -9777,8 +9957,18 @@ mod tests {
                     let mut expected = vec![0;constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                     let mut actual = vec![0;expected.len()];
-                    assert!(recursive_provider::fill(&state,&mut actual).unwrap());
-                    assert_eq!(actual, expected, "general recursive prefix {prefix:?}");
+                    struct CapacityGuard(usize);
+                    impl Drop for CapacityGuard {
+                        fn drop(&mut self) {
+                            TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(self.0));
+                        }
+                    }
+                    let _capacity = CapacityGuard(TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()));
+                    for capacity in [0, 1, 2, 16, 256, 2048] {
+                        TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
+                        assert!(recursive_provider::fill(&state,&mut actual).unwrap());
+                        assert_eq!(actual, expected, "general recursive prefix {prefix:?} capacity={capacity}");
+                    }
                     assert!(try_fill_recursive_mask_shared(&state,&mut actual).unwrap());
                     assert_eq!(actual, expected, "production shared prefix {prefix:?}");
                     assert_recursive_persistent_roundtrip(&state);
@@ -11078,6 +11268,70 @@ nt start ::= A;
         state.commit_token(3).unwrap();
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
+    }
+
+
+    #[test]
+    fn recursive_subtree_proof_preserves_sparse_aliases_and_output_polarity() {
+        struct CapacityGuard(usize);
+        impl Drop for CapacityGuard {
+            fn drop(&mut self) {
+                TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(self.0));
+            }
+        }
+        let _capacity = CapacityGuard(TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.get()));
+        // Nested a-prefix terminals make the radix walk learn an a self-loop
+        // before reaching the remaining a-only subtrees. Duplicate byte strings
+        // have distinct, sparse original IDs. More rejected original tokens
+        // switches the same exact result to adaptive positive-side emission.
+        for distractors in [0usize, 192] {
+            let mut entries = vec![
+                (0, b"".to_vec()), (2, b"X".to_vec()), (4, b"!".to_vec()),
+                (6, b"a!".to_vec()), (8, b"Xa!".to_vec()), (10, b"z".to_vec()),
+            ];
+            for len in 1..=64usize {
+                let id = 16 + (len as u32 - 1) * 4;
+                entries.push((id, vec![b'a'; len]));
+                entries.push((id + 1, vec![b'a'; len]));
+            }
+            for index in 0..distractors {
+                entries.push((1024 + index as u32 * 2, format!("z{index:03}").into_bytes()));
+            }
+            let vocab = Vocab::new(entries);
+            let parent = Constraint::compile(Grammar::glrm(
+                r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#,
+            ), &vocab).unwrap();
+            let child = Constraint::compile(Grammar::glrm(
+                r#"start payload; t A ::= "a"+; nt payload ::= A;"#,
+            ), &vocab).unwrap();
+            let composed = parent.bind_grammar_dynamic_boundary("payload", child).unwrap();
+            let loaded = Constraint::load(composed.save()).unwrap();
+            for constraint in [&composed, &loaded] {
+                for prefix in ["X", "Xa", "Xaa"] {
+                    let mut state = constraint.start();
+                    state.commit_bytes(prefix.as_bytes()).unwrap();
+                    let mut expected = vec![0; constraint.mask_len()];
+                    state.fill_recursive_mask_by_exact_full_walk(&mut expected);
+                    for capacity in [0, 1, 2, 16, 2048] {
+                        TEST_RECURSIVE_PRODUCT_CACHE_CAPACITY.with(|v| v.set(capacity));
+                        let mut actual = vec![u32::MAX; expected.len()];
+                        assert!(recursive_provider::fill(&state, &mut actual).unwrap());
+                        assert_eq!(actual, expected,
+                            "sparse aliases: prefix={prefix:?}, capacity={capacity}, distractors={distractors}");
+                        for len in 1..=64usize {
+                            let id = 16 + (len as u32 - 1) * 4;
+                            assert!(token_allowed(&actual, id));
+                            assert!(token_allowed(&actual, id + 1));
+                            assert!(!token_allowed(&actual, id + 2), "unused sparse ID must stay clear");
+                        }
+                        assert!(!token_allowed(&actual, 10));
+                        for index in 0..distractors {
+                            assert!(!token_allowed(&actual, 1024 + index as u32 * 2));
+                        }
+                    }
+                }
+            }
+        }
     }
 
 }
