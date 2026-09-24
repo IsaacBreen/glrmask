@@ -515,6 +515,22 @@ pub fn schema_to_named_grammar_for_dynamic_with_name_provenance(
     schema_to_named_grammar_with_config_and_name_provenance(schema, config)
 }
 
+/// Compiler-only entry point. Named-grammar inspection keeps all definitions;
+/// an actual Dynamic build may remove unreachable generated rules before their
+/// regex processing, because its next stage already discards those same rules.
+#[doc(hidden)]
+pub fn schema_to_named_grammar_for_runtime_dynamic(
+    schema: &Value,
+    vocab_partition: bool,
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut config = JsonSchemaConfig::from_env();
+    config.lazy_ordinary_bounded_strings = true;
+    config.split_pattern_property_prefix = true;
+    config.sparse_large_optional_objects = !vocab_partition;
+    let prune = std::env::var_os("GLRMASK_DISABLE_EARLY_JSON_RULE_PRUNE").is_none();
+    Ok(schema_to_named_grammar_with_config_runtime_impl(schema, config, false, prune)?.grammar)
+}
+
 /// Convert JSON Schema for the vocabulary-partitioned dynamic compiler.
 ///
 /// O2 deliberately keeps large optional objects on the ordinary dynamic
@@ -600,6 +616,26 @@ mod dynamic_fixed_object_policy_tests {
         assert_eq!(sparse_object_rules(&grammar), 0);
     }
 
+
+    #[test]
+    fn compiler_only_pruning_preserves_inspection_and_reachable_grammar() {
+        for schema in [json!({"type":"boolean"}),
+            json!({"type":"integer","minimum":0,"maximum":99}),
+            json!({"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false})] {
+            let inspected = schema_to_named_grammar_for_dynamic(&schema).unwrap();
+            let runtime = super::schema_to_named_grammar_for_runtime_dynamic(&schema, false).unwrap();
+            assert!(inspected.rules.len() > runtime.rules.len());
+            let a = inspected.prune_unreachable();
+            let b = runtime.prune_unreachable();
+            assert_eq!(a.rules, b.rules);
+            assert_eq!(a.lexer_partitions, b.lexer_partitions);
+            let literals = a.emitted_anonymous_literals();
+            assert_eq!(literals, b.emitted_anonymous_literals());
+            for literal in literals {
+                assert_eq!(a.lexer_literal_partitions.get(&literal), b.lexer_literal_partitions.get(&literal));
+            }
+        }
+    }
 
     #[test]
     fn property_name_provenance_preserves_domains_predicate_kind_and_anchors() {
@@ -757,6 +793,15 @@ fn schema_to_named_grammar_with_config_impl(
     config: JsonSchemaConfig,
     collect_name_provenance: bool,
 ) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
+    schema_to_named_grammar_with_config_runtime_impl(schema, config, collect_name_provenance, false)
+}
+
+fn schema_to_named_grammar_with_config_runtime_impl(
+    schema: &Value,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+    early_prune: bool,
+) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
@@ -784,12 +829,9 @@ fn schema_to_named_grammar_with_config_impl(
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let lower_started_at = profile_enabled.then(std::time::Instant::now);
-    let lowered = if collect_name_provenance {
-        lower::lower_document_with_name_provenance(&document, config)
-    } else {
-        lower::lower_document_with_options(&document, config, false)
-    }
-    .map_err(GlrMaskError::from)?;
+    let lowered = lower::lower_document_with_runtime_pruning(
+        &document, config, collect_name_provenance, early_prune,
+    ).map_err(GlrMaskError::from)?;
     if let Some(total_started_at) = total_started_at {
         eprintln!(
             "[glrmask/profile][json_schema_import] preflight_ms={:.3} load_ms={:.3} lower_ms={:.3} total_ms={:.3}",

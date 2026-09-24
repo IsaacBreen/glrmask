@@ -206,6 +206,15 @@ pub(crate) fn lower_document_with_options(
     config: JsonSchemaConfig,
     collect_name_provenance: bool,
 ) -> ImportResult<JsonSchemaNamedGrammar> {
+    lower_document_with_runtime_pruning(document, config, collect_name_provenance, false)
+}
+
+pub(crate) fn lower_document_with_runtime_pruning(
+    document: &SchemaDocument,
+    config: JsonSchemaConfig,
+    collect_name_provenance: bool,
+    early_prune: bool,
+) -> ImportResult<JsonSchemaNamedGrammar> {
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let started_at = profile_enabled.then(std::time::Instant::now);
@@ -213,7 +222,7 @@ pub(crate) fn lower_document_with_options(
     let setup_ms = started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
-    let lowered = lowerer.finish()?;
+    let lowered = lowerer.finish_with_early_rule_pruning(early_prune)?;
     if let Some(started_at) = started_at {
         eprintln!(
             "[glrmask/profile][json_schema_lower_document] setup_ms={:.3} finish_ms={:.3} total_ms={:.3}",
@@ -592,7 +601,11 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    fn finish(mut self) -> ImportResult<JsonSchemaNamedGrammar> {
+    fn finish(self) -> ImportResult<JsonSchemaNamedGrammar> {
+        self.finish_with_early_rule_pruning(false)
+    }
+
+    fn finish_with_early_rule_pruning(mut self, early_prune: bool) -> ImportResult<JsonSchemaNamedGrammar> {
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
         let root_started_at = profile_enabled.then(std::time::Instant::now);
@@ -648,11 +661,6 @@ impl<'a> Lowerer<'a> {
             );
         }
         let simplify_started_at = profile_enabled.then(std::time::Instant::now);
-        let terminal_simplify_started_at = profile_enabled.then(std::time::Instant::now);
-        simplify_terminal_rules(&mut self.rules);
-        let terminal_simplify_ms = terminal_simplify_started_at
-            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
-            .unwrap_or(0.0);
         let mut grammar = NamedGrammar {
             rules: self.rules,
             start: "start".to_string(),
@@ -661,6 +669,22 @@ impl<'a> Lowerer<'a> {
             lexer_literal_partitions: Default::default(),
             default_lexer_partition: None,
         };
+        // JSON builtins are installed before the requested schema is lowered.
+        // A closed boolean/object schema cannot reach most of them. Remove
+        // only reference-unreachable rules before parsing/simplifying their
+        // regex bodies. The existing graph walk follows terminal references,
+        // exclusions, intersections and ExprNFA labels as well as CFG edges.
+        // Ordinary and provenance-bearing imports must return the same grammar.
+        // Project only rule metadata below; predicate IDs and source predicates
+        // remain stable, just as in the existing alternative-pruning API.
+        if early_prune {
+            prune_generated_rules_in_place(&mut grammar.rules, &grammar.start);
+        }
+        let terminal_simplify_started_at = profile_enabled.then(std::time::Instant::now);
+        simplify_terminal_rules(&mut grammar.rules);
+        let terminal_simplify_ms = terminal_simplify_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
+            .unwrap_or(0.0);
         let expr_simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_named_grammar_expressions(&mut grammar);
         let expr_simplify_ms = expr_simplify_started_at
@@ -718,6 +742,11 @@ impl<'a> Lowerer<'a> {
                     .clone()
             })
             .unwrap_or_default();
+        let name_provenance = if early_prune {
+            name_provenance.projected_to_named_grammar(&grammar)
+        } else {
+            name_provenance
+        };
         Ok(JsonSchemaNamedGrammar { grammar, name_provenance })
     }
 
@@ -2356,6 +2385,101 @@ fn collect_shared_ap_exclusions_from_schema(
 fn simplify_terminal_rules(rules: &mut [NamedRule]) {
     for rule in rules.iter_mut().filter(|rule| rule.is_terminal) {
         rule.expr = simplify_terminal_expr(rule.expr.clone());
+    }
+}
+
+/// Same reference closure as NamedGrammar::prune_unreachable, but this pass
+/// owns the generated rules and has not assigned any partition metadata yet.
+/// Borrow names during discovery, then retain/move live rules without cloning
+/// their expression trees. The public borrowed pruning API cannot do this.
+fn prune_generated_rules_in_place(rules: &mut Vec<NamedRule>, start: &str) {
+    fn references<'a>(expr: &'a GrammarExpr, pending: &mut Vec<&'a str>) {
+        match expr {
+            GrammarExpr::Ref(name) => pending.push(name.as_str()),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => references(inner, pending),
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
+                for part in parts { references(part, pending); }
+            }
+            GrammarExpr::Exclude { expr, exclude } => {
+                references(expr, pending); references(exclude, pending);
+            }
+            GrammarExpr::Intersect { expr, intersect } => {
+                references(expr, pending); references(intersect, pending);
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                for (item, _) in items { references(item, pending); }
+                references(separator, pending);
+            }
+            GrammarExpr::ExprNFA(nfa) => {
+                for symbol in &nfa.symbols { references(symbol, pending); }
+            }
+            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
+            | GrammarExpr::LexerDfa(_) | GrammarExpr::AnyByte => {}
+        }
+    }
+    let keep = {
+        let by_name = rules.iter().map(|r| (r.name.as_str(), &r.expr))
+            .collect::<rustc_hash::FxHashMap<_, _>>();
+        let mut reached = rustc_hash::FxHashSet::default();
+        let mut pending = vec![start];
+        while let Some(name) = pending.pop() {
+            if !reached.insert(name) { continue; }
+            if let Some(expr) = by_name.get(name) { references(expr, &mut pending); }
+        }
+        rules.iter().map(|r| reached.contains(r.name.as_str())).collect::<Vec<_>>()
+    };
+    let mut index = 0;
+    rules.retain(|_| { let retain = keep[index]; index += 1; retain });
+}
+
+#[cfg(test)]
+mod early_rule_pruning_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn lower(value: &Value, early: bool, provenance: bool) -> NamedGrammar {
+        let features = super::super::load::scan_document_features(value);
+        let document = super::super::load::load_document_with_features(value, &features).unwrap();
+        let mut config = JsonSchemaConfig::default();
+        config.lazy_ordinary_bounded_strings = true;
+        config.split_pattern_property_prefix = true;
+        config.sparse_large_optional_objects = true;
+        Lowerer::new_with_name_provenance(&document, config, provenance)
+            .finish_with_early_rule_pruning(early).unwrap().grammar
+    }
+
+    #[test]
+    fn early_rule_pruning_preserves_reachable_definitions() {
+        let cases = [
+            json!(true), json!(false), json!({"type":"boolean"}),
+            json!({"type":"integer","minimum":-10,"maximum":100}),
+            json!({"type":"string","maxLength":300}),
+            json!({"type":"string","pattern":"^[a-z]{2,5}$"}),
+            json!({"type":"array","items":{"type":"boolean"},"maxItems":4}),
+            json!({"type":"object","properties":{"a":{"type":"boolean"},"b":{"type":"string"}},"additionalProperties":false}),
+            json!({"type":"object","properties":{"a":{"type":"boolean"}}}),
+            json!({"$defs":{"node":{"anyOf":[{"type":"null"},{"type":"array","items":{"$ref":"#/$defs/node"}}]}},"$ref":"#/$defs/node"}),
+        ];
+        for schema in cases {
+            let baseline = lower(&schema, false, false).prune_unreachable();
+            let candidate = lower(&schema, true, false).prune_unreachable();
+            assert_eq!(baseline.start, candidate.start, "{schema}");
+            assert_eq!(baseline.ignore, candidate.ignore, "{schema}");
+            assert_eq!(baseline.rules, candidate.rules, "{schema}");
+            assert_eq!(baseline.lexer_partitions, candidate.lexer_partitions, "{schema}");
+            assert_eq!(baseline.emitted_anonymous_literals(), candidate.emitted_anonymous_literals(), "{schema}");
+        }
+    }
+
+    #[test]
+    fn early_rule_pruning_removes_unused_builtins_but_keeps_provenance_contract() {
+        let schema = json!({"type":"boolean"});
+        let baseline = lower(&schema, false, false);
+        let candidate = lower(&schema, true, false);
+        assert!(candidate.rules.len() < baseline.rules.len());
+        let with_provenance = lower(&schema, true, true);
+        assert_eq!(candidate.rules, with_provenance.rules);
     }
 }
 

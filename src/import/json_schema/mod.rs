@@ -1,6 +1,8 @@
+#[cfg(test)]
+pub(crate) use glrmask_json_schema::schema_to_named_grammar_for_dynamic;
+
 pub(crate) use glrmask_json_schema::{
     prepare_named_grammar, prepare_named_grammar_for_dump, schema_to_named_grammar,
-    schema_to_named_grammar_for_dynamic, schema_to_named_grammar_for_dynamic_vocab_partition,
     schema_to_named_grammar_with_dynamic_value_token,
     schema_to_named_grammar_with_programmatic_value_tokens,
 };

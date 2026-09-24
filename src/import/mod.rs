@@ -788,7 +788,7 @@ fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::N
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
 
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
-    let named = json_schema::schema_to_named_grammar_for_dynamic(&schema);
+    let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, false);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
     Ok(named?)
 }
@@ -802,7 +802,7 @@ fn parse_json_schema_to_named_dynamic_vocab_partition(
     emit_import_phase_end("serde_json_from_str", json_parse_started_at);
 
     let schema_to_named_started_at = emit_import_phase_start("schema_to_named_grammar");
-    let named = json_schema::schema_to_named_grammar_for_dynamic_vocab_partition(&schema);
+    let named = glrmask_json_schema::__private::schema_to_named_grammar_for_runtime_dynamic(&schema, true);
     emit_import_phase_end("schema_to_named_grammar", schema_to_named_started_at);
     Ok(named?)
 }

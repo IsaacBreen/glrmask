@@ -57,6 +57,7 @@ pub mod __private {
         GLRMASK_JSON_SCHEMA_SPLIT_LITERAL_TERMINALS_ENV, finalize_lexer_partitions,
         lower_exact_subtractions_enabled, prepare_named_grammar_for_lowering,
         schema_to_named_grammar_for_dynamic_with_name_provenance,
+        schema_to_named_grammar_for_runtime_dynamic,
         JsonNameDomain, JsonNamePredicateProvenance, JsonNameProvenanceSidecar,
         JsonNameRuleProvenance, JsonNameSuffix, JsonSchemaNamedGrammar,
         split_literal_terminals_enabled,
