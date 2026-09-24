@@ -1,4 +1,4 @@
-use glrmask::{Grammar, Module, Vocab};
+use glrmask::{Grammar, UnlinkedConstraint, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -20,7 +20,7 @@ fn immutable_source_and_compiled_bindings_cross_token_boundaries() {
     let child = Grammar::from_ebnf(r#"start ::= "a""#);
     let compiled = child.compile(&v).unwrap();
     for c in [parent.bind("child", &child).unwrap().compile(&v).unwrap(),
-              parent.bind("child", &compiled).unwrap().compile(&v).unwrap()] {
+              parent.compile_unlinked(&v).unwrap().bind("child", &compiled).unwrap().link().unwrap()] {
         let mut s = c.start();
         assert!(allowed(&s.mask(), 4));
         s.commit_token(4).unwrap();
@@ -32,10 +32,10 @@ fn immutable_source_and_compiled_bindings_cross_token_boundaries() {
 #[test]
 fn module_reuse_load_and_closed_link() {
     let v = vocab();
-    let host = Grammar::from_glrm(HOST).compile_module(&v).unwrap();
+    let host = Grammar::from_glrm(HOST).compile_unlinked(&v).unwrap();
     let a = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
-    let b = Grammar::from_ebnf(r#"start ::= "b""#).compile_module(&v).unwrap();
-    for parent in [&host, &Module::load(host.save()).unwrap()] {
+    let b = Grammar::from_ebnf(r#"start ::= "b""#).compile_unlinked(&v).unwrap().link().unwrap();
+    for parent in [&host, &UnlinkedConstraint::load(host.save()).unwrap()] {
         assert!(parent.link().is_err());
         let bound = parent.bind("child", &a).unwrap().link().unwrap();
         assert!(allowed(&bound.start().mask(), 4));
@@ -63,7 +63,7 @@ fn source_exact_token_identity_is_not_bytes() {
 fn compiled_exact_token_bind_matches_source_at_every_step() {
     let v = vocab();
     let g = Grammar::from_glrm(TOKEN_HOST);
-    let m = g.compile_module(&v).unwrap();
+    let m = g.compile_unlinked(&v).unwrap();
     assert!(m.link().is_err());
     let expected = g.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap().compile(&v).unwrap();
     let actual = m.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap().link().unwrap();
@@ -80,8 +80,8 @@ fn compiled_exact_token_bind_matches_source_at_every_step() {
 #[test]
 fn unbound_exact_token_survives_save_load() {
     let v = vocab();
-    let m = Grammar::from_glrm(TOKEN_HOST).compile_module(&v).unwrap();
-    let loaded = Module::load(m.save()).unwrap();
+    let m = Grammar::from_glrm(TOKEN_HOST).compile_unlinked(&v).unwrap();
+    let loaded = UnlinkedConstraint::load(m.save()).unwrap();
     assert!(loaded.link().is_err(), "loading must not silently close unresolved token slots");
     let c = loaded.bind("MARK", v.token(7).unwrap()).unwrap().link().unwrap();
     let mut s = c.start();
@@ -98,20 +98,21 @@ fn wrong_vocabulary_and_slot_kind_are_rejected() {
     assert!(parent.bind("MARK", other.token(7).unwrap()).unwrap().compile(&v).is_err());
     assert!(Grammar::from_glrm(HOST).bind("child", v.token(7).unwrap()).is_err());
     let child = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
-    assert!(parent.bind("MARK", &child).is_err());
+    assert!(parent.compile_unlinked(&v).unwrap().bind("MARK", &child).is_err());
     let incompatible = Grammar::from_ebnf(r#"start ::= "different""#).compile(&other).unwrap();
-    assert!(Grammar::from_glrm(HOST).bind("child", &incompatible).unwrap().compile(&v).is_err());
+    assert!(Grammar::from_glrm(HOST).compile_unlinked(&v).unwrap().bind("child", &incompatible).is_err());
 }
 
 #[test]
 fn nested_open_token_module_keeps_its_qualified_kind_after_load() {
     let v = vocab();
-    let inner = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
-        .compile_module(&v).unwrap();
-    let outer = Grammar::from_glrm(HOST).compile_module(&v).unwrap();
-    let open = outer.bind("child", &inner).unwrap();
+    // Open child graphs are assembled in the source world; the public compiled
+    // binding API now accepts runnable children, not open child artifacts.
+    let inner = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;");
+    let outer = Grammar::from_glrm(HOST);
+    let open = outer.bind("child", &inner).unwrap().compile_unlinked(&v).unwrap();
     assert!(open.link().is_err());
-    let loaded = Module::load(open.save()).unwrap();
+    let loaded = UnlinkedConstraint::load(open.save()).unwrap();
     let grammar_child = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
     assert!(loaded.bind("child.MARK", &grammar_child).is_err());
     let closed = loaded.bind("child.MARK", v.tokens([7, 8]).unwrap()).unwrap().link().unwrap();
@@ -130,12 +131,14 @@ fn nested_open_token_module_keeps_its_qualified_kind_after_load() {
 fn mixed_source_compilation_never_silently_closes_child_token_slots() {
     let v = vocab();
     let child_source = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;");
-    let child_module = child_source.compile_module(&v).unwrap();
+    let child_module = child_source.compile_unlinked(&v).unwrap();
+    assert!(child_module.link().is_err());
     let parent = Grammar::from_glrm(HOST);
-    for grammar in [parent.bind("child", &child_source).unwrap(), parent.bind("child", &child_module).unwrap()] {
-        assert!(grammar.compile(&v).is_err());
-        let open = grammar.compile_module(&v).unwrap();
-        let open = Module::load_with_vocab(open.save(), &v).unwrap();
+    let grammar = parent.bind("child", &child_source).unwrap();
+    assert!(grammar.compile(&v).is_err());
+    let fresh = grammar.compile_unlinked(&v).unwrap();
+    for open in [fresh.clone(), UnlinkedConstraint::load(fresh.save()).unwrap()] {
+        let open = UnlinkedConstraint::load_with_vocab(open.save(), &v).unwrap();
         assert!(open.link().is_err());
         let closed = open.bind("child.MARK", v.token(7).unwrap()).unwrap().link().unwrap();
         let mut s = closed.start();
@@ -151,15 +154,15 @@ fn mixed_slot_binding_order_and_saved_partial_modules() {
     let grammar = Grammar::from_glrm(
         "glrm 1; start start; extern token MARK; extern grammar child; nt start = MARK child;",
     );
-    let host = grammar.compile_module(&v).unwrap();
+    let host = grammar.compile_unlinked(&v).unwrap();
     let child = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
     assert!(host.bind("MARK", &child).is_err());
     assert!(host.bind("child", v.token(7).unwrap()).is_err());
     let token_first = host.bind("MARK", v.token(8).unwrap()).unwrap();
-    let token_first = Module::load(token_first.save()).unwrap();
+    let token_first = UnlinkedConstraint::load(token_first.save()).unwrap();
     let token_first = token_first.bind("child", &child).unwrap().link().unwrap();
     let child_first = host.bind("child", &child).unwrap();
-    let child_first = Module::load(child_first.save()).unwrap();
+    let child_first = UnlinkedConstraint::load(child_first.save()).unwrap();
     let child_first = child_first.bind("MARK", v.token(8).unwrap()).unwrap().link().unwrap();
     let mut a = token_first.start();
     let mut b = child_first.start();
@@ -177,7 +180,7 @@ fn mixed_slot_binding_order_and_saved_partial_modules() {
 fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     use glrmask::Constraint;
     let v = vocab();
-    let module = Grammar::from_glrm(TOKEN_HOST).compile_module(&v).unwrap();
+    let module = Grammar::from_glrm(TOKEN_HOST).compile_unlinked(&v).unwrap();
     let bytes = module.save();
     assert!(Constraint::load(bytes.clone()).is_err());
     let manifest_len =
@@ -185,18 +188,18 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     let body_start = 16 + manifest_len;
     assert!(
         Constraint::load(&bytes[body_start..]).is_err(),
-        "an open Module body must not be loadable as a public Constraint",
+        "an open UnlinkedConstraint body must not be loadable as a public Constraint",
     );
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
-    assert!(Module::load(constraint.save()).is_err());
+    assert!(UnlinkedConstraint::load(constraint.save()).is_err());
     for length in [0, 1, 8, 15, 16, bytes.len() - 1] {
-        assert!(Module::load(&bytes[..length]).is_err(), "accepted truncation to {length}");
+        assert!(UnlinkedConstraint::load(&bytes[..length]).is_err(), "accepted truncation to {length}");
     }
     let mut corrupt = bytes.clone();
     corrupt[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-    assert!(Module::load(corrupt).is_err());
+    assert!(UnlinkedConstraint::load(corrupt).is_err());
     let incompatible = Vocab::new(vec![(7, b"different".to_vec())]);
-    assert!(Module::load_with_vocab(bytes, &incompatible).is_err());
+    assert!(UnlinkedConstraint::load_with_vocab(bytes, &incompatible).is_err());
 }
 
 fn assert_same_language(expected: &glrmask::Constraint, actual: &glrmask::Constraint, depth: usize) {
@@ -227,12 +230,12 @@ fn exact_token_link_is_differentially_equal_to_source_for_choices_and_repetition
         let source = format!("glrm 1; start start; extern token MARK; nt start = {rule};");
         let grammar = Grammar::from_glrm(&source);
         let expected = grammar.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap().compile(&v).unwrap();
-        let module = grammar.compile_module(&v).unwrap();
-        let module = Module::load(module.save()).unwrap();
+        let module = grammar.compile_unlinked(&v).unwrap();
+        let module = UnlinkedConstraint::load(module.save()).unwrap();
         let bound = module.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap();
         let unsaved = bound.link().unwrap();
         assert_same_language(&expected, &unsaved, 4);
-        let loaded_module = Module::load(bound.save()).unwrap();
+        let loaded_module = UnlinkedConstraint::load(bound.save()).unwrap();
         let actual = loaded_module.link().unwrap();
         let loaded = glrmask::Constraint::load(actual.save()).unwrap();
         assert_same_language(&expected, &actual, 4);
@@ -243,13 +246,14 @@ fn exact_token_link_is_differentially_equal_to_source_for_choices_and_repetition
 #[test]
 fn repeated_open_child_slots_keep_independent_token_bindings() {
     let v = vocab();
-    let child = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
-        .compile_module(&v).unwrap();
+    let child = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;");
+    let child_open = child.compile_unlinked(&v).unwrap();
     let parent = Grammar::from_glrm(
         "glrm 1; start start; extern grammar A; extern grammar B; nt start = A B;",
-    ).compile_module(&v).unwrap();
-    let open = parent.bind("A", &child).unwrap().bind("B", &child).unwrap();
-    let loaded = Module::load(open.save()).unwrap();
+    );
+    let open = parent.bind("A", &child).unwrap().bind("B", &child).unwrap()
+        .compile_unlinked(&v).unwrap();
+    let loaded = UnlinkedConstraint::load(open.save()).unwrap();
     let first = loaded.bind("A.MARK", v.token(7).unwrap()).unwrap();
     assert!(first.link().is_err());
     let final_module = first.bind("B.MARK", v.token(8).unwrap()).unwrap();
@@ -262,14 +266,14 @@ fn repeated_open_child_slots_keep_independent_token_bindings() {
     assert!(!allowed(&state.mask(), 7));
     state.commit_token(8).unwrap();
     assert!(state.is_accepting());
-    assert!(child.link().is_err());
+    assert!(child_open.link().is_err());
 }
 
 #[test]
 fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     use glrmask::BuildOptions;
     let v = vocab();
-    let module = Grammar::from_ebnf(r#"start ::= "a""#).compile_module(&v).unwrap();
+    let module = Grammar::from_ebnf(r#"start ::= "a""#).compile_unlinked(&v).unwrap();
     let mut constraint = module.link_with(BuildOptions::default().end_tokens([130, 255])).unwrap();
     for _ in 0..4 {
         assert_eq!(constraint.mask_len(), 8);
@@ -365,7 +369,7 @@ fn root_artifact_headers_are_bounded_and_cannot_enter_module_body() {
     fake_module.extend_from_slice(&8u64.to_le_bytes());
     fake_module.extend_from_slice(&0u64.to_le_bytes());
     fake_module.extend_from_slice(&bytes);
-    assert!(Module::load(fake_module).is_err());
+    assert!(UnlinkedConstraint::load(fake_module).is_err());
 }
 
 #[test]
@@ -374,7 +378,7 @@ fn public_constraint_load_rejects_an_open_module_body() {
     let module = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar CHILD; nt start = CHILD;"#,
     )
-    .compile_module(&v)
+    .compile_unlinked(&v)
     .unwrap();
     let bytes = module.save();
     assert!(bytes.starts_with(b"GLRMOD03"));
@@ -383,7 +387,7 @@ fn public_constraint_load_rejects_an_open_module_body() {
     let body_start = 16 + manifest_len;
     assert!(body_start < bytes.len());
     assert!(glrmask::Constraint::load(&bytes[body_start..]).is_err());
-    assert!(Module::load(bytes).is_ok());
+    assert!(UnlinkedConstraint::load(bytes).is_ok());
 }
 
 #[test]
@@ -395,7 +399,7 @@ fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
         .build()
         .unwrap();
     // Build and consume the whole runtime inside the pool. The public API does
-    // not promise that Module/Constraint are Send; this regression is about
+    // not promise that UnlinkedConstraint/Constraint are Send; this regression is about
     // scheduler progress with one Rayon worker, not cross-thread transport.
     pool.install(|| {
         let v = Vocab::new(vec![
@@ -407,7 +411,7 @@ fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
         let host = Grammar::from_glrm(
             r#"glrm 1; start start; extern grammar CHILD; nt start = "x" CHILD "y";"#,
         )
-        .compile_module(&v)
+        .compile_unlinked(&v)
         .unwrap();
         let child = Grammar::from_ebnf(r#"start ::= "a""#)
             .compile(&v)
@@ -434,7 +438,7 @@ fn composed_dynamic_reference_does_not_admit_empty_byte_alias_without_special_pa
         r#"glrm 1; start start; extern token MARK; nt start = MARK "b" | "a" "y";"#,
     );
     let constraint = source
-        .compile_module(&v)
+        .compile_unlinked(&v)
         .unwrap()
         .bind("MARK", v.tokens([7, 8]).unwrap())
         .unwrap()
@@ -465,13 +469,14 @@ fn one_shot_optimization_preserves_deferred_compiled_module_bindings() {
     let token_child = Grammar::from_glrm(
         r#"glrm 1; start start; extern token MARK; nt start = MARK;"#,
     )
-    .compile_module(&v)
+    .compile_unlinked(&v)
     .unwrap()
     .bind("MARK", v.token(7).unwrap())
-    .unwrap();
+    .unwrap().link().unwrap();
     let parent = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
     )
+    .compile_unlinked(&v).unwrap()
     .bind("child", &token_child)
     .unwrap();
     let expected = Grammar::from_ebnf(r#"start ::= "x" @token(7) "y""#)
@@ -480,8 +485,7 @@ fn one_shot_optimization_preserves_deferred_compiled_module_bindings() {
 
     for optimization in [Optimization::FastBuild, Optimization::Auto, Optimization::FastRuntime] {
         let actual = parent
-            .compile_with(
-                &v,
+            .link_with(
                 BuildOptions::default().optimization(optimization),
             )
             .unwrap();
@@ -506,8 +510,8 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     );
 
-    let open = source.compile_module(&vocab).unwrap();
-    let loaded_open = Module::load(open.save()).unwrap();
+    let open = source.compile_unlinked(&vocab).unwrap();
+    let loaded_open = UnlinkedConstraint::load(open.save()).unwrap();
     let bound = loaded_open
         .bind("CONTROL", vocab.token(2).unwrap())
         .unwrap();
@@ -530,7 +534,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.is_accepting());
 
     let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
-    assert!(Module::load_with_vocab(open.save(), &missing_domain).is_err());
+    assert!(UnlinkedConstraint::load_with_vocab(open.save(), &missing_domain).is_err());
     assert!(glrmask::Constraint::load_with_vocab(constraint.save(), &missing_domain).is_err());
 }
 

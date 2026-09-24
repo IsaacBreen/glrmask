@@ -1,6 +1,6 @@
 //! A slice certificate must cover every input atom, not only surviving edges.
 //! These public-API regressions run with ordinary defaults (no environment setup).
-use glrmask::{BuildOptions, Constraint, Grammar, Module, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, UnlinkedConstraint, Optimization, Vocab};
 
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32)
@@ -85,8 +85,8 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
         .unwrap();
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,
-    ).compile_module(&vocab).unwrap();
-    let loaded_host = Module::load(host.save()).unwrap();
+    ).compile_unlinked(&vocab).unwrap();
+    let loaded_host = UnlinkedConstraint::load(host.save()).unwrap();
     for parent in [&host, &loaded_host] {
         let bound = parent.bind("child", &child).unwrap().link().unwrap();
         let mut state = bound.start();
