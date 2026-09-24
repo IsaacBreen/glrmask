@@ -1979,6 +1979,7 @@ impl BoundedCodeIntersectionOracle {
         &self,
         coordinate: BoundedCodeOracleCoordinate,
         atom_is_exact_body_code: bool,
+        first_atom_is_total: bool,
         max_repetitions: u32,
     ) -> Option<u32> {
         let BoundedCodeEnvelopeState::Body {
@@ -1991,7 +1992,11 @@ impl BoundedCodeIntersectionOracle {
         if completed > self.max {
             return Some(0);
         }
-        if !atom_is_exact_body_code {
+        // The completion relation is existential: missing pattern transitions
+        // are omitted by compute_completion_row. A surviving self-loop does
+        // not imply that every slice atom is defined. Require a separately
+        // completed universal first-atom proof before extrapolating the loop.
+        if !atom_is_exact_body_code || !first_atom_is_total {
             return None;
         }
         let relation = self.completion_relations.first()?.as_ref()?;
@@ -5411,25 +5416,6 @@ impl VirtualResidualRuntime {
                 max_repetitions,
             );
         }
-        if let Some(radius) = store
-            .liveness_oracle
-            .as_ref()?
-            .invariant_body_repeat_radius(
-                coordinate,
-                atom_is_exact_body_code,
-                max_repetitions,
-            )
-        {
-            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROOF_PHASES").is_some() {
-                eprintln!(
-                    "[glrmask/profile][virtual_radius_fast] state={} terminal={} fast_radius={}",
-                    state,
-                    self.terminal,
-                    radius,
-                );
-            }
-            return Some(radius);
-        }
         let at_body_boundary = atom_is_exact_body_code
             && matches!(
                 coordinate.envelope,
@@ -5468,6 +5454,32 @@ impl VirtualResidualRuntime {
             if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROOF_PHASES").is_some() {
                 eprintln!(
                     "[glrmask/profile][virtual_radius_fast] state={} terminal={} zero_probe_radius={}",
+                    state,
+                    self.terminal,
+                    radius,
+                );
+            }
+            return Some(radius);
+        }
+
+        // First establish that EVERY atom in the actual slice can be read.
+        // If all successful body completions also return to the same pattern
+        // coordinate, this total one-atom transition can then be repeated.
+        // In particular, a last-word nonspace loop must not certify a space
+        // that has no pattern transition at all.
+        if let Some(radius) = store
+            .liveness_oracle
+            .as_ref()?
+            .invariant_body_repeat_radius(
+                coordinate,
+                atom_is_exact_body_code,
+                zero_probe == Some(1),
+                max_repetitions,
+            )
+        {
+            if std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROOF_PHASES").is_some() {
+                eprintln!(
+                    "[glrmask/profile][virtual_radius_fast] state={} terminal={} fast_radius={}",
                     state,
                     self.terminal,
                     radius,
@@ -6621,6 +6633,103 @@ mod tests {
             ),
             Some(3),
         );
+    }
+
+    #[test]
+    fn slice_radius_totality_rejects_missing_multibyte_atom() {
+        // The existential completion relation contains only the successful
+        // a-loop; it omits the body word bc, which the pattern cannot read.
+        let pattern = Expr::Seq(vec![
+            bytes(b"<"),
+            Expr::Repeat { expr: Box::new(bytes(b"a")), min: 0, max: None },
+            bytes(b">"),
+        ]);
+        let expr = Expr::Intersect {
+            expr: Box::new(pattern),
+            intersect: Box::new(bounded_code_envelope_expr(0, 4)),
+        };
+        let runtime = VirtualResidualRuntime::new_dynamic(
+            &expr, 0, 0, 1, 2, 1,
+            Arc::new(VirtualStateAllocator::new(2).unwrap()),
+            Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap()),
+        ).expect("bounded-code test runtime");
+        let source = runtime.step(1, b'<').expect("live prefix");
+        assert!(runtime.step(source, b'b').is_none());
+
+        // Exact atom language a|bc, repeated by the slice DFA. First accepting
+        // boundaries are complete body code words, including the missing bc.
+        let mut classes = [3u8; 256];
+        classes[b'a' as usize] = 0;
+        classes[b'b' as usize] = 1;
+        classes[b'c' as usize] = 2;
+        let transitions = [1, 2, 3, 3, 1, 2, 3, 3, 3, 3, 1, 3, 3, 3, 3, 3];
+        let accepting = [false, true, false, false];
+        let productive = [true, true, true, false];
+        assert_eq!(
+            runtime.parser_transparent_byte_dfa_repeat_radius(
+                source, 0, 4, &classes, &transitions, &accepting, &productive, 8, 16 * 1024,
+            ),
+            Some(0),
+            "an existing self-loop cannot certify an absent body-code transition",
+        );
+    }
+
+    #[test]
+    fn slice_radius_totality_rejects_space_after_last_allowed_word() {
+        for max_words in 1usize..=4 {
+            let word = || Expr::Repeat {
+                expr: Box::new(bytes(b"a")), min: 1, max: None,
+            };
+            let pattern = Expr::Seq(vec![
+                bytes(b"<"), word(),
+                Expr::Repeat {
+                    expr: Box::new(Expr::Seq(vec![bytes(b" "), word()])),
+                    min: 0, max: Some(max_words - 1),
+                },
+                bytes(b">"),
+            ]);
+            let expr = Expr::Intersect {
+                expr: Box::new(pattern),
+                intersect: Box::new(bounded_code_envelope_with_body(
+                    Expr::Choice(vec![bytes(b"a"), bytes(b" ")]), 0, 32,
+                )),
+            };
+            let runtime = VirtualResidualRuntime::new_dynamic(
+                &expr, 0, 0, 1, 2, 1,
+                Arc::new(VirtualStateAllocator::new(2).unwrap()),
+                Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap()),
+            ).expect("word-count bounded-code runtime");
+            let prefix = format!("<{}", vec!["a"; max_words].join(" "));
+            let mut source = 1u32;
+            for byte in prefix.bytes() {
+                source = runtime.step(source, byte).expect("valid last-word prefix");
+            }
+            assert!(runtime.step(source, b' ').is_none(), "word bound must reject another separator");
+            let mut broad_classes = [1u8; 256];
+            broad_classes[b'a' as usize] = 0;
+            broad_classes[b' ' as usize] = 0;
+            let transitions = [1, 2, 1, 2, 2, 2];
+            let accepting = [false, true, false];
+            let productive = [true, true, false];
+            assert_eq!(
+                runtime.parser_transparent_byte_dfa_repeat_radius(
+                    source, 0, 2, &broad_classes, &transitions,
+                    &accepting, &productive, 32, 16 * 1024,
+                ),
+                Some(0), "broad atom set includes the forbidden separator; max_words={max_words}",
+            );
+            // A narrower alphabet really is total and invariant, and should
+            // retain the fast positive radius up to the character envelope.
+            let mut narrow_classes = [1u8; 256];
+            narrow_classes[b'a' as usize] = 0;
+            assert_eq!(
+                runtime.parser_transparent_byte_dfa_repeat_radius(
+                    source, 0, 2, &narrow_classes, &transitions,
+                    &accepting, &productive, 32, 16 * 1024,
+                ),
+                Some((32 - (2 * max_words - 1)) as u32),
+            );
+        }
     }
 
     #[test]

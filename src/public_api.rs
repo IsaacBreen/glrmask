@@ -1797,19 +1797,24 @@ fn select_supported_boundary(
     parent: &RuntimeConstraint,
     children: &[(String, Arc<RuntimeConstraint>)],
 ) -> Result<SegmentedBoundaryBackend> {
-    fn contains_nullable_link(constraint: &RuntimeConstraint) -> bool {
-        constraint.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
-            overlay.segmented_parser_links.iter().any(|link| link.child_start_nullable)
-                || overlay.segmented_parser_components.iter()
-                    .any(|component| contains_nullable_link(&component.constraint))
-        })
+    fn requires_dynamic_boundary(constraint: &RuntimeConstraint) -> bool {
+        // A FastBuild child can carry exact virtual lexer residuals. Static
+        // boundary shards cannot execute those coordinates, even when the
+        // child is non-nullable. Select the supported backend from metadata
+        // before linking rather than asking callers to know internal engines.
+        constraint.tokenizer.has_virtual_residual_runtime()
+            || constraint.static_dynamic_overlay.as_ref().is_some_and(|overlay| {
+                overlay.segmented_parser_links.iter().any(|link| link.child_start_nullable)
+                    || overlay.segmented_parser_components.iter()
+                        .any(|component| requires_dynamic_boundary(&component.constraint))
+            })
     }
-    if contains_nullable_link(parent) {
+    if requires_dynamic_boundary(parent) {
         return Ok(SegmentedBoundaryBackend::Dynamic);
     }
     for (_, child) in children {
         if child.composition_start_nullable().map_err(Error::Compilation)?
-            || contains_nullable_link(child)
+            || requires_dynamic_boundary(child)
         {
             return Ok(SegmentedBoundaryBackend::Dynamic);
         }

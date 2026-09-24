@@ -150,6 +150,10 @@ name = "o25804_mask_commit_mismatch"
 path = "tests/regressions/json_schema/o25804_mask_commit_mismatch.rs"
 
 [[test]]
+name = "word_limit_totality"
+path = "tests/regressions/json_schema/word_limit_totality.rs"
+
+[[test]]
 name = "o4836_unicode_escape_key"
 path = "tests/regressions/json_schema/o4836_unicode_escape_key.rs"
 
