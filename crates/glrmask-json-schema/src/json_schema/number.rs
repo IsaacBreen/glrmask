@@ -305,6 +305,17 @@ fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
     let Some(multiple) = multiple else {
         return true;
     };
+    if !multiple.is_finite() || multiple <= 0.0 {
+        return false;
+    }
+    if multiple.fract() == 0.0 {
+        // Every i64 magnitude is below 2^64. Avoid both a saturating float
+        // conversion at that boundary and loss of integer precision above2^53.
+        if multiple >= u64::MAX as f64 {
+            return value == 0;
+        }
+        return value.unsigned_abs() % (multiple as u64) == 0;
+    }
     let quotient = (value as f64) / multiple;
     (quotient - quotient.round()).abs() < 1e-9
 }
@@ -314,13 +325,16 @@ fn bounded_integer_multiple_choice(
     upper: i64,
     multiple: Option<f64>,
 ) -> Option<GrammarExpr> {
-    let multiple = positive_integer_multiple_i64(multiple?)?;
-    let first = ceil_div_i64(lower, multiple).checked_mul(multiple)?;
+    let multiple = i128::from(positive_integer_multiple_value(multiple?)?);
+    let lower = i128::from(lower);
+    let upper = i128::from(upper);
+    let quotient = lower / multiple;
+    let first = (quotient + i128::from(lower % multiple > 0)) * multiple;
     if first > upper {
         return Some(never());
     }
     let count = ((upper - first) / multiple) + 1;
-    if count > MAX_EXPLICIT_INTEGER_MULTIPLES {
+    if count > i128::from(MAX_EXPLICIT_INTEGER_MULTIPLES) {
         return None;
     }
     let alternatives = (0..count)
@@ -398,7 +412,11 @@ fn integer_modulo_expr(divisor: u64) -> ImportResult<GrammarExpr> {
 }
 
 fn positive_integer_multiple_value(multiple: f64) -> Option<u64> {
-    if !multiple.is_finite() || multiple < 1.0 || multiple.fract() != 0.0 {
+    if !multiple.is_finite()
+        || multiple < 1.0
+        || multiple >= u64::MAX as f64
+        || multiple.fract() != 0.0
+    {
         return None;
     }
     let value = multiple as u64;
@@ -588,5 +606,39 @@ mod integer_modulo_tests {
             exact_multiple.extend(std::iter::repeat_n(b'0', 2048));
             assert!(accepts(&dfa, &exact_multiple));
         }
+    }
+
+    #[test]
+    fn integer_modulo_finite_filter_is_exact_above_float_precision() {
+        for value in [i64::MIN, i64::MIN + 1, -9_007_199_254_740_993, 9_007_199_254_740_993, i64::MAX - 1, i64::MAX] {
+            for divisor in [2i64, 3, 7, 12, 37] {
+                assert_eq!(integer_satisfies_multiple(value, Some(divisor as f64)), value % divisor == 0,
+                           "value={value} divisor={divisor}");
+            }
+        }
+    }
+
+    #[test]
+    fn integer_modulo_full_signed_range_does_not_overflow_enumeration() {
+        assert!(bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some(3.0)).is_none(),
+                "too many multiples must fall through to the DFA, not become an empty language");
+        let expr = bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some((1u64 << 62) as f64)).unwrap();
+        let expected = choice([i64::MIN, -(1i64 << 62), 0, 1i64 << 62]
+            .into_iter().map(|value| lit_bytes(value.to_string().into_bytes())).collect());
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn integer_modulo_large_divisor_conversion_is_not_saturating() {
+        let two_to_63 = (1u64 << 63) as f64;
+        let two_to_64 = u64::MAX as f64;
+        assert_eq!(positive_integer_multiple_value(two_to_63), Some(1u64 << 63));
+        assert!(positive_integer_multiple_value(two_to_64).is_none());
+        assert!(!integer_satisfies_multiple(i64::MIN, Some(two_to_64)));
+        assert!(!integer_satisfies_multiple(i64::MAX, Some(two_to_64)));
+        assert!(integer_satisfies_multiple(0, Some(two_to_64)));
+        assert!(integer_satisfies_multiple(i64::MIN, Some(two_to_63)));
+        assert_eq!(bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some(two_to_63)),
+                   Some(choice(vec![lit_bytes(i64::MIN.to_string().into_bytes()), lit_bytes(b"0".to_vec())])));
     }
 }
