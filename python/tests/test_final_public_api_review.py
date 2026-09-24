@@ -26,19 +26,17 @@ def accepting(state):
 
 
 def test_public_types_exist_without_exposing_backend_selection():
-    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "ExactToken", "ExactTokens", "Optimization"]:
+    for name in ["Grammar", "UnlinkedConstraint", "Constraint", "ConstraintState", "Vocab", "ExactToken", "ExactTokens", "Optimization"]:
         assert hasattr(glrmask, name), name
     for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME"]:
         assert hasattr(glrmask.Optimization, name), name
 
 
-@pytest.mark.parametrize("compiled", [False, True])
-def test_source_or_compiled_child_uses_one_immutable_bind(compiled):
+def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     v = vocab()
     parent = glrmask.Grammar.from_glrm(HOST)
     child = glrmask.Grammar.from_ebnf('start ::= "a"')
-    supplied = child.compile(v) if compiled else child
-    c = parent.bind("child", supplied).compile(v)
+    c = parent.bind("child", child).compile(v)
     state = c.start()
     mask = np.asarray(state.mask())
     assert mask.dtype == np.bool_
@@ -47,20 +45,22 @@ def test_source_or_compiled_child_uses_one_immutable_bind(compiled):
     assert accepting(state)
     with pytest.raises((ValueError, RuntimeError)):
         parent.compile(v)
+    with pytest.raises(TypeError):
+        parent.bind("child", child.compile(v))
 
 
-def test_unbound_module_save_load_remains_open_and_immutable():
+def test_unlinked_constraint_save_load_remains_open_and_immutable():
     v = vocab()
-    host = glrmask.Grammar.from_glrm(HOST).compile_module(v)
+    host = glrmask.Grammar.from_glrm(HOST).compile_unlinked(v)
     artifact = host.save()
     assert isinstance(artifact, bytes)
-    loaded = glrmask.Module.load(artifact)
+    loaded = glrmask.UnlinkedConstraint.load(artifact)
     child = glrmask.Grammar.from_ebnf('start ::= "a"').compile(v)
     bound = loaded.bind("child", child).link()
     assert bound.start().mask()[4]
-    for open_module in [host, loaded]:
+    for open_unlinked in [host, loaded]:
         with pytest.raises((ValueError, RuntimeError)):
-            open_module.link()
+            open_unlinked.link()
     with pytest.raises((ValueError, RuntimeError)):
         glrmask.Constraint.load(artifact)
 
@@ -82,11 +82,11 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         v.tokens([7, 7])
 
 
-def test_open_token_module_nested_save_and_late_binding():
+def test_source_nested_open_token_survives_unlinked_save_and_late_binding():
     v = vocab()
-    child = glrmask.Grammar.from_glrm(MARK).compile_module(v)
-    parent = glrmask.Grammar.from_glrm(HOST).compile_module(v)
-    nested = glrmask.Module.load(parent.bind("child", child).save())
+    child = glrmask.Grammar.from_glrm(MARK)
+    parent = glrmask.Grammar.from_glrm(HOST).bind("child", child)
+    nested = glrmask.UnlinkedConstraint.load(parent.compile_unlinked(v).save())
     with pytest.raises((ValueError, RuntimeError)):
         nested.link()
     c = nested.bind("child.MARK", v.token(7)).link()
@@ -97,6 +97,14 @@ def test_open_token_module_nested_save_and_late_binding():
     state.commit_token(7)
     state.commit_token(3)
     assert accepting(state)
+
+
+def test_unlinked_constraint_rejects_unlinked_child():
+    v = vocab()
+    child = glrmask.Grammar.from_ebnf('start ::= "a"').compile_unlinked(v)
+    parent = glrmask.Grammar.from_glrm(HOST).compile_unlinked(v)
+    with pytest.raises(TypeError):
+        parent.bind("child", child)
 
 
 def test_state_retains_constraint_after_python_owner_is_collected():
@@ -122,7 +130,7 @@ def test_vocab_compatibility_checks_the_entire_mapping():
 
 def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
     v = vocab()
-    c = glrmask.Grammar.from_glrm(MARK).compile_module(v).bind("MARK", v.tokens([7, 63, 127])).link()
+    c = glrmask.Grammar.from_glrm(MARK).compile_unlinked(v).bind("MARK", v.tokens([7, 63, 127])).link()
     state = c.start()
     words = np.full(6, -1, dtype=np.int32)  # Extra words must be cleared.
     state.fill_mask(words)
@@ -141,7 +149,9 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     assert not own_state.mask()[127]
     own_state.commit_token(1)
     assert accepting(own_state) and own_state.mask()[127]
-    c = glrmask.Grammar.from_glrm(HOST).bind("child", child).compile(v, end_tokens=[63], optimization=mode)
+    c = glrmask.Grammar.from_glrm(HOST).compile_unlinked(v).bind("child", child).link(
+        end_tokens=[63], optimization=mode
+    )
     state = c.start()
     assert state.mask()[4]  # Child EOS must not be embedded into its body.
     state.commit_token(4)

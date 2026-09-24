@@ -32,11 +32,11 @@ cargo add glrmask
 
 GLRMask has three ordinary public layers:
 
-- `Grammar` is a source or mixed description. It can contain source children, compiled children, and vocabulary-qualified exact-token bindings.
-- `Module` is reusable compiled machinery for one exact vocabulary. It may deliberately remain open and is not runnable.
+- `Grammar` is a source description. It can contain source `Grammar` children and vocabulary-qualified exact-token bindings.
+- `UnlinkedConstraint` is reusable compiled machinery for one exact vocabulary in pre-link form. It may deliberately remain open and is not runnable.
 - `Constraint` is closed, rooted, and immediately runnable. `ConstraintState` is the mutable per-sequence state.
 
-Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `Module`; the original remains reusable.
+Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `UnlinkedConstraint`; the original remains reusable.
 
 At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one marks the state terminated.
 
@@ -177,9 +177,9 @@ exact_only_ids)` for IDs that are valid exact-token bindings but must never
 enter the byte language. Python's `Vocab.from_llama_cpp()` records omitted
 control/EOG/empty-piece IDs this way automatically.
 
-### Cached parents with `Module`
+### Cached parents with `UnlinkedConstraint`
 
-Use `compile_module` when a compiled parent will be reused with request-specific children. A `Module` may remain open, can be saved and loaded, and is deliberately not runnable.
+Use `compile_unlinked` when a compiled parent will be reused with request-specific children. An `UnlinkedConstraint` may remain open, can be saved and loaded, and is deliberately not runnable.
 
 ```rust
 # use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
@@ -187,7 +187,7 @@ Use `compile_module` when a compiled parent will be reused with request-specific
 let parent = Grammar::from_glrm(
     "glrm 1; start document; extern grammar payload; nt document = payload;",
 );
-let host = parent.compile_module(vocab)?;
+let host = parent.compile_unlinked(vocab)?;
 
 let child_a = Grammar::from_ebnf(r#"start ::= "a""#).compile(vocab)?;
 let child_b = Grammar::from_ebnf(r#"start ::= "b""#).compile(vocab)?;
@@ -203,7 +203,7 @@ let _constraint_b = b.link()?;
 # }
 ```
 
-`Module::bind` is compiled-only: it accepts another `Module`, a `Constraint`, or an exact-token value. It does not parse or compile source children. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+`UnlinkedConstraint::bind` is compiled-only: grammar slots accept already-compiled `Constraint` children (and token slots accept exact-token values). It does not accept source `Grammar` values or another `UnlinkedConstraint`. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
 
 Python uses the same lifecycle:
 
@@ -211,7 +211,7 @@ Python uses the same lifecycle:
 parent = glrmask.Grammar.from_glrm(
     'glrm 1; start document; extern grammar payload; nt document = payload;'
 )
-host = parent.compile_module(vocab)
+host = parent.compile_unlinked(vocab)
 child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
 constraint = host.bind("payload", child).link(
     optimization=glrmask.Optimization.FAST_RUNTIME,
@@ -245,8 +245,8 @@ A state reports `is_accepting()` for grammar-body acceptance, `is_rejected()` fo
 Both compiled object types are serializable:
 
 ```python
-module_bytes = host.save()
-host = glrmask.Module.load(module_bytes)
+unlinked_bytes = host.save()
+host = glrmask.UnlinkedConstraint.load(unlinked_bytes)
 
 constraint_bytes = constraint.save()
 constraint = glrmask.Constraint.load(constraint_bytes)
