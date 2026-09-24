@@ -8035,7 +8035,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let mut constraint = artifact.constraint;
             if let Some(tokenizer) = tokenizer {
-                constraint.tokenizer = tokenizer;
+                constraint.tokenizer = tokenizer.into();
             }
             if let Some(original_token_map) = original_token_map {
                 match original_token_map {
@@ -8187,9 +8187,7 @@ impl Constraint {
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
             if virtual_runtimes.is_empty() {
-                constraint
-                    .tokenizer
-                    .restore_terminal_exprs(artifact.terminal_exprs)
+                Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                     .map_err(crate::GlrMaskError::Serialization)?;
             } else {
                 let compiled_static_residual = !constraint.uses_dynamic_runtime()
@@ -8199,7 +8197,7 @@ impl Constraint {
                             && virtual_runtimes.iter().all(|entry| entry.kind == crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeKind::ResidualExpr)
                     });
                 let restore_result = if compiled_static_residual {
-                    constraint.tokenizer.restore_compiled_static_residual_runtimes(
+                    Arc::make_mut(&mut constraint.tokenizer).restore_compiled_static_residual_runtimes(
                         &virtual_runtimes, static_virtual_residual_mask.as_ref().unwrap().projections(),
                     )
                 } else {
@@ -8207,7 +8205,7 @@ impl Constraint {
                         constraint.retained_terminal_exprs().map(|exprs| exprs.to_vec())
                     });
                     if constraint.uses_dynamic_runtime() {
-                        constraint.tokenizer.restore_terminal_exprs_with_virtual_runtime_metadata(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata(
                             terminal_exprs, &virtual_runtimes, false,
                         )
                     } else if let Some(static_mask) = static_virtual_residual_mask
@@ -8219,11 +8217,11 @@ impl Constraint {
                                 .all(|projection| !projection.oracle_bytes().is_empty())
                         })
                     {
-                        constraint.tokenizer.restore_terminal_exprs_with_precompiled_static_residual_oracles(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_precompiled_static_residual_oracles(
                             terminal_exprs, &virtual_runtimes, static_mask.projections(), false,
                         )
                     } else {
-                        constraint.tokenizer.restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
                             terminal_exprs, &virtual_runtimes, false,
                         )
                     }
@@ -8255,9 +8253,7 @@ impl Constraint {
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
             constraint.internal_token_buf_masks = artifact.internal_token_buf_masks;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_DOMAIN_LABELS_CONSTRAINT_VERSION {
@@ -8266,9 +8262,7 @@ impl Constraint {
             let mut constraint = artifact.constraint;
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION {
@@ -8276,9 +8270,7 @@ impl Constraint {
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             let mut constraint = artifact.constraint;
             constraint.ignore_expr = artifact.ignore_expr;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_EXPRLESS_CONSTRAINT_VERSION {

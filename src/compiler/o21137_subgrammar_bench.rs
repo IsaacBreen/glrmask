@@ -669,12 +669,12 @@ fn profile_owned_parent_tokenizer(
     .expect("benchmark table composition");
     // Clone outside the measured interval. The production fast path consumes
     // the freshly compiled parent and therefore does not pay this clone.
-    let owned_parent = parent.tokenizer.clone();
+    let owned_parent = parent.tokenizer.as_ref().clone();
     let child_tokenizers = child_bindings
         .iter()
         .enumerate()
         .map(|(index, (_, child))| {
-            (&child.tokenizer, composed_table.terminal_offsets[index + 1])
+            (child.tokenizer.as_ref(), composed_table.terminal_offsets[index + 1])
         })
         .collect::<Vec<_>>();
     let started_at = Instant::now();

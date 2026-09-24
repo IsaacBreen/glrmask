@@ -6196,7 +6196,7 @@ fn boundary_visible_residual_starts_by_first_byte(
             if !relevant_terminals.contains(global_terminal as usize) {
                 continue;
             }
-            if std::ptr::eq(tokenizer, &component.tokenizer) {
+            if std::ptr::eq(tokenizer, component.tokenizer.as_ref()) {
                 let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
                     continue;
                 };
@@ -19121,7 +19121,7 @@ fn merged_terminal_live_states_owned_parent(
 
 fn build_composed_constraint_unfinalized(
     composed_table: ComposedTable,
-    tokenizer: Tokenizer,
+    tokenizer: impl Into<Arc<Tokenizer>>,
     tokenizer_state_offsets: Vec<u32>,
     parser_dwa: DWA,
     parser_state_domain_labels: Vec<i32>,
@@ -19139,6 +19139,7 @@ fn build_composed_constraint_unfinalized(
     defer_dynamic_mask_vocab: bool,
     vocab: &Vocab,
 ) -> ConstraintComposition {
+    let tokenizer = tokenizer.into();
     let total_started_at = Instant::now();
     let phase_started_at = Instant::now();
     let terminal_offsets = composed_table.terminal_offsets.clone();
@@ -33514,9 +33515,7 @@ table: &child.table,
                 if component.tokenizer.terminal_exprs().is_none() {
                     let exprs = component.retained_terminal_exprs().map(|exprs| exprs.to_vec());
                     if let Some(exprs) = exprs {
-                        component
-                            .tokenizer
-                            .restore_terminal_exprs(Some(exprs))
+                        Arc::make_mut(&mut component.tokenizer).restore_terminal_exprs(Some(exprs))
                             .expect("restore component terminal exprs for minbound oracle");
                     }
                 }
@@ -33585,8 +33584,8 @@ table: &dispatch.table,
             let outer_table_ms = outer_table_started.elapsed().as_secs_f64() * 1000.0;
             let terminal_names = merged_terminal_display_names(&core, &children);
             let tokenizer_inputs = [
-                (&core.tokenizer, composed_table.terminal_offsets[0]),
-                (&dispatch.tokenizer, composed_table.terminal_offsets[1]),
+                (core.tokenizer.as_ref(), composed_table.terminal_offsets[0]),
+                (dispatch.tokenizer.as_ref(), composed_table.terminal_offsets[1]),
             ];
             let outer_tokenizer_started = Instant::now();
             let (mut merged_tokenizer, tokenizer_offsets) =
@@ -35476,9 +35475,7 @@ table: &dispatch.table,
         if component.tokenizer.terminal_exprs().is_none()
             && let Some(exprs) = component.retained_terminal_exprs().map(|exprs| exprs.to_vec())
         {
-            component
-                .tokenizer
-                .restore_terminal_exprs(Some(exprs))
+            Arc::make_mut(&mut component.tokenizer).restore_terminal_exprs(Some(exprs))
                 .expect("restore component terminal exprs");
         }
         let inline_rules = component.table.rules.len();

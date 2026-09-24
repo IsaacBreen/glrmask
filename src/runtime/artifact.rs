@@ -9985,7 +9985,7 @@ pub struct Constraint {
     pub(crate) direct_regular_automaton: Option<DirectRegularAutomaton>,
     pub(crate) table: GLRTable,
     pub(crate) terminal_display_names: Vec<String>,
-    pub(crate) tokenizer: Tokenizer,
+    pub(crate) tokenizer: Arc<Tokenizer>,
     /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
     /// scans every tokenizer state, so runtime dispatch must not recompute it.
     pub(crate) tokenizer_has_epsilon_transitions: bool,
@@ -10363,8 +10363,8 @@ pub(crate) struct ConstraintSerde {
     pub(crate) table: GLRTable,
     #[serde(default)]
     pub(crate) terminal_display_names: Vec<String>,
-    #[serde(with = "crate::automata::lexer::tokenizer::artifact_serde")]
-    pub(crate) tokenizer: Tokenizer,
+    #[serde(with = "crate::runtime::artifact::immutable_tokenizer_serde")]
+    pub(crate) tokenizer: Arc<Tokenizer>,
     /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
     /// scans every tokenizer state, so runtime dispatch must not recompute it.
     #[serde(skip, default)]
@@ -11003,5 +11003,58 @@ mod dynamic_mask_vocab_cache_boundary_tests {
             &template.self_loop_projections,
             &fresh.self_loop_projections,
         ));
+    }
+}
+
+/// Arc ownership is a runtime/lifecycle detail; keep the existing tokenizer
+/// artifact bytes unchanged. A retained observer can pin this same allocation,
+/// and all subsequent mutation must use copy-on-write on the Constraint side.
+pub(crate) mod immutable_tokenizer_serde {
+    use super::{Arc, Tokenizer};
+    use serde::{Deserializer, Serializer};
+    pub(crate) fn serialize<S: Serializer>(tokenizer: &Arc<Tokenizer>, serializer: S) -> Result<S::Ok,S::Error> {
+        crate::automata::lexer::tokenizer::artifact_serde::serialize(tokenizer.as_ref(), serializer)
+    }
+    pub(crate) fn deserialize<'de,D: Deserializer<'de>>(deserializer: D) -> Result<Arc<Tokenizer>,D::Error> {
+        crate::automata::lexer::tokenizer::artifact_serde::deserialize(deserializer).map(Arc::new)
+    }
+}
+
+#[cfg(test)]
+mod immutable_tokenizer_tests {
+    use super::*;
+    use crate::automata::lexer::ast::{bytes, choice, plus};
+    use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize)]
+    struct OwnedRef<'a>(#[serde(with = "crate::automata::lexer::tokenizer::artifact_serde")] &'a Tokenizer);
+    #[derive(Serialize, Deserialize)]
+    struct Shared(#[serde(with = "super::immutable_tokenizer_serde")] Arc<Tokenizer>);
+    #[test]
+    fn shared_tokenizer_retains_exact_owned_wire_and_byte_behavior() {
+        let expressions=vec![choice(vec![bytes(b"abc"),bytes(b"abd")]),plus(bytes(b" "))];
+        for tokenizer in [build_regex_monolithic(&expressions).into_tokenizer(2,None),build_regex_partitioned(&expressions,&[0,1]).into_tokenizer(2,None)] {
+            let owned_wire=bincode::serialize(&OwnedRef(&tokenizer)).unwrap();let shared=Shared(Arc::new(tokenizer));
+            let wire=bincode::serialize(&shared).unwrap();assert_eq!(owned_wire,wire);
+            let loaded:Shared=bincode::deserialize(&wire).unwrap();assert_eq!(bincode::serialize(&loaded).unwrap(),owned_wire);
+            for q in 0..shared.0.num_states(){for b in 0..=255u8{assert_eq!(shared.0.step_all(&[q],b),loaded.0.step_all(&[q],b));}}
+        }
+    }
+    #[test]
+    fn pinned_tokenizer_is_unchanged_after_copy_on_write_mutation() {
+        let expressions=vec![Expr::Epsilon,bytes(b"a")];
+        let mut owner=Arc::new(build_regex_monolithic(&expressions).into_tokenizer(2,None));let pinned=Arc::clone(&owner);
+        let original=bincode::serialize(&OwnedRef(pinned.as_ref())).unwrap();assert!(Arc::ptr_eq(&owner,&pinned));
+        let drained=Arc::make_mut(&mut owner).isolate_start_state_and_drain_nullable_terminals();
+        assert!(drained.contains(&0),"fixture must exercise a real nullable-state mutation");assert!(!Arc::ptr_eq(&owner,&pinned));
+        assert_eq!(bincode::serialize(&OwnedRef(pinned.as_ref())).unwrap(),original);
+        assert_ne!(bincode::serialize(&OwnedRef(owner.as_ref())).unwrap(),original);
+        assert!(!Arc::make_mut(&mut owner).isolate_start_state_and_drain_nullable_terminals().contains(&0));
+    }
+    #[test]
+    fn constraint_clone_shares_the_same_immutable_lexer() {
+        let vocab=crate::Vocab::new(vec![(1,b"a".to_vec()),(2,b"b".to_vec())]);
+        let source=Constraint::from_glrm_grammar(r#"start x; nt x ::= "a" | "b";"#,&vocab).unwrap();
+        let copy=source.clone();assert!(Arc::ptr_eq(&source.tokenizer,&copy.tokenizer));assert_eq!(source.save(),copy.save());
     }
 }

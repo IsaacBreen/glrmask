@@ -3797,9 +3797,7 @@ mod tests {
         if component.tokenizer.terminal_exprs().is_none()
             && let Some(exprs) = component.retained_terminal_exprs().map(|exprs| exprs.to_vec())
         {
-            component
-                .tokenizer
-                .restore_terminal_exprs(Some(exprs))
+            Arc::make_mut(&mut component.tokenizer).restore_terminal_exprs(Some(exprs))
                 .expect("restore component terminal exprs");
         }
         let inline_rules = component.table.rules.len();

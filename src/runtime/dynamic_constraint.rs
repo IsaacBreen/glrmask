@@ -820,7 +820,7 @@ impl DynamicConstraint {
         Ok(DynamicConstraintPayloadV1 {
             table: payload.table,
             terminal_display_names: payload.terminal_display_names,
-            tokenizer: payload.tokenizer,
+            tokenizer: payload.tokenizer.into(),
             ignore_terminal: payload.ignore_terminal,
             direct_regular_automaton: None,
             token_bytes: payload.token_bytes,
@@ -908,7 +908,7 @@ impl DynamicConstraint {
             direct_regular_automaton: payload.direct_regular_automaton,
             table: payload.table,
             terminal_display_names: payload.terminal_display_names,
-            tokenizer: payload.tokenizer,
+            tokenizer: payload.tokenizer.into(),
             tokenizer_has_epsilon_transitions: false,
             ignore_terminal: payload.ignore_terminal,
             special_token_terminals,
@@ -1195,7 +1195,7 @@ impl DynamicConstraint {
             v1: DynamicConstraintPayloadV1 {
                 table: constraint.table.clone(),
                 terminal_display_names: constraint.terminal_display_names.clone(),
-                tokenizer: constraint.tokenizer.clone(),
+                tokenizer: constraint.tokenizer.as_ref().clone(),
                 ignore_terminal: constraint.ignore_terminal,
                 direct_regular_automaton: constraint.direct_regular_automaton.clone(),
                 token_bytes: Arc::clone(&constraint.token_bytes),
@@ -1331,7 +1331,7 @@ impl DynamicConstraint {
                 deferred_rules: constraint.deferred_table_rules_blob,
             },
             terminal_display_names: constraint.terminal_display_names,
-            tokenizer: FastTransferTokenizer(constraint.tokenizer),
+            tokenizer: FastTransferTokenizer(Arc::unwrap_or_clone(constraint.tokenizer)),
             ignore_terminal: constraint.ignore_terminal,
             direct_regular_automaton: constraint.direct_regular_automaton,
             special_token_terminals: constraint.special_token_terminals,
@@ -5054,7 +5054,7 @@ mod tests {
             alternatives: vec![DynamicConstraintTransferAlternativeV1 {
                 table: constraint.inner.table.clone(),
                 terminal_display_names: constraint.inner.terminal_display_names.clone(),
-                tokenizer: constraint.inner.tokenizer.clone(),
+                tokenizer: constraint.inner.tokenizer.as_ref().clone(),
                 ignore_terminal: constraint.inner.ignore_terminal,
                 direct_regular_automaton: constraint.inner.direct_regular_automaton.clone(),
                 special_token_terminals: constraint.inner.special_token_terminals.clone(),
@@ -7126,7 +7126,7 @@ mod tests {
                 v1: LegacyDynamicConstraintPayloadV11V1 {
                     table: constraint.inner.table.clone(),
                     terminal_display_names: constraint.inner.terminal_display_names.clone(),
-                    tokenizer: constraint.inner.tokenizer.clone(),
+                    tokenizer: constraint.inner.tokenizer.as_ref().clone(),
                     ignore_terminal: constraint.inner.ignore_terminal,
                     direct_regular_automaton: constraint.inner.direct_regular_automaton.clone(),
                     token_bytes: Arc::clone(&constraint.inner.token_bytes),
@@ -7162,7 +7162,7 @@ mod tests {
                 v1: LegacyDynamicConstraintPayloadV12V1 {
                     table: constraint.inner.table.clone(),
                     terminal_display_names: constraint.inner.terminal_display_names.clone(),
-                    tokenizer: constraint.inner.tokenizer.clone(),
+                    tokenizer: constraint.inner.tokenizer.as_ref().clone(),
                     ignore_terminal: constraint.inner.ignore_terminal,
                     direct_regular_automaton: constraint.inner.direct_regular_automaton.clone(),
                     token_bytes: Arc::clone(&constraint.inner.token_bytes),
@@ -7649,7 +7649,7 @@ nt start ::= A;
             alternatives: vec![LegacyDynamicConstraintTransferAlternativeV1 {
                 table: original.inner.table.clone(),
                 terminal_display_names: original.inner.terminal_display_names.clone(),
-                tokenizer: original.inner.tokenizer.clone(),
+                tokenizer: original.inner.tokenizer.as_ref().clone(),
                 ignore_terminal: original.inner.ignore_terminal,
                 direct_regular_automaton: original.inner.direct_regular_automaton.clone(),
                 special_token_terminals: original.inner.special_token_terminals.clone(),
@@ -7678,7 +7678,7 @@ nt start ::= A;
             alternatives: vec![LegacyDynamicConstraintTransferAlternativeV2 {
                 table: original.inner.table.clone(),
                 terminal_display_names: original.inner.terminal_display_names.clone(),
-                tokenizer: original.inner.tokenizer.clone(),
+                tokenizer: original.inner.tokenizer.as_ref().clone(),
                 ignore_terminal: original.inner.ignore_terminal,
                 direct_regular_automaton: original.inner.direct_regular_automaton.clone(),
                 special_token_terminals: original.inner.special_token_terminals.clone(),
@@ -7712,7 +7712,7 @@ nt start ::= A;
             alternatives: vec![LegacyDynamicConstraintTransferAlternativeV3 {
                 table: original.inner.table.clone(),
                 terminal_display_names: original.inner.terminal_display_names.clone(),
-                tokenizer: original.inner.tokenizer.clone(),
+                tokenizer: original.inner.tokenizer.as_ref().clone(),
                 ignore_terminal: original.inner.ignore_terminal,
                 direct_regular_automaton: original.inner.direct_regular_automaton.clone(),
                 special_token_terminals: original.inner.special_token_terminals.clone(),

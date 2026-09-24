@@ -1891,7 +1891,7 @@ pub(super) fn try_scalar_dispatch(
             return Ok(false);
         };
         let overflowed = std::cell::Cell::new(false);
-        let use_pair_map = !std::ptr::eq(tokenizer, &state.constraint.tokenizer);
+        let use_pair_map = !std::ptr::eq(tokenizer, state.constraint.tokenizer.as_ref());
         let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
             tokenizer,
             transitions16,
@@ -2272,7 +2272,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 subset_cache,
                 &root_states,
                 &overflowed,
-                !std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer),
+                !std::ptr::eq(lexer_scan_cache.tokenizer(), state.constraint.tokenizer.as_ref()),
             ) {
                 let mut collapsed = DynamicBranches::new();
                 collapsed.push(DynamicBranch {

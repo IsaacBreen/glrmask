@@ -231,8 +231,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
 
     let source_subsets = candidate.source_subsets.clone();
     let exact_source_states = candidate.exact_source_states.clone();
-    let built = constraint
-        .tokenizer
+    let built = std::sync::Arc::make_mut(&mut constraint.tokenizer)
         .finish_full_determinization_with_source_fallback(candidate);
     debug_assert_eq!(built.source_state_offset as usize, report.product_states);
     debug_assert_eq!(built.tokenizer.num_states() as usize, runtime_state_tsids.len());
@@ -257,7 +256,7 @@ pub(super) fn maybe_install_runtime_lexer_product(
         source_offsets.push(source_states_flat.len() as u32);
     }
 
-    constraint.tokenizer = built.tokenizer;
+    constraint.tokenizer = built.tokenizer.into();
     constraint.state_to_internal_tsid = state_to_internal_tsid;
     constraint.internal_tsid_to_states = internal_tsid_to_states;
     constraint.deferred_internal_tsid_to_states = Default::default();
