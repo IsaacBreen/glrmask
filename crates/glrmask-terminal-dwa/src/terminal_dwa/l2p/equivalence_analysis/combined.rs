@@ -2045,6 +2045,13 @@ fn try_analyze_equivalences_with_raw_quotient(
     ))
 }
 
+/// A finite, explicitly scoped observation query. The optional total quotient
+/// certifies continuation topology; it never expands the initial query set.
+#[derive(Clone, Copy)]
+pub struct ScopedEquivalenceDomain<'a> {
+    pub continuation_state_map: Option<&'a ManyToOneIdMap>,
+}
+
 pub fn analyze_equivalences_with_group_filter(
     partition_label: &str,
     tokenizer: &Tokenizer,
@@ -2061,6 +2068,7 @@ pub fn analyze_equivalences_with_group_filter(
     shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
+    scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
@@ -2103,6 +2111,7 @@ pub fn analyze_equivalences_with_group_filter(
         shared_transition_cache,
         initial_state_map,
         initial_state_map_has_stable_restricted_observation,
+        scoped_domain,
         token_position_partition,
         precomputed_raw_observations,
         prebuilt_token_trie,
@@ -2133,6 +2142,7 @@ pub fn analyze_vocab_equivalences_with_group_filter(
     shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
+    scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
@@ -2153,6 +2163,7 @@ pub fn analyze_vocab_equivalences_with_group_filter(
         shared_transition_cache,
         initial_state_map,
         initial_state_map_has_stable_restricted_observation,
+        scoped_domain,
         token_position_partition,
         precomputed_raw_observations,
         prebuilt_token_trie,
@@ -2334,11 +2345,13 @@ fn analyze_equivalences_impl(
     shared_transition_cache: Option<&std::sync::OnceLock<super::compat::FlatTransitionCache>>,
     initial_state_map: Option<&ManyToOneIdMap>,
     initial_state_map_has_stable_restricted_observation: bool,
+    scoped_domain: Option<ScopedEquivalenceDomain<'_>>,
     token_position_partition: Option<&GlobalTokenPositionStatePartition>,
     precomputed_raw_observations: Option<(&[u32], &[u32])>,
     prebuilt_token_trie: Option<&TokenBoundedAnalysisTrie>,
     vocab_only: bool,
 ) -> (InternalIdMap, CombinedEquivalenceProfile) {
+    let continuation_state_map = scoped_domain.and_then(|domain| domain.continuation_state_map);
     let prebuilt_token_trie = std::env::var("GLRMASK_USE_PREBUILT_L2P_TOKEN_TRIE")
         .map(|value| {
             let trimmed = value.trim();
@@ -2463,7 +2476,19 @@ fn analyze_equivalences_impl(
             max_token_len,
             active_byte_count,
         );
-        let analysis_view_policy = l2p_nfa_analysis_view_policy(partition_label);
+        // Query only the actual candidate token trajectories. A whole-byte-
+        // alphabet powerset may be much larger despite fewer initial roots,
+        // and later exact analysis pays for that unnecessary topology. Both
+        // existing views compute the same exact relation. Scope is explicit,
+        // not inferred from a partition label (ordinary p0/p1 names survive
+        // composition). Explicit diagnostic overrides remain authoritative.
+        let analysis_view_policy = if scoped_domain.is_some()
+            && std::env::var_os("GLRMASK_L2P_NFA_RELEVANT_POWERSET_VIEW").is_none()
+        {
+            L2pNfaAnalysisViewPolicy::Bounded
+        } else {
+            l2p_nfa_analysis_view_policy(partition_label)
+        };
         let powerset_max_states = l2p_nfa_relevant_powerset_max_states();
         let powerset_min_bounded_pairs =
             l2p_nfa_relevant_powerset_min_bounded_pairs(partition_label);
@@ -2499,8 +2524,13 @@ fn analyze_equivalences_impl(
         // the scoped initial equivalence relation while satisfying the
         // powerset builder's total-state-map contract and keeps post-commit
         // continuation exact.
+        // An explicitly supplied total continuation certificate may contain
+        // classes outside the token-start query domain. It is used ONLY to
+        // build transitions, never to widen prepared.initial_states. Keeping
+        // these domains separate preserves the proof while making query cost
+        // proportional to represented start classes rather than the whole Q.
         let completed_certified_powerset_seed_map =
-            initial_state_map_has_stable_restricted_observation
+            (initial_state_map_has_stable_restricted_observation && continuation_state_map.is_none())
                 .then(|| {
                     initial_state_map.and_then(|map| {
                         map.original_to_internal
@@ -2517,9 +2547,9 @@ fn analyze_equivalences_impl(
                 })
                 .flatten();
         let certified_powerset_seed_map = if initial_state_map_has_stable_restricted_observation {
-            completed_certified_powerset_seed_map
+            continuation_state_map.or(completed_certified_powerset_seed_map
                 .as_ref()
-                .or(initial_state_map)
+                .or(initial_state_map))
         } else {
             None
         };
@@ -2680,6 +2710,15 @@ fn analyze_equivalences_impl(
                 None,
                 None,
             );
+            // The legacy reference expands excluded raw states into additional
+            // classes. Compare both partitions on the actual requested seed
+            // domain, not on that unrelated continuation-only expansion.
+            // Every equivalence class/member within the query is still checked.
+            let reference = if scoped_domain.is_some() {
+                crate::terminal_dwa::scope::restrict_quotient_to_initial_domain(
+                    &reference, initial_state_map.expect("certified scoped initial domain"),
+                ).expect("reference quotient must cover the scoped raw domain")
+            } else { reference };
             assert_same_many_to_one_partition(
                 &tokenizer_states,
                 &reference,

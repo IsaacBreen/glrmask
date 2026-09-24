@@ -5769,6 +5769,41 @@ impl Constraint {
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
+    /// Borrow already-materialized local templates, or decode only the template
+    /// vector from a deferred composition cache. Unlike full materialization,
+    /// this does not clone a Constraint or reconstruct unused characterizations,
+    /// token-reset rows, parser DWAs, or mutable runtime state.
+    pub(crate) fn retained_parser_templates_for_compilation(
+        &self,
+    ) -> Result<Cow<'_, [Option<crate::automata::unweighted_u32::dfa::DFA>]>, String> {
+        if !self.composition_parser_templates_by_terminal.is_empty() {
+            return Ok(Cow::Borrowed(&self.composition_parser_templates_by_terminal));
+        }
+        let Some(blob) = self.deferred_composition_metadata_blob.as_ref() else {
+            return Ok(Cow::Borrowed(&[]));
+        };
+        let input = blob.as_slice();
+        validate_composition_metadata_wire(input)?;
+        if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        {
+            let parts = split_composition_metadata_parts(input)?;
+            let cache_raw = decode_composition_metadata_part(
+                parts.cache_wire, parts.cache_raw_len, parts.cache_compressed,
+            )?;
+            // This vector is the first field of ConstraintCompositionCacheMetadata
+            // in every split format. Deserialize that field with a bounded slice
+            // reader, leaving its unrelated characterization vector untouched.
+            let templates = bincode::deserialize_from(cache_raw.as_ref())
+                .map_err(|error| error.to_string())?;
+            Ok(Cow::Owned(templates))
+        } else {
+            Ok(Cow::Owned(decode_composition_metadata(input)?
+                .composition_parser_templates_by_terminal))
+        }
+    }
+
     pub(crate) fn materialize_composition_metadata_for_compilation(
         &mut self,
     ) -> Result<(), String> {
@@ -9425,6 +9460,25 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.composition_reset_tokens_by_terminal, expected);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn retained_template_read_is_exact_and_does_not_materialize_constraint() {
+        let original = tiny_constraint();
+        let expected = original.composition_parser_templates_by_terminal.clone();
+        assert!(!expected.is_empty());
+        assert!(matches!(original.retained_parser_templates_for_compilation().unwrap(), Cow::Borrowed(_)));
+        let bytes = original.save();
+        let loaded = Constraint::load(&bytes).unwrap();
+        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        let templates = loaded.retained_parser_templates_for_compilation().unwrap();
+        assert!(matches!(templates, Cow::Owned(_)));
+        assert_eq!(templates.as_ref(), expected.as_slice());
+        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        assert!(loaded.composition_parser_characterizations_by_terminal.is_empty());
+        assert!(loaded.deferred_composition_metadata_blob.is_some());
+        assert_eq!(loaded.save(), bytes);
+        assert_eq!(loaded.start().mask(), original.start().mask());
     }
 
     #[test]

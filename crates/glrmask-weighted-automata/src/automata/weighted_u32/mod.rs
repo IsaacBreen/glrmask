@@ -5,5 +5,6 @@ pub mod minimize;
 pub mod minimize_acyclic;
 pub mod minimize_token_deterministic_nwa;
 pub mod nwa;
+pub mod nwa_support;
 pub mod terminal_automaton;
 pub mod source_nwa;

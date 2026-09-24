@@ -12334,7 +12334,7 @@ fn transport_composition_template_dfa(
 /// in the same transition traversal.  The eager composition fast path needs
 /// both representations immediately, so rebuilding the skeleton afterward
 /// would just walk and allocate every transported transition a second time.
-fn transport_composition_template_dfa_with_skeleton(
+pub(crate) fn transport_composition_template_dfa_with_skeleton(
     mut dfa: UnweightedDfa,
     state_relation: &[Vec<u32>],
 ) -> Option<(UnweightedDfa, NWA)> {
@@ -23378,10 +23378,9 @@ fn compose_constraints_owned_parent_impl(
 ///
 /// Fixpoint-free single topological pass; matches the fixpoint propagation
 /// on acyclic inputs. Used for shard candidate-token triggers and gates.
-pub(crate) fn accepted_original_tokens(
-    dwa: &DWA,
-    id_map: &InternalIdMap,
-) -> BTreeSet<u32> {
+/// Exact union of the correlated weights of all accepting paths.
+/// This is the ordinary accepted-token summary before projecting away TSIDs.
+pub(crate) fn accepted_weight_support(dwa: &DWA) -> Weight {
     assert!(dwa.is_acyclic(), "accepted-token summary expects acyclic DWA");
     let n = dwa.num_states() as usize;
     let mut indegree = vec![0usize; n];
@@ -23431,6 +23430,14 @@ pub(crate) fn accepted_original_tokens(
         }
     }
 
+    accepted
+}
+
+pub(crate) fn accepted_original_tokens(
+    dwa: &DWA,
+    id_map: &InternalIdMap,
+) -> BTreeSet<u32> {
+    let accepted = accepted_weight_support(dwa);
     let mut originals = BTreeSet::new();
     for (_, internal_tokens) in accepted.raw_range_values() {
         for range in internal_tokens.ranges() {

@@ -8,8 +8,10 @@
 
 use std::sync::Arc;
 
+use crate::automata::lexer::{Lexer, tokenizer::Tokenizer};
 use crate::compiler::stages::equiv_types::ManyToOneIdMap;
 use crate::ds::bitset::BitSet;
+use crate::Vocab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImmediateComponentId(pub u32);
@@ -177,8 +179,104 @@ pub fn complete_with_continuation_singletons(map: &mut ManyToOneIdMap) {
     }
 }
 
+/// Restrict a certified observation quotient to a token-start domain.
+///
+/// Each output class is an intersection of one proved class with the allowed
+/// raw domain, so every retained member still has the same observation as its
+/// representative. This is an INITIAL observation map, not a total transition
+/// congruence: callers must keep the original total quotient separately when
+/// constructing a continuation topology.
+pub fn restrict_quotient_to_initial_domain(
+    quotient: &ManyToOneIdMap,
+    domain: &ManyToOneIdMap,
+) -> Option<ManyToOneIdMap> {
+    let n = domain.original_to_internal.len();
+    if quotient.original_to_internal.len() != n { return None; }
+    let mut remap = vec![u32::MAX; quotient.num_internal_ids() as usize];
+    let mut original_to_internal = vec![u32::MAX; n];
+    let mut groups = Vec::<Vec<u32>>::new();
+    let mut representatives = Vec::new();
+    for (raw, &allowed) in domain.original_to_internal.iter().enumerate() {
+        if allowed == u32::MAX { continue; }
+        let class = quotient.original_to_internal[raw] as usize;
+        let slot = remap.get_mut(class)?;
+        if *slot == u32::MAX {
+            *slot = groups.len() as u32;
+            groups.push(Vec::new());
+            representatives.push(raw as u32);
+        }
+        original_to_internal[raw] = *slot;
+        groups[*slot as usize].push(raw as u32);
+    }
+    Some(ManyToOneIdMap {
+        original_to_internal,
+        internal_to_originals: groups,
+        representative_original_ids: representatives,
+    })
+}
+
+/// Necessary initial-state support for a crossing-only lexical walk.
+///
+/// A crossing terminal word either completes a terminal on a token prefix,
+/// or its first observed terminal is foreign and only partially consumed.
+/// The event predicate therefore includes *any* terminal completion and any
+/// foreign future observation. A state with no such event on any vocabulary
+/// prefix cannot begin a crossing word. Local parser/follow restrictions are
+/// deliberately ignored, so this is a safe superset, not an admission oracle.
+///
+/// The ordinary byte scanners report matches only AFTER consuming a byte.
+/// A local finalizer already present at token entry is therefore not an event
+/// by itself. Foreign finalizer/future observations at entry are retained for
+/// empty-token and epsilon cases. Final-byte matches remain conservatively
+/// included; no assumption about positive-byte CALL/RETURN is made.
+/// Only token-start seeds are filtered. All reset/continuation raw coordinates
+/// remain available to the ordinary compiler and its exact lifting maps.
+pub fn crossing_prefix_seed_support(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    flat_trans: &[u32],
+    ownership: &BoundaryOwnership,
+    start: ImmediateComponentId,
+) -> Option<(Vec<bool>, usize)> {
+    use super::l2p::equivalence_analysis::state_equivalence::nfa::build_token_bounded_analysis_trie_sorted;
+
+    if vocab.is_empty() || tokenizer.has_virtual_residual_runtime() {
+        return None;
+    }
+    if vocab.entries_map().values().try_fold(0usize, |n, v| n.checked_add(v.len()))? > 262_144 {
+        return None;
+    }
+    let n = tokenizer.num_states() as usize;
+    let mut events = Vec::with_capacity(n);
+    let mut initial_events = Vec::with_capacity(n);
+    let mut closures = Vec::new();
+    let mut closure_volume = 0usize;
+    for q in 0..n {
+        if tokenizer.state_is_virtual_runtime(q as u32) { return None; }
+        let foreign_future = tokenizer.possible_future_terminals_iter(q as u32)
+            .any(|t| ownership.owner_of_terminal(t) != Some(start));
+        events.push(tokenizer.matched_terminals_iter(q as u32).next().is_some() || foreign_future);
+        initial_events.push(foreign_future || tokenizer.matched_terminals_iter(q as u32)
+            .any(|t| ownership.owner_of_terminal(t) != Some(start)));
+        if tokenizer.state_has_epsilon_transitions(q as u32) {
+            let closure = tokenizer.singleton_epsilon_closure(q as u32);
+            closure_volume = closure_volume.checked_add(closure.len())?;
+            if closure_volume > 262_144 { return None; }
+            closures.push((q, closure));
+        }
+    }
+    let mut words = vocab.entries_map().values().map(Vec::as_slice).collect::<Vec<_>>();
+    words.sort_unstable(); words.dedup();
+    let trie = build_token_bounded_analysis_trie_sorted(&words);
+    trie.prefix_event_sources(flat_trans, &events, &closures, Some(&initial_events))
+}
+
 #[derive(Debug, Clone)]
 pub struct BoundaryAnalysisScope {
+    // Ensures differential tests can construct a genuinely unfiltered oracle
+    // even when the shared family builder automatically narrows partitions.
+    #[cfg(test)]
+    automatic_prefix_support: bool,
     initial_states: InitialStateDomain,
     reset_states: Arc<[u32]>,
     ownership: Arc<BoundaryOwnership>,
@@ -188,6 +286,51 @@ pub struct BoundaryAnalysisScope {
 }
 
 impl BoundaryAnalysisScope {
+    pub fn automatic_prefix_support_enabled(&self) -> bool {
+        #[cfg(test)]
+        { return self.automatic_prefix_support; }
+        #[cfg(not(test))]
+        { true }
+    }
+    /// Relocate only raw lexer coordinates for an independently certified
+    /// query-observation view. Terminal ownership and all crossing/follow
+    /// observations remain identical. Every requested initial/reset state
+    /// must have a defined image; no seed is silently dropped.
+    pub fn relocate_query_view(&self, map:&[u32], state_count:usize, resets:Vec<u32>) -> Result<Self,String>{
+        if map.len()!=self.initial_states.keep_raw.len(){return Err("query map source size".into());}
+        let mut keep=vec![false;state_count];
+        for (q,&yes) in self.initial_states.keep_raw.iter().enumerate(){if yes{
+            let mapped=map[q] as usize;if mapped>=state_count{return Err("query view omitted initial state".into());}
+            keep[mapped]=true;
+        }}
+        let mut expected=self.reset_states.iter().map(|&q|map[q as usize]).collect::<Vec<_>>();
+        expected.sort_unstable();expected.dedup();let mut actual=resets.clone();actual.sort_unstable();actual.dedup();
+        if expected!=actual || expected.iter().any(|&q|q as usize>=state_count){return Err("query view reset relation changed".into());}
+        let result=Self::new(InitialStateDomain::from_mask(state_count,keep)?,resets,
+            Arc::clone(&self.ownership),self.start_component,self.require_crossing,self.follow_transparent.clone())?;
+        #[cfg(test)] { let mut result=result; result.automatic_prefix_support=self.automatic_prefix_support; return Ok(result); }
+        #[cfg(not(test))] { Ok(result) }
+    }
+
+    /// Intersect the query's token-start domain without changing continuation
+    /// topology, ownership, or the zero-width/follow contracts.
+    pub fn intersect_initial_support(&self, support: &[bool]) -> Option<Self> {
+        assert_eq!(support.len(), self.initial_states.keep_raw.len());
+        let keep = self.initial_states.keep_raw.iter().zip(support)
+            .map(|(&initial, &live)| initial && live).collect();
+        let initial_states = InitialStateDomain::from_mask(support.len(), keep).ok()?;
+        Some(Self {
+            #[cfg(test)]
+            automatic_prefix_support: self.automatic_prefix_support,
+            initial_states,
+            reset_states: Arc::clone(&self.reset_states),
+            ownership: Arc::clone(&self.ownership),
+            start_component: self.start_component,
+            require_crossing: self.require_crossing,
+            follow_transparent: self.follow_transparent.clone(),
+        })
+    }
+
     pub fn new(
         initial_states: InitialStateDomain,
         reset_states: Vec<u32>,
@@ -216,6 +359,8 @@ impl BoundaryAnalysisScope {
             return Err("boundary reset state lies outside raw tokenizer domain".to_owned());
         }
         Ok(Self {
+            #[cfg(test)]
+            automatic_prefix_support: true,
             initial_states,
             reset_states: Arc::from(reset_states.into_boxed_slice()),
             ownership,
@@ -264,6 +409,110 @@ impl BoundaryAnalysisScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_quotient_keeps_seed_members_but_not_foreign_representatives() {
+        let quotient = ManyToOneIdMap::from_original_to_internal_with_representatives(
+            vec![0, 1, 0, 1, 2, 2], 3, vec![0, 1, 4],
+        );
+        let domain = InitialStateDomain::from_mask(6, vec![false, false, true, true, false, true]).unwrap();
+        let restricted = restrict_quotient_to_initial_domain(&quotient, domain.exact_singleton_map()).unwrap();
+        assert_eq!(restricted.original_to_internal, vec![u32::MAX, u32::MAX, 0, 1, u32::MAX, 2]);
+        assert_eq!(restricted.representative_original_ids, vec![2, 3, 5]);
+        // The separate total certificate remains unchanged and has all raw
+        // successors, including the representatives excluded from seed scope.
+        assert_eq!(quotient.representative_original_ids, vec![0, 1, 4]);
+        let domain = InitialStateDomain::from_mask(6, vec![true, false, true, false, false, false]).unwrap();
+        let restricted = restrict_quotient_to_initial_domain(&quotient, domain.exact_singleton_map()).unwrap();
+        assert_eq!(restricted.internal_to_originals, vec![vec![0, 2]]);
+    }
+
+    #[test]
+    fn prefix_support_preserves_complete_boundary_weighted_language() {
+        use crate::automata::lexer::ast::{Expr, bytes, choice, plus};
+        use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
+        use crate::automata::weighted::terminal_automaton::TerminalAutomaton;
+        use crate::compiler::glr::analysis::AnalyzedGrammar;
+        use crate::grammar::flat::{Rule, Symbol};
+        use super::super::{build_scoped_boundary_id_map_and_terminal_dwa, l1, l2p, types};
+        use std::collections::BTreeMap;
+
+        let expressions = vec![
+            bytes(b"abcdefghijklmn"),
+            choice(vec![bytes(b"xyz"), plus(bytes(b"q")), Expr::Epsilon]),
+            bytes(b"!"),
+        ];
+        for tokenizer in [
+            build_regex_monolithic(&expressions).into_tokenizer(
+                3, Some(Arc::from(expressions.clone().into_boxed_slice())),
+            ),
+            build_regex_partitioned(&expressions, &[0, 1, 2]).into_tokenizer(
+                3, Some(Arc::from(expressions.clone().into_boxed_slice())),
+            ),
+        ] {
+        let n = tokenizer.num_states() as usize;
+        let vocab = Vocab::new(vec![
+            (0, vec![]), (3, b"mn!".to_vec()), (11, b"mn!".to_vec()),
+            (24, b"!ab".to_vec()), (81, b"z!".to_vec()), (100, b"q!".to_vec()),
+            (103, b"!q!".to_vec()), (109, b"!".to_vec()), (200, vec![0xc2]),
+        ]);
+        let rules = vec![
+            Rule { lhs: 1, rhs: vec![Symbol::Nonterminal(0)] },
+            Rule { lhs: 0, rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)] },
+            Rule { lhs: 0, rhs: vec![Symbol::Terminal(1), Symbol::Terminal(2)] },
+            Rule { lhs: 0, rhs: vec![Symbol::Terminal(2), Symbol::Terminal(0)] },
+            Rule { lhs: 0, rhs: vec![Symbol::Terminal(2), Symbol::Terminal(1), Symbol::Terminal(2)] },
+        ];
+        let grammar = AnalyzedGrammar::from_composed_rules(
+            rules, 3, vec!["long".into(), "pattern".into(), "foreign".into()],
+            vec!["doc".into(), "augmented".into()], 1,
+        );
+        let ownership = Arc::new(BoundaryOwnership::flat(&[0, 2], 3).unwrap());
+        let flat: Arc<[u32]> = Arc::from(l1::build_flat_transition_table(&tokenizer));
+        let mut total_removed = 0;
+        for start in [ImmediateComponentId(0), ImmediateComponentId(1)] {
+            let (support, _) = crossing_prefix_seed_support(&tokenizer, &vocab, &flat, &ownership, start).unwrap();
+            total_removed += support.iter().filter(|&&keep| !keep).count();
+            let build = |mask: Vec<bool>, automatic_prefix_support| {
+                let mut scope = BoundaryAnalysisScope::new(
+                    InitialStateDomain::from_mask(n, mask).unwrap(),
+                    tokenizer.deterministic_reset_states().into_iter().collect(),
+                    Arc::clone(&ownership), start, true, None,
+                ).unwrap();
+                scope.automatic_prefix_support = automatic_prefix_support;
+                let (mapped, profile) = build_scoped_boundary_id_map_and_terminal_dwa(
+                    &tokenizer, &vocab, &types::TerminalColoring::identity(3),
+                    None, &grammar, &BTreeMap::new(), Arc::clone(&flat), &scope,
+                );
+                let (automaton, id_map) = mapped.into_parts();
+                let TerminalAutomaton::Dwa(dwa) = automaton else { panic!("boundary must publish DWA") };
+                types::LocalIdMapTerminalDwa { dwa, id_map, profile }
+            };
+            // The reference cannot run partition-local support implicitly:
+            // otherwise both sides could share the same pruning bug.
+            l2p::terminal_dwa_equivalence::compare(
+                &build(vec![true; n], false), &build(support, true),
+            ).unwrap();
+        }
+        assert!(total_removed > 0, "test must exercise actual seed removal");
+        }
+    }
+
+    #[test]
+    fn prefix_support_keeps_epsilon_and_foreign_partial_observations() {
+        let tokenizer = crate::automata::lexer::tokenizer::arbitrary_epsilon_l1_test_tokenizer();
+        let flat = super::super::l1::build_flat_transition_table(&tokenizer);
+        let ownership = BoundaryOwnership::flat(&[0, 1], 2).unwrap();
+        let vocab = Vocab::new(vec![(8, b"a!".to_vec()), (20, b"b!".to_vec())]);
+        let (support, _) = crossing_prefix_seed_support(&tokenizer, &vocab, &flat, &ownership, ImmediateComponentId(0)).unwrap();
+        assert!(support[0] && support[1] && support[2] && support[4]);
+        // Local acceptance at entry is not a completion of this token: the
+        // ordinary scanners record matches only after a consumed byte.
+        assert!(!support[3] && !support[6]);
+        // Fixture state5 completes foreign terminal1. State6, like state3,
+        // completes LOCAL terminal0 and has no outgoing byte transitions.
+        assert!(support[5]);
+    }
 
     #[test]
     fn initial_domain_builds_only_in_scope_singleton_classes() {

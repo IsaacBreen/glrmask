@@ -1651,11 +1651,34 @@ impl TiDiscoveryContext {
         tokenizer: &Tokenizer,
         initial_state_map: Option<&ManyToOneIdMap>,
     ) -> Option<TiRestrictedObservationSeed> {
+        let seed = self.output_projection_seed.borrow();
+        let seed = seed.as_ref()?;
+        self.reusable_nfa_observation_state_map_from_seed(tokenizer, initial_state_map, seed)
+    }
+
+    /// Reuse the discovery topology but certify every original output label.
+    /// A composed grammar may require global residual observations even when
+    /// TI's final discovery round used only representative terminal labels.
+    /// The full output seed is immutable and was retained before any folding.
+    pub fn reusable_nfa_full_observation_state_map(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+    ) -> Option<TiRestrictedObservationSeed> {
+        self.reusable_nfa_observation_state_map_from_seed(
+            tokenizer, initial_state_map, &self.raw.full_output_projection_seed,
+        )
+    }
+
+    fn reusable_nfa_observation_state_map_from_seed(
+        &self,
+        tokenizer: &Tokenizer,
+        initial_state_map: Option<&ManyToOneIdMap>,
+        seed: &OutputProjectionSeed,
+    ) -> Option<TiRestrictedObservationSeed> {
         if !tokenizer.has_epsilon_transitions() || !self.topology.nfa_configurations_use_raw_states {
             return None;
         }
-        let seed = self.output_projection_seed.borrow();
-        let seed = seed.as_ref()?;
         let configurations = self.topology.nfa_configurations.as_ref()?;
         let active_language = raw_active_language_states(
             tokenizer,
@@ -11876,6 +11899,22 @@ pub fn restore_raw_follow_constraints_after_expansion(
     num_terminals: usize,
     ignore_terminal: Option<TerminalID>,
 ) -> RawFollowRestoration {
+    restore_raw_follow_constraints_after_expansion_with_transparent(
+        expanded_dwa, disallowed_follows, num_terminals, ignore_terminal, None,
+    )
+}
+
+/// The same predecessor-follow product with additional scoped-transparent
+/// terminal labels. A transparent label neither checks nor replaces the
+/// predecessor; parser component ownership is enforced later by its transfer.
+/// This matches the ordinary NWA follow product used before TI expansion.
+pub fn restore_raw_follow_constraints_after_expansion_with_transparent(
+    expanded_dwa: &DWA,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    num_terminals: usize,
+    ignore_terminal: Option<TerminalID>,
+    follow_transparent: Option<&BitSet>,
+) -> RawFollowRestoration {
     // Every query below is for an in-range raw terminal. Borrow the original
     // rows instead of normalizing by cloning `num_terminals` full bitsets. The
     // former normalization was several milliseconds by itself on p0/p1 even
@@ -11964,6 +12003,7 @@ pub fn restore_raw_follow_constraints_after_expansion(
         for (&label, (target, weight)) in &source.transitions {
             let next_previous_key = if label < 0
                 || ignore_terminal.is_some_and(|ignore| label as TerminalID == ignore)
+                || follow_transparent.is_some_and(|bits| bits.get(label as usize))
             {
                 previous_key
             } else if (label as usize) < previous_key_for_terminal.len() {
@@ -13320,5 +13360,32 @@ mod tests {
             &[4, 4],
             &[4, 5],
         ));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn scoped_follow_restoration_matches_global_transparency_and_keeps_predecessor() {
+    let mut source = DWA::new(1, 2);
+    for _ in 0..3 { source.add_state(); }
+    source.states_mut()[0].transitions.insert(0, (1, Weight::all()));
+    source.states_mut()[1].transitions.insert(2, (2, Weight::all()));
+    source.states_mut()[2].transitions.insert(1, (3, Weight::all()));
+    source.states_mut()[3].final_weight = Some(Weight::all());
+    let mut transparent = BitSet::new(3); transparent.set(2);
+    for block_real_successor in [false, true] {
+        let mut blocked = BitSet::new(3); blocked.set(2);
+        if block_real_successor { blocked.set(1); }
+        let follows = BTreeMap::from([(0, blocked), (2, BitSet::all(3))]);
+        let expected = restore_raw_follow_constraints_after_expansion(&source, &follows, 3, Some(2));
+        let actual = restore_raw_follow_constraints_after_expansion_with_transparent(
+            &source, &follows, 3, None, Some(&transparent),
+        );
+        assert_eq!(expected.dwa.start_state(), actual.dwa.start_state());
+        assert_eq!(expected.dwa.states(), actual.dwa.states());
+        let mut q = Some(actual.dwa.start_state());
+        for label in [0,2,1] { q = q.and_then(|q| actual.dwa.states()[q as usize].transitions.get(&label).map(|&(target,_)| target)); }
+        let accepts = q.is_some_and(|q| actual.dwa.states()[q as usize].final_weight.as_ref().is_some_and(|w| !w.is_empty()));
+        assert_eq!(accepts, !block_real_successor);
     }
 }
