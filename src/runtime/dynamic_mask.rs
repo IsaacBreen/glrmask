@@ -4909,16 +4909,50 @@ fn try_full_walk_mask_with_table<
         }
     }
     const OPTIONAL_SPACE_NONSPACE_SLICE: u32 = 0x40;
-    let direct_residual_slice = if std::env::var_os(
-        "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE",
-    )
-    .is_some()
-    {
+    // Default-on, with a diagnostic opt-out for equal-binary comparisons.
+    static WORD_SLICE_ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct_residual_slice = if *WORD_SLICE_ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_DIRECT_RESIDUAL_WORD_SLICE").is_none()
+    }) {
         first_match_direct_root.and_then(|(coordinate, _, _)| {
             let FirstMatchDirectCoordinate::Virtual(coordinate) = coordinate else {
                 return None;
             };
             let slice = vocab.llg_slice_by_cache_id(OPTIONAL_SPACE_NONSPACE_SLICE)?;
+            // A proved word slice is not automatically the cheapest exact
+            // route. For a large safe radius, the existing master certificate
+            // can leave substantially less work than the word-only trie.
+            // Compare immutable residual op counts before paying for another
+            // proof; declining this optional route leaves the original
+            // master/ordinary execution and its accepted language unchanged.
+            static WORD_ROUTE_PERMILLE: OnceLock<Option<usize>> = OnceLock::new();
+            if let Some(max_permille) = *WORD_ROUTE_PERMILLE.get_or_init(|| {
+                std::env::var("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_WORD_ROUTE_PERMILLE")
+                    .ok()
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .or(Some(500))
+            }) {
+                let word_ops = slice.trie().full_walk_ops().len();
+                let existing_ops = master_decision
+                    .and_then(|(radius, whitespace)| {
+                        vocab.llg_master_residual_ops(radius, whitespace)
+                    })
+                    .unwrap_or_else(|| trie.full_walk_ops().len());
+                let prefer_word = word_ops.saturating_mul(1000)
+                    < existing_ops.saturating_mul(max_permille);
+                if std::env::var_os("GLRMASK_PROFILE_WORD_ROUTE").is_some()
+                    && dynamic_mask_profile_enabled(state.generation)
+                {
+                    eprintln!(
+                        "[glrmask/profile][word_route] generation={} master={:?} word_ops={} existing_ops={} max_permille={} attempt={}",
+                        state.generation, master_decision, word_ops, existing_ops,
+                        max_permille, prefer_word,
+                    );
+                }
+                if !prefer_word {
+                    return None;
+                }
+            }
             let work_limit = std::env::var(
                 "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_WORK_LIMIT",
             )

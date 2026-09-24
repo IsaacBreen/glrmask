@@ -3231,15 +3231,18 @@ fn prepare_llg_slice_leftovers_for_ordered_vocab(
         .map(Vec::len)
         .max()
         .unwrap_or(0);
+    // Default to the validated finite word language. This is vocabulary-only
+    // preparation; every runtime use still needs an exact residual proof and
+    // must beat the already-certified route by the conservative work margin.
     let ascii_slice_max_token_byte_len = std::env::var(
         "GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE_MAX_BYTES",
     )
     .ok()
     .and_then(|value| value.trim().parse::<usize>().ok())
     .filter(|&value| value != 0)
-    .map_or(max_token_byte_len, |value| value.min(max_token_byte_len));
+    .map_or(16.min(max_token_byte_len), |value| value.min(max_token_byte_len));
     let ascii_word = (max_token_byte_len != 0
-        && std::env::var_os("GLRMASK_EXPERIMENT_DIRECT_RESIDUAL_ASCII_WORD_SLICE").is_some())
+        && std::env::var_os("GLRMASK_DISABLE_DIRECT_RESIDUAL_WORD_SLICE").is_none())
     .then(|| {
         Arc::new(
             VocabPartitionDfa::compile_utf8_regex(
