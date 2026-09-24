@@ -3483,6 +3483,10 @@ pub(crate) struct DynamicMaskVocab {
     /// for model-token masking this is the largest safe-token scalar length.
     projected_terminal_radius_cache:
         Arc<Mutex<FxHashMap<(TerminalID, u32, u32, u32), u32>>>,
+    /// Conservative bounded certificates over exact physical source coordinates.
+    /// Never shared with a different grammar's fresh runtime vocabulary instance.
+    raw_terminal_radius_cache:
+        Arc<Mutex<FxHashMap<(TerminalID, u32, u32, u32, usize), u32>>>,
     /// Exact original-token masks rejected by a token-start maximal-munch
     /// guard. Keys are the canonical sorted `(mask lexer state, terminal)`
     /// memories carried by `InitialPruneGuard`. The result depends only on the
@@ -3827,6 +3831,7 @@ impl DynamicMaskVocab {
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             mask_determinized_tokenizer: None,
@@ -3925,6 +3930,7 @@ impl DynamicMaskVocab {
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             mask_determinized_tokenizer: None,
@@ -3989,6 +3995,7 @@ impl DynamicMaskVocab {
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             mask_determinized_tokenizer: None,
@@ -4126,6 +4133,7 @@ impl DynamicMaskVocab {
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             mask_determinized_tokenizer: None,
@@ -7225,6 +7233,136 @@ impl DynamicMaskVocab {
         Some(certified)
     }
 
+    /// Prove a bounded safe-atom prefix radius directly in the physical lexer.
+    /// Unlike the projected proof this explores only the requested horizon,
+    /// without first building/minimizing the terminal's entire residual DFA.
+    /// The slice must mark each completed atom by entering an accepting state,
+    /// as the safe+ UTF-8 slice does. The shortest failing accepted word gives
+    /// a universal safe lower bound for all strictly shorter atom layers.
+    /// Every traversed prefix must retain the selected terminal. Epsilon or
+    /// nonphysical coordinates and exhausted work budgets fail closed.
+    pub(crate) fn raw_terminal_slice_repeat_radius(
+        &self,
+        tokenizer: &Tokenizer,
+        terminal: TerminalID,
+        source: u32,
+        slice_cache_id: u32,
+        slice: &VocabPartitionDfa,
+        max_repetitions: u32,
+        work_limit: usize,
+    ) -> Option<u32> {
+        if max_repetitions == 0
+            || source >= tokenizer.num_states()
+            || tokenizer.state_is_virtual_runtime(source)
+            || tokenizer.state_has_epsilon_transitions(source)
+            || slice.accepting_map().get(slice.start_state() as usize).copied()?
+        {
+            return None;
+        }
+        // A dedicated cache cannot alias projected/symbolic certificate keys.
+        // Slice IDs refer to immutable languages within this vocabulary instance.
+        // Include budget so an earlier cheap failed attempt cannot mask a later
+        // larger-budget certificate. Cached zero is always conservative.
+        let key = (terminal, source, slice_cache_id, max_repetitions, work_limit);
+        if let Some(&cached) = self.raw_terminal_radius_cache.lock()
+            .unwrap_or_else(|p| p.into_inner()).get(&key)
+        {
+            return Some(cached);
+        }
+        static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let diagnostic = *PROFILE.get_or_init(|| {
+            std::env::var_os("GLRMASK_PROFILE_RAW_TERMINAL_RADIUS").is_some()
+        });
+        let started = diagnostic.then(std::time::Instant::now);
+        let mut work = 0usize;
+        let mut explored = 0usize;
+        let result = (|| {
+            let slice_count = slice.accepting_map().len();
+            let mut reverse = vec![Vec::<(u32, u8)>::new(); slice_count];
+            for state in 0..slice_count as u32 {
+                let mut seen = FxHashSet::default();
+                for byte in 0u16..=255 {
+                    let target = slice.step(state, byte as u8);
+                    if (target as usize) < slice_count && seen.insert(target) {
+                        reverse[target as usize].push((state, u8::from(slice.accepting_map()[target as usize])));
+                    }
+                }
+            }
+            let mut min_to_accept = vec![u32::MAX; slice_count];
+            let mut distances = VecDeque::new();
+            for (state, &accepting) in slice.accepting_map().iter().enumerate() {
+                if accepting { min_to_accept[state] = 0; distances.push_back(state as u32); }
+            }
+            while let Some(target) = distances.pop_front() {
+                for &(state, cost) in &reverse[target as usize] {
+                    let next = min_to_accept[target as usize].saturating_add(u32::from(cost));
+                    if next < min_to_accept[state as usize] {
+                        min_to_accept[state as usize] = next;
+                        if cost == 0 { distances.push_front(state); } else { distances.push_back(state); }
+                    }
+                }
+            }
+            let mut best = FxHashMap::<(u32, u32), u32>::default();
+            let mut queue = VecDeque::from([(slice.start_state(), source, 0u32)]);
+            best.insert((slice.start_state(), source), 0);
+            let mut first_bad = max_repetitions.saturating_add(1);
+            while let Some((slice_state, lexer_state, completed)) = queue.pop_front() {
+                if best.get(&(slice_state, lexer_state)).copied() != Some(completed)
+                    || completed >= first_bad || completed > max_repetitions
+                { continue; }
+                if lexer_state >= tokenizer.num_states()
+                    || tokenizer.state_is_virtual_runtime(lexer_state)
+                    || tokenizer.state_has_epsilon_transitions(lexer_state)
+                { return None; }
+                explored += 1;
+                for byte in 0u16..=255 {
+                    let target_slice = slice.step(slice_state, byte as u8);
+                    if target_slice as usize >= slice_count || !slice.can_reach_accepting(target_slice) { continue; }
+                    let next_completed = completed.saturating_add(u32::from(slice.accepting_map()[target_slice as usize]));
+                    let rest = min_to_accept[target_slice as usize];
+                    if rest == u32::MAX { continue; }
+                    let shortest_word = next_completed.saturating_add(rest);
+                    if shortest_word > max_repetitions || shortest_word >= first_bad { continue; }
+                    work += 1;
+                    if work > work_limit { return None; }
+                    let target = tokenizer.step(lexer_state, byte as u8);
+                    if target.is_some_and(|t| tokenizer.state_is_virtual_runtime(t)) {
+                        return None;
+                    }
+                    let live = target.is_some_and(|t| t < tokenizer.num_states()
+                        && (tokenizer.possible_future_terminals(t).contains(terminal as usize)
+                            || tokenizer.matched_terminals_slice(t).contains(&terminal)));
+                    if !live {
+                        first_bad = first_bad.min(shortest_word);
+                        continue;
+                    }
+                    let target = target.expect("live target exists");
+                    if tokenizer.state_has_epsilon_transitions(target) { return None; }
+                    if next_completed >= first_bad { continue; }
+                    let state_key = (target_slice, target);
+                    if next_completed < best.get(&state_key).copied().unwrap_or(u32::MAX) {
+                        best.insert(state_key, next_completed);
+                        if slice.accepting_map()[target_slice as usize] {
+                            queue.push_back((target_slice, target, next_completed));
+                        } else { queue.push_front((target_slice, target, next_completed)); }
+                    }
+                }
+            }
+            Some(first_bad.saturating_sub(1).min(max_repetitions))
+        })();
+        // Zero is always a sound lower bound. Remember failures so an expensive
+        // source cannot repeatedly spend the same bounded proof budget.
+        let radius = result.unwrap_or(0);
+        self.raw_terminal_radius_cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, radius);
+        if diagnostic {
+            eprintln!("[raw_terminal_radius] source={} terminal={} radius={} complete={} work={} states={} max={} ms={:.3}",
+                source, terminal, radius, result.is_some(), work, explored, max_repetitions,
+                started.map_or(0.0, |s| s.elapsed().as_secs_f64()*1000.0));
+        }
+        Some(radius)
+    }
+
+
     /// Return the largest completed-atom count `r <= max_repetitions` such
     /// that every word in the regular `slice+` language with at most `r`
     /// completed atoms remains a live prefix of this exact projected terminal.
@@ -8285,6 +8423,7 @@ impl Default for DynamicMaskVocab {
             projected_terminal_text_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_partition_cache: Arc::new(Mutex::new(FxHashMap::default())),
             projected_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
+            raw_terminal_radius_cache: Arc::new(Mutex::new(FxHashMap::default())),
             pending_guard_blocked_mask_cache: Arc::new(Mutex::new(FxHashMap::default())),
             mask_tokenizer: None,
             mask_determinized_tokenizer: None,
@@ -11008,5 +11147,89 @@ mod dynamic_mask_vocab_cache_boundary_tests {
             &template.self_loop_projections,
             &fresh.self_loop_projections,
         ));
+    }
+}
+
+
+#[cfg(test)]
+mod raw_terminal_radius_tests {
+    use super::*;
+    use crate::{Constraint, Grammar, Vocab};
+
+    /// Exhaustively enumerate the finite test alphabet, independent of the
+    /// product/shortest-distance algorithm being checked. No quotient proofs.
+    fn reference_radius(
+        tokenizer: &Tokenizer, terminal: TerminalID, source: u32,
+        atoms: &[&[u8]], horizon: u32,
+    ) -> u32 {
+        let mut frontier = vec![source];
+        for count in 1..=horizon {
+            let mut next = Vec::new();
+            for state in frontier {
+                for atom in atoms {
+                    let mut end = state;
+                    for &byte in *atom {
+                        let Some(target) = tokenizer.step(end, byte) else { return count - 1; };
+                        if target >= tokenizer.num_states()
+                            || (!tokenizer.possible_future_terminals(target).contains(terminal as usize)
+                                && !tokenizer.matched_terminals_slice(target).contains(&terminal))
+                        {
+                            return count - 1;
+                        }
+                        end = target;
+                    }
+                    next.push(end);
+                }
+            }
+            frontier = next;
+        }
+        horizon
+    }
+
+    #[test]
+    fn raw_terminal_radius_matches_exhaustive_ascii_and_multibyte_words() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()),
+                                    (2, "é".as_bytes().to_vec())]);
+        let fixtures: [(&str, &str, Vec<&[u8]>); 3] = [
+            (r"[ab]{1,4}", r"[ab]+", vec![b"a", b"b"]),
+            (r"a{1,4}", r"[ab]+", vec![b"a", b"b"]),
+            (r"(?:a|é){1,4}", r"(?:a|\xC3\xA9)+", vec![b"a", "é".as_bytes()]),
+        ];
+        let mut positive = 0usize;
+        let mut checked = 0usize;
+        for (pattern, slice_pattern, atoms) in fixtures {
+            let grammar = format!("glrm 1; start s; t WORD = /{pattern}/; nt s = WORD;");
+            let constraint = Constraint::compile(Grammar::glrm(&grammar), &vocab).unwrap();
+            let terminal = constraint.terminal_display_names.iter()
+                .position(|name| name == "WORD").unwrap() as TerminalID;
+            let slice = VocabPartitionDfa::compile_byte_regex("test-atoms", slice_pattern).unwrap();
+            for source in 0..constraint.tokenizer.num_states() {
+                if constraint.tokenizer.state_has_epsilon_transitions(source)
+                    || constraint.tokenizer.state_is_virtual_runtime(source) { continue; }
+                let expected = reference_radius(&constraint.tokenizer, terminal, source, &atoms, 6);
+                let actual = constraint.dynamic_mask_vocab.raw_terminal_slice_repeat_radius(
+                    &constraint.tokenizer, terminal, source, 901, &slice, 6, 65_536,
+                );
+                assert_eq!(actual, Some(expected), "pattern={pattern} source={source}");
+                checked += 1;
+                positive += usize::from(expected > 0);
+                // Budget exhaustion never creates a certificate, and its key
+                // cannot poison a subsequent larger-budget query.
+                assert_eq!(constraint.dynamic_mask_vocab.raw_terminal_slice_repeat_radius(
+                    &constraint.tokenizer, terminal, source, 901, &slice, 6, 0,
+                ), Some(0));
+                assert_eq!(constraint.dynamic_mask_vocab.raw_terminal_slice_repeat_radius(
+                    &constraint.tokenizer, terminal, source, 901, &slice, 6, 65_536,
+                ), actual);
+            }
+            let empty = VocabPartitionDfa::compile_byte_regex("nullable", r"a*").unwrap();
+            assert_eq!(constraint.dynamic_mask_vocab.raw_terminal_slice_repeat_radius(
+                &constraint.tokenizer, terminal, 0, 902, &empty, 6, 65_536,
+            ), None);
+            assert_eq!(constraint.dynamic_mask_vocab.raw_terminal_slice_repeat_radius(
+                &constraint.tokenizer, terminal, u32::MAX, 901, &slice, 6, 65_536,
+            ), None);
+        }
+        assert!(checked > 4 && positive > 0, "must exercise real positive and negative certificates");
     }
 }

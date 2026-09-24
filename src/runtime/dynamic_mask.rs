@@ -36,6 +36,82 @@ mod recursive_provider;
 
 type ParserStacks = LeveledGSS<u32, ()>;
 
+/// Exact admission for one retained parser frontier during one mask invocation.
+/// The borrowed ConstraintState keeps the owner alive for this entire lifetime;
+/// the address is only an extra identity check, never a global cache key.
+struct RootAdmissionMemo {
+    owner: usize,
+    gss: ParserStacks,
+    admitted: OnceLock<BitSet>,
+}
+
+type SharedRootAdmission = Option<Arc<RootAdmissionMemo>>;
+
+fn root_admission_memo_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_ROOT_ADMISSION_MEMO").is_none()
+    })
+}
+
+fn raw_terminal_radius_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_RAW_TERMINAL_RADIUS").is_none()
+    })
+}
+
+fn exact_parser_admission_for_stacks(constraint: &Constraint, stacks: &ParserStacks) -> BitSet {
+    let parser_gss = with_empty_accumulators(stacks);
+    constraint.direct_regular_admissible_terminals(&parser_gss).unwrap_or_else(|| {
+        let candidates = BitSet::all(constraint.table.num_terminals as usize);
+        super::commit::exact_admitted_terminals_for_candidates(
+            constraint, &parser_gss, &candidates,
+        )
+    })
+}
+
+#[inline]
+fn parser_admission_with_root_memo(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+    shared: &SharedRootAdmission,
+) -> BitSet {
+    let Some(memo) = shared.as_ref().filter(|memo| {
+        memo.owner == constraint as *const Constraint as usize && memo.gss.ptr_eq(stacks)
+    }) else {
+        return exact_parser_admission_for_stacks(constraint, stacks);
+    };
+    let admitted = memo.admitted.get_or_init(|| {
+        exact_parser_admission_for_stacks(constraint, stacks)
+    });
+    static VERIFY: OnceLock<bool> = OnceLock::new();
+    if *VERIFY.get_or_init(|| {
+        std::env::var_os("GLRMASK_ASSERT_ROOT_ADMISSION_MEMO").is_some()
+    }) {
+        assert_eq!(*admitted, exact_parser_admission_for_stacks(constraint, stacks));
+    }
+    admitted.clone()
+}
+
+fn root_admission_memo(
+    constraint: &Constraint,
+    stacks: &ParserStacks,
+    roots: &DynamicBranches,
+) -> SharedRootAdmission {
+    if !root_admission_memo_enabled() {
+        return None;
+    }
+    roots.iter().find(|branch| branch.gss.ptr_eq(stacks))
+        .and_then(|branch| branch.shared_root_admission.clone())
+        .or_else(|| Some(Arc::new(RootAdmissionMemo {
+            owner: constraint as *const Constraint as usize,
+            gss: stacks.clone(),
+            admitted: OnceLock::new(),
+        })))
+}
+
+
 /// The current LR action row is a necessary condition for admitting a terminal
 /// when no zero-width control transitions can change the top first. It is only
 /// a candidate superset: stack-dependent reductions/guards still require the
@@ -2377,6 +2453,7 @@ fn singleton_product_cache_keeps_exact_keys_and_capacity() {
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
+    shared_root_admission: SharedRootAdmission,
     reset_lexer: Option<u32>,
     token_boundary_allowed: Vec<u8>,
     children: SmallVec<[(TerminalID, u32); 16]>,
@@ -2420,6 +2497,7 @@ impl FullWalkParserCache {
             nodes.push(FullWalkParserNode {
                 gss: branch.gss.clone(),
                 admitted: None,
+                shared_root_admission: branch.shared_root_admission.clone(),
                 reset_lexer: None,
                 token_boundary_allowed: dense_lexer_state_count
                     .map_or_else(Vec::new, |count| vec![0; count]),
@@ -2465,6 +2543,7 @@ impl FullWalkParserCache {
         self.nodes.push(FullWalkParserNode {
             gss: stacks,
             admitted: None,
+            shared_root_admission: None,
             reset_lexer: None,
             token_boundary_allowed: self
                 .dense_lexer_state_count
@@ -2577,17 +2656,9 @@ impl FullWalkParserCache {
             if self.profile {
                 self.profile_admitted_builds += 1;
             }
-            let parser_gss = with_empty_accumulators(&self.nodes[index].gss);
-            let admitted = constraint
-                .direct_regular_admissible_terminals(&parser_gss)
-                .unwrap_or_else(|| {
-                    let candidates = BitSet::all(constraint.table.num_terminals as usize);
-                    super::commit::exact_admitted_terminals_for_candidates(
-                        constraint,
-                        &parser_gss,
-                        &candidates,
-                    )
-                });
+            let admitted = parser_admission_with_root_memo(
+                constraint, &self.nodes[index].gss, &self.nodes[index].shared_root_admission,
+            );
             self.nodes[index].admitted = Some(admitted);
         }
         self.nodes[index].admitted.as_ref().unwrap()
@@ -4772,10 +4843,25 @@ fn try_full_walk_mask_with_table<
                                     .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1e3),
                             );
                         }
-                        match (projected, symbolic) {
+                        let known_radius = match (projected, symbolic) {
                             (Some(left), Some(right)) => Some(left.max(right)),
                             (left, right) => left.or(right),
-                        }
+                        };
+                        known_radius.or_else(|| {
+                            // Scoped/composed/projected coordinates must never be
+                            // interpreted as physical coordinates of the owner.
+                            if !raw_terminal_radius_enabled()
+                                || vocab.mask_runtime_tokenizer().is_some()
+                                || transitions.exact_raw_state(lexer_state) != Some(source)
+                            {
+                                return None;
+                            }
+                            vocab.raw_terminal_slice_repeat_radius(
+                                &state.constraint.tokenizer, terminal, source,
+                                safe_plus.cache_id(), safe_plus.dfa(),
+                                max_vocab_safe_chars.min(16), 65_536,
+                            )
+                        })
                     })
                     .filter_map(|radius| u16::try_from(radius).ok())
                     .max()
@@ -6616,6 +6702,7 @@ struct DynamicBranch {
     /// schedule vocabulary root bytes from the retained terminal residual.
     residual_continuation_terminal: Option<TerminalID>,
     gss: ParserStacks,
+    shared_root_admission: SharedRootAdmission,
     initial_prune_guard: InitialPruneGuard,
 }
 
@@ -8786,6 +8873,7 @@ fn fill_recursive_mask_using<T: FullWalkTransitionTable>(
                 // residual/slice proofs until provider-native proofs exist.
                 exact_tokenizer_state: None,
                 gss: stacks,
+                shared_root_admission: None,
                 initial_prune_guard: InitialPruneGuard::new_recursive(
                     &terminals_disallowed,
                 ),
@@ -9312,6 +9400,9 @@ fn fill_mask_dynamic_impl(
                         .count(),
                 );
             }
+            let shared_root_admission = root_admission_memo(
+                state.constraint, &stacks, &root_branches,
+            );
             // Project fresh starts and resets, but preserve an existing
             // continuation root's exact raw coordinate. That coordinate enables
             // the retained-terminal residual scheduler and established hot paths;
@@ -9331,14 +9422,9 @@ fn fill_mask_dynamic_impl(
                     .then(|| parser_row_projection_candidates(state.constraint, &stacks))
                     .flatten();
                 let (mut admitted, exact_admission) = row_candidates.unwrap_or_else(|| {
-                    let parser_gss = with_empty_accumulators(&stacks);
-                    let admitted = state.constraint.direct_regular_admissible_terminals(&parser_gss)
-                        .unwrap_or_else(|| {
-                            let candidates = BitSet::all(state.constraint.table.num_terminals as usize);
-                            super::commit::exact_admitted_terminals_for_candidates(
-                                state.constraint, &parser_gss, &candidates,
-                            )
-                        });
+                    let admitted = parser_admission_with_root_memo(
+                        state.constraint, &stacks, &shared_root_admission,
+                    );
                     (admitted, true)
                 });
                 if let Some(ignore) = state.constraint.ignore_terminal {
@@ -9379,6 +9465,7 @@ fn fill_mask_dynamic_impl(
                 parser_filtered_transparent,
                 residual_continuation_terminal: None,
                 gss: stacks,
+                shared_root_admission,
                 initial_prune_guard,
             });
     }
@@ -10266,6 +10353,38 @@ mod tests {
             }
             frontier = next;
         }
+    }
+
+    #[test]
+    fn root_admission_memo_is_exact_and_owner_frontier_scoped() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
+        let constraint = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = A B;"#,
+        ), &vocab).unwrap();
+        let other = Constraint::compile(Grammar::glrm(
+            r#"glrm 1; start s; t A = "a"; t B = "b"; nt s = B A;"#,
+        ), &vocab).unwrap();
+        let stacks = ParserStacks::from_single_stack(vec![0], ());
+        let shared = Some(Arc::new(RootAdmissionMemo {
+            owner: &constraint as *const Constraint as usize,
+            gss: stacks.clone(), admitted: OnceLock::new(),
+        }));
+        assert!(shared.as_ref().unwrap().admitted.get().is_none());
+        let expected = exact_parser_admission_for_stacks(&constraint, &stacks);
+        assert_eq!(parser_admission_with_root_memo(&constraint, &stacks, &shared), expected);
+        assert_eq!(parser_admission_with_root_memo(&constraint, &stacks.clone(), &shared), expected);
+        assert_eq!(shared.as_ref().unwrap().admitted.get(), Some(&expected));
+
+        let terminal = constraint.terminal_display_names.iter()
+            .position(|name| name == "A").unwrap() as TerminalID;
+        let child = parser_child(&constraint, &stacks, terminal).unwrap();
+        assert!(!child.ptr_eq(&stacks));
+        assert_eq!(parser_admission_with_root_memo(&constraint, &child, &shared),
+                   exact_parser_admission_for_stacks(&constraint, &child));
+        assert_eq!(parser_admission_with_root_memo(&other, &stacks, &shared),
+                   exact_parser_admission_for_stacks(&other, &stacks));
+        assert_eq!(shared.as_ref().unwrap().admitted.get(), Some(&expected),
+                   "foreign/frontier fallback must not overwrite retained root proof");
     }
 
     #[test]
