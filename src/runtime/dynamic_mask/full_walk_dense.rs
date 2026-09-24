@@ -1568,6 +1568,7 @@ fn precollapse_master_decision(
                     vocab.prepare_runtime_projected_terminal_quotients(
                         &state.constraint.tokenizer,
                         &safe_plus_slice.slice_token_bytes(),
+                        None,
                     );
                 }
             }

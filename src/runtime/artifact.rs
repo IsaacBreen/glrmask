@@ -7111,6 +7111,7 @@ impl DynamicMaskVocab {
         &self,
         source: &Tokenizer,
         safe_slice_bytes: &U8Set,
+        component_state_cap: Option<usize>,
     ) {
         if self.projected_terminal_quotients_prepared
             || self.runtime_projected_terminal_quotients.get().is_some()
@@ -7125,8 +7126,12 @@ impl DynamicMaskVocab {
                         .is_some_and(|support| safe_slice_bytes.is_subset(&support))
                 })
                 .collect::<Vec<_>>();
-            let mut quotients = source
-                .build_terminal_projected_quotients_for_containment_candidates(&candidates);
+            let mut quotients = match component_state_cap {
+                Some(cap) => source.build_terminal_projected_quotients_for_containment_candidates_bounded(
+                    &candidates, cap, cap.saturating_mul(256),
+                ),
+                None => source.build_terminal_projected_quotients_for_containment_candidates(&candidates),
+            };
             quotients.sort_unstable_by_key(|(terminal, _)| *terminal);
             quotients.dedup_by_key(|(terminal, _)| *terminal);
             Arc::from(
