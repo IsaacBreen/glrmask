@@ -19222,6 +19222,7 @@ fn build_composed_constraint_unfinalized(
         table,
         terminal_display_names,
         tokenizer,
+        boundary_completion_index: None,
         tokenizer_has_epsilon_transitions,
         ignore_terminal,
         special_token_terminals,

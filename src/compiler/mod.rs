@@ -132,3 +132,4 @@ pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
 mod boundary_prefix_dominance;
 
 mod boundary_first_completion;
+pub(crate) mod boundary_precomputed_completion;

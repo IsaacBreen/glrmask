@@ -1029,6 +1029,16 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
 }
 
 fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
+    let bytes=encode_composition_metadata_base_for_save(constraint);
+    if let Some(wire)=crate::compiler::boundary_precomputed_completion::saved_wire(constraint) {
+        crate::compiler::boundary_precomputed_completion::wrap_envelope(bytes,wire)
+            .expect("certified component index fits its bounded envelope")
+    } else {
+        crate::compiler::boundary_precomputed_completion::split_envelope(&bytes)
+            .expect("retained composition envelope validated at load").0.to_vec()
+    }
+}
+fn encode_composition_metadata_base_for_save(constraint: &Constraint) -> Vec<u8> {
     let Some(blob) = constraint.deferred_composition_metadata_blob.as_ref() else {
         return encode_composition_metadata(constraint);
     };
@@ -1047,7 +1057,8 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
     let (link_raw_len, link_wire, link_compressed) =
         encode_composition_metadata_part(link_raw);
 
-    let input = blob.as_slice();
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())
+        .expect("retained composition envelope validated at load");
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
@@ -1088,6 +1099,7 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
 }
 
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     if input.is_empty() {
         return Ok(());
     }
@@ -1129,6 +1141,7 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
 fn decode_composition_link_metadata(
     input: &[u8],
 ) -> Result<ConstraintCompositionLinkMetadata, String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
         return Ok(ConstraintCompositionLinkMetadata {
@@ -1185,6 +1198,7 @@ fn decode_composition_link_metadata(
 }
 
 fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMetadata, String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
         return Ok(ConstraintCompositionMetadata {
@@ -5782,7 +5796,7 @@ impl Constraint {
         let Some(blob) = self.deferred_composition_metadata_blob.as_ref() else {
             return Ok(Cow::Borrowed(&[]));
         };
-        let input = blob.as_slice();
+        let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())?;
         validate_composition_metadata_wire(input)?;
         if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
             || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
@@ -7019,6 +7033,7 @@ impl Constraint {
         };
         let deserialize_started = profile.then(std::time::Instant::now);
         let mut packed_dwa_inventory = None;
+        let mut prepared_completion_wire: Option<Arc<[u8]>> = None;
         let mut loaded_packed_dwa_dense_masks = false;
         let mut constraint = if uses_external_runtime_sections(version)
             || version == PREVIOUS_VOCAB_SECTION_CONSTRAINT_VERSION
@@ -8090,6 +8105,9 @@ impl Constraint {
             constraint.deferred_terminal_exprs_blob = artifact.terminal_exprs_blob;
             constraint.deferred_terminal_exprs = Default::default();
             constraint.deferred_composition_metadata_blob = if let Some(section) = composition_metadata_section {
+                let (_, prepared)=crate::compiler::boundary_precomputed_completion::split_envelope(section)
+                    .map_err(crate::GlrMaskError::Serialization)?;
+                prepared_completion_wire=prepared.map(Arc::from);
                 validate_composition_metadata_wire(section)
                     .map_err(crate::GlrMaskError::Serialization)?;
                 if section.is_empty() {
@@ -8358,6 +8376,16 @@ impl Constraint {
                     reason: crate::runtime::SummaryUnavailable::LegacyArtifact,
                 },
             );
+        }
+        if let Some(wire)=prepared_completion_wire {
+            let started=std::time::Instant::now();
+            let prepared=crate::compiler::boundary_precomputed_completion::PreparedCompletion::load(
+                Arc::clone(&constraint.tokenizer),wire,
+            ).map_err(crate::GlrMaskError::Serialization)?;
+            constraint.boundary_completion_index=Some(Arc::new(prepared));
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+                eprintln!("[glrmask/profile][component_completion_load] certified=true ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+            }
         }
         Ok(constraint)
     }

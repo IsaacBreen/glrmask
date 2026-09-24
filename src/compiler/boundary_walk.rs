@@ -207,16 +207,31 @@ fn build_boundary_terminal_dwa_with_shared(
     inputs: &BoundaryWalkInputs,
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
 ) -> Option<BoundaryWalkOutput> {
+    build_boundary_terminal_dwa_with_prepared(inputs, shared, None)
+}
+
+fn build_boundary_terminal_dwa_with_prepared(
+    inputs: &BoundaryWalkInputs,
+    shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
+    prepared: Option<&super::boundary_precomputed_completion::PreparedSourceSpan>,
+) -> Option<BoundaryWalkOutput> {
     let tile_size=std::env::var("GLRMASK_BOUNDARY_QUERY_TILE_SIZE").ok()
         .and_then(|s|s.parse::<usize>().ok()).filter(|&n|(1..=4096).contains(&n));
     let terminal_support=std::env::var_os("GLRMASK_BOUNDARY_QUERY_TERMINAL_SUPPORT").is_some();
     let query_view=std::env::var_os("GLRMASK_BOUNDARY_QUERY_VIEW").is_some();
     let identity = std::env::var_os("GLRMASK_BOUNDARY_IDENTITY_REFINEMENT").is_some();
     let first_started = Instant::now();
-    let first = std::env::var_os("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT")
-        .and_then(|_| inputs.flat_trans)
-        .and_then(|flat| super::boundary_first_completion::prepare(
-            inputs.merged_tokenizer,inputs.vocab,inputs.scope,flat));
+    let use_first = std::env::var_os("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT").is_some();
+    let precomputed = (use_first
+        && std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION").is_some())
+        .then(|| prepared.and_then(|span| span.refine(inputs.merged_tokenizer, inputs.vocab, inputs.scope)))
+        .flatten();
+    let precomputed_selected = precomputed.is_some();
+    let first = precomputed.or_else(|| use_first.then(|| inputs.flat_trans.and_then(|flat|
+        super::boundary_first_completion::prepare(inputs.merged_tokenizer, inputs.vocab, inputs.scope, flat))).flatten());
+    if compose_profile_enabled() && prepared.is_some() {
+        eprintln!("[glrmask/profile][boundary_precomputed_completion] component={} selected={precomputed_selected}", inputs.scope.start_component().0);
+    }
     let narrowed = first.as_ref().and_then(|plan|
         inputs.scope.intersect_initial_support(&plan.representatives));
     let scoped = BoundaryWalkInputs {
@@ -770,6 +785,7 @@ fn map_boundary_shard_walks_with<R, F>(
     inputs: &BoundaryShardLinkInputs,
     consume: &F,
     early_adjacency: Option<&BTreeMap<u32,BitSet>>,
+    prepared_first: Option<&[Option<super::boundary_precomputed_completion::PreparedSourceSpan>]>,
 ) -> Result<Option<(Vec<(usize, R)>, BoundaryShardLinkProfile)>, String>
 where
     R: Send,
@@ -1028,7 +1044,7 @@ where
                 crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(inputs.merged_tokenizer))
                 .expect("write boundary input tokenizer");
         }
-        let mut output = build_boundary_terminal_dwa_with_shared(&BoundaryWalkInputs {
+        let mut output = build_boundary_terminal_dwa_with_prepared(&BoundaryWalkInputs {
             merged_tokenizer: inputs.merged_tokenizer,
             vocab: candidate_vocab,
             grammar: inputs.grammar,
@@ -1038,7 +1054,7 @@ where
             scope: &scope,
             flat_trans: Some(&flat),
             retain_non_crossing_paths: plan.retain_non_crossing_paths,
-        }, shared.as_ref())
+        }, shared.as_ref(), prepared_first.and_then(|spans| spans.get(plan.start_component)).and_then(Option::as_ref))
         .expect("nonempty candidate-vocab shard walks must produce a DWA");
         if live_vocab.is_some()
             && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOKEN_LIVENESS").is_some()
@@ -1179,7 +1195,7 @@ where
 pub(crate) fn build_boundary_shard_walks(
     inputs: &BoundaryShardLinkInputs,
 ) -> Option<(Vec<BuiltBoundaryShardWalk>, BoundaryShardLinkProfile)> {
-    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), None)
+    map_boundary_shard_walks_with(inputs, &|shard| Ok(shard), None, None)
         .expect("identity boundary-walk consumer cannot fail")
         .map(|(built, profile)| {
             (
@@ -2008,6 +2024,15 @@ pub(crate) fn build_walk_static_boundary_link(
             "merged tokenizer must place the fresh reset fan-out at state 0".to_string(),
         );
     }
+    // These spans are established at the actual disjoint-union boundary, from
+    // the same immutable component allocations and its returned raw offsets.
+    // The following Expr-sidecar restoration changes no byte/label topology.
+    let prepared_first = std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION")
+        .map(|_| std::iter::once(parent)
+            .chain(children.iter().map(|child| child.constraint))
+            .zip(tokenizer_offsets.iter().copied())
+            .map(|(component, offset)| super::boundary_precomputed_completion::PreparedSourceSpan::for_component(component, offset))
+            .collect::<Vec<_>>());
     if merged.terminal_exprs().is_none() {
         let all: Vec<&Constraint> = std::iter::once(parent)
             .chain(children.iter().map(|child| child.constraint))
@@ -2300,6 +2325,7 @@ pub(crate) fn build_walk_static_boundary_link(
         },
         &process_shard,
         std::env::var_os("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY").is_some().then_some(scoped_adjacent.as_ref()).flatten(),
+        prepared_first.as_deref(),
     )? else {
         return Ok(empty_output());
     };
@@ -3218,6 +3244,7 @@ fn build_walk_static_boundary_link_nested(
         },
         &process_shard,
         None,
+        None, // Nested-coordinate transport retains the exact on-the-fly path.
     )? else {
         return Ok(empty_output());
     };

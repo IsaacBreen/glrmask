@@ -1693,6 +1693,10 @@ impl RuntimeConstraint {
         self.materialize_composition_metadata_for_compilation()
             .map_err(Error::Compilation)?;
         crate::compiler::boundary_candidates::persist_boundary_candidate_summary(self, vocab);
+        if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_COMPLETION").is_some() {
+            crate::compiler::boundary_precomputed_completion::prepare_component(self, vocab)
+                .map_err(crate::GlrMaskError::Compilation)?;
+        }
         Ok(())
     }
 }

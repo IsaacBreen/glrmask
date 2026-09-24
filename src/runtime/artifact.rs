@@ -9986,6 +9986,7 @@ pub struct Constraint {
     pub(crate) table: GLRTable,
     pub(crate) terminal_display_names: Vec<String>,
     pub(crate) tokenizer: Arc<Tokenizer>,
+    pub(crate) boundary_completion_index: Option<Arc<crate::compiler::boundary_precomputed_completion::PreparedCompletion>>,
     /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
     /// scans every tokenizer state, so runtime dispatch must not recompute it.
     pub(crate) tokenizer_has_epsilon_transitions: bool,
@@ -10365,6 +10366,8 @@ pub(crate) struct ConstraintSerde {
     pub(crate) terminal_display_names: Vec<String>,
     #[serde(with = "crate::runtime::artifact::immutable_tokenizer_serde")]
     pub(crate) tokenizer: Arc<Tokenizer>,
+    #[serde(skip)]
+    pub(crate) boundary_completion_index: Option<Arc<crate::compiler::boundary_precomputed_completion::PreparedCompletion>>,
     /// Cached tokenizer topology flag. `Tokenizer::has_epsilon_transitions()`
     /// scans every tokenizer state, so runtime dispatch must not recompute it.
     #[serde(skip, default)]
