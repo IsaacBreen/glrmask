@@ -229,6 +229,14 @@ pub mod __private {
 
     pub type Result<T> = std::result::Result<T, Error>;
 
+    /// Diagnostic upper bound for outgoing model tokens of ONE compiled
+    /// component. No caller, sibling, placeholder binding or link graph is
+    /// accepted here. An unavailable certificate is an error, never empty.
+    pub fn debug_component_boundary_candidate_ids(component:&Constraint,vocab:&Vocab)->Result<Vec<u32>>{
+        crate::compiler::boundary_candidates::boundary_candidate_ids(component,vocab).0
+            .ok_or_else(||Error::Compilation("component-only outgoing boundary summary unavailable".into()))
+    }
+
     /// Internal debug bridge: compile an ordinary
     /// [`crate::grammar::ast::NamedGrammar`] through the normal
     /// (non-composition) compiler path, using the same default table

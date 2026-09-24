@@ -15,6 +15,10 @@ use crate::automata::lexer::compile::{
 pub mod classify;
 mod definition_skeleton;
 mod finalize_ignore;
+#[cfg(any(test, feature = "internal-api"))]
+mod identity_refinement;
+#[cfg(feature = "internal-api")]
+pub use identity_refinement::build_scoped_boundary_identity_refinement;
 pub mod grammar_helpers;
 pub mod l1;
 pub mod l2p;

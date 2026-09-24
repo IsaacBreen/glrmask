@@ -4,6 +4,7 @@
 //! caller must supply a separately effect-certified overapproximation of its
 //! parser stacks. Shape checks here establish suffix/root dominance only; they
 //! do not manufacture a grammar reachability certificate.
+use super::CheckedNativeTopology;
 use super::{FastBoundaryNwaState, DEFAULT_LABEL};
 use std::collections::VecDeque;
 
@@ -77,27 +78,46 @@ fn insert(bits:&mut[u64],id:usize,root:usize){
 pub(super) fn restrict(
     nwa:&mut [FastBoundaryNwaState], starts:&[u32], domain:&FiniteParserReadSupport,
 ) -> Option<ReadSupportProfile> {
+    restrict_with_topology(nwa, starts, domain, None)
+}
+
+pub(super) fn restrict_with_topology(
+    nwa:&mut [FastBoundaryNwaState], starts:&[u32], domain:&FiniteParserReadSupport,
+    topology:Option<&CheckedNativeTopology>,
+) -> Option<ReadSupportProfile> {
     let (n,words,root)=(nwa.len(),domain.words,domain.root);
     if n==0 || n>200_000 || n.checked_mul(words)?>8_000_000
         || starts.iter().any(|&q|q as usize>=n) {return None;}
-    let mut indegree=vec![0usize;n];
+    if topology.is_some_and(|order| order.order.len() != n) { return None; }
+    let mut indegree=if topology.is_none(){vec![0usize;n]}else{Vec::new()};
     let mut edges=0usize;
-    for state in nwa.iter() {
+    for (q,state) in nwa.iter().enumerate() {
         for (label,branches) in &state.transitions {
             if *label!=DEFAULT_LABEL && (*label<0 || *label as usize>=domain.target.len()) {return None;}
             for &(next,weight) in branches {
                 if next as usize>=n {return None;}
-                if weight!=0 {indegree[next as usize]+=1;edges+=1;}
+                if weight!=0 {
+                    if let Some(order)=topology {if !order.permits(q,next){return None;}}
+                    else{indegree[next as usize]+=1;}
+                    edges+=1;
+                }
             }
         }
         for &(next,weight) in &state.epsilons {
             if next as usize>=n{return None;}
-            if weight!=0 {indegree[next as usize]+=1;edges+=1;}
+            if weight!=0 {
+                    if let Some(order)=topology {if !order.permits(q,next){return None;}}
+                    else{indegree[next as usize]+=1;}
+                    edges+=1;
+                }
         }
     }
     if edges>4_000_000{return None;}
-    let mut queue=(0..n).filter(|&q|indegree[q]==0).collect::<VecDeque<_>>();
     let mut topo=Vec::with_capacity(n);
+    if let Some(order)=topology {
+        topo.extend(order.order.iter().map(|&q|q as usize));
+    } else {
+    let mut queue=(0..n).filter(|&q|indegree[q]==0).collect::<VecDeque<_>>();
     while let Some(q)=queue.pop_front(){
         topo.push(q);
         for &(next,weight) in nwa[q].epsilons.iter()
@@ -106,6 +126,7 @@ pub(super) fn restrict(
             indegree[next as usize]-=1;
             if indegree[next as usize]==0{queue.push_back(next as usize);}
         }
+    }
     }
     if topo.len()!=n{return None;}
     let mut contexts=vec![0u64;n*words];

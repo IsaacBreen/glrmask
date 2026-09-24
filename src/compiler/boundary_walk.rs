@@ -211,8 +211,39 @@ fn build_boundary_terminal_dwa_with_shared(
         .and_then(|s|s.parse::<usize>().ok()).filter(|&n|(1..=4096).contains(&n));
     let terminal_support=std::env::var_os("GLRMASK_BOUNDARY_QUERY_TERMINAL_SUPPORT").is_some();
     let query_view=std::env::var_os("GLRMASK_BOUNDARY_QUERY_VIEW").is_some();
-    let output=build_boundary_terminal_dwa_query(inputs,shared,tile_size,terminal_support,query_view)?;
-    if (tile_size.is_some() || terminal_support)
+    let identity = std::env::var_os("GLRMASK_BOUNDARY_IDENTITY_REFINEMENT").is_some();
+    let first_started = Instant::now();
+    let first = std::env::var_os("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT")
+        .and_then(|_| inputs.flat_trans)
+        .and_then(|flat| super::boundary_first_completion::prepare(
+            inputs.merged_tokenizer,inputs.vocab,inputs.scope,flat));
+    let narrowed = first.as_ref().and_then(|plan|
+        inputs.scope.intersect_initial_support(&plan.representatives));
+    let scoped = BoundaryWalkInputs {
+        merged_tokenizer:inputs.merged_tokenizer,vocab:inputs.vocab,
+        grammar:inputs.grammar,disallowed_follows:inputs.disallowed_follows,
+        ignore_terminal:inputs.ignore_terminal,
+        follow_transparent_ignores:inputs.follow_transparent_ignores,
+        scope:narrowed.as_ref().unwrap_or(inputs.scope),
+        flat_trans:inputs.flat_trans,retain_non_crossing_paths:inputs.retain_non_crossing_paths,
+    };
+    let first_ms=first_started.elapsed().as_secs_f64()*1000.0;
+    let allow_identity_tiles = std::env::var_os("GLRMASK_BOUNDARY_IDENTITY_TILES").is_some();
+    let mut output=build_boundary_terminal_dwa_query(&scoped,shared,
+        if identity && !allow_identity_tiles { None } else { tile_size },
+        terminal_support && !identity,query_view,identity)?;
+    if let (Some(plan),Some(_))=(&first,&narrowed) {
+        let old=&output.id_map.tokenizer_states;
+        let mut lifted=old.original_to_internal.clone();
+        for(q,&keep)in inputs.scope.initial_states().keep_raw().iter().enumerate(){
+            if keep{lifted[q]=old.original_to_internal[plan.original_to_rep[q]as usize];}
+        }
+        output.id_map.tokenizer_states=crate::compiler::stages::equiv_types::ManyToOneIdMap::from_original_to_internal_allowing_unmapped(lifted,old.num_internal_ids());
+        output.profile.initial_states=plan.before;
+        output.profile.setup_ms+=first_ms;
+        if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_first_completion] component={} before={} after={} prefixes={} steps={} cells={} ms={first_ms:.3}",inputs.scope.start_component().0,plan.before,plan.after,plan.prefixes,plan.steps,plan.signature_cells);}
+    }
+    if (first.is_some() || identity || tile_size.is_some() || terminal_support)
         && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_QUERY_TILES").is_some()
     {
         // This reference bypasses tiling, terminal support and compact views.
@@ -229,7 +260,7 @@ fn build_boundary_terminal_dwa_with_shared(
 fn build_boundary_terminal_dwa_query(
     inputs: &BoundaryWalkInputs,
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
-    tile_size:Option<usize>, terminal_support:bool, query_view:bool,
+    tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
     if query_view
         && let Some(prepared)=super::boundary_query_view::prepare(inputs.merged_tokenizer,inputs.vocab,inputs.scope)
@@ -240,7 +271,7 @@ fn build_boundary_terminal_dwa_query(
             disallowed_follows:inputs.disallowed_follows,ignore_terminal:inputs.ignore_terminal,
             follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,
             retain_non_crossing_paths:inputs.retain_non_crossing_paths,flat_trans:None,
-        },None,tile_size,terminal_support)?;
+        },None,tile_size,terminal_support,identity)?;
         let current=&output.id_map.tokenizer_states;
         let mut originals=vec![u32::MAX;view.original_to_view.len()];
         let mut groups=vec![Vec::new();current.num_internal_ids() as usize];
@@ -280,7 +311,7 @@ fn build_boundary_terminal_dwa_query(
         }
         return Some(output);
     }
-    build_boundary_terminal_dwa_query_jobs(inputs,shared,tile_size,terminal_support)
+    build_boundary_terminal_dwa_query_jobs(inputs,shared,tile_size,terminal_support,identity)
 }
 
 /// A disjoint partition of original model tokens is a union of independent
@@ -288,7 +319,7 @@ fn build_boundary_terminal_dwa_query(
 /// coordinates by the existing compiler merger, never by concatenating IDs.
 fn build_boundary_terminal_dwa_query_jobs(
     inputs:&BoundaryWalkInputs,shared:Option<&tdwa::ScopedBoundarySharedContext<'_>>,
-    tile_size:Option<usize>,terminal_support:bool,
+    tile_size:Option<usize>,terminal_support:bool,identity:bool,
 )->Option<BoundaryWalkOutput>{
     use crate::compiler::stages::mapped_artifact::MappedArtifact;
     use rayon::prelude::*;
@@ -305,7 +336,7 @@ fn build_boundary_terminal_dwa_query_jobs(
             keep
         });
         let elapsed=began.elapsed().as_secs_f64()*1000.0;
-        let mut result=build_boundary_terminal_dwa_on_view_filtered(inputs,shared,support.as_deref())?;
+        let mut result=build_boundary_terminal_dwa_on_view_policy(inputs,shared,support.as_deref(),identity)?;
         result.profile.setup_ms+=elapsed;Some(result)
     };
     let Some(size)=tile_size.filter(|_|inputs.scope.require_crossing()
@@ -336,7 +367,7 @@ fn build_boundary_terminal_dwa_query_jobs(
             scope:scoped.as_ref().unwrap_or(inputs.scope),
             retain_non_crossing_paths:inputs.retain_non_crossing_paths,flat_trans:Some(&flat),
         };
-        let output=build_boundary_terminal_dwa_query(&local,shared,None,terminal_support,true)?;
+        let output=build_boundary_terminal_dwa_query(&local,shared,None,terminal_support,true,identity)?;
         if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_tile] component={} tokens={} initial={} ms={:.3}",
             inputs.scope.start_component().0,vocab.len(),local.scope.initial_states().len(),began.elapsed().as_secs_f64()*1000.0);}
         Some(output)
@@ -371,6 +402,13 @@ fn build_boundary_terminal_dwa_on_view_filtered(
     inputs:&BoundaryWalkInputs,shared:Option<&tdwa::ScopedBoundarySharedContext<'_>>,
 terminal_filter:Option<&[bool]>,
 )->Option<BoundaryWalkOutput>{
+    build_boundary_terminal_dwa_on_view_policy(inputs,shared,terminal_filter,false)
+}
+
+fn build_boundary_terminal_dwa_on_view_policy(
+    inputs:&BoundaryWalkInputs,shared:Option<&tdwa::ScopedBoundarySharedContext<'_>>,
+    terminal_filter:Option<&[bool]>,identity:bool,
+)->Option<BoundaryWalkOutput>{
     let setup_started = Instant::now();
     let tokenizer = inputs.merged_tokenizer;
     let num_terms = inputs.grammar.num_terminals as usize;
@@ -385,7 +423,11 @@ terminal_filter:Option<&[bool]>,
     };
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
     let walk_started = Instant::now();
-    let (mapped, tdwa_profile) = tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
+    let refined = identity.then(|| tdwa::build_scoped_boundary_identity_refinement(
+        tokenizer, inputs.vocab, inputs.ignore_terminal, inputs.grammar,
+        inputs.disallowed_follows, Arc::clone(flat), inputs.scope,
+    )).flatten();
+    let (mapped, tdwa_profile) = refined.unwrap_or_else(|| tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
         tokenizer,
         inputs.vocab,
         &coloring,
@@ -396,7 +438,7 @@ terminal_filter:Option<&[bool]>,
         inputs.scope,
         shared,
         terminal_filter,
-    );
+    ));
     let (automaton, id_map) = mapped.into_parts();
     let mut dwa = match automaton {
         TerminalAutomaton::Dwa(dwa) => dwa,
@@ -897,7 +939,33 @@ where
         {
             let started = Instant::now();
             let follow_aware = std::env::var_os("GLRMASK_BOUNDARY_TOKEN_FOLLOWS").is_some();
-            let support = if follow_aware {
+            let cut = (follow_aware && std::env::var_os("GLRMASK_BOUNDARY_CUT_SUPPORT").is_some())
+                .then(|| super::boundary_cut_support::crossing_support_with_transitions(
+                    inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
+                    &ownership, plan.crossing_owner, inputs.disallowed_follows,
+                    inputs.ignore_terminal, inputs.follow_transparent_ignores, early_adjacency,
+                    support_transitions.as_ref(),
+                )).flatten();
+            let used_cut = cut.is_some();
+            let support = if let Some(cut) = cut {
+                if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CUT_SUPPORT").is_some() {
+                    let reference = super::boundary_token_support::crossing_token_support_with_prepared_transitions(
+                        inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
+                        &ownership, plan.crossing_owner, inputs.disallowed_follows,
+                        inputs.ignore_terminal, inputs.follow_transparent_ignores, early_adjacency,
+                        support_transitions.as_ref(),
+                    ).expect("independent support reference must finish in validation mode");
+                    assert_eq!(cut.tokens, reference.tokens, "cut support differs from raw frontier observer");
+                    eprintln!("[glrmask/validate][boundary_cut_support] component={} exact=true",plan.start_component);
+                }
+                if compose_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_cut_support] component={} before={} after={} profile={:?}",
+                        plan.start_component,candidate_vocab.len(),cut.tokens.len(),cut.profile);
+                }
+                Some(super::boundary_token_support::CrossingTokenSupport {
+                    tokens:cut.tokens, byte_prefixes:0, state_steps:cut.profile.raw_step_work, max_frontier:0,
+                })
+            } else if follow_aware {
                 crate::compiler::boundary_token_support::crossing_token_support_with_prepared_transitions(
                     inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
                     &ownership, plan.crossing_owner, inputs.disallowed_follows,
@@ -912,7 +980,9 @@ where
             };
             if let Some(support) = support {
                 if compose_profile_enabled() {
-                    eprintln!("[glrmask/profile][boundary_token_liveness] component={} follows={follow_aware} before={} after={} byte_prefixes={} state_steps={} max_frontier={} elapsed_ms={:.3}",
+                    // Cut mode reports its own counters above; zero legacy
+                    // prefix/frontier counters mean not collected in that mode.
+                    eprintln!("[glrmask/profile][boundary_token_liveness] component={} follows={follow_aware} cut={used_cut} before={} after={} byte_prefixes={} state_steps={} max_frontier={} elapsed_ms={:.3}",
                         plan.start_component, candidate_vocab.len(), support.tokens.len(),
                         support.byte_prefixes, support.state_steps, support.max_frontier,
                         started.elapsed().as_secs_f64() * 1000.0);
@@ -2094,9 +2164,10 @@ pub(crate) fn build_walk_static_boundary_link(
             let started = Instant::now();
             let before_states = shard.output.dwa.num_states();
             let before_tokens = shard.candidate_tokens.len();
-            let filtered = tdwa::l2p::apply_explicit_follow_constraints(
-                &shard.output.dwa, relation, grammar.num_terminals as usize, None,
-            ).dwa;
+            let product = if std::env::var_os("GLRMASK_BOUNDARY_FOLLOW_ROW_QUOTIENT").is_some(){
+                tdwa::l2p::apply_boundary_follow_constraints
+            }else{tdwa::l2p::apply_explicit_follow_constraints};
+            let filtered = product(&shard.output.dwa,relation,grammar.num_terminals as usize,None).dwa;
             let filtered = minimize_acyclic_owned(filtered);
             let candidates = boundary_accepted_tokens(&filtered,&shard.output.id_map);
             // Keep the empty-case reference until its parser emptiness proof is

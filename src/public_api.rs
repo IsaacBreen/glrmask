@@ -1692,6 +1692,7 @@ impl RuntimeConstraint {
         self.bind_vocab_exact(vocab).map_err(Error::Compilation)?;
         self.materialize_composition_metadata_for_compilation()
             .map_err(Error::Compilation)?;
+        crate::compiler::boundary_candidates::persist_boundary_candidate_summary(self, vocab);
         Ok(())
     }
 }

@@ -23,6 +23,10 @@ exclude = [
 default = []
 internal-api = []
 
+[[example]]
+name = "composition_component_candidates"
+required-features = ["internal-api"]
+
 [dependencies]
 glrmask-finite-automata = { version = "=0.1.1", path = "crates/glrmask-finite-automata" }
 glrmask-weight = { version = "=0.1.1", path = "crates/glrmask-weight", features = ["internal-api"] }

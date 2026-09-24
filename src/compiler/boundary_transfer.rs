@@ -1918,6 +1918,78 @@ pub(crate) fn compile_signed_shard_parser(
     id_map: &InternalIdMap,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
+    let original_dwa = shard_dwa;
+    // Prefix admission is existential: a successful extended terminal path
+    // necessarily executes its accepting prefix. This optional reduction is
+    // applied only to the completed crossing/follow-filtered lexical DWA.
+    let prefix_candidate = if std::env::var_os("GLRMASK_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+        let started = Instant::now();
+        let candidate = crate::compiler::boundary_prefix_dominance::reduce(shard_dwa);
+        if let Some((reduced,stats)) = candidate.as_ref() {
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+                let alphabet = shard_dwa.states().iter().flat_map(|state|state.transitions.keys())
+                    .filter(|&&label|label>=0).map(|&label|label as u32+1).max().unwrap_or(1);
+                let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+                    shard_dwa,reduced,alphabet,500_000,
+                )?;
+                if let Some(difference)=comparison.difference {
+                    return Err(format!("lexical prefix reduction changed weighted prefix language: {difference:?}"));
+                }
+                eprintln!("[glrmask/validate][boundary_prefix_minimal] component={start_component} exact_prefix=true pairs={} branches={}",
+                    comparison.product_states,comparison.compared_branches);
+            }
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=true elapsed_ms={:.3} stats={stats:?}",started.elapsed().as_secs_f64()*1000.0);
+            }
+        } else if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=false elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+        }
+        candidate
+    } else {None};
+    let shard_dwa=prefix_candidate.as_ref().map_or(shard_dwa,|(dwa,_)|dwa);
+
+    let result = compile_signed_shard_parser_impl(context, library, shard_dwa, id_map, start_component)?;
+    if prefix_candidate.is_some()
+        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some()
+    {
+        // Genuinely untouched lexical reference. The implementation helper
+        // cannot reapply prefix reduction, irrespective of environment flags.
+        let reference = compile_signed_shard_parser_impl(
+            context, library, original_dwa, id_map, start_component,
+        )?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa, &result.parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference) = comparison.difference {
+            return Err(format!("lexical prefix dominance changed final parser masks: {difference:?}"));
+        }
+        if let Some(certificate) = context.predecessor_support.get().and_then(|c|c.as_ref().ok()) {
+            certificate.compare(&reference.parser_dwa, &result.parser_dwa)?;
+            let tables = std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+            super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+                context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        }
+        eprintln!("[glrmask/validate][boundary_prefix_minimal_parser] component={start_component} all_prefix_exact=true pairs={} branches={}", comparison.product_states, comparison.compared_branches);
+    }
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_RESULT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create compiled parser diagnostics");
+        let bytes = bincode::serialize(&(context.total_scoped_states,start_component,&result.parser_dwa))
+            .expect("serialize compiled parser diagnostics");
+        let compressed = zstd::stream::encode_all(bytes.as_slice(),1).expect("compress parser diagnostics");
+        std::fs::write(directory.join(format!("component-{start_component}.bin.zst")),compressed)
+            .expect("write compiled parser diagnostics");
+    }
+    Ok(result)
+}
+
+fn compile_signed_shard_parser_impl(
+    context: &SignedLinkContext,
+    library: &FragmentLibrary,
+    shard_dwa: &DWA,
+    id_map: &InternalIdMap,
+    start_component: u32,
+) -> Result<SignedShardOutput, String> {
     let project = std::env::var_os("GLRMASK_BOUNDARY_CORRELATED_SUPPORT").is_some();
     let atoms = std::env::var_os("GLRMASK_BOUNDARY_WEIGHT_ATOMS").is_some();
     let tagged_bundles=std::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
@@ -2027,15 +2099,6 @@ pub(crate) fn compile_signed_shard_parser(
         }
         eprintln!("[glrmask/validate][boundary_atom_prefix] component={start_component} exact=true pairs={} branches={}",
             comparison.product_states, comparison.compared_branches);
-    }
-    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_RESULT") {
-        let directory = std::path::PathBuf::from(directory);
-        std::fs::create_dir_all(&directory).expect("create compiled parser diagnostics");
-        let bytes = bincode::serialize(&(context.total_scoped_states,start_component,&result.parser_dwa))
-            .expect("serialize compiled parser diagnostics");
-        let compressed = zstd::stream::encode_all(bytes.as_slice(),1).expect("compress parser diagnostics");
-        std::fs::write(directory.join(format!("component-{start_component}.bin.zst")),compressed)
-            .expect("write compiled parser diagnostics");
     }
     if admission_tails && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ADMISSION_TAILS").is_some() {
         let reference=compile_signed_shard_parser_with_support(

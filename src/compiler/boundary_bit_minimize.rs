@@ -14,7 +14,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap,FxHasher};
+use std::hash::{Hash,Hasher};
 use crate::automata::weighted::dwa::{DWA, DWAState};
 use crate::ds::weight::Weight;
 
@@ -522,14 +523,33 @@ fn minimize_prepared(
         bucket.sort_unstable_by_key(|&s|std::cmp::Reverse((masks.popcount(needed[s]),states[s].edges.len(),s)));
         let base=groups.len();
         let mut exact=FxHashMap::<Signature,u32>::default();
+        let reuse_rows=std::env::var_os("GLRMASK_BOUNDARY_MIN_ROW_REUSE").is_some();
+        let mut row_keys=FxHashMap::<u64,smallvec::SmallVec<[(usize,u32);1]>>::default();
         for s in bucket {
-            let signature=Signature {
+            let signature=if reuse_rows {
+                let mut edges=std::mem::take(&mut states[s].edges);
+                for edge in &mut edges {edge.target=if edge.mask==0{0}else{mapped[edge.target as usize]};}
+                Signature{final_mask:states[s].final_mask,edges}
+            }else{Signature {
                 final_mask:states[s].final_mask,
                 edges:states[s].edges.iter().map(|edge|Edge{label:edge.label,
                     target:if edge.mask==0 {0} else {mapped[edge.target as usize]},mask:edge.mask}).collect(),
-            };
-            if let Some(&id)=exact.get(&signature) {
-                mapped[s]=id;profile.exact_hits+=1;continue;
+            }};
+            let fingerprint=if reuse_rows {
+                let mut hasher=FxHasher::default();signature.hash(&mut hasher);let h=hasher.finish();
+                // All test-mode keys deliberately collide. Full row comparison,
+                // not this fingerprint, is the equality proof.
+                if cfg!(test){0}else{h}
+            }else{0};
+            let existing=if reuse_rows {
+                row_keys.get(&fingerprint).and_then(|entries| entries.iter().find_map(|&(source,id)| {
+                    (states[source].final_mask==signature.final_mask && states[source].edges==signature.edges).then_some(id)
+                }))
+            }else{exact.get(&signature).copied()};
+            if let Some(id)=existing {
+                mapped[s]=id;profile.exact_hits+=1;
+                if reuse_rows{states[s].edges=signature.edges;}
+                continue;
             }
             let mut found=None;
             for id in base..groups.len() {
@@ -542,12 +562,28 @@ fn minimize_prepared(
                 None=>{let id=groups.len();groups.push(Group{domain:needed[s],signature:signature.clone(),guarded:states[s].guarded});id},
             };
             mapped[s]=id as u32;
-            exact.insert(signature,id as u32);
+            if reuse_rows {
+                states[s].edges=signature.edges;
+                row_keys.entry(fingerprint).or_default().push((s,id as u32));
+            }else{exact.insert(signature,id as u32);}
         }
     }
     profile.merge_ms=started.elapsed().as_secs_f64()*1000.0;
     let started=Instant::now();
     let mut exported=FxHashMap::<Mask,Weight>::default();
+    if std::env::var_os("GLRMASK_BOUNDARY_PARALLEL_WEIGHT_EXPORT").is_some()
+        && rayon::current_num_threads()>1 && groups.len()>=256 {
+        use rayon::prelude::*;
+        let mut seen=vec![false;masks.values.len()];let mut ids=Vec::new();
+        for group in &groups {
+            for id in std::iter::once(group.signature.final_mask).chain(group.signature.edges.iter().map(|e|e.mask)) {
+                if !std::mem::replace(&mut seen[id as usize],true){ids.push(id);}
+            }
+        }
+        // Independent exact decoding, once per used mask. Group and edge order
+        // stay fixed; publication still uses the ordinary Weight constructor.
+        exported=ids.par_iter().map(|&id|(id,masks.export(id))).collect();
+    }
     let mut export=|id:Mask|exported.entry(id).or_insert_with(||masks.export(id)).clone();
     let output_states=groups.into_iter().map(|g| {
         let mut s=DWAState::default();
@@ -893,4 +929,25 @@ fn native_decoder_retains_bounded_large_output_and_declines_above_cap() {
     assert!(FiniteAtomDecoder::new_checked(vec![first.clone(),second.clone()]).is_some());
     let extra=Weight::from_token_set_for_tsid(37,[0].into_iter().collect());
     assert!(FiniteAtomDecoder::new_checked(vec![first,second,extra]).is_none());
+}
+
+
+#[cfg(test)]
+#[test]
+fn large_final_decode_preserves_full_prefix_masks() {
+    // More than 256 distinct residual depths exercises the optional parallel
+    // unique-mask decoder when that feature is enabled in the test process.
+    let mut rows = vec![DWAState::default(); 301];
+    for q in 0..300 { rows[q].transitions.insert(0, ((q + 1) as u32, Weight::all())); }
+    rows[300].final_weight = Some(Weight::from_per_tsid_token_sets([
+        (0, range_set_blaze::RangeSetBlaze::from_iter([7..=7])),
+    ]));
+    let input = DWA::from_parts(rows, 0);
+    let (output, _) = minimize_finite_final_atoms(&input, 2147483646)
+        .expect("small one-coordinate depth fixture fits resource bounds");
+    assert!(output.num_states() >= 256);
+    let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+        &input, &output, 2, 2000,
+    ).unwrap();
+    assert!(comparison.difference.is_none(), "parallel weight export changed prefix masks: {:?}", comparison.difference);
 }

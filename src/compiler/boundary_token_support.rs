@@ -185,6 +185,11 @@ pub(crate) struct PreparedSupportTransitions<'a> {
     has_epsilon: Vec<bool>,
 }
 impl<'a> PreparedSupportTransitions<'a> {
+    /// Borrow the pinned direct table without accepting a lookalike context.
+    pub(crate) fn flat_for(&self,tokenizer:&Tokenizer)->Option<&[u32]> {
+        std::ptr::eq(self.tokenizer,tokenizer).then_some(self.flat)
+    }
+
     /// `flat` must be the ordinary direct transition table built from this
     /// exact immutable tokenizer. The crate-private caller owns that link
     /// context; no vocabulary-dependent state map is accepted here.
@@ -366,6 +371,39 @@ mod tests {
     use std::sync::Arc;
     use crate::automata::lexer::ast::{bytes, choice, plus};
     use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
+
+    #[test]
+    fn prepared_raw_transitions_match_scalar_follow_queries() {
+        let expressions=vec![plus(choice(vec![bytes(b"a"),bytes(b"ab")])),bytes(b"c"),
+            choice(vec![bytes(b"!x"),bytes(b"!y")]),bytes(b" ")];
+        let mut words=vec![Vec::<u8>::new()];
+        let mut level=vec![Vec::<u8>::new()];
+        for _ in 0..5 {
+            let mut next=Vec::new();
+            for word in level {for byte in b"ac! " {let mut w=word.clone();w.push(*byte);next.push(w);}}
+            words.extend(next.iter().cloned());level=next;
+        }
+        let vocab=Vocab::new(words.into_iter().enumerate().map(|(i,w)|(11+i as u32*3,w)).collect());
+        let owner=BoundaryOwnership::flat(&[0,2],4).unwrap();
+        let mut blocked=BitSet::new(4);blocked.set(2);
+        let follows=BTreeMap::from([(0,blocked)]);
+        for tokenizer in [build_regex_monolithic(&expressions).into_tokenizer(4,None),
+            build_regex_partitioned(&expressions,&[0,1,2,3]).into_tokenizer(4,None)] {
+            let flat=crate::compiler::stages::id_map_and_terminal_dwa::l1::build_flat_transition_table(&tokenizer);
+            let prepared=PreparedSupportTransitions::new(&tokenizer,&flat).unwrap();
+            let initial=vec![true;tokenizer.num_states() as usize];
+            for adjacency in [None,Some(&follows)] {
+                let reference=crossing_token_support_with_prepared_transitions(&tokenizer,&vocab,&initial,&owner,
+                    ImmediateComponentId(0),&follows,Some(3),None,adjacency,None).unwrap();
+                let candidate=crossing_token_support_with_prepared_transitions(&tokenizer,&vocab,&initial,&owner,
+                    ImmediateComponentId(0),&follows,Some(3),None,adjacency,Some(&prepared)).unwrap();
+                assert_eq!(reference.tokens,candidate.tokens);
+                assert_eq!(reference.state_steps,candidate.state_steps);
+                assert_eq!(reference.max_frontier,candidate.max_frontier);
+            }
+            assert!(PreparedSupportTransitions::new(&tokenizer,&[0]).is_none());
+        }
+    }
 
     #[test]
     fn crossing_support_handles_partial_endpoints_resets_and_duplicate_tokens() {

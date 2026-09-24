@@ -77,6 +77,18 @@ pub(super) fn compile(
     let trim = std::env::var_os("GLRMASK_DISABLE_BOUNDARY_DIRECT_PROGRAM_TRIM").is_none();
     let (native, profile) = normalize_finite_template_program(
         &program, context.total_scoped_states, quotient.rows(), Some(&native_context), trim)?;
+    if let Some(directory)=std::env::var_os("GLRMASK_DUMP_BOUNDARY_NATIVE_PREMIN") {
+        let directory=std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create native diagnostic directory");
+        // Diagnostic only; serialize the unchanged finite normalized graph
+        // with its exact decoder. Never used in performance measurements.
+        let bytes=bincode::serialize(&(context.total_scoped_states,start_component,
+            native.rows,native.token_count,&native.states,&native.weights,quotient.atoms()))
+            .expect("serialize native pre-min graph and decoder");
+        let compressed=zstd::stream::encode_all(bytes.as_slice(),1).expect("compress native diagnostic");
+        std::fs::write(directory.join(format!("component-{start_component}-native.bin.zst")),compressed)
+            .expect("write native pre-min diagnostic");
+    }
     let minimize_started = Instant::now();
     let (parser_dwa, min_profile) = minimize_native_decoded(
         &native, &decoder, crate::compiler::glr::labels::DEFAULT_LABEL)?;
@@ -87,7 +99,7 @@ pub(super) fn compile(
             started.elapsed().as_secs_f64()*1000.0);
     }
     Some(SignedShardOutput { parser_dwa, templates_ms: library.templates_ms,
-        compose_ms: prepare_ms + profile.assembly_ms + profile.support_ms + profile.trim_ms,
+        compose_ms: prepare_ms + profile.assembly_ms + profile.early_top_ms + profile.early_trim_ms + profile.support_ms + profile.trim_ms,
         resolve_ms: profile.resolve_ms, normalize_ms: profile.normalize_ms + minimize_ms,
         signed_states: profile.input_states, signed_transitions: profile.input_edges, terms: library.ordinary_terms })
 }

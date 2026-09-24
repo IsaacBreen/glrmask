@@ -8,6 +8,7 @@ mod boundary_tagged_templates;
 mod boundary_query_view;
 mod boundary_query_terminals;
 pub(crate) mod boundary_token_support;
+mod boundary_cut_support;
 pub(crate) mod boundary_scoped_follow;
 pub(crate) mod weight_observation_quotient;
 pub(crate) mod boundary_candidates;
@@ -127,3 +128,7 @@ pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
         },
     }
 }
+
+mod boundary_prefix_dominance;
+
+mod boundary_first_completion;

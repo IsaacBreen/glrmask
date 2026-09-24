@@ -11915,6 +11915,28 @@ pub fn restore_raw_follow_constraints_after_expansion_with_transparent(
     ignore_terminal: Option<TerminalID>,
     follow_transparent: Option<&BitSet>,
 ) -> RawFollowRestoration {
+    restore_raw_follow_constraints_impl(expanded_dwa,disallowed_follows,num_terminals,
+        ignore_terminal,follow_transparent,false)
+}
+
+/// Exact predecessor-row quotient for a boundary-only follow product. The
+/// previous symbol is observed only via its disallowed-successor row; grouping
+/// equal rows is a congruence. This changes neither labels nor edge weights.
+/// Keep the ordinary caller's historical shape policy separate.
+#[cfg(any(test,feature="internal-api"))]
+pub fn restore_boundary_follow_constraints(
+    expanded_dwa:&DWA,disallowed_follows:&BTreeMap<u32,BitSet>,num_terminals:usize,
+    ignore_terminal:Option<TerminalID>,
+)->RawFollowRestoration{
+    restore_raw_follow_constraints_impl(expanded_dwa,disallowed_follows,num_terminals,
+        ignore_terminal,None,true)
+}
+
+fn restore_raw_follow_constraints_impl(
+    expanded_dwa:&DWA,disallowed_follows:&BTreeMap<u32,BitSet>,num_terminals:usize,
+    ignore_terminal:Option<TerminalID>,follow_transparent:Option<&BitSet>,
+    boundary_row_quotient:bool,
+)->RawFollowRestoration{
     // Every query below is for an in-range raw terminal. Borrow the original
     // rows instead of normalizing by cloning `num_terminals` full bitsets. The
     // former normalization was several milliseconds by itself on p0/p1 even
@@ -11948,9 +11970,13 @@ pub fn restore_raw_follow_constraints_after_expansion_with_transparent(
     // This exact quotient is particularly valuable for compact direct suffix
     // graphs.  Bound the product shape so large general TI artifacts retain
     // their historical canonicalization path.
-    let use_follow_row_quotient = expanded_dwa.states().len() <= 24
-        && follow_row_class_count <= 64
-        && expanded_dwa.states().len() * follow_row_class_count <= 1200;
+    let use_follow_row_quotient = if boundary_row_quotient {
+        expanded_dwa.states().len().checked_mul(follow_row_class_count)
+            .is_some_and(|states|states <= 2_000_000)
+    }else{
+        expanded_dwa.states().len() <= 24 && follow_row_class_count <= 64
+            && expanded_dwa.states().len()*follow_row_class_count <= 1200
+    };
     let (previous_key_for_terminal, follow_rows) = if use_follow_row_quotient {
         let mut class_for_row = FxHashMap::<Option<&BitSet>, u32>::default();
         let mut rows = Vec::<Option<&BitSet>>::new();
@@ -13388,4 +13414,34 @@ fn scoped_follow_restoration_matches_global_transparency_and_keeps_predecessor()
         let accepts = q.is_some_and(|q| actual.dwa.states()[q as usize].final_weight.as_ref().is_some_and(|w| !w.is_empty()));
         assert_eq!(accepts, !block_real_successor);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn boundary_follow_row_quotient_matches_large_unquotiented_products() {
+    let mut seed=19u64;
+    let mut random=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as usize};
+    let mut selected=0;
+    for case in 0..128 {
+        let mut source=DWA::new(0,4);for _ in 1..40{source.add_state();}
+        for q in 0..40 {
+            let mask=random()as u32%16;
+            source.set_final_weight(q,Weight::from_token_set_for_tsid(0,(0..4).filter(|b|mask&(1<<b)!=0).collect()));
+            if q==39{continue;}
+            for label in 0..12 {
+                if random()%3==0{continue;}
+                let target=q+1+random()as u32%(39-q);let mask=random()as u32%16;
+                source.add_transition(q,label,target,Weight::from_token_set_for_tsid(0,(0..4).filter(|b|mask&(1<<b)!=0).collect()));
+            }
+        }
+        let rows=(0..12).map(|t|{let mut row=BitSet::new(12);for next in 0..12{if(t%3+next)%4==0{row.set(next);}}(t as u32,row)}).collect();
+        let ignore=(case%2==0).then_some(11);
+        let reference=restore_raw_follow_constraints_after_expansion(&source,&rows,12,ignore);
+        let candidate=restore_boundary_follow_constraints(&source,&rows,12,ignore);
+        assert!(!reference.used_follow_row_quotient);
+        selected+=usize::from(candidate.used_follow_row_quotient);
+        assert!(crate::automata::weighted::equivalence::find_difference(&reference.dwa,&candidate.dwa).unwrap().is_none());
+        assert!(crate::automata::weighted::equivalence::find_difference(&candidate.dwa,&reference.dwa).unwrap().is_none());
+    }
+    assert_eq!(selected,128);
 }

@@ -32,9 +32,14 @@ pub struct FiniteTemplateProgramProfile {
     pub positive_states: usize,
     pub positive_edges: usize,
     pub assembly_ms: f64,
+    pub early_top_ms: f64,
+    pub early_trim_ms: f64,
     pub resolve_ms: f64,
     pub support_ms: f64,
     pub trim_ms: f64,
+    pub weight_support_ms: f64,
+    pub requotient_ms:f64,
+    pub reexpand_ms:f64,
     pub normalize_ms: f64,
 }
 
@@ -54,7 +59,7 @@ fn empty_state() -> FastBoundaryNwaState {
 fn build(
     program: &FiniteTemplateProgram<'_>, alphabet: u32,
     interner: &mut FastBoundaryWeightInterner, limits: FiniteCompileLimits,
-) -> Option<(Vec<FastBoundaryNwaState>, usize)> {
+) -> Option<(Vec<FastBoundaryNwaState>, usize, Vec<u32>)> {
     let ports = program.port_finals.len();
     if ports == 0 || ports > limits.states || alphabet == 0
         || alphabet as usize > limits.states || alphabet >= DEFAULT_LABEL as u32
@@ -131,8 +136,8 @@ fn build(
     if !interner.allow_work(0, states.len(), total_edges) { return None; }
     // The continuation/entry graph is supplied by the caller. Check the whole
     // instantiated program rather than assuming acyclic templates suffice.
-    fast_boundary_topological_order(&states)?;
-    Some((states, total_edges))
+    let topology = fast_boundary_topological_order(&states)?;
+    Some((states, total_edges, topology))
 }
 
 /// Injective positive reachability compaction. Keep every explicit label key,
@@ -178,32 +183,63 @@ pub fn normalize_finite_template_program(
     let limits = FiniteCompileLimits::default();
     let mut interner = FastBoundaryWeightInterner::new(rows, 64)?;
     interner.limits = Some(limits);
-    let (mut states, edges) = build(program, parser_states, &mut interner, limits)?;
+    let (mut states, edges, topology_order) = build(program, parser_states, &mut interner, limits)?;
+    let topology = if std::env::var_os("GLRMASK_BOUNDARY_REUSE_PROGRAM_TOPOLOGY").is_some()
+        && std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_TRIM").is_none()
+    { Some(CheckedNativeTopology::from_order(topology_order)?) } else { None };
     if !selected_for_state_count(states.len()) { return None; }
     let mut profile = FiniteTemplateProgramProfile {
         input_states: states.len(), input_edges: edges,
         assembly_ms: elapsed_ms(started), ..Default::default()
     };
+    let mut active_starts=program.starts.to_vec();
+    if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_SUPPORT").is_some(){
+        let phase=Instant::now();
+        let statistics=finite_top_support::restrict(&mut states,program.starts,parser_states)?;
+        profile.early_top_ms=elapsed_ms(phase);
+        if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_early_top_support] ms={:.3} stats={statistics:?}",profile.early_top_ms);}
+        if std::env::var_os("GLRMASK_BOUNDARY_EARLY_TOP_TRIM").is_some(){
+            let phase=Instant::now();
+            // The same injective compactor is label-agnostic; signed labels
+            // are retained unchanged. Every live target keeps a distinct ID.
+            (states,active_starts)=trim(states,&active_starts)?;
+            profile.early_trim_ms=elapsed_ms(phase);
+            if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_early_top_trim] states={} ms={:.3}",states.len(),profile.early_trim_ms);}
+        }
+    }
     let phase = Instant::now();
-    fast_boundary_resolve_negative_codes(&mut states, &mut interner)?;
+    fast_boundary_resolve_negative_codes_with_topology(&mut states, &mut interner, topology.as_ref())?;
     profile.resolve_ms = elapsed_ms(phase);
     let phase = Instant::now();
     if let Some(context) = read_context {
-        finite_read_support::restrict(&mut states, program.starts, context)?;
+        finite_read_support::restrict_with_topology(&mut states, &active_starts, context, topology.as_ref())?;
     }
     profile.support_ms = elapsed_ms(phase);
     let phase = Instant::now();
     let owned_starts;
     let starts = if trim_positive {
-        (states, owned_starts) = trim(states, program.starts)?;
+        (states, owned_starts) = trim(states, &active_starts)?;
         owned_starts.as_slice()
-    } else { program.starts };
+    } else { &active_starts };
     profile.trim_ms = elapsed_ms(phase);
     profile.positive_states = states.len();
     profile.positive_edges = states.iter().map(|s| s.epsilons.len()
         + s.transitions.iter().map(|(_, b)| b.len()).sum::<usize>()).sum();
     if !selected_for_state_count(states.len())
         || !interner.allow_work(0, states.len(), profile.positive_edges) { return None; }
+    if let Ok(mode)=std::env::var("GLRMASK_BOUNDARY_POSITIVE_WEIGHT_SUPPORT"){
+        let phase=Instant::now();
+        let stats=finite_weight_support::restrict(&mut states,starts,&mut interner,
+            mode!="backward",mode!="forward")?;
+        profile.weight_support_ms=elapsed_ms(phase);
+        if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_positive_weight_support] mode={mode} stats={stats:?} ms={:.3}",profile.weight_support_ms);}
+    }
+    let decoder=if std::env::var_os("GLRMASK_BOUNDARY_REQUOTIENT_POSITIVE_WEIGHTS").is_some(){
+        let phase=Instant::now();let decoder=finite_requotient::apply(&mut states,&mut interner)?;
+        profile.requotient_ms=elapsed_ms(phase);
+        if compile_profile_enabled(){eprintln!("[glrmask/profile][boundary_requotient] selected={} old_points={} new_classes={} rows={} ms={:.3}",decoder.is_some(),decoder.as_ref().map_or(0,|d|d.old_points),decoder.as_ref().map_or(0,|d|d.classes()),interner.tsid_count,profile.requotient_ms);}
+        decoder
+    }else{None};
     let phase = Instant::now();
     let result = determinize_preconverted_small_boundary_output(
         &states, starts, parser_states, &mut interner, program.coefficients.len(),
@@ -211,7 +247,10 @@ pub fn normalize_finite_template_program(
     )?;
     profile.normalize_ms = elapsed_ms(phase);
     match result {
-        SmallBoundaryDeterminizeOutput::Finite(result) => Some((result, profile)),
+        SmallBoundaryDeterminizeOutput::Finite(result) => {
+            let phase=Instant::now();let result=if let Some(d)=decoder{d.decode(result)}else{result};
+            profile.reexpand_ms=elapsed_ms(phase);Some((result,profile))
+        },
         _ => unreachable!("finite output requested"),
     }
 }
@@ -274,7 +313,7 @@ mod tests {
                 port_finals: &finals, starts: &[0], instances: &instances };
             let expected = reference(&program);
             let mut interner = FastBoundaryWeightInterner::new(1, 64).unwrap();
-            let (actual, _) = build(&program, 3, &mut interner, Default::default()).unwrap();
+            let (actual, _, _) = build(&program, 3, &mut interner, Default::default()).unwrap();
             assert_eq!(actual.len(), expected.states().len());
             for (q, (a, b)) in actual.iter().zip(expected.states()).enumerate() {
                 assert_eq!(interner.to_weight(a.final_weight), b.final_weight.clone().unwrap_or_else(Weight::empty), "final case={case} q={q}");

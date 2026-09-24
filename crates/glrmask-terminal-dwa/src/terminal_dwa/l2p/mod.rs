@@ -20,6 +20,8 @@ mod terminal_interchangeability;
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub use terminal_interchangeability::restore_raw_follow_constraints_after_expansion as apply_explicit_follow_constraints;
+#[cfg(feature="internal-api")]
+pub use terminal_interchangeability::restore_boundary_follow_constraints as apply_boundary_follow_constraints;
 
 #[cfg(feature = "internal-api")]
 pub use terminal_interchangeability::warm_ti_pool;

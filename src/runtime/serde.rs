@@ -6263,8 +6263,11 @@ impl Constraint {
                     },
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes =
-                            crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table);
+                        let rules = self.retained_table_rules()
+                            .expect("validated retained grammar rules must remain readable");
+                        let bytes = crate::compiler::glr::table::artifact_serde::to_compact_bytes_with_rules(
+                            &self.table, rules,
+                        );
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=table ms={:.3} bytes={}",
