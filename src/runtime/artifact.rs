@@ -7273,6 +7273,14 @@ impl DynamicMaskVocab {
         let diagnostic = *PROFILE.get_or_init(|| {
             std::env::var_os("GLRMASK_PROFILE_RAW_TERMINAL_RADIUS").is_some()
         });
+        static BATCH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let batch_rows = *BATCH.get_or_init(|| {
+            std::env::var_os("GLRMASK_DISABLE_RAW_RADIUS_BATCH_ROWS").is_none()
+        });
+        let verify_rows = *VERIFY.get_or_init(|| {
+            std::env::var_os("GLRMASK_ASSERT_RAW_RADIUS_BATCH_ROWS").is_some()
+        });
         let started = diagnostic.then(std::time::Instant::now);
         let mut work = 0usize;
         let mut explored = 0usize;
@@ -7315,6 +7323,20 @@ impl DynamicMaskVocab {
                     || tokenizer.state_has_epsilon_transitions(lexer_state)
                 { return None; }
                 explored += 1;
+                // The guarded physical, epsilon-free row is exactly step().
+                // Materialize once per product node; no row survives the proof.
+                let mut row = [None; 256];
+                if batch_rows {
+                    for (byte, target) in tokenizer.transitions_from(lexer_state) {
+                        row[byte as usize] = Some(target);
+                    }
+                    if verify_rows {
+                        for byte in 0u16..=255 {
+                            assert_eq!(row[byte as usize], tokenizer.step(lexer_state, byte as u8));
+                        }
+                    }
+                }
+                let mut previous_edge = None;
                 for byte in 0u16..=255 {
                     let target_slice = slice.step(slice_state, byte as u8);
                     if target_slice as usize >= slice_count || !slice.can_reach_accepting(target_slice) { continue; }
@@ -7325,7 +7347,19 @@ impl DynamicMaskVocab {
                     if shortest_word > max_repetitions || shortest_word >= first_bad { continue; }
                     work += 1;
                     if work > work_limit { return None; }
-                    let target = tokenizer.step(lexer_state, byte as u8);
+                    let target = if batch_rows {
+                        row[byte as usize]
+                    } else {
+                        tokenizer.step(lexer_state, byte as u8)
+                    };
+                    // Equal product targets have identical atom costs, liveness
+                    // and successors. The original eligible-byte budget has
+                    // ALREADY been charged above, including duplicate edges.
+                    if batch_rows {
+                        let edge = (target_slice, target);
+                        if previous_edge == Some(edge) { continue; }
+                        previous_edge = Some(edge);
+                    }
                     if target.is_some_and(|t| tokenizer.state_is_virtual_runtime(t)) {
                         return None;
                     }
