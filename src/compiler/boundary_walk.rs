@@ -533,7 +533,7 @@ fn build_boundary_terminal_dwa_query_jobs(
     let merge_ms=merge_started.elapsed().as_secs_f64()*1000.0;
     profile.walk_ms=started.elapsed().as_secs_f64()*1000.0;
     profile.tokenizer_classes=id_map.num_tsids() as usize;profile.token_classes=id_map.num_internal_tokens() as usize;
-    profile.lexical_accepted_tokens=accepted_original_tokens(&dwa,&id_map).len();
+    profile.lexical_accepted_tokens=terminal_accepted_original_tokens(&dwa,&id_map).len();
     if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_tiles] component={} groups={} tokens={} size={} merge_ms={merge_ms:.3} total_ms={:.3} states={} transitions={}",
         inputs.scope.start_component().0,groups.len(),inputs.vocab.len(),size,profile.walk_ms,dwa.num_states(),dwa.num_transitions());}
     Some(BoundaryWalkOutput{dwa,id_map,profile})
@@ -645,7 +645,7 @@ fn finalize_boundary_terminal_dwa(
         dwa = minimize_acyclic_owned(dwa);
         minimize_ms += started.elapsed().as_secs_f64() * 1000.0;
     }
-    let accepted = accepted_original_tokens(&dwa, id_map);
+    let accepted = terminal_accepted_original_tokens(&dwa, id_map);
     if accepted.is_empty() {
         dwa = DWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     } else if !summarize_after && dwa.num_states() > 1 && dwa.is_acyclic() {
@@ -756,6 +756,17 @@ mod support_finalize_gate {
 /// Original model tokens accepted by a shard terminal DWA (candidate-token
 /// trigger + gate helper). The shard DWAs are acyclic (asserted).
 pub(crate) fn boundary_accepted_tokens(dwa: &DWA, id_map: &InternalIdMap) -> BTreeSet<u32> {
+    terminal_accepted_original_tokens(dwa, id_map)
+}
+
+// Terminal-only selection: parser support calculations retain their original
+// implementation. The candidate reads this graph without changing it.
+fn terminal_accepted_original_tokens(dwa: &DWA, id_map: &InternalIdMap) -> BTreeSet<u32> {
+    if std::env::var_os("GLRMASK_BOUNDARY_BATCHED_TOKEN_SUPPORT").is_some()
+        && let Some(tokens) = super::boundary_terminal_summary::accepted_tokens(dwa, id_map)
+    {
+        return tokens;
+    }
     accepted_original_tokens(dwa, id_map)
 }
 

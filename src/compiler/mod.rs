@@ -9,6 +9,7 @@ mod boundary_query_view;
 mod boundary_query_terminals;
 pub(crate) mod boundary_token_support;
 mod boundary_cut_support;
+mod boundary_terminal_summary;
 pub(crate) mod boundary_scoped_follow;
 pub(crate) mod boundary_scoped_follow_delta;
 pub(crate) mod boundary_flat_transitions;
