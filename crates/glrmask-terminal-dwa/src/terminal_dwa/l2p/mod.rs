@@ -11,6 +11,7 @@
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
+mod native_boundary;
 pub mod postprocess;
 pub(crate) mod terminal_dwa_equivalence;
 #[cfg(feature = "internal-api")]
@@ -1790,6 +1791,29 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             } else {
                 (nwa, false)
             };
+            let native_started = Instant::now();
+            let native_eligible = std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+                && partition_label == "boundary_identity_refinement"
+                && shard_options.and_then(|options| options.crossing_filter).is_some()
+                && !path_conditioned_after_preminimize
+                && max_structural_label_depth_to_final(&nwa).is_some_and(|depth| depth > 2)
+                && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none();
+            let native = native_eligible.then(|| native_boundary::compile_sparse(&nwa)).flatten();
+            let native_ms = native_started.elapsed().as_secs_f64() * 1000.0;
+            let (dwa, determinize_ms, minimize_ms) = if let Some((dwa, stats)) = native {
+                if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some() {
+                    let reference = minimize_owned(determinize(&nwa)
+                        .expect("reference boundary determinization failed"));
+                    let states = native_boundary::graph_isomorphism(&dwa, &reference)
+                        .expect("native terminal graph differs from the ordinary compiler");
+                    eprintln!("[glrmask/validate][boundary_native_terminal] exact_graph=true states={states}");
+                }
+                if l2p_timing_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_native_terminal] input_states={} total_ms={native_ms:.3} stats={stats:?}", nwa.states().len());
+                }
+                let det_ms = stats.import_ms + stats.compute_ms;
+                (dwa, det_ms, (native_ms - det_ms).max(0.0))
+            } else {
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
             let use_depth2 = structural_depth.is_some_and(|depth| depth <= 2);
@@ -1829,6 +1853,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 minimize_owned(det)
             };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+                (dwa, determinize_ms, minimize_ms)
+            };
             let dwa_stats_before_compact = dwa.stats();
 
             (
