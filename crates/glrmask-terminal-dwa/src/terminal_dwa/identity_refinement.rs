@@ -7,6 +7,24 @@
 //! The ordinary L2P, follow, crossing and final ignore passes remain unchanged.
 use super::*;
 
+/// A permutation, never an equivalence quotient. Every raw state has exactly
+/// one distinct internal coordinate; selected token-entry coordinates form
+/// a dense prefix so weighted sets can use shorter interval representations.
+fn singleton_state_map(selected: &[bool], packed: bool) -> ManyToOneIdMap {
+    let n = selected.len() as u32;
+    let representatives = if packed {
+        (0..n).filter(|&q| selected[q as usize])
+            .chain((0..n).filter(|&q| !selected[q as usize])).collect::<Vec<_>>()
+    } else { (0..n).collect() };
+    let mut original_to_internal = vec![u32::MAX; n as usize];
+    for (internal, &raw) in representatives.iter().enumerate() {
+        original_to_internal[raw as usize] = internal as u32;
+    }
+    ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+        original_to_internal, representatives,
+    )
+}
+
 pub fn build_scoped_boundary_identity_refinement(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -31,10 +49,8 @@ pub fn build_scoped_boundary_identity_refinement(
     let mut roots = tokenizer.deterministic_reset_states().into_vec();
     roots.sort_unstable(); roots.dedup();
     if roots != scope.reset_states() { return None; }
-    let singleton = (0..n).collect::<Vec<_>>();
-    let states = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-        singleton.clone(), singleton,
-    );
+    let packed = std::env::var_os("GLRMASK_BOUNDARY_PACK_INITIAL_TSIDS").is_some();
+    let states = singleton_state_map(scope.initial_states().keep_raw(), packed);
     let mut words = BTreeMap::<Vec<u8>, Vec<u32>>::new();
     for (&id, word) in vocab.entries_map() {
         words.entry(word.clone()).or_default().push(id);
@@ -103,7 +119,7 @@ pub fn build_scoped_boundary_identity_refinement(
     output.profile.id_map_ms += map_ms;
     output.profile.terminal_dwa_ms += finish.elapsed().as_secs_f64() * 1000.0;
     if compile_profile_enabled() {
-        eprintln!("[glrmask/profile][boundary_identity_refinement] tokens={} states={n} initial={} map_ms={map_ms:.3} total_ms={:.3}",
+        eprintln!("[glrmask/profile][boundary_identity_refinement] tokens={} states={n} initial={} packed={packed} map_ms={map_ms:.3} total_ms={:.3}",
             vocab.len(), scope.initial_states().len(), started.elapsed().as_secs_f64() * 1000.0);
     }
     Some((MappedArtifact::new(TerminalAutomaton::Dwa(dwa), output.id_map), output.profile))
@@ -114,6 +130,25 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::{bytes, choice, plus};
     use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
+
+    #[test]
+    fn initial_coordinate_packing_is_a_total_bijection() {
+        for n in [1usize, 2, 7, 65, 513] {
+            for stride in 1..6 {
+                let selected = (0..n).map(|q| q % stride == stride - 1).collect::<Vec<_>>();
+                let map = singleton_state_map(&selected, true);
+                let count = selected.iter().filter(|&&x| x).count();
+                let mut seen = vec![false; n];
+                for (raw, &id) in map.original_to_internal.iter().enumerate() {
+                    assert!(!seen[id as usize]); seen[id as usize] = true;
+                    assert_eq!(map.representative_original_ids[id as usize], raw as u32);
+                    assert_eq!((id as usize) < count, selected[raw]);
+                    assert_eq!(map.internal_to_originals[id as usize], vec![raw as u32]);
+                }
+                assert!(seen.into_iter().all(|x| x));
+            }
+        }
+    }
 
     #[test]
     fn identity_refinement_matches_ordinary_scoped_languages_with_ignores() {

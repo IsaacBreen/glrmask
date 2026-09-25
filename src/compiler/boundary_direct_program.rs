@@ -61,6 +61,63 @@ pub(super) fn compile(
     // Mirror the established finite compiler's policy instead of spending
     // codec work on a tiny shard that will deliberately use its exact fallback.
     if !(4096..=200_000).contains(&estimated_states) || coefficients.len() > 2048 { return None; }
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        // Count physical template insertion, not only the compact lexical
+        // graph. Keep this diagnostic outside unprofiled performance samples.
+        let mut counts = vec![0usize; templates.len()];
+        for instance in &instances { counts[instance.template] += 1; }
+        let mut groups = BTreeMap::<&str, (usize, usize, usize, usize)>::new();
+        let mut largest = Vec::new();
+        for (&key, &id) in &template_ids {
+            let kind = if library.entry_keys.contains(&key) { "entry" }
+                else if library.finish_keys.contains(&key) { "finish" } else { "ordinary" };
+            let template = templates[id];
+            let states = template.states().len();
+            let edges = template.states().iter().map(|row|
+                row.epsilons.len() + row.transitions.values().map(Vec::len).sum::<usize>()).sum::<usize>();
+            let copies = counts[id];
+            let group = groups.entry(kind).or_default();
+            group.0 += usize::from(copies != 0);
+            group.1 += copies;
+            group.2 += states * copies;
+            group.3 += edges * copies;
+            if copies != 0 {
+                largest.push((states * copies, key, kind, copies, states, edges));
+            }
+        }
+        largest.sort_unstable_by(|a,b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        largest.truncate(12);
+        eprintln!("[glrmask/profile][boundary_template_census] component={start_component} lexical_states={} lexical_edges={} ports={ports} groups_templates_copies_states_edges={groups:?} largest_totalstates_key_kind_copies_states_edges={largest:?}",
+            lexical.num_states(), lexical.num_transitions());
+        if std::env::var_os("GLRMASK_PROFILE_BOUNDARY_LEAF_TEMPLATES").is_some() {
+            let profile_started=Instant::now();
+            let mut counts=BTreeMap::<u32,usize>::new();
+            for row in lexical.states() {
+                for (label,target,weight) in row.transitions.entries() {
+                    if weight.is_empty() {continue;}
+                    let next=&lexical.states()[target as usize];
+                    if next.final_weight.as_ref().is_some_and(|w|!w.is_empty())
+                        && next.transitions.entries().all(|(_,_,w)|w.is_empty()) {
+                        *counts.entry(label as u32).or_default()+=1;
+                    }
+                }
+            }
+            let mut originals=0usize;let mut projected=0usize;let mut records=Vec::new();
+            for (&key,&copies) in &counts {
+                let original=library.templates.by_terminal_nwa.get(&key)?;
+                let reduced=library.templates.by_terminal.get(&key)
+                    .and_then(|dfa|admission::project(dfa,context.total_scoped_states));
+                let before=original.states().len();
+                let after=reduced.as_ref().map_or(before,|dfa|dfa.states.len());
+                originals+=before*copies;projected+=after*copies;
+                records.push(((before.saturating_sub(after))*copies,key,copies,before,after,reduced.is_some()));
+            }
+            records.sort_unstable_by(|a,b|b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+            records.truncate(15);
+            eprintln!("[glrmask/profile][boundary_leaf_template_census] component={start_component} keys={} copies={} original_copied_states={originals} projected_copied_states={projected} largest_saving_key_copies_before_after_selected={records:?} diagnostic_ms={:.3}",
+                counts.len(),counts.values().sum::<usize>(),profile_started.elapsed().as_secs_f64()*1000.0);
+        }
+    }
     let certificate = context.predecessor_support.get_or_init(|| {
         let tables = std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
         super::super::boundary_stack_support::build(&tables, &context.state_offsets, &context.links, context.total_scoped_states)

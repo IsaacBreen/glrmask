@@ -25,6 +25,8 @@ pub(super) struct SummaryStats {
     pub work: usize,
     pub cache_hits: usize,
     pub max_stack: usize,
+    pub rejected_queries: usize,
+    pub rejected_edges: usize,
 }
 
 struct Frame {
@@ -42,6 +44,15 @@ struct Solver<'a> {
     stack: Vec<Frame>,
     inflight_pairs: usize,
     stats: SummaryStats,
+    may_read: Vec<u128>,
+    filter: bool,
+}
+
+/// Two independent word positions form a conservative 128-bit read synopsis.
+/// A collision can only fail to reject an impossible read, never invent a proof.
+fn read_signature(label: i32) -> u128 {
+    let x=(label as u32 as u64).wrapping_mul(0x9e3779b97f4a7c15);
+    (1u128 << (x >> 58)) | (1u128 << (64 + ((x ^ (x >> 23)).wrapping_mul(0xd6e8feb86659fd93) >> 58)))
 }
 
 impl Solver<'_> {
@@ -72,6 +83,13 @@ impl Solver<'_> {
     }
 
     fn query(&mut self, state: u32, label: i32) -> Option<usize> {
+        let wanted=read_signature(label);
+        if self.filter {
+            self.account(1)?;
+            if self.may_read[state as usize] & wanted != wanted {
+                self.stats.rejected_queries+=1;return Some(0);
+            }
+        }
         if let Some(&id) = self.known.get(&(state, label)) {
             self.stats.cache_hits += 1;
             return Some(id);
@@ -84,6 +102,13 @@ impl Solver<'_> {
             let q = self.stack[last].state;
             let edge = self.stack[last].edge;
             if let Some(&(target, weight)) = self.effective[q as usize].get(edge) {
+                if self.filter {
+                    self.account(1)?;
+                    if self.may_read[target as usize] & wanted != wanted {
+                        self.stats.rejected_edges+=1;
+                        self.stack[last].edge+=1;continue;
+                    }
+                }
                 if let Some(&id) = self.known.get(&(target, label)) {
                     self.account(1 + self.results[id].len())?;
                     let previous = self.stack[last].result.len();
@@ -134,6 +159,14 @@ pub(super) fn compute_with_topology(
     states: &[FastBoundaryNwaState], interner: &mut FastBoundaryWeightInterner,
     topology: Option<&CheckedNativeTopology>,
 ) -> Option<(Vec<FastBoundaryDerivedRow>, SummaryStats)> {
+    compute_with_topology_mode(states,interner,topology,
+        std::env::var_os("GLRMASK_BOUNDARY_CANCELLATION_READ_FILTER").is_some())
+}
+
+fn compute_with_topology_mode(
+    states:&[FastBoundaryNwaState],interner:&mut FastBoundaryWeightInterner,
+    topology:Option<&CheckedNativeTopology>,filter:bool,
+)->Option<(Vec<FastBoundaryDerivedRow>,SummaryStats)> {
     // This is normally guaranteed by the original BTreeMap/template builder.
     // Certify it once rather than scanning every row for every requested read.
     if states.iter().any(|row|!row.transitions.windows(2).all(|p|p[0].0<p[1].0)){return None;}
@@ -145,7 +178,8 @@ pub(super) fn compute_with_topology(
     let n = states.len();
     if topo.len() != n { return None; }
     let mut solver = Solver { states, interner, effective: vec![Vec::new(); n],
-        known: FxHashMap::default(), results: Vec::new(), stack: Vec::new(), inflight_pairs: 0, stats: Default::default() };
+        known: FxHashMap::default(), results: vec![Vec::new()], stack: Vec::new(), inflight_pairs: 0, stats: Default::default(),
+        may_read:if filter{vec![u128::MAX;n]}else{Vec::new()},filter };
     let mut derived = vec![FastBoundaryDerivedRow::default(); n];
     let mut retained_edges = 0usize;
     for &q in topo.iter().rev() {
@@ -178,6 +212,16 @@ pub(super) fn compute_with_topology(
         row.sort_unstable_by_key(|&(target, _)| target);
         retained_edges = retained_edges.checked_add(row.len())?;
         if retained_edges > MAX_RESULT_PAIRS { return None; }
+        if filter {
+            solver.account(states[q as usize].transitions.len()+row.len()+1)?;
+            let mut may=0u128;
+            for &(label,_) in &states[q as usize].transitions {
+                if label==DEFAULT_LABEL {may=u128::MAX;break;}
+                if !is_negative_label(label) {may|=read_signature(label);}
+            }
+            for &(target,_) in &row {may|=solver.may_read[target as usize];}
+            solver.may_read[q as usize]=may;
+        }
         solver.effective[q as usize] = row;
     }
     solver.account(0)?;
@@ -234,6 +278,7 @@ mod tests {
         let mut seed=59119u64;
         let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as usize};
         let mut pairs=0usize;
+        let mut rejected=0usize;
         for case in 0..1024 {
             let mut interner=FastBoundaryWeightInterner::new([1,2,17,64][case%4],64).unwrap();
             interner.limits=Some(Default::default());
@@ -262,15 +307,19 @@ mod tests {
                     transitions:rows.into_iter().collect()});
             }
             let expected=fast_boundary_cancellations_worklist(&states,&mut interner).unwrap();
-            let (actual,stats)=compute(&states,&mut interner).unwrap();
+            let (actual,stats)=compute_with_topology_mode(&states,&mut interner,None,false).unwrap();
+            let (filtered,filter_stats) = compute_with_topology_mode(&states,&mut interner,None,true).unwrap();
+            rejected+=filter_stats.rejected_queries+filter_stats.rejected_edges;
             let literal=literal_paths(&states,&mut interner);
             pairs+=stats.result_pairs;
             for q in 0..n {
                 assert_eq!(canonical(&actual[q]),canonical(&expected.derived[q]),"FIFO case={case} q={q}");
+                assert_eq!(canonical(&filtered[q]),canonical(&actual[q]),"read filter case={case} q={q}");
                 assert_eq!(canonical(&actual[q]),canonical(&literal[q]),"literal case={case} q={q}");
             }
         }
         assert!(pairs>0,"fixtures must actually complete queries");
+        assert!(rejected>0,"fixtures must exercise actual read rejection");
     }
 
     #[test]
@@ -286,4 +335,33 @@ mod tests {
         interner.limits=Some(FiniteCompileLimits{work:0,..Default::default()});
         assert!(compute(&states,&mut interner).is_none());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn read_synopsis_collisions_cannot_create_or_remove_cancellations() {
+    let mut signatures=FxHashMap::default();
+    let mut collision=None;
+    for label in 0..10_000i32 {
+        if let Some(previous)=signatures.insert(read_signature(label),label){
+            collision=Some((previous,label));break;
+        }
+    }
+    let (a,b)=collision.expect("only4096two-bit combinations exist");
+    assert_ne!(a,b);assert_eq!(read_signature(a),read_signature(b));
+    let push=crate::compiler::glr::labels::encode_negative_label;
+    let source=vec![
+        FastBoundaryNwaState{final_weight:0,epsilons:vec![],transitions:vec![(push(a as u32),smallvec::smallvec![(1,1)])]},
+        FastBoundaryNwaState{final_weight:0,epsilons:vec![],transitions:vec![(b,smallvec::smallvec![(2,1)])]},
+        FastBoundaryNwaState{final_weight:1,epsilons:vec![],transitions:vec![]},
+    ];
+    let mut pool=FastBoundaryWeightInterner::new(1,64).unwrap();
+    let old=compute_with_topology_mode(&source,&mut pool,None,false).unwrap().0;
+    let new=compute_with_topology_mode(&source,&mut pool,None,true).unwrap().0;
+    assert_eq!(old[0].len(),0);assert_eq!(new[0].len(),0);
+    let mut source=source;
+    source[1].transitions.push((DEFAULT_LABEL,smallvec::smallvec![(2,1)]));
+    source[1].transitions.sort_unstable_by_key(|r|r.0);
+    let new=compute_with_topology_mode(&source,&mut pool,None,true).unwrap().0;
+    assert_eq!(new[0].len(),1,"DEFAULT must never be rejected");
 }

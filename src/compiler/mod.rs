@@ -10,6 +10,8 @@ mod boundary_query_terminals;
 pub(crate) mod boundary_token_support;
 mod boundary_cut_support;
 pub(crate) mod boundary_scoped_follow;
+pub(crate) mod boundary_scoped_follow_delta;
+pub(crate) mod boundary_flat_transitions;
 pub(crate) mod weight_observation_quotient;
 pub(crate) mod boundary_candidates;
 pub(crate) mod boundary_tail;
@@ -132,4 +134,5 @@ pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
 mod boundary_prefix_dominance;
 
 mod boundary_first_completion;
+mod boundary_finite_lexer;
 pub(crate) mod boundary_precomputed_completion;

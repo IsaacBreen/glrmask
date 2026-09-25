@@ -3701,6 +3701,8 @@ struct FastBoundaryNwaState {
 mod finite_template_program;
 #[path = "finite_top_support.rs"]
 mod finite_top_support;
+#[path = "finite_weighted_top.rs"]
+mod finite_weighted_top;
 #[path = "finite_weight_support.rs"]
 mod finite_weight_support;
 #[path="finite_requotient.rs"]
@@ -4742,6 +4744,7 @@ enum FastPossibleOutgoingIds {
     All,
     Small(SmallVec<[u32; 16]>),
     Bits(BitSet),
+    Shared(std::sync::Arc<[u32]>),
 }
 
 impl FastPossibleOutgoingIds {
@@ -4752,6 +4755,7 @@ impl FastPossibleOutgoingIds {
             Self::All => num_parser_states as usize,
             Self::Small(ids) => ids.len(),
             Self::Bits(ids) => ids.count_ones(),
+            Self::Shared(ids) => ids.len(),
         }
     }
 
@@ -4769,6 +4773,7 @@ impl FastPossibleOutgoingIds {
                     f(parser_state);
                 }
             }
+            Self::Shared(ids) => { for &parser_state in ids.iter() { f(parser_state); } }
             Self::Bits(ids) => {
                 for parser_state in ids.iter_ones() {
                     f(parser_state as u32);
@@ -4779,6 +4784,106 @@ impl FastPossibleOutgoingIds {
 }
 
 fn fast_boundary_possible_outgoing_ids(
+    nwa:&[FastBoundaryNwaState], supports:&[Vec<u32>], num_parser_states:u32,
+)->Vec<FastPossibleOutgoingIds>{
+    if std::env::var_os("GLRMASK_BOUNDARY_POSSIBLE_SET_CACHE").is_some(){
+        let result=fast_boundary_possible_outgoing_ids_cached(nwa,supports,num_parser_states);
+        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_GUARD_SET_CACHE").is_some(){
+            validate_guard_observer(nwa,supports,num_parser_states,&result);
+        }
+        result
+    }else{fast_boundary_possible_outgoing_ids_reference(nwa,supports,num_parser_states)}
+}
+
+/// Equality is only over row observations, not NWA states. In particular the
+/// topology and zero-weight guards observed by the normalizer remain intact.
+fn fast_boundary_possible_outgoing_ids_cached(
+    nwa:&[FastBoundaryNwaState], supports:&[Vec<u32>], num_parser_states:u32,
+)->Vec<FastPossibleOutgoingIds>{
+    fast_boundary_possible_outgoing_ids_cached_with_budget(nwa,supports,num_parser_states,65_536,1_048_576)
+}
+
+fn fast_boundary_possible_outgoing_ids_cached_with_budget(
+    nwa:&[FastBoundaryNwaState],supports:&[Vec<u32>],num_parser_states:u32,
+    cache_cap:usize,member_budget:usize,
+)->Vec<FastPossibleOutgoingIds>{
+    let started=Instant::now();
+    let mut classes=vec![Vec::<u32>::new(),Vec::<u32>::new()]; // empty, ALL
+    let mut index=FxHashMap::<Vec<u32>,u32>::default();
+    let mut state_class=Vec::with_capacity(nwa.len());
+    for state in nwa {
+        let mut ids=Vec::new();let mut all=false;
+        for &(label,_) in &state.transitions {
+            if label==DEFAULT_LABEL{all=true;break;}
+            if let Some(q)=parser_state_label(label,num_parser_states){ids.push(q);}
+        }
+        if all{state_class.push(1);continue;}
+        if ids.is_empty(){state_class.push(0);continue;}
+        ids.sort_unstable();ids.dedup();
+        let id=if let Some(&id)=index.get(&ids){id}else{
+            let id=classes.len() as u32;classes.push(ids.clone());index.insert(ids,id);id
+        };
+        state_class.push(id);
+    }
+    let mut cache=FxHashMap::<(bool,SmallVec<[u32;8]>),FastPossibleOutgoingIds>::default();
+    let mut hits=0usize;
+    let mut retained_members=0usize;
+    let output=supports.iter().map(|support|{
+        let mut key=SmallVec::<[u32;8]>::new();
+        for &state in support {
+            let c=state_class.get(state as usize).copied().unwrap_or(0);
+            if c==1{return FastPossibleOutgoingIds::All;}
+            if c!=0{key.push(c);}
+        }
+        if key.is_empty(){return FastPossibleOutgoingIds::Empty;}
+        key.sort_unstable();key.dedup();
+        // Preserve the reference's singleton explicit-full versus multi-row
+        // wildcard convention. They have different fallback dispatch paths.
+        let cache_key=(support.len()==1,key);
+        if let Some(value)=cache.get(&cache_key){hits+=1;return value.clone();}
+        let mut ids=Vec::new();
+        for &c in &cache_key.1{ids.extend_from_slice(&classes[c as usize]);}
+        if cache_key.1.len()>1{ids.sort_unstable();ids.dedup();}
+        let value=if !cache_key.0&&ids.len()==num_parser_states as usize{
+            FastPossibleOutgoingIds::All
+        }else if ids.len()<=16{
+            FastPossibleOutgoingIds::Small(ids.into_iter().collect())
+        }else{FastPossibleOutgoingIds::Shared(std::sync::Arc::from(ids))};
+        let members=cache_key.1.len().saturating_add(value.count(num_parser_states));
+        if cache.len()<cache_cap && members<=member_budget.saturating_sub(retained_members){
+            retained_members+=members;cache.insert(cache_key,value.clone());
+        }
+        value
+    }).collect::<Vec<_>>();
+    if compile_profile_enabled(){eprintln!("[glrmask/profile][guard_observer_cache] raw_states={} classes={} supports={} entries={} hits={} elapsed_ms={:.3}",nwa.len(),classes.len(),supports.len(),cache.len(),hits,elapsed_ms(started));}
+    output
+}
+
+/// Independent diagnostic observer using raw label-key set union. Branch
+/// vector contents are intentionally irrelevant, including zero/empty guards.
+fn validate_guard_observer(
+    nwa:&[FastBoundaryNwaState],supports:&[Vec<u32>],alphabet:u32,
+    actual:&[FastPossibleOutgoingIds],
+){
+    assert_eq!(supports.len(),actual.len());
+    for (row,(support,actual)) in supports.iter().zip(actual).enumerate(){
+        let mut keys=BTreeSet::new();let mut wildcard=false;
+        for &q in support { if let Some(state)=nwa.get(q as usize){
+            for &(label,_) in &state.transitions {
+                if label==DEFAULT_LABEL{wildcard=true;}
+                else if label>=0 && (label as u32)<alphabet{keys.insert(label as u32);}
+            }
+        }}
+        let full=wildcard || (support.len()!=1 && !keys.is_empty() && keys.len()==alphabet as usize);
+        let expected=if full{(0..alphabet).collect::<Vec<_>>()}else{keys.into_iter().collect()};
+        let mut found=Vec::new();actual.for_each(alphabet,|q|found.push(q));
+        assert_eq!(found,expected,"raw guard set differs at support {row}");
+        assert_eq!(actual.count(alphabet),expected.len(),"guard count differs");
+        assert_eq!(matches!(actual,FastPossibleOutgoingIds::All),full,"wildcard convention differs");
+    }
+}
+
+fn fast_boundary_possible_outgoing_ids_reference(
     nwa: &[FastBoundaryNwaState],
     supports: &[Vec<u32>],
     num_parser_states: u32,
@@ -5120,7 +5225,7 @@ fn determinize_fast_boundary_with_fallbacks(
                         fast_boundary_add_target(&mut default_all, default_target, fallback_weight, interner);
                     }
                     FastPossibleOutgoingIds::Empty => {}
-                    FastPossibleOutgoingIds::Small(_) | FastPossibleOutgoingIds::Bits(_) => {
+                    FastPossibleOutgoingIds::Small(_) | FastPossibleOutgoingIds::Bits(_) | FastPossibleOutgoingIds::Shared(_) => {
                         possible.for_each(num_parser_states, |parser_state| {
                             let parser_state = parser_state as usize;
                             if !dense_touched[parser_state] {
@@ -5497,6 +5602,7 @@ fn determinize_preconverted_small_boundary_output(
                         for &id in ids { candidate_bits.set(id as usize); }
                     }
                     FastPossibleOutgoingIds::Bits(ids) => candidate_bits = ids.clone(),
+                    FastPossibleOutgoingIds::Shared(ids) => { for &id in ids.iter() { candidate_bits.set(id as usize); } },
                 }
                 let mut reference_bits = BitSet::new(dense_positive_label_limit as usize);
                 match reference {
@@ -11023,5 +11129,46 @@ mod checked_topology_reuse_tests {
         assert_eq!(before,rows(&graph,&p));
         graph[1].epsilons[0]=(u32::MAX,0);
         assert!(!order.certifies(&graph));
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn exact_guard_class_union_preserves_empty_rows_full_explicit_and_wildcards(){
+    fn observe(v:&FastPossibleOutgoingIds,n:u32)->(bool,bool,usize,Vec<u32>){
+        let mut out=Vec::new();v.for_each(n,|q|out.push(q));
+        (matches!(v,FastPossibleOutgoingIds::All),matches!(v,FastPossibleOutgoingIds::Empty),v.count(n),out)
+    }
+    let mut seed=8128u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as usize};
+    for alphabet in [1u32,4,17,65,129]{
+        for _case in 0..128 {
+            let mut nwa=Vec::new();
+            for q in 0..24u32 {
+                let mut transitions=Vec::new();
+                for label in 0..alphabet {
+                    if q==0||next()%4==0{
+                        let branches=match next()%3{0=>SmallVec::new(),1=>smallvec::smallvec![(0,0)],_=>smallvec::smallvec![(0,1)]};
+                        transitions.push((label as i32,branches));
+                    }
+                }
+                if q==1{transitions.push((DEFAULT_LABEL,SmallVec::new()));}
+                nwa.push(FastBoundaryNwaState{final_weight:0,epsilons:Vec::new(),transitions});
+            }
+            let mut supports=vec![vec![],vec![0],vec![0,0],vec![1],vec![999]];
+            for _ in 0..100{supports.push((0..next()%10).map(|_|next()as u32%26).collect());}
+            let old=fast_boundary_possible_outgoing_ids_reference(&nwa,&supports,alphabet);
+            let new=fast_boundary_possible_outgoing_ids_cached(&nwa,&supports,alphabet);
+            assert_eq!(old.len(),new.len());
+            for(a,b)in old.iter().zip(&new){assert_eq!(observe(a,alphabet),observe(b,alphabet));}
+            validate_guard_observer(&nwa,&supports,alphabet,&new);
+            for(cap,words)in [(0,0),(1,0),(1,16),(4,128)]{
+                let bounded=fast_boundary_possible_outgoing_ids_cached_with_budget(&nwa,&supports,alphabet,cap,words);
+                for(a,b)in old.iter().zip(&bounded){assert_eq!(observe(a,alphabet),observe(b,alphabet));}
+                validate_guard_observer(&nwa,&supports,alphabet,&bounded);
+            }
+            assert!(!matches!(new[1],FastPossibleOutgoingIds::All));
+            assert!(matches!(new[2],FastPossibleOutgoingIds::All));
+            assert!(matches!(new[3],FastPossibleOutgoingIds::All));
+        }
     }
 }

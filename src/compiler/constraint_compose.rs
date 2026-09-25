@@ -23439,7 +23439,10 @@ pub(crate) fn accepted_original_tokens(
     dwa: &DWA,
     id_map: &InternalIdMap,
 ) -> BTreeSet<u32> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let started = profile.then(Instant::now);
     let accepted = accepted_weight_support(dwa);
+    let support_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
     let mut originals = BTreeSet::new();
     for (_, internal_tokens) in accepted.raw_range_values() {
         for range in internal_tokens.ranges() {
@@ -23453,6 +23456,10 @@ pub(crate) fn accepted_original_tokens(
                 }
             }
         }
+    }
+    if let Some(started) = started {
+        eprintln!("[glrmask/profile][accepted_token_support] states={} edges={} tokens={} support_ms={support_ms:.3} total_ms={:.3}",
+            dwa.num_states(), dwa.num_transitions(), originals.len(), started.elapsed().as_secs_f64() * 1000.0);
     }
     originals
 }

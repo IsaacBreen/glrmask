@@ -51,22 +51,105 @@ struct Signature { final_mask: Mask, edges: Vec<Edge> }
 struct State { final_mask: Mask, edges: Vec<Edge>, guarded: bool }
 struct Group { domain: Mask, signature: Signature, guarded: bool }
 
+enum MaskBucket { One(Mask), Many(Vec<Mask>) }
+
+#[cfg(test)]
+mod mask_storage_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_and_sparse_masks_preserve_ids_under_forced_collisions() {
+        let mut seed = 93u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            seed
+        };
+        for rows in [1, 9, 44, 64] {
+            for (indexed, sparse, force_collisions) in [
+                (true, false, false), (false, true, false),
+                (true, true, false), (true, true, true),
+            ] {
+                let mut reference = Masks::with_storage(rows, false, false);
+                let mut candidate = Masks::with_storage(rows, indexed, sparse);
+                if force_collisions {
+                    candidate.fingerprint_mask = 0;
+                    candidate.indexed.clear();
+                    candidate.indexed.insert(0, MaskBucket::Many(vec![0, 1]));
+                }
+                let mut inputs = vec![vec![0; rows], vec![u64::MAX; rows]];
+                for _ in 0..96 {
+                    inputs.push((0..rows).map(|_| {
+                        let v = next();
+                        if v % 5 == 0 { v } else { 0 }
+                    }).collect());
+                }
+                for _ in 0..3 {
+                    for value in &inputs {
+                        assert_eq!(reference.intern(value.clone()), candidate.intern(value.clone()));
+                    }
+                }
+                for _ in 0..512 {
+                    let n = reference.values.len() as u64;
+                    let a = (next() % n) as Mask;
+                    let b = (next() % n) as Mask;
+                    let d1 = (next() % n) as Mask;
+                    let d2 = (next() % n) as Mask;
+                    assert_eq!(reference.equal_on_overlap(a, b, d1, d2),
+                               candidate.equal_on_overlap(a, b, d1, d2));
+                    assert_eq!(reference.and(a, b), candidate.and(a, b));
+                    assert_eq!(reference.or(a, b), candidate.or(a, b));
+                    assert_eq!(reference.popcount(a), candidate.popcount(a));
+                }
+                assert_eq!(reference.values, candidate.values);
+                assert_eq!(reference.cardinalities, candidate.cardinalities);
+                let before = candidate.values.len();
+                assert!(candidate.intern(vec![0; rows + 1]).is_none());
+                assert_eq!(candidate.values.len(), before, "invalid input cannot publish a row");
+                if indexed { assert!(candidate.ids.is_empty(), "indexed mode must not duplicate bit rows"); }
+                if sparse { assert_eq!(candidate.values.len(), candidate.nonzero_words.len()); }
+                if force_collisions { assert_eq!(candidate.indexed.len(), 1); }
+            }
+        }
+    }
+}
+
 struct Masks {
     rows: usize,
     points: Option<Vec<(u32,u32)>>,
     point_rows: Vec<(u32,usize,usize)>,
     decoded_atoms: Option<Vec<Weight>>,
+    decoded_point_rows: Option<Vec<(u32, Vec<(u32, usize)>)>>,
     values: Vec<Box<[u64]>>,
     cardinalities: Vec<u32>,
     ids: FxHashMap<Box<[u64]>, Mask>,
+    indexed: FxHashMap<u64, MaskBucket>,
+    nonzero_words: Vec<Box<[u16]>>,
+    use_index: bool,
+    borrow_rows: bool,
+    use_sparse_overlap: bool,
+    #[cfg(test)]
+    fingerprint_mask: u64,
     and_cache: FxHashMap<(Mask, Mask), Mask>,
     source_cache: FxHashMap<usize, (Weight, Mask)>,
 }
 
 impl Masks {
     fn new(rows: usize) -> Self {
+        Self::with_storage(rows,
+            std::env::var_os("GLRMASK_BOUNDARY_MIN_MASK_INDEX").is_some(),
+            std::env::var_os("GLRMASK_BOUNDARY_MIN_SPARSE_OVERLAP").is_some())
+    }
+
+    fn with_storage(rows: usize, use_index: bool, use_sparse_overlap: bool) -> Self {
         let mut result = Self {
-            rows, points: None, point_rows: Vec::new(), decoded_atoms: None, values: Vec::new(), cardinalities: Vec::new(), ids: FxHashMap::default(),
+            rows, points: None, point_rows: Vec::new(), decoded_atoms: None, decoded_point_rows: None, values: Vec::new(), cardinalities: Vec::new(), ids: FxHashMap::default(),
+            indexed: FxHashMap::default(), nonzero_words: Vec::new(), use_index,
+            borrow_rows: std::env::var_os("GLRMASK_BOUNDARY_MIN_BORROWED_ROWS").is_some(),
+            // Decline only this storage shortcut, not an otherwise valid
+            // minimization, when word offsets do not fit the compact index.
+            use_sparse_overlap: use_sparse_overlap && rows <= u16::MAX as usize,
+            #[cfg(test)]
+            fingerprint_mask: u64::MAX,
             and_cache: FxHashMap::default(), source_cache: FxHashMap::default(),
         };
         assert_eq!(result.intern(vec![0; rows]).expect("initial empty mask fits"), 0);
@@ -90,15 +173,102 @@ impl Masks {
         }
         masks.points=Some(points);Some(masks)
     }
+
+    fn fingerprint(&self, value: &[u64]) -> u64 {
+        let mut hasher = FxHasher::default();
+        value.hash(&mut hasher);
+        let hash = hasher.finish();
+        #[cfg(test)]
+        { return hash & self.fingerprint_mask; }
+        #[cfg(not(test))]
+        { hash }
+    }
+
+    fn lookup(&self, value: &[u64], fingerprint: u64) -> Option<Mask> {
+        if value.len() != self.rows { return None; }
+        if self.use_index {
+            if let Some(bucket) = self.indexed.get(&fingerprint) {
+                // A fingerprint is never an equality certificate. The owned
+                // immutable row in `values` is compared in full on every hit.
+                match bucket {
+                    MaskBucket::One(id) => {
+                        if self.values[*id as usize].as_ref() == value {
+                            return Some(*id);
+                        }
+                    }
+                    MaskBucket::Many(ids) => {
+                        for &id in ids {
+                            if self.values[id as usize].as_ref() == value {
+                                return Some(id);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(&id) = self.ids.get(value) { return Some(id); }
+        None
+    }
+    /// Interner membership is exact even under a fingerprint collision.
+    /// Only a new row is allocated; the policy is fixed once per invocation.
+    fn intern_slice(&mut self, value: &[u64]) -> Option<Mask> {
+        if value.len()!=self.rows{return None;}
+        let fingerprint=if self.use_index{self.fingerprint(value)}else{0};
+        if let Some(id)=self.lookup(value,fingerprint){return Some(id);}
+        self.insert_new(value.to_vec(),fingerprint)
+    }
     fn intern(&mut self, value: Vec<u64>) -> Option<Mask> {
-        if let Some(&id) = self.ids.get(value.as_slice()) { return Some(id); }
-        if value.len() != self.rows || self.values.len() >= MAX_MASKS
+        if value.len()!=self.rows{return None;}
+        let fingerprint=if self.use_index{self.fingerprint(&value)}else{0};
+        if let Some(id)=self.lookup(&value,fingerprint){return Some(id);}
+        self.insert_new(value,fingerprint)
+    }
+    // The caller has checked width and exact non-membership. Existing resource
+    // bounds and insertion/ID order are the same for borrowed and owned paths.
+    fn insert_new(&mut self, value: Vec<u64>, fingerprint: u64) -> Option<Mask> {
+        if self.values.len() >= MAX_MASKS
             || (self.values.len() + 1).checked_mul(self.rows)? > MAX_MASK_WORDS
         { return None; }
         let value = value.into_boxed_slice();
         let id = self.values.len() as Mask;
         self.cardinalities.push(value.iter().map(|word|word.count_ones()).sum());
-        self.values.push(value.clone()); self.ids.insert(value, id); Some(id)
+        if self.use_sparse_overlap {
+            self.nonzero_words.push(value.iter().enumerate()
+                .filter_map(|(i, &word)| (word != 0).then_some(i as u16)).collect());
+        }
+        if self.use_index {
+            self.values.push(value);
+            match self.indexed.entry(fingerprint) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(MaskBucket::One(id));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    match entry.get_mut() {
+                        MaskBucket::One(previous) => {
+                            let previous = *previous;
+                            *entry.get_mut() = MaskBucket::Many(vec![previous, id]);
+                        }
+                        MaskBucket::Many(ids) => ids.push(id),
+                    }
+                }
+            }
+        } else {
+            self.values.push(value.clone()); self.ids.insert(value, id);
+        }
+        Some(id)
+    }
+    fn boolean_row(&mut self,a:Mask,b:Mask,intersection:bool)->Option<Mask> {
+        if self.borrow_rows && self.rows<=64 {
+            let mut temporary=[0u64;64];
+            for (i,dst) in temporary[..self.rows].iter_mut().enumerate() {
+                *dst=if intersection {self.values[a as usize][i]&self.values[b as usize][i]}
+                    else {self.values[a as usize][i]|self.values[b as usize][i]};
+            }
+            self.intern_slice(&temporary[..self.rows])
+        }else{
+            let bits=self.values[a as usize].iter().zip(&self.values[b as usize])
+                .map(|(&a,&b)|if intersection{a&b}else{a|b}).collect();
+            self.intern(bits)
+        }
     }
     fn import(&mut self, weight: &Weight) -> Option<Mask> {
         if weight.is_empty() { return Some(0); }
@@ -153,20 +323,29 @@ impl Masks {
         if a == 1 || b == 0 { return Some(b); }
         let key = if a < b { (a,b) } else { (b,a) };
         if let Some(&id) = self.and_cache.get(&key) { return Some(id); }
-        let bits = self.values[a as usize].iter().zip(&self.values[b as usize])
-            .map(|(&a,&b)| a & b).collect();
-        let id = self.intern(bits)?;
+        let id = self.boolean_row(a,b,true)?;
         if self.and_cache.len() < 262_144 { self.and_cache.insert(key,id); }
         Some(id)
     }
     fn or(&mut self, a: Mask, b: Mask) -> Option<Mask> {
         if a == b || b == 0 || a == 1 { return Some(a); }
         if a == 0 || b == 1 { return Some(b); }
-        self.intern(self.values[a as usize].iter().zip(&self.values[b as usize])
-            .map(|(&a,&b)| a | b).collect())
+        self.boolean_row(a,b,false)
     }
     fn equal_on_overlap(&self, a: Mask, b: Mask, d1: Mask, d2: Mask) -> bool {
         if a == b { return true; }
+        if self.use_sparse_overlap {
+            let left = &self.nonzero_words[d1 as usize];
+            let right = &self.nonzero_words[d2 as usize];
+            let selected = if left.len() <= right.len() { left } else { right };
+            // Outside either domain's nonzero-word support, d1 & d2 is zero.
+            // Thus the omitted terms in (a XOR b) & d1 & d2 are exactly zero.
+            return selected.iter().all(|&word| {
+                let i = word as usize;
+                ((self.values[a as usize][i] ^ self.values[b as usize][i])
+                    & self.values[d1 as usize][i] & self.values[d2 as usize][i]) == 0
+            });
+        }
         let (a,b,d1,d2) = (&self.values[a as usize], &self.values[b as usize],
             &self.values[d1 as usize], &self.values[d2 as usize]);
         (0..self.rows).all(|i| ((a[i] ^ b[i]) & d1[i] & d2[i]) == 0)
@@ -176,6 +355,15 @@ impl Masks {
     }
     fn export(&self, id: Mask) -> Weight {
         if id == 0 { return Weight::empty(); }
+        if let Some(rows)=&self.decoded_point_rows {
+            let mask=&self.values[id as usize];
+            return Weight::from_per_tsid_token_sets(rows.iter().filter_map(|(row, points)| {
+                let tokens=points.iter().filter_map(|&(token,atom)|
+                    (mask[atom/64]&(1u64<<(atom%64))!=0).then_some(token))
+                    .collect::<range_set_blaze::RangeSetBlaze<u32>>();
+                (!tokens.is_empty()).then_some((*row,tokens))
+            }));
+        }
         if let Some(atoms)=&self.decoded_atoms {
             let mut selected=Vec::new();
             for (word_index,&word) in self.values[id as usize].iter().enumerate() {
@@ -205,6 +393,33 @@ impl Masks {
                 let tokens = (0..64u32).filter(|bit| word & (1u64 << bit) != 0).collect();
                 (row as u32,tokens)
             }))
+    }
+
+    /// A finite disjoint atom decoder is a sparse Boolean incidence map:
+    /// each original point has exactly one owning atom. Decode by that bit
+    /// instead of constructing unions of intermediate range-weight objects.
+    /// Unsupported/non-disjoint inputs keep the unchanged union decoder.
+    fn prepare_point_decoder(&mut self) -> Option<()> {
+        self.decoded_point_rows=None;
+        let atoms=self.decoded_atoms.as_ref()?;
+        let mut points=Vec::<(u32,u32,usize)>::new();
+        for (atom,weight) in atoms.iter().enumerate() {
+            if atom>=self.rows*64 || weight.is_full(){return None;}
+            for (lo,hi,tokens) in weight.range_entries() {
+                let count=(u128::from(hi)-u128::from(lo)+1)*(tokens.len() as u128);
+                if count>(32768-points.len()) as u128{return None;}
+                for row in lo..=hi {for token in tokens.iter(){points.push((row,token,atom));}}
+            }
+        }
+        points.sort_unstable();
+        if points.windows(2).any(|p|p[0].0==p[1].0 && p[0].1==p[1].1){return None;}
+        let mut rows=Vec::<(u32,Vec<(u32,usize)>)>::new();
+        for (row,token,atom) in points {
+            if rows.last().is_none_or(|(last,_)|*last!=row){rows.push((row,Vec::new()));}
+            rows.last_mut().unwrap().1.push((token,atom));
+        }
+        self.decoded_point_rows=Some(rows);
+        Some(())
     }
 
     /// Partition the finite coordinate universe by membership in every input
@@ -455,6 +670,9 @@ fn minimize_prepared(
     let started=Instant::now();
     let mut needed=vec![0;n];
     let mut heights=vec![0usize;n];
+    let dedup_support=std::env::var_os("GLRMASK_BOUNDARY_MIN_DEDUP_SUPPORT").is_some();
+    let mut seen_contribution=Vec::<u32>::new();
+    let mut duplicate_contributions=0usize;
     for &s in topo.iter().rev() {
         // Repeated identical contributions are common in substituted parser
         // templates. Union is idempotent: retain an existing ID until a second
@@ -462,9 +680,29 @@ fn minimize_prepared(
         // avoids both per-edge and per-singleton-state intermediate allocation.
         let mut support=states[s].final_mask;
         let mut accumulator:Option<Vec<u64>>=None;
+        let dedup_this_row=dedup_support && states[s].edges.len()>=8;
+        let epoch=s as u32+1;
+        if dedup_this_row {
+            seen_contribution.resize(masks.values.len(),0);
+            seen_contribution[support as usize]=epoch;
+        }
         for edge in &mut states[s].edges {
             edge.mask=masks.and(edge.mask,needed[edge.target as usize])?;
             if edge.mask!=0 {
+                // Every edge still contributes its own target height and keeps
+                // its exact clipped coefficient. Only the repeated OR into
+                // this source's support is omitted: X union X equals X.
+                heights[s]=heights[s].max(heights[edge.target as usize]+1);
+                if dedup_this_row {
+                    if edge.mask as usize>=seen_contribution.len() {
+                        seen_contribution.resize(masks.values.len(),0);
+                    }
+                    if seen_contribution[edge.mask as usize]==epoch {
+                        duplicate_contributions+=1;
+                        continue;
+                    }
+                    seen_contribution[edge.mask as usize]=epoch;
+                }
                 if let Some(accumulator)=accumulator.as_mut() {
                     for (dst,&src) in accumulator.iter_mut().zip(&masks.values[edge.mask as usize]) {*dst|=src;}
                 } else if support==0 {
@@ -476,13 +714,16 @@ fn minimize_prepared(
                         accumulator=Some(union);
                     }
                 }
-                heights[s]=heights[s].max(heights[edge.target as usize]+1);
             }
         }
         needed[s]=match accumulator { Some(bits) => masks.intern(bits)?, None => support };
         if !states[s].guarded {states[s].edges.retain(|e|e.mask!=0);}
     }
     profile.push_ms=started.elapsed().as_secs_f64()*1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][min_support_dedup] enabled={dedup_support} duplicates={duplicate_contributions} indexed_masks={} push_ms={:.3}",
+            seen_contribution.len(),profile.push_ms);
+    }
     if compress {
         let start=Instant::now();
         // Root support is already available from the necessary backward pass.
@@ -570,6 +811,15 @@ fn minimize_prepared(
     }
     profile.merge_ms=started.elapsed().as_secs_f64()*1000.0;
     let started=Instant::now();
+    if std::env::var_os("GLRMASK_BOUNDARY_MIN_POINT_DECODE").is_some() {
+        let selected=masks.prepare_point_decoder().is_some();
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+            eprintln!("[glrmask/profile][min_point_decoder] selected={selected} rows={} points={} prepare_ms={:.3}",
+                masks.decoded_point_rows.as_ref().map_or(0,Vec::len),
+                masks.decoded_point_rows.as_ref().map_or(0,|rows|rows.iter().map(|(_,p)|p.len()).sum::<usize>()),
+                started.elapsed().as_secs_f64()*1000.0);
+        }
+    }
     let mut exported=FxHashMap::<Mask,Weight>::default();
     if std::env::var_os("GLRMASK_BOUNDARY_PARALLEL_WEIGHT_EXPORT").is_some()
         && rayon::current_num_threads()>1 && groups.len()>=256 {
@@ -657,7 +907,8 @@ fn minimize_native_impl(
     let all = if input.token_count == 64 { u64::MAX } else { (1u64 << input.token_count) - 1 };
     for weight in &input.weights {
         if weight.len() != input.rows || weight.iter().any(|bits| bits & !all != 0) { return None; }
-        ids.push(masks.intern(weight.to_vec())?);
+        ids.push(if masks.borrow_rows {masks.intern_slice(weight)?}
+            else{masks.intern(weight.to_vec())?});
     }
     if ids.first().copied() != Some(0) { return None; }
     let mut indegree = vec![0usize; n];
@@ -910,6 +1161,35 @@ mod tests {
 
 #[cfg(test)]
 #[test]
+fn finite_point_decoder_equals_union_for_every_generated_selection() {
+    let mut seed=703u64;
+    let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);seed>>32};
+    for count in [1usize,7,64,65,130] {
+        let atoms=(0..count).map(|i| {
+            // Distinct original tokens keep atoms disjoint, but different
+            // atoms overlap in TSID extent and require an actual set union.
+            Weight::from_uniform((i%11)as u32..=(i%11+3)as u32,
+                [i as u32*3+1,i as u32*3+2].into_iter().collect())
+        }).collect::<Vec<_>>();
+        let mut reference=Masks::new(count.div_ceil(64));reference.decoded_atoms=Some(atoms.clone());
+        let mut candidate=Masks::new(count.div_ceil(64));candidate.decoded_atoms=Some(atoms);
+        candidate.prepare_point_decoder().unwrap();
+        for _ in 0..256 {
+            let bits=(0..count.div_ceil(64)).map(|_|next()).collect::<Vec<_>>();
+            let a=reference.intern(bits.clone()).unwrap();let b=candidate.intern(bits).unwrap();
+            assert_eq!(reference.export(a),candidate.export(b));
+        }
+        assert_eq!(reference.export(1),candidate.export(1),"padding does not decode as ALL");
+    }
+    let mut bad=Masks::new(1);
+    bad.decoded_atoms=Some(vec![Weight::all()]);assert!(bad.prepare_point_decoder().is_none());
+    let atom=Weight::from_token_set_for_tsid(2,[3].into_iter().collect());
+    bad.decoded_atoms=Some(vec![atom.clone(),atom]);assert!(bad.prepare_point_decoder().is_none());
+    assert!(bad.decoded_point_rows.is_none());
+}
+
+#[cfg(test)]
+#[test]
 fn decoder_rejects_overlap_and_unbounded_universe() {
     let a = Weight::from_token_set_for_tsid(11, [17, 19].into_iter().collect());
     let b = Weight::from_token_set_for_tsid(11, [19, 23].into_iter().collect());
@@ -950,4 +1230,57 @@ fn large_final_decode_preserves_full_prefix_masks() {
         &input, &output, 2, 2000,
     ).unwrap();
     assert!(comparison.difference.is_none(), "parallel weight export changed prefix masks: {:?}", comparison.difference);
+}
+
+#[cfg(test)]
+#[test]
+fn borrowed_rows_match_owned_ids_and_algebra_with_collisions() {
+    let mut seed=7u64;
+    let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);seed};
+    for rows in [1,9,44,64]{for indexed in [false,true]{for sparse in [false,true]{
+        let mut old=Masks::with_storage(rows,indexed,sparse);old.borrow_rows=false;
+        let mut new=Masks::with_storage(rows,indexed,sparse);new.borrow_rows=true;
+        if indexed {
+            for pool in [&mut old,&mut new]{pool.fingerprint_mask=0;pool.indexed.clear();pool.indexed.insert(0,MaskBucket::Many(vec![0,1]));}
+        }
+        let mut inputs=vec![vec![0;rows],vec![u64::MAX;rows]];
+        for _ in 0..64{inputs.push((0..rows).map(|_|next()).collect());}
+        for _ in 0..3{for v in &inputs{assert_eq!(old.intern(v.clone()),new.intern_slice(v));}}
+        for _ in 0..256 {
+            let n=old.values.len();let a=(next()as usize%n)as u32;let b=(next()as usize%n)as u32;
+            assert_eq!(old.and(a,b),new.and(a,b));assert_eq!(old.or(a,b),new.or(a,b));
+        }
+        assert_eq!(old.values,new.values);assert_eq!(old.cardinalities,new.cardinalities);assert_eq!(old.nonzero_words,new.nonzero_words);
+        let before=new.values.len();assert!(new.intern_slice(&vec![0;rows+1]).is_none());assert_eq!(before,new.values.len());
+    }}}
+}
+
+#[cfg(test)]
+#[test]
+fn repeated_support_rows_preserve_original_prefix_masks() {
+    let mut rng=981u64;
+    let mut next=|| {rng=rng.wrapping_mul(6364136223846793005).wrapping_add(1);rng>>32};
+    for case in 0..64 {
+        let n=8;
+        let mut states=vec![DWAState::default();n];
+        let weights=(0..8u32).map(|x|Weight::from_token_set_for_tsid(0,
+            (0..8u32).filter(|&bit|(x+1)&(1<<bit)!=0).collect())).collect::<Vec<_>>();
+        for source in 0..n {
+            states[source].final_weight=Some(weights[(next()%8)as usize].clone());
+            if source+1==n {continue;}
+            for label in 0..64 {
+                let target=source+1+(next()as usize%(n-source-1));
+                let weight=&weights[((label/8+case)%8)as usize];
+                states[source].transitions.insert(label as i32,(target as u32,weight.clone()));
+            }
+            if source%2==0 {
+                states[source].transitions.insert(2147483646,((n-1)as u32,Weight::empty()));
+            }
+        }
+        let input=DWA::from_parts(states,0);
+        let new=minimize_finite_bits(&input,1,2147483646).unwrap().0;
+        let cmp=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &input,&new,65,100000).unwrap();
+        assert!(cmp.difference.is_none(),"case {case}: {:?}",cmp.difference);
+    }
 }
