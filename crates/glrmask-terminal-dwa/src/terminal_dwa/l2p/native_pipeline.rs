@@ -55,10 +55,13 @@ pub struct Profile {
 struct Pool {
     failed: bool,
     total_runs: usize,
+    bulk:bool,
+    union_rows:Vec<Bits>,
     bits: Vec<Bits>,
     bi: FxHashMap<Bits, u32>,
     values: Vec<Runs>,
     wi: FxHashMap<Runs, u32>,
+    single:FxHashMap<Run,u32>,
     token_imports: FxHashMap<usize, (SharedTokenSet, u32)>,
     hashes: FxHashMap<u32, u64>,
     token_and: FxHashMap<(u32,u32),u32>,
@@ -72,6 +75,7 @@ struct Pool {
 impl Pool {
     fn new() -> Self {
         let mut p = Self::default();
+        p.bulk=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA").is_some();
         p.intern_bits([0; WORDS]);
         p.values.push(Runs::new());
         p.values.push(Runs::new());
@@ -94,6 +98,11 @@ impl Pool {
         v
     }
     fn intern(&mut self, r: Runs) -> u32 {
+        if self.bulk&&r.len()==1{
+            let run=r[0];if let Some(&v)=self.single.get(&run){return v}
+            if self.values.len()>=MAX_MASKS||self.total_runs>=MAX_RUNS{self.failed=true;return 0}
+            self.total_runs+=1;let id=self.values.len()as u32;self.values.push(r);self.single.insert(run,id);return id;
+        }
         if let Some(&v) = self.wi.get(&r) {
             return v;
         }
@@ -232,6 +241,25 @@ impl Pool {
                 if self.or.len()<100_000{self.or.insert(key,id);}return id;
             }
         }
+        if self.bulk {
+            let(mut i,mut j)=(0usize,0usize);let mut x=self.values[a as usize].first().copied();let mut y=self.values[b as usize].first().copied();let mut out=Runs::new();
+            while x.is_some()||y.is_some(){
+                match(x,y){
+                    (Some(l),None)=>{Self::emit(&mut out,l.lo,l.hi,l.b);i+=1;x=self.values[a as usize].get(i).copied();},
+                    (None,Some(r))=>{Self::emit(&mut out,r.lo,r.hi,r.b);j+=1;y=self.values[b as usize].get(j).copied();},
+                    (Some(l),Some(r))if l.hi<r.lo=>{Self::emit(&mut out,l.lo,l.hi,l.b);i+=1;x=self.values[a as usize].get(i).copied();},
+                    (Some(l),Some(r))if r.hi<l.lo=>{Self::emit(&mut out,r.lo,r.hi,r.b);j+=1;y=self.values[b as usize].get(j).copied();},
+                    (Some(mut l),Some(mut r))=>{
+                        if l.lo<r.lo{Self::emit(&mut out,l.lo,r.lo-1,l.b);l.lo=r.lo;}
+                        if r.lo<l.lo{Self::emit(&mut out,r.lo,l.lo-1,r.b);r.lo=l.lo;}
+                        let end=l.hi.min(r.hi);let bits=self.token_join(l.b,r.b);Self::emit(&mut out,l.lo,end,bits);
+                        if l.hi==end{i+=1;x=self.values[a as usize].get(i).copied();}else{l.lo=end+1;x=Some(l);}
+                        if r.hi==end{j+=1;y=self.values[b as usize].get(j).copied();}else{r.lo=end+1;y=Some(r);}
+                    },_=>break,
+                }
+            }
+            let id=self.intern(out);if self.or.len()<100_000{self.or.insert(key,id);}return id;
+        }
         let mut endpoints =
             Vec::with_capacity((self.values[a as usize].len() + self.values[b as usize].len()) * 2);
         for x in self.values[a as usize]
@@ -279,7 +307,32 @@ impl Pool {
         }
         id
     }
-    fn join_all(&mut self, mut ids: Vec<u32>) -> u32 {
+    fn join_terms(&mut self, terms:impl IntoIterator<Item=u32>)->u32 {
+        if !self.bulk{return self.join_all_reference(terms.into_iter().collect())}
+        let mut ids:SmallVec<[u32;8]>=SmallVec::new();
+        for id in terms {if id==1{return 1}if id!=0{ids.push(id)}}
+        if ids.is_empty(){return 0}if ids.len()==1{return ids[0]}
+        ids.sort_unstable();ids.dedup();
+        if ids.len()==1{return ids[0]}if ids.len()==2{return self.join(ids[0],ids[1])}
+        let mut low=u32::MAX;let mut high=0u32;let mut work=0u64;
+        for &id in &ids{for r in &self.values[id as usize]{low=low.min(r.lo);high=high.max(r.hi);work+=u64::from(r.hi)-u64::from(r.lo)+1;}}
+        let span=u64::from(high).saturating_sub(u64::from(low))+1;
+        if span<=8192&&work<=1_000_000&&ids.len()>=8 {
+            let mut rows=std::mem::take(&mut self.union_rows);rows.resize(span as usize,[0;8]);rows[..span as usize].fill([0;8]);
+            for &id in &ids {for r in &self.values[id as usize]{
+                let bits=self.bits[r.b as usize];
+                for row in &mut rows[(r.lo-low)as usize..=(r.hi-low)as usize]{for k in 0..8{row[k]|=bits[k];}}
+            }}
+            let mut out=Runs::new();for (offset,&bits) in rows[..span as usize].iter().enumerate(){
+                let bid=self.intern_bits(bits);let raw=low+offset as u32;Self::emit(&mut out,raw,raw,bid);
+            }
+            self.union_rows=rows;
+            return self.intern(out);
+        }
+        self.join_all_reference(ids.into_vec())
+    }
+    fn join_all(&mut self, ids: Vec<u32>)->u32 {self.join_terms(ids)}
+    fn join_all_reference(&mut self, mut ids: Vec<u32>) -> u32 {
         ids.retain(|&x| x != 0);
         ids.sort_unstable();
         ids.dedup();
@@ -553,6 +606,8 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
         ..Default::default()
     };
     let t = Instant::now();
+    let leaf_fused=minimize&&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EARLY_LEAVES").is_some();
+    let mut leaf_id=None::<u32>;let mut leaf_weights=Vec::new();
     let start = closure(
         &states,
         &mut p,
@@ -574,6 +629,7 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
         if subsets.len() > MAX_STATES || p.failed {
             return None;
         }
+        if leaf_id==Some(cursor as u32){out.push((0,Edges::new()));cursor+=1;continue}
         let pairs = subsets[cursor].clone();
         let fast = pairs.len() == 1 && !parallel_waves;
         let mut fws = Vec::new();
@@ -590,9 +646,16 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
                     continue;
                 }
                 for &(label, dst, direct) in &group.edges {
+                    let leaf_target=leaf_fused&&states[dst as usize].groups.iter().all(|g|g.edges.is_empty())&&states[dst as usize].eps.is_empty();
+                    let nw=if leaf_target{p.meet(nw,states[dst as usize].final_w)}else{nw};
+                    if nw==0{continue}
                     if fast && direct {
                         let key:Subset = smallvec![(dst, nw)];
-                        let dest = if let Some(&v) = ids.get(&key) {
+                        let is_leaf=leaf_target;
+                        let dest=if is_leaf{
+                            leaf_weights.push(nw);
+                            *leaf_id.get_or_insert_with(||{let id=subsets.len()as u32;subsets.push(Subset::new());id})
+                        }else if let Some(&v) = ids.get(&key) {
                             v
                         } else {
                             let v = subsets.len() as u32;
@@ -619,17 +682,21 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
                 while j < bs.len() && bs[j].0 == bs[i].0 {
                     j += 1
                 }
-                let nw = p.join_all(bs[i..j].iter().map(|x| x.1).collect());
+                let nw = p.join_terms(bs[i..j].iter().map(|x| x.1));
                 if nw != 0 {
                     key.push((bs[i].0, nw));
                 }
                 i = j;
             }
-            let ew = p.join_all(key.iter().map(|x| x.1).collect());
+            let ew = p.join_terms(key.iter().map(|x| x.1));
             if ew == 0 {
                 continue;
             }
-            let dest = if let Some(&v) = ids.get(&key) {
+            let is_leaf=leaf_fused&&key.iter().all(|&(q,_)|states[q as usize].groups.iter().all(|g|g.edges.is_empty())&&states[q as usize].eps.is_empty());
+            let dest=if is_leaf{
+                leaf_weights.push(ew);
+                *leaf_id.get_or_insert_with(||{let id=subsets.len()as u32;subsets.push(Subset::new());id})
+            }else if let Some(&v) = ids.get(&key) {
                 v
             } else {
                 let v = subsets.len() as u32;
@@ -659,10 +726,11 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
         );
         return None;
     }
+    if let Some(id)=leaf_id{out[id as usize].0=p.join_terms(leaf_weights);}
     prof.compute_ms = t.elapsed().as_secs_f64() * 1000.;
     let t = Instant::now();
     let (out, start) = if minimize {
-        minimize_sparse_graph(out, &mut p)?
+        minimize_sparse_graph(out, &mut p,leaf_id)?
     } else {
         (out, 0)
     };
@@ -848,7 +916,7 @@ impl RowMap {
     }
 }
 
-fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool) -> Option<(Graph, u32)> {
+fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
     let profile = std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NATIVE_TERMINAL").is_some();
@@ -875,12 +943,12 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool) -> Option<(Graph, u32)>
     if topo.len() != n {
         return None;
     }
-    let mut needed = vec![0u32; n];
+    let mut needed=vec![0u32;n];
     for &s in topo.iter().rev() {
         let mut ws = vec![graph[s].0];
         let mut es = Edges::new();
         for &(l, d, w) in &graph[s].1 {
-            let nw = p.meet(w, needed[d as usize]);
+            let nw=if leaf==Some(d){w}else{p.meet(w,needed[d as usize])};
             if nw != 0 {
                 ws.push(nw);
                 es.push((l, d, nw));
@@ -1130,7 +1198,7 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool) -> Option<(Graph, u32)>
                 mapped[s] = id
             }
             if h == 0 {
-                let fw = p.join_all(g.members.iter().map(|&s| graph[s].0).collect());
+                let fw = p.join_terms(g.members.iter().map(|&s| graph[s].0));
                 output.push((fw, Edges::new()));
                 continue;
             }
@@ -1275,6 +1343,25 @@ mod tests {
             assert_eq!(p.export(all), Weight::union_all(&words));
             assert!(!p.failed);
         }
+    }
+    #[test]
+    fn bulk_union_preserves_dense_overlaps_and_extreme_coordinates(){
+        for base in [0u32,u32::MAX-1024]{for count in [3usize,8,17,128]{
+            let mut pool=Pool::new();pool.bulk=true;
+            let inputs=(0..count).map(|i|Weight::from_uniform(
+                base+(i%64)as u32..=base+(i%64)as u32+64,
+                [0u32,63,64,127,255,256,511].into_iter().filter(|t|(*t as usize+i)%3!=0).collect()
+            )).collect::<Vec<_>>();
+            let ids=inputs.iter().map(|w|pool.import(w).unwrap()).collect::<Vec<_>>();
+            let merged=pool.join_terms(ids.clone());assert_eq!(pool.export(merged),Weight::union_all(&inputs));
+            let reversed=pool.join_terms(ids.into_iter().rev());assert_eq!(merged,reversed);
+            assert!(!pool.failed);assert!(pool.union_rows.len()<=8192);
+        }}
+        let mut pool=Pool::new();pool.bulk=true;
+        let left=Weight::from_uniform(0..=u32::MAX,[0u32,64].into_iter().collect());
+        let right=Weight::from_uniform(u32::MAX..=u32::MAX,[1u32,511].into_iter().collect());
+        let a=pool.import(&left).unwrap();let b=pool.import(&right).unwrap();let c=pool.join(a,b);
+        assert_eq!(pool.export(c),left.union(&right));
     }
     #[test]
     fn region_overlay_matches_exact_bitwise_partial_functions() {

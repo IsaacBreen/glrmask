@@ -73,6 +73,7 @@ fn canonicalize(a:&mut Arena,p:&mut Pool)->Option<()>{
  if a.states.len()<=1{return Some(())}reachable(a);let order=topo(a);if order.len()!=a.states.len(){return None}
  let mut mapped=vec![u32::MAX;a.states.len()];let mut states=Vec::<Row>::with_capacity(a.states.len());let mut seen=FxHashMap::<Row,u32>::default();let mut merged=0;
  let mut remap_branches=|bs:&[(u32,u32)],mapped:&[u32]|->Branches{
+  if p.bulk{if bs.is_empty(){return Branches::new()}if bs.len()==1{return smallvec![(mapped[bs[0].0 as usize],bs[0].1)];}}
   let mut pairs=bs.iter().map(|&(d,w)|(mapped[d as usize],w)).collect::<Vec<_>>();pairs.sort_by_key(|x|x.0);let mut out=Branches::with_capacity(pairs.len());
   for(d,w)in pairs{if let Some((last,weight))=out.last_mut(){if *last==d{*weight=p.join(*weight,w);continue}}out.push((d,w));}out
  };

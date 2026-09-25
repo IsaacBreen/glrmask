@@ -54,6 +54,7 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     pruned_weight_cache: FxHashMap<(usize, usize, u32, TerminalID), Weight>,
     leaf_weight_cache: FxHashMap<LeafTokenIds, Weight>,
     transition_buffer: FxHashMap<(u32, i32, u32), Weight>,
+    compact_buffer:Option<native_compact_buffer::CompactBuffer>,
     epsilon_buffer: FxHashMap<(u32, u32), Weight>,
     pub profile: TerminalDwaBuildProfile,
     flat_transitions: Vec<Option<Box<[u32; 256]>>>,
@@ -142,6 +143,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             pruned_weight_cache: FxHashMap::default(),
             leaf_weight_cache: FxHashMap::default(),
             transition_buffer: FxHashMap::default(),
+            compact_buffer:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_COMPACT_EVENT_BUFFER").is_some().then(native_compact_buffer::CompactBuffer::default),
             epsilon_buffer: FxHashMap::default(),
             profile: TerminalDwaBuildProfile::default(),
             flat_transitions: vec![None; num_tokenizer_states],
@@ -578,6 +580,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
             } else {
+                if let Some(buffer)=&mut self.compact_buffer{buffer.add((source,label as i32,target),weight);continue}
                 self.transition_buffer
                     .entry((source, label as i32, target))
                     .and_modify(|existing| *existing = existing.union(weight))
@@ -690,6 +693,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             self.nwa.append_epsilon(from,target,weight.end,weight.valid,&weight.bits);
         }
 
+        if let Some(buffer)=&mut self.compact_buffer{buffer.flush(self.nwa);}
         let mut transition_entries: Vec<_> = std::mem::take(&mut self.transition_buffer).into_iter().collect();
         transition_entries.sort_unstable_by_key(|((from, label, target), _)| (*from, *label, *target));
         for ((from, label, target), weight) in transition_entries {
@@ -1023,8 +1027,9 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
  if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
   let slots=builder.leaf_token_ids_buffer.len();
   let live=builder.leaf_token_ids_buffer.values().filter(|x|!x.is_empty()).count();
-  eprintln!("[glrmask/profile][native_builder_buffers] sparse_leaf_slots={slots} nonempty_leaf_slots={live} estimated_entry_bytes={} transitions={} epsilons={}",slots*std::mem::size_of::<LeafTokenIds>(),builder.transition_buffer.len(),builder.epsilon_buffer.len());
+  eprintln!("[glrmask/profile][native_builder_buffers] sparse_leaf_slots={slots} nonempty_leaf_slots={live} estimated_entry_bytes={} transitions={} epsilons={}",slots*std::mem::size_of::<LeafTokenIds>(),builder.transition_buffer.len()+builder.compact_buffer.as_ref().map_or(0,|b|b.len()),builder.epsilon_buffer.len());
  }
+ if builder.compact_buffer.as_ref().is_some_and(|b|b.failed){return None}
  let t=std::time::Instant::now();builder.flush_transition_buffer();builder.profile.flush_ms=t.elapsed().as_secs_f64()*1000.;
  let profile=builder.profile;drop(builder);let build_ms=started.elapsed().as_secs_f64()*1000.;
  Some(NativeBuild{sink,profile,build_ms})
@@ -1033,3 +1038,5 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
 #[cfg(test)] #[path="native_builder_tests.rs"] mod tests;
 
 #[path="native_scalar_cursor.rs"] mod native_scalar_cursor;
+
+#[path="native_compact_buffer.rs"] mod native_compact_buffer;
