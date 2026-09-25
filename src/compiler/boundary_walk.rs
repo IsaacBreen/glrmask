@@ -1253,12 +1253,27 @@ where
             let started = Instant::now();
             let follow_aware = std::env::var_os("GLRMASK_BOUNDARY_TOKEN_FOLLOWS").is_some();
             let cut = (follow_aware && std::env::var_os("GLRMASK_BOUNDARY_CUT_SUPPORT").is_some())
-                .then(|| super::boundary_cut_support::crossing_support_with_transitions(
-                    inputs.merged_tokenizer, candidate_vocab, scope.initial_states().keep_raw(),
-                    &ownership, plan.crossing_owner, inputs.disallowed_follows,
-                    inputs.ignore_terminal, inputs.follow_transparent_ignores, early_adjacency,
-                    support_transitions.as_ref(),
-                )).flatten();
+                .then(|| {
+                    let prepared=std::env::var_os("GLRMASK_BOUNDARY_PREPARED_CUT")
+                        .and_then(|_|prepared_first).and_then(|spans|super::boundary_precomputed_completion::cut_support(
+                            spans,inputs.merged_tokenizer,candidate_vocab,scope.initial_states().keep_raw(),
+                            &ownership,plan.crossing_owner,inputs.disallowed_follows,
+                            inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,
+                        ));
+                    let ordinary=|| super::boundary_cut_support::crossing_support_with_transitions(
+                        inputs.merged_tokenizer,candidate_vocab,scope.initial_states().keep_raw(),
+                        &ownership,plan.crossing_owner,inputs.disallowed_follows,
+                        inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,support_transitions.as_ref(),
+                    );
+                    if let Some(candidate)=prepared.as_ref(){
+                        if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREPARED_CUT").is_some(){
+                            let reference=ordinary().expect("ordinary necessary-cut reference must finish");
+                            assert_eq!(candidate.tokens,reference.tokens,"prepared cut changed original token IDs");
+                            eprintln!("[glrmask/validate][boundary_prepared_cut] component={} exact_ids=true",plan.start_component);
+                        }
+                    }
+                    prepared.or_else(ordinary)
+                }).flatten();
             let used_cut = cut.is_some();
             let support = if let Some(cut) = cut {
                 if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CUT_SUPPORT").is_some() {

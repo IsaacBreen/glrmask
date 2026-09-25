@@ -6,6 +6,8 @@ mod prefix_observer;
 mod completion_index;
 mod prefix_span_support;
 mod prefix_uniform;
+#[allow(dead_code)] mod reset_index;
+#[allow(dead_code)] mod cut_query;
 use self::completion_index::{CompletionContext, UntrustedCompletionIndex};
 use self::prefix_observer::{Limits, PrefixObserver, Profile};
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};
@@ -18,8 +20,9 @@ const ENVELOPE: &[u8;4]=b"CMS6";
 const MAX_PART:usize=128*1024*1024;
 
 pub(crate) struct PreparedCompletion {
-    context: CompletionContext,
+    context: Arc<CompletionContext>,
     wire: Arc<[u8]>,
+    cut: Option<PreparedCut>,
 }
 impl std::fmt::Debug for PreparedCompletion {
     fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {
@@ -30,8 +33,14 @@ impl std::fmt::Debug for PreparedCompletion {
 impl PreparedCompletion {
     pub(crate) fn matches(&self,source:&Tokenizer)->bool{std::ptr::eq(self.context.source(),source)}
     pub(crate) fn load(source:Arc<Tokenizer>,wire:Arc<[u8]>)->Result<Self,String>{
-        let context=CompletionContext::load(source,&wire).map_err(|e|format!("completion index certificate: {e:?}"))?;
-        Ok(Self{context,wire})
+        let (prefix,reset_wire)=split_cut_wire(&wire)?;
+        let context=Arc::new(CompletionContext::load(Arc::clone(&source),prefix).map_err(|e|format!("completion index certificate: {e:?}"))?);
+        let cut=if let Some(bytes)=reset_wire {
+            let reset=reset_index::ResetIndex::from_bytes(source,bytes).ok_or("prepared reset certificate invalid")?;
+            let first=completion_index::FirstUnionIndex::prepare(Arc::clone(&context)).map_err(|e|format!("prepared first unions: {e:?}"))?;
+            Some(PreparedCut{reset,first})
+        }else{None};
+        Ok(Self{context,wire,cut})
     }
 }
 
@@ -64,7 +73,10 @@ pub(crate) fn saved_wire(constraint:&Constraint)->Option<&[u8]>{
 /// component, link seed set, or link-refined vocabulary is an input.
 pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result<bool,String>{
     let started=Instant::now();
-    if saved_wire(constraint).is_some(){return Ok(true);}
+    if saved_wire(constraint).is_some(){
+        if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
+        return Ok(true);
+    }
     if !std::ptr::eq(constraint.composition_tokenizer(),constraint.tokenizer.as_ref())
         ||constraint.tokenizer.has_virtual_residual_runtime(){return Ok(false);}
     let (Some(ids),_)=super::boundary_candidates::boundary_candidate_ids(constraint,vocab)else{return Ok(false)};
@@ -79,7 +91,9 @@ pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result
     let prepared=PreparedCompletion::load(Arc::clone(&source),wire)?;
     let elapsed=started.elapsed().as_secs_f64()*1000.;
     if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_completion_prepare] states={} classes={} vocab={} bytes={} total_ms={elapsed:.3} profile={profile:?}",source.num_states(),prepared.context.class_count(),words.len(),prepared.wire.len());}
-    constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;Ok(true)
+    constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;
+    if std::env::var_os("GLRMASK_PREPARE_BOUNDARY_CUT").is_some(){return prepare_cut_component(constraint,vocab);}
+    Ok(true)
 }
 
 /// Construct this only alongside the link's actual disjoint-union call. The
@@ -187,3 +201,69 @@ mod lifecycle_tests {
         assert!(PreparedCompletion::load(b,wire).is_err());
     }
 }
+
+
+struct PreparedCut { reset:reset_index::ResetIndex, first:completion_index::FirstUnionIndex }
+const CUT_MAGIC:&[u8;8]=b"GCCX0001";
+fn split_cut_wire(bytes:&[u8])->Result<(&[u8],Option<&[u8]>),String>{
+    if !bytes.starts_with(CUT_MAGIC){return Ok((bytes,None));}
+    if bytes.len()<16{return Err("truncated prepared cut wire".into());}
+    let a=u32::from_le_bytes(bytes[8..12].try_into().unwrap())as usize;
+    let b=u32::from_le_bytes(bytes[12..16].try_into().unwrap())as usize;
+    let end=16usize.checked_add(a).and_then(|v|v.checked_add(b)).ok_or("cut wire length overflow")?;
+    if a==0||b==0||a>MAX_PART||b>MAX_PART||end!=bytes.len()||end>MAX_PART{return Err("invalid cut wire lengths".into());}
+    let prefix=&bytes[16..16+a];if prefix.starts_with(CUT_MAGIC){return Err("nested cut wire forbidden".into());}
+    Ok((prefix,Some(&bytes[16+a..])))
+}
+fn join_cut_wire(prefix:&[u8],reset:&[u8])->Result<Arc<[u8]>,String>{
+    if prefix.is_empty()||reset.is_empty()||prefix.starts_with(CUT_MAGIC){return Err("invalid cut wire parts".into());}
+    let n=16usize.checked_add(prefix.len()).and_then(|n|n.checked_add(reset.len())).ok_or("cut wire overflow")?;
+    if n>MAX_PART{return Err("cut wire resource bound".into());}
+    let mut out=Vec::with_capacity(n);out.extend_from_slice(CUT_MAGIC);out.extend_from_slice(&(prefix.len()as u32).to_le_bytes());out.extend_from_slice(&(reset.len()as u32).to_le_bytes());out.extend_from_slice(prefix);out.extend_from_slice(reset);Ok(Arc::from(out))
+}
+/// Prepare reusable reset factors before the link descriptor/partner exists.
+/// Unsupported component size is a conservative decline, not missing language.
+fn prepare_cut_component(constraint:&mut Constraint,vocab:&Vocab)->Result<bool,String>{
+    let Some(old)=constraint.boundary_completion_index.as_ref()else{return Ok(false)};
+    if !old.matches(constraint.composition_tokenizer()){return Ok(false)}
+    if old.cut.is_some(){return Ok(true)}
+    let began=Instant::now();let source=Arc::clone(&constraint.tokenizer);
+    if !old.matches(source.as_ref()){return Ok(false)}
+    let model=vocab.iter().map(|(_,b)|b.to_vec()).collect::<Vec<_>>();
+    let Some(reset)=reset_index::ResetIndex::prepare(Arc::clone(&source),&model)else{return Ok(false)};
+    let Some(bytes)=reset.to_bytes()else{return Ok(false)};
+    if !reset.verify(){return Err("fresh reset certificate failed".into())}
+    let first=match completion_index::FirstUnionIndex::prepare(Arc::clone(&old.context)){
+        Ok(x)=>x,Err(completion_index::Error::ResourceLimit)=>return Ok(false),Err(e)=>return Err(format!("prepared first union: {e:?}")),
+    };
+    let(prefix,_)=split_cut_wire(&old.wire)?;let wire=join_cut_wire(prefix,&bytes)?;
+    let prepared=PreparedCompletion{context:Arc::clone(&old.context),wire,cut:Some(PreparedCut{reset,first})};
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][component_cut_prepare] states={} model_words={} reset_bytes={} total_ms={:.3}",source.num_states(),model.len(),bytes.len(),began.elapsed().as_secs_f64()*1000.0);}
+    constraint.boundary_completion_index=Some(Arc::new(prepared));constraint.serialized_artifact_cache=None;Ok(true)
+}
+
+/// Called only with spans constructed from the actual immutable disjoint union.
+/// The ordinary filter remains the fallback on old wire, mixed seeds, nested
+/// composition layouts, unsupported factor coverage or resource bounds.
+pub(crate) fn cut_support(
+    spans:&[Option<PreparedSourceSpan>],merged:&Tokenizer,vocab:&Vocab,initial:&[bool],
+    ownership:&glrmask_terminal_dwa::__private::terminal_dwa::scope::BoundaryOwnership,
+    owner:glrmask_terminal_dwa::__private::terminal_dwa::scope::ImmediateComponentId,
+    disallowed:&std::collections::BTreeMap<u32,crate::ds::bitset::BitSet>,ignore:Option<u32>,
+    transparent:Option<&crate::ds::bitset::BitSet>,adjacency:Option<&std::collections::BTreeMap<u32,crate::ds::bitset::BitSet>>,
+)->Option<super::boundary_cut_support::Result>{
+    if initial.len()!=merged.num_states()as usize||merged.has_virtual_residual_runtime(){return None}
+    let all=spans.iter().map(Option::as_ref).collect::<Option<Vec<_>>>()?;
+    let mut next=1u32;let mut nt=0u32;
+    for span in &all{if span.offset!=next||span.terminal_offset!=nt{return None}next=next.checked_add(span.prepared.context.raw_states()as u32)?;nt=nt.checked_add(span.prepared.context.source().num_terminals())?;}
+    if next!=merged.num_states()||nt!=merged.num_terminals(){return None}
+    let first=*all.get(owner.0 as usize)?;let n=first.prepared.context.raw_states();let offset=first.offset as usize;
+    let mut local=vec![false;n];for(q,&keep)in initial.iter().enumerate(){if keep{let i=q.checked_sub(offset)?;*local.get_mut(i)?=true;}}
+    let parts=all.iter().map(|span|{let cut=span.prepared.cut.as_ref()?;Some(cut_query::Part{prefix:span.prepared.context.as_ref(),unions:&cut.first,reset:&cut.reset,terminal_offset:span.terminal_offset})}).collect::<Option<Vec<_>>>()?;
+    let result=cut_query::query(nt as usize,&parts,owner,&local,vocab,ownership,disallowed,ignore,transparent,adjacency)?;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_prepared_cut] component={} tokens={} profile={:?}",owner.0,result.tokens.len(),result.profile);}
+    Some(super::boundary_cut_support::Result{tokens:result.tokens,profile:super::boundary_cut_support::Profile{states:result.profile.products,edges:result.profile.product_edges,raw_step_work:0,cut_pairs:result.profile.cut_pairs,match_events:result.profile.events,transfer_cache_entries:result.profile.transfers,mask_classes:result.profile.observations,setup_ms:result.profile.setup_ms,solve_ms:result.profile.solve_ms}})
+}
+
+#[cfg(test)]
+mod cut_lifecycle;

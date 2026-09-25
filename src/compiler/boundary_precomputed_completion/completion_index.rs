@@ -475,3 +475,82 @@ mod tests {
   assert_eq!(index.prefix_support(&[true],&words),Err(Error::Malformed));
  }
 }
+
+// Read-only queries on the existing certified component index. These return
+// projected OBSERVATIONS, never token admission. A caller must separately
+// prove that erased terminal labels cannot occur on accepted boundary paths.
+#[derive(Debug)]
+pub(crate) struct PrefixUnions {
+    pub columns: Vec<Vec<u32>>,
+    pub word_columns: Vec<Vec<usize>>,
+}
+fn query_columns(transitions:&[Vec<(u8,u32)>],covered:&[Vec<u8>],words:&[Vec<u8>])
+ ->Result<(Vec<Vec<usize>>,Vec<usize>)>{
+    if words.len()>131_072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262_144{return Err(Error::ResourceLimit)}
+    let mut selected=vec![false;transitions.len()];selected[0]=true;
+    let mut paths=Vec::with_capacity(words.len());
+    for word in words{
+        if covered.binary_search(word).is_err(){return Err(Error::QueryOutsideCoverage)}
+        let mut q=0;let mut path=vec![q];
+        for &b in word{let row=&transitions[q];q=row[row.binary_search_by_key(&b,|&(b,_)|b).map_err(|_|Error::QueryOutsideCoverage)?].1 as usize;selected[q]=true;path.push(q);}
+        paths.push(path);
+    }
+    Ok((paths,selected.iter().enumerate().filter_map(|(i,&yes)|yes.then_some(i)).collect()))
+}
+
+/// Transpose immutable component observations once. Each group is the exact
+/// class support of one nonempty completion observation at a prefix column.
+/// This is independent of future seeds, vocabulary subset and composition.
+pub(crate) struct FirstUnionIndex{
+    context:Arc<CompletionContext>,
+    groups:Vec<Vec<(usize,Vec<u64>)>>,
+    paths:Vec<Vec<usize>>,
+    pub groups_count:usize,
+    pub cells:usize,
+}
+impl FirstUnionIndex{
+    pub fn prepare(context:Arc<CompletionContext>)->Result<Self>{
+        let words=context.members.len().div_ceil(64);let mut groups=Vec::with_capacity(context.data.columns);let mut cells=0usize;let mut groups_count=0;
+        for col in 0..context.data.columns{
+            let mut index=FxHashMap::<usize,usize>::default();let mut entries=Vec::<(usize,Vec<u64>)>::new();
+            for(class,sig)in context.data.signatures.iter().enumerate(){let observation=sig[col]as usize;if context.data.observations[observation].is_empty(){continue}
+                let id=if let Some(&id)=index.get(&observation){id}else{
+                    cells=cells.checked_add(words).ok_or(Error::ResourceLimit)?;if cells>4_000_000{return Err(Error::ResourceLimit)}
+                    let id=entries.len();index.insert(observation,id);entries.push((observation,vec![0u64;words]));id
+                };entries[id].1[class/64]|=1u64<<(class%64);
+            }
+            groups_count+=entries.len();groups.push(entries);
+        }
+        let mut paths=Vec::with_capacity(context.covered_words.len());let mut path_cells=0usize;
+        for word in &context.covered_words{
+            path_cells=path_cells.checked_add(word.len()).and_then(|n|n.checked_add(1)).ok_or(Error::ResourceLimit)?;
+            if path_cells>8_000_000{return Err(Error::ResourceLimit)}
+            let mut q=0usize;let mut path=vec![q];for &b in word{let row=&context.transitions[q];let i=row.binary_search_by_key(&b,|&(b,_)|b).map_err(|_|Error::CertificateMismatch)?;q=row[i].1 as usize;path.push(q);}paths.push(path);
+        }
+        Ok(Self{context,groups,paths,groups_count,cells})
+    }
+    pub fn source(&self)->&Tokenizer{self.context.source()}
+    pub fn query(&self,seeds:&[bool],words:&[Vec<u8>])->Result<PrefixUnions>{
+        let result=self.query_borrowed(seeds,&words.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
+        Ok(PrefixUnions{columns:result.columns,word_columns:result.word_columns.into_iter().map(|p|p.to_vec()).collect()})
+    }
+    pub fn query_borrowed<'s>(&'s self,seeds:&[bool],words:&[&[u8]])->Result<PrefixUnionViews<'s>>{
+        let ctx=self.context.as_ref();if seeds.len()!=ctx.data.raw_to_class.len(){return Err(Error::Malformed)}
+        if words.len()>131072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262144{return Err(Error::ResourceLimit)}
+        let mut selected=vec![false;ctx.data.columns];selected[0]=true;let mut word_columns=Vec::with_capacity(words.len());
+        for &word in words{let index=ctx.covered_words.binary_search_by(|x|x.as_slice().cmp(word)).map_err(|_|Error::QueryOutsideCoverage)?;let path=self.paths[index].as_slice();for &c in path{selected[c]=true}word_columns.push(path);}
+        let selected=selected.iter().enumerate().filter_map(|(i,&yes)|yes.then_some(i)).collect::<Vec<_>>();
+        let mut active=vec![0u64;ctx.members.len().div_ceil(64)];
+        for(raw,&yes)in seeds.iter().enumerate(){if yes{let c=ctx.data.raw_to_class[raw]as usize;active[c/64]|=1u64<<(c%64);}}
+        let mut seen=vec![0u32;ctx.source.num_terminals()as usize];let mut columns=vec![Vec::new();ctx.data.columns];
+        for(generation,&col)in selected.iter().enumerate(){let epoch=generation as u32+1;
+            for (observation,classes)in &self.groups[col]{if !active.iter().zip(classes).any(|(&a,&b)|a&b!=0){continue}
+                for &terminal in &ctx.data.observations[*observation]{let old=seen.get_mut(terminal as usize).ok_or(Error::Malformed)?;if *old!=epoch{*old=epoch;columns[col].push(terminal);}}
+            }
+            columns[col].sort_unstable();
+        }
+        Ok(PrefixUnionViews{columns,word_columns})
+    }
+}
+
+pub(crate) struct PrefixUnionViews<'a>{pub columns:Vec<Vec<u32>>,pub word_columns:Vec<&'a[usize]>}
