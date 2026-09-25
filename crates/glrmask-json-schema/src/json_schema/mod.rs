@@ -796,12 +796,16 @@ fn schema_to_named_grammar_with_config_impl(
     schema_to_named_grammar_with_config_runtime_impl(schema, config, collect_name_provenance, false)
 }
 
+pub(crate) mod diagnostic_ledger;
+
 fn schema_to_named_grammar_with_config_runtime_impl(
     schema: &Value,
     config: JsonSchemaConfig,
     collect_name_provenance: bool,
     early_prune: bool,
 ) -> Result<JsonSchemaNamedGrammar, GlrMaskError> {
+    let _ledger_total = diagnostic_ledger::Timer::start("import_total");
+    let ledger_features = diagnostic_ledger::Timer::start("features_coercion");
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
@@ -817,17 +821,22 @@ fn schema_to_named_grammar_with_config_runtime_impl(
     } else {
         Cow::Borrowed(schema)
     };
+    drop(ledger_features);
+    let ledger_preflight = diagnostic_ledger::Timer::start("preflight");
     let preflight_started_at = profile_enabled.then(std::time::Instant::now);
     preflight::check_schema_preflight(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
     let preflight_ms = preflight_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    drop(ledger_preflight);
+    let ledger_load = diagnostic_ledger::Timer::start("typed_load");
     let load_started_at = profile_enabled.then(std::time::Instant::now);
     let document = load_document_with_features(imported_schema.as_ref(), &document_features)
         .map_err(GlrMaskError::from)?;
     let load_ms = load_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
+    drop(ledger_load);
     let lower_started_at = profile_enabled.then(std::time::Instant::now);
     let lowered = lower::lower_document_with_runtime_pruning(
         &document, config, collect_name_provenance, early_prune,

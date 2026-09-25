@@ -215,10 +215,13 @@ pub(crate) fn lower_document_with_runtime_pruning(
     collect_name_provenance: bool,
     early_prune: bool,
 ) -> ImportResult<JsonSchemaNamedGrammar> {
+    let _ledger_lower = super::diagnostic_ledger::Timer::start("lower_total");
+    let ledger_setup = super::diagnostic_ledger::Timer::start("lower_setup");
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let started_at = profile_enabled.then(std::time::Instant::now);
     let lowerer = Lowerer::new_with_name_provenance(document, config, collect_name_provenance);
+    drop(ledger_setup);
     let setup_ms = started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
@@ -611,6 +614,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn finish_with_early_rule_pruning(mut self, early_prune: bool) -> ImportResult<JsonSchemaNamedGrammar> {
+        let ledger_root = super::diagnostic_ledger::Timer::start("root_lowering");
         let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
         let root_started_at = profile_enabled.then(std::time::Instant::now);
@@ -619,6 +623,7 @@ impl<'a> Lowerer<'a> {
         let root_expr = self.lower_schema(&self.document.root)?;
         self.add_nonterminal_rule(&root_rule, root_expr);
         self.add_nonterminal_rule("start", r(&root_rule));
+        drop(ledger_root);
         let root_lower_ms = root_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
@@ -666,6 +671,7 @@ impl<'a> Lowerer<'a> {
             );
         }
         let simplify_started_at = profile_enabled.then(std::time::Instant::now);
+        let ledger_prune = super::diagnostic_ledger::Timer::start("construct_prune");
         let mut grammar = NamedGrammar {
             rules: self.rules,
             start: "start".to_string(),
@@ -685,22 +691,30 @@ impl<'a> Lowerer<'a> {
         if early_prune {
             prune_generated_rules_in_place(&mut grammar.rules, &grammar.start);
         }
+        drop(ledger_prune);
+        let ledger_term = super::diagnostic_ledger::Timer::start("terminal_simplify");
         let terminal_simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_terminal_rules(&mut grammar.rules);
         let terminal_simplify_ms = terminal_simplify_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        drop(ledger_term);
+        let ledger_expr = super::diagnostic_ledger::Timer::start("expression_simplify");
         let expr_simplify_started_at = profile_enabled.then(std::time::Instant::now);
         simplify_named_grammar_expressions(&mut grammar);
         let expr_simplify_ms = expr_simplify_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        drop(ledger_expr);
+        let ledger_resolve = super::diagnostic_ledger::Timer::start("terminal_resolve");
         let resolve_started_at = profile_enabled.then(std::time::Instant::now);
         let resolved_terminals = resolved_named_terminal_exprs(&grammar)
             .map_err(|error| SchemaImportError::new(error.to_string()))?;
         let resolve_ms = resolve_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        drop(ledger_resolve);
+        let ledger_partition = super::diagnostic_ledger::Timer::start("partition");
         let partition_started_at = profile_enabled.then(std::time::Instant::now);
         grammar.lexer_partitions = build_json_lexer_partition_classes(
             &grammar,
@@ -711,11 +725,15 @@ impl<'a> Lowerer<'a> {
         let partition_ms = partition_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        drop(ledger_partition);
+        let ledger_repeat = super::diagnostic_ledger::Timer::start("repeat_audit");
         let repeat_audit_started_at = profile_enabled.then(std::time::Instant::now);
         emit_repeated_single_byte_terminal_warnings(&grammar, &resolved_terminals);
         let repeat_audit_ms = repeat_audit_started_at
             .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
             .unwrap_or(0.0);
+        drop(ledger_repeat);
+        let ledger_literals = super::diagnostic_ledger::Timer::start("literal_partition");
         let literals_started_at = profile_enabled.then(std::time::Instant::now);
         let literals = grammar.emitted_anonymous_literals();
         grammar.set_literal_lexer_partition(JSON_LITERAL_LEXER_PARTITION, literals);
@@ -736,6 +754,8 @@ impl<'a> Lowerer<'a> {
                 grammar.rules.len(),
             );
         }
+        drop(ledger_literals);
+        let _ledger_provenance = super::diagnostic_ledger::Timer::start("provenance");
         let name_provenance = self
             .json_name_provenance
             .as_ref()

@@ -34,6 +34,9 @@ pub use json_schema::{
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {
+    pub mod diagnostic_import_ledger {
+        pub use crate::json_schema::diagnostic_ledger::{drain, Record};
+    }
     pub mod ast {
         pub use crate::json_schema::ast::*;
     }
