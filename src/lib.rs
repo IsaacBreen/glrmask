@@ -181,6 +181,11 @@ pub(crate) fn set_test_compat_mode(enabled: bool) {
 #[cfg(feature = "internal-api")]
 #[doc(hidden)]
 pub mod __private {
+    /// Drain private diagnostic rows after benchmark clocks have stopped.
+    pub fn take_core_ledger_rows() -> Vec<String> {
+        crate::compiler::core_ledger::take()
+    }
+
     #[derive(Debug, Clone, Copy, Default)]
     pub struct CompilerCacheStats {
         pub token_set_entries: usize,

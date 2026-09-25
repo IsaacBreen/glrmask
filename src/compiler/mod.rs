@@ -117,3 +117,5 @@ pub(crate) fn synthetic_bounded_terminals_enabled() -> bool {
         },
     }
 }
+
+pub(crate) mod core_ledger;

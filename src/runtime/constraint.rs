@@ -7500,6 +7500,8 @@ impl Constraint {
     }
 
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
+        let ledger = std::env::var_os("GLRMASK_DIAG_CORE_LEDGER").is_some();
+        let ledger_all_started = ledger.then(std::time::Instant::now);
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if self.table.unconditional_advance.len() != self.table.num_states as usize
             || self
@@ -7512,12 +7514,14 @@ impl Constraint {
         }
         let profile = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
             || std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some();
-        let total_started_at = profile.then(std::time::Instant::now);
+        let ledger_rows_ms = ledger_all_started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        let timed = profile || ledger;
+        let total_started_at = timed.then(std::time::Instant::now);
         // `terminal_live_states` is a legacy/static derived cache. Dynamic mask
         // and commit paths do not consume it, so rebuilding it here only adds
         // dynamic compile/load latency and allocations.
         self.terminal_live_states.clear();
-        let started_at = profile.then(std::time::Instant::now);
+        let started_at = timed.then(std::time::Instant::now);
         if self.table.guarded_shift_index.len() != self.table.num_states as usize {
             if self.table.has_guarded_stack_shifts() {
                 self.table.rebuild_guarded_shift_index();
@@ -7533,7 +7537,7 @@ impl Constraint {
             && self.table.num_states <= 32
             && !self.uses_sparse_direct_regular_runtime();
         let build_vocab = || {
-            let started_at = profile.then(std::time::Instant::now);
+            let started_at = timed.then(std::time::Instant::now);
             if !dynamic_mask_vocab.is_initialized() {
                 let _ = dynamic_mask_vocab.materialize_pending_source();
             }
@@ -7547,14 +7551,14 @@ impl Constraint {
             (dynamic_mask_vocab, elapsed)
         };
         let build_fast = || {
-            let started_at = profile.then(std::time::Instant::now);
+            let started_at = timed.then(std::time::Instant::now);
             let transitions = self.compute_tokenizer_fast_transitions();
             let elapsed = started_at
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (transitions, elapsed)
         };
         let build_support = || {
-            let started_at = profile.then(std::time::Instant::now);
+            let started_at = timed.then(std::time::Instant::now);
             let support = if self.uses_sparse_direct_regular_runtime() {
                 self.direct_regular_automaton
                     .as_ref()
@@ -7571,6 +7575,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             (support, elapsed)
         };
+        let ledger_join_started = ledger.then(std::time::Instant::now);
         let (
             ((mut dynamic_mask_vocab, dynamic_vocab_ms), (tokenizer_fast_transitions, tokenizer_fast_ms)),
             (direct_regular_terminal_support, support_ms),
@@ -7579,13 +7584,15 @@ impl Constraint {
         } else {
             rayon::join(|| rayon::join(build_vocab, build_fast), build_support)
         };
+        let ledger_join_ms = ledger_join_started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
         dynamic_mask_vocab.set_direct_regular_terminal_support(
             direct_regular_terminal_support,
         );
-        let slice_leftovers_started_at = profile.then(std::time::Instant::now);
+        let slice_leftovers_started_at = timed.then(std::time::Instant::now);
         self.prepare_llg_slice_leftovers(&mut dynamic_mask_vocab);
         let slice_leftovers_ms = slice_leftovers_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
+        let ledger_quotients_started = ledger.then(std::time::Instant::now);
         // Master-slice prover preparation remains available for O1 experiments
         // and for artifacts that actually carry a master trie. O2 deliberately
         // keeps its grammar quotient as the walk coordinate, so its master trie
@@ -7686,12 +7693,15 @@ impl Constraint {
         // cost milliseconds on pathological schemas. Deferring it would turn
         // build work into an unaccounted first-mask latency spike and make
         // warmup semantics affect measured TBM.
+        let ledger_quotients_ms = ledger_quotients_started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+        let ledger_artifacts_started = ledger.then(std::time::Instant::now);
         self.prepare_dynamic_mask_runtime_artifacts(&mut dynamic_mask_vocab);
+        let ledger_artifacts_ms = ledger_artifacts_started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
         let has_dense_mask_projection =
             dynamic_mask_vocab.has_dense_mask_tokenizer_projection();
         let terminal_observation_enabled =
             self.dynamic_terminal_observation_classes_enabled(&dynamic_mask_vocab);
-        let terminal_observation_started_at = profile.then(std::time::Instant::now);
+        let terminal_observation_started_at = timed.then(std::time::Instant::now);
         let terminal_observation_classes = if !terminal_observation_enabled {
             Vec::new()
         } else if has_dense_mask_projection {
@@ -7704,7 +7714,7 @@ impl Constraint {
         dynamic_mask_vocab.set_terminal_observation_classes(terminal_observation_classes);
         let terminal_observation_ms = terminal_observation_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
-        let hot_frontier_started_at = profile.then(std::time::Instant::now);
+        let hot_frontier_started_at = timed.then(std::time::Instant::now);
         self.direct_regular_dynamic_hot_frontiers = self
             .compute_direct_regular_dynamic_hot_frontiers(
                 dynamic_mask_vocab.direct_regular_terminal_support(),
@@ -7714,7 +7724,11 @@ impl Constraint {
         let hot_frontier_count = self.direct_regular_dynamic_hot_frontiers.len();
         self.dynamic_mask_vocab = dynamic_mask_vocab;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
-        if let Some(total_started_at) = total_started_at {
+        if ledger {
+            let ledger_total_ms = ledger_all_started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
+            crate::compiler::core_ledger::record(format!("[glrmask/runtime-ledger] rows_ms={ledger_rows_ms:.6} guarded_ms={guarded_shift_ms:.6} join_ms={ledger_join_ms:.6} vocab_ms={dynamic_vocab_ms:.6} fast_ms={tokenizer_fast_ms:.6} support_ms={support_ms:.6} leftovers_ms={slice_leftovers_ms:.6} quotients_ms={ledger_quotients_ms:.6} artifacts_ms={ledger_artifacts_ms:.6} observation_ms={terminal_observation_ms:.6} frontier_ms={hot_frontier_ms:.6} total_ms={ledger_total_ms:.6} small={small_ready_runtime}"));
+        }
+        if profile && let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} slice_leftovers_ms={:.3} terminal_observation_ms={:.3} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
                 guarded_shift_ms,
