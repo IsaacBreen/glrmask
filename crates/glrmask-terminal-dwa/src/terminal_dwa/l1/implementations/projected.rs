@@ -4564,10 +4564,15 @@ fn build_binary_impl(input: BuildInput<'_>, allow_finite_switch: bool) -> Option
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(2_000_000usize);
-    assert!(
-        direct_selected || !projected_limit_exceeded(input, projected.configs.len(), limit),
-        "projected L1 exceeded GLRMASK_L1_SINGLE_MAX_STATES; raise the projected-state limit for this diagnostic guard"
-    );
+    if !direct_selected && projected_limit_exceeded(input, projected.configs.len(), limit) {
+        // None denotes an empty relation, not a failed build. Finite projection
+        // may already have sent us here after its own budget was exhausted.
+        // Report a typed failure rather than retrying or returning partial data.
+        glrmask_invariant::__private::fail_compilation_resource_limit(format!(
+            "projected L1 partition {:?} has {} states, exceeding GLRMASK_L1_SINGLE_MAX_STATES={}",
+            input.partition_label, projected.configs.len(), limit,
+        ));
+    }
     let expanded = if direct_selected {
         projected.configs.len()
     } else {
