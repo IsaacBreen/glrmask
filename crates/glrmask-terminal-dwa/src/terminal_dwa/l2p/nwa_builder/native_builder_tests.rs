@@ -109,3 +109,35 @@ fn native_emission_declines_unsupported_seed_and_token_domains() {
     valid.append_transition(0,0,1,map.num_tsids(),true,&[1;8]);
     assert!(valid.export_raw().is_none(),"incompatible uniform domains must decline");
 }
+
+#[test]
+fn strict_future_absence_preserves_only_possible_zero_byte_node_match() {
+    let exprs=vec![choice(vec![crate::automata::lexer::ast::Expr::Epsilon,bytes(b"a"),bytes(b"ab")]),
+        plus(bytes(b"b")),bytes(&[0,255]),bytes(b"!"),choice(vec![bytes(b"a!"),bytes(b"b!")])];
+    let words=[b"a".to_vec(),b"ab".to_vec(),b"aba!".to_vec(),b"b".to_vec(),b"bb!".to_vec(),
+        b"abbb".to_vec(),vec![0,255],vec![0,255,b'!'],vec![255,0],b"!".to_vec()];
+    let tree=VocabPrefixTree::build(&words.into_iter().enumerate().collect::<Vec<_>>());
+    let mut nodes=vec![&tree.root];let mut cursor=0;
+    while cursor<nodes.len(){let children=nodes[cursor].children();nodes.extend(children);cursor+=1;}
+    let mut checks=0;
+    for partitioned in [false,true]{
+        let tok=if partitioned{build_regex_partitioned(&exprs,&[0,1,2,3,4])}else{build_regex(&exprs)}
+            .into_tokenizer(5,Some(Arc::from(exprs.clone())));
+        let mut pm=PossibleMatchesComputer::new(&tok);
+        for q in 0..tok.num_states(){
+            if tok.state_has_epsilon_transitions(q){continue}
+            for t in 0..5u32{
+                if tok.possible_future_terminals(q).get(t as usize){continue}
+                for node in &nodes{for suffix in [&b""[..],&b"a"[..],&b"bb"[..],&b"ab!"[..],&[0,255][..]]{
+                    let ordinary=pm.possible_matches_for_suffix_and_node(suffix,node,q);
+                    if let Some(found)=ordinary.get(&t){
+                        assert!(found.iter().all(|id|suffix.is_empty()&&node.has_token()&&id==node.token_id()as u32),
+                            "future absence lost a positive extension q={q} t={t} suffix={suffix:?}");
+                    }
+                    checks+=1;
+                }}
+            }
+        }
+    }
+    assert!(checks>500);
+}

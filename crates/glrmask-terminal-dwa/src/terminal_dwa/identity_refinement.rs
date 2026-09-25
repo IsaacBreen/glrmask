@@ -6,6 +6,7 @@
 //! equivalence/TI machinery is optional compression, not required for exactness.
 //! The ordinary L2P, follow, crossing and final ignore passes remain unchanged.
 use super::*;
+use crate::ds::weight::Weight;
 
 /// A permutation, never an equivalence quotient. Every raw state has exactly
 /// one distinct internal coordinate; selected token-entry coordinates form
@@ -30,14 +31,22 @@ fn singleton_state_map(selected: &[bool], packed: bool) -> ManyToOneIdMap {
 /// treating an arbitrary equivalent TDWA as a minimization fixed point.
 /// This certificate belongs to the accompanying output and is consumed before
 /// any change to that graph. It is never persisted or exposed to mask runtime.
-pub struct NativeMinimizationFixedPoint { _private: () }
+pub struct NativeMinimizationFixedPoint { accepted_weight: Option<Weight> }
 
 impl NativeMinimizationFixedPoint {
+    /// Exact correlated support for the accompanying unchanged native graph.
+    /// No graph argument is accepted: the proof cannot be rebound to a different
+    /// graph or used after ignore erasure, adjacency restoration or relabeling.
+    pub fn accepted_weight(&self)->Option<&Weight>{self.accepted_weight.as_ref()}
+
     // Reproduce the ordinary second pass's *small-direct* eligibility. Larger
     // outputs can be graph-isomorphic fixed points yet have a different raw
     // row order after generic hash-class enumeration. They must keep the old
     // second pass; a language or isomorphism proof alone is not sufficient.
     fn from_native(dwa:&crate::automata::weighted_u32::dwa::DWA,ignore:Option<TerminalID>)->Option<Self>{
+        Self::from_native_with_support(dwa,ignore,std::env::var_os("GLRMASK_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some())
+    }
+    fn from_native_with_support(dwa:&crate::automata::weighted_u32::dwa::DWA,ignore:Option<TerminalID>,support:bool)->Option<Self>{
         let n=dwa.states().len();
         if ignore.is_some() || n==0 || n>192 { return None; }
         let mut heights=vec![0usize;n];
@@ -53,8 +62,31 @@ impl NativeMinimizationFixedPoint {
             heights[source]=height;buckets[height]+=1;
             if height!=0 && buckets[height]>64{return None;}
         }
-        Some(Self{_private:()})
+        // This constructor is private and is called ONLY for the completed
+        // native minimum above, never for an arbitrary terminal automaton.
+        // Native weights are backward-pushed: each edge w(q,r) is contained
+        // in the accepting suffix support R(r). Thus R(q)=F(q) union edges(q),
+        // with no remaining intersections. Compatible unions preserve this.
+        let accepted_weight=support.then(|| {
+            let root=&dwa.states()[dwa.start_state() as usize];
+            Weight::union_all(root.final_weight.iter().chain(root.transitions.values().map(|(_,w)|w)))
+        });
+        Some(Self{accepted_weight})
     }
+}
+
+fn native_support_reference(dwa:&crate::automata::weighted_u32::dwa::DWA)->Weight {
+    // Independent suffix recurrence. Used only under the explicit validator.
+    let mut supports=vec![Weight::empty();dwa.states().len()];
+    for(q,state)in dwa.states().iter().enumerate(){
+        let mut parts=state.final_weight.iter().cloned().collect::<Vec<_>>();
+        for &(r,ref weight)in state.transitions.values(){
+            assert!((r as usize)<q,"native certificate expects bottom-up DAG");
+            parts.push(weight.intersection(&supports[r as usize]));
+        }
+        supports[q]=Weight::union_all(&parts);
+    }
+    supports[dwa.start_state()as usize].clone()
 }
 
 pub fn build_scoped_boundary_identity_refinement(
@@ -171,6 +203,13 @@ pub fn build_scoped_boundary_identity_with_certificate(
             // induction a second identical-policy minimization changes neither
             // weights nor groups. Ignore erasure could invalidate that proof.
             let proof=NativeMinimizationFixedPoint::from_native(&candidate.dwa,ignore_terminal);
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some(){
+                if let Some(accepted)=proof.as_ref().and_then(|p|p.accepted_weight()){
+                    let reference=native_support_reference(&candidate.dwa);
+                    assert_eq!(accepted,&reference,"native root support is not backward-pushed");
+                    eprintln!("[glrmask/validate][native_root_support] exact_full_weight=true states={}",candidate.dwa.num_states());
+                }
+            }
             (candidate,proof)
         }
         None=>(ordinary()?,None),
@@ -216,6 +255,30 @@ mod tests {
         assert!(NativeMinimizationFixedPoint::from_native(&DWA::from_parts(wide,65),None).is_none());
     }
 
+    #[test]
+    fn native_root_certificate_preserves_full_correlated_support_of_pushed_dags(){
+        use crate::automata::weighted_u32::dwa::{DWA,DWAState};
+        let mut seed=230192u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as usize};
+        let mut palette=vec![Weight::empty(),Weight::all()];
+        for row in [0,7,4096]{for token in [0,1,64,257,511]{palette.push(Weight::from_token_set_for_tsid(row,[token].into_iter().collect()));}}
+        for case in 0..512{
+            let n=2+next()%18;let mut rows=vec![DWAState::default();n];let mut suffix=vec![Weight::empty();n];
+            for(q,state)in rows.iter_mut().enumerate(){
+                state.final_weight=Some(palette[next()%palette.len()].clone());
+                if q>0{for label in 0..4{let r=next()%q;let w=palette[next()%palette.len()].intersection(&suffix[r]);if !w.is_empty(){state.transitions.insert(label,(r as u32,w));}}}
+                suffix[q]=Weight::union_all(state.final_weight.iter().chain(state.transitions.values().map(|(_,w)|w)));
+            }
+            let graph=DWA::from_parts(rows,(n-1)as u32);
+            let certificate=NativeMinimizationFixedPoint::from_native_with_support(&graph,None,true).unwrap();
+            assert_eq!(certificate.accepted_weight(),Some(&native_support_reference(&graph)),"case={case}");
+            assert!(NativeMinimizationFixedPoint::from_native_with_support(&graph,Some(0),true).is_none());
+            assert!(NativeMinimizationFixedPoint::from_native_with_support(&graph,None,false).unwrap().accepted_weight().is_none());
+        }
+        // Why an arbitrary graph may NOT mint this private native-origin proof.
+        let a=Weight::from_token_set_for_tsid(0,[7].into_iter().collect());let b=Weight::from_token_set_for_tsid(1,[7].into_iter().collect());
+        let mut rows=vec![DWAState::default();2];rows[0].final_weight=Some(b);rows[1].transitions.insert(1,(0,a.clone()));
+        let graph=DWA::from_parts(rows,1);assert_eq!(native_support_reference(&graph),Weight::empty());assert_ne!(a,native_support_reference(&graph));
+    }
     #[test]
     fn initial_coordinate_packing_is_a_total_bijection() {
         for n in [1usize, 2, 7, 65, 513] {

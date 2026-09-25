@@ -608,7 +608,13 @@ fn build_boundary_terminal_dwa_on_view_policy(
     let reference=(certified && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_MINIMUM").is_some())
         .then(||finalize_boundary_terminal_dwa(dwa.clone(),&id_map,summarize_after));
     let (finalized, accepted_tokens, final_minimize_ms) = if certified {
-        let accepted=terminal_accepted_original_tokens(&dwa,&id_map);
+        let accepted=if let Some(support)=native_fixed_point.as_ref().and_then(|proof|proof.accepted_weight()){
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some(){
+                assert_eq!(support,&super::constraint_compose::accepted_weight_support(&dwa),
+                    "certified root support changed correlated output weights");
+            }
+            super::boundary_terminal_summary::project_accepted_tokens(support,&id_map)
+        }else{terminal_accepted_original_tokens(&dwa,&id_map)};
         let graph=if accepted.is_empty(){DWA::new(id_map.num_tsids(),id_map.max_internal_token_id())}else{dwa};
         (graph,accepted,0.0)
     }else{finalize_boundary_terminal_dwa(dwa,&id_map,summarize_after)};

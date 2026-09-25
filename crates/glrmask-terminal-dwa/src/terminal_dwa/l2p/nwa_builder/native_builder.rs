@@ -66,6 +66,9 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     scalar_deterministic_dispatch: bool,
     scalar_cursor:bool,
     lean_frontiers:bool,
+    prove_future_absence:bool,
+    validate_future_absence:bool,
+    future_absence_hits:usize,
     cached_reset_roots:Vec<u32>,
     validate_scalar_cursor:bool,
     dfa_scan_strict_reference: bool,
@@ -161,6 +164,10 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             scalar_deterministic_dispatch,
             scalar_cursor:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR").is_some(),
             lean_frontiers:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(),
+            prove_future_absence:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FUTURE_ABSENCE").is_some()
+                && !tokenizer.has_virtual_residual_runtime(),
+            validate_future_absence:std::env::var_os("GLRMASK_VALIDATE_NATIVE_FUTURE_ABSENCE").is_some(),
+            future_absence_hits:0,
             cached_reset_roots:if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
             validate_scalar_cursor:std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
@@ -432,6 +439,32 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
 
         let remove_leaf = remaining_segment.is_empty() && child_node.has_token();
+        // Strict future excludes zero-byte acceptance. At an epsilon-free
+        // matching state, absence of this terminal proves that no positive
+        // continuation can extend it. The current trie-node token is still
+        // removed independently, exactly as in the ordinary scanner.
+        if self.prove_future_absence && end_state.is_some_and(|q|
+            !self.tokenizer.state_has_epsilon_transitions(q)
+            && !self.tokenizer.possible_future_terminals(q).get(terminal_id as usize))
+        {
+            self.future_absence_hits += 1;
+            let mut weight=self.cached_reachable_weight(child_node.reachable_token_ids());
+            if remove_leaf {
+                if leaf_token_id>=512{return None}
+                weight.bits[leaf_token_id as usize/64]&=!(1u64<<(leaf_token_id%64));
+            }
+            if self.validate_future_absence {
+                let ordinary=self.possible_matches.possible_matches_for_suffix_and_node(
+                    remaining_segment,child_node,end_state.expect("checked matching state"));
+                let mut expected=child_node.reachable_token_ids().clone();
+                if remove_leaf{expected.remove(leaf_token_id as usize);}
+                if let Some(tokens)=ordinary.get(&terminal_id){subtract_possible_matches(&mut expected,tokens);}
+                let expected=self.token_set_weight_fast(&expected);
+                assert_eq!((weight.valid,weight.end,weight.bits),(expected.valid,expected.end,expected.bits),
+                    "strict-future absence changed exact continuation coefficient");
+            }
+            return (!weight.is_empty()).then_some(weight);
+        }
         let possible_matches = end_state.map(|end_state| {
             self.possible_matches
                 .possible_matches_for_suffix_and_node(
@@ -1059,6 +1092,14 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
  }
  if builder.compact_buffer.as_ref().is_some_and(|b|b.failed){return None}
  let t=std::time::Instant::now();builder.flush_transition_buffer();builder.profile.flush_ms=t.elapsed().as_secs_f64()*1000.;
+ if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
+  eprintln!("[glrmask/profile][native_event_details] future_absence_hits={} walk_ms={:.3} flush_ms={:.3} scan_ms={:.3} match_filter_ms={:.3} end_state_ms={:.3} match_process_ms={:.3} continuation_ms={:.3} scan_calls={} scan_bytes={} matches={}",
+   builder.future_absence_hits,builder.profile.trie_walk_ms,builder.profile.flush_ms,
+   builder.profile.trie_execute_ms,builder.profile.trie_match_filter_ms,
+   builder.profile.trie_end_state_ms,builder.profile.trie_match_process_ms,
+   builder.profile.trie_continuation_weight_ms,builder.profile.trie_execute_calls,
+   builder.profile.trie_execute_input_bytes,builder.profile.trie_matches);
+ }
  let profile=builder.profile;drop(builder);let build_ms=started.elapsed().as_secs_f64()*1000.;
  Some(NativeBuild{sink,profile,build_ms})
 }

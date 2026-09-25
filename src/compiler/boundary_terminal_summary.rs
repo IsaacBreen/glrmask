@@ -67,6 +67,17 @@ pub(super) fn accepted_tokens(dwa: &DWA, id_map: &InternalIdMap) -> Option<BTree
         assert_eq!(accepted, reference, "batched terminal summary changed correlated TSID/token support");
         eprintln!("[glrmask/validate][boundary_batched_token_support] exact_full_weight=true states={}", dwa.num_states());
     }
+    let originals=project_accepted_tokens(&accepted,id_map);
+    if let Some(t) = started {
+        eprintln!("[glrmask/profile][boundary_batched_token_support] states={} edges={} tokens={} support_ms={support_ms:.3} total_ms={:.3}",
+            dwa.num_states(), dwa.num_transitions(), originals.len(), t.elapsed().as_secs_f64()*1000.0);
+    }
+    Some(originals)
+}
+
+/// Project only AFTER correlated support has been proved by its producer.
+/// This is the unchanged existing raw-TSID/token mapping loop.
+pub(super) fn project_accepted_tokens(accepted:&Weight,id_map:&InternalIdMap)->BTreeSet<u32>{
     let groups = &id_map.vocab_tokens.internal_to_originals;
     let mut originals = BTreeSet::new();
     for (_, tokens) in accepted.raw_range_values() {
@@ -77,11 +88,7 @@ pub(super) fn accepted_tokens(dwa: &DWA, id_map: &InternalIdMap) -> Option<BTree
             for ids in &groups[lo..=hi] { originals.extend(ids.iter().copied()); }
         }
     }
-    if let Some(t) = started {
-        eprintln!("[glrmask/profile][boundary_batched_token_support] states={} edges={} tokens={} support_ms={support_ms:.3} total_ms={:.3}",
-            dwa.num_states(), dwa.num_transitions(), originals.len(), t.elapsed().as_secs_f64()*1000.0);
-    }
-    Some(originals)
+    originals
 }
 
 #[cfg(test)]
