@@ -3714,3 +3714,5 @@ pub fn build_transport_nwa_via_trie_walk<'a>(
     );
     builder.base.profile
 }
+
+#[path="nwa_builder/native_builder.rs"] pub mod native_builder;

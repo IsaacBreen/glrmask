@@ -12,6 +12,7 @@ use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
 mod native_boundary;
+mod native_pipeline;
 pub mod postprocess;
 pub(crate) mod terminal_dwa_equivalence;
 #[cfg(feature = "internal-api")]
@@ -1645,6 +1646,42 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 None => seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map),
             };
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let validate_native_pipeline=std::env::var_os("GLRMASK_VALIDATE_NATIVE_EVENT_PIPELINE").is_some();
+            let mut native_pipeline_raw=None;
+            let native_pipeline = if partition_label=="boundary_identity_refinement"
+                && !use_terminal_coloring
+                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
+                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+                && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none()
+                && internal_vocab.iter().any(|(_,word)|word.len()>2)
+            {
+                (|| {
+                    let filter=shard_options.and_then(|o|o.crossing_filter)?;
+                    let mut native=nwa_builder::native_builder::build(
+                        tokenizer_for_build,terminal_coloring,ignore_terminal,&nwa,
+                        leaf_state,simplified_id_map.num_tsids(),&full_tree.root,&roots,
+                        flat_trans.map(AsRef::as_ref),representative_core_active_terminals)?;
+                    if validate_native_pipeline {native_pipeline_raw=Some(native.sink.export_raw()?);}
+                    let started=Instant::now();
+                    let owners=(0..grammar.num_terminals).map(|t|filter.ownership.owner_of_terminal(t).map(|o|o.0)).collect::<Option<Vec<_>>>()?;
+                    let(dwa,post,core)=native.sink.finish(equivalence_disallowed_follows,grammar.num_terminals as usize,
+                        ignore_terminal,shard_options.and_then(|o|o.follow_transparent),&owners,filter.start_component.0)?;
+                    let kernel_ms=started.elapsed().as_secs_f64()*1000.;
+                    let graph_stats=dwa.stats();
+                    let post_ms=post.follows_ms+post.prune_ms+post.canonical_ms+post.crossing_ms;
+                    let det_ms=core.import_ms+core.compute_ms;
+                    if l2p_timing_profile_enabled() {
+                        eprintln!("[glrmask/profile][native_event_pipeline] tokens={internal_vocab_count} build_ms={:.3} kernel_ms={kernel_ms:.3} post={post:?} core={core:?}",native.build_ms);
+                    }
+                    Some((dwa,vocab_tree_ms,possible_matches_ms,seed_ms,native.build_ms,native.profile,
+                        0.0,0.0,post.follows_ms,post.prune_ms,post.canonical_ms,post.crossing_ms,
+                        det_ms,(kernel_ms-post_ms-det_ms).max(0.0),internal_vocab_count,
+                        post.input_states,post.input_states,post.follow_states,post.pruned_states,post.canonical_states,
+                        graph_stats,false))
+                })()
+            } else {None};
+            let ordinary = || {
             let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
@@ -1678,6 +1715,10 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_ms = 0.0;
+            if let Some(ref expected)=native_pipeline_raw {
+                assert_eq!(expected.start_states(),nwa.start_states(),"native pipeline seeded-start mismatch");
+                assert_eq!(expected.states(),nwa.states(),"native pipeline raw event NWA mismatch");
+            }
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
@@ -1881,6 +1922,17 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 dwa_stats_before_compact,
                 false,
             )
+            };
+            if let Some(native)=native_pipeline {
+                if validate_native_pipeline {
+                    let reference=ordinary();
+                    native_boundary::graph_isomorphism(&native.0,&reference.0)
+                        .expect("native full event pipeline graph differs from the original constructor");
+                    eprintln!("[glrmask/validate][native_event_pipeline] exact_raw_graph=true exact_final_graph=true tokens={internal_vocab_count}");
+                }
+                native
+            } else {ordinary()}
+
         }
     };
     if early_none {
