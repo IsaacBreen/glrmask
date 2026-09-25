@@ -54,9 +54,22 @@ fn union_len(a: &[u32], b: &[u32]) -> usize {
 
 /// `flat` is the table constructed from this same immutable tokenizer by the
 /// boundary linker. Never pass a table belonging to a different source/view.
+pub(super) struct Footprint {pub keep:Vec<bool>,pub footprint_ms:f64,pub first_states:usize,pub reset_states:usize,pub state_steps:usize}
 pub(super) fn prepare(
     tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &[u32],
 ) -> Option<QueryView> {
+    let Footprint{keep,footprint_ms,first_states,reset_states,state_steps}=footprint(tokenizer,vocab,scope,flat)?;
+    let began = Instant::now();
+    let view = tokenizer.induced_observation_view(&keep)?;
+    let scope = scope.relocate_query_view(&view.original_to_view, view.tokenizer.num_states() as usize,
+        view.tokenizer.deterministic_reset_states().into_vec()).ok()?;
+    Some(QueryView { view, scope, footprint_ms,
+        materialize_ms: began.elapsed().as_secs_f64()*1000.0,
+        first_states, reset_states, state_steps })
+}
+pub(super) fn footprint(
+    tokenizer: &Tokenizer, vocab: &Vocab, scope: &BoundaryAnalysisScope, flat: &[u32],
+) -> Option<Footprint> {
     let n = tokenizer.num_states() as usize;
     if n < 256 || n > 200_000 || tokenizer.has_virtual_residual_runtime()
         || !scope.require_crossing() || flat.len() != n.checked_mul(256)?
@@ -117,13 +130,7 @@ pub(super) fn prepare(
     let keep = first.into_iter().zip(continuation).map(|(a,b)| a||b).collect::<Vec<_>>();
     if keep.iter().filter(|&&x| x).count() >= n { return None; }
     let footprint_ms = began.elapsed().as_secs_f64() * 1000.0;
-    let began = Instant::now();
-    let view = tokenizer.induced_observation_view(&keep)?;
-    let scope = scope.relocate_query_view(&view.original_to_view, view.tokenizer.num_states() as usize,
-        view.tokenizer.deterministic_reset_states().into_vec()).ok()?;
-    Some(QueryView { view, scope, footprint_ms,
-        materialize_ms: began.elapsed().as_secs_f64()*1000.0,
-        first_states, reset_states, state_steps })
+    Some(Footprint{keep,footprint_ms,first_states,reset_states,state_steps})
 }
 
 #[cfg(test)]

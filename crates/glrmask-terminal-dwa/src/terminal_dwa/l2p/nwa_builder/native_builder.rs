@@ -26,6 +26,9 @@ impl Weight {
 }
 pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     tokenizer: &'tok Tokenizer,
+    borrowed_map:Option<BorrowedObservation<'tok>>,
+    borrowed_cursor:Option<native_borrowed_cursor::BorrowedScalarCache<'tok>>,
+    mapping_failed:bool,
     terminal_coloring: TerminalColoring,
     possible_future_terminals: FxHashMap<TokenizerState, Vec<TerminalID>>,
     future_terminal_color_groups: FxHashMap<TokenizerState, FutureTerminalColorGroups>,
@@ -124,6 +127,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             .then(|| NfaTrieScanCache::new(tokenizer, active_terminals.clone()));
         Self {
             tokenizer,
+            borrowed_map:None,
+            borrowed_cursor:None,
+            mapping_failed:false,
             terminal_coloring,
             possible_future_terminals: FxHashMap::default(),
             future_terminal_color_groups: FxHashMap::default(),
@@ -181,12 +187,20 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
     }
 
+    #[inline]
+    fn original_state(&self,q:u32)->u32{self.borrowed_map.map_or(q,|m|m.original(q))}
+    fn reset_roots(&self)->SmallVec<[u32;1]>{
+        let roots=self.tokenizer.deterministic_reset_states();
+        if let Some(map)=self.borrowed_map{roots.into_iter().filter_map(|q|map.logical(q)).collect()}else{roots}
+    }
     /// O(1) DFA step using lazily-built flat transition table.
     #[inline]
     fn fast_step(&mut self, state: u32, byte: u8) -> Option<u32> {
         let state_idx = state as usize;
         if self.flat_transitions[state_idx].is_none() {
-            self.flat_transitions[state_idx] = Some(self.tokenizer.transition_row(state));
+            let mut row=self.tokenizer.transition_row(self.original_state(state));
+            if let Some(map)=self.borrowed_map {for target in row.iter_mut(){if *target!=u32::MAX{*target=map.logical(*target).unwrap_or(u32::MAX);}}}
+            self.flat_transitions[state_idx] = Some(row);
         }
         let next = self.flat_transitions[state_idx].as_ref().unwrap()[byte as usize];
         if next == u32::MAX { None } else { Some(next) }
@@ -209,11 +223,12 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     fn possible_future_terminals_for_state(&mut self, tokenizer_state: TokenizerState) -> Vec<TerminalID> {
         if let Some(existing)=self.possible_future_terminals.get(&tokenizer_state){return existing.clone()}
         let active = self.active_terminals.clone();
+        let original=self.original_state(tokenizer_state);
         self.possible_future_terminals
             .entry(tokenizer_state)
             .or_insert_with(|| {
                 self.tokenizer
-                    .possible_future_terminals_iter(tokenizer_state)
+                    .possible_future_terminals_iter(original)
                     .filter(|&terminal| active.as_ref().map_or(true, |mask| {
                         mask.get(terminal as usize).copied().unwrap_or(false)
                     }))
@@ -231,7 +246,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut colors = SmallVec::<[ColorId; 8]>::new();
         let mut ignore_present = false;
 
-        for terminal_id in self.tokenizer.possible_future_terminals_iter(tokenizer_state) {
+        for terminal_id in self.tokenizer.possible_future_terminals_iter(self.original_state(tokenizer_state)) {
             if !self.terminal_is_active(terminal_id) {
                 continue;
             }
@@ -448,8 +463,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         // continuation can extend it. The current trie-node token is still
         // removed independently, exactly as in the ordinary scanner.
         if self.prove_future_absence && end_state.is_some_and(|q|
-            !self.tokenizer.state_has_epsilon_transitions(q)
-            && !self.tokenizer.possible_future_terminals(q).get(terminal_id as usize))
+            !self.tokenizer.state_has_epsilon_transitions(self.original_state(q))
+            && !self.tokenizer.possible_future_terminals(self.original_state(q)).get(terminal_id as usize))
         {
             self.future_absence_hits += 1;
             let mut weight=self.cached_reachable_weight(child_node.reachable_token_ids());
@@ -459,7 +474,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
             if self.validate_future_absence {
                 let ordinary=self.possible_matches.possible_matches_for_suffix_and_node(
-                    remaining_segment,child_node,end_state.expect("checked matching state"));
+                    remaining_segment,child_node,self.original_state(end_state.expect("checked matching state")));
                 let mut expected=child_node.reachable_token_ids().clone();
                 if remove_leaf{expected.remove(leaf_token_id as usize);}
                 if let Some(tokens)=ordinary.get(&terminal_id){subtract_possible_matches(&mut expected,tokens);}
@@ -469,7 +484,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             }
             return (!weight.is_empty()).then_some(weight);
         }
-        let possible_matches = end_state.map(|end_state| {
+        let original_end=end_state.map(|q|self.original_state(q));
+        let possible_matches = original_end.map(|end_state| {
             self.possible_matches
                 .possible_matches_for_suffix_and_node(
                     remaining_segment,
@@ -555,10 +571,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         }
         self.profile.trie_self_loop_checks += 1;
         if let Some(flat_transitions) = self.shared_flat_transitions {
-            let base = tokenizer_state as usize * 256;
+            let raw=self.original_state(tokenizer_state);
+            let base = raw as usize * 256;
             let can_skip = U8Set::from_words(*node.subtree_bytes())
                 .iter()
-                .all(|byte| flat_transitions[base + byte as usize] == tokenizer_state);
+                .all(|byte| flat_transitions[base + byte as usize] == raw);
             if can_skip {
                 self.profile.trie_self_loop_skips += 1;
             }
@@ -570,7 +587,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let self_loop_bytes = self
             .self_loop_bytes
             .entry(tokenizer_state)
-            .or_insert_with(|| self.tokenizer.self_loop_bytes(tokenizer_state));
+            .or_insert_with(|| self.tokenizer.self_loop_bytes(self.borrowed_map.map_or(tokenizer_state,|m|m.original(tokenizer_state))));
         let can_skip = U8Set::from_words(*node.subtree_bytes()).is_subset(self_loop_bytes);
         if can_skip {
             self.profile.trie_self_loop_skips += 1;
@@ -935,11 +952,21 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 let remaining = &segment_bytes[offset..];
                 let execute_started_at = self.profile_timing.then(std::time::Instant::now);
                 let end_states = if self.has_epsilon_transitions {
+                    let raw=self.original_state(tokenizer_state);
                     let cache=self.nfa_scan_cache.as_mut().expect("epsilon tokenizer must initialize NFA trie scan cache");
-                    if self.scalar_cursor {
-                        cache.execute_native_scalar_into(remaining,tokenizer_state,&mut matches_buf,
+                    let mut ends=if let Some(prepared)=self.borrowed_cursor.as_ref(){
+                        cache.execute_native_borrowed_into(remaining,raw,&mut matches_buf,prepared,self.validate_scalar_cursor)
+                    }else if self.scalar_cursor {
+                        cache.execute_native_scalar_into(remaining,raw,&mut matches_buf,
                             self.shared_flat_transitions,self.validate_scalar_cursor)
-                    }else{cache.execute_into(remaining,tokenizer_state,&mut matches_buf)}
+                    }else{cache.execute_into(remaining,raw,&mut matches_buf)};
+                    if let Some(map)=self.borrowed_map {
+                        let mut failed=false;
+                        matches_buf.retain_mut(|matched|{if let Some(q)=map.logical(matched.end_state){matched.end_state=q;true}else{failed=true;false}});
+                        ends.retain_mut(|q|{if let Some(logical)=map.logical(*q){*q=logical;true}else{failed=true;false}});
+                        self.mapping_failed|=failed;
+                    }
+                    ends
                 } else {
                     match_map_buf.clear();
                     let mut scan_state = tokenizer_state;
@@ -947,7 +974,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     for (index, &byte) in segment_bytes[offset..].iter().enumerate() {
                         if let Some(next) = self.fast_step(scan_state, byte) {
                             scan_state = next;
-                            for terminal in self.tokenizer.matched_terminals_iter(scan_state) {
+                            for terminal in self.tokenizer.matched_terminals_iter(self.original_state(scan_state)) {
                                 if !self.terminal_is_active(terminal) {
                                     continue;
                                 }
@@ -977,10 +1004,14 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     if self.dfa_scan_strict_reference {
                         let mut reference = self
                             .tokenizer
-                            .execute_from_state(remaining, tokenizer_state);
+                            .execute_from_state(remaining, self.original_state(tokenizer_state));
                         reference
                             .matches
                             .retain(|matched| self.terminal_is_active(matched.id));
+                        if let Some(map)=self.borrowed_map {
+                            reference.matches.retain_mut(|m|{if let Some(q)=map.logical(m.end_state){m.end_state=q;true}else{self.mapping_failed=true;false}});
+                            reference.end_state.retain_mut(|q|{if let Some(v)=map.logical(*q){*q=v;true}else{self.mapping_failed=true;false}});
+                        }
                         let mut actual_matches = matches_buf.clone();
                         actual_matches.sort_unstable_by_key(|matched| {
                             (matched.id, matched.width, matched.end_state)
@@ -1085,7 +1116,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let reset_states = if self.lean_frontiers {
                         self.cached_reset_roots.as_slice()
                     } else {
-                        uncached_reset_states = self.tokenizer.deterministic_reset_states();
+                        uncached_reset_states = self.reset_roots();
                         uncached_reset_states.as_slice()
                     };
                     let destination = ensure_continuation_state(
@@ -1129,6 +1160,57 @@ fn ensure_continuation_state(
 }
 
 
+/// Borrowed lexical graph with exactly the original induced view's logical
+/// state IDs. Numeric event/frontier keys stay logical; only immutable lexical
+/// reads are translated to the shared source graph.
+#[derive(Clone,Copy)]
+pub struct BorrowedObservation<'a> {
+    original_to_logical:&'a [u32],
+    logical_to_original:&'a [u32],
+    has_epsilon:bool,
+    scalar_dispatch:bool,
+}
+impl<'a> BorrowedObservation<'a> {
+    pub fn new(source:&Tokenizer,original_to_logical:&'a [u32],logical_to_original:&'a [u32])->Option<Self>{
+        if source.has_virtual_residual_runtime()||original_to_logical.len()!=source.num_states()as usize
+            || logical_to_original.is_empty()||logical_to_original.len()>=16384
+            ||logical_to_original.windows(2).any(|w|w[0]>=w[1]){return None;}
+        for (q,&raw)in logical_to_original.iter().enumerate(){
+            if *original_to_logical.get(raw as usize)?!=q as u32{return None;}
+            // FIRST/reset prefixes were epsilon-closed by the view proof.
+            // Reject a map omitting part of any retained epsilon closure.
+            for r in source.singleton_epsilon_closure(raw){
+                if *original_to_logical.get(r as usize)?==u32::MAX{return None;}
+            }
+        }
+        for (raw,&q)in original_to_logical.iter().enumerate(){
+            if q!=u32::MAX&&logical_to_original.get(q as usize).copied()!=Some(raw as u32){return None;}
+        }
+        let has_epsilon=logical_to_original.iter().any(|&q|source.state_has_epsilon_transitions(q));
+        let start=source.initial_state_id();
+        let any_start=source.transitions_from(start).next().is_some();
+        let kept_start=source.transitions_from(start).any(|(_,target)|original_to_logical.get(target as usize).is_some_and(|&q|q!=u32::MAX));
+        // Removing the last direct reset edge can change the special dispatcher
+        // interpretation. Leave that shape to the ordinary materialized path.
+        if any_start!=kept_start{return None;}
+        let scalar_dispatch=if source.has_scalar_deterministic_dispatch(){true}
+        else if let Some(roots)=source.deterministic_dispatch_roots(){
+            let mut todo=roots.to_vec();let mut seen=vec![false;logical_to_original.len()];let mut scalar=true;let mut work=0usize;
+            while let Some(raw)=todo.pop(){
+                let q=*original_to_logical.get(raw as usize)?;if q==u32::MAX{return None;}
+                if std::mem::replace(&mut seen[q as usize],true){continue;}
+                if source.state_has_epsilon_transitions(raw){scalar=false;break;}
+                for (_,target) in source.transitions_from(raw){work+=1;if work>2_000_000{return None;}if original_to_logical[target as usize]!=u32::MAX{todo.push(target);}}
+            }
+            scalar
+        }else{false};
+        Some(Self{original_to_logical,logical_to_original,has_epsilon,scalar_dispatch})
+    }
+    fn original(&self,q:u32)->u32{self.logical_to_original[q as usize]}
+    pub(in crate::terminal_dwa) fn logical(&self,raw:u32)->Option<u32>{self.original_to_logical.get(raw as usize).copied().filter(|&q|q!=u32::MAX)}
+    pub fn len(&self)->usize{self.logical_to_original.len()}
+}
+
 pub struct NativeBuild {
  pub sink:NWA,
  pub profile:TerminalDwaBuildProfile,
@@ -1139,24 +1221,57 @@ pub struct NativeBuild {
 pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
  seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
  tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool])->Option<NativeBuild>{
+ build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,None)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn build_borrowed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
+ seed:&crate::automata::weighted_u32::nwa::NWA,leaf:u32,num_tsids:u32,
+ tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
+ build_impl(tokenizer,coloring,ignore,NativeSeedInput::Generic(seed),leaf,num_tsids,tree,roots,flat,active,Some(map))
+}
+enum NativeSeedInput<'a>{Generic(&'a crate::automata::weighted_u32::nwa::NWA),Direct{max_token:u32,classes:&'a [u32]}}
+#[allow(clippy::too_many_arguments)]
+pub fn build_borrowed_direct_seed<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
+ classes:&[u32],max_token:u32,num_tsids:u32,tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,
+ flat:Option<&'a [u32]>,active:&[bool],map:BorrowedObservation<'a>)->Option<NativeBuild>{
+ build_impl(tokenizer,coloring,ignore,NativeSeedInput::Direct{max_token,classes},0,num_tsids,tree,roots,flat,active,Some(map))
+}
+#[allow(clippy::too_many_arguments)]
+fn build_impl<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Option<TerminalID>,
+ seed:NativeSeedInput<'_>,leaf:u32,num_tsids:u32,
+ tree:&VocabPrefixTreeNode,roots:&NodesByTokenizerState,flat:Option<&'a [u32]>,active:&[bool],map:Option<BorrowedObservation<'a>>)->Option<NativeBuild>{
  let parallel=std::env::var_os("GLRMASK_DISABLE_L2P_PARALLEL_ROOT_TRIE").is_none()
    && std::env::var_os("GLRMASK_ENABLE_L2P_SELF_LOOP_SUBTREE_SKIP").is_none()
    && tree.children().len()>=2 && rayon::current_num_threads()>1
    && (std::env::var_os("GLRMASK_L2P_PARALLEL_ROOT_TRIE").is_some()||tree.reachable_token_ids().len()>=512);
  if parallel||tree.reachable_token_ids().is_empty()||tree.reachable_token_ids().iter().any(|id|id>=512)
-   ||tokenizer.num_states()>=16384||active.len()>65536||num_tsids==0{return None}
- let started=std::time::Instant::now();let mut sink=NWA::from_seed(seed,num_tsids)?;
- let mut initial=vec![false;seed.states().len()];for(_,sources)in roots.iter(){for &s in sources{*initial.get_mut(s as usize)?=true;}}
+   ||map.map_or(tokenizer.num_states()as usize,|m|m.len())>=16384||active.len()>65536||num_tsids==0{return None}
+ let started=std::time::Instant::now();let mut sink=match seed{NativeSeedInput::Generic(seed)=>NWA::from_seed(seed,num_tsids)?,
+  NativeSeedInput::Direct{max_token,classes}=>NWA::from_ordered_singleton_seeds(num_tsids,max_token,classes)?};
+ let mut initial=vec![false;sink.states_len()];for(_,sources)in roots.iter(){for &s in sources{*initial.get_mut(s as usize)?=true;}}
  let mut pm=PossibleMatchesComputer::new(tokenizer);
  let mut builder=TerminalNwaBuilder::new(tokenizer,coloring.clone(),&mut pm,&mut sink,num_tsids,leaf,ignore,
-   initial,false,None,Some(active.to_vec()),tokenizer.num_states() as usize,flat);
+   initial,false,None,Some(active.to_vec()),map.map_or(tokenizer.num_states()as usize,|m|m.len()),flat);
+ if let Some(map)=map {
+  // Mapped DFA scalar paths retain the original cached execution route; all
+  // nontrivial configurations are read from the original immutable lexer.
+  builder.borrowed_map=Some(map);
+  builder.has_epsilon_transitions=map.has_epsilon;
+  builder.scalar_deterministic_dispatch=map.scalar_dispatch;
+  builder.shared_flat_transitions=flat.filter(|rows|rows.len()==tokenizer.num_states()as usize*256);
+  builder.cached_reset_roots=builder.reset_roots().into_vec();
+  if std::env::var_os("GLRMASK_BOUNDARY_BORROWED_COMPACT").is_some(){
+   builder.borrowed_cursor=native_borrowed_cursor::BorrowedScalarCache::new(tokenizer,map,U8Set::from_words(*tree.subtree_bytes()),flat);
+  }
+  builder.lean_frontiers=true;
+ }
  let t=std::time::Instant::now();builder.build_from_trie(tree,roots);builder.profile.trie_walk_ms=t.elapsed().as_secs_f64()*1000.;
  if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
   let slots=builder.leaf_token_ids_buffer.len();
   let live=builder.leaf_token_ids_buffer.values().filter(|x|!x.is_empty()).count();
   eprintln!("[glrmask/profile][native_builder_buffers] sparse_leaf_slots={slots} nonempty_leaf_slots={live} estimated_entry_bytes={} transitions={} epsilons={}",slots*std::mem::size_of::<LeafTokenIds>(),builder.transition_buffer.len()+builder.compact_buffer.as_ref().map_or(0,|b|b.len()),builder.epsilon_buffer.len());
  }
- if builder.compact_buffer.as_ref().is_some_and(|b|b.failed){return None}
+ if builder.mapping_failed||builder.borrowed_cursor.as_ref().is_some_and(|c|c.failed.get())||builder.compact_buffer.as_ref().is_some_and(|b|b.failed){return None}
  let t=std::time::Instant::now();builder.flush_transition_buffer();if builder.leaf_flush_failed{return None}builder.profile.flush_ms=t.elapsed().as_secs_f64()*1000.;
  if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
   eprintln!("[glrmask/profile][native_event_details] future_absence_hits={} walk_ms={:.3} flush_ms={:.3} scan_ms={:.3} match_filter_ms={:.3} end_state_ms={:.3} match_process_ms={:.3} continuation_ms={:.3} scan_calls={} scan_bytes={} matches={}",
@@ -1173,5 +1288,6 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
 #[cfg(test)] #[path="native_builder_tests.rs"] mod tests;
 
 #[path="native_scalar_cursor.rs"] mod native_scalar_cursor;
+#[path="native_borrowed_cursor.rs"] mod native_borrowed_cursor;
 
 #[path="native_compact_buffer.rs"] mod native_compact_buffer;

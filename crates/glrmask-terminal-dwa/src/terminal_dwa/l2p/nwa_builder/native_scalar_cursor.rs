@@ -5,7 +5,7 @@
 use super::*;
 
 impl NfaTrieScanCache<'_> {
-    fn record_native_match(&mut self, terminal:TerminalID, end_state:u32, width:usize, stamp:u32) {
+    pub(super) fn record_native_match(&mut self, terminal:TerminalID, end_state:u32, width:usize, stamp:u32) {
         let t=terminal as usize;
         if self.match_seen_stamp[t]!=stamp {
             self.match_seen_stamp[t]=stamp;

@@ -409,6 +409,27 @@ fn build_boundary_terminal_dwa_query(
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
+    if identity && query_view && std::env::var_os("GLRMASK_BOUNDARY_BORROWED_QUERY").is_some(){
+        if let Some(candidate)=build_boundary_terminal_dwa_borrowed_query(inputs){
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BORROWED_QUERY").is_some(){
+                let reference=build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)?;
+                assert_eq!(candidate.dwa.start_state(),reference.dwa.start_state());assert_eq!(candidate.dwa.states(),reference.dwa.states());
+                for (a,b)in [(&candidate.id_map.tokenizer_states,&reference.id_map.tokenizer_states),(&candidate.id_map.vocab_tokens,&reference.id_map.vocab_tokens)]{
+                    assert_eq!(a.original_to_internal,b.original_to_internal);assert_eq!(a.internal_to_originals,b.internal_to_originals);assert_eq!(a.representative_original_ids,b.representative_original_ids);
+                }
+                eprintln!("[glrmask/validate][borrowed_query] exact_graph=true exact_maps=true tokens={}",inputs.vocab.len());
+            }
+            return Some(candidate);
+        }
+    }
+    build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)
+}
+
+fn build_boundary_terminal_dwa_query_reference(
+    inputs: &BoundaryWalkInputs,
+    shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
+    tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
+) -> Option<BoundaryWalkOutput> {
     if query_view
         && let Some(prepared)=super::boundary_query_view::prepare_with_policy(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans.map(|flat|flat.as_ref()))
     {
@@ -589,6 +610,13 @@ fn build_boundary_terminal_dwa_on_view_policy(
         );
         (mapped,profile,None)
     });
+    finalize_scoped_terminal_output(inputs,mapped,tdwa_profile,native_fixed_point,setup_ms,walk_started)
+}
+
+fn finalize_scoped_terminal_output(
+ inputs:&BoundaryWalkInputs,mapped:crate::compiler::stages::mapped_artifact::MappedArtifact<TerminalAutomaton>,tdwa_profile:tdwa::types::TerminalDwaPhaseProfile,
+ native_fixed_point:Option<tdwa::NativeMinimizationFixedPoint>,setup_ms:f64,walk_started:Instant,
+)->Option<BoundaryWalkOutput>{
     let (automaton, id_map) = mapped.into_parts();
     let mut dwa = match automaton {
         TerminalAutomaton::Dwa(dwa) => dwa,
@@ -7517,4 +7545,48 @@ mod tests {
         }
         assert!(!rows.is_empty(), "artifact must carry at least one boundary shard");
     }
+}
+
+fn build_boundary_terminal_dwa_borrowed_query(inputs:&BoundaryWalkInputs)->Option<BoundaryWalkOutput>{
+    let flat=inputs.flat_trans?;
+    let prepared=super::boundary_query_view::prepare_borrowed(inputs.merged_tokenizer,inputs.vocab,inputs.scope,flat)?;
+    let began=Instant::now();
+    let (mapped,profile,certificate)=tdwa::build_scoped_boundary_borrowed_identity_with_certificate(
+        inputs.merged_tokenizer,inputs.vocab,inputs.ignore_terminal,inputs.grammar,inputs.disallowed_follows,
+        Arc::clone(flat),&prepared.scope,&prepared.original_to_view,&prepared.view_to_original)?;
+    let local=BoundaryWalkInputs{merged_tokenizer:inputs.merged_tokenizer,vocab:inputs.vocab,grammar:inputs.grammar,
+        disallowed_follows:inputs.disallowed_follows,ignore_terminal:inputs.ignore_terminal,
+        follow_transparent_ignores:inputs.follow_transparent_ignores,scope:&prepared.scope,
+        retain_non_crossing_paths:inputs.retain_non_crossing_paths,flat_trans:Some(flat)};
+    let mut output=finalize_scoped_terminal_output(&local,mapped,profile,certificate,0.,began)?;
+        let current=&output.id_map.tokenizer_states;
+        let mut originals=vec![u32::MAX;prepared.original_to_view.len()];
+        let mut groups=vec![Vec::new();current.num_internal_ids() as usize];
+        for (raw,&keep) in inputs.scope.initial_states().keep_raw().iter().enumerate(){if keep{
+            let compact=prepared.original_to_view[raw];assert_ne!(compact,u32::MAX);
+            let class=current.original_to_internal[compact as usize];originals[raw]=class;
+            if class!=u32::MAX{groups[class as usize].push(raw as u32);}
+        }}
+        let representatives=groups.iter().map(|g|g.first().copied().unwrap_or(u32::MAX)).collect();
+        output.id_map.tokenizer_states=crate::compiler::stages::equiv_types::ManyToOneIdMap{
+            original_to_internal:originals,internal_to_originals:groups,representative_original_ids:representatives,
+        };
+        // Runtime publication requires a total raw-state map even though this
+        // shard can be queried only from its certified initial domain. Add one
+        // fresh zero-language class, never reuse a productive continuation ID.
+        // Prove that no accepted lexical point mentions the new ID before
+        // assigning all omitted states to it; symbolic ALL is not a finite row.
+        let dead_class=output.id_map.tokenizer_states.num_internal_ids();
+        if !proves_fresh_dead_class(&output.dwa,dead_class,
+            std::env::var_os("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND").is_some()){
+            return None;
+        }
+        output.id_map.tokenizer_states=output.id_map.tokenizer_states.fill_unmapped_with_new_class();
+        output.profile.setup_ms+=prepared.footprint_ms+prepared.materialize_ms;
+        output.profile.initial_states=inputs.scope.initial_states().len();
+        if compose_profile_enabled(){eprintln!("[glrmask/profile][boundary_query_view] component={} raw_states={} view_states={} first_states={} reset_states={} steps={} footprint_ms={:.3} materialize_ms={:.3} compile_ms={:.3}",
+            inputs.scope.start_component().0,inputs.merged_tokenizer.num_states(),prepared.view_to_original.len(),
+            prepared.first_states,prepared.reset_states,prepared.state_steps,prepared.footprint_ms,
+            prepared.materialize_ms,output.profile.walk_ms);}
+    Some(output)
 }

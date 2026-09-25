@@ -167,3 +167,79 @@ fn native_factored_leaf_flush_exhaustion_declines_without_mutating_the_seed() {
     assert_eq!(seed.start_states(),snapshot.0);
     assert_eq!(seed.states(),snapshot.1);
 }
+
+#[test]
+fn borrowed_source_matches_materialized_logical_event_graph(){
+    let exprs=vec![bytes(&vec![b'q';300]),choice(vec![bytes(b"a"),bytes(b"ab"),bytes(b"abc")]),
+        plus(choice(vec![bytes(b"b"),bytes(b"ca")])),bytes(b"!"),plus(bytes(b" ")),
+        choice(vec![crate::automata::lexer::ast::Expr::Epsilon,bytes(&[0,255,128])])];
+    let mut random=307413u64;let mut next=||{random=random.wrapping_mul(6364136223846793005).wrapping_add(1);(random>>32)as usize};
+    let mut checked=0;
+    for split in [false,true]{
+        let source=if split{build_regex_partitioned(&exprs,&[0,1,2,3,4,5])}else{build_regex(&exprs)}.into_tokenizer(6,Some(Arc::from(exprs.clone())));
+        let source_flat=crate::terminal_dwa::l1::build_flat_transition_table(&source);
+        for case in 0..32{
+            let mut words=vec![b"a".to_vec(),b"abc!".to_vec(),b"ab !a".to_vec(),b"bc".to_vec(),vec![0,255,128]];
+            for _ in 0..16{let n=1+next()%10;words.push((0..n).map(|_|b"abc! q"[next()%6]).collect());}
+            words.sort();words.dedup();
+            let starts=(0..source.num_states()).filter(|&q|q==source.initial_state_id()||next()%30==0).collect::<Vec<_>>();
+            let mut keep=vec![false;source.num_states()as usize];
+            for &q in &starts{for r in source.singleton_epsilon_closure(q){keep[r as usize]=true;}}
+            let reset=source.deterministic_reset_states().into_vec();
+            for word in &words{
+                for &start in &starts{
+                    let mut states=source.singleton_epsilon_closure(start).into_vec();
+                    for &byte in word{states=source.step_all(&states,byte).into_vec();for &q in &states{keep[q as usize]=true;}}
+                }
+                for cut in 0..word.len(){let mut states=reset.iter().flat_map(|&q|source.singleton_epsilon_closure(q)).collect::<Vec<_>>();states.sort();states.dedup();
+                    for &q in &states{keep[q as usize]=true;}
+                    for &byte in &word[cut..]{states=source.step_all(&states,byte).into_vec();for &q in &states{keep[q as usize]=true;}}
+                }
+            }
+            let view=source.induced_observation_view(&keep).unwrap();
+            let borrowed=BorrowedObservation::new(&source,&view.original_to_view,&view.view_to_original).unwrap();
+            assert_eq!(borrowed.has_epsilon,view.tokenizer.has_epsilon_transitions());
+            assert_eq!(borrowed.scalar_dispatch,view.tokenizer.has_scalar_deterministic_dispatch());
+            let mask=view.view_to_original.iter().map(|raw|starts.contains(raw)).collect::<Vec<_>>();
+            let tree=VocabPrefixTree::build(&words.into_iter().enumerate().collect::<Vec<_>>());
+            let ids=id_map(view.tokenizer.num_states(),tree.root.reachable_token_ids().len()as usize);
+            let(seed,leaf,roots)=seeded(&view.tokenizer,&ids,&mask);
+            let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);
+            let coloring=TerminalColoring::identity(6);let active=(0..6).map(|i|case%3!=0||i!=4).collect::<Vec<_>>();let ignore=(case%2==0).then_some(4);
+            let mut a=build(&view.tokenizer,&coloring,ignore,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&flat),&active).unwrap();
+            let mut b=build_borrowed(&source,&coloring,ignore,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&source_flat),&active,borrowed).expect("certified query-prefix coverage");
+            let classes=mask.iter().enumerate().filter(|(_,v)|**v).map(|(q,_)|ids.tokenizer_states.original_to_internal[q]).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+            let mut direct=build_borrowed_direct_seed(&source,&coloring,ignore,&classes,ids.max_internal_token_id(),ids.num_tsids(),&tree.root,&roots,Some(&source_flat),&active,borrowed).unwrap();
+            let a=a.sink.export_raw().unwrap();let b=b.sink.export_raw().unwrap();let d=direct.sink.export_raw().unwrap();assert_eq!(a.start_states(),b.start_states());assert_eq!(a.states(),b.states(),"split={split},case={case}");assert_eq!(a.start_states(),d.start_states());assert_eq!(a.states(),d.states(),"direct_seed split={split},case={case}");checked+=1;
+        }
+    }
+    assert_eq!(checked,64);
+}
+
+#[test]
+fn borrowed_view_epsilon_free_packed_sources_are_exact(){
+    use crate::automata::lexer::tokenizer::artifact_serde;
+    for split in [false,true]{
+        let exprs=vec![choice(vec![bytes(b"abcdef"),bytes(b"ab"),bytes(b"b")]),bytes(b"!"),plus(bytes(b" ")),bytes(&vec![b'q';200])];
+        let fresh=if split{build_regex_partitioned(&exprs,&[0,1,2,3])}else{build_regex(&exprs)}.into_tokenizer(4,Some(Arc::from(exprs.clone())));
+        let wire=artifact_serde::to_fast_bytes(&fresh);let packed=artifact_serde::from_fast_bytes(&wire).unwrap();
+        for tok in [&fresh,&packed]{
+            let words=vec![b"a".to_vec(),b"ab!".to_vec(),b"abc".to_vec(),b"b ab!".to_vec()];let entries=words.iter().cloned().enumerate().collect::<Vec<_>>();let tree=VocabPrefixTree::build(&entries);
+            let first=(0..tok.num_states()).filter(|&q|q%13==0).collect::<Vec<_>>();let mut keep=vec![false;tok.num_states()as usize];
+            for &q in &first {for q in tok.singleton_epsilon_closure(q){keep[q as usize]=true;}}
+            for word in &words {for cut in 0..word.len(){
+                let mut states=if cut==0{first.iter().flat_map(|&q|tok.singleton_epsilon_closure(q)).collect::<Vec<_>>()}else{Vec::new()};
+                states.extend(tok.deterministic_reset_states().iter().flat_map(|&q|tok.singleton_epsilon_closure(q)));states.sort();states.dedup();
+                for &q in &states{keep[q as usize]=true;}
+                for &b in &word[cut..]{states=tok.step_all(&states,b).into_vec();for &q in &states{keep[q as usize]=true;}}
+            }}
+            let view=tok.induced_observation_view(&keep).unwrap();let map=BorrowedObservation::new(tok,&view.original_to_view,&view.view_to_original).unwrap();
+            assert_eq!(map.has_epsilon,view.tokenizer.has_epsilon_transitions());assert_eq!(map.scalar_dispatch,view.tokenizer.has_scalar_deterministic_dispatch());
+            let initial=view.view_to_original.iter().map(|q|first.contains(q)).collect::<Vec<_>>();let ids=id_map(view.tokenizer.num_states(),entries.len());let (seed,leaf,roots)=seeded(&view.tokenizer,&ids,&initial);let color=TerminalColoring::identity(4);let active=vec![true;4];
+            let flat=crate::terminal_dwa::l1::build_flat_transition_table(&view.tokenizer);let rawflat=crate::terminal_dwa::l1::build_flat_transition_table(tok);
+            let mut a=build(&view.tokenizer,&color,None,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&flat),&active).unwrap();
+            let mut b=build_borrowed(tok,&color,None,&seed,leaf,ids.num_tsids(),&tree.root,&roots,Some(&rawflat),&active,map).unwrap();
+            assert_eq!(a.sink.export_raw().unwrap().states(),b.sink.export_raw().unwrap().states());
+        }
+    }
+}

@@ -137,3 +137,23 @@ pub(super) fn prepare_with_policy(
     }
     prepare(tokenizer,vocab,scope)
 }
+
+pub(super) struct BorrowedQuery {
+    pub original_to_view:Vec<u32>,pub view_to_original:Vec<u32>,
+    pub scope:BoundaryAnalysisScope,pub footprint_ms:f64,pub materialize_ms:f64,
+    pub first_states:usize,pub reset_states:usize,pub state_steps:usize,
+}
+pub(super) fn prepare_borrowed(tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:&[u32])->Option<BorrowedQuery>{
+    let footprint=fast::footprint(tokenizer,vocab,scope,flat)?;
+    let began=Instant::now();let n=tokenizer.num_states()as usize;let mut keep=footprint.keep;
+    let closures=tokenizer.all_singleton_epsilon_closures();let start=tokenizer.initial_state_id();
+    keep[start as usize]=true;let mut closure_work=0usize;
+    for q in 0..n{if keep[q]{closure_work=closure_work.checked_add(closures[q].len())?;if closure_work>8_000_000{return None;}for &r in &closures[q]{*keep.get_mut(r as usize)?=true;}}}
+    let mut inverse=vec![start];let mut mapping=vec![u32::MAX;n];mapping[start as usize]=0;
+    for(q,&yes)in keep.iter().enumerate(){if yes&&q!=start as usize{mapping[q]=inverse.len()as u32;inverse.push(q as u32);}}
+    if inverse.len()>=16384{return None;}
+    let reset=scope.reset_states().iter().map(|&q|mapping.get(q as usize).copied().filter(|&q|q!=u32::MAX)).collect::<Option<Vec<_>>>()?;
+    let scoped=scope.relocate_query_view(&mapping,inverse.len(),reset).ok()?;
+    Some(BorrowedQuery{original_to_view:mapping,view_to_original:inverse,scope:scoped,
+        footprint_ms:footprint.footprint_ms,materialize_ms:began.elapsed().as_secs_f64()*1000.,first_states:footprint.first_states,reset_states:footprint.reset_states,state_steps:footprint.state_steps})
+}

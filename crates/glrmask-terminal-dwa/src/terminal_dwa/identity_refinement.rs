@@ -109,19 +109,43 @@ pub fn build_scoped_boundary_identity_with_certificate(
     flat_trans: Arc<[u32]>,
     scope: &scope::BoundaryAnalysisScope,
 ) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, Option<NativeMinimizationFixedPoint>)> {
+    build_identity_common(tokenizer,vocab,ignore_terminal,grammar,disallowed_follows,flat_trans,scope,None)
+}
+
+#[doc(hidden)]
+pub fn build_scoped_boundary_borrowed_identity_with_certificate(
+    source:&Tokenizer,vocab:&Vocab,ignore_terminal:Option<TerminalID>,grammar:&AnalyzedGrammar,
+    disallowed_follows:&BTreeMap<u32,BitSet>,source_flat:Arc<[u32]>,scope:&scope::BoundaryAnalysisScope,
+    original_to_view:&[u32],view_to_original:&[u32],
+)->Option<(MappedArtifact<TerminalAutomaton>,TerminalDwaPhaseProfile,Option<NativeMinimizationFixedPoint>)>{
+    let borrowed=l2p::nwa_builder::native_builder::BorrowedObservation::new(source,original_to_view,view_to_original)?;
+    build_identity_common(source,vocab,ignore_terminal,grammar,disallowed_follows,source_flat,scope,Some(borrowed))
+}
+
+fn build_identity_common(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    scope: &scope::BoundaryAnalysisScope,
+    borrowed:Option<l2p::nwa_builder::native_builder::BorrowedObservation<'_>>,
+) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, Option<NativeMinimizationFixedPoint>)> {
     let started = Instant::now();
-    let n = tokenizer.num_states();
+    let n = borrowed.map_or(tokenizer.num_states(),|m|m.len()as u32);
     let max_token = *vocab.entries_map().keys().max()?;
     if n == 0 || n > 200_000 || max_token >= 2_000_000 || vocab.len() > 4096
         || tokenizer.has_virtual_residual_runtime()
         || vocab.entries_map().values().any(Vec::is_empty)
         || scope.initial_states().keep_raw().len() != n as usize
         || grammar.num_terminals != tokenizer.num_terminals()
-        || flat_trans.len() != (n as usize).checked_mul(256)?
+        || flat_trans.len() != (tokenizer.num_states()as usize).checked_mul(256)?
     {
         return None;
     }
-    let mut roots = tokenizer.deterministic_reset_states().into_vec();
+    let mut roots = tokenizer.deterministic_reset_states().into_iter()
+        .map(|raw|borrowed.map_or(Some(raw),|m|m.logical(raw))).collect::<Option<Vec<_>>>()?;
     roots.sort_unstable(); roots.dedup();
     if roots != scope.reset_states() { return None; }
     let packed = std::env::var_os("GLRMASK_BOUNDARY_PACK_INITIAL_TSIDS").is_some();
@@ -175,6 +199,7 @@ pub fn build_scoped_boundary_identity_with_certificate(
     };
     let active = vec![true; tokenizer.num_terminals() as usize];
     let ordinary = || {
+        if borrowed.is_some(){return None;}
         let always = compute_always_allowed_follows(grammar);
         l2p::build_l2p_id_map_and_terminal_dwa_mode(
         "boundary_identity_refinement", tokenizer, vocab,
@@ -188,11 +213,12 @@ pub fn build_scoped_boundary_identity_with_certificate(
     let direct=(std::env::var_os("GLRMASK_BOUNDARY_DIRECT_IDENTITY_ENTRY").is_some()
         &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
         &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some())
-        .then(||l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
-            disallowed_follows,Some(&flat_trans),scope,&shared.id_map)).flatten();
+        .then(||if let Some(map)=borrowed{l2p::native_identity::try_build_borrowed(tokenizer,vocab,ignore_terminal,grammar,
+            disallowed_follows,Some(&flat_trans),scope,&shared.id_map,map)}else{l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
+            disallowed_follows,Some(&flat_trans),scope,&shared.id_map)}).flatten();
     let (mut output, fixed_point)=match direct {
         Some(candidate)=>{
-            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_IDENTITY").is_some(){
+            if borrowed.is_none() && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_IDENTITY").is_some(){
                 let reference=ordinary()?;
                 l2p::native_identity::validate(&candidate,&reference);
                 eprintln!("[glrmask/validate][boundary_direct_identity] exact_graph=true exact_maps=true tokens={}",vocab.len());

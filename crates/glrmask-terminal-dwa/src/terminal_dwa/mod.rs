@@ -18,7 +18,7 @@ mod finalize_ignore;
 #[cfg(any(test, feature = "internal-api"))]
 mod identity_refinement;
 #[cfg(feature = "internal-api")]
-pub use identity_refinement::{build_scoped_boundary_identity_refinement,build_scoped_boundary_identity_with_certificate,NativeMinimizationFixedPoint};
+pub use identity_refinement::{build_scoped_boundary_borrowed_identity_with_certificate,build_scoped_boundary_identity_refinement,build_scoped_boundary_identity_with_certificate,NativeMinimizationFixedPoint};
 pub mod grammar_helpers;
 pub mod l1;
 pub mod l2p;

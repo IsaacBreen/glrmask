@@ -185,6 +185,20 @@ fn w(seed:&mut u64)->Weight{
 /// event emission, postprocessing, determinization, and minimization.
 pub struct NativeSink { arena:Arena, pool:Pool, num_tsids:u32, edges:usize }
 impl NativeSink {
+ /// Constructs precisely the ordinary leaf0/start1/per-selected-TSID seed
+ /// graph without allocating generic Weight/NWA objects and reimporting them.
+ pub fn from_ordered_singleton_seeds(num_tsids:u32,max_token:u32,seeds:&[u32])->Option<Self>{
+  if num_tsids==0||max_token>=512||seeds.len().checked_add(2)?>=16384||!policy_supported()
+    ||seeds.iter().any(|&q|q>=num_tsids)||seeds.windows(2).any(|w|w[0]>=w[1]){return None;}
+  let mut pool=Pool::new();let mut bits=[0u64;8];
+  let whole=max_token as usize/64;for word in &mut bits[..whole]{*word=u64::MAX;}
+  bits[whole]=if max_token%64==63{u64::MAX}else{(1u64<<(max_token%64+1))-1};
+  let b=pool.intern_bits(bits);let mut states=Vec::with_capacity(seeds.len()+2);
+  states.push(Row{final_w:Some(1),..Default::default()});states.push(Row::default());
+  for &q in seeds{let id=states.len()as u32;let w=pool.intern(smallvec![Run{lo:q,hi:q,b}]);states[1].eps.push((id,w));states.push(Row::default());}
+  if pool.failed{return None;}
+  Some(Self{arena:Arena{starts:vec![1],states},pool,num_tsids,edges:seeds.len()})
+ }
  pub fn from_seed(seed:&NWA,num_tsids:u32)->Option<Self> {
   if num_tsids==0||!policy_supported(){return None}
   let mut pool=Pool::new();let arena=import(seed,&mut pool)?;
