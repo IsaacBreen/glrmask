@@ -919,7 +919,8 @@ impl RowMap {
 fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
-    let profile = std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NATIVE_TERMINAL").is_some();
+    let reuse_scratch=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH").is_some();
+    let profiling = std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NATIVE_TERMINAL").is_some();
     let total = Instant::now();
     let mut phase = Instant::now();
     let n = graph.len();
@@ -945,6 +946,21 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
     }
     let mut needed=vec![0u32;n];
     for &s in topo.iter().rev() {
+        if reuse_scratch {
+        let mut ws: SmallVec<[u32; 8]> = smallvec![graph[s].0];
+        let mut kept = 0;
+        for index in 0..graph[s].1.len() {
+            let (l,d,w) = graph[s].1[index];
+            let nw=if leaf==Some(d){w}else{p.meet(w,needed[d as usize])};
+            if nw != 0 {
+                ws.push(nw);
+                graph[s].1[kept] = (l,d,nw);
+                kept += 1;
+            }
+        }
+        graph[s].1.truncate(kept);
+        needed[s] = p.join_terms(ws);
+        } else {
         let mut ws = vec![graph[s].0];
         let mut es = Edges::new();
         for &(l, d, w) in &graph[s].1 {
@@ -956,11 +972,12 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
         }
         graph[s].1 = es;
         needed[s] = p.join_all(ws);
+        }
         if needed[s] == 1 {
             return None;
         }
     }
-    if profile {
+    if profiling {
         eprintln!("MIN push_ms={:.3}", phase.elapsed().as_secs_f64() * 1000.);
     }
     phase = Instant::now();
@@ -1073,6 +1090,10 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
         }
         let mut regions = Regions::default();
         let mut groups = Vec::<Group>::new();
+        let mut observations = Vec::<(i32,u32)>::new();
+        let mut profile = Vec::<(u64,u32)>::new();
+        let mut targets = Vec::<(i32,u32)>::new();
+        let mut merged = Vec::<(u64,u32)>::new();
         for members in classes {
             if p.failed {
                 #[cfg(test)]
@@ -1093,10 +1114,16 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                 continue;
             }
             let s = members[0];
-            let observations = std::iter::once((i32::MIN, graph[s].0))
+            // The reference policy drops scratch storage after each class;
+            // the selected policy keeps only its capacity, never its contents.
+            if !reuse_scratch {
+                observations=Vec::new(); profile=Vec::new();
+                targets=Vec::new(); merged=Vec::new();
+            }
+            observations.clear();
+            observations.extend(std::iter::once((i32::MIN, graph[s].0))
                 .chain(graph[s].1.iter().map(|&(l, _, w)| (l, w)))
-                .filter(|&(_, w)| w != 0)
-                .collect::<Vec<_>>();
+                .filter(|&(_, w)| w != 0));
             if observations.iter().any(|&(_, w)| w == 1) {
                 return None;
             }
@@ -1108,8 +1135,8 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                         .zip(&p.values[first])
                         .all(|(a, b)| a.lo == b.lo && a.hi == b.hi)
             });
-            let profile = if aligned {
-                let mut profile = Vec::new();
+            profile.clear();
+            if aligned {
                 for i in 0..p.values[first].len() {
                     let r = p.values[first][i];
                     let count = (u64::from(r.hi) - u64::from(r.lo) + 1) * observations.len() as u64;
@@ -1124,10 +1151,9 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                     let reg = regions.intern(sig, p);
                     profile.extend((r.lo..=r.hi).map(|row| (u64::from(row), reg)));
                 }
-                profile
             } else {
                 let mut byrow = FxHashMap::<u64, RegionSignature>::default();
-                for (label, w) in observations {
+                for &(label, w) in &observations {
                     for r in &p.values[w as usize] {
                         let len = u64::from(r.hi) - u64::from(r.lo) + 1;
                         point_budget += len;
@@ -1139,18 +1165,13 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                         }
                     }
                 }
-                byrow
-                    .into_iter()
-                    .map(|(row, sig)| (row, regions.intern(sig, p)))
-                    .collect::<Vec<_>>()
-            };
-            let targets = graph[s]
-                .1
-                .iter()
-                .map(|&(l, d, _)| (l, mapped[d as usize]))
-                .collect::<Vec<_>>();
+                profile.extend(byrow.into_iter()
+                    .map(|(row, sig)| (row, regions.intern(sig, p))));
+            }
+            targets.clear();
+            targets.extend(graph[s].1.iter().map(|&(l,d,_)|(l,mapped[d as usize])));
             let mut selected = None;
-            let mut merged = Vec::new();
+            merged.clear();
             'groups: for (i, g) in groups.iter().enumerate() {
                 if !targets
                     .iter()
@@ -1176,16 +1197,16 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
             if let Some(i) = selected {
                 let g = &mut groups[i];
                 g.members.extend(members);
-                g.targets.extend(targets.into_iter().map(|(l,d)|(l as u64,d)));
-                g.behavior.extend(merged);
+                g.targets.extend(targets.iter().copied().map(|(l,d)|(l as u64,d)));
+                g.behavior.extend(merged.iter().copied());
             } else {
                 if slots.is_some_and(|n| n.saturating_mul(groups.len() + 1) > 2_000_000) || target_slots.is_some_and(|n| n.saturating_mul(groups.len()+1)>2_000_000) {
                     return None;
                 }
                 groups.push(Group {
                     members,
-                    targets: RowMap::from_entries(target_slots,targets.into_iter().map(|(l,d)|(l as u64,d))),
-                    behavior: RowMap::from_entries(slots, profile),
+                    targets: RowMap::from_entries(target_slots,targets.iter().copied().map(|(l,d)|(l as u64,d))),
+                    behavior: RowMap::from_entries(slots, profile.iter().copied()),
                 });
             }
         }
@@ -1222,7 +1243,7 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                 .collect();
             output.push((fw, es));
         }
-        if profile {
+        if profiling {
             eprintln!(
                 "MIN height={} candidates={} groups={} class_ms={:.3} group_ms={:.3} rebuild_ms={:.3} total_ms={:.3}",
                 h,
@@ -1235,7 +1256,7 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
             );
         }
     }
-    if profile {
+    if profiling {
         eprintln!(
             "MIN afterpush_ms={:.3} total_ms={:.3}",
             phase.elapsed().as_secs_f64() * 1000.,
