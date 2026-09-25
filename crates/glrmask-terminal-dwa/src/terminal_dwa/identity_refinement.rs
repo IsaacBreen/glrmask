@@ -25,7 +25,50 @@ fn singleton_state_map(selected: &[bool], packed: bool) -> ManyToOneIdMap {
     )
 }
 
+/// A native minimum whose graph has not undergone ignore erasure or another
+/// transformation. The private constructor prevents generic callers from
+/// treating an arbitrary equivalent TDWA as a minimization fixed point.
+/// This certificate belongs to the accompanying output and is consumed before
+/// any change to that graph. It is never persisted or exposed to mask runtime.
+pub struct NativeMinimizationFixedPoint { _private: () }
+
+impl NativeMinimizationFixedPoint {
+    // Reproduce the ordinary second pass's *small-direct* eligibility. Larger
+    // outputs can be graph-isomorphic fixed points yet have a different raw
+    // row order after generic hash-class enumeration. They must keep the old
+    // second pass; a language or isomorphism proof alone is not sufficient.
+    fn from_native(dwa:&crate::automata::weighted_u32::dwa::DWA,ignore:Option<TerminalID>)->Option<Self>{
+        let n=dwa.states().len();
+        if ignore.is_some() || n==0 || n>192 { return None; }
+        let mut heights=vec![0usize;n];
+        let mut buckets=vec![0usize;n];
+        for (source,state) in dwa.states().iter().enumerate(){
+            let mut height=0;
+            for &(target,ref weight) in state.transitions.values(){
+                // The native output is constructed bottom-up with live edges.
+                // Refuse any future backend representation that changes this.
+                if target as usize>=source || weight.is_empty(){return None;}
+                height=height.max(heights[target as usize]+1);
+            }
+            heights[source]=height;buckets[height]+=1;
+            if height!=0 && buckets[height]>64{return None;}
+        }
+        Some(Self{_private:()})
+    }
+}
+
 pub fn build_scoped_boundary_identity_refinement(
+    tokenizer:&Tokenizer,vocab:&Vocab,ignore_terminal:Option<TerminalID>,
+    grammar:&AnalyzedGrammar,disallowed_follows:&BTreeMap<u32,BitSet>,
+    flat_trans:Arc<[u32]>,scope:&scope::BoundaryAnalysisScope,
+)->Option<(MappedArtifact<TerminalAutomaton>,TerminalDwaPhaseProfile)>{
+    build_scoped_boundary_identity_with_certificate(tokenizer,vocab,ignore_terminal,
+        grammar,disallowed_follows,flat_trans,scope).map(|(mapped,profile,_)|(mapped,profile))
+}
+
+/// Same public construction contract, with an additional narrowly scoped
+/// certificate for a completed, unmodified native minimization.
+pub fn build_scoped_boundary_identity_with_certificate(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
     ignore_terminal: Option<TerminalID>,
@@ -33,7 +76,7 @@ pub fn build_scoped_boundary_identity_refinement(
     disallowed_follows: &BTreeMap<u32, BitSet>,
     flat_trans: Arc<[u32]>,
     scope: &scope::BoundaryAnalysisScope,
-) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile)> {
+) -> Option<(MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile, Option<NativeMinimizationFixedPoint>)> {
     let started = Instant::now();
     let n = tokenizer.num_states();
     let max_token = *vocab.entries_map().keys().max()?;
@@ -99,15 +142,39 @@ pub fn build_scoped_boundary_identity_refinement(
         initial_state_domain_is_exact: true,
     };
     let active = vec![true; tokenizer.num_terminals() as usize];
-    let always = compute_always_allowed_follows(grammar);
-    let mut output = l2p::build_l2p_id_map_and_terminal_dwa_mode(
+    let ordinary = || {
+        let always = compute_always_allowed_follows(grammar);
+        l2p::build_l2p_id_map_and_terminal_dwa_mode(
         "boundary_identity_refinement", tokenizer, vocab,
         &TerminalColoring::identity(active.len()), false, ignore_terminal, grammar,
         &always, &active, disallowed_follows,
         None, None, None, None, None, None, None, Some(&flat_trans), None,
         Some(&shared.id_map.tokenizer_states), false,
         Some(scope.initial_states().keep_raw()), Some(&options),
-    )?;
+        )
+    };
+    let direct=(std::env::var_os("GLRMASK_BOUNDARY_DIRECT_IDENTITY_ENTRY").is_some()
+        &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
+        &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some())
+        .then(||l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
+            disallowed_follows,Some(&flat_trans),scope,&shared.id_map)).flatten();
+    let (mut output, fixed_point)=match direct {
+        Some(candidate)=>{
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_IDENTITY").is_some(){
+                let reference=ordinary()?;
+                l2p::native_identity::validate(&candidate,&reference);
+                eprintln!("[glrmask/validate][boundary_direct_identity] exact_graph=true exact_maps=true tokens={}",vocab.len());
+            }
+            // Native greedy groups are pairwise incompatible on their live
+            // domains or label targets. Taking compatible unions cannot remove
+            // these witnesses. Weights are already backward-pushed; by height
+            // induction a second identical-policy minimization changes neither
+            // weights nor groups. Ignore erasure could invalidate that proof.
+            let proof=NativeMinimizationFixedPoint::from_native(&candidate.dwa,ignore_terminal);
+            (candidate,proof)
+        }
+        None=>(ordinary()?,None),
+    };
     let finish = Instant::now();
     let dwa = match erase_ignore_after_ti(TerminalAutomaton::Dwa(output.dwa), ignore_terminal) {
         TerminalAutomaton::Dwa(dwa) => dwa,
@@ -122,7 +189,7 @@ pub fn build_scoped_boundary_identity_refinement(
         eprintln!("[glrmask/profile][boundary_identity_refinement] tokens={} states={n} initial={} packed={packed} map_ms={map_ms:.3} total_ms={:.3}",
             vocab.len(), scope.initial_states().len(), started.elapsed().as_secs_f64() * 1000.0);
     }
-    Some((MappedArtifact::new(TerminalAutomaton::Dwa(dwa), output.id_map), output.profile))
+    Some((MappedArtifact::new(TerminalAutomaton::Dwa(dwa), output.id_map), output.profile, fixed_point))
 }
 
 #[cfg(test)]
@@ -130,6 +197,24 @@ mod tests {
     use super::*;
     use crate::automata::lexer::ast::{bytes, choice, plus};
     use crate::automata::lexer::compile::{build_regex_monolithic, build_regex_partitioned};
+
+    #[test]
+    fn native_fixedpoint_certificate_requires_the_unchanged_small_direct_order() {
+        use crate::automata::weighted_u32::dwa::{DWA,DWAState};
+        use crate::ds::weight::Weight;
+        let w=Weight::from_token_set_for_tsid(0,[0].into_iter().collect());
+        let mut rows=vec![DWAState::default();3];rows[0].final_weight=Some(w.clone());
+        rows[1].transitions.insert(0,(0,w.clone()));rows[2].transitions.insert(1,(1,w.clone()));
+        let good=DWA::from_parts(rows.clone(),2);
+        assert!(NativeMinimizationFixedPoint::from_native(&good,None).is_some());
+        assert!(NativeMinimizationFixedPoint::from_native(&good,Some(2)).is_none());
+        rows[1].transitions.insert(2,(2,w.clone()));
+        assert!(NativeMinimizationFixedPoint::from_native(&DWA::from_parts(rows,2),None).is_none());
+        assert!(NativeMinimizationFixedPoint::from_native(&DWA::from_parts(vec![DWAState::default();193],0),None).is_none());
+        let mut wide=vec![DWAState::default();66];wide[0].final_weight=Some(w.clone());
+        for row in &mut wide[1..]{row.transitions.insert(0,(0,w.clone()));}
+        assert!(NativeMinimizationFixedPoint::from_native(&DWA::from_parts(wide,65),None).is_none());
+    }
 
     #[test]
     fn initial_coordinate_packing_is_a_total_bijection() {
@@ -161,6 +246,8 @@ mod tests {
             (0..4).map(|t| format!("t{t}")).collect(), vec!["start".into(), "body".into()], 0);
         let mut seed = 244134u64;
         let mut random = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); (seed >> 32) as usize };
+        let mut direct_cases=0;
+        let mut fixed_points=0;
         for partitioned in [false, true] {
             let tokenizer = if partitioned { build_regex_partitioned(&expressions, &[0, 1, 2, 3]) }
                 else { build_regex_monolithic(&expressions) }.into_tokenizer(4, Some(expressions.clone().into()));
@@ -189,9 +276,29 @@ mod tests {
                     let TerminalAutomaton::Dwa(dwa) = automaton else { panic!("DWA expected") };
                     LocalIdMapTerminalDwa { dwa, id_map, profile: Default::default() }
                 };
-                l2p::terminal_dwa_equivalence::compare(&parts(reference), &parts(candidate))
+                let candidate=parts(candidate);
+                if let Some(mut direct)=l2p::native_identity::try_build(&tokenizer,&vocab,ignore,
+                    &grammar,&follows,Some(&flat),&scope,&candidate.id_map){
+                    if ignore.is_none(){
+                        let twice=crate::automata::weighted::minimize::minimize_owned(direct.dwa.clone());
+                        assert_eq!(direct.dwa.start_state(),twice.start_state());
+                        assert_eq!(direct.dwa.states(),twice.states(),"native output must be an exact fixed point");
+                        fixed_points+=1;
+                    }
+                    direct.dwa=match erase_ignore_after_ti(TerminalAutomaton::Dwa(direct.dwa),ignore){
+                        TerminalAutomaton::Dwa(dwa)=>dwa,
+                        TerminalAutomaton::TokenDeterministicNwa(nwa)|TerminalAutomaton::EpsilonNwa(nwa)=>{
+                            crate::automata::weighted::determinize::determinize(&nwa).unwrap()
+                        }
+                    };
+                    l2p::native_identity::validate(&direct,&candidate);
+                    direct_cases+=1;
+                }
+                l2p::terminal_dwa_equivalence::compare(&parts(reference), &candidate)
                     .unwrap_or_else(|e| panic!("partitioned={partitioned} case={case}: {e}"));
             }
         }
+        assert!(direct_cases>=8,"direct native path not exercised: {direct_cases}");
+        assert!(fixed_points>=8,"native fixedpoint not exercised: {fixed_points}");
     }
 }

@@ -11,6 +11,8 @@ use crate::compiler::stages::id_map_and_terminal_dwa::scope::BoundaryAnalysisSco
 use crate::Vocab;
 use std::time::Instant;
 
+mod fast;
+
 pub(super) struct QueryView {
     pub view:TokenizerObservationView,
     pub scope:BoundaryAnalysisScope,
@@ -109,4 +111,29 @@ mod tests {
             let empty=Vocab::new(vec![(99,vec![])]);assert!(prepare(&tokenizer,&empty,&scope).is_none());
         }
     }
+}
+
+/// Uses only the direct table of this exact immutable source, as built by the
+/// caller at the link's disjoint-union boundary. A declined optimization uses
+/// the original traversal and its original resource/coverage decisions.
+pub(super) fn prepare_with_policy(
+    tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&[u32]>,
+)->Option<QueryView>{
+    if std::env::var_os("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW").is_some() {
+        if let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
+                let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
+                assert_eq!(candidate.view.original_to_view,reference.view.original_to_view);
+                assert_eq!(candidate.scope.initial_states().keep_raw(),reference.scope.initial_states().keep_raw());
+                assert_eq!(candidate.scope.reset_states(),reference.scope.reset_states());
+                assert_eq!((candidate.first_states,candidate.reset_states,candidate.state_steps),
+                    (reference.first_states,reference.reset_states,reference.state_steps));
+                assert_eq!(crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&candidate.view.tokenizer),
+                    crate::automata::lexer::tokenizer::artifact_serde::to_fast_bytes(&reference.view.tokenizer));
+                eprintln!("[glrmask/validate][factored_query_view] exact=true states={}",candidate.view.tokenizer.num_states());
+            }
+            return Some(candidate);
+        }
+    }
+    prepare(tokenizer,vocab,scope)
 }

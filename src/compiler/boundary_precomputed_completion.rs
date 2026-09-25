@@ -120,14 +120,34 @@ impl PreparedSourceSpan {
         ).map(|(mask,_)|mask)
     }
     pub(crate) fn refine(&self,merged:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<FirstRefinement>{
+        let fast=std::env::var_os("GLRMASK_BOUNDARY_UNIFORM_FIRST_PROOF").is_some();
+        let result=self.refine_impl(merged,vocab,scope,fast);
+        if fast && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_UNIFORM_FIRST_PROOF").is_some(){
+            let reference=self.refine_impl(merged,vocab,scope,false);
+            assert_eq!(result.is_some(),reference.is_some());
+            if let (Some(a),Some(b))=(&result,&reference){
+                assert_eq!(a.original_to_rep,b.original_to_rep);
+                assert_eq!(a.representatives,b.representatives);
+                assert_eq!((a.before,a.after),(b.before,b.after));
+                eprintln!("[glrmask/validate][uniform_first_proof] exact=true before={} after={}",a.before,a.after);
+            }
+        }
+        result
+    }
+    fn refine_impl(&self,merged:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,fast:bool)->Option<FirstRefinement>{
         let n=merged.num_states()as usize;let local_n=self.prepared.context.raw_states();let offset=self.offset as usize;
         if !scope.require_crossing()||vocab.is_empty()||vocab.entries_map().values().any(Vec::is_empty)
             ||scope.initial_states().keep_raw().len()!=n||offset.checked_add(local_n)?>n{return None;}
+        let terminal_end=self.terminal_offset.checked_add(self.prepared.context.source().num_terminals())?;
+        let uniform=fast && !merged.has_virtual_residual_runtime()
+            && scope.ownership().num_terminals()==merged.num_terminals() as usize
+            && terminal_end as usize<=scope.ownership().num_terminals()
+            && (self.terminal_offset..terminal_end).all(|t|scope.ownership().owner_of_terminal(t)==Some(scope.start_component()));
         let mut local=vec![false;local_n];let mut reps=vec![false;n];let mut mapping=(0..n as u32).collect::<Vec<_>>();
         let mut before=0;let mut after=0;
         for(q,&keep)in scope.initial_states().keep_raw().iter().enumerate(){if !keep{continue;}before+=1;
             if q<offset||q>=offset+local_n{return None;}
-            let pure=merged.singleton_epsilon_closure(q as u32).iter().all(|&r|merged.matched_terminals_iter(r).chain(merged.possible_future_terminals_iter(r)).all(|t|scope.ownership().owner_of_terminal(t)==Some(scope.start_component())));
+            let pure=uniform || merged.singleton_epsilon_closure(q as u32).iter().all(|&r|merged.matched_terminals_iter(r).chain(merged.possible_future_terminals_iter(r)).all(|t|scope.ownership().owner_of_terminal(t)==Some(scope.start_component())));
             if pure{local[q-offset]=true;}else{reps[q]=true;after+=1;}
         }
         let words=vocab.entries_map().values().cloned().collect::<Vec<_>>();
@@ -181,6 +201,10 @@ mod lifecycle_tests {
         let scope=BoundaryAnalysisScope::new(InitialStateDomain::from_mask(seeds.len(),seeds).unwrap(),merged.deterministic_reset_states().into_vec(),Arc::new(BoundaryOwnership::flat(&[0,nt],nt+1).unwrap()),ImmediateComponentId(0),true,None).unwrap();
         let span=PreparedSourceSpan::for_component(&loaded,offsets[0],0).unwrap();
         let actual=span.refine(&merged,&selected,&scope).unwrap();
+        let uniform=span.refine_impl(&merged,&selected,&scope,true).unwrap();
+        let ordinary=span.refine_impl(&merged,&selected,&scope,false).unwrap();
+        assert_eq!(uniform.original_to_rep,ordinary.original_to_rep);
+        assert_eq!(uniform.representatives,ordinary.representatives);
         let flat=l1::build_flat_transition_table(&merged);
         let expected=super::super::boundary_first_completion::prepare(&merged,&selected,&scope,&flat).unwrap();
         assert_eq!(actual.original_to_rep,expected.original_to_rep);assert_eq!(actual.representatives,expected.representatives);

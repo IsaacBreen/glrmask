@@ -410,7 +410,7 @@ fn build_boundary_terminal_dwa_query(
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
     if query_view
-        && let Some(prepared)=super::boundary_query_view::prepare(inputs.merged_tokenizer,inputs.vocab,inputs.scope)
+        && let Some(prepared)=super::boundary_query_view::prepare_with_policy(inputs.merged_tokenizer,inputs.vocab,inputs.scope,inputs.flat_trans.map(|flat|flat.as_ref()))
     {
         let view=&prepared.view;
         let mut output=build_boundary_terminal_dwa_query_jobs(&BoundaryWalkInputs{
@@ -570,11 +570,12 @@ fn build_boundary_terminal_dwa_on_view_policy(
     };
     let setup_ms = setup_started.elapsed().as_secs_f64() * 1000.0;
     let walk_started = Instant::now();
-    let refined = identity.then(|| tdwa::build_scoped_boundary_identity_refinement(
+    let refined = identity.then(|| tdwa::build_scoped_boundary_identity_with_certificate(
         tokenizer, inputs.vocab, inputs.ignore_terminal, inputs.grammar,
         inputs.disallowed_follows, Arc::clone(flat), inputs.scope,
     )).flatten();
-    let (mapped, tdwa_profile) = refined.unwrap_or_else(|| tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
+    let (mapped, tdwa_profile, native_fixed_point) = refined.unwrap_or_else(|| {
+        let (mapped, profile)=tdwa::build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
         tokenizer,
         inputs.vocab,
         &coloring,
@@ -585,7 +586,9 @@ fn build_boundary_terminal_dwa_on_view_policy(
         inputs.scope,
         shared,
         terminal_filter,
-    ));
+        );
+        (mapped,profile,None)
+    });
     let (automaton, id_map) = mapped.into_parts();
     let mut dwa = match automaton {
         TerminalAutomaton::Dwa(dwa) => dwa,
@@ -599,8 +602,22 @@ fn build_boundary_terminal_dwa_on_view_policy(
     // though it still has transitions.  Canonicalize it here so callers do
     // not carry dead terminal structure into template/parser construction and
     // so the empty-shard representation remains stable across family choices.
-    let (finalized, accepted_tokens, final_minimize_ms) = finalize_boundary_terminal_dwa(
-        dwa, &id_map, std::env::var_os("GLRMASK_BOUNDARY_SUMMARIZE_AFTER_MIN").is_some());
+    let certified = native_fixed_point.is_some()
+        && std::env::var_os("GLRMASK_BOUNDARY_REUSE_NATIVE_MINIMUM").is_some();
+    let summarize_after=std::env::var_os("GLRMASK_BOUNDARY_SUMMARIZE_AFTER_MIN").is_some();
+    let reference=(certified && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_MINIMUM").is_some())
+        .then(||finalize_boundary_terminal_dwa(dwa.clone(),&id_map,summarize_after));
+    let (finalized, accepted_tokens, final_minimize_ms) = if certified {
+        let accepted=terminal_accepted_original_tokens(&dwa,&id_map);
+        let graph=if accepted.is_empty(){DWA::new(id_map.num_tsids(),id_map.max_internal_token_id())}else{dwa};
+        (graph,accepted,0.0)
+    }else{finalize_boundary_terminal_dwa(dwa,&id_map,summarize_after)};
+    if let Some((reference,accepted,_))=reference {
+        assert_eq!(accepted_tokens,accepted,"native minimum changed original accepted token IDs");
+        assert_eq!(finalized.start_state(),reference.start_state());
+        assert_eq!(finalized.states(),reference.states(),"native fixed-point certificate did not preserve exact graph");
+        eprintln!("[glrmask/validate][reuse_native_minimum] exact_graph=true tokens={}",inputs.vocab.len());
+    }
     dwa = finalized;
     let lexical_accepted_tokens = accepted_tokens.len();
     let all_input_tokens_accepted = accepted_tokens.len() == inputs.vocab.len()

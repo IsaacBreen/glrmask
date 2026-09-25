@@ -13,6 +13,7 @@ pub mod equivalence_analysis;
 pub mod nwa_builder;
 mod native_boundary;
 mod native_pipeline;
+pub(super) mod native_identity;
 pub mod postprocess;
 pub(crate) mod terminal_dwa_equivalence;
 #[cfg(feature = "internal-api")]
