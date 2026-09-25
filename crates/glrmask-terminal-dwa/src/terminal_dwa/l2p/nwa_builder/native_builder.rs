@@ -65,6 +65,8 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     has_epsilon_transitions: bool,
     scalar_deterministic_dispatch: bool,
     scalar_cursor:bool,
+    lean_frontiers:bool,
+    cached_reset_roots:Vec<u32>,
     validate_scalar_cursor:bool,
     dfa_scan_strict_reference: bool,
 }
@@ -158,6 +160,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             has_epsilon_transitions,
             scalar_deterministic_dispatch,
             scalar_cursor:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR").is_some(),
+            lean_frontiers:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(),
+            cached_reset_roots:if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
             validate_scalar_cursor:std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
                 "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
@@ -796,7 +800,16 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let leaf_token_id = child_node.token_id() as u32;
         let mut next_level_nodes = NodesByTokenizerState::new();
         let mut pending_by_offset = BTreeMap::<usize, NodesByTokenizerState>::new();
-        pending_by_offset.insert(0, initial_nodes.clone());
+        // The initial frontier is immutable for this entire segment. Borrow it
+        // instead of allocating/copying one source Vec per raw lexer state.
+        let mut initial = Some(if self.lean_frontiers {
+            std::borrow::Cow::Borrowed(initial_nodes)
+        } else {
+            std::borrow::Cow::Owned(initial_nodes.clone())
+        });
+        // No recursive caller observes the continuation frontier of a trie
+        // leaf. Token-end futures and longest-match events are still emitted.
+        let keep_next_frontier = !self.lean_frontiers || !child_node.children().is_empty();
 
         // Reusable DFA longest-match buffer. The pre-epsilon lexer path used
         // this scalar scanner and is dramatically faster than routing every
@@ -804,15 +817,22 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         let mut match_map_buf = FxHashMap::<TerminalID, (usize, u32)>::default();
         let mut matches_buf: Vec<TokenizerMatch> = Vec::new();
 
-        while let Some((offset, nodes_at_offset)) = pending_by_offset.pop_first() {
+        loop {
+            let batch = initial.take().map(|nodes| (0, nodes)).or_else(||
+                pending_by_offset.pop_first().map(|(offset,nodes)| (offset,std::borrow::Cow::Owned(nodes))));
+            let Some((offset,nodes_at_offset)) = batch else {break};
             if offset == segment_bytes.len() {
-                for (tokenizer_state, nwa_states) in nodes_at_offset {
-                    next_level_nodes.merge(tokenizer_state, &nwa_states);
+                if keep_next_frontier {
+                    for (tokenizer_state, nwa_states) in nodes_at_offset.iter() {
+                        next_level_nodes.merge(tokenizer_state, nwa_states);
+                    }
                 }
                 continue;
             }
 
-            for (tokenizer_state, source_nodes) in nodes_at_offset {
+            // FxHashMap::iter and its owning iterator visit the same buckets;
+            // borrowing changes storage lifetime, not discovery/event order.
+            for (tokenizer_state, source_nodes) in nodes_at_offset.iter() {
                 let remaining = &segment_bytes[offset..];
                 let execute_started_at = self.profile_timing.then(std::time::Instant::now);
                 let end_states = if self.has_epsilon_transitions {
@@ -899,7 +919,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                         );
                     }
 
-                    next_level_nodes.merge(end_state, &source_nodes);
+                    if keep_next_frontier {
+                        next_level_nodes.merge(end_state, source_nodes);
+                    }
                 }
                 if let Some(started_at) = end_state_started_at {
                     self.profile.trie_end_state_ms +=
@@ -960,10 +982,16 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                     let continuation_nodes = pending_by_offset
                         .entry(next_offset)
                         .or_insert_with(NodesByTokenizerState::new);
-                    let reset_states = self.tokenizer.deterministic_reset_states();
+                    let uncached_reset_states;
+                    let reset_states = if self.lean_frontiers {
+                        self.cached_reset_roots.as_slice()
+                    } else {
+                        uncached_reset_states = self.tokenizer.deterministic_reset_states();
+                        uncached_reset_states.as_slice()
+                    };
                     let destination = ensure_continuation_state(
                         continuation_nodes,
-                        &reset_states,
+                        reset_states,
                         self.nwa,
                     );
 
