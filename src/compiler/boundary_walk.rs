@@ -1181,16 +1181,37 @@ where
             && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
         {
             let started = Instant::now();
-            if let Some((support, observation_states)) = tdwa::scope::crossing_prefix_seed_support(
-                inputs.merged_tokenizer, candidate_vocab, &flat, &ownership, plan.crossing_owner,
-            ) {
+            let prepared_support = std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS")
+                .and_then(|_| prepared_first)
+                .and_then(|spans| spans.get(plan.start_component))
+                .and_then(Option::as_ref)
+                .and_then(|span| span.prefix_seed_support(
+                    inputs.merged_tokenizer,candidate_vocab,&seed_mask,&ownership,plan.crossing_owner,
+                ));
+            let precomputed = prepared_support.is_some();
+            if let Some(support) = &prepared_support
+                && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS").is_some()
+            {
+                let (reference, _) = tdwa::scope::crossing_prefix_seed_support(
+                    inputs.merged_tokenizer,candidate_vocab,&flat,&ownership,plan.crossing_owner,
+                ).expect("original prefix-seed validator must run for this covered input");
+                let expected = reference.iter().zip(&seed_mask).map(|(a,b)|*a&&*b).collect::<Vec<_>>();
+                assert_eq!(support,&expected,"prepared prefix-seed query changed original source bits");
+            }
+            // No reverse-trie observation states are visited by the prepared
+            // query. Zero is marked as not collected in the profile below.
+            let supported = prepared_support.map(|support| (support,0)).or_else(||
+                tdwa::scope::crossing_prefix_seed_support(
+                    inputs.merged_tokenizer,candidate_vocab,&flat,&ownership,plan.crossing_owner,
+                ));
+            if let Some((support, observation_states)) = supported {
                 let before = seed_mask.iter().filter(|&&keep| keep).count();
                 for (keep, supported) in seed_mask.iter_mut().zip(support) { *keep &= supported; }
                 let after = seed_mask.iter().filter(|&&keep| keep).count();
                 if compose_profile_enabled() {
-                    eprintln!("[glrmask/profile][boundary_prefix_seed_support] component={} tokens={} seeds_before={} seeds_after={} observation_states={} elapsed_ms={:.3}",
+                    eprintln!("[glrmask/profile][boundary_prefix_seed_support] component={} tokens={} seeds_before={} seeds_after={} observation_states={} observation_states_collected={} precomputed={} elapsed_ms={:.3}",
                         plan.start_component, candidate_vocab.len(), before, after,
-                        observation_states, started.elapsed().as_secs_f64() * 1000.0);
+                        observation_states, !precomputed, precomputed, started.elapsed().as_secs_f64() * 1000.0);
                 }
                 if after == 0 { return None; }
             }
@@ -2316,7 +2337,8 @@ pub(crate) fn build_walk_static_boundary_link(
         .map(|_| std::iter::once(parent)
             .chain(children.iter().map(|child| child.constraint))
             .zip(tokenizer_offsets.iter().copied())
-            .map(|(component, offset)| super::boundary_precomputed_completion::PreparedSourceSpan::for_component(component, offset))
+            .zip(composed.terminal_offsets.iter().copied())
+            .map(|((component, offset), terminal_offset)| super::boundary_precomputed_completion::PreparedSourceSpan::for_component(component, offset, terminal_offset))
             .collect::<Vec<_>>());
     if merged.terminal_exprs().is_none() {
         let all: Vec<&Constraint> = std::iter::once(parent)

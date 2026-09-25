@@ -233,6 +233,12 @@ impl CertifiedCompletionIndex<'_> {
     pub fn query(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<(u32, Vec<u32>)>> {
         query_data(&self.data, &self.members, &self.transitions, &self.covered_words, seeds, words)
     }
+    /// Exact positive-byte prefix-completion support, not token admission.
+    /// Entry-only nullable matches are excluded. Resets are never traversed.
+    pub fn prefix_support(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<bool>> {
+        prefix_support_data(&self.data,&self.members,&self.transitions,&self.covered_words,seeds,words)
+    }
+
 
 }
 
@@ -259,6 +265,37 @@ impl CompletionContext {
     pub fn query(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<(u32, Vec<u32>)>> {
         query_data(&self.data, &self.members, &self.transitions, &self.covered_words, seeds, words)
     }
+    /// Exact positive-byte prefix-completion support, not token admission.
+    /// Entry-only nullable matches are excluded. Resets are never traversed.
+    pub fn prefix_support(&self, seeds: &[bool], words: &[Vec<u8>]) -> Result<Vec<bool>> {
+        prefix_support_data(&self.data,&self.members,&self.transitions,&self.covered_words,seeds,words)
+    }
+
+}
+
+fn prefix_support_data(data:&Data,members:&[Vec<u32>],transitions:&[Vec<(u8,u32)>],covered_words:&[Vec<u8>],seeds:&[bool],words:&[Vec<u8>])->Result<Vec<bool>> {
+    if seeds.len()!=data.raw_to_class.len(){return Err(Error::Malformed);}
+    if words.len()>131_072||words.iter().try_fold(0usize,|n,w|n.checked_add(w.len())).ok_or(Error::ResourceLimit)?>262_144{return Err(Error::ResourceLimit);}
+    let mut selected=vec![false;data.columns];
+    for word in words {
+        if covered_words.binary_search(word).is_err(){return Err(Error::QueryOutsideCoverage);}
+        let mut state=0;
+        for &byte in word {
+            let row=&transitions[state];
+            state=row[row.binary_search_by_key(&byte,|&(b,_)|b).map_err(|_|Error::QueryOutsideCoverage)?].1 as usize;
+            // Include state0 if a NONEMPTY prefix has this exact transformation.
+            selected[state]=true;
+        }
+    }
+    let columns=selected.iter().enumerate().filter_map(|(i,x)|x.then_some(i)).collect::<Vec<_>>();
+    let mut result=vec![false;seeds.len()];let mut work=0usize;
+    for (class,group)in members.iter().enumerate(){
+        if !group.iter().any(|q|seeds[*q as usize]){continue;}
+        work=work.checked_add(columns.len()).ok_or(Error::ResourceLimit)?;if work>MAX_CELLS{return Err(Error::ResourceLimit);}
+        let observations=&data.signatures[class];
+        if columns.iter().any(|c|observations[*c]!=0){for &q in group{result[q as usize]=seeds[q as usize];}}
+    }
+    Ok(result)
 }
 
 fn query_data(data: &Data, members: &[Vec<u32>], transitions: &[Vec<(u8,u32)>], covered_words: &[Vec<u8>],
@@ -401,4 +438,40 @@ mod tests {
         assert!(CompletionContext::load(different,&wire).is_err());
     }
 
+}
+
+#[cfg(test)]mod prefix_support_tests{
+ use super::*;
+ use glrmask_lexer::__private::automata::lexer::{ast::{bytes,choice,plus,Expr},compile::{build_regex_monolithic,build_regex_partitioned}};
+ use super::super::prefix_observer::{Limits,Profile};
+ fn direct(tok:&Tokenizer,seeds:&[bool],words:&[Vec<u8>])->Vec<bool>{
+  seeds.iter().enumerate().map(|(q,keep)|*keep&&words.iter().any(|word|{
+    let mut states=tok.singleton_epsilon_closure(q as u32).into_vec();
+    for &b in word{states=tok.step_all(&states,b).into_vec();if states.iter().any(|q|tok.matched_terminals_iter(*q).next().is_some()){return true;}}false
+  })).collect()
+ }
+ #[test]fn prefix_support_matches_raw_scanner_for_all_source_roles_and_subsets(){
+  let exprs=vec![choice(vec![bytes(b"aab"),bytes(b"bac"),bytes(b"aba")]),plus(choice(vec![bytes(b"a"),bytes(b"bc")])),Expr::Epsilon];
+  let mut seed=541u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32)as usize};
+  for tokenizer in [build_regex_monolithic(&exprs).into_tokenizer(3,None),build_regex_partitioned(&exprs,&[0,1,2]).into_tokenizer(3,None)]{
+   for _ in 0..64{
+    let mut words=vec![vec![],b"a".to_vec(),b"bbb".to_vec()];for _ in 0..16{words.push((0..next()%7).map(|_|b'a'+(next()%4)as u8).collect());}words.sort();words.dedup();
+    let observer=PrefixObserver::prepare(&tokenizer,&words,Limits::default(),&mut Profile::default()).unwrap().certify(&tokenizer).unwrap();
+    let index=UntrustedCompletionIndex::from_certified_prefix(&observer).unwrap();let wire=index.to_bytes().unwrap();let context=UntrustedCompletionIndex::from_bytes(&wire).unwrap().certify(&tokenizer).unwrap();
+    for _ in 0..4{
+     let seeds=(0..tokenizer.num_states()).map(|_|next()%3!=0).collect::<Vec<_>>();let query=words.iter().filter(|_|next()%3!=0).cloned().collect::<Vec<_>>();
+     assert_eq!(context.prefix_support(&seeds,&query).unwrap(),direct(&tokenizer,&seeds,&query));
+    }
+   }
+  }
+ }
+ #[test]fn entry_finalizer_alone_does_not_count_as_a_positive_byte_event(){
+  let tokenizer=build_regex_monolithic(&[bytes(b"a"),Expr::Epsilon]).into_tokenizer(2,None);let words=vec![vec![],b"a".to_vec(),b"z".to_vec()];
+  let observer=PrefixObserver::prepare(&tokenizer,&words,Limits::default(),&mut Profile::default()).unwrap().certify(&tokenizer).unwrap();
+  let index=UntrustedCompletionIndex::from_certified_prefix(&observer).unwrap().certify(&tokenizer).unwrap();let seeds=vec![true;tokenizer.num_states()as usize];
+  assert!(index.prefix_support(&seeds,&[vec![]]).unwrap().iter().all(|x|!*x));
+  assert_eq!(index.prefix_support(&seeds,&[b"z".to_vec()]).unwrap(),direct(&tokenizer,&seeds,&[b"z".to_vec()]));
+  assert_eq!(index.prefix_support(&seeds,&[b"unknown".to_vec()]),Err(Error::QueryOutsideCoverage));
+  assert_eq!(index.prefix_support(&[true],&words),Err(Error::Malformed));
+ }
 }

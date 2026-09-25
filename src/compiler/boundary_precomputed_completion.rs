@@ -4,6 +4,8 @@
 mod prefix_observer;
 #[allow(dead_code)]
 mod completion_index;
+mod prefix_span_support;
+mod prefix_uniform;
 use self::completion_index::{CompletionContext, UntrustedCompletionIndex};
 use self::prefix_observer::{Limits, PrefixObserver, Profile};
 use crate::automata::lexer::tokenizer::{Lexer,Tokenizer};
@@ -83,12 +85,25 @@ pub(crate) fn prepare_component(constraint:&mut Constraint,vocab:&Vocab)->Result
 /// Construct this only alongside the link's actual disjoint-union call. The
 /// offset is the returned injection for this same immutable source allocation.
 /// Expr restoration does not alter that union's byte or label coordinates.
-pub(crate) struct PreparedSourceSpan { prepared:Arc<PreparedCompletion>, offset:u32 }
+pub(crate) struct PreparedSourceSpan { prepared:Arc<PreparedCompletion>, offset:u32, terminal_offset:u32 }
 impl PreparedSourceSpan {
-    pub(crate) fn for_component(constraint:&Constraint,offset:u32)->Option<Self>{
+    pub(crate) fn for_component(constraint:&Constraint,offset:u32,terminal_offset:u32)->Option<Self>{
         let prepared=constraint.boundary_completion_index.as_ref()?;
         if !prepared.matches(constraint.composition_tokenizer()){return None;}
-        Some(Self{prepared:Arc::clone(prepared),offset})
+        Some(Self{prepared:Arc::clone(prepared),offset,terminal_offset})
+    }
+    /// Same conservative prefix-seed mask as the raw scanner, restricted to
+    /// the caller's selected initial set. Only the existing certified component
+    /// index is read; unknown coverage/ownership/topology declines to raw scan.
+    pub(crate) fn prefix_seed_support(
+        &self, merged:&Tokenizer, vocab:&Vocab, initial:&[bool],
+        ownership:&glrmask_terminal_dwa::__private::terminal_dwa::scope::BoundaryOwnership,
+        owner:glrmask_terminal_dwa::__private::terminal_dwa::scope::ImmediateComponentId,
+    )->Option<Vec<bool>> {
+        prefix_uniform::in_verified_uniform_span(
+            &self.prepared.context,self.offset,self.terminal_offset,
+            merged,vocab,initial,ownership,owner,
+        ).map(|(mask,_)|mask)
     }
     pub(crate) fn refine(&self,merged:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<FirstRefinement>{
         let n=merged.num_states()as usize;let local_n=self.prepared.context.raw_states();let offset=self.offset as usize;
@@ -150,14 +165,14 @@ mod lifecycle_tests {
         let mut seeds=vec![false;merged.num_states()as usize];
         for q in 0..loaded.tokenizer.num_states(){seeds[(q+offsets[0])as usize]=true;}
         let scope=BoundaryAnalysisScope::new(InitialStateDomain::from_mask(seeds.len(),seeds).unwrap(),merged.deterministic_reset_states().into_vec(),Arc::new(BoundaryOwnership::flat(&[0,nt],nt+1).unwrap()),ImmediateComponentId(0),true,None).unwrap();
-        let span=PreparedSourceSpan::for_component(&loaded,offsets[0]).unwrap();
+        let span=PreparedSourceSpan::for_component(&loaded,offsets[0],0).unwrap();
         let actual=span.refine(&merged,&selected,&scope).unwrap();
         let flat=l1::build_flat_transition_table(&merged);
         let expected=super::super::boundary_first_completion::prepare(&merged,&selected,&scope,&flat).unwrap();
         assert_eq!(actual.original_to_rep,expected.original_to_rep);assert_eq!(actual.representatives,expected.representatives);
         let outside=Vocab::new(vec![(42,b"not-in-component-coverage".to_vec())]);assert!(span.refine(&merged,&outside,&scope).is_none());
         let mut changed=loaded.clone();changed.tokenizer=Arc::new(build_regex_monolithic(&[Expr::Epsilon,bytes(b"z")]).into_tokenizer(2,None));
-        assert!(saved_wire(&changed).is_none());assert!(PreparedSourceSpan::for_component(&changed,offsets[0]).is_none());
+        assert!(saved_wire(&changed).is_none());assert!(PreparedSourceSpan::for_component(&changed,offsets[0],0).is_none());
         assert!(saved_wire(&loaded).is_some());
     }
 
