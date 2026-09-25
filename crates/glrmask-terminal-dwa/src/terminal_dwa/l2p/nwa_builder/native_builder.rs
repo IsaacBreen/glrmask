@@ -63,6 +63,8 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     profile_timing: bool,
     has_epsilon_transitions: bool,
     scalar_deterministic_dispatch: bool,
+    scalar_cursor:bool,
+    validate_scalar_cursor:bool,
     dfa_scan_strict_reference: bool,
 }
 
@@ -153,6 +155,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
             has_epsilon_transitions,
             scalar_deterministic_dispatch,
+            scalar_cursor:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR").is_some(),
+            validate_scalar_cursor:std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
                 "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
             )
@@ -808,14 +812,11 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 let remaining = &segment_bytes[offset..];
                 let execute_started_at = self.profile_timing.then(std::time::Instant::now);
                 let end_states = if self.has_epsilon_transitions {
-                    self.nfa_scan_cache
-                        .as_mut()
-                        .expect("epsilon tokenizer must initialize NFA trie scan cache")
-                        .execute_into(
-                            remaining,
-                            tokenizer_state,
-                            &mut matches_buf,
-                        )
+                    let cache=self.nfa_scan_cache.as_mut().expect("epsilon tokenizer must initialize NFA trie scan cache");
+                    if self.scalar_cursor {
+                        cache.execute_native_scalar_into(remaining,tokenizer_state,&mut matches_buf,
+                            self.shared_flat_transitions,self.validate_scalar_cursor)
+                    }else{cache.execute_into(remaining,tokenizer_state,&mut matches_buf)}
                 } else {
                     match_map_buf.clear();
                     let mut scan_state = tokenizer_state;
@@ -1030,3 +1031,5 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
 }
 
 #[cfg(test)] #[path="native_builder_tests.rs"] mod tests;
+
+#[path="native_scalar_cursor.rs"] mod native_scalar_cursor;
