@@ -82,6 +82,18 @@ struct StructuralSchemaCacheKey {
     object_variant_ref_stack: Vec<String>,
 }
 
+mod borrowed_key;
+
+fn borrowed_schema_key_options() -> (bool, bool) {
+    static OPTIONS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    *OPTIONS.get_or_init(|| {
+        let enabled = |name: &str| std::env::var(name).is_ok_and(|v|
+            matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+        (enabled("GLRMASK_EXPERIMENT_BORROWED_SCHEMA_KEY"),
+         enabled("GLRMASK_ASSERT_BORROWED_SCHEMA_KEY"))
+    })
+}
+
 impl StructuralSchemaCacheKey {
     fn fingerprint(&self) -> u64 {
         // The fingerprint is only a bucket selector. Cache lookup always
@@ -903,6 +915,59 @@ impl<'a> Lowerer<'a> {
     fn lower_schema_memoized(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
         debug_assert!(matches!(schema.kind, SchemaKind::Assertions(_)));
 
+        let (borrowed_enabled, verify_borrowed) = borrowed_schema_key_options();
+        let borrowed_fingerprint = if borrowed_enabled || verify_borrowed {
+            let query = borrowed_key::BorrowedKey {
+                schema,
+                terminal_partition_class: self.terminal_partition_class,
+                site: if schema.location.ends_with("/additionalProperties") {
+                    StructuralSchemaSite::AdditionalProperties
+                } else {
+                    StructuralSchemaSite::Ordinary
+                },
+                object_variant_ref_stack: &self.object_variant_ref_stack,
+            };
+            let fingerprint = query.fingerprint();
+            let reference = verify_borrowed.then(|| {
+                let mut canonical = schema.clone();
+                canonical.normalize_locations_relative();
+                StructuralSchemaCacheKey {
+                    schema: canonical,
+                    terminal_partition_class: query.terminal_partition_class,
+                    site: query.site,
+                    object_variant_ref_stack: self.object_variant_ref_stack.iter().cloned().collect(),
+                }
+            });
+            if let Some(reference) = reference.as_ref() {
+                assert_eq!(fingerprint, reference.fingerprint(), "borrowed schema key changed fingerprint");
+                assert!(query.matches(reference), "borrowed key must equal its canonical owned key");
+                if let Some(bucket) = self.structural_schema_expr_cache.get(&fingerprint) {
+                    for entry in bucket {
+                        assert_eq!(query.matches(&entry.key), entry.key == *reference,
+                            "borrowed key changed a complete-cache equality decision");
+                    }
+                }
+                for (_, active_key, _) in &self.active_schema_lowerings {
+                    assert_eq!(query.matches(active_key), *active_key == *reference,
+                        "borrowed key changed an active-key equality decision");
+                }
+            }
+            if borrowed_enabled && self.structural_schema_memo_enabled {
+                let hit = self.structural_schema_expr_cache.get(&fingerprint)
+                    .and_then(|bucket| bucket.iter().find(|entry| query.matches(&entry.key)))
+                    .map(|entry| entry.expr.clone());
+                if let Some(expr) = hit {
+                    self.structural_schema_cache_hits += 1;
+                    return Ok(expr);
+                }
+            }
+            borrowed_enabled.then_some(fingerprint)
+        } else {
+            None
+        };
+        // A miss still owns the identical canonical key for the active guard
+        // and completed cache. Only successful borrowed lookups avoid copying
+        // the schema; no references into temporary lowering nodes are retained.
         let mut canonical = schema.clone();
         canonical.normalize_locations_relative();
         let key = StructuralSchemaCacheKey {
@@ -919,10 +984,10 @@ impl<'a> Lowerer<'a> {
                 .cloned()
                 .collect(),
         };
-        let fingerprint = key.fingerprint();
+        let fingerprint = borrowed_fingerprint.unwrap_or_else(|| key.fingerprint());
         // Completed results always have precedence, exactly as before the
         // cycle guard. An active ancestor must not hide an existing result.
-        let hit_expr = self.structural_schema_memo_enabled.then(|| {
+        let hit_expr = (self.structural_schema_memo_enabled && borrowed_fingerprint.is_none()).then(|| {
             self.structural_schema_expr_cache
                 .get(&fingerprint)
                 .and_then(|bucket| bucket.iter().find(|entry| entry.key == key))
