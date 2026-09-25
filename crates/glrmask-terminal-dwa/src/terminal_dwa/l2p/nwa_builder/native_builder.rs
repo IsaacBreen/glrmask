@@ -70,6 +70,8 @@ pub struct TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     validate_future_absence:bool,
     future_absence_hits:usize,
     cached_reset_roots:Vec<u32>,
+    batch_leaf_flush:bool,
+    leaf_flush_failed:bool,
     validate_scalar_cursor:bool,
     dfa_scan_strict_reference: bool,
 }
@@ -168,6 +170,8 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
                 && !tokenizer.has_virtual_residual_runtime(),
             validate_future_absence:std::env::var_os("GLRMASK_VALIDATE_NATIVE_FUTURE_ABSENCE").is_some(),
             future_absence_hits:0,
+            batch_leaf_flush:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FACTORED_LEAF_FLUSH").is_some(),
+            leaf_flush_failed:false,
             cached_reset_roots:if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
             validate_scalar_cursor:std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
@@ -627,6 +631,9 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
     }
 
     pub fn flush_transition_buffer(&mut self) {
+        if self.batch_leaf_flush && !self.use_terminal_coloring && self.future_leaf_buffer.is_empty(){
+            self.flush_factored_leaf_outputs();return;
+        }
         let flush_start = std::time::Instant::now();
         let mut leaf_transition_buckets: Vec<FxHashMap<i32, BufferedLeafTransition>> =
             (0..self.nwa.states_len()).map(|_| FxHashMap::default()).collect();
@@ -769,6 +776,65 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
         self.profile.flush_leaf_ms = flush_leaf_ms;
         self.profile.flush_future_ms = flush_future_ms;
         self.profile.flush_weight_ms = flush_weight_ms;
+    }
+
+    /// Compile sparse leaf observations in two factored arrays. A deferred
+    /// (source, lexer-state, token-set) contributes one coefficient to every
+    /// possible terminal; do not clone that token vector into a hash map for
+    /// every source/terminal pair. Only the (source,label,coefficient-ID) keys
+    /// are sorted. Exact union and final edge order are unchanged.
+    fn flush_factored_leaf_outputs(&mut self) {
+        let started=std::time::Instant::now();
+        let mut coefficients=Vec::<Weight>::new();
+        let mut entries=Vec::<(u32,u32,u32)>::new();
+        if self.leaf_token_ids_buffer.len()>100_000{self.leaf_flush_failed=true;return}
+        for ((source,label),tokens)in std::mem::take(&mut self.leaf_token_ids_buffer){
+            if tokens.is_empty(){continue}
+            let weight=self.cached_leaf_weight(tokens);
+            let id=coefficients.len()as u32;coefficients.push(weight);entries.push((source,label,id));
+        }
+        let deferred=std::mem::take(&mut self.deferred_uncolored_future_leaf_buffer);
+        let mut future_cache=FxHashMap::<u32,Vec<u32>>::default();
+        for (source,groups)in deferred.into_iter().enumerate(){
+            for (state,tokens)in groups {
+                if tokens.is_empty(){continue}
+                let count=tokens.len()as u64;
+                if coefficients.len()>=100_000{self.leaf_flush_failed=true;return}
+                let weight=self.cached_leaf_weight(tokens);
+                let id=coefficients.len()as u32;coefficients.push(weight);
+                let terminals=future_cache.entry(state).or_insert_with(||self.possible_future_terminals_for_state(state));
+                for &terminal in terminals.iter(){
+                    if self.ignore_terminal==Some(terminal){continue}
+                    if entries.len()>=100_000{self.leaf_flush_failed=true;return}
+                    self.profile.future_terminal_additions+=count;
+                    entries.push((source as u32,terminal,id));
+                }
+                if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
+            }
+        }
+        if entries.len()>100_000||coefficients.len()>100_000{self.leaf_flush_failed=true;return}
+        // Keep all non-leaf transitions exactly as before, before appending
+        // any leaf branch. Duplicate targets must not be coalesced here.
+        let mut epsilon_entries=std::mem::take(&mut self.epsilon_buffer).into_iter().collect::<Vec<_>>();
+        epsilon_entries.sort_unstable_by_key(|((from,to),_)|(*from,*to));
+        for ((from,to),w)in epsilon_entries {self.nwa.append_epsilon(from,to,w.end,w.valid,&w.bits);}
+        if let Some(buffer)=&mut self.compact_buffer{buffer.flush(self.nwa);}
+        let mut transition_entries=std::mem::take(&mut self.transition_buffer).into_iter().collect::<Vec<_>>();
+        transition_entries.sort_unstable_by_key(|((from,l,to),_)|(*from,*l,*to));
+        for((from,l,to),w)in transition_entries{self.nwa.append_transition(from,l,to,w.end,w.valid,&w.bits);}
+        entries.sort_unstable();
+        let mut i=0;
+        while i<entries.len(){
+            let(from,label,_)=entries[i];let mut weight=Weight::empty();
+            while i<entries.len()&&entries[i].0==from&&entries[i].1==label {
+                weight=weight.union(&coefficients[entries[i].2 as usize]);i+=1;
+            }
+            if !weight.is_empty(){self.nwa.append_transition(from,label as i32,self.leaf_state,weight.end,weight.valid,&weight.bits);}
+        }
+        self.profile.flush_weight_ms=started.elapsed().as_secs_f64()*1000.;
+        if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
+            eprintln!("[glrmask/profile][native_factored_leaf] coefficients={} contributions={} exact_source_order=true",coefficients.len(),entries.len());
+        }
     }
 
     pub fn build_from_trie(
@@ -1091,7 +1157,7 @@ pub fn build<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Optio
   eprintln!("[glrmask/profile][native_builder_buffers] sparse_leaf_slots={slots} nonempty_leaf_slots={live} estimated_entry_bytes={} transitions={} epsilons={}",slots*std::mem::size_of::<LeafTokenIds>(),builder.transition_buffer.len()+builder.compact_buffer.as_ref().map_or(0,|b|b.len()),builder.epsilon_buffer.len());
  }
  if builder.compact_buffer.as_ref().is_some_and(|b|b.failed){return None}
- let t=std::time::Instant::now();builder.flush_transition_buffer();builder.profile.flush_ms=t.elapsed().as_secs_f64()*1000.;
+ let t=std::time::Instant::now();builder.flush_transition_buffer();if builder.leaf_flush_failed{return None}builder.profile.flush_ms=t.elapsed().as_secs_f64()*1000.;
  if std::env::var_os("GLRMASK_PROFILE_NATIVE_BUILDER").is_some(){
   eprintln!("[glrmask/profile][native_event_details] future_absence_hits={} walk_ms={:.3} flush_ms={:.3} scan_ms={:.3} match_filter_ms={:.3} end_state_ms={:.3} match_process_ms={:.3} continuation_ms={:.3} scan_calls={} scan_bytes={} matches={}",
    builder.future_absence_hits,builder.profile.trie_walk_ms,builder.profile.flush_ms,

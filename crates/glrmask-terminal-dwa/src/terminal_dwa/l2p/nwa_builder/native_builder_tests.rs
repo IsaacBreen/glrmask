@@ -141,3 +141,29 @@ fn strict_future_absence_preserves_only_possible_zero_byte_node_match() {
     }
     assert!(checks>500);
 }
+
+#[test]
+fn native_factored_leaf_flush_exhaustion_declines_without_mutating_the_seed() {
+    // Real builder overflow, not just a flag assertion: create too many
+    // distinct leaf keys, then ensure no partial native graph escapes.
+    let exprs=vec![bytes(b"a"),bytes(b"!")];
+    let tokenizer=build_regex(&exprs).into_tokenizer(2,Some(Arc::from(exprs)));
+    let map=id_map(tokenizer.num_states(),2);
+    let keep=vec![true;tokenizer.num_states()as usize];
+    let(seed,leaf,_)=seeded(&tokenizer,&map,&keep);
+    let snapshot=(seed.start_states().to_vec(),seed.states().to_vec());
+    let mut nwa=NWA::from_seed(&seed,map.num_tsids()).unwrap();
+    let mut pm=PossibleMatchesComputer::new(&tokenizer);
+    let mut builder=TerminalNwaBuilder::new(&tokenizer,TerminalColoring::identity(2),&mut pm,
+        &mut nwa,map.num_tsids(),leaf,None,vec![true;seed.states().len()],false,None,Some(vec![true,true]),tokenizer.num_states()as usize,None);
+    builder.batch_leaf_flush=true;
+    for q in 0..100001u32 {builder.leaf_token_ids_buffer.insert((q,0),smallvec::smallvec![0]);}
+    builder.flush_transition_buffer();
+    assert!(builder.leaf_flush_failed);
+    drop(builder);
+    let result=nwa.export_raw().unwrap();
+    assert_eq!(result.start_states(),snapshot.0);
+    assert_eq!(result.states(),snapshot.1);
+    assert_eq!(seed.start_states(),snapshot.0);
+    assert_eq!(seed.states(),snapshot.1);
+}
