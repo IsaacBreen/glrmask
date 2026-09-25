@@ -270,6 +270,9 @@ pub struct Lowerer<'a> {
     pub object_variant_ref_stack: BTreeSet<String>,
     structural_schema_memo_enabled: bool,
     structural_schema_expr_cache: HashMap<u64, Vec<StructuralSchemaCacheEntry>>,
+    // In-flight calls are separate from completed memo entries, preserving the
+    // original result lookup and completion order for all terminating imports.
+    active_schema_lowerings: Vec<(u64, StructuralSchemaCacheKey, usize)>,
     structural_schema_cache_hits: usize,
     structural_schema_cache_misses: usize,
     used_rule_names: BTreeSet<String>,
@@ -449,6 +452,7 @@ impl<'a> Lowerer<'a> {
             object_variant_ref_stack: BTreeSet::new(),
             structural_schema_memo_enabled: structural_schema_memo_enabled(),
             structural_schema_expr_cache: HashMap::new(),
+            active_schema_lowerings: Vec::new(),
             structural_schema_cache_hits: 0,
             structural_schema_cache_misses: 0,
             used_rule_names: BTreeSet::new(),
@@ -498,6 +502,7 @@ impl<'a> Lowerer<'a> {
             object_variant_ref_stack: BTreeSet::new(),
             structural_schema_memo_enabled: self.structural_schema_memo_enabled,
             structural_schema_expr_cache: HashMap::new(),
+            active_schema_lowerings: Vec::new(),
             structural_schema_cache_hits: 0,
             structural_schema_cache_misses: 0,
             used_rule_names: BTreeSet::new(),
@@ -888,9 +893,7 @@ impl<'a> Lowerer<'a> {
         {
             return Ok(expr);
         }
-        if !self.structural_schema_memo_enabled
-            || !matches!(schema.kind, SchemaKind::Assertions(_))
-        {
+        if !matches!(schema.kind, SchemaKind::Assertions(_)) {
             return self.lower_schema_uncached(schema);
         }
 
@@ -917,11 +920,14 @@ impl<'a> Lowerer<'a> {
                 .collect(),
         };
         let fingerprint = key.fingerprint();
-        let hit_expr = self
-            .structural_schema_expr_cache
-            .get(&fingerprint)
-            .and_then(|bucket| bucket.iter().find(|entry| entry.key == key))
-            .map(|entry| entry.expr.clone());
+        // Completed results always have precedence, exactly as before the
+        // cycle guard. An active ancestor must not hide an existing result.
+        let hit_expr = self.structural_schema_memo_enabled.then(|| {
+            self.structural_schema_expr_cache
+                .get(&fingerprint)
+                .and_then(|bucket| bucket.iter().find(|entry| entry.key == key))
+                .map(|entry| entry.expr.clone())
+        }).flatten();
         if let Some(expr) = hit_expr {
             // The cached expression references helper rules emitted by the
             // original miss. Cache entries never cross Lowerer instances, and
@@ -931,15 +937,34 @@ impl<'a> Lowerer<'a> {
             self.structural_schema_cache_hits += 1;
             return Ok(expr);
         }
+        let ref_rule_count = self.definition_rules.len();
+        if self.active_schema_lowerings.iter().any(|(active_hash, active_key, count)| {
+            *active_hash == fingerprint && *count == ref_rule_count && *active_key == key
+        }) {
+            return Err(SchemaImportError::at(
+                &schema.location,
+                "recursive schema constraint revisits an unresolved lowering state; \
+                 this recursive constraint specialization is not supported",
+            ));
+        }
         self.structural_schema_cache_misses += 1;
-        let expr = self.lower_schema_uncached(schema)?;
-        self.structural_schema_expr_cache
-            .entry(fingerprint)
-            .or_default()
-            .push(StructuralSchemaCacheEntry {
-                key,
-                expr: expr.clone(),
-            });
+        self.active_schema_lowerings.push((fingerprint, key, ref_rule_count));
+        let result = self.lower_schema_uncached(schema);
+        // Always unwind our own frame, including normal error returns. Nested
+        // calls pop their frames before returning, so this is a strict stack.
+        let (active_hash, key, count) = self.active_schema_lowerings.pop()
+            .expect("active lowering frame must survive nested calls");
+        debug_assert_eq!(active_hash, fingerprint);
+        debug_assert_eq!(count, ref_rule_count);
+        let expr = result?;
+        if self.structural_schema_memo_enabled {
+            // Publish only on completion, in the original order. No active
+            // placeholders, altered .find precedence, or bucket reordering.
+            self.structural_schema_expr_cache
+                .entry(fingerprint)
+                .or_default()
+                .push(StructuralSchemaCacheEntry { key, expr: expr.clone() });
+        }
         Ok(expr)
     }
 
@@ -3057,4 +3082,64 @@ mod structural_schema_memo_tests {
         assert!(matches!(fused_format, GrammarExpr::Ref(_)));
     }
 
+}
+
+
+#[cfg(test)]
+mod recursive_lowering_guard_tests {
+    use super::*;
+    use super::super::load::load_document;
+    use serde_json::json;
+
+    #[test]
+    fn ordinary_recursive_objects_and_aliases_still_lower() {
+        for value in [
+            json!({"type":"object", "properties":{"node":{"$ref":"#"}}}),
+            json!({"type":"array", "items":{"$ref":"#/$defs/list"},
+                "$defs":{"list":{"type":"array", "items":{"$ref":"#/$defs/list"}}}}),
+        ] {
+            for memo in [true, false] {
+                let document = load_document(&value).unwrap();
+                let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+                lowerer.structural_schema_memo_enabled = memo;
+                assert!(lowerer.finish().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_recursive_specializations_fail_closed_and_unwind() {
+        for extra in [json!({"items":false}),
+                      json!({"additionalProperties":{"type":"string"}})] {
+            let mut node = json!({"$ref":"#", "type":"object"});
+            node.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let value = json!({"type":"object", "properties":{"node":node}});
+            for memo in [true, false] {
+                let document = load_document(&value).unwrap();
+                let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+                lowerer.structural_schema_memo_enabled = memo;
+                lowerer.definition_rules.insert("#".into(), "root".into());
+                let err = lowerer.lower_schema(&document.root).expect_err("must reject unsupported recursion");
+                assert!(err.message().contains("recursive schema constraint"), "{:?}", err);
+                assert!(lowerer.active_schema_lowerings.is_empty());
+                let leaf = load_document(&json!({"type":"boolean"})).unwrap();
+                assert!(lowerer.lower_schema(&leaf.root).is_ok());
+                assert!(lowerer.active_schema_lowerings.is_empty());
+                if !memo { assert!(lowerer.structural_schema_expr_cache.is_empty()); }
+            }
+        }
+    }
+
+    #[test]
+    fn completed_result_precedes_an_equal_active_frame() {
+        let document = load_document(&json!({"type":"boolean"})).unwrap();
+        let mut lowerer = Lowerer::new(&document, JsonSchemaConfig::default());
+        let expected = lowerer.lower_schema(&document.root).unwrap();
+        let entry = lowerer.structural_schema_expr_cache.values().next().unwrap()[0].clone();
+        let fingerprint = entry.key.fingerprint();
+        lowerer.active_schema_lowerings.push((fingerprint, entry.key, lowerer.definition_rules.len()));
+        assert_eq!(lowerer.lower_schema(&document.root).unwrap(), expected);
+        assert_eq!(lowerer.active_schema_lowerings.len(), 1);
+        assert_eq!(lowerer.structural_schema_cache_hits, 1);
+    }
 }
