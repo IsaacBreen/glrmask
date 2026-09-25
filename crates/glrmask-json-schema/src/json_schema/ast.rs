@@ -195,6 +195,68 @@ pub struct NumberSchema {
 }
 
 impl Schema {
+    /// The same value as cloning and then normalizing locations, without first
+    /// allocating the original location strings that normalization discards.
+    pub fn clone_with_relative_locations(&self) -> Self {
+        self.clone_relative_to(&self.location)
+    }
+
+    fn clone_relative_to(&self, root: &str) -> Self {
+        let Schema { location, kind } = self;
+        let location = if location == root {
+            "#".to_owned()
+        } else if let Some(suffix) = location.strip_prefix(root)
+            && suffix.starts_with('/')
+        {
+            format!("#{suffix}")
+        } else {
+            location.clone()
+        };
+        let kind = match kind {
+            SchemaKind::Any => SchemaKind::Any,
+            SchemaKind::Never => SchemaKind::Never,
+            SchemaKind::Ref(pointer) => SchemaKind::Ref(pointer.clone()),
+            SchemaKind::Assertions(a) => {
+                let SchemaAssertions { types, const_value, enum_values, object, array,
+                    string, number, any_of, one_of, all_of, not } = a.as_ref();
+                let children = |schemas: &[Schema]| schemas.iter()
+                    .map(|s| s.clone_relative_to(root)).collect();
+                SchemaKind::Assertions(Box::new(SchemaAssertions {
+                    types: types.clone(), const_value: const_value.clone(),
+                    enum_values: enum_values.clone(), string: string.clone(), number: number.clone(),
+                    any_of: children(any_of), one_of: children(one_of), all_of: children(all_of),
+                    not: not.as_ref().map(|s| s.clone_relative_to(root)),
+                    object: object.as_ref().map(|o| {
+                        let ObjectSchema { properties, required, required_order, property_dependencies,
+                            min_properties, max_properties, pattern_properties, property_names,
+                            additional_properties } = o;
+                        ObjectSchema {
+                            properties: properties.iter().map(|PropertySchema { name, schema }|
+                                PropertySchema { name: name.clone(), schema: schema.clone_relative_to(root) }).collect(),
+                            required: required.clone(), required_order: required_order.clone(),
+                            property_dependencies: property_dependencies.clone(),
+                            min_properties: *min_properties, max_properties: *max_properties,
+                            pattern_properties: pattern_properties.iter().map(|PatternPropertySchema { pattern, schema }|
+                                PatternPropertySchema { pattern: pattern.clone(), schema: schema.clone_relative_to(root) }).collect(),
+                            property_names: property_names.as_ref().map(|s| s.clone_relative_to(root)),
+                            additional_properties: match additional_properties {
+                                AdditionalProperties::AllowAny => AdditionalProperties::AllowAny,
+                                AdditionalProperties::Deny => AdditionalProperties::Deny,
+                                AdditionalProperties::Schema(s) => AdditionalProperties::Schema(Box::new(s.clone_relative_to(root))),
+                            },
+                        }
+                    }),
+                    array: array.as_ref().map(|a| {
+                        let ArraySchema { items, prefix_items, min_items, max_items } = a;
+                        ArraySchema { items: Box::new(items.clone_relative_to(root)),
+                            prefix_items: children(prefix_items), min_items: *min_items, max_items: *max_items }
+                    }),
+                }))
+            }
+        };
+        Self { location, kind }
+    }
+
     pub fn normalize_locations_relative(&mut self) {
         let root = self.location.clone();
         self.normalize_locations_relative_to(&root);
@@ -254,5 +316,65 @@ impl Schema {
 
     pub fn assertions(location: impl Into<String>, assertions: SchemaAssertions) -> Self {
         Self { location: location.into(), kind: SchemaKind::Assertions(Box::new(assertions)) }
+    }
+}
+
+#[cfg(test)]
+mod canonical_clone_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn same_as_original(schema: &Schema) {
+        let mut old = schema.clone(); old.normalize_locations_relative();
+        let fused = schema.clone_with_relative_locations();
+        assert_eq!(fused, old);
+        assert_eq!(bincode::serialize(&fused).unwrap(), bincode::serialize(&old).unwrap());
+    }
+
+    #[test]
+    fn canonical_clone_covers_every_assertion_presence_combination() {
+        for root in ["#", "#/a", "#/한글", "<synthetic>"] {
+            for bits in 0u16..2048 {
+                let child = Schema::assertions(format!("{root}/nested"), SchemaAssertions {
+                    const_value: Some(json!({"z":"日本語","a":[0.0,-0.0,true,null]})), ..Default::default()
+                });
+                let children = vec![child.clone(), Schema::any("<implicit-array-items>"),
+                    Schema::never(format!("{root}lookalike")), Schema { location: format!("{root}/ref"), kind:SchemaKind::Ref("#/$defs/node".into()) }];
+                let mut a=SchemaAssertions::default();
+                if bits & 1 != 0 { a.types=Some(vec![SchemaType::Object,SchemaType::Array]); }
+                if bits & 2 != 0 { a.const_value=Some(json!({"a":0.0,"b":-0.0})); }
+                if bits & 4 != 0 { a.enum_values=Some(vec![json!("한글"),json!([1,true,null])]); }
+                if bits & 8 != 0 { a.object=Some(ObjectSchema {
+                    properties:vec![PropertySchema {name:"x".into(),schema:child.clone()}],
+                    required:BTreeSet::from(["x".into()]), required_order:vec!["x".into()],
+                    property_dependencies:BTreeMap::from([("x".into(),BTreeSet::from(["y".into()]))]),
+                    min_properties:1,max_properties:Some(9),
+                    pattern_properties:vec![PatternPropertySchema {pattern:"^x".into(),schema:child.clone()}],
+                    property_names:Some(child.clone()),
+                    additional_properties:match bits%3 {0=>AdditionalProperties::AllowAny,1=>AdditionalProperties::Deny,
+                        _=>AdditionalProperties::Schema(Box::new(child.clone()))},
+                }); }
+                if bits & 16 != 0 { a.array=Some(ArraySchema { items:Box::new(child.clone()),prefix_items:children.clone(),min_items:1,max_items:Some(7) }); }
+                if bits & 32 != 0 { a.string=Some(StringSchema {min_length:1,max_length:Some(10),pattern:Some("[abc]".into()),format:Some("email".into())}); }
+                if bits & 64 != 0 { a.number=Some(NumberSchema {integer:true,minimum:Some(-0.0),maximum:Some(10.5),exclusive_minimum:true,exclusive_maximum:false,multiple_of:Some(0.5),format:Some("int32".into())}); }
+                if bits & 128 != 0 { a.any_of=children.clone(); }
+                if bits & 256 != 0 { a.one_of=children.clone(); }
+                if bits & 512 != 0 { a.all_of=children.clone(); }
+                if bits & 1024 != 0 { a.not=Some(child); }
+                same_as_original(&Schema::assertions(root,a));
+            }
+        }
+    }
+
+    #[test]
+    fn canonical_clone_leaves_input_and_reference_pointers_unchanged() {
+        for root in ["", "#", "#/a", "#/a/b", "#/한글"] {
+            let source=Schema::assertions(root,SchemaAssertions { any_of:vec![
+                Schema {location:format!("{root}/ref"),kind:SchemaKind::Ref(format!("{root}/target"))},
+                Schema::any(format!("{root}extra")),Schema::never("#/unrelated"),
+            ],..Default::default()});
+            let before=bincode::serialize(&source).unwrap();same_as_original(&source);
+            assert_eq!(bincode::serialize(&source).unwrap(),before);
+        }
     }
 }

@@ -903,8 +903,28 @@ impl<'a> Lowerer<'a> {
     fn lower_schema_memoized(&mut self, schema: &Schema) -> ImportResult<GrammarExpr> {
         debug_assert!(matches!(schema.kind, SchemaKind::Assertions(_)));
 
-        let mut canonical = schema.clone();
-        canonical.normalize_locations_relative();
+        static OPTIONS: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+        let (enabled, verify) = *OPTIONS.get_or_init(|| {
+            let flag = |name: &str| std::env::var(name).is_ok_and(|v|
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"));
+            (flag("GLRMASK_EXPERIMENT_CANONICAL_SCHEMA_CLONE"),
+             flag("GLRMASK_ASSERT_CANONICAL_SCHEMA_CLONE"))
+        });
+        let canonical = if enabled || verify {
+            let fused = schema.clone_with_relative_locations();
+            if verify {
+                let mut reference = schema.clone();
+                reference.normalize_locations_relative();
+                assert_eq!(bincode::serialize(&fused).unwrap(), bincode::serialize(&reference).unwrap(),
+                    "fused canonical clone changed serialized schema");
+                assert_eq!(fused, reference, "fused canonical clone changed typed schema");
+            }
+            fused
+        } else {
+            let mut canonical = schema.clone();
+            canonical.normalize_locations_relative();
+            canonical
+        };
         let key = StructuralSchemaCacheKey {
             schema: canonical,
             terminal_partition_class: self.terminal_partition_class,
