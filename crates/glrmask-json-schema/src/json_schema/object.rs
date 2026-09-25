@@ -30,6 +30,19 @@ const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 const SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES: usize = 64;
 
+fn sparse_fixed_object_min_optional_properties() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| parse_sparse_fixed_object_threshold(
+        std::env::var("GLRMASK_EXPERIMENT_SPARSE_OBJECT_MIN_OPTIONALS").ok().as_deref(),
+    ))
+}
+
+fn parse_sparse_fixed_object_threshold(value: Option<&str>) -> usize {
+    value.and_then(|v| v.trim().parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES)
+}
+
 struct ObjectItem {
     key: String,
     pair: GrammarExpr,
@@ -2903,7 +2916,7 @@ impl<'a> Lowerer<'a> {
         let mut builder = ExprNfaBuilder::new();
         let optional_count = items.iter().filter(|item| !item.required).count();
         let sparse_direct_nfa = self.config.sparse_large_optional_objects
-            && optional_count >= SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES;
+            && optional_count >= sparse_fixed_object_min_optional_properties();
         if tail_pair.is_none() && !sparse_direct_nfa {
             self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
         } else {
@@ -4139,6 +4152,21 @@ impl<'a> Lowerer<'a> {
         }
 
         Ok(Cow::Owned(normalized))
+    }
+}
+
+#[cfg(test)]
+mod sparse_threshold_experiment_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_threshold_keeps_the_existing_default_and_rejects_bad_values() {
+        for value in [None, Some(""), Some("0"), Some("-1"), Some("invalid")] {
+            assert_eq!(parse_sparse_fixed_object_threshold(value), 64);
+        }
+        assert_eq!(parse_sparse_fixed_object_threshold(Some("16")),16);
+        assert_eq!(parse_sparse_fixed_object_threshold(Some(" 32 ")),32);
+        assert_eq!(parse_sparse_fixed_object_threshold(Some("64")),64);
     }
 }
 
