@@ -916,7 +916,10 @@ impl RowMap {
     }
 }
 
-fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
+fn minimize_sparse_graph(graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
+    minimize_sparse_graph_policy(graph,p,leaf,std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SINGLE_CLASS").is_some())
+}
+fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,single_class:bool) -> Option<(Graph, u32)> {
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
     let reuse_scratch=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH").is_some();
@@ -1080,6 +1083,22 @@ fn minimize_sparse_graph(mut graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Opt
                 }
                 classes.extend(subs);
             }
+        }
+        // A sole exact class has no compatibility decision. The ordinary
+        // profile-expansion/reconstruction cycle is precisely the identity on
+        // its canonical coefficients. Retain the same logical-work budget.
+        if h>0 && classes.len()==1 && single_class{
+            let members=classes.pop().unwrap();let s=members[0];
+            let mut work=0u64;
+            for w in std::iter::once(graph[s].0).chain(graph[s].1.iter().map(|e|e.2)){
+                if w==1{return None;}
+                for r in &p.values[w as usize]{work=work.checked_add(u64::from(r.hi)-u64::from(r.lo)+1)?;}
+            }
+            point_budget+=work;if point_budget>2_000_000{return None;}
+            let id=output.len()as u32;
+            let es=graph[s].1.iter().map(|&(l,d,w)|(l,mapped[d as usize],w)).collect();
+            for &q in &members{mapped[q]=id;}
+            output.push((graph[s].0,es));continue;
         }
         let class_ms = height_begin.elapsed().as_secs_f64() * 1000.;
         let group_begin = Instant::now();
@@ -1635,3 +1654,26 @@ mod tests {
 }
 
 #[path="native_pipeline_post.rs"] pub(super) mod post;
+
+#[cfg(test)]
+#[test]
+fn sole_class_minimization_is_exact_without_profile_roundtrip(){
+    fn exported(g:Graph,start:u32,p:&mut Pool)->DWA{
+        DWA::from_parts(g.into_iter().map(|(f,es)|DWAState{
+            final_weight:(f!=0).then(||p.export(f)),
+            transitions:es.into_iter().map(|(l,d,w)|(l,(d,p.export(w)))).collect(),
+        }).collect(),start)
+    }
+    // A nonuniform root has different coefficients on its labels. It is NOT
+    // eligible for a uniform-behavior shortcut; being the sole class suffices.
+    for base in [0u32,4096,u32::MAX-4]{for token in [0u32,63,64,256,511]{
+        let a=Weight::from_token_set_for_tsid(base,[token].into_iter().collect());
+        let b=Weight::from_token_set_for_tsid(base+2,[token,token^1].into_iter().collect());
+        let mut outputs=Vec::new();
+        for enabled in [false,true]{let mut pool=Pool::new();let aw=pool.import(&a).unwrap();let bw=pool.import(&b).unwrap();let both=pool.join(aw,bw);
+            let graph=vec![(0,smallvec![(3,1,aw),(7,2,bw)]),(aw,smallvec![(4,3,aw)]),(0,smallvec![(9,3,bw)]),(both,Edges::new())];
+            let (g,start)=minimize_sparse_graph_policy(graph,&mut pool,None,enabled).unwrap();outputs.push(exported(g,start,&mut pool));
+        }
+        assert_eq!(outputs[0].start_state(),outputs[1].start_state());assert_eq!(outputs[0].states(),outputs[1].states());
+    }}
+}
