@@ -6377,7 +6377,11 @@ fn build_dynamic_tokenizer_lane(
             .ok()
             .and_then(|value| value.trim().parse::<u32>().ok())
             .filter(|&value| value > 0)
-            .unwrap_or(512);
+            // Keep the exact component lexer by default rather than eagerly
+            // constructing a cross-terminal product. Runtime artifact and
+            // serialization preparation still run for that coordinate below.
+            // Set the source-state limit to 512 for the historical eager policy.
+            .unwrap_or(1);
         if source_states <= source_state_limit {
             let transition_limit = source_transitions.saturating_mul(6).max(1);
             let state_limit = std::env::var("GLRMASK_DYNAMIC_LEXER_MAX_STATES")
