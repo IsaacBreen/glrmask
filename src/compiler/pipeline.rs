@@ -6423,22 +6423,26 @@ fn compile_dynamic_owned_early_overlap(
     default_table_construction: GlrTableConstruction,
     finalize_runtime: bool,
     start_nullable: bool,
+    ledger_entry_ms: f64,
 ) -> crate::Result<DynamicConstraint> {
+    let ledger = std::env::var_os("GLRMASK_DIAG_CORE_LEDGER").is_some();
     let profile = compile_profile_enabled();
-    let total_started = profile.then(Instant::now);
-    let shared_started = profile.then(Instant::now);
+    let timed = profile || ledger;
+    let total_started = timed.then(Instant::now);
+    let shared_started = timed.then(Instant::now);
     let shared_grammar = prepare_dynamic_shared_terminal_domain(grammar);
     let shared_ms = shared_started.map_or(0.0, elapsed_ms);
-    let clone_started = profile.then(Instant::now);
+    let clone_started = timed.then(Instant::now);
     let lexer_grammar = shared_grammar.clone();
     let clone_ms = clone_started.map_or(0.0, elapsed_ms);
 
     run_with_dynamic_compile_thread_pool(false, || -> crate::Result<DynamicConstraint> {
+        let ledger_join_started = ledger.then(Instant::now);
         let (tokenizer_result, parser_result) = macro_join_if(
             true,
             "dynamic_early_tokenizer_and_parser",
             || -> crate::Result<(DynamicTokenizerLaneResult, f64, f64)> {
-                let factor_started = profile.then(Instant::now);
+                let factor_started = timed.then(Instant::now);
                 let prepared_expressions = prepare_factored_terminal_expressions(&lexer_grammar);
                 let factor_ms = factor_started.map_or(0.0, elapsed_ms);
                 let prepared_has_giant_repeat = prepared_expressions
@@ -6455,11 +6459,11 @@ fn compile_dynamic_owned_early_overlap(
                 Ok((result, factor_ms, tokenizer_ms))
             },
             || -> crate::Result<(GrammarDef, GLRTable, bool, f64, f64, f64)> {
-                let prepare_started = profile.then(Instant::now);
+                let prepare_started = timed.then(Instant::now);
                 let (prepared_grammar, terminal_domain_changed) =
                     prepare_dynamic_parser_after_terminal_domain(shared_grammar);
                 let parser_prepare_ms = prepare_started.map_or(0.0, elapsed_ms);
-                let analysis_started = profile.then(Instant::now);
+                let analysis_started = timed.then(Instant::now);
                 let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                 if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
                     panic!("[glrmask] grammar precondition violations:\n{}", message);
@@ -6494,8 +6498,10 @@ fn compile_dynamic_owned_early_overlap(
             analysis_ms,
             table_ms,
         ) = parser_result?;
+        let ledger_join_ms = ledger_join_started.map_or(0.0, elapsed_ms);
+        let ledger_rebuild_started = ledger.then(Instant::now);
         if terminal_domain_changed {
-            let factor_started = profile.then(Instant::now);
+            let factor_started = timed.then(Instant::now);
             let prepared_expressions = prepare_factored_terminal_expressions(&prepared_grammar);
             factor_ms += factor_started.map_or(0.0, elapsed_ms);
             let prepared_has_giant_repeat = prepared_expressions
@@ -6512,7 +6518,8 @@ fn compile_dynamic_owned_early_overlap(
             (tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection) = rebuilt;
             tokenizer_ms += rebuilt_ms;
         }
-        let dynamic_vocab_started = profile.then(Instant::now);
+        let ledger_rebuild_ms = ledger_rebuild_started.map_or(0.0, elapsed_ms);
+        let dynamic_vocab_started = timed.then(Instant::now);
         let dynamic_mask_vocab = if finalize_runtime {
             crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab)
         } else {
@@ -6522,7 +6529,12 @@ fn compile_dynamic_owned_early_overlap(
         let terminal_display_names = (0..prepared_grammar.num_terminals())
             .map(|terminal| prepared_grammar.terminal_display_name(terminal))
             .collect::<Vec<_>>();
-        let finalize_started = profile.then(Instant::now);
+        let finalize_started = timed.then(Instant::now);
+        let ledger_rules = prepared_grammar.rules.len();
+        let ledger_terminals = prepared_grammar.num_terminals();
+        let ledger_tokenizer_states = tokenizer.num_states();
+        let ledger_table_states = table.num_states;
+        let ledger_construct_started = ledger.then(Instant::now);
         let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             table,
             terminal_display_names,
@@ -6545,16 +6557,27 @@ fn compile_dynamic_owned_early_overlap(
                 .dynamic_mask_vocab
                 .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
         }
+        let ledger_construct_ms = ledger_construct_started.map_or(0.0, elapsed_ms);
+        let ledger_runtime_started = ledger.then(Instant::now);
         if finalize_runtime {
             constraint.inner.rebuild_dynamic_runtime_caches();
         }
+        let ledger_runtime_ms = ledger_runtime_started.map_or(0.0, elapsed_ms);
+        let ledger_composition_started = ledger.then(Instant::now);
         constraint
             .inner
             .table
             .set_embedded_start_nullable(start_nullable);
         constraint.set_composition_grammar(prepared_grammar);
+        let ledger_composition_ms = ledger_composition_started.map_or(0.0, elapsed_ms);
+        let ledger_save_started = ledger.then(Instant::now);
         if finalize_runtime {
             constraint.cache_external_vocab_artifact_for_save();
+        }
+        let ledger_save_ms = ledger_save_started.map_or(0.0, elapsed_ms);
+        if ledger {
+            let ledger_total_ms = total_started.map_or(0.0, elapsed_ms) + ledger_entry_ms;
+            eprintln!("[glrmask/core-ledger] path=early shared_ms={shared_ms:.6} clone_ms={clone_ms:.6} parser_prepare_ms={parser_prepare_ms:.6} rebuilt={terminal_domain_changed} rebuild_wall_ms={ledger_rebuild_ms:.6} total_ms={ledger_total_ms:.6} rules={ledger_rules} terminals={ledger_terminals} tokenizer_states={ledger_tokenizer_states} table_states={ledger_table_states} entry_ms={ledger_entry_ms:.6} factor_ms={factor_ms:.6} analysis_ms={analysis_ms:.6} tokenizer_ms={tokenizer_ms:.6} table_ms={table_ms:.6} dynamic_vocab_ms={dynamic_vocab_ms:.6} join_wall_ms={ledger_join_ms:.6} construct_ms={ledger_construct_ms:.6} runtime_cache_ms={ledger_runtime_ms:.6} composition_ms={ledger_composition_ms:.6} save_cache_ms={ledger_save_ms:.6}");
         }
         if profile {
             eprintln!(
@@ -6573,6 +6596,7 @@ fn compile_dynamic_owned_impl(
     default_table_construction: GlrTableConstruction,
     finalize_runtime: bool,
 ) -> crate::Result<DynamicConstraint> {
+    let ledger_entry_started = std::env::var_os("GLRMASK_DIAG_CORE_LEDGER").is_some().then(Instant::now);
     let start_nullable = grammar.start_is_nullable();
     // Ordinary non-tiny grammars can start terminal factoring/tokenizer construction
     // after a small shared terminal-domain prefix, while parser-only normalization,
@@ -6596,11 +6620,15 @@ fn compile_dynamic_owned_impl(
             default_table_construction,
             finalize_runtime,
             start_nullable,
+            ledger_entry_started.map_or(0.0, elapsed_ms),
         );
     }
+    let ledger = std::env::var_os("GLRMASK_DIAG_CORE_LEDGER").is_some();
     let profile = compile_profile_enabled();
-    let total_started_at = profile.then(Instant::now);
-    let prepare_started_at = profile.then(Instant::now);
+    let timed = profile || ledger;
+    let ledger_entry_ms = ledger_entry_started.map_or(0.0, elapsed_ms);
+    let total_started_at = timed.then(Instant::now);
+    let prepare_started_at = timed.then(Instant::now);
     // A direct-regular frontend result already contains the complete parser
     // language. Generic CFG normalization cannot improve that automaton and is
     // unnecessary for the dynamic backend, which consumes the retained
@@ -6624,6 +6652,7 @@ fn compile_dynamic_owned_impl(
         prepare_dynamic_glr_transforms_only(grammar)
     };
     let prepare_ms = prepare_started_at.map_or(0.0, elapsed_ms);
+    let ledger_policy_started = ledger.then(Instant::now);
     const TINY_DYNAMIC_MAX_TERMINALS: usize = 16;
     const TINY_DYNAMIC_MAX_RULES: usize = 64;
     const TINY_DYNAMIC_MAX_TOTAL_STATE_ESTIMATE: u128 = 4_096;
@@ -6666,6 +6695,7 @@ fn compile_dynamic_owned_impl(
     let tiny_dynamic_compile = tiny_structure
         && estimated_total_states <= TINY_DYNAMIC_MAX_TOTAL_STATE_ESTIMATE
         && estimated_max_states <= TINY_DYNAMIC_MAX_TERMINAL_STATE_ESTIMATE;
+    let ledger_policy_ms = ledger_policy_started.map_or(0.0, elapsed_ms);
     run_with_dynamic_compile_thread_pool(tiny_dynamic_compile, || -> crate::Result<DynamicConstraint> {
         if profile_dynamic_mask_quotient && !prefactored_has_giant_repeat
         {
@@ -6747,17 +6777,18 @@ fn compile_dynamic_owned_impl(
         let direct_state_count = direct_regular_automaton
             .as_ref()
             .map(|automaton| automaton.states.len());
+        let ledger_factor_join_started = ledger.then(Instant::now);
         let ((prepared_expressions, factor_ms), (analyzed_grammar, analysis_ms)) = macro_join_if(
             defer_factoring,
             "dynamic_factor_and_analysis",
             || {
-                let started_at = profile.then(Instant::now);
+                let started_at = timed.then(Instant::now);
                 let expressions = prefactored_expressions
                     .unwrap_or_else(|| prepare_factored_terminal_expressions(&prepared_grammar));
                 (expressions, started_at.map_or(0.0, elapsed_ms))
             },
             || {
-                let started_at = profile.then(Instant::now);
+                let started_at = timed.then(Instant::now);
                 let analyzed_grammar = if direct_regular_automaton.is_none() {
                     let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                     if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
@@ -6770,6 +6801,7 @@ fn compile_dynamic_owned_impl(
                 (analyzed_grammar, started_at.map_or(0.0, elapsed_ms))
             },
         );
+        let ledger_factor_join_ms = ledger_factor_join_started.map_or(0.0, elapsed_ms);
         let prepared_has_giant_repeat = prepared_expressions
             .iter()
             .any(expression_contains_large_bounded_repeat);
@@ -6800,6 +6832,7 @@ fn compile_dynamic_owned_impl(
             );
         }
 
+        let ledger_join_started = ledger.then(Instant::now);
         let (tokenizer_result, ((table, table_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
             parallel_dynamic_core,
             "dynamic_tokenizer_and_table_vocab",
@@ -6844,11 +6877,17 @@ fn compile_dynamic_owned_impl(
         );
         let ((tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection), tokenizer_ms) =
             tokenizer_result?;
+        let ledger_join_ms = ledger_join_started.map_or(0.0, elapsed_ms);
 
-        let finalize_started_at = profile.then(Instant::now);
+        let finalize_started_at = timed.then(Instant::now);
         // Build unfinalized so a mask-only finite-token quotient can be
         // attached before dynamic runtime caches/projections are constructed.
         // The exact full tokenizer above remains authoritative for commit.
+        let ledger_rules = prepared_grammar.rules.len();
+        let ledger_terminals = prepared_grammar.num_terminals();
+        let ledger_tokenizer_states = tokenizer.num_states();
+        let ledger_table_states = table.num_states;
+        let ledger_construct_started = ledger.then(Instant::now);
         let mut constraint = DynamicConstraint::from_parts_with_dynamic_vocab_unfinalized(
             table,
             terminal_display_names,
@@ -6871,18 +6910,29 @@ fn compile_dynamic_owned_impl(
                 .dynamic_mask_vocab
                 .set_virtual_residuals_mask_projection(mask_tokenizer, projections);
         }
+        let ledger_construct_ms = ledger_construct_started.map_or(0.0, elapsed_ms);
+        let ledger_runtime_started = ledger.then(Instant::now);
         if finalize_runtime {
             constraint.inner.rebuild_dynamic_runtime_caches();
         }
+        let ledger_runtime_ms = ledger_runtime_started.map_or(0.0, elapsed_ms);
+        let ledger_composition_started = ledger.then(Instant::now);
         constraint
             .inner
             .table
             .set_embedded_start_nullable(start_nullable);
         constraint.set_composition_grammar(prepared_grammar);
+        let ledger_composition_ms = ledger_composition_started.map_or(0.0, elapsed_ms);
+        let ledger_save_started = ledger.then(Instant::now);
         if finalize_runtime {
             constraint.cache_external_vocab_artifact_for_save();
         }
-        if let Some(total_started_at) = total_started_at {
+        let ledger_save_ms = ledger_save_started.map_or(0.0, elapsed_ms);
+        if ledger {
+            let ledger_total_ms = total_started_at.map_or(0.0, elapsed_ms) + ledger_entry_ms;
+            eprintln!("[glrmask/core-ledger] path=standard tiny={tiny_dynamic_compile} prepare_ms={prepare_ms:.6} policy_ms={ledger_policy_ms:.6} factor_join_wall_ms={ledger_factor_join_ms:.6} total_ms={ledger_total_ms:.6} rules={ledger_rules} terminals={ledger_terminals} tokenizer_states={ledger_tokenizer_states} table_states={ledger_table_states} entry_ms={ledger_entry_ms:.6} factor_ms={factor_ms:.6} analysis_ms={analysis_ms:.6} tokenizer_ms={tokenizer_ms:.6} table_ms={table_ms:.6} dynamic_vocab_ms={dynamic_vocab_ms:.6} join_wall_ms={ledger_join_ms:.6} construct_ms={ledger_construct_ms:.6} runtime_cache_ms={ledger_runtime_ms:.6} composition_ms={ledger_composition_ms:.6} save_cache_ms={ledger_save_ms:.6}");
+        }
+        if profile && let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_compile] finalize_runtime={} prepare_ms={:.3} analysis_ms={:.3} tokenizer_ms={:.3} table_ms={:.3} dynamic_vocab_ms={:.3} finalize_ms={:.3} parallel_core_wall_ms={:.3} total_ms={:.3}",
                 finalize_runtime,
