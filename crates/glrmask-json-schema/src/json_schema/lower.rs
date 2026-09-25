@@ -82,16 +82,170 @@ struct StructuralSchemaCacheKey {
     object_variant_ref_stack: Vec<String>,
 }
 
+/// Preserve the exact FxHasher result of one write of the serialized key.
+/// FxHasher write boundaries are significant, so buffer partial native words
+/// rather than forwarding arbitrary serializer fragments to the hasher.
+struct SchemaKeyHashWriter {
+    hasher: FxHasher,
+    pending: [u8; std::mem::size_of::<usize>()],
+    used: usize,
+}
+
+impl SchemaKeyHashWriter {
+    fn new() -> Self {
+        Self {
+            hasher: FxHasher::default(),
+            pending: [0; std::mem::size_of::<usize>()],
+            used: 0,
+        }
+    }
+
+    fn finish(mut self) -> u64 {
+        // Hash the final 4/2/1-byte tail only once, at the actual end of input.
+        if self.used != 0 {
+            self.hasher.write(&self.pending[..self.used]);
+        }
+        self.hasher.finish()
+    }
+}
+
+impl std::io::Write for SchemaKeyHashWriter {
+    fn write(&mut self, mut bytes: &[u8]) -> std::io::Result<usize> {
+        let original_len = bytes.len();
+        let word = self.pending.len();
+        if self.used != 0 {
+            let copied = (word - self.used).min(bytes.len());
+            self.pending[self.used..self.used + copied].copy_from_slice(&bytes[..copied]);
+            self.used += copied;
+            bytes = &bytes[copied..];
+            if self.used != word {
+                return Ok(original_len);
+            }
+            self.hasher.write(&self.pending);
+            self.used = 0;
+        }
+        let aligned_len = bytes.len() / word * word;
+        if aligned_len != 0 {
+            self.hasher.write(&bytes[..aligned_len]);
+        }
+        let tail = &bytes[aligned_len..];
+        self.pending[..tail.len()].copy_from_slice(tail);
+        self.used = tail.len();
+        Ok(original_len)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // A flush is not an end-of-stream marker. Preserve the partial word.
+        Ok(())
+    }
+}
+
 impl StructuralSchemaCacheKey {
-    fn fingerprint(&self) -> u64 {
-        // The fingerprint is only a bucket selector. Cache lookup always
-        // confirms full typed equality, so hash collisions cannot change the
-        // imported language.
+    fn fingerprint_baseline(&self) -> u64 {
         let encoded = bincode::serialize(self)
             .expect("loaded JSON Schema AST must remain binary-serializable");
         let mut hasher = FxHasher::default();
         hasher.write(&encoded);
         hasher.finish()
+    }
+
+    fn fingerprint_streamed(&self) -> u64 {
+        let mut writer = SchemaKeyHashWriter::new();
+        bincode::serialize_into(&mut writer, self)
+            .expect("loaded JSON Schema AST must remain binary-serializable");
+        writer.finish()
+    }
+
+    fn fingerprint(&self) -> u64 {
+        // A fingerprint selects a bucket only. Full typed equality and the
+        // existing completed/active cache ordering remain authoritative.
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = *ENABLED.get_or_init(|| {
+            std::env::var("GLRMASK_EXPERIMENT_STREAM_SCHEMA_KEY_HASH").is_ok_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            })
+        });
+        let verify = *VERIFY.get_or_init(|| {
+            std::env::var("GLRMASK_ASSERT_STREAM_SCHEMA_KEY_HASH").is_ok_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            })
+        });
+        if !enabled && !verify {
+            return self.fingerprint_baseline();
+        }
+        let streamed = self.fingerprint_streamed();
+        if verify || !enabled {
+            let baseline = self.fingerprint_baseline();
+            assert_eq!(streamed, baseline, "schema-key fingerprint changed");
+            if !enabled {
+                return baseline;
+            }
+        }
+        streamed
+    }
+}
+
+#[cfg(test)]
+mod streamed_schema_key_hash_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn segmented_writes_match_the_original_single_write_hash() {
+        for len in 0..=256 {
+            let bytes = (0..len).map(|i| (i * 37 + len * 13) as u8).collect::<Vec<_>>();
+            let mut original = FxHasher::default();
+            original.write(&bytes);
+            let expected = original.finish();
+            for chunk in 1..=31 {
+                let mut stream = SchemaKeyHashWriter::new();
+                for part in bytes.chunks(chunk) {
+                    stream.write_all(part).unwrap();
+                    stream.flush().unwrap();
+                    assert_eq!(stream.write(&[]).unwrap(), 0);
+                }
+                assert_eq!(stream.finish(), expected, "len={len} chunk={chunk}");
+            }
+            for split in 0..=len {
+                let mut stream = SchemaKeyHashWriter::new();
+                stream.write_all(&bytes[..split]).unwrap();
+                stream.flush().unwrap();
+                stream.write_all(&bytes[split..]).unwrap();
+                assert_eq!(stream.finish(), expected, "len={len} split={split}");
+            }
+        }
+    }
+
+    #[test]
+    fn serialized_typed_keys_preserve_every_original_fingerprint() {
+        for len in 0..=96 {
+            let mut schema = Schema::assertions(
+                "#/properties/outer",
+                SchemaAssertions {
+                    types: Some(vec![SchemaType::String, SchemaType::Null]),
+                    const_value: Some(serde_json::json!({
+                        "text": "a中🙂".repeat(len), "n": -0.25, "v": [null, true, false]
+                    })),
+                    any_of: vec![
+                        Schema::any("#/properties/outer/items"),
+                        Schema::never("#/other"),
+                        Schema { location: "#/properties/outer/ref".into(), kind: SchemaKind::Ref("#".into()) },
+                    ],
+                    ..SchemaAssertions::default()
+                },
+            );
+            schema.normalize_locations_relative();
+            for terminal_partition_class in [JsonTerminalPartitionClass::Other, JsonTerminalPartitionClass::Literal, JsonTerminalPartitionClass::Pattern] {
+                for site in [StructuralSchemaSite::Ordinary, StructuralSchemaSite::AdditionalProperties] {
+                    let key = StructuralSchemaCacheKey {
+                        schema: schema.clone(), terminal_partition_class, site,
+                        object_variant_ref_stack: vec!["#".into(), "#/properties/ref".into()],
+                    };
+                    assert_eq!(key.fingerprint_streamed(), key.fingerprint_baseline(), "len={len}");
+                }
+            }
+        }
     }
 }
 
