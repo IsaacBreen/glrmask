@@ -156,6 +156,42 @@ impl StructuralSchemaCacheKey {
         writer.finish()
     }
 
+    fn fingerprint_buffered(&self, buffer: &mut Vec<u8>) -> u64 {
+        buffer.clear();
+        bincode::serialize_into(&mut *buffer, self)
+            .expect("loaded JSON Schema AST must remain binary-serializable");
+        let mut hasher = FxHasher::default();
+        hasher.write(buffer);
+        hasher.finish()
+    }
+
+    fn fingerprint_for_lowerer(&self, buffer: &mut Vec<u8>) -> u64 {
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let enabled = *ENABLED.get_or_init(|| {
+            std::env::var("GLRMASK_EXPERIMENT_BUFFER_SCHEMA_KEY_HASH").is_ok_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            })
+        });
+        let verify = *VERIFY.get_or_init(|| {
+            std::env::var("GLRMASK_ASSERT_BUFFER_SCHEMA_KEY_HASH").is_ok_and(|v| {
+                matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on")
+            })
+        });
+        if !enabled && !verify {
+            return self.fingerprint();
+        }
+        let buffered = self.fingerprint_buffered(buffer);
+        if verify || !enabled {
+            let baseline = self.fingerprint_baseline();
+            assert_eq!(buffered, baseline, "buffered schema-key fingerprint changed");
+            if !enabled {
+                return baseline;
+            }
+        }
+        buffered
+    }
+
     fn fingerprint(&self) -> u64 {
         // A fingerprint selects a bucket only. Full typed equality and the
         // existing completed/active cache ordering remain authoritative.
@@ -219,6 +255,7 @@ mod streamed_schema_key_hash_tests {
 
     #[test]
     fn serialized_typed_keys_preserve_every_original_fingerprint() {
+        let mut reused_buffer = Vec::new();
         for len in 0..=96 {
             let mut schema = Schema::assertions(
                 "#/properties/outer",
@@ -243,8 +280,32 @@ mod streamed_schema_key_hash_tests {
                         object_variant_ref_stack: vec!["#".into(), "#/properties/ref".into()],
                     };
                     assert_eq!(key.fingerprint_streamed(), key.fingerprint_baseline(), "len={len}");
+                    assert_eq!(key.fingerprint_buffered(&mut reused_buffer), key.fingerprint_baseline(), "buffered len={len}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn buffered_key_hash_clears_previous_longer_serializations() {
+        let mut buffer = Vec::new();
+        let mut capacity = 0;
+        for len in [4096, 0, 513, 1, 20, 0, 3] {
+            let key = StructuralSchemaCacheKey {
+                schema: Schema::assertions("#", SchemaAssertions {
+                    const_value: Some(serde_json::Value::String("x".repeat(len))),
+                    ..SchemaAssertions::default()
+                }),
+                terminal_partition_class: JsonTerminalPartitionClass::Other,
+                site: StructuralSchemaSite::Ordinary,
+                object_variant_ref_stack: Vec::new(),
+            };
+            assert_eq!(key.fingerprint_buffered(&mut buffer), key.fingerprint_baseline());
+            assert_eq!(buffer, bincode::serialize(&key).unwrap());
+            if capacity != 0 {
+                assert_eq!(buffer.capacity(), capacity);
+            }
+            capacity = buffer.capacity();
         }
     }
 }
@@ -429,6 +490,9 @@ pub struct Lowerer<'a> {
     active_schema_lowerings: Vec<(u64, StructuralSchemaCacheKey, usize)>,
     structural_schema_cache_hits: usize,
     structural_schema_cache_misses: usize,
+    // Compile-local scratch only: never retain schema bytes in a process-global
+    // cache or share mutable storage between isolated/parallel lowerers.
+    structural_schema_fingerprint_buffer: Vec<u8>,
     used_rule_names: BTreeSet<String>,
     next_rule_id: usize,
 }
@@ -609,6 +673,7 @@ impl<'a> Lowerer<'a> {
             active_schema_lowerings: Vec::new(),
             structural_schema_cache_hits: 0,
             structural_schema_cache_misses: 0,
+            structural_schema_fingerprint_buffer: Vec::new(),
             used_rule_names: BTreeSet::new(),
             next_rule_id: 0,
         };
@@ -659,6 +724,7 @@ impl<'a> Lowerer<'a> {
             active_schema_lowerings: Vec::new(),
             structural_schema_cache_hits: 0,
             structural_schema_cache_misses: 0,
+            structural_schema_fingerprint_buffer: Vec::new(),
             used_rule_names: BTreeSet::new(),
             next_rule_id,
         };
@@ -1073,7 +1139,7 @@ impl<'a> Lowerer<'a> {
                 .cloned()
                 .collect(),
         };
-        let fingerprint = key.fingerprint();
+        let fingerprint = key.fingerprint_for_lowerer(&mut self.structural_schema_fingerprint_buffer);
         // Completed results always have precedence, exactly as before the
         // cycle guard. An active ancestor must not hide an existing result.
         let hit_expr = self.structural_schema_memo_enabled.then(|| {
