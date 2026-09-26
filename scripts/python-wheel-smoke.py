@@ -28,6 +28,24 @@ state.commit_token(2)
 assert state.is_accepting()
 
 
+# A fused token crossing a grammar-terminal boundary exercises the static L2P
+# compiler, not just the simple word-by-word path above. This small case exposed
+# a native compilation crash in an obsolete macOS nightly toolchain that an
+# import-only or word-only smoke test did not catch.
+boundary_vocab = glrmask.Vocab.from_id_to_bytes(
+    {0: b"X", 1: b"ab!", 2: b"Xab!", 3: b"a", 4: b"b", 5: b"!"}
+)
+boundary_constraint = glrmask.Grammar.from_glrm(
+    'glrm 1; start child; nt child = "a" "b";'
+).compile(boundary_vocab)
+boundary_state = boundary_constraint.start()
+assert boundary_state.mask().tolist() == [False, False, False, True, False, False]
+boundary_state.commit_token(3)
+assert boundary_state.mask().tolist() == [False, False, False, False, True, False]
+boundary_state.commit_token(4)
+assert boundary_state.is_accepting()
+
+
 # Exercise the optional llama-cpp-python adapter without installing or loading a
 # real model. The fake module mirrors the small low-level API surface consumed by
 # Vocab.from_llama_cpp.

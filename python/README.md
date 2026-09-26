@@ -34,6 +34,37 @@ python -m pip install glrmask
 
 Published wheels include the native extension and support Python 3.9 through 3.13.
 
+### Building a wheel locally on macOS
+
+The September 26, 2026 validation used Rust 1.95.0, CPython 3.12, and the Apple
+command-line C/C++ toolchain. The resulting wheel passed all 42 checked-in Python
+tests on macOS 27. Use an explicit toolchain rather than an old ambient nightly:
+
+```bash
+rustup toolchain install 1.95.0 --profile minimal
+env -u CFLAGS -u CXXFLAGS -u CPPFLAGS -u LDFLAGS -u AR -u RANLIB -u STRIP \
+  RUSTUP_TOOLCHAIN=1.95.0 \
+  CARGO_PROFILE_RELEASE_STRIP=none \
+  CC="$(xcrun --find clang)" \
+  CXX="$(xcrun --find clang++)" \
+  SDKROOT="$(xcrun --show-sdk-path)" \
+  python -m maturin build --release --locked \
+    --manifest-path python/Cargo.toml --out dist
+python scripts/python-artifact-smoke.py dist --kind wheel --tests
+```
+
+Run these commands from the repository root, with `maturin` available in the
+selected Python environment. The artifact smoke test installs into a temporary
+virtual environment and does not replace the package in your working environment.
+
+Keeping symbol stripping disabled avoids the Mach-O string-table alignment issue
+tracked in [rust-lang/rust#157750](https://github.com/rust-lang/rust/issues/157750).
+An older local `1.91.0-nightly (2025-08-25)` additionally crashed on a small static
+GLRM compile; the same source and tests passed with 1.95.0. This is a record of
+the tested toolchains, not a claim that every intermediate version is affected.
+The wheel workflow uses this explicit macOS configuration and runs the Python
+regression suite after clean installation.
+
 ## Quickstart
 
 ```python

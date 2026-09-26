@@ -7,10 +7,12 @@ on:
       - ".github/workflows/python-wheels.yml"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "crates/**"
       - "python/**"
       - "scripts/check-python-wheel-set.py"
       - "scripts/python-artifact-smoke.py"
       - "scripts/python-wheel-smoke.py"
+      - "scripts/tests/test_python_artifact_smoke.py"
       - "src/**"
   push:
     tags:
@@ -68,6 +70,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
           architecture: ${{ matrix.platform.python-arch }}
 
+      - name: Select the validated macOS wheel toolchain
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          echo 'RUSTUP_TOOLCHAIN=1.95.0' >> "$GITHUB_ENV"
+          # LLVM debug stripping can misalign the Mach-O LINKEDIT string pool,
+          # which macOS 27 rejects even when an older build runner accepts it.
+          # See rust-lang/rust#157750. This changes wheel packaging, not masking.
+          echo 'CARGO_PROFILE_RELEASE_STRIP=none' >> "$GITHUB_ENV"
+
       - name: Build manylinux wheel
         if: ${{ matrix.platform.linux }}
         uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
@@ -104,7 +117,7 @@ jobs:
           python -m twine check dist/*
 
       - name: Clean-install and smoke-test wheel
-        run: python scripts/python-artifact-smoke.py dist --kind wheel
+        run: python scripts/python-artifact-smoke.py dist --kind wheel --tests
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
@@ -137,7 +150,7 @@ jobs:
           python -m twine check dist/*
 
       - name: Clean-install and smoke-test sdist
-        run: python scripts/python-artifact-smoke.py dist --kind sdist
+        run: python scripts/python-artifact-smoke.py dist --kind sdist --tests
 
       - name: Upload sdist artifact
         uses: actions/upload-artifact@v6
