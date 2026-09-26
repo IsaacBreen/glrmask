@@ -3602,16 +3602,20 @@ impl Constraint {
 
     pub(crate) fn prepare_dynamic_mask_runtime_artifacts(&self, vocab: &mut DynamicMaskVocab) {
         let profile_runtime_mask = std::env::var_os("GLRMASK_PROFILE_DYNAMIC_MASK").is_some();
-        let max_token_started = profile_runtime_mask.then(std::time::Instant::now);
+        let ledger = std::env::var_os("GLRMASK_DIAG_CORE_LEDGER").is_some();
+        let artifact_started = ledger.then(std::time::Instant::now);
+        let timed = ledger || profile_runtime_mask;
+        let max_token_started = timed.then(std::time::Instant::now);
         let max_token_len = self.dynamic_runtime_max_token_byte_len(vocab);
-        if let Some(started) = max_token_started {
+        let max_token_ms = max_token_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        if profile_runtime_mask && let Some(started) = max_token_started {
             eprintln!(
                 "[glrmask/profile][dynamic_mask_runtime_prepare] max_token_len_ms={:.3} value={}",
                 started.elapsed().as_secs_f64() * 1e3,
                 max_token_len,
             );
         }
-        let projection_started = profile_runtime_mask.then(std::time::Instant::now);
+        let projection_started = timed.then(std::time::Instant::now);
         self.prepare_dynamic_virtual_residual_mask_projection(vocab);
         if max_token_len > 0
             && vocab.mask_projection_tokenizer().is_none()
@@ -3628,7 +3632,8 @@ impl Constraint {
                 vocab.set_virtual_unit_repeat_mask_projection(mask_tokenizer, projection);
             }
         }
-        if let Some(started) = projection_started {
+        let projection_ms = projection_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        if profile_runtime_mask && let Some(started) = projection_started {
             eprintln!(
                 "[glrmask/profile][dynamic_mask_runtime_prepare] virtual_residual_projection_ms={:.3}",
                 started.elapsed().as_secs_f64() * 1e3,
@@ -3642,15 +3647,17 @@ impl Constraint {
         // A finite projection whose only epsilon structure is its reset
         // dispatcher executes directly over raw scalar component rows. The
         // 0x8000 bound is the Flat16 representation boundary.
-        let scalar_started = profile_runtime_mask.then(std::time::Instant::now);
+        let scalar_started = timed.then(std::time::Instant::now);
         let scalar_dispatch = mask_execution_source.has_scalar_deterministic_dispatch();
-        if let Some(started) = scalar_started {
+        let scalar_ms = scalar_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        if profile_runtime_mask && let Some(started) = scalar_started {
             eprintln!(
                 "[glrmask/profile][dynamic_mask_runtime_prepare] scalar_dispatch_proof_ms={:.3} result={}",
                 started.elapsed().as_secs_f64() * 1e3,
                 scalar_dispatch,
             );
         }
+        let execution_started = ledger.then(std::time::Instant::now);
         if eager_mask_execution
             && mask_execution_source.has_epsilon_transitions()
             && !mask_execution_source.has_any_virtual_runtime()
@@ -3658,15 +3665,17 @@ impl Constraint {
         {
             let _ = vocab.prepare_mask_execution(&self.tokenizer, max_token_len);
         }
-        let full_walk_started = profile_runtime_mask.then(std::time::Instant::now);
+        let execution_ms = execution_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        let full_walk_started = timed.then(std::time::Instant::now);
         vocab.prepare_full_walk_fast_transitions(&self.tokenizer);
-        if let Some(started) = full_walk_started {
+        let full_walk_ms = full_walk_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        if profile_runtime_mask && let Some(started) = full_walk_started {
             eprintln!(
                 "[glrmask/profile][dynamic_mask_runtime_prepare] full_walk_fast_ms={:.3}",
                 started.elapsed().as_secs_f64() * 1e3,
             );
         }
-        let master_slice_started = profile_runtime_mask.then(std::time::Instant::now);
+        let master_slice_started = timed.then(std::time::Instant::now);
         let max_safe_chars = u32::from(vocab.llg_master_max_safe_chars());
         for &slice_id in &[0u32, 3u32] {
             if let Some(slice) = vocab.llg_slice_by_cache_id(slice_id) {
@@ -3681,11 +3690,17 @@ impl Constraint {
                 );
             }
         }
-        if let Some(started) = master_slice_started {
+        let master_slice_ms = master_slice_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+        if profile_runtime_mask && let Some(started) = master_slice_started {
             eprintln!(
                 "[glrmask/profile][dynamic_mask_runtime_prepare] master_slice_artifacts_ms={:.3}",
                 started.elapsed().as_secs_f64() * 1e3,
             );
+        }
+
+        if ledger {
+            let total_ms = artifact_started.map_or(0.0, |v| v.elapsed().as_secs_f64() * 1000.0);
+            crate::compiler::core_ledger::record(format!("[glrmask/artifact-ledger] max_token_ms={max_token_ms:.6} projection_ms={projection_ms:.6} scalar_ms={scalar_ms:.6} execution_ms={execution_ms:.6} full_walk_ms={full_walk_ms:.6} master_slice_ms={master_slice_ms:.6} total_ms={total_ms:.6}"));
         }
 
         // Projected-terminal containment quotients are proof accelerators, not
