@@ -1,0 +1,689 @@
+{
+  "production_commit": "7d0f388ffed2a997a4db6018a5f9f8cc619e8406",
+  "development_branch": "glrmask-main",
+  "binary_sha256": "6127ee209fb0e558642df1eea90403a4ba82ef17e95154ee57f51d7e16c628cd",
+  "canonical_report": "final-jsb-guard-resource-20260926",
+  "canonical_audit_sha256": "4cd36912bafc4bf39219d38c19c63152623c51e6bfa4b896563b576f0cc5c051",
+  "population": {
+    "schemas": 8326,
+    "examples": 30788,
+    "matched_tbm_positions": 2925983
+  },
+  "quantiles_us": {
+    "glrmask_native": {
+      "0.5": 2.7,
+      "0.9": 5.3,
+      "0.95": 6.9,
+      "0.99": 11.5,
+      "0.999": 18.9,
+      "0.9995": 21.4,
+      "0.9999": 26.400000000000002,
+      "0.99999": 31.3,
+      "1.0": 40.4
+    },
+    "glrmask_dynamic": {
+      "0.5": 5.6,
+      "0.9": 60.300000000000004,
+      "0.95": 77.3,
+      "0.99": 149.5,
+      "0.999": 560.5,
+      "0.9995": 690.6009000000079,
+      "0.9999": 1902.7634200002067,
+      "0.99999": 2157.1700900000988,
+      "1.0": 3145.4
+    },
+    "dualmask_o2": {
+      "0.5": 6.7,
+      "0.9": 25.9,
+      "0.95": 37.0,
+      "0.99": 59.6,
+      "0.999": 163.80180000001562,
+      "0.9995": 216.1009000000078,
+      "0.9999": 257.1607200000435,
+      "0.99999": 393.97643200047315,
+      "1.0": 496.20000000000005
+    },
+    "llguidance_native": {
+      "0.5": 8.1,
+      "0.9": 32.7,
+      "0.95": 55.5,
+      "0.99": 275.0,
+      "0.999": 893.3018000000156,
+      "0.9995": 1031.9009000000078,
+      "0.9999": 2855.381260000076,
+      "0.99999": 3947.9818320063873,
+      "1.0": 6979.8
+    }
+  },
+  "dynamic_tail_check": {
+    "tail_knots": 29260,
+    "nonwinning_knots": 0,
+    "maximum_dynamic_llguidance_ratio": 0.7914498982130739,
+    "strict_p99_to_p100_dominance": true,
+    "first_nonwinning_knots": []
+  },
+  "full_dynamic_mask_gate": {
+    "frames": 3471762,
+    "different_mask_frames": 0,
+    "first_mismatches": [],
+    "outcomes_and_trajectories_equal": true,
+    "labels_aligned": true,
+    "largest_frame_bytes": 16032,
+    "stored_mask_payload_bytes": 0,
+    "elapsed_seconds": 252.86000000000058,
+    "returncodes": [
+      0,
+      0
+    ]
+  },
+  "root_library_gate": {
+    "label": "root-library",
+    "returncode": 0,
+    "log_sha256": "bd7ebde8b1d92dedf76995a06f71442a7cf8920465f50a19ce986de18e8a7efb",
+    "passed": 799,
+    "failed": 0,
+    "ignored": 51
+  },
+  "runs": {
+    "glrmask_dynamic": {
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "independent_sha256": [
+        "05760384f0ef803526784a30798ac59e22318598c59b50821537702da79cc82c",
+        "39c44d9423bed5c6e04af06a01614393f9b2533687e53d0ac2f0f9c5272b4f2f"
+      ],
+      "merged_sha256": "c4d56c304af9060a8c16bbad2c21e110ddff7780cd8b049e0245bfb9891e4566",
+      "arithmetic_checked_positions": 3427832,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "DynamicConstraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      }
+    },
+    "glrmask": {
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "independent_sha256": [
+        "782bf5dccbb2d1de46e626b53054af75ed1f4504562b220292ff2bf9fbf159c6",
+        "c16de7ac8bef836e427531b046e07c9a749c1b67279148cf5b760fd4f7e18aa7"
+      ],
+      "merged_sha256": "d4e7ef76cd13593ce58237c52ade7e402a5db489166cb9e3d445f67a93d0b365",
+      "arithmetic_checked_positions": 3426616,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "Constraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        },
+        {
+          "problem": "jsb/data/Kubernetes---kb_1161_Normalized",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "Constraint::compile(Grammar::json_schema): Compilation error: resource limit exceeded: projected L1 partition \"p4\" has 2643046 states, exceeding GLRMASK_L1_SINGLE_MAX_STATES=2000000"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 233,
+        "ok": 9325
+      },
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      }
+    },
+    "dualmask_o2": {
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "independent_sha256": [
+        "617ddbfbb68c3fa4a1fa6eda9bd8190abd6759f563a9b0ced2575110c94a0113",
+        "54d871ef43a87195f19879c2f7c695e74e27651d678f44c08a58772d466ca6d8"
+      ],
+      "merged_sha256": "e0b6d04424e2bba0bb45986f1a267267481683b1c9691e78b0ccb4ce692ce4eb",
+      "arithmetic_checked_positions": 3427832,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "DynamicConstraint::compile_with_vocab_partition(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      }
+    }
+  },
+  "raw_sha256": {
+    "glrmask_dynamic": "c4d56c304af9060a8c16bbad2c21e110ddff7780cd8b049e0245bfb9891e4566",
+    "glrmask": "d4e7ef76cd13593ce58237c52ade7e402a5db489166cb9e3d445f67a93d0b365",
+    "dualmask_o2": "e0b6d04424e2bba0bb45986f1a267267481683b1c9691e78b0ccb4ce692ce4eb",
+    "llguidance": "e3719c13ebe1d1abb4b1715cf466afb40d07a92a88de3b3bec8d27e46c7dba2b"
+  },
+  "matched_raw_sha256": "685518a7ff28cdf90a18cdddf70ad35de3d050bf503ae9cd6c6039794c070c08",
+  "plot_sha256": {
+    "a_maskbench_ttfm.webp": "9bfdf4db3a046eea1775819938edb758ed0df4f167cd7dd9c5149c264353b6f8",
+    "b_maskbench_tbm.webp": "e8f763b03de2746d37f4c7bac42ece8997fc32b2267b4164100188035062f95f",
+    "c_tbm_tail_smooth_plot.webp": "e0166d5effda15108df7d22c0d0b62bf4f847bf075a118c0098a31c232728753",
+    "d_ttfm_tail_smooth_plot.webp": "52cb03c03b151fec88c4abe5d2e691b103517c04fb321e88223051c4460f42b1",
+    "e_desync_swap_rate_plot.webp": "bf5dd587d619fe6419ab6045875efa529f55884270f1479a3fb2349b162c3066",
+    "f_tbm_comparison_combined.webp": "421e1eb32a03fec86a23fbc3e24fc9d8d704707e806dee5b4bc89372871c7315",
+    "g_combined_exceedance_xlog_ylinear.webp": "a16aef4ebbfda80b43a14fd2410ae194cd32b2fce2bc5f38412c8ac3ac3f3508",
+    "h_tbm_ideas_centered_hist.webp": "586bcca786747a0a680b2bbe6ca96d61fe46d9e61546905c70c60d13027ac437"
+  },
+  "ttfm_common_us": {
+    "dualmask_o2": {
+      "count": 8326,
+      "mean_us": 9733.73507086236,
+      "p100_us": 492445.6,
+      "p50_us": 5253.5,
+      "p75_us": 7742.799999999999,
+      "p90_us": 15187.349999999999,
+      "p95_us": 24953.4,
+      "p99_99_us": 454404.42924998,
+      "p99_9_us": 373367.50749999576,
+      "p99_us": 77315.17499999999
+    },
+    "glrmask": {
+      "count": 8326,
+      "mean_us": 26422.815601729522,
+      "p100_us": 1285369.2,
+      "p50_us": 9741.25,
+      "p75_us": 15959.575,
+      "p90_us": 59237.85,
+      "p95_us": 123482.57500000001,
+      "p99_99_us": 1205629.7692499582,
+      "p99_9_us": 709901.4574999979,
+      "p99_us": 231143.72499999998
+    },
+    "glrmask_dynamic": {
+      "count": 8326,
+      "mean_us": 2605.583749699736,
+      "p100_us": 120535.8,
+      "p50_us": 1545.9,
+      "p75_us": 2498.675,
+      "p90_us": 4463.0,
+      "p95_us": 6704.025000000001,
+      "p99_99_us": 96730.62899998753,
+      "p99_9_us": 48357.8224999995,
+      "p99_us": 20345.574999999997
+    },
+    "llguidance": {
+      "count": 8326,
+      "mean_us": 841.8135239010329,
+      "p100_us": 141870.2,
+      "p50_us": 576.2,
+      "p75_us": 762.2,
+      "p90_us": 1262.3,
+      "p95_us": 1906.9499999999998,
+      "p99_99_us": 47685.229249950615,
+      "p99_9_us": 10991.104999999934,
+      "p99_us": 6599.400000000001
+    }
+  },
+  "llguidance_contemporaneously_rerun": false,
+  "limitations": [
+    "Empirical same-population min-of-two timing comparison, not a universal latency bound.",
+    "Only Dynamic full-mask bitwise equality was checked over the complete supported cohort; Static/O2 use native outcome/trajectory and targeted gates.",
+    "Known label disagreements remain; benchmark support and pairwise agreement are not universal JSON Schema conformance.",
+    "Renovate recursive specialization remains unsupported but fails cleanly; the Static projected-state budget remains unchanged.",
+    "TTFM/build parity with llguidance is not reached; no build work was deferred outside the measured interval.",
+    "The checked-in archive excludes raw binaries and very large timing files; input/raw hashes identify locally retained evidence."
+  ],
+  "finalization_validation": {
+    "registered_tests": {
+      "suites": [
+        {
+          "suite": "unittests src\\lib.rs",
+          "passed": 799,
+          "failed": 0,
+          "ignored": 51
+        },
+        {
+          "suite": "tests\\regressions\\tokenizer\\byte_restricted_state_equivalence.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\parser\\direct_glrm_ordered_suffix_ambiguity.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\parser\\direct_glrm_ordered_suffix_fixed_n5.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\end_tokens.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\final_public_api.rs",
+          "passed": 22,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\final_public_api_review.rs",
+          "passed": 19,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\glrm_v1.rs",
+          "passed": 21,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\integer_multiple_exact.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\integration.rs",
+          "passed": 107,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\json_schema\\unicode_class_pattern.rs",
+          "passed": 14,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\json_schema\\unicode_escape_characterization.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\mre.rs",
+          "passed": 12,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\parser\\o13029_unit_inlining_false_negative.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\parser\\o15627_schema_gss_split.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o17408_false_positive.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o25804_mask_commit_mismatch.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\tokenizer\\o35155_scaling.rs",
+          "passed": 19,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o4836_unicode_escape_key.rs",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o6363_required_anyof.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o67291_recursive_anyof_ref.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\o82710_whitespace.rs",
+          "passed": 8,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\parser\\ordered_anyof_ambiguity.rs",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\resjson_recursive_ref.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\replay\\snowplow_hostname.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\terminal_interchangeability\\shared_suffix.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\terminal_interchangeability\\separator_transport.rs",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\tokenizer\\unicode_escape_progression.rs",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "suite": "tests\\regressions\\json_schema\\word_limit_totality.rs",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "passed": 1062,
+      "failed": 0,
+      "ignored": 51,
+      "root_passed": 799,
+      "log_sha256": "0a6c9f3b7829246dcb51fa078c5498e12f43260c4bb741b4c3d2a385c2d89707",
+      "excluded_nested_filtered_summaries": 9
+    },
+    "workspace_libraries": {
+      "suites": [
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask-276f5b6b2efe72db.exe)",
+          "passed": 799,
+          "ignored": 51,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_artifact-8d3fd4e8639d0f6d.exe)",
+          "passed": 15,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_dwa_merge-1fd3af34dc0cd0da.exe)",
+          "passed": 13,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_finite_automata-a247dec5d1d49c1d.exe)",
+          "passed": 6,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_glr-f2dafadabfd1b26f.exe)",
+          "passed": 195,
+          "ignored": 2,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_grammar-ccbcfefe25573165.exe)",
+          "passed": 92,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_invariant-286067bcd4cb08b2.exe)",
+          "passed": 4,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_json_schema-a43acd8ee943e8fb.exe)",
+          "passed": 51,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_lexer-58b503f6bea1aad3.exe)",
+          "passed": 237,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_parser_dwa-32ceba3768686f44.exe)",
+          "passed": 24,
+          "ignored": 1,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_terminal_dwa-600331d29db6b7af.exe)",
+          "passed": 232,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_vocab-8f38d5dff2690a45.exe)",
+          "passed": 3,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_weight-b842ec14381c7902.exe)",
+          "passed": 21,
+          "ignored": 0,
+          "failed": 0
+        },
+        {
+          "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_weighted_automata-74ef993622997902.exe)",
+          "passed": 52,
+          "ignored": 0,
+          "failed": 0
+        }
+      ],
+      "passed": 1744,
+      "failed": 0,
+      "ignored": 54,
+      "scope_excludes_python_binding": true
+    },
+    "gate_records": {
+      "workspace-libraries": {
+        "returncode": 0,
+        "started": 1790384776.6856384,
+        "finished": 1790385063.2217722,
+        "log_sha256": "882c196c5c25fc0da9d19053046129378ee37fceb2be69dc50d4b81001c57e8f",
+        "command": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "--workspace",
+          "--exclude",
+          "_glrmask",
+          "--lib",
+          "--",
+          "--test-threads=4"
+        ]
+      },
+      "public-examples": {
+        "returncode": 0,
+        "started": 1790385063.232747,
+        "finished": 1790385092.3952577,
+        "log_sha256": "1816ba299bd0ccee4e4ad6440265281d995c358287f6fe9eb02c23a6336caf60",
+        "command": [
+          "cargo",
+          "check",
+          "--release",
+          "--locked",
+          "-p",
+          "glrmask",
+          "--examples"
+        ]
+      },
+      "root-doctests": {
+        "returncode": 0,
+        "started": 1790385092.4067743,
+        "finished": 1790385097.1637144,
+        "log_sha256": "9da74c4daf62b08dd6cbb1318001e6309eab02c361c50a6ec3a13d9f23dc10d6",
+        "command": [
+          "cargo",
+          "test",
+          "--release",
+          "--locked",
+          "-p",
+          "glrmask",
+          "--doc"
+        ]
+      }
+    },
+    "production_source_unchanged_from_measured_commit": true
+  },
+  "preserved_experiments": [
+    {
+      "ref": "archive/importer-buffer-hash-20260926",
+      "commit": "1416fb87d1bbffd8072cdabe889c0d77c1aced63",
+      "parent": "2459e3778f0cd5dd38ab195cbdd74c6f9618f4ac",
+      "changed_files": [
+        "crates/glrmask-json-schema/src/json_schema/lower.rs"
+      ],
+      "source_pin_sha256": "302c7ad85c62a8f4b0ee61de10c5b7ef9096a466682d07fdaea525fdafd26cf6",
+      "original_worktree_unchanged": true,
+      "production_promoted": false
+    },
+    {
+      "ref": "archive/core-artifact-ledger-20260926",
+      "commit": "7ead760c5f602dcd10ca5880758387fdbc7787fe",
+      "parent": "5aa67d4b4b8b0332603a6bf4383e0c4e13ccdf76",
+      "changed_files": [
+        "src/runtime/constraint.rs"
+      ],
+      "source_pin_sha256": "ba7362cbafd95cb55dd6980c963ac9914b948e20f28a0b25bfaaccbf16047bd5",
+      "original_worktree_unchanged": true,
+      "production_promoted": false
+    },
+    {
+      "ref": "archive/importer-borrowed-key-20260926",
+      "commit": "2e8ed461d659203d53924aa703ca43d02c05f5bc",
+      "production_promoted": false
+    },
+    {
+      "ref": "archive/importer-canonical-clone-20260926",
+      "commit": "bc03ef6460694d30f678c3a31ffef2bcba925fe4",
+      "production_promoted": false
+    },
+    {
+      "ref": "archive/importer-phase-ledger-20260926",
+      "commit": "a9893811f41175d6ab25c011a46989880376d2be",
+      "production_promoted": false
+    },
+    {
+      "ref": "archive/importer-sparse-object-20260926",
+      "commit": "b8931924d8eea1ec12b7dd2e4eec3b13e62692fe",
+      "production_promoted": false
+    }
+  ],
+  "benchmark_harness_retention_commit": "1683b0b4eec6cef5c710855f3da7043d05052131"
+}
