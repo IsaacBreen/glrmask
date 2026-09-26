@@ -1,0 +1,867 @@
+{
+  "checked_at": "2026-09-26T10:19:27.662175+08:00",
+  "source_commit": "1c93a53852f2d1ed74303ec42bd199b3454fc60f",
+  "binary_sha256": "d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed",
+  "audit_sha256": "52e441ff8049030675839c59fa99066ff2d29e1e1cffd9231ba726ec47494b25",
+  "population": {
+    "schemas": 8326,
+    "examples": 30788,
+    "matched_tbm_positions": 2925983
+  },
+  "dynamic_tail_check": {
+    "tail_knots": 29260,
+    "nonwinning_knots": 0,
+    "maximum_dynamic_llguidance_ratio": 0.7812003810733567,
+    "strict_p99_to_p100_dominance": true,
+    "first_nonwinning_knots": []
+  },
+  "quantiles_us": {
+    "glrmask_native": {
+      "0.5": 2.7,
+      "0.9": 5.3,
+      "0.95": 6.9,
+      "0.99": 11.600000000000001,
+      "0.999": 18.9,
+      "0.9995": 21.4,
+      "0.9999": 26.240180000010877,
+      "0.99999": 31.474018000019715,
+      "1.0": 42.6
+    },
+    "glrmask_dynamic": {
+      "0.5": 5.5,
+      "0.9": 60.099999999999994,
+      "0.95": 78.0,
+      "0.99": 151.0,
+      "0.999": 555.1018000000157,
+      "0.9995": 680.5009000000078,
+      "0.9999": 1916.7634200002067,
+      "0.99999": 2193.7791320034303,
+      "1.0": 3104.1
+    },
+    "dualmask_o2": {
+      "0.5": 6.6000000000000005,
+      "0.9": 26.0,
+      "0.95": 37.1,
+      "0.99": 60.300000000000004,
+      "0.999": 164.79999999999998,
+      "0.9995": 214.7009000000078,
+      "0.9999": 257.3,
+      "0.99999": 401.418126000138,
+      "1.0": 550.2
+    },
+    "llguidance_native": {
+      "0.5": 8.1,
+      "0.9": 32.7,
+      "0.95": 55.5,
+      "0.99": 275.0,
+      "0.999": 893.3018000000156,
+      "0.9995": 1031.9009000000078,
+      "0.9999": 2855.381260000076,
+      "0.99999": 3947.9818320063873,
+      "1.0": 6979.8
+    }
+  },
+  "ttfm": {
+    "dualmask_o2": {
+      "count": 8326,
+      "mean_us": 9667.121703098726,
+      "p100_us": 486843.7,
+      "p50_us": 5232.75,
+      "p75_us": 7736.925,
+      "p90_us": 15119.75,
+      "p95_us": 24466.049999999996,
+      "p99_99_us": 458456.7819999851,
+      "p99_9_us": 341361.94249999797,
+      "p99_us": 76258.40000000001
+    },
+    "glrmask": {
+      "count": 8326,
+      "mean_us": 26404.956797982224,
+      "p100_us": 1048692.3,
+      "p50_us": 9746.099999999999,
+      "p75_us": 15925.475000000002,
+      "p90_us": 58643.4,
+      "p95_us": 125375.29999999999,
+      "p99_99_us": 1035875.0467499932,
+      "p99_9_us": 693387.8799999893,
+      "p99_us": 230605.3
+    },
+    "glrmask_dynamic": {
+      "count": 8326,
+      "mean_us": 2602.845039634879,
+      "p100_us": 118227.4,
+      "p50_us": 1554.05,
+      "p75_us": 2497.5,
+      "p90_us": 4441.549999999999,
+      "p95_us": 6775.175000000001,
+      "p99_99_us": 95500.06674998808,
+      "p99_9_us": 47858.654999999206,
+      "p99_us": 20426.024999999998
+    },
+    "llguidance": {
+      "count": 8326,
+      "mean_us": 841.8135239010329,
+      "p100_us": 141870.2,
+      "p50_us": 576.2,
+      "p75_us": 762.2,
+      "p90_us": 1262.3,
+      "p95_us": 1906.9499999999998,
+      "p99_99_us": 47685.229249950615,
+      "p99_9_us": 10991.104999999934,
+      "p99_us": 6599.400000000001
+    }
+  },
+  "native_runs": {
+    "glrmask_dynamic": {
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "arithmetic_checked_positions": 3427832
+    },
+    "glrmask": {
+      "statuses": {
+        "build_error": 233,
+        "ok": 9325
+      },
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "arithmetic_checked_positions": 3426616
+    },
+    "dualmask_o2": {
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "arithmetic_checked_positions": 3427832
+    }
+  },
+  "run_protocol": "wall; P0xfff; two independent fresh runs; elementwise TBM minima; first-run build/TTFM; no added warmup, outlier replacement, prefetch, or sleep",
+  "raw_sha256": {
+    "glrmask_dynamic": "30f89e8b4f8d742658409c36d731bf56ff2144b030e7b968e02a00b58a35ac71",
+    "glrmask": "33b936444684d8aecf1793b3540bc578b4fb8cb93a7f6d776066a181e4680f7f",
+    "dualmask_o2": "10a929ba1b4e4344e50f3d3bb80d08a993c0be3f73ef48fcac34100b197806f4",
+    "llguidance": "e3719c13ebe1d1abb4b1715cf466afb40d07a92a88de3b3bec8d27e46c7dba2b"
+  },
+  "matched_raw_sha256": "ae53c73d9b8cfb5a8735a6302ff0235332e56e22fa65b3d857340336f7b4f77a",
+  "plot_sha256": {
+    "a_maskbench_ttfm.webp": "f010503e53caec99a1a583ff4c3f8b23b4105f9e7d07cd016566333892ae3d8c",
+    "b_maskbench_tbm.webp": "ac21758e69b8aab5e53a5fc2548de11cd60b509465555853c3c6af79ed3acef0",
+    "c_tbm_tail_smooth_plot.webp": "dfa82eb8c029dfca2b0ec4bb5b333ba7c39330e97e372a2d7594d80f89f9c405",
+    "d_ttfm_tail_smooth_plot.webp": "cbceb7e2a1fcfd9fd8f93c9631ecdc22a74bcdebac2537a2941434f5fef10879",
+    "e_desync_swap_rate_plot.webp": "aebe2adb88e141e12f4bfbf940670b53865efa73ef9fcc65448438a11fd64648",
+    "f_tbm_comparison_combined.webp": "3a796a33720564adcf6cd1ff33fb1e51b0f296d6c6f5c253fcacaca010a07b9d",
+    "g_combined_exceedance_xlog_ylinear.webp": "defac35b3bb22f2f14e165686fe01877d8ab4cbc631356844731dc0e892d5e81",
+    "h_tbm_ideas_centered_hist.webp": "56216af98c1da71b228d06a3038a01efc7501847772f7c7f4130d146adee9bac"
+  },
+  "workspace_validation": {
+    "passed": 2171,
+    "failed": 0,
+    "ignored": 54,
+    "suites": [
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask-276f5b6b2efe72db.exe)",
+        "passed": 897,
+        "failed": 0,
+        "ignored": 51,
+        "returncode": 0,
+        "log_sha256": "b03c3bb4be366d58a8c83242ff15eeccdedc2ad50ff0905812c12de66234dfea",
+        "scope": "root suite recovered from the final unfiltered summary in the workspace run"
+      },
+      {
+        "suite": "tests\\regressions\\tokenizer\\byte_restricted_state_equivalence.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\byte_restricted_state_equivalence_mre-aa36c9cdf3c88200.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\parser\\direct_glrm_ordered_suffix_ambiguity.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\direct_glrm_ordered_suffix_ambiguity-4dc8132b77bf2d3a.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\parser\\direct_glrm_ordered_suffix_fixed_n5.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\direct_glrm_ordered_suffix_fixed_n5-7dcfeb8a2dafa1a4.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\end_tokens.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\end_tokens-e58510813d7d16bd.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\final_public_api.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\final_public_api-beec8331de98f55d.exe)",
+        "passed": 22,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\final_public_api_review.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\final_public_api_review-b0555b9828cccc8f.exe)",
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\glrm_v1.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrm_v1-3a266e4747671185.exe)",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\integer_multiple_exact.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\integer_multiple_exact-2fdc53a1bf379908.exe)",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\integration.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\integration-73a7d8bc47d987ad.exe)",
+        "passed": 107,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\json_schema\\unicode_class_pattern.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\json_schema_unicode_class_pattern-95a1beaec9e6bba4.exe)",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\json_schema\\unicode_escape_characterization.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\json_schema_unicode_escape_characterization-df61c915f6779348.exe)",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\mre.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\mre-faf0c9f28e5a78dc.exe)",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\parser\\o13029_unit_inlining_false_negative.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o13029_unit_inlining_false_negative-d568c7fac0d996ba.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\parser\\o15627_schema_gss_split.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o15627_schema_gss_split_mre-ba335eb592162571.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o17408_false_positive.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o17408_repro-a36ad1de989e9253.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o25804_mask_commit_mismatch.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o25804_mask_commit_mismatch-8bbdf70d55384183.exe)",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\tokenizer\\o35155_scaling.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o35155_tokenizer_scaling-3f09b732a352b356.exe)",
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o4836_unicode_escape_key.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o4836_unicode_escape_key-bffa68fdab646632.exe)",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o6363_required_anyof.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o6363_required_anyof-681f51c597526ed6.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o67291_recursive_anyof_ref.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o67291_recursive_anyof_ref-8f8b7678253021ff.exe)",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\o82710_whitespace.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\o82710_repro-2a61eecb49ddcba6.exe)",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\parser\\ordered_anyof_ambiguity.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\ordered_anyof_ambiguity-6238e541f01c794b.exe)",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\resjson_recursive_ref.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\resjson_repro-391de3ae83cc6776.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\replay\\snowplow_hostname.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\snowplow_hostname_replay_mre-777e37c23c888f7d.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\terminal_interchangeability\\shared_suffix.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\ti_mre_final-c770b4d39fffd7b7.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\terminal_interchangeability\\separator_transport.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\ti_separator_transport_mre-66e5c149354f3fac.exe)",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\tokenizer\\unicode_escape_progression.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\unicode_escape_progression_glrm_mre-446157ec2738d12b.exe)",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "tests\\regressions\\json_schema\\word_limit_totality.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\word_limit_totality-74a11f5598efb075.exe)",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_artifact-8d3fd4e8639d0f6d.exe)",
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_dwa_merge-1fd3af34dc0cd0da.exe)",
+        "passed": 13,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_finite_automata-a247dec5d1d49c1d.exe)",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_glr-f2dafadabfd1b26f.exe)",
+        "passed": 196,
+        "failed": 0,
+        "ignored": 2
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_grammar-ccbcfefe25573165.exe)",
+        "passed": 92,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_invariant-286067bcd4cb08b2.exe)",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_json_schema-a43acd8ee943e8fb.exe)",
+        "passed": 51,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_lexer-58b503f6bea1aad3.exe)",
+        "passed": 238,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_parser_dwa-32ceba3768686f44.exe)",
+        "passed": 46,
+        "failed": 0,
+        "ignored": 1
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_terminal_dwa-600331d29db6b7af.exe)",
+        "passed": 272,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_vocab-8f38d5dff2690a45.exe)",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_weight-b842ec14381c7902.exe)",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0
+      },
+      {
+        "suite": "unittests src\\lib.rs (C:/gdt22/target-final-integration-915939\\release\\deps\\glrmask_weighted_automata-74ef993622997902.exe)",
+        "passed": 54,
+        "failed": 0,
+        "ignored": 0
+      }
+    ],
+    "source_hashes_unchanged": true,
+    "workspace_excludes_python_binding": true,
+    "full_dynamic_masks": {
+      "frames": 3471762,
+      "different_mask_frames": 0,
+      "first_mismatches": [],
+      "outcomes_and_trajectories_equal": true,
+      "labels_aligned": true,
+      "largest_frame_bytes": 16032,
+      "stored_mask_payload_bytes": 0,
+      "elapsed_seconds": 258.4060000000027,
+      "returncodes": [
+        0,
+        0
+      ]
+    },
+    "log_sha256": "b03c3bb4be366d58a8c83242ff15eeccdedc2ad50ff0905812c12de66234dfea"
+  },
+  "full_mask_gate": {
+    "frames": 3471762,
+    "different_mask_frames": 0,
+    "first_mismatches": [],
+    "outcomes_and_trajectories_equal": true,
+    "labels_aligned": true,
+    "largest_frame_bytes": 16032,
+    "stored_mask_payload_bytes": 0,
+    "elapsed_seconds": 258.4060000000027,
+    "returncodes": [
+      0,
+      0
+    ]
+  },
+  "targeted_gates": {
+    "binary_sha256": "d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed",
+    "runs": [
+      {
+        "mode": "dynamic",
+        "case": "accelerator",
+        "returncode": 0,
+        "elapsed_seconds": 2.1409999999959837,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---accelerator",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "exact_old_signature": true
+      },
+      {
+        "mode": "dynamic",
+        "case": "renovate",
+        "returncode": 0,
+        "elapsed_seconds": 1.2660000000032596,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---renovate-schema",
+            "status": "build_error",
+            "error": "DynamicConstraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+          },
+          {
+            "problem_id": "jsb/data/Glaiveai2K---calculate_area_423b749e",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "clean_unsupported_error": true,
+        "next_schema_matches_baseline": true
+      },
+      {
+        "mode": "static",
+        "case": "accelerator",
+        "returncode": 0,
+        "elapsed_seconds": 1.4219999999986612,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---accelerator",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "exact_old_signature": true
+      },
+      {
+        "mode": "static",
+        "case": "renovate",
+        "returncode": 0,
+        "elapsed_seconds": 1.3439999999973224,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---renovate-schema",
+            "status": "build_error",
+            "error": "Constraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+          },
+          {
+            "problem_id": "jsb/data/Glaiveai2K---calculate_area_423b749e",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "clean_unsupported_error": true,
+        "next_schema_matches_baseline": true
+      },
+      {
+        "mode": "static",
+        "case": "static-limit",
+        "returncode": 0,
+        "elapsed_seconds": 2.9530000000013388,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/Kubernetes---kb_1161_Normalized",
+            "status": "build_error",
+            "error": "Constraint::compile(Grammar::json_schema): Compilation error: resource limit exceeded: projected L1 partition \"p4\" has 2643046 states, exceeding GLRMASK_L1_SINGLE_MAX_STATES=2000000"
+          },
+          {
+            "problem_id": "jsb/data/Github_hard---o46658",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "clean_unsupported_error": true,
+        "next_schema_matches_baseline": true
+      },
+      {
+        "mode": "o2",
+        "case": "accelerator",
+        "returncode": 0,
+        "elapsed_seconds": 1.3909999999959837,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---accelerator",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "exact_old_signature": true
+      },
+      {
+        "mode": "o2",
+        "case": "renovate",
+        "returncode": 0,
+        "elapsed_seconds": 1.3279999999940628,
+        "timing_is_not_publication": true,
+        "problems": [
+          {
+            "problem_id": "jsb/data/JsonSchemaStore---renovate-schema",
+            "status": "build_error",
+            "error": "DynamicConstraint::compile_with_vocab_partition(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+          },
+          {
+            "problem_id": "jsb/data/Glaiveai2K---calculate_area_423b749e",
+            "status": "ok",
+            "error": null
+          }
+        ],
+        "clean_unsupported_error": true,
+        "next_schema_matches_baseline": true
+      }
+    ],
+    "all_passed": true
+  },
+  "python_extension_compile": {
+    "returncode": 0,
+    "started": 1790386583.5111575,
+    "finished": 1790386651.7172632,
+    "source_pin_sha256": "c64462cfd2635d90b109c478595318d44613293f336912fb31b48cc2cf867512",
+    "log_sha256": "2f08caff20fdf57451a36ea7d754999cd67aae0a13e39ae2645a530a360389f5",
+    "source_unchanged": true,
+    "python": "C:\\gdt22\\.venv\\Scripts\\python.exe",
+    "command": [
+      "C:/Users/isaacbreen/.cargo/bin/cargo.exe",
+      "check",
+      "--release",
+      "--locked",
+      "--offline",
+      "--manifest-path",
+      "C:\\gdt22\\final-integration-915939\\Cargo.toml",
+      "-p",
+      "_glrmask"
+    ],
+    "scope": "Python extension Rust compile check only; not Python runtime tests"
+  },
+  "native_raw_manifests": {
+    "glrmask_dynamic": {
+      "mode": "dynamic",
+      "framework": "glrmask_dynamic",
+      "revision": "1c93a53852f2d1ed74303ec42bd199b3454fc60f",
+      "binary": "C:\\gdt22\\artifacts\\final-integration-915939\\combined-boundary\\candidate.exe",
+      "binary_sha256": "d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed",
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      },
+      "archived_llguidance_sha256": "e3719c13ebe1d1abb4b1715cf466afb40d07a92a88de3b3bec8d27e46c7dba2b",
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "started_epoch": 1790387845.7015746,
+      "native_pids": [
+        {
+          "pid": 17840,
+          "affinity": "0xfff"
+        },
+        {
+          "pid": 11388,
+          "affinity": "0xfff"
+        }
+      ],
+      "finished_epoch": 1790388102.5969548,
+      "merged_sha256": "30f89e8b4f8d742658409c36d731bf56ff2144b030e7b968e02a00b58a35ac71",
+      "independent_sha256": [
+        "e9748bb74b4dec5585543308db1fef5451b0760a00d1abf0d2359a8bdc28be85",
+        "53e687bcc03ea6d163def82fc14f09f790b9f693105393c8d470dabea78ff640"
+      ],
+      "arithmetic_checked_positions": 3427832,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "DynamicConstraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "initial_mask_minima_independently_checked": 34603
+    },
+    "glrmask": {
+      "mode": "static",
+      "framework": "glrmask",
+      "revision": "1c93a53852f2d1ed74303ec42bd199b3454fc60f",
+      "binary": "C:\\gdt22\\artifacts\\final-integration-915939\\combined-boundary\\candidate.exe",
+      "binary_sha256": "d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed",
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      },
+      "archived_llguidance_sha256": "e3719c13ebe1d1abb4b1715cf466afb40d07a92a88de3b3bec8d27e46c7dba2b",
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "started_epoch": 1790388104.6033487,
+      "native_pids": [
+        {
+          "pid": 9616,
+          "affinity": "0xfff"
+        },
+        {
+          "pid": 8676,
+          "affinity": "0xfff"
+        }
+      ],
+      "finished_epoch": 1790388703.592022,
+      "merged_sha256": "33b936444684d8aecf1793b3540bc578b4fb8cb93a7f6d776066a181e4680f7f",
+      "independent_sha256": [
+        "84087e56ba9ccb0e189019c1d0b318015ca5d8117f014e7d6b6f4d6f2249606f",
+        "4d3a5bbe1905c06d36164a0cb4bfc5ce793d4010cb71f8e360fa72886dfc1174"
+      ],
+      "arithmetic_checked_positions": 3426616,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "Constraint::compile(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        },
+        {
+          "problem": "jsb/data/Kubernetes---kb_1161_Normalized",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "Constraint::compile(Grammar::json_schema): Compilation error: resource limit exceeded: projected L1 partition \"p4\" has 2643046 states, exceeding GLRMASK_L1_SINGLE_MAX_STATES=2000000"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 233,
+        "ok": 9325
+      },
+      "initial_mask_minima_independently_checked": 34603
+    },
+    "dualmask_o2": {
+      "mode": "o2",
+      "framework": "dualmask_o2",
+      "revision": "1c93a53852f2d1ed74303ec42bd199b3454fc60f",
+      "binary": "C:\\gdt22\\artifacts\\final-integration-915939\\combined-boundary\\candidate.exe",
+      "binary_sha256": "d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed",
+      "input_hashes": {
+        "corpus.json.zst": "d23648fd79ba197704ac8c3c9b76ecee4e4d6d2944ec27f12be14c7670ac5d35",
+        "tokenizer.json": "b47fcb7017102fb3594326d69acc6b74872032ed15def90890d49d61ea94d220",
+        "vocab.json.zst": "a20d69094c72c7d1443c5be0d5bf049f1caa831075c05ddd78adf67c4a8fd591"
+      },
+      "archived_llguidance_sha256": "e3719c13ebe1d1abb4b1715cf466afb40d07a92a88de3b3bec8d27e46c7dba2b",
+      "clock": "wall",
+      "timing_runs": 2,
+      "first_run_build_accounting": true,
+      "retains_independent_raws": true,
+      "no_outlier_replacement": true,
+      "started_epoch": 1790388705.8429317,
+      "native_pids": [
+        {
+          "pid": 1416,
+          "affinity": "0xfff"
+        },
+        {
+          "pid": 4856,
+          "affinity": "0xfff"
+        }
+      ],
+      "finished_epoch": 1790389023.2543964,
+      "merged_sha256": "10a929ba1b4e4344e50f3d3bb80d08a993c0be3f73ef48fcac34100b197806f4",
+      "independent_sha256": [
+        "e36e9d35d8e07f2e80f9f396346c06a253cc2379ccbc8b2b71eb16967fb1f736",
+        "56194b2487c903a959f38149027ae20a3fefdc10c93c88fcd5ae6262539698e2"
+      ],
+      "arithmetic_checked_positions": 3427832,
+      "examples": 34603,
+      "support_changes": [
+        {
+          "problem": "jsb/data/JsonSchemaStore---renovate-schema",
+          "before": "process_crash",
+          "after": "build_error",
+          "error": "DynamicConstraint::compile_with_vocab_partition(Grammar::json_schema): Grammar parse error: #/properties/customDatasources: recursive schema constraint revisits an unresolved lowering state; this recursive constraint specialization is not supported"
+        }
+      ],
+      "semantic_regressions": [],
+      "process_segments": [
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 1
+        },
+        {
+          "segment": 1,
+          "start_index": 0,
+          "completed": 9558,
+          "returncode": 0,
+          "timing_run": 2
+        }
+      ],
+      "statuses": {
+        "build_error": 232,
+        "ok": 9326
+      },
+      "initial_mask_minima_independently_checked": 34603
+    }
+  },
+  "reused_llguidance_report": "C:\\gdt22\\final-publication-s50-1707\\cfa\\results\\final-jsb-s50-restored-20260924",
+  "contemporaneous_llguidance_rerun": false,
+  "scope_note": "This is the post-boundary integrated source1c93; earlier7d0f report remains immutable and is not relabelled."
+}

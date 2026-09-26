@@ -1,5 +1,7 @@
 # Dynamic build optimization and crash recovery: 26 September 2026
 
+**Final integrated source:** `1c93a53852f2d1ed74303ec42bd199b3454fc60f`. The last section records the fresh post-boundary sweep; earlier sections retain the original pre-boundary evidence.
+
 ## Release scope
 
 The measured production tree is `7d0f388ffed2a997a4db6018a5f9f8cc619e8406`. It extends the previously published `e24e24c63664a27d26c980527439a8dea36d2a3b` by five validated commits:
@@ -103,4 +105,28 @@ Before the production push, `glrmask-main` advanced to `d26f65fc7b4d21def0c84851
 
 The combined production tree was rebuilt and passed 2171 Rust workspace and registered tests, zero failures (54 existing ignored), public-example compilation, and the root doctest. The Python extension also passed a separate compile check against the same source; this is not Python runtime/wheel validation. All 3471762 complete Dynamic mask frames matched the prior validated tree, with identical outcomes and trajectories. Both formerly crashing cases still return their explicit build errors and allow subsequent compiles.
 
-The numerical tables above remain measurements of the original `7d0f388ff` tree. They must not be silently relabelled as measurements of this later combined tree. A separate final timing audit is required to confirm its distribution.
+The numerical tables above remain measurements of the original `7d0f388ff` tree. They must not be silently relabelled as measurements of this later combined tree. The separate final timing audit below confirms the combined distribution; the older measurements above remain unchanged.
+
+## Final integrated timing gate ? source `1c93a5385`
+
+The newly merged production tree passed a fresh full six-process Windows sweep (Dynamic, Static, and O2, two independent repetitions each). All six processed 9,558 schemas with no crash or restart. Both operands were retained, every minimum was checked, and every previously supported native outcome and token trajectory was preserved. Only the September 24 llguidance raw was reused. The measured compiled source is `1c93a53852f2d1ed74303ec42bd199b3454fc60f`; later documentation commits do not change its production code.
+
+Report: `final-jsb-integrated-boundary-20260926`.
+Executable SHA256: `d7d9869d1d1d3708a519f85d245f2c586e69376977aa5507eeda4078f80462ed`.
+
+| Engine | Matched TBM p99, us | Matched TBM p100, us |
+| --- | ---: | ---: |
+| GLRMask Static | 11.6 | 42.6 |
+| GLRMask Dynamic | 151.0 | 3,104.1 |
+| GLRMask O2 | 60.3 | 550.2 |
+| Archived llguidance | 275.0 | 6,979.8 |
+
+The matched population remains exactly 8,326 schemas / 30,788 examples / 2,925,983 positions. Dynamic is below llguidance at all 29,260 empirical p99-p100 comparison points; the maximum ratio is 0.7812003811. There are no substituted replay values or removed outliers.
+
+Dynamic first-run TTFM is 1.55405 ms median, 4.44155 ms p90, 20.426025 ms p99, and 118.2274 ms maximum. This confirms the runtime-tail acceptance gate but does not meet the still-open build/TTFM parity goal. Differences from the earlier pre-boundary report are reported as measurements, not attributed wholesale to an algorithmic speedup.
+
+The full combined-tree gate is **2,171 Rust workspace and registered tests passed, zero failed, 54 existing ignored**, including 897 root tests. Examples, the root doctest, and the Python extension compile check also passed. The complete Dynamic mask comparison checked 3,471,762 frames with zero differences. Python runtime tests and a full Static/O2 bitwise mask sweep are not claimed.
+
+[The integrated audit record](assets/integrated-dynamic-boundary-validation-2026-09-26.json) includes independent-run hashes, arithmetic counts, outcomes, exact percentile evidence, and the combined validation results. The prior [pre-boundary audit](assets/dynamic-build-and-crash-validation-2026-09-26.json) remains available as the historical measurement.
+
+CFA harness closure also includes commit `41cbabc230fb48fc51bfce3ef4b35766e19d3a6a` for a supported Windows wall-clock default (explicit overrides remain honored) and `c9f379ade92834d80d26bf7c52ba9dcdd45c530b` for cross-platform archive checksums. CFA master at that checkpoint passed 31 focused tests on Windows and macOS. These changes do not rewrite any already measured benchmark operands.
