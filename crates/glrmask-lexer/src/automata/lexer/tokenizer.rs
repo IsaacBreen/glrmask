@@ -12195,6 +12195,35 @@ impl Tokenizer {
     /// global reset dispatcher must not disable exact single-terminal quotient
     /// construction for an ordinary deterministic component.
     fn scalar_physical_component_root(&self, root: u32) -> bool {
+        static GLOBAL_PROOF: OnceLock<bool> = OnceLock::new();
+        static ASSERT_PROOF: OnceLock<bool> = OnceLock::new();
+        let result = if *GLOBAL_PROOF.get_or_init(|| {
+            std::env::var_os("GLRMASK_DISABLE_GLOBAL_SCALAR_PROOF").is_none()
+        }) {
+            self.scalar_physical_component_root_impl::<true>(root)
+        } else {
+            self.scalar_physical_component_root_impl::<false>(root)
+        };
+        if *ASSERT_PROOF.get_or_init(|| {
+            std::env::var_os("GLRMASK_ASSERT_GLOBAL_SCALAR_PROOF").is_some()
+        }) {
+            assert_eq!(result, self.scalar_physical_component_root_impl::<false>(root),
+                "global scalar proof differs from exact component traversal at {root}");
+        }
+        result
+    }
+
+    fn scalar_physical_component_root_impl<const GLOBAL_PROOF: bool>(&self, root: u32) -> bool {
+        // Valid tokenizer byte transitions stay in their physical DFA unless a
+        // virtual runtime owns the destination. With neither virtual runtimes
+        // nor epsilon edges anywhere (including packed segments), every root's
+        // byte-reachable component is already certified scalar. No component
+        // enumeration or allocation is needed solely to re-prove this boolean.
+        if GLOBAL_PROOF && root < self.num_states()
+            && !self.has_any_virtual_runtime() && !self.has_epsilon_transitions()
+        {
+            return true;
+        }
         self.scalar_physical_component_states(root).is_some()
     }
 
@@ -14696,6 +14725,71 @@ mod tests {
         )
     }
 
+
+    #[test]
+    fn global_scalar_proof_matches_local_scan_on_generated_graphs() {
+        // Includes loops, absent bytes, shared targets and reset-unreachable
+        // states. Every root is compared, not just the tokenizer's start.
+        for states in [1usize, 2, 7, 31] {
+            for seed in 0..12u64 {
+                let mut bits = seed + 1;
+                let mut dfa = DFA::new(states);
+                dfa.ensure_group_capacity(2);
+                for source in 0..states as u32 {
+                    for byte in [0u8, b'a', b'b', b'"', 128, 255] {
+                        bits = bits.wrapping_mul(6364136223846793005).wrapping_add(1);
+                        if bits & 3 != 0 {
+                            dfa.add_transition(source, byte, ((bits >> 32) % states as u64) as u32);
+                        }
+                    }
+                }
+                let tokenizer = Tokenizer::from_parts(dfa, 2, None);
+                assert!(!tokenizer.has_epsilon_transitions());
+                assert!(!tokenizer.has_any_virtual_runtime());
+                for root in 0..states as u32 {
+                    assert!(tokenizer.scalar_physical_component_root_impl::<true>(root));
+                    assert_eq!(tokenizer.scalar_physical_component_root_impl::<true>(root),
+                        tokenizer.scalar_physical_component_root_impl::<false>(root));
+                }
+                for root in [states as u32, u32::MAX] {
+                    assert!(!tokenizer.scalar_physical_component_root_impl::<true>(root));
+                    assert!(!tokenizer.scalar_physical_component_root_impl::<false>(root));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn global_scalar_proof_preserves_mixed_component_refusals() {
+        let mut dfa = DFA::new(5);
+        dfa.ensure_group_capacity(1);
+        dfa.add_transition(0, b'a', 1);
+        dfa.add_transition(1, b'b', 2);
+        dfa.add_epsilon_transition(2, 3);
+        // Root 4 remains scalar even though unrelated roots are not.
+        dfa.add_transition(4, b'z', 4);
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        assert!(tokenizer.has_epsilon_transitions());
+        for root in 0..5 {
+            assert_eq!(tokenizer.scalar_physical_component_root_impl::<true>(root),
+                tokenizer.scalar_physical_component_root_impl::<false>(root));
+        }
+        assert!(!tokenizer.scalar_physical_component_root_impl::<true>(0));
+        assert!(tokenizer.scalar_physical_component_root_impl::<true>(4));
+
+        let mut tokenizer = tokenizer_from_exprs(vec![
+            Expr::U8Seq(b"b".to_vec()), Expr::U8Class(U8Set::empty()),
+        ]);
+        tokenizer.isolate_start_state_and_drain_nullable_terminals();
+        tokenizer.install_virtual_zero_min_unit_repeat_component(
+            U8Set::single(b'a'), 1_000_000_000, 1,
+        ).unwrap();
+        assert!(tokenizer.has_any_virtual_runtime());
+        for root in 0..tokenizer.num_states() {
+            assert_eq!(tokenizer.scalar_physical_component_root_impl::<true>(root),
+                tokenizer.scalar_physical_component_root_impl::<false>(root));
+        }
+    }
 
     #[test]
     fn bounded_eager_candidates_preserve_exact_rows_and_single_worker_execution() {

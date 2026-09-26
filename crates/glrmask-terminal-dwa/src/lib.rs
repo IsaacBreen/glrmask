@@ -9,6 +9,8 @@ pub(crate) use glrmask_vocab::Vocab;
 
 #[derive(ThisError, Debug)]
 pub(crate) enum Error {
+    #[error("Compilation resource limit exceeded: {0}")]
+    ResourceLimit(String),
     #[error("Internal compiler invariant violated: {0}")]
     InternalInvariant(String),
 }
@@ -18,7 +20,9 @@ pub(crate) mod error {
     pub(crate) use glrmask_invariant::__private::fail_internal_invariant;
 
     pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T, Error> {
-        glrmask_invariant::__private::catch_internal_invariant_message(f).map_err(Error::InternalInvariant)
+        glrmask_invariant::__private::catch_compilation_resource_limit(|| {
+            glrmask_invariant::__private::catch_internal_invariant_message(f)
+        }).map_err(Error::ResourceLimit)?.map_err(Error::InternalInvariant)
     }
 }
 

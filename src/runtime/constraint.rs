@@ -7162,6 +7162,26 @@ impl Constraint {
     pub(crate) fn build_dynamic_terminal_observation_classes(
         &self,
     ) -> Vec<(TerminalID, Arc<[u32]>)> {
+        let classes = if std::env::var_os("GLRMASK_DISABLE_EARLY_OBSERVATION_FILTER").is_some() {
+            self.build_dynamic_terminal_observation_classes_filtered::<false>()
+        } else {
+            self.build_dynamic_terminal_observation_classes_filtered::<true>()
+        };
+        if std::env::var_os("GLRMASK_ASSERT_EARLY_OBSERVATION_FILTER").is_some() {
+            assert_eq!(
+                classes,
+                self.build_dynamic_terminal_observation_classes_filtered::<false>(),
+                "early future filtering changed exact terminal-observation rows",
+            );
+        }
+        classes
+    }
+
+    // Only reorder necessary, immutable selector predicates. The historical
+    // selector remains available as an exact same-binary differential oracle.
+    fn build_dynamic_terminal_observation_classes_filtered<const EARLY_FUTURES: bool>(
+        &self,
+    ) -> Vec<(TerminalID, Arc<[u32]>)> {
         if std::env::var_os("GLRMASK_DISABLE_DYNAMIC_TERMINAL_OBSERVATION_CACHE").is_some() {
             return Vec::new();
         }
@@ -7190,6 +7210,20 @@ impl Constraint {
         }
         let mut best_by_futures = BTreeMap::<Vec<TerminalID>, (usize, u32)>::new();
         for state in 0..self.tokenizer.num_states() {
+            // Singleton/empty and >8-terminal futures can never participate.
+            // Check that cheap metadata before scanning potentially 256 byte
+            // transitions twice. Nine entries are enough to reject >8 exactly;
+            // a retained 2..=8 signature is complete, ordered and unchanged.
+            let early_futures = if EARLY_FUTURES {
+                let futures = self.tokenizer.possible_future_terminals_iter(state)
+                    .take(9).collect::<SmallVec<[TerminalID; 8]>>();
+                if !(2..=8).contains(&futures.len()) {
+                    continue;
+                }
+                Some(futures)
+            } else {
+                None
+            };
             if self.tokenizer.transitions_from(state).count() < 100 {
                 continue;
             }
@@ -7197,10 +7231,9 @@ impl Constraint {
             if loop_len < 64 {
                 continue;
             }
-            let futures = self
-                .tokenizer
-                .possible_future_terminals_iter(state)
-                .collect::<Vec<_>>();
+            let futures = early_futures.map(SmallVec::into_vec).unwrap_or_else(|| {
+                self.tokenizer.possible_future_terminals_iter(state).collect::<Vec<_>>()
+            });
             if !(2..=8).contains(&futures.len()) {
                 continue;
             }
@@ -7265,14 +7298,27 @@ impl Constraint {
             let mut repeated_mixed =
                 BTreeMap::<Vec<TerminalID>, (usize, usize, u32)>::new();
             for state in 0..self.tokenizer.num_states() {
+                let early_futures = if EARLY_FUTURES {
+                    let futures = self.tokenizer.possible_future_terminals_iter(state)
+                        .take(9).collect::<SmallVec<[TerminalID; 8]>>();
+                    if !(2..=8).contains(&futures.len())
+                        || !futures.iter().any(|&terminal| {
+                            small_rows.get(terminal as usize).copied().unwrap_or(0) != 0
+                        })
+                    {
+                        continue;
+                    }
+                    Some(futures)
+                } else {
+                    None
+                };
                 let transitions = self.tokenizer.transitions_from(state).count();
                 if transitions < 100 {
                     continue;
                 }
-                let futures = self
-                    .tokenizer
-                    .possible_future_terminals_iter(state)
-                    .collect::<Vec<_>>();
+                let futures = early_futures.map(SmallVec::into_vec).unwrap_or_else(|| {
+                    self.tokenizer.possible_future_terminals_iter(state).collect::<Vec<_>>()
+                });
                 if !(2..=8).contains(&futures.len())
                     || !futures.iter().any(|&terminal| {
                         small_rows.get(terminal as usize).copied().unwrap_or(0) != 0
@@ -13973,6 +14019,40 @@ impl<'a> ConstraintState<'a> {
 #[cfg(test)]
 mod dense_internal_token_mask_tests {
     use super::*;
+
+    #[test]
+    fn early_observation_filter_matches_historical_rows_across_future_widths() {
+        let vocab = Vocab::new((0u32..128).map(|id| (id, vec![id as u8])).collect::<Vec<_>>());
+        let mut saw_mixed = false;
+        let mut saw_over_limit = false;
+        for width in [1usize, 2, 3, 8, 9, 12] {
+            let mut grammar = String::from("start start;\n");
+            for terminal in 0..width {
+                let suffix = char::from(b'a' + terminal as u8);
+                grammar.push_str(&format!("t T{terminal} ::= /[\\x00-\\x7F]+{suffix}/;\n"));
+            }
+            grammar.push_str("nt start ::= ");
+            grammar.push_str(&(0..width).map(|t| format!("T{t} T{t}"))
+                .collect::<Vec<_>>().join(" | "));
+            grammar.push_str(";\n");
+            let built = crate::DynamicConstraint::from_glrm_grammar(&grammar, &vocab)
+                .expect("finite physical selector fixture compiles");
+            let constraint = &built.inner;
+            assert!(!constraint.tokenizer.has_any_virtual_runtime());
+            for state in 0..constraint.tokenizer.num_states() {
+                let count = constraint.tokenizer.possible_future_terminals_iter(state).count();
+                saw_mixed |= (2..=8).contains(&count);
+                saw_over_limit |= count > 8;
+            }
+            assert_eq!(
+                constraint.build_dynamic_terminal_observation_classes_filtered::<true>(),
+                constraint.build_dynamic_terminal_observation_classes_filtered::<false>(),
+                "future width {width}",
+            );
+        }
+        assert!(saw_mixed, "fixtures must exercise eligible mixed signatures");
+        assert!(saw_over_limit, "fixtures must exercise the nine-entry rejection bound");
+    }
 
     #[test]
     fn bind_vocab_exact_rebinds_equal_vocab_and_rejects_mismatch() {

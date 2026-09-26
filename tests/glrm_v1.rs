@@ -1,5 +1,5 @@
 use glrmask::{
-    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Module, Optimization,
+    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Optimization, UnlinkedConstraint,
     Vocab,
 };
 
@@ -284,9 +284,9 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save()).unwrap();
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
 
-    let loaded_static_parent = Module::load(
+    let loaded_static_parent = UnlinkedConstraint::load(
         Grammar::from_glrm(parent_source)
-            .compile_module(&vocab)
+            .compile_unlinked(&vocab)
             .unwrap()
             .save(),
     )
@@ -320,13 +320,13 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
     let parent = Grammar::from_glrm(
         "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
     )
-    .compile_module(&vocab)
+    .compile_unlinked(&vocab)
     .unwrap();
 
-    // An unresolved grammar slot belongs to Module, never Constraint. Its
-    // private linker coordinate survives Module persistence without becoming
+    // An unresolved grammar slot belongs to UnlinkedConstraint, never Constraint. Its
+    // private linker coordinate survives UnlinkedConstraint persistence without becoming
     // part of the public model-token mask.
-    let loaded = Module::load(parent.save()).unwrap();
+    let loaded = UnlinkedConstraint::load(parent.save()).unwrap();
     let child = Grammar::from_ebnf(r#"start ::= "y""#)
         .compile(&vocab)
         .unwrap();
@@ -681,13 +681,13 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     let open = Grammar::from_glrm(parent)
         .bind("child", unresolved_grammar_child)
         .unwrap()
-        .compile_module(&vocab)
+        .compile_unlinked(&vocab)
         .unwrap()
         ;
     // Independent open components may reuse the same private sentinel token
     // number. Terminal IDs, not those hidden token IDs, are the linker
     // coordinate; qualified nested slots must survive serialization and bind.
-    let open = Module::load(open.save()).unwrap();
+    let open = UnlinkedConstraint::load(open.save()).unwrap();
     let leaf = Grammar::from_ebnf(r#"start ::= "x""#)
         .compile(&vocab)
         .unwrap();
