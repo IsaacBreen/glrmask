@@ -99,6 +99,25 @@ The small paired differences do not establish a meaningful terminal performance 
 
 One initial merge build failed on the pointer type mismatch described above and was corrected before testing. The additional library harness initially supplied an `internal-api` feature to the weighted-automata package, which has no such feature; Cargo rejected the command before tests. The command was corrected only for that package and all remaining suites passed. Both unsuccessful attempts are retained in the evidence, rather than silently omitted.
 
+## S01: buffered vocabulary fingerprinting
+
+After integration, a separate shared-setup investigation found that the first cached candidate-summary lookup still computed the full vocabulary digest. It issued three small BLAKE3 update calls per model token: token ID, byte length and token bytes. S01 batches the **identical ordered byte transcript** through a 4 KiB buffer; large byte strings pass directly to the hasher. The digest algorithm/version, canonical field encoding, cached value and cache lifetime remain unchanged. No hashing work is moved outside the measured link.
+
+The additional switch `GLRMASK_BUFFERED_VOCAB_DIGEST=1` is included in the checked-in validated profile. It is not enabled by default outside that profile. This improves a fresh vocabulary's first digest computation; an already cached digest was already cheap and does not gain another four milliseconds on every reuse.
+
+Two new independent test functions cover 97 vocabulary cases and 13 update-boundary sizes, comparing both the original incremental calculation and a separately assembled canonical byte transcript. The full root suite now passes **894 tests, zero failures, 51 ignored**, under both default and accepted-plus-digest-validation configurations. Both thread-count artifact/mapping/arbitrary-prefix gates, all four 11,767-step replays, and the historical legacy artifact remain exact. Only `src/compiler/compile.rs` changes executable source for S01; all other Rust source is hash-locked.
+
+The first 48 coarse-profiled calls and an independent fixed 32-call confirmation retained all samples:
+
+| Threads | Shared setup, first screen | Shared setup, confirmation | Combined median paired saving |
+|---|---:|---:|---:|
+| 10 | 23.9260 → 19.6325 ms | 23.8190 → 19.5760 ms | **4.3135 ms**, 12/12 blocks positive |
+| 1 | 24.9210 → 20.4990 ms | 24.4270 → 20.5820 ms | **4.21125 ms**, 8/8 blocks positive |
+
+A separate fixed 32-call, **uninstrumented whole-link** comparison measured ten-thread medians 253.7435 → 250.7590 ms, with median paired saving 2.54775 ms and all four blocks positive. One-thread medians were 294.3740 → 289.9330 ms, but noisy paired blocks gave only 0.04275 ms median saving and two of four positive; that run does **not** establish a reliable one-thread whole-link improvement. The consistent claim is the measured shared-setup reduction, not a universal end-to-end saving of the same size.
+
+The child terminal build is not changed by this optimization and remains approximately 16 ms / 14–15 ms. S01 therefore **does not achieve the child-stage 10 ms target**. Its evidence, exact source/binary manifests, failed-attempt history and raw timing rows are retained in `.benchmarks/finalize-761063/s01-buffered-digest/`.
+
 ## Rejected directions and remaining work
 
 The reverse suffix token-filter solver, its memoized variant, and the streaming forward-prefix solver all passed their exactness checks but lost full-stage performance. They are not enabled or retained as production source. Reducing byte-cut visits increased terminal-transfer or frontier-maintenance work. Direct native token hashing and forward-domain identity certificates likewise failed to establish a worthwhile total-cost improvement.
