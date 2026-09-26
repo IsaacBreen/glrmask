@@ -56,9 +56,9 @@ Historic matched measurements on the Mac:
 
 P11 retained 96 fresh calls and improved all 24 paired blocks. K01 retained 80 fresh calls; its combined median paired improvement was 0.90325 ms at ten threads and 0.19425 ms at one thread. Do not add improvements from different cohorts or attribute cross-session baseline drift to a patch. The uninstrumented whole-link data and parent/setup timings are retained separately in the local evidence.
 
-## Main-branch integration
+## Development-branch integration (`glrmask-main`)
 
-Integration starts from accepted K01 `910a55e516d7d26d999e95f439144f2338fd4694` and main `e24e24c63`, preserving the latter's `UnlinkedConstraint` API migration and dynamic proof fixes.
+Integration starts from accepted K01 `910a55e516d7d26d999e95f439144f2338fd4694` and the active development branch `glrmask-main` at `e24e24c63`, preserving the latter's `UnlinkedConstraint` API migration and dynamic proof fixes. The validated work is merged and pushed to **`glrmask-main`**, which is checked out in the primary development worktree. GitHub's separate default branch `main` is an older, divergent line and was not modified by this task.
 
 The textual conflict was between independent test/helper modules appended to `src/runtime/artifact.rs`; both were retained. A compile-time incompatibility in a newly added pointer-identity check was resolved by comparing `constraint.tokenizer.as_ref()` with the cached lexer pointer, matching the accepted shared-tokenizer ownership representation. This is an ownership adaptation, not a changed cache policy.
 
@@ -117,6 +117,14 @@ The first 48 coarse-profiled calls and an independent fixed 32-call confirmation
 A separate fixed 32-call, **uninstrumented whole-link** comparison measured ten-thread medians 253.7435 → 250.7590 ms, with median paired saving 2.54775 ms and all four blocks positive. One-thread medians were 294.3740 → 289.9330 ms, but noisy paired blocks gave only 0.04275 ms median saving and two of four positive; that run does **not** establish a reliable one-thread whole-link improvement. The consistent claim is the measured shared-setup reduction, not a universal end-to-end saving of the same size.
 
 The child terminal build is not changed by this optimization and remains approximately 16 ms / 14–15 ms. S01 therefore **does not achieve the child-stage 10 ms target**. Its evidence, exact source/binary manifests, failed-attempt history and raw timing rows are retained in `.benchmarks/finalize-761063/s01-buffered-digest/`.
+
+## Final release checks and cleanup
+
+The final S01 source also passes the 45 public API/regression cases with the accepted profile and hash validator enabled. Both one-thread and ten-thread invocations through the **checked-in launcher** exercise the exact 128,256-token digest validator and produce the expected artifact sizes. The Python Rust binding check passes again on S01. The root documentation example also passes its doctest.
+
+The remaining internal-crate suites were checked as part of closure: artifact 15, grammar 92, vocabulary 3, invariant 0, DWA merge 13, and finite automata 6 tests, all with zero failures. Across the validated suites this gives **1,941 Rust test cases**, plus **one root doctest** and **five launcher tests**; 54 Rust cases are ignored. Repeated configurations and subprocess summaries are not counted as new tests. The detailed final summary is `final-validation-summary.json` in the preserved integration evidence.
+
+The source worktrees are left clean. Failed experiments are not installed. Cleanup is limited to byte-and-hash-verified duplicate immutable artifacts, with every original path retained, and reversible compression of this task's completed test executables. Source snapshots, raw timing rows, test logs, accepted binaries, old control flags and rejected variants remain available. Other workers' worktrees and caches are not removed. Publication records separately verify the exact local and remote `glrmask-main` SHA; no force push is used.
 
 ## Rejected directions and remaining work
 
