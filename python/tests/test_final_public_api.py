@@ -12,7 +12,7 @@ def vocab():
 def test_top_level_surface_hides_engine_and_experimental_policy_types():
     for name in [
         "Grammar",
-        "Module",
+        "UnlinkedConstraint",
         "ExactToken",
         "ExactTokens",
         "Optimization",
@@ -48,7 +48,7 @@ def test_json_schema_constructor_accepts_text_and_objects():
         assert s.is_accepting()
 
 
-def test_bind_validation_is_early_and_compiled_modules_reject_source():
+def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     v = vocab()
     g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
     child = glrmask.Grammar.from_ebnf('start ::= "a"')
@@ -63,9 +63,11 @@ def test_bind_validation_is_early_and_compiled_modules_reject_source():
         bound.bind('T', v.token(8))
     with pytest.raises(ValueError):
         bound.bind('missing', child)
-    m = g.compile_module(v)
+    m = g.compile_unlinked(v)
     with pytest.raises(TypeError):
         m.bind('C', child)
+    with pytest.raises(TypeError):
+        g.bind('C', child.compile(v))
 
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
@@ -89,17 +91,14 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
         s.commit_bytes(b'a')
 
 
-def test_description_owns_compiled_and_source_bindings_after_collection():
+def test_description_owns_source_bindings_after_collection():
     v = vocab()
     parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
     child_source = glrmask.Grammar.from_ebnf('start ::= "a"')
-    child_compiled = child_source.compile(v)
     a = parent.bind('C', child_source)
-    b = parent.bind('C', child_compiled)
-    del parent, child_source, child_compiled, v
+    del parent, child_source, v
     gc.collect()
     assert a.compile(vocab()).start().mask()[0]
-    assert b.compile(vocab()).start().mask()[0]
 
 
 def test_artifact_ownership_and_existing_vocab_validation():

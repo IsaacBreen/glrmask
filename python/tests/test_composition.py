@@ -3,14 +3,21 @@ import glrmask
 
 def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, optimization=None):
     grammar = glrmask.Grammar.from_glrm(source)
-    for name, child in (subgrammars or {}).items():
-        grammar = grammar.bind(name, child)
     kwargs = {}
     if end_tokens is not None:
         kwargs["end_tokens"] = end_tokens
     if optimization is not None:
         kwargs["optimization"] = optimization
-    return grammar.compile(vocab, **kwargs)
+    subgrammars = subgrammars or {}
+    if not subgrammars:
+        return grammar.compile(vocab, **kwargs)
+
+    # Compiled-child composition belongs to the compiled world: compile the
+    # parent into pre-link form, bind runnable Constraints, then link.
+    parent = grammar.compile_unlinked(vocab)
+    for name, child in subgrammars.items():
+        parent = parent.bind(name, child)
+    return parent.link(**kwargs)
 
 
 def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
@@ -369,7 +376,7 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         start document;
         nt document = "x" | "<" payload ">";
         """
-    ).compile_module(vocab)
+    ).compile_unlinked(vocab)
     child_a = _glrm(
         'glrm 1; start value; nt value = "a";',
         vocab,
@@ -394,7 +401,7 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     state.commit_token(1)
     assert state.is_accepting()
 
-    loaded_parent = glrmask.Module.load(parent.save(), vocab=vocab)
+    loaded_parent = glrmask.UnlinkedConstraint.load(parent.save(), vocab=vocab)
     loaded_with_a = loaded_parent.bind("payload", child_a).link()
     state = loaded_with_a.start()
     state.commit_token(0)

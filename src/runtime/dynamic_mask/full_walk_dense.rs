@@ -1568,6 +1568,7 @@ fn precollapse_master_decision(
                     vocab.prepare_runtime_projected_terminal_quotients(
                         &state.constraint.tokenizer,
                         &safe_plus_slice.slice_token_bytes(),
+                        None,
                     );
                 }
             }
@@ -1937,6 +1938,7 @@ pub(super) fn try_scalar_dispatch(
                 parser_filtered_transparent: branch.parser_filtered_transparent,
                 residual_continuation_terminal: branch.residual_continuation_terminal,
                 gss: branch.gss.clone(),
+                shared_root_admission: branch.shared_root_admission.clone(),
                 initial_prune_guard: branch.initial_prune_guard.clone(),
             });
         }
@@ -2042,6 +2044,7 @@ pub(super) fn try_scalar_dispatch(
             parser_filtered_transparent: branch.parser_filtered_transparent,
             residual_continuation_terminal: branch.residual_continuation_terminal,
             gss: branch.gss.clone(),
+            shared_root_admission: branch.shared_root_admission.clone(),
             initial_prune_guard: branch.initial_prune_guard.clone(),
         });
     }
@@ -2239,6 +2242,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 parser_filtered_transparent: false,
                 residual_continuation_terminal: None,
                 gss: root_branches[0].gss.clone(),
+                shared_root_admission: root_branches[0].shared_root_admission.clone(),
                 initial_prune_guard: InitialPruneGuard::Passed,
             });
             return try_full_walk_mask_with_table::<_, true>(
@@ -2282,6 +2286,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                     parser_filtered_transparent: false,
                     residual_continuation_terminal: None,
                     gss: root_branches[0].gss.clone(),
+                    shared_root_admission: root_branches[0].shared_root_admission.clone(),
                     initial_prune_guard: InitialPruneGuard::Passed,
                 });
                 let result = try_full_walk_mask_with_table::<_, true>(
@@ -2367,6 +2372,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 parser_filtered_transparent: false,
                 residual_continuation_terminal: None,
                 gss: root_branches[0].gss.clone(),
+                shared_root_admission: root_branches[0].shared_root_admission.clone(),
                 initial_prune_guard: InitialPruneGuard::Passed,
             });
             return try_full_walk_mask_with_table::<_, true>(
@@ -2603,6 +2609,7 @@ enum FullWalkManyState {
 struct FullWalkParserNode {
     gss: ParserStacks,
     admitted: Option<BitSet>,
+    shared_root_admission: SharedRootAdmission,
     admitted_singleton: Option<TerminalID>,
     token_boundary_allowed: Vec<u8>,
     children: SmallVec<[(TerminalID, u32); 16]>,
@@ -2644,6 +2651,7 @@ impl FullWalkParserCache {
             nodes.push(FullWalkParserNode {
                 gss: branch.gss.clone(),
                 admitted: None,
+                shared_root_admission: branch.shared_root_admission.clone(),
                 admitted_singleton: None,
                 token_boundary_allowed: vec![0; lexer_state_count],
                 children: SmallVec::new(),
@@ -2752,6 +2760,7 @@ impl FullWalkParserCache {
             self.nodes.push(FullWalkParserNode {
                 gss,
                 admitted: None,
+                shared_root_admission: None,
                 admitted_singleton: None,
                 token_boundary_allowed: vec![0; self.lexer_state_count],
                 children: SmallVec::new(),
@@ -2772,17 +2781,9 @@ impl FullWalkParserCache {
         let index = node as usize;
         if self.nodes[index].admitted.is_none() {
             let started = self.profile.then(std::time::Instant::now);
-            let parser_gss = with_empty_accumulators(&self.nodes[index].gss);
-            let admitted = constraint
-                .direct_regular_admissible_terminals(&parser_gss)
-                .unwrap_or_else(|| {
-                    let candidates = BitSet::all(constraint.table.num_terminals as usize);
-                    super::super::commit::exact_admitted_terminals_for_candidates(
-                        constraint,
-                        &parser_gss,
-                        &candidates,
-                    )
-                });
+            let admitted = parser_admission_with_root_memo(
+                constraint, &self.nodes[index].gss, &self.nodes[index].shared_root_admission,
+            );
             self.nodes[index].admitted_singleton = {
                 let mut ones = admitted.iter_ones();
                 let first = ones.next().map(|terminal| terminal as TerminalID);
@@ -5813,6 +5814,26 @@ fn try_full_walk_mask_with_table_from_initial<
         }
     }
 
+    static PARSER_NARROW_HOT: OnceLock<bool> = OnceLock::new();
+    let parser_narrow_root = *PARSER_NARROW_HOT.get_or_init(|| {
+        std::env::var_os("GLRMASK_DISABLE_PARSER_NARROW_HOT").is_none()
+    })
+        && root_branches.len() == 1
+        && root_branches[0].initial_prune_guard.is_passed()
+        && root_branches[0].exact_tokenizer_state
+            == Some(root_branches[0].tokenizer_config)
+        && std::ptr::eq(lexer_scan_cache.tokenizer(), state.constraint.tokenizer.as_ref())
+        && parser_cache.nodes[root_parser_nodes[0] as usize]
+            .admitted_singleton.is_some_and(|terminal| {
+                let tokenizer = lexer_scan_cache.tokenizer();
+                let source = root_branches[0].tokenizer_config;
+                source < tokenizer.num_states()
+                    && !tokenizer.state_is_virtual_runtime(source)
+                    && !tokenizer.state_has_epsilon_transitions(source)
+                    && tokenizer.possible_future_terminals_iter(source)
+                        .any(|candidate| candidate != terminal)
+            });
+
     let dense_hot_lane_would = std::env::var_os("GLRMASK_DISABLE_DENSE_HOT_LANE").is_none()
         && !profile_walk
         && !profile_kernel
@@ -5957,7 +5978,7 @@ fn try_full_walk_mask_with_table_from_initial<
         if hot_scalar.intern(initial_lexer_state).is_none() {
             return Ok(false);
         }
-        let probe = dense_hot_root_probe(
+        let mut probe = dense_hot_root_probe(
             state,
             vocab,
             trie,
@@ -5969,6 +5990,12 @@ fn try_full_walk_mask_with_table_from_initial<
             &mut hot_scalar,
             e_certified_byte,
         );
+        if parser_narrow_root {
+            // A singleton parser frontier with broader lexical futures favors
+            // the existing exact interior-pruning executor. No acceptance
+            // condition or transition is changed by this routing decision.
+            probe.prefer_pruning = true;
+        }
         let learned_dense = if probe.prefer_pruning {
             None
         } else {

@@ -7550,8 +7550,19 @@ impl Constraint {
             && std::env::var_os("GLRMASK_DISABLE_O2_PREPARED_MASTER_PROVERS").is_none();
         let restored_complete_master = dynamic_mask_vocab
             .has_complete_prepared_master_prover_rows(self.tokenizer.num_states() as usize);
-        let eager_containment_quotients = o2_prepared_master
+        // Pay bounded scalar-proof setup before serving rather than during a
+        // cold mask. This is a performance policy only; skipped or failed proof
+        // candidates retain the exact vocabulary walk. O2 keeps its own policy.
+        let ordinary_eager = self.uses_dynamic_runtime()
+            && !dynamic_mask_vocab.is_grammar_quotiented()
+            && std::env::var_os("GLRMASK_DISABLE_EAGER_CONTAINMENT_QUOTIENTS").is_none();
+        let eager_containment_quotients = o2_prepared_master || ordinary_eager
             || std::env::var_os("GLRMASK_EXPERIMENT_EAGER_CONTAINMENT_QUOTIENTS").is_some();
+        let eager_component_state_cap = ordinary_eager.then(|| {
+            std::env::var("GLRMASK_EAGER_CONTAINMENT_MAX_STATES")
+                .ok().and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(3_000)
+        });
         if eager_containment_quotients {
             let started = std::time::Instant::now();
             let force_partition_provers =
@@ -7569,6 +7580,7 @@ impl Constraint {
                 dynamic_mask_vocab.prepare_runtime_projected_terminal_quotients(
                     &self.tokenizer,
                     &safe_plus.slice_token_bytes(),
+                    eager_component_state_cap,
                 );
             }
             if profile || std::env::var_os("GLRMASK_PROFILE_PREPARED_MASTER_PROVERS").is_some() {

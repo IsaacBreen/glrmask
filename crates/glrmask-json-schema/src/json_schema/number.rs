@@ -1,5 +1,9 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
+use crate::automata::lexer::ast::Expr;
+use crate::automata::lexer::compile::compile_expression_labeled_nfa;
+use crate::grammar::expr_nfa::ExprNfaBuilder;
 use crate::import::ast::GrammarExpr;
 use crate::import::numeric_range::{rx_float_range, rx_int_range};
 
@@ -9,6 +13,10 @@ use super::lower::{choice, lit_bytes, never, r, Lowerer, JSON_INTEGER_RULE, JSON
 
 const MAX_EXPLICIT_INTEGER_RANGE: i64 = 512;
 const MAX_EXPLICIT_INTEGER_MULTIPLES: i64 = 2048;
+// A general divisor needs one remainder state per residue. Bound construction
+// explicitly rather than accepting numbers which violate an unsupported
+// multipleOf. This does not bound the number of input digits.
+const MAX_INTEGER_REMAINDER_STATES: u64 = 4096;
 pub(super) const JSON_INTEGER_ATOM_RULE_PREFIX: &str = "JSON_INTEGER_ATOM_";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,12 +254,16 @@ impl<'a> Lowerer<'a> {
                 }
                 return Ok(expr);
             }
-            if positive_integer_multiple_value(multiple).is_some() {
+            if let Some(divisor) = positive_integer_multiple_value(multiple) {
+                let expr = integer_modulo_expr(divisor)?;
                 if lower.is_some() || upper.is_some() {
                     let regex = rx_int_range(lower, upper).map_err(SchemaImportError::new)?;
-                    return Ok(GrammarExpr::RawRegex(regex));
+                    return Ok(GrammarExpr::Intersect {
+                        expr: Box::new(expr),
+                        intersect: Box::new(GrammarExpr::RawRegex(regex)),
+                    });
                 }
-                return Ok(r(JSON_INTEGER_RULE));
+                return Ok(expr);
             }
             return Err(SchemaImportError::new(format!("integer multipleOf={multiple} is unsupported")));
         }
@@ -293,6 +305,17 @@ fn integer_satisfies_multiple(value: i64, multiple: Option<f64>) -> bool {
     let Some(multiple) = multiple else {
         return true;
     };
+    if !multiple.is_finite() || multiple <= 0.0 {
+        return false;
+    }
+    if multiple.fract() == 0.0 {
+        // Every i64 magnitude is below 2^64. Avoid both a saturating float
+        // conversion at that boundary and loss of integer precision above2^53.
+        if multiple >= u64::MAX as f64 {
+            return value == 0;
+        }
+        return value.unsigned_abs() % (multiple as u64) == 0;
+    }
     let quotient = (value as f64) / multiple;
     (quotient - quotient.round()).abs() < 1e-9
 }
@@ -302,13 +325,16 @@ fn bounded_integer_multiple_choice(
     upper: i64,
     multiple: Option<f64>,
 ) -> Option<GrammarExpr> {
-    let multiple = positive_integer_multiple_i64(multiple?)?;
-    let first = ceil_div_i64(lower, multiple).checked_mul(multiple)?;
+    let multiple = i128::from(positive_integer_multiple_value(multiple?)?);
+    let lower = i128::from(lower);
+    let upper = i128::from(upper);
+    let quotient = lower / multiple;
+    let first = (quotient + i128::from(lower % multiple > 0)) * multiple;
     if first > upper {
         return Some(never());
     }
     let count = ((upper - first) / multiple) + 1;
-    if count > MAX_EXPLICIT_INTEGER_MULTIPLES {
+    if count > i128::from(MAX_EXPLICIT_INTEGER_MULTIPLES) {
         return None;
     }
     let alternatives = (0..count)
@@ -330,8 +356,67 @@ fn integer_multiple_expr(multiple: f64) -> Option<GrammarExpr> {
     power_of_ten_multiple_regex(multiple, true).map(GrammarExpr::RawRegex)
 }
 
+/// Exact signed canonical-decimal integers divisible by `divisor`.
+///
+/// After a nonzero first digit, state r represents the absolute value of the
+/// consumed decimal prefix modulo divisor. Appending d updates r to
+/// (10*r+d) mod divisor, so precisely remainder zero is accepting. The sign
+/// does not affect divisibility; separate start/sign/zero states reject a
+/// bare minus, plus signs, leading zeroes and non-digit spellings. The usual
+/// integer lexical policy is retained (no decimal/exponent aliases).
+fn integer_modulo_expr(divisor: u64) -> ImportResult<GrammarExpr> {
+    if divisor == 0 || divisor > MAX_INTEGER_REMAINDER_STATES {
+        return Err(SchemaImportError::new(format!(
+            "integer multipleOf={divisor} exceeds the exact remainder-state budget of {MAX_INTEGER_REMAINDER_STATES}; supply finite bounds or a supported compact divisor"
+        )));
+    }
+    let mut graph = ExprNfaBuilder::new();
+    let start = graph.start_state();
+    let after_minus = graph.add_state();
+    let zero = graph.add_state();
+    let remainders = (0..divisor).map(|_| graph.add_state()).collect::<Vec<_>>();
+    let digits = (b'0'..=b'9')
+        .map(|byte| graph.add_symbol(lit_bytes(vec![byte])))
+        .collect::<Vec<_>>();
+    graph.add_transition(start, lit_bytes(vec![b'-']), after_minus);
+    graph.set_accepting(zero);
+    graph.set_accepting(remainders[0]);
+    for source in [start, after_minus] {
+        graph.add_labeled_transition(source, digits[0], zero);
+        for digit in 1..=9u64 {
+            graph.add_labeled_transition(
+                source,
+                digits[digit as usize],
+                remainders[(digit % divisor) as usize],
+            );
+        }
+    }
+    for remainder in 0..divisor {
+        for digit in 0..=9u64 {
+            let target = (10 * remainder + digit) % divisor;
+            graph.add_labeled_transition(
+                remainders[remainder as usize],
+                digits[digit as usize],
+                remainders[target as usize],
+            );
+        }
+    }
+    let (nfa, symbols) = graph.into_nfa_and_symbols();
+    let symbols = symbols.into_iter().map(|symbol| match symbol {
+        GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes),
+        _ => unreachable!("the remainder automaton uses literal-byte labels only"),
+    }).collect::<Vec<_>>();
+    let dfa = compile_expression_labeled_nfa(&nfa, &symbols)
+        .map_err(SchemaImportError::new)?;
+    Ok(GrammarExpr::LexerDfa(Arc::new(dfa)))
+}
+
 fn positive_integer_multiple_value(multiple: f64) -> Option<u64> {
-    if !multiple.is_finite() || multiple < 1.0 || multiple.fract() != 0.0 {
+    if !multiple.is_finite()
+        || multiple < 1.0
+        || multiple >= u64::MAX as f64
+        || multiple.fract() != 0.0
+    {
         return None;
     }
     let value = multiple as u64;
@@ -454,4 +539,106 @@ fn decimal_fraction_prefix_regex(prefix: &str, scale_digits: usize) -> String {
         return format!("0{{1,{scale_digits}}}");
     }
     format!("{prefix}0{{0,{extra_zeros}}}")
+}
+
+#[cfg(test)]
+mod integer_modulo_tests {
+    use super::*;
+    use crate::json_schema::config::JsonSchemaConfig;
+    use crate::json_schema::load::load_document;
+    use crate::json_schema::lower::lower_document;
+
+    #[test]
+    fn integer_modulo_unbounded_constraint_must_not_be_dropped() {
+        let document = load_document(&serde_json::json!({"type": "integer"})).unwrap();
+        let unrestricted = lower_document(&document, JsonSchemaConfig::default()).unwrap();
+        for divisor in [3.0, 7.0, 12.0, 37.0] {
+            let document = load_document(&serde_json::json!({"type": "integer", "multipleOf": divisor})).unwrap();
+            let constrained = lower_document(&document, JsonSchemaConfig::default()).unwrap();
+            assert_ne!(constrained.rules, unrestricted.rules, "multipleOf={divisor} became unconstrained integers");
+        }
+    }
+
+    #[test]
+    fn integer_modulo_unsupported_large_divisor_must_fail_closed() {
+        let document = load_document(&serde_json::json!({"type": "integer", "multipleOf": 1_000_003})).unwrap();
+        assert!(lower_document(&document, JsonSchemaConfig::default()).is_err(),
+                "an unsupported divisor must not silently discard divisibility");
+    }
+
+    fn accepts(dfa: &crate::automata::lexer::DFA, bytes: &[u8]) -> bool {
+        let mut state = 0;
+        for &byte in bytes {
+            let Some(next) = dfa.step(state, byte) else { return false; };
+            state = next;
+        }
+        dfa.finalizers(state).contains(0)
+    }
+
+    #[test]
+    fn integer_modulo_dfa_matches_arithmetic_exhaustively() {
+        for divisor in (1..=64u64).chain([127, 257, 4096]) {
+            let GrammarExpr::LexerDfa(dfa) = integer_modulo_expr(divisor).unwrap() else { unreachable!() };
+            for value in -4096i64..=4096 {
+                assert_eq!(accepts(&dfa, value.to_string().as_bytes()), value % divisor as i64 == 0,
+                           "value={value}, divisor={divisor}");
+            }
+            for bytes in [b"".as_slice(), b"-", b"+0", b"00", b"-00", b"01", b"1.0", b"1e3", b" 0", b"0 ", b"1x"] {
+                assert!(!accepts(&dfa, bytes), "invalid integer spelling {bytes:?}");
+            }
+            assert!(accepts(&dfa, b"-0"));
+        }
+    }
+
+    #[test]
+    fn integer_modulo_has_no_input_digit_horizon() {
+        for divisor in [3u64, 7, 12, 37, 257, 4096] {
+            let GrammarExpr::LexerDfa(dfa) = integer_modulo_expr(divisor).unwrap() else { unreachable!() };
+            let mut bytes = Vec::new();
+            let mut remainder = 0u64;
+            for i in 0..2048 {
+                let digit = if i == 0 { 1 } else { ((i * 7 + 3) % 10) as u64 };
+                bytes.push(b'0' + digit as u8);
+                remainder = (10 * remainder + digit) % divisor;
+                assert_eq!(accepts(&dfa, &bytes), remainder == 0);
+            }
+            let mut exact_multiple = divisor.to_string().into_bytes();
+            exact_multiple.extend(std::iter::repeat_n(b'0', 2048));
+            assert!(accepts(&dfa, &exact_multiple));
+        }
+    }
+
+    #[test]
+    fn integer_modulo_finite_filter_is_exact_above_float_precision() {
+        for value in [i64::MIN, i64::MIN + 1, -9_007_199_254_740_993, 9_007_199_254_740_993, i64::MAX - 1, i64::MAX] {
+            for divisor in [2i64, 3, 7, 12, 37] {
+                assert_eq!(integer_satisfies_multiple(value, Some(divisor as f64)), value % divisor == 0,
+                           "value={value} divisor={divisor}");
+            }
+        }
+    }
+
+    #[test]
+    fn integer_modulo_full_signed_range_does_not_overflow_enumeration() {
+        assert!(bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some(3.0)).is_none(),
+                "too many multiples must fall through to the DFA, not become an empty language");
+        let expr = bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some((1u64 << 62) as f64)).unwrap();
+        let expected = choice([i64::MIN, -(1i64 << 62), 0, 1i64 << 62]
+            .into_iter().map(|value| lit_bytes(value.to_string().into_bytes())).collect());
+        assert_eq!(expr, expected);
+    }
+
+    #[test]
+    fn integer_modulo_large_divisor_conversion_is_not_saturating() {
+        let two_to_63 = (1u64 << 63) as f64;
+        let two_to_64 = u64::MAX as f64;
+        assert_eq!(positive_integer_multiple_value(two_to_63), Some(1u64 << 63));
+        assert!(positive_integer_multiple_value(two_to_64).is_none());
+        assert!(!integer_satisfies_multiple(i64::MIN, Some(two_to_64)));
+        assert!(!integer_satisfies_multiple(i64::MAX, Some(two_to_64)));
+        assert!(integer_satisfies_multiple(0, Some(two_to_64)));
+        assert!(integer_satisfies_multiple(i64::MIN, Some(two_to_63)));
+        assert_eq!(bounded_integer_multiple_choice(i64::MIN, i64::MAX, Some(two_to_63)),
+                   Some(choice(vec![lit_bytes(i64::MIN.to_string().into_bytes()), lit_bytes(b"0".to_vec())])));
+    }
 }

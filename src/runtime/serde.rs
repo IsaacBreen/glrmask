@@ -6777,7 +6777,7 @@ impl Constraint {
             let body = Self::load_body(bytes)?;
             if !body.late_grammar_slots.is_empty() {
                 return Err(crate::Error::Serialization(
-                    "constraint artifact has unresolved slots; load it as a Module instead"
+                    "constraint artifact has unresolved slots; load it as an UnlinkedConstraint instead"
                         .to_owned(),
                 ));
             }
@@ -6868,7 +6868,7 @@ impl Constraint {
     /// Load an embeddable compiled body without enforcing the public
     /// closed-root invariant.
     ///
-    /// Only Module and segmented-runtime persistence use this. Public callers
+    /// Only UnlinkedConstraint and segmented-runtime persistence use this. Public callers
     /// must use `Constraint::load`, which rejects unresolved slots.
     pub(crate) fn load_body_artifact<'a>(
         bytes: impl Into<Cow<'a, [u8]>>,

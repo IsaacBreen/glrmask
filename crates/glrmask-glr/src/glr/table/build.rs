@@ -1904,7 +1904,12 @@ fn finish_table(
 
 #[derive(Debug, Clone)]
 struct Lr0State {
-    kernel: BTreeSet<Item>,
+    // Canonical LR(0) kernels are already sorted/deduplicated before state
+    // interning. Retain that exact sequence in one shared contiguous
+    // allocation rather than rebuilding a BTreeSet for every accepted state.
+    // The kernel index holds an Arc clone of the same allocation while the
+    // automaton is being constructed.
+    kernel: Arc<[Item]>,
     closure: Vec<Item>,
 }
 
@@ -1912,8 +1917,8 @@ fn item_next_symbol<'a>(item: &Item, rules: &'a [Rule]) -> Option<&'a Symbol> {
     rules[item.rule as usize].rhs.get(item.dot as usize)
 }
 
-fn lr0_closure(grammar: &AnalyzedGrammar, kernel: &BTreeSet<Item>) -> Vec<Item> {
-    let mut result = kernel.clone();
+fn lr0_closure(grammar: &AnalyzedGrammar, kernel: &[Item]) -> Vec<Item> {
+    let mut result = kernel.iter().copied().collect::<BTreeSet<_>>();
     let mut queue: VecDeque<Item> = kernel.iter().copied().collect();
 
     while let Some(item) = queue.pop_front() {
@@ -1972,7 +1977,7 @@ impl Lr0ClosureScratch {
 
 fn lr0_closure_fast(
     grammar: &AnalyzedGrammar,
-    kernel: &BTreeSet<Item>,
+    kernel: &[Item],
     scratch: &mut Lr0ClosureScratch,
 ) -> Vec<Item> {
     scratch.begin();
@@ -2006,18 +2011,99 @@ fn lr0_closure_fast(
 fn build_lr0_item_sets(
     grammar: &AnalyzedGrammar,
 ) -> (Vec<Lr0State>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    if std::env::var_os("GLRMASK_DISABLE_FLAT_LR0_KERNELS").is_none() {
+        let result = build_lr0_item_sets_flat(grammar);
+        if std::env::var_os("GLRMASK_ASSERT_FLAT_LR0_KERNELS").is_some() {
+            let reference = build_lr0_item_sets_tree(grammar);
+            assert_eq!(result.1, reference.1);
+            assert_eq!(result.0.len(), reference.0.len());
+            for (left, right) in result.0.iter().zip(&reference.0) {
+                assert_eq!(left.kernel, right.kernel);
+                assert_eq!(left.closure, right.closure);
+            }
+        }
+        return result;
+    }
+    build_lr0_item_sets_tree(grammar)
+}
+
+// Sorting the same (symbol, advanced-item) pairs produces exactly the order
+// of the original BTreeMap<Symbol, BTreeSet<Item>>. Only novel kernels need
+// a shared contiguous allocation; hits avoid temporary trees.
+fn build_lr0_item_sets_flat(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<Lr0State>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
+    let mut scratch = Lr0ClosureScratch::new(grammar);
+    let start_kernel: Arc<[Item]> =
+        Arc::from([Item::new(0, 0, grammar.rules[0].rhs.len() as u32)]);
+    let start_closure = lr0_closure_fast(grammar, start_kernel.as_ref(), &mut scratch);
+    let mut state_by_kernel = FxHashMap::<Arc<[Item]>, u32>::default();
+    state_by_kernel.insert(Arc::clone(&start_kernel), 0);
+    let mut states = vec![Lr0State { kernel: start_kernel, closure: start_closure }];
+    let mut transitions = vec![BTreeMap::new()];
+    let mut queue = VecDeque::from([0u32]);
+    let mut advanced = Vec::<(Symbol, Item)>::new();
+    let mut key = Vec::<Item>::new();
+    while let Some(source) = queue.pop_front() {
+        advanced.clear();
+        for item in &states[source as usize].closure {
+            if let Some(symbol) = item_next_symbol(item, &grammar.rules) {
+                advanced.push((symbol.clone(), Item::new(item.rule, item.dot + 1, item.stack_depth)));
+            }
+        }
+        advanced.sort_unstable();
+        advanced.dedup();
+        for group in advanced.chunk_by(|left, right| left.0 == right.0) {
+            let symbol = &group[0].0;
+            let has_dot_1 = group.iter().any(|(_, item)| item.dot == 1);
+            let is_replace = !has_dot_1 && match symbol {
+                Symbol::Terminal(_) => replace_shifts_enabled(),
+                Symbol::Nonterminal(_) => replace_gotos_enabled(),
+            };
+            key.clear();
+            key.extend(group.iter().map(|(_, item)| {
+                if is_replace {
+                    Item::new(item.rule, item.dot, item.stack_depth.saturating_sub(1))
+                } else { *item }
+            }));
+            // Saturating depth adjustment may merge distinct input items.
+            key.sort_unstable();
+            key.dedup();
+            let target = if let Some(&target) = state_by_kernel.get(key.as_slice()) {
+                target
+            } else {
+                let target = states.len() as u32;
+                let kernel: Arc<[Item]> = Arc::from(key.as_slice());
+                let closure = lr0_closure_fast(grammar, kernel.as_ref(), &mut scratch);
+                state_by_kernel.insert(Arc::clone(&kernel), target);
+                states.push(Lr0State { kernel, closure });
+                transitions.push(BTreeMap::new());
+                queue.push_back(target);
+                target
+            };
+            transitions[source as usize].insert(symbol.clone(), (target, is_replace, false));
+        }
+    }
+    (states, transitions)
+}
+
+fn build_lr0_item_sets_tree(
+    grammar: &AnalyzedGrammar,
+) -> (Vec<Lr0State>, Vec<BTreeMap<Symbol, (u32, bool, bool)>>) {
     let mut closure_scratch = Lr0ClosureScratch::new(grammar);
     let mut start_kernel = BTreeSet::new();
     start_kernel.insert(Item::new(0, 0, grammar.rules[0].rhs.len() as u32));
-    let start_closure = lr0_closure_fast(grammar, &start_kernel, &mut closure_scratch);
+    let start_kernel_vec = start_kernel.iter().copied().collect::<Vec<_>>();
+    let start_closure = lr0_closure_fast(grammar, &start_kernel_vec, &mut closure_scratch);
+    let start_kernel: Arc<[Item]> = Arc::from(start_kernel_vec);
 
     let mut states = vec![Lr0State {
-        kernel: start_kernel.clone(),
+        kernel: Arc::clone(&start_kernel),
         closure: start_closure,
     }];
     let mut transitions = vec![BTreeMap::new()];
-    let mut state_by_kernel: FxHashMap<Vec<Item>, u32> = FxHashMap::default();
-    state_by_kernel.insert(start_kernel.iter().copied().collect(), 0);
+    let mut state_by_kernel: FxHashMap<Arc<[Item]>, u32> = FxHashMap::default();
+    state_by_kernel.insert(start_kernel, 0);
 
     let mut queue = VecDeque::from([0u32]);
     while let Some(source) = queue.pop_front() {
@@ -2052,14 +2138,15 @@ fn build_lr0_item_sets(
             }
 
             let key = adjusted_kernel.iter().copied().collect::<Vec<_>>();
-            let target = if let Some(&target) = state_by_kernel.get(&key) {
+            let target = if let Some(&target) = state_by_kernel.get(key.as_slice()) {
                 target
             } else {
                 let target = states.len() as u32;
-                let closure = lr0_closure_fast(grammar, &adjusted_kernel, &mut closure_scratch);
-                state_by_kernel.insert(key, target);
+                let kernel: Arc<[Item]> = Arc::from(key);
+                let closure = lr0_closure_fast(grammar, kernel.as_ref(), &mut closure_scratch);
+                state_by_kernel.insert(Arc::clone(&kernel), target);
                 states.push(Lr0State {
-                    kernel: adjusted_kernel,
+                    kernel,
                     closure,
                 });
                 transitions.push(BTreeMap::new());
@@ -4643,6 +4730,31 @@ mod tests {
                             }
                         }
                     }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_lr0_kernels_preserve_every_state_and_transition() {
+        use super::{build_lr0_item_sets_flat, build_lr0_item_sets_tree};
+        let mut grammars = vec![multi_lookahead_grammar(), mysterious_conflict_grammar(),
+            recursive_ambiguous_grammar(), template_like_grammar(), large_left_linear_grammar(),
+            unit_chain_grammar(), ambiguous_unit_chain_grammar(), nullable_unit_chain_grammar()];
+        for n in 1..=7 {
+            for branches in 1..=3 {
+                for recursive in [false, true] {
+                    grammars.push(generated_unit_dag_grammar(n, branches, true, recursive));
+                }
+            }
+        }
+        for grammar in grammars {
+            let (a, ta) = build_lr0_item_sets_tree(&grammar);
+            let (b, tb) = build_lr0_item_sets_flat(&grammar);
+            assert_eq!(ta, tb);
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.iter().zip(&b) {
+                assert_eq!(a.kernel, b.kernel);
+                assert_eq!(a.closure, b.closure);
             }
         }
     }

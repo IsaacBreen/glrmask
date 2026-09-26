@@ -6908,20 +6908,22 @@ fn integer_power_of_ten_multiple_lowers_to_regex() {
 }
 
 #[test]
-fn unbounded_integer_multiple_of_three_lowers_broadly() {
+fn unbounded_integer_multiple_of_three_lowers_exactly() {
     let schema = json!({"type": "integer", "multipleOf": 3});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Ref(name) if name == "JSON_INTEGER"));
+    assert!(matches!(start_expr(&grammar), GrammarExpr::LexerDfa(_)));
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn lower_bounded_integer_multiple_of_twelve_lowers_to_range() {
+fn lower_bounded_integer_multiple_of_twelve_intersects_exact_modulo_and_range() {
     let schema = json!({"type": "integer", "minimum": 0, "multipleOf": 12});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let GrammarExpr::RawRegex(regex) = start_expr(&grammar) else {
-        panic!("expected broad integer range regex: {:?}", start_expr(&grammar));
+    let GrammarExpr::Intersect { expr, intersect } = start_expr(&grammar) else {
+        panic!("expected exact modulo/range intersection: {:?}", start_expr(&grammar));
     };
+    assert!(matches!(expr.as_ref(), GrammarExpr::LexerDfa(_)));
+    let GrammarExpr::RawRegex(regex) = intersect.as_ref() else { panic!("range must be preserved") };
     assert!(regex.contains("[1-9][0-9]"), "{regex}");
     lower(&grammar).unwrap();
 }

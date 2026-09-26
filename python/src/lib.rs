@@ -1782,7 +1782,7 @@ fn compile_glrm_serialized(
 }
 
 // ---------------------------------------------------------------------------
-// Module
+// UnlinkedConstraint
 // ---------------------------------------------------------------------------
 
 
@@ -1951,7 +1951,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Grammar",
-            "Module",
+            "UnlinkedConstraint",
             "ExactToken",
             "ExactTokens",
             "Optimization",

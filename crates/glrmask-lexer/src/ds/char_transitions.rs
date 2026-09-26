@@ -36,6 +36,13 @@ impl<T> CharTransitions<T> {
     }
 
     pub fn insert(&mut self, key: u8, value: T) -> Option<T> {
+        // DFA builders commonly visit the byte alphabet in ascending order.
+        // Appending that next entry needs neither binary search nor a shift.
+        // Equal/out-of-order keys retain the exact replacement/insertion path.
+        if self.entries.last().is_none_or(|(last, _)| *last < key) {
+            self.entries.push((key, value));
+            return None;
+        }
         match self.entry_index(key) {
             Ok(index) => Some(std::mem::replace(&mut self.entries[index].1, value)),
             Err(index) => {
@@ -92,6 +99,8 @@ impl<T> IndexMut<u8> for CharTransitions<T> {
     }
 }
 
+/// A view of the sorted entries. Preserve the underlying slice's exact
+/// remaining length so collectors can reserve once, without scanning values.
 pub struct CharTransitionsIter<'a, T> {
     inner: std::slice::Iter<'a, (u8, T)>,
 }
@@ -99,10 +108,28 @@ pub struct CharTransitionsIter<'a, T> {
 impl<'a, T> Iterator for CharTransitionsIter<'a, T> {
     type Item = (u8, &'a T);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|(k, v)| (*k, v))
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.inner.len()
+    }
 }
+
+impl<T> ExactSizeIterator for CharTransitionsIter<'_, T> {
+    #[inline]
+    fn len(&self) -> usize { self.inner.len() }
+}
+
+impl<T> std::iter::FusedIterator for CharTransitionsIter<'_, T> {}
 
 pub struct CharTransitionsIterMut<'a, T> {
     inner: std::slice::IterMut<'a, (u8, T)>,
@@ -111,10 +138,28 @@ pub struct CharTransitionsIterMut<'a, T> {
 impl<'a, T> Iterator for CharTransitionsIterMut<'a, T> {
     type Item = (u8, &'a mut T);
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(|(k, v)| (*k, v))
     }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        self.inner.len()
+    }
 }
+
+impl<T> ExactSizeIterator for CharTransitionsIterMut<'_, T> {
+    #[inline]
+    fn len(&self) -> usize { self.inner.len() }
+}
+
+impl<T> std::iter::FusedIterator for CharTransitionsIterMut<'_, T> {}
 
 impl<'a, T> IntoIterator for &'a CharTransitions<T> {
     type Item = (u8, &'a T);
@@ -139,6 +184,10 @@ impl<T> Extend<(u8, T)> for CharTransitions<T> {
     where
         I: IntoIterator<Item = (u8, T)>,
     {
+        let iter = iter.into_iter();
+        // There can be at most 256 distinct byte keys. Use a known input
+        // length without reserving unbounded space for repeated replacements.
+        self.entries.reserve(iter.size_hint().0.min(256usize.saturating_sub(self.entries.len())));
         for (key, value) in iter {
             self.insert(key, value);
         }
@@ -160,5 +209,66 @@ impl<T: fmt::Debug> fmt::Debug for CharTransitions<T> {
             map.entry(key, value);
         }
         map.finish()
+    }
+}
+
+#[cfg(test)]
+mod iterator_contract_tests {
+    use super::CharTransitions;
+
+    #[test]
+    fn exact_lengths_survive_partial_consumption() {
+        for count in [0usize, 1, 3, 31, 100, 256] {
+            let transitions: CharTransitions<u32> = (0..count)
+                .map(|byte| (byte as u8, byte as u32 + 1000))
+                .collect();
+            for consumed in 0..=count {
+                let mut iter = transitions.iter();
+                for byte in 0..consumed {
+                    assert_eq!(iter.next(), Some((byte as u8, &(byte as u32 + 1000))));
+                }
+                assert_eq!(iter.len(), count - consumed);
+                assert_eq!(iter.size_hint(), (count - consumed, Some(count - consumed)));
+                assert_eq!(iter.count(), count - consumed);
+            }
+            let mut iter = transitions.iter();
+            while iter.next().is_some() {}
+            assert_eq!(iter.next(), None);
+            assert_eq!(iter.size_hint(), (0, Some(0)));
+        }
+    }
+
+    #[test]
+    fn mutable_exact_lengths_preserve_updates_and_key_order() {
+        let mut transitions: CharTransitions<u32> = [(9, 90), (1, 10), (4, 40)].into_iter().collect();
+        let mut iter = transitions.iter_mut();
+        assert_eq!(iter.len(), 3);
+        let (key, value) = iter.next().unwrap();
+        assert_eq!(key, 1);
+        *value = 11;
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+        assert_eq!(iter.count(), 2);
+        assert_eq!(transitions.iter().map(|(key, value)| (key, *value)).collect::<Vec<_>>(),
+                   vec![(1, 11), (4, 40), (9, 90)]);
+        let mut iter = transitions.iter_mut();
+        while iter.next().is_some() {}
+        assert!(iter.next().is_none());
+        assert_eq!(iter.len(), 0);
+    }
+
+    #[test]
+    fn sorted_append_and_arbitrary_replacements_match_ordered_map() {
+        use std::collections::BTreeMap;
+        for stride in [1u32, 3, 17, 255] {
+            let mut transitions = CharTransitions::new();
+            let mut reference = BTreeMap::new();
+            for value in 0..1024u32 {
+                let key = value.wrapping_mul(stride) as u8;
+                assert_eq!(transitions.insert(key, value), reference.insert(key, value));
+            }
+            assert_eq!(transitions.iter().map(|(key, value)| (key, *value)).collect::<Vec<_>>(),
+                       reference.into_iter().collect::<Vec<_>>());
+            assert_eq!(transitions.len(), 256);
+        }
     }
 }

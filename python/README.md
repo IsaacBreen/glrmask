@@ -67,12 +67,12 @@ assert state.is_terminated()
 
 The ordinary API has four layers:
 
-- `Grammar`: immutable source/mixed description.
-- `Module`: reusable compiled machinery for one exact vocabulary; it may intentionally remain open.
+- `Grammar`: immutable source description with source-grammar/exact-token bindings.
+- `UnlinkedConstraint`: reusable compiled machinery for one exact vocabulary in pre-link form; it may intentionally remain open.
 - `Constraint`: closed, rooted, immediately runnable compiled constraint.
 - `ConstraintState`: mutable state for one generated sequence.
 
-`Grammar.bind(...)` and `Module.bind(...)` return new values and leave the receiver reusable.
+`Grammar.bind(...)` and `UnlinkedConstraint.bind(...)` return new values and leave the receiver reusable.
 
 ### Vocabulary and exact tokens
 
@@ -141,9 +141,9 @@ The intent-level optimization choices are:
 
 They preserve language semantics and all return the same `Constraint` type. They do not expose GLRMask's internal static/dynamic/O1/O2/O3 engines.
 
-### Bind source or compiled children
+### Bind source children
 
-A source child and a compiled child use the same immutable operation:
+Source composition stays in the source world:
 
 ```python
 parent = glrmask.Grammar.from_glrm('''
@@ -155,32 +155,33 @@ nt document = "{" payload "}";
 
 source_child = glrmask.Grammar.from_json_schema(payload_schema)
 a = parent.bind("payload", source_child).compile(vocab)
-
-compiled_child = source_child.compile(vocab)
-b = parent.bind("payload", compiled_child).compile(vocab)
 ```
 
-All compiled components in one composition must target the same exact vocabulary mapping.
+`Grammar.bind` does not accept a compiled `Constraint`. To reuse a compiled parent
+with request-specific compiled children, use `compile_unlinked` instead.
 
-### Cache an open parent with `Module`
+### Cache an unlinked parent
 
-Use `compile_module` when a parent is reused across requests:
+Use `compile_unlinked` when a parent is reused across requests:
 
 ```python
-host = parent.compile_module(vocab)
+host = parent.compile_unlinked(vocab)
 child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
 
 bound = host.bind("payload", child)
 constraint = bound.link(optimization=glrmask.Optimization.FAST_RUNTIME)
 ```
 
-`Module.bind` is compiled-only: accepted values are `Module`, `Constraint`, `ExactToken`, and `ExactTokens`. It does not parse or compile a source `Grammar`. Composition remains deferred until `link`, so the terminal optimization preference can choose the link strategy.
+`UnlinkedConstraint.bind` is compiled-only: accepted grammar children are runnable
+`Constraint` values (plus `ExactToken`/`ExactTokens` for token slots). It does not
+accept a source `Grammar` or another `UnlinkedConstraint`. Composition remains
+deferred until `link`, so the terminal optimization preference can choose the link strategy.
 
-Open modules are serializable:
+Unlinked constraints are serializable:
 
 ```python
 artifact = host.save()
-host = glrmask.Module.load(artifact)
+host = glrmask.UnlinkedConstraint.load(artifact)
 ```
 
 ### Decode
@@ -217,7 +218,7 @@ End tokens are final-root policy, not grammar-child semantics:
 constraint = grammar.compile(vocab, end_tokens=[eos_id])
 ```
 
-An end token is allowed only when the grammar body is accepting. A child's previous end-token policy is not inherited when that compiled constraint is embedded in another grammar or module.
+An end token is allowed only when the grammar body is accepting. A child's previous end-token policy is not inherited when that compiled constraint is linked into an unlinked parent.
 
 ### Constraint persistence
 
@@ -228,7 +229,7 @@ artifact = constraint.save()
 constraint = glrmask.Constraint.load(artifact)
 ```
 
-Passing `vocab=` to `Constraint.load` or `Module.load` is optional and validates/shares an already-existing exact vocabulary object.
+Passing `vocab=` to `Constraint.load` or `UnlinkedConstraint.load` is optional and validates/shares an already-existing exact vocabulary object.
 
 ## Grammar formats
 

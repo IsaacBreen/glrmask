@@ -12806,6 +12806,27 @@ impl Tokenizer {
         &self,
         terminals: &[TerminalID],
     ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
+        self.build_containment_candidates_with_limits(terminals, None)
+    }
+
+    /// Prepare independent exact proofs in parallel, after a bounded shared
+    /// component preflight. An omitted component has no certificate and must
+    /// use the ordinary exact walk; a resource limit is never an acceptance.
+    /// The bounded path deliberately declines unbounded expression fallback.
+    pub fn build_terminal_projected_quotients_for_containment_candidates_bounded(
+        &self,
+        terminals: &[TerminalID],
+        max_states: usize,
+        max_edges: usize,
+    ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
+        self.build_containment_candidates_with_limits(terminals, Some((max_states, max_edges)))
+    }
+
+    fn build_containment_candidates_with_limits(
+        &self,
+        terminals: &[TerminalID],
+        limits: Option<(usize, usize)>,
+    ) -> Vec<(TerminalID, TerminalProjectedQuotient)> {
         let profile =
             std::env::var_os("GLRMASK_PROFILE_DYNAMIC_PROJECTED_QUOTIENT_BUILD").is_some();
         let mut candidates = terminals
@@ -12832,8 +12853,11 @@ impl Tokenizer {
         let component_jobs = by_root
             .into_par_iter()
             .filter_map(|(root, terminals)| {
-                self.scalar_physical_component_states(root)
-                    .map(|states| (terminals, Arc::new(states)))
+                let states = match limits {
+                    Some((states, edges)) => self.scalar_physical_component_states_bounded(root, states, edges),
+                    None => self.scalar_physical_component_states(root),
+                }?;
+                Some((terminals, Arc::new(states)))
             })
             .collect::<Vec<_>>();
         let mut jobs = Vec::<(TerminalID, Arc<Vec<u32>>)>::new();
@@ -12861,15 +12885,17 @@ impl Tokenizer {
             })
             .collect::<Vec<_>>();
 
-        results.extend(
-            fallback
-                .into_par_iter()
-                .filter_map(|terminal| {
-                    let quotient = self.terminal_expr_projected_quotient_from_root(terminal)?;
-                    Some((terminal, quotient))
-                })
-                .collect::<Vec<_>>(),
-        );
+        if limits.is_none() {
+            results.extend(
+                fallback
+                    .into_par_iter()
+                    .filter_map(|terminal| {
+                        let quotient = self.terminal_expr_projected_quotient_from_root(terminal)?;
+                        Some((terminal, quotient))
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
         results.sort_unstable_by_key(|(terminal, _)| *terminal);
         if profile {
             eprintln!(
@@ -14670,6 +14696,21 @@ mod tests {
         )
     }
 
+
+    #[test]
+    fn bounded_eager_candidates_preserve_exact_rows_and_single_worker_execution() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        pool.install(|| {
+            let t = Tokenizer::from_parts(one_byte_component(b'a'), 1, None);
+            let original = t.build_terminal_projected_quotients_for_containment_candidates(&[0]);
+            let bounded = t.build_terminal_projected_quotients_for_containment_candidates_bounded(&[0, 0, 7], 2, 1);
+            assert_eq!(original.len(), 1);
+            assert_eq!(bounded.len(), 1);
+            assert_eq!(bincode::serialize(&original).unwrap(), bincode::serialize(&bounded).unwrap());
+            assert!(t.build_terminal_projected_quotients_for_containment_candidates_bounded(&[0], 1, 1).is_empty());
+            assert!(t.build_terminal_projected_quotients_for_containment_candidates_bounded(&[0], 2, 0).is_empty());
+        });
+    }
 
     #[test]
     fn coldcap_component_limits_are_exact_and_cycles_are_deduplicated() {

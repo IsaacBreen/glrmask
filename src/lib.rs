@@ -5,13 +5,13 @@
 //! GLRMask has three core immutable/reusable layers:
 //!
 //! - [`Grammar`] describes source grammar semantics and bindings.
-//! - [`Module`] stores reusable compiled machinery for one exact [`Vocab`]; it
-//!   may intentionally retain unresolved request-specific slots.
+//! - [`UnlinkedConstraint`] stores reusable compiled machinery for one exact
+//!   [`Vocab`] in pre-link form; it may retain unresolved request-specific slots.
 //! - [`Constraint`] is closed and immediately runnable. Call [`Constraint::start`]
 //!   to create one mutable [`ConstraintState`] per generated sequence.
 //!
-//! `Grammar::bind` and `Module::bind` are immutable: they return a new value and
-//! leave the receiver reusable.
+//! `Grammar::bind` and `UnlinkedConstraint::bind` are immutable: they return a
+//! new value and leave the receiver reusable.
 //!
 //! # Quick start
 //!
@@ -46,17 +46,17 @@
 //! [`Vocab::tokens`], so a binding carries the vocabulary identity it belongs to
 //! rather than accepting an unqualified integer.
 //!
-//! A source grammar and a compiled child use the same operation. Source/mixed
-//! descriptions are compiled together by [`Grammar::compile`] or
-//! [`Grammar::compile_with`].
+//! Source grammars compose with source grammars. Compiled children are attached
+//! only to [`UnlinkedConstraint`] values, keeping source compilation and compiled
+//! linking as separate lifecycle stages.
 //!
 //! # Cached parents
 //!
-//! Use [`Grammar::compile_module`] when a compiled parent will be reused. Bind
-//! compiled request-specific children or exact-token values with [`Module::bind`],
-//! then call [`Module::link`] or [`Module::link_with`]. Binding itself does not
-//! compile cross-component boundaries; final link options select the build/runtime
-//! trade-off.
+//! Use [`Grammar::compile_unlinked`] when a compiled parent will be reused. Bind
+//! compiled request-specific [`Constraint`] children or exact-token values with
+//! [`UnlinkedConstraint::bind`], then call [`UnlinkedConstraint::link`] or
+//! [`UnlinkedConstraint::link_with`]. Binding itself does not compile
+//! cross-component boundaries; final link options select the build/runtime trade-off.
 //!
 //! # Final options and termination
 //!
@@ -68,7 +68,8 @@
 //!
 //! # Persistence
 //!
-//! [`Module::save`] / [`Module::load`] retain open compiled bindings. A
+//! [`UnlinkedConstraint::save`] / [`UnlinkedConstraint::load`] retain open
+//! compiled bindings. A
 //! [`Constraint`] has its own [`Constraint::save`] / [`Constraint::load`] artifact
 //! and remains embeddable after loading. Artifacts are pre-release formats and
 //! are not yet promised to remain compatible across GLRMask releases.
@@ -93,7 +94,7 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{BuildOptions, Grammar, Module, Optimization};
+pub use public_api::{BuildOptions, Grammar, Optimization, UnlinkedConstraint};
 
 /// Model token identifier.
 pub type TokenId = u32;
