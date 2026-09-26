@@ -1429,7 +1429,7 @@ impl Constraint {
         }
 
         let (mut tokenizer, state_offsets) = Tokenizer::disjoint_union_with_owned_parent(
-            root.tokenizer.clone(),
+            root.tokenizer.as_ref().clone(),
             root_terminal_base,
             &child_inputs,
         );
@@ -1614,7 +1614,7 @@ impl Constraint {
                 )
             };
 
-        self.tokenizer = tokenizer;
+        self.tokenizer = tokenizer.into();
         self.state_to_internal_tsid = state_to_internal_tsid;
         self.internal_tsid_to_states = internal_tsid_to_states;
         self.deferred_internal_tsid_to_states = OnceLock::new();
@@ -1839,7 +1839,7 @@ impl Constraint {
         let tokenizer = root.tokenizer.clone();
         let tokenizer_fast_transitions = root.tokenizer_fast_transitions.clone();
         let tokenizer_has_epsilon_transitions = root.tokenizer_has_epsilon_transitions;
-        self.tokenizer = tokenizer;
+        self.tokenizer = tokenizer.into();
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
         self.tokenizer_has_epsilon_transitions = tokenizer_has_epsilon_transitions;
         self.terminal_live_states.clear();

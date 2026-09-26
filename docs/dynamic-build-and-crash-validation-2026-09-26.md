@@ -14,7 +14,7 @@ The measured production tree is `7d0f388ffed2a997a4db6018a5f9f8cc619e8406`. It e
 
 The development integration target is `glrmask-main`, the branch used by the current project worktrees and prior publications. The separately named repository-default `main` is a divergent historical line; this release does not overwrite or silently merge that line.
 
-The finalization changes above the measured tree are validation documentation and migration of remaining public test/guide references from the removed `Module` / `compile_module` API to `UnlinkedConstraint` / `compile_unlinked`. They do not change production Rust source, dependencies, runtime policy, or the measured executable. The earlier API migration is not reversed by adding obsolete compatibility aliases.
+The first finalization checkpoint `862c27530` above the measured tree added validation documentation and migration of remaining public test/guide references from the removed `Module` / `compile_module` API to `UnlinkedConstraint` / `compile_unlinked`. They do not change production Rust source, dependencies, runtime policy, or the measured executable. The earlier API migration is not reversed by adding obsolete compatibility aliases.
 
 ## The pathological maxima were memory-pressure effects
 
@@ -89,10 +89,18 @@ Further work should target construction cost in runtime-artifact preparation, co
 
 ## Finalization gates and retained experiments
 
-The final release candidate, with production code identical to the measured tree, passed all 29 registered root/integration/regression executables: **1,062 tests passed, zero failed, 51 pre-existing ignored**. This includes 799 root-library tests and 263 registered integration/regression tests. Nine nested filtered child-process summaries were excluded from that total. The GLRM suite retains all 21 original tests and assertions after its public API migration.
+The pre-boundary release candidate `862c27530`, with production code identical to the measured tree, passed all 29 registered root/integration/regression executables: **1,062 tests passed, zero failed, 51 pre-existing ignored**. This includes 799 root-library tests and 263 registered integration/regression tests. Nine nested filtered child-process summaries were excluded from that total. The GLRM suite retains all 21 original tests and assertions after its public API migration.
 
-The additional Rust workspace library gate (excluding the Python binding crate), all public-example compilation checks, and root documentation tests also passed. The JSON evidence records each actual suite and log hash; overlapping root tests are not presented as independent extra coverage. This finalization did not rebuild or retime the canonical publication binary, since production Rust source and dependency locks are unchanged.
+The additional Rust workspace library gate (excluding the Python binding crate), all public-example compilation checks, and root documentation tests also passed. The JSON evidence records each actual suite and log hash; overlapping root tests are not presented as independent extra coverage. Those pre-boundary checks did not rebuild or retime the canonical publication binary because production Rust source and dependency locks were unchanged at that checkpoint.
 
 The source of the negative/neutral experiments is preserved on remote `archive/*-20260926` branches, including `archive/importer-buffer-hash-20260926`, `archive/importer-borrowed-key-20260926`, `archive/importer-canonical-clone-20260926`, `archive/importer-phase-ledger-20260926`, `archive/importer-sparse-object-20260926`, and `archive/core-artifact-ledger-20260926`. Their exact commits are in the JSON evidence. They are intentionally not merged into the production branch.
 
 The separate CFA benchmark repository now preserves independent timing operands and failure evidence by default at commit `1683b0b4eec6cef5c710855f3da7043d05052131`. Its 20 regression tests and a native 81,921-position elementwise-minimum audit passed. This harness repair keeps the same timing aggregation and first-run build/TTFM semantics; the existing publication report remains pinned to the harness revision that actually produced it.
+
+## Concurrent boundary integration
+
+Before the production push, `glrmask-main` advanced to `d26f65fc7b4d21def0c848514cfcf7dc0aa9e169` with separately validated boundary/terminal work. The push guard stopped before changing the remote. The release candidate now merges that history rather than overwriting it. The three overlapping files merged without conflict and retained the Dynamic scalar proof, component-first policy, and observation filter.
+
+The combined production tree was rebuilt and passed 2171 Rust workspace and registered tests, zero failures (54 existing ignored), public-example compilation, and the root doctest. The Python extension also passed a separate compile check against the same source; this is not Python runtime/wheel validation. All 3471762 complete Dynamic mask frames matched the prior validated tree, with identical outcomes and trajectories. Both formerly crashing cases still return their explicit build errors and allow subsequent compiles.
+
+The numerical tables above remain measurements of the original `7d0f388ff` tree. They must not be silently relabelled as measurements of this later combined tree. A separate final timing audit is required to confirm its distribution.

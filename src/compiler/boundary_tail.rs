@@ -846,6 +846,81 @@ pub(crate) struct RootCallCandidateResult {
     pub(crate) map_ms: f64,
 }
 
+/// The original exact root-CALL vocabulary predicate. Kept as an independent
+/// validator and as the fallback for an unsorted prefix input.
+fn root_call_candidate_ids_reference(
+    vocab: &crate::Vocab,
+    exits: ByteSet,
+    entries: Option<&[Vec<u8>]>,
+) -> Vec<u32> {
+    let mut ids = Vec::new();
+    for (id, bytes) in vocab.iter() {
+        if (1..bytes.len()).any(|cut| {
+            exits.contains(bytes[cut - 1]) && entries.is_none_or(|prefixes| {
+                let suffix = &bytes[cut..];
+                prefixes.iter().any(|prefix| {
+                    suffix.starts_with(prefix) || prefix.starts_with(suffix)
+                })
+            })
+        }) {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Nonempty comparable byte strings must have the same first byte. Index the
+/// already-sorted entry cover once, then compare only that byte's contiguous
+/// prefix range at each positive, proper token cut. This changes no proof or
+/// admission rule and makes no assumptions about text encoding or token IDs.
+fn root_call_candidate_ids_indexed(
+    vocab: &crate::Vocab,
+    exits: ByteSet,
+    entries: Option<&[Vec<u8>]>,
+) -> Vec<u32> {
+    let Some(prefixes) = entries else {
+        return root_call_candidate_ids_reference(vocab, exits, None);
+    };
+    if prefixes.iter().any(Vec::is_empty)
+        || prefixes.windows(2).any(|pair| pair[0] > pair[1])
+    {
+        return root_call_candidate_ids_reference(vocab, exits, entries);
+    }
+    if prefixes.is_empty() || exits.count() == 0 {
+        return Vec::new();
+    }
+    let mut ranges = [(0usize, 0usize); 256];
+    let mut cursor = 0;
+    while cursor < prefixes.len() {
+        let first = prefixes[cursor][0] as usize;
+        let start = cursor;
+        cursor += 1;
+        while cursor < prefixes.len() && prefixes[cursor][0] as usize == first {
+            cursor += 1;
+        }
+        ranges[first] = (start, cursor);
+    }
+    let mut ids = Vec::new();
+    for (id, bytes) in vocab.iter() {
+        if bytes.windows(2).enumerate().any(|(offset, pair)| {
+            if !exits.contains(pair[0]) { return false; }
+            let (lo, hi) = ranges[pair[1] as usize];
+            if lo == hi { return false; }
+            let suffix = &bytes[offset + 1..];
+            prefixes[lo..hi].iter().any(|prefix| {
+                suffix.starts_with(prefix) || prefix.starts_with(suffix)
+            })
+        }) {
+            ids.push(id);
+        }
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 /// Link-local root refinement, never reusable component metadata. A flat
 /// graph root has no caller: its first ownership crossing must be a CALL,
 /// not root completion. At the SAME positive proper-prefix cut, the remaining
@@ -896,21 +971,18 @@ pub(crate) fn build_root_call_candidates(
     }
     let summary_ms = started.elapsed().as_secs_f64() * 1000.0;
     let map_started = Instant::now();
-    let mut candidate_ids = Vec::new();
-    for (id, bytes) in vocab.iter() {
-        if (1..bytes.len()).any(|cut| {
-            language.bytes.contains(bytes[cut - 1]) && entries.as_ref().is_none_or(|prefixes| {
-                let suffix = &bytes[cut..];
-                prefixes.iter().any(|prefix| {
-                    suffix.starts_with(prefix) || prefix.starts_with(suffix)
-                })
-            })
-        }) {
-            candidate_ids.push(id);
-        }
+    let indexed = std::env::var_os("GLRMASK_BOUNDARY_ROOT_PREFIX_INDEX").is_some();
+    let candidate_ids = if indexed {
+        root_call_candidate_ids_indexed(vocab, language.bytes, entries.as_deref())
+    } else {
+        root_call_candidate_ids_reference(vocab, language.bytes, entries.as_deref())
+    };
+    if indexed && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ROOT_PREFIX_INDEX").is_some() {
+        assert_eq!(candidate_ids,
+            root_call_candidate_ids_reference(vocab, language.bytes, entries.as_deref()),
+            "indexed root CALL candidates differ from the original full prefix scan");
+        eprintln!("[glrmask/validate][boundary_root_prefix_index] exact=true candidates={}", candidate_ids.len());
     }
-    candidate_ids.sort_unstable();
-    candidate_ids.dedup();
     Ok(RootCallCandidateResult {
         candidate_ids,
         exit_byte_count: language.bytes.count(),
@@ -1417,6 +1489,57 @@ mod tests {
         );
         assert!(probe.candidate_ids.contains(&1));
         assert!(probe.candidate_ids.contains(&2));
+    }
+
+    #[test]
+    fn root_call_index_preserves_generated_binary_vocabulary_and_fallbacks() {
+        let mut seed = 0x8a6137c5u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let alphabet = [0u8, 9, 10, 32, 34, 97, 98, 127, 128, 255];
+        for case in 0..256 {
+            let mut words = vec![(1u32, Vec::new()), (8, vec![0]),
+                (22, vec![255, 0, 128]), (31, vec![255, 0, 128])];
+            for n in 0..96 {
+                let len = next() % 33;
+                words.push((100 + n * 7, (0..len).map(|_| alphabet[next() % alphabet.len()]).collect()));
+            }
+            let vocab = crate::Vocab::new(words);
+            let mut exits = ByteSet::default();
+            for &byte in &alphabet { if next() % 2 == 0 { exits.insert(byte); } }
+            let count = next() % 16;
+            let mut prefixes: Vec<Vec<u8>> = (0..count).map(|_| {
+                let len = 1 + next() % 8;
+                (0..len).map(|_| alphabet[next() % alphabet.len()]).collect()
+            }).collect();
+            if case % 11 == 0 { prefixes.push(Vec::new()); }
+            prefixes.sort();
+            if case % 7 == 0 { prefixes.reverse(); }
+            for cover in [None, Some(prefixes.as_slice()), Some(&[][..])] {
+                assert_eq!(root_call_candidate_ids_indexed(&vocab, exits, cover),
+                    root_call_candidate_ids_reference(&vocab, exits, cover), "case {case}");
+            }
+        }
+    }
+
+    #[test]
+    fn root_call_index_checks_both_prefix_directions_at_the_same_proper_cut() {
+        let vocab = vocab(&[
+            (0, b"a"), (1, b"ac"), (2, b"ac"), (3, b"acat"),
+            (4, b"acaterpillar"), (5, b"xa"), (6, b"axcat"),
+            (7, b"xac"), (8, b"adog"), (9, b"acow"),
+            (10, b"cat"), (11, b""),
+        ]);
+        let mut exits = ByteSet::default(); exits.insert(b'a');
+        let prefixes = vec![b"cat".to_vec(), b"cot".to_vec(), b"dog".to_vec()];
+        assert_eq!(root_call_candidate_ids_indexed(&vocab, exits, Some(&prefixes)),
+            vec![1, 2, 3, 4, 7, 8]);
+        assert_eq!(root_call_candidate_ids_indexed(&vocab, exits, Some(&[Vec::new()])),
+            root_call_candidate_ids_reference(&vocab, exits, None));
+        assert!(root_call_candidate_ids_indexed(&vocab, exits, Some(&[])).is_empty());
+        assert!(root_call_candidate_ids_indexed(&vocab, ByteSet::default(), Some(&prefixes)).is_empty());
     }
 
     #[test]

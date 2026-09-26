@@ -64,6 +64,10 @@ impl SharedClassifyBytesets {
 }
 
 struct ActiveL2pRouteSetup {
+    // The cache uses Arc identity in its key. Keep that object alive for as
+    // long as the entry exists; otherwise a later query can recycle its
+    // address with a different follow relation and hit stale cached analysis.
+    _follow_owner: Arc<BTreeMap<u32, BitSet>>,
     active_start_states: Arc<[u32]>,
     allowed_boundary_pairs: Box<[U8Set; 256]>,
     allowed_boundary_pair_words: Box<[u64; 1024]>,
@@ -2268,6 +2272,7 @@ fn active_l2p_route_setup(
     }
 
     let setup = Arc::new(ActiveL2pRouteSetup {
+        _follow_owner: Arc::clone(disallowed_follows),
         active_start_states: active_start_states.into(),
         allowed_boundary_pairs,
         allowed_boundary_pair_words,
@@ -7790,4 +7795,30 @@ mod tests {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn shared_route_cache_retains_follow_identity_and_separates_policies() {
+    use crate::automata::lexer::ast::Expr;
+    use crate::automata::lexer::compile::build_regex_monolithic;
+    let tokenizer = build_regex_monolithic(&[
+        Expr::U8Seq(b"a".to_vec()), Expr::U8Seq(b"b".to_vec()),
+    ]).into_tokenizer(2, None);
+    let bytesets = SharedClassifyBytesets::build(&tokenizer, 2);
+    let mut active = BitSet::new(2); active.set(0); active.set(1);
+    let follows = Arc::new(BTreeMap::new());
+    let weak = Arc::downgrade(&follows);
+    let first = active_l2p_route_setup(&tokenizer, &bytesets, &active, &follows);
+    assert!(first.allowed_boundary_pairs[b'a' as usize].contains(b'b'));
+    let repeated = active_l2p_route_setup(&tokenizer, &bytesets, &active, &follows);
+    assert!(Arc::ptr_eq(&first, &repeated));
+    drop(first); drop(repeated); drop(follows);
+    assert!(weak.upgrade().is_some(), "cache identity must remain owned");
+    let mut blocked = BitSet::new(2); blocked.set(1);
+    let follows = Arc::new(BTreeMap::from([(0, blocked)]));
+    let other = active_l2p_route_setup(&tokenizer, &bytesets, &active, &follows);
+    assert!(!other.allowed_boundary_pairs[b'a' as usize].contains(b'b'));
+    drop(other); drop(bytesets);
+    assert!(weak.upgrade().is_none(), "dropping cache releases old identity");
 }

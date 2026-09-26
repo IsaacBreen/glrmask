@@ -6900,7 +6900,7 @@ impl<'a> DynamicNfaScanCache<'a> {
         let tokenizer = vocab
             .mask_runtime_tokenizer()
             .unwrap_or(&constraint.tokenizer);
-        let use_constraint_fast_transitions = std::ptr::eq(tokenizer, &constraint.tokenizer);
+        let use_constraint_fast_transitions = std::ptr::eq(tokenizer, constraint.tokenizer.as_ref());
         Self::new_with_tokenizer(
             constraint,
             tokenizer,
@@ -9072,7 +9072,7 @@ fn fill_mask_dynamic_impl(
             lexer_scan_cache.tokenizer().num_states(),
             lexer_scan_cache.tokenizer().has_epsilon_transitions(),
             state.constraint.tokenizer.num_states(),
-            !std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer),
+            !std::ptr::eq(lexer_scan_cache.tokenizer(), state.constraint.tokenizer.as_ref()),
         );
         if let Ok(value) = std::env::var("GLRMASK_PROFILE_DYNAMIC_RELEVANT_TERMINALS") {
             let terminals = value

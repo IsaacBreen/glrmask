@@ -6021,6 +6021,16 @@ pub struct TokenizerAnalysisUnion {
     pub right_offset: u32,
 }
 
+/// A compile-time induced graph with original lexical observations.
+/// This is not a replacement runtime lexer: only queries whose complete
+/// trajectories were proved to lie in the retained set may use it.
+#[doc(hidden)]
+pub struct TokenizerObservationView {
+    pub tokenizer: Tokenizer,
+    pub original_to_view: Vec<u32>,
+    pub view_to_original: Vec<u32>,
+}
+
 pub trait Lexer {
     fn start_state(&self) -> u32;
     fn num_terminals(&self) -> u32;
@@ -9041,6 +9051,56 @@ impl Tokenizer {
             .states()
             .get(state as usize)
             .is_some_and(|state| !state.epsilon_transitions.is_empty())
+    }
+
+    /// Preserve an epsilon-closed induced subset with exact matched/future
+    /// observations. The caller must prove that its queried byte paths stay
+    /// inside this subset. Full original futures are intentional: a token may
+    /// end at a live residual whose later bytes lie outside the current query.
+    /// Every direct epsilon edge is copied once; a transitive closure must not
+    /// be substituted as direct topology. Packed and ordinary inputs share the
+    /// same authoritative accessors. No wire-layout construction is involved.
+    pub fn induced_observation_view(&self, retained: &[bool]) -> Option<TokenizerObservationView> {
+        let n=self.num_states() as usize;
+        if n==0 || n>200_000 || retained.len()!=n || self.has_virtual_residual_runtime(){return None;}
+        let closures=self.all_singleton_epsilon_closures();
+        let mut keep=retained.to_vec();keep[self.initial_state_id() as usize]=true;
+        let mut closure_work=0usize;
+        for q in 0..n {if keep[q]{
+            closure_work=closure_work.checked_add(closures[q].len())?;
+            if closure_work>8_000_000{return None;}
+            for &r in &closures[q]{if r as usize>=n{return None;}keep[r as usize]=true;}
+        }}
+        let start=self.initial_state_id();
+        let mut inverse=vec![start];let mut mapping=vec![u32::MAX;n];mapping[start as usize]=0;
+        for (q,&yes) in keep.iter().enumerate(){if yes && q!=start as usize{
+            mapping[q]=inverse.len() as u32;inverse.push(q as u32);
+        }}
+        let mut dfa=DFA::new(inverse.len());dfa.ensure_group_capacity(self.num_terminals as usize);
+        for terminal in 0..self.num_terminals{dfa.set_group_u8set(terminal,*self.dfa.group_id_to_u8set(terminal));}
+        let mut edge_work=0usize;
+        for (view,&raw) in inverse.iter().enumerate(){
+            if self.state_is_virtual_runtime(raw){return None;}
+            let mut edges=Vec::new();
+            for (byte,target) in self.transitions_from(raw){
+                if target as usize>=n{return None;}
+                let target=mapping[target as usize];
+                if target!=u32::MAX{edges.push((byte,target));}
+            }
+            edges.sort_unstable();
+            edge_work=edge_work.checked_add(edges.len())?;
+            if edge_work>8_000_000{return None;}
+            dfa.set_transitions_from_sorted_entries(view as u32,edges);
+            dfa.overwrite_state_metadata(view as u32,self.state_finalizers(raw).clone(),self.state_futures(raw).clone());
+            let mut valid=true;
+            self.for_each_epsilon_target(raw,|target|{
+                let mapped=mapping.get(target as usize).copied().unwrap_or(u32::MAX);
+                if mapped==u32::MAX{valid=false;}else{dfa.add_epsilon_transition(view as u32,mapped);edge_work+=1;}
+            });
+            if !valid || edge_work>8_000_000{return None;}
+        }
+        Some(TokenizerObservationView{tokenizer:Tokenizer::from_parts(dfa,self.num_terminals,self.exprs.clone()),
+            original_to_view:mapping,view_to_original:inverse})
     }
 
     fn for_each_epsilon_target(&self, state: u32, mut visit: impl FnMut(u32)) {
@@ -17988,5 +18048,48 @@ mod tests {
             .expect("one epsilon SCC should fit in one determinized state");
         assert_eq!(built.tokenizer.num_states(), 1);
         assert_eq!(raw_to_determinized, vec![0, 0]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn induced_observation_view_preserves_direct_epsilon_and_packed_outputs(){
+    use super::ast::{bytes,choice,plus,Expr};
+    use super::compile::{build_regex_monolithic,build_regex_partitioned};
+    let expressions=vec![bytes(b"longliteralend"),choice(vec![bytes(b"!x"),bytes(b"!yz")]),plus(bytes(b"q")),Expr::Epsilon];
+    let words=vec![b"end!".to_vec(),b"q!xq".to_vec(),b"!y".to_vec(),b"qend".to_vec()];
+    for fresh in [build_regex_monolithic(&expressions).into_tokenizer(4,Some(Arc::from(expressions.clone()))),
+        build_regex_partitioned(&expressions,&[0,1,2,3]).into_tokenizer(4,Some(Arc::from(expressions.clone())))]{
+        let wire=artifact_serde::to_fast_bytes(&fresh);
+        let mut packed=artifact_serde::from_fast_bytes(&wire).unwrap();
+        packed.restore_terminal_exprs_without_virtual_runtime(Some(expressions.clone())).unwrap();
+        for tokenizer in [&fresh,&packed]{
+            let mut keep=vec![false;tokenizer.num_states() as usize];
+            let roots=tokenizer.deterministic_reset_states().into_vec();
+            for word in &words{for start in 0..word.len(){
+                let mut states=roots.clone();
+                for &byte in &word[start..]{states=tokenizer.step_all(&states,byte).into_vec();
+                    for &q in &states{keep[q as usize]=true;}
+                }
+            }}
+            let view=tokenizer.induced_observation_view(&keep).unwrap();
+            assert!(view.tokenizer.num_states()<tokenizer.num_states());
+            assert!(view.tokenizer.terminal_exprs().is_some());
+            for (q,&raw) in view.view_to_original.iter().enumerate(){
+                assert_eq!(view.tokenizer.state_finalizers(q as u32),tokenizer.state_finalizers(raw));
+                assert_eq!(view.tokenizer.state_futures(q as u32),tokenizer.state_futures(raw));
+                let mut expected=Vec::new();tokenizer.for_each_epsilon_target(raw,|t|expected.push(view.original_to_view[t as usize]));
+                let mut actual=Vec::new();view.tokenizer.for_each_epsilon_target(q as u32,|t|actual.push(t));
+                expected.sort_unstable();actual.sort_unstable();assert_eq!(actual,expected);
+            }
+            for word in &words{for start in 0..word.len(){
+                let mut a=roots.clone();let mut b=view.tokenizer.deterministic_reset_states().into_vec();
+                for &byte in &word[start..]{
+                    a=tokenizer.step_all(&a,byte).into_vec();b=view.tokenizer.step_all(&b,byte).into_vec();
+                    let mut decoded=b.iter().map(|&q|view.view_to_original[q as usize]).collect::<Vec<_>>();
+                    decoded.sort_unstable();decoded.dedup();assert_eq!(a,decoded);
+                }
+            }}
+        }
     }
 }

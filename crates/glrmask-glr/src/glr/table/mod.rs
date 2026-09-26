@@ -720,13 +720,13 @@ pub mod artifact_serde {
         Ok(rows)
     }
 
-    fn encode_meta(table: &GLRTable) -> Vec<u8> {
-        if table.rules.len() < CHUNKED_RULES_MIN_ROWS {
+    fn encode_meta(table: &GLRTable, source_rules: &[Rule]) -> Vec<u8> {
+        if source_rules.len() < CHUNKED_RULES_MIN_ROWS {
             return bincode::serialize(&CompactTableMetaRef {
                 num_states: table.num_states,
                 num_terminals: table.num_terminals,
                 num_rules: table.num_rules,
-                rules: &table.rules,
+                rules: &source_rules,
                 nonterminal_display_names: &table.nonterminal_display_names,
                 construction: table.construction,
                 admission_policy: table.admission_policy,
@@ -738,14 +738,14 @@ pub mod artifact_serde {
             .expect("GLR metadata serialization should succeed");
         }
         let encode_rules = || {
-            bincode::serialize(&table.rules).expect("GLR rules serialization should succeed")
+            bincode::serialize(&source_rules).expect("GLR rules serialization should succeed")
         };
         let encode_rest = || {
             bincode::serialize(&CompactTableMetaNoRulesRef {
                 num_states: table.num_states,
                 num_terminals: table.num_terminals,
                 num_rules: table.num_rules,
-                first_rule: table.rules.first(),
+                first_rule: source_rules.first(),
                 nonterminal_display_names: &table.nonterminal_display_names,
                 construction: table.construction,
                 admission_policy: table.admission_policy,
@@ -767,7 +767,7 @@ pub mod artifact_serde {
         };
         let mut out = Vec::with_capacity(DEFERRED_META_HEADER_LEN + rules.len() + rest.len());
         out.extend_from_slice(DEFERRED_META_MAGIC);
-        out.extend_from_slice(&(table.rules.len() as u32).to_le_bytes());
+        out.extend_from_slice(&(source_rules.len() as u32).to_le_bytes());
         out.extend_from_slice(&(rules.len() as u64).to_le_bytes());
         out.extend_from_slice(&(rest.len() as u64).to_le_bytes());
         out.extend_from_slice(&rules);
@@ -970,6 +970,19 @@ pub mod artifact_serde {
     }
 
     pub fn to_compact_bytes(table: &GLRTable) -> Vec<u8> {
+        to_compact_bytes_impl(table, &table.rules)
+    }
+
+    /// Serialize immutable runtime rows with separately retained source rules.
+    /// A loaded runtime table may carry only its augmented rule, while its
+    /// complete source rules are stored in an independently decoded section.
+    pub fn to_compact_bytes_with_rules(table: &GLRTable, rules: &[Rule]) -> Vec<u8> {
+        assert_eq!(rules.len(), table.num_rules as usize, "retained GLR rule count");
+        assert_eq!(rules.first(), table.rules.first(), "retained augmented GLR rule");
+        to_compact_bytes_impl(table, rules)
+    }
+
+    fn to_compact_bytes_impl(table: &GLRTable, rules: &[Rule]) -> Vec<u8> {
         let encode_action = || encode_action_rows(&table.action);
         let encode_goto = || {
             bincode::serialize(&table.goto).expect("GLR goto serialization should succeed")
@@ -978,7 +991,7 @@ pub mod artifact_serde {
             let compact = CompactAdvance::from_rows(&table.advance);
             bincode::serialize(&compact).expect("GLR advance serialization should succeed")
         };
-        let encode_meta = || encode_meta(table);
+        let encode_meta = || encode_meta(table, rules);
         // Scheduling four tiny bincode jobs costs more than the work for the
         // ordinary schema tables. Keep large tables parallel, but let compact
         // tables stay on one worker and in cache.
@@ -1005,6 +1018,23 @@ pub mod artifact_serde {
         out.extend_from_slice(&advance);
         out.extend_from_slice(&meta);
         out
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn retained_rule_writer_preserves_deferred_runtime_table() {
+        let mut table = placeholder();
+        table.num_rules = 2048;
+        table.rules = vec![Rule { lhs: 0, rhs: Vec::new() }];
+        let rules = vec![table.rules[0].clone(); table.num_rules as usize];
+        let bytes = to_compact_bytes_with_rules(&table, &rules);
+        let deferred = from_compact_bytes_deferred(&bytes).unwrap();
+        assert!(deferred.deferred_rules.is_some());
+        assert_eq!(deferred.table.rules.len(), 1);
+        assert_eq!(deferred.table.num_rules, 2048);
+        let full = from_compact_bytes(&bytes).unwrap();
+        assert_eq!(full.rules, rules);
+        assert_eq!(to_compact_bytes(&full), bytes);
     }
 
     fn from_compact_bytes_deferred_impl(

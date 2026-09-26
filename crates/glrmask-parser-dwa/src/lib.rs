@@ -36,6 +36,7 @@ pub(crate) mod compiler {
 #[cfg(feature = "internal-api")]
 pub(crate) mod merge;
 pub(crate) mod parser_dwa;
+pub(crate) mod parser_equivalence;
 pub(crate) mod resolve_negatives;
 pub(crate) mod templates;
 
@@ -50,6 +51,9 @@ pub mod __private {
     }
     pub mod parser_dwa {
         pub use crate::parser_dwa::*;
+    }
+    pub mod parser_equivalence {
+        pub use crate::parser_equivalence::*;
     }
     pub mod resolve_negatives {
         pub use crate::resolve_negatives::*;

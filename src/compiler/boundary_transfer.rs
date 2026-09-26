@@ -30,6 +30,15 @@
 //!   child-start/return-pop/nullability (the provider dispatches Finish by
 //!   first-incoming-link, which must not define semantics accidentally).
 
+#[path = "boundary_owner_program.rs"]
+mod owner_program;
+#[path = "boundary_template_top.rs"]
+mod template_top;
+#[path = "boundary_admission.rs"]
+mod admission;
+#[path = "boundary_direct_program.rs"]
+mod direct_program;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
@@ -38,6 +47,7 @@ use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_
 use range_set_blaze::RangeSetBlaze;
 
 use crate::automata::weighted_u32::dwa::DWA;
+use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::weighted_u32::minimize::reverse_hashcons_owned;
 use crate::automata::weighted_u32::minimize_acyclic::{
     PointwiseClassOrder, minimize_acyclic_owned_with_pointwise_class_order,
@@ -493,7 +503,13 @@ pub(crate) fn assemble_boundary_transfer_query() -> Result<(), String> {
 /// tables, provider-layout injections, and validated control contracts. No
 /// composed or provider-level table exists anywhere in this object.
 pub(crate) struct SignedLinkContext<'a> {
+    /// Fixed table/link certificate; constructed lazily inside this link timer.
+    predecessor_support: std::sync::OnceLock<Result<super::boundary_stack_support::Certificate,String>>,
     pub parent_table: &'a GLRTable,
+    /// Unspecialized local template DFAs retained by the *same* component
+    /// artifact as each table. These remain local until an injective link-time
+    /// label relocation; they never contain knowledge of future links.
+    pub component_template_sources: Vec<std::borrow::Cow<'a, [Option<UnweightedDfa>]>>,
     pub child_tables: Vec<&'a GLRTable>,
     pub links: Vec<ScopedSubgrammarLink>,
     pub terminal_offsets: Vec<u32>,
@@ -511,6 +527,44 @@ pub(crate) struct SignedLinkContext<'a> {
 }
 
 impl<'a> SignedLinkContext<'a> {
+    pub(crate) fn with_component_template_sources(
+        mut self,
+        components: &[&'a Constraint],
+    ) -> Result<Self, String> {
+        if components.len() != self.state_offsets.len() {
+            return Err("prepared template sources differ from link component count".into());
+        }
+        for (index, component) in components.iter().enumerate() {
+            // Establish provenance structurally: sources cannot be paired with
+            // an unrelated/rebuilt table that happens to have equal dimensions.
+            if !std::ptr::eq(&component.table, self.component_table(index as u32)?) {
+                return Err(format!("prepared template source {index} is not the context's table"));
+            }
+        }
+        let decode = std::env::var_os("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES").is_some();
+        let started = Instant::now();
+        self.component_template_sources = components.iter()
+            .map(|component| {
+                // A reconstructed recursive table has a different scoped state
+                // coordinate from its original component cache. Its leaf sources
+                // can still reuse their own templates, but this aggregate cannot.
+                if component.uses_compact_segmented_parser_runtime() {
+                    Ok(std::borrow::Cow::Borrowed(&[][..]))
+                } else if decode {
+                    component.retained_parser_templates_for_compilation()
+                } else {
+                    Ok(std::borrow::Cow::Borrowed(component.composition_parser_templates_by_terminal.as_slice()))
+                }
+            })
+            .collect::<Result<_, String>>()?;
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            eprintln!("[glrmask/profile][boundary_retained_template_sources] enabled={decode} components={} templates={} decode_ms={:.3}",
+                components.len(), self.component_template_sources.iter().map(|v| v.iter().filter(|d| d.is_some()).count()).sum::<usize>(),
+                started.elapsed().as_secs_f64() * 1000.0);
+        }
+        Ok(self)
+    }
+
     fn component_table(&self, component: u32) -> Result<&'a GLRTable, String> {
         if component == 0 {
             return Ok(self.parent_table);
@@ -679,6 +733,8 @@ pub(crate) fn build_signed_link_context<'a>(
         num_terminals,
         global_ignores,
         unbound_slots,
+    )?.with_component_template_sources(
+        &std::iter::once(parent).chain(children.iter().map(|child| child.constraint)).collect::<Vec<_>>(),
     )
 }
 
@@ -752,6 +808,8 @@ pub(crate) fn build_signed_link_context_from_parts<'a>(
     let child_tables = tables[1..].to_vec();
     let closure = certify_bounded_closure(&links)?;
     let context = SignedLinkContext {
+        predecessor_support: std::sync::OnceLock::new(),
+        component_template_sources: Vec::new(),
         parent_table,
         child_tables,
         links,
@@ -811,6 +869,7 @@ fn empty_transfer() -> TerminalCharacterization {
 /// through the standard template compiler. Entry/Finish fragments are keyed by
 /// synthetic terminal ids above the composed domain (never emitted by the
 /// lexical DWA, never confused with real terminals).
+#[derive(Clone)]
 pub(crate) struct FragmentLibrary {
     pub templates: Templates,
     /// Synthetic fragment key per link index for Entry / Finish exports.
@@ -1343,11 +1402,65 @@ pub(crate) fn build_fragment_library_cached(
     emitted: &[bool],
     start_component: u32,
 ) -> Result<FragmentLibrary, String> {
+    let reuse = std::env::var_os("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES").is_some();
+    let result = build_fragment_library_cached_impl(context, cache, emitted, start_component, reuse)?;
+    if reuse && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_RETAINED_TEMPLATES").is_some() {
+        let reference_cache = FragmentTransferCache::new(context)?;
+        let reference = build_fragment_library_cached_impl(
+            context, &reference_cache, emitted, start_component, false,
+        )?;
+        assert_eq!(result.templates.by_terminal.len(), reference.templates.by_terminal.len());
+        for (terminal, expected) in &reference.templates.by_terminal {
+            let actual = result.templates.by_terminal.get(terminal)
+                .expect("retained template build omitted demanded terminal");
+            assert_same_template_language(actual, expected)?;
+        }
+        eprintln!("[glrmask/validate][boundary_retained_templates] component={start_component} terminals={} exact=true",
+            result.templates.by_terminal.len());
+    }
+    Ok(result)
+}
+
+/// Booleanize a template DFA, then use the existing exact weighted-language
+/// comparator. Template skeleton weights are placeholders and cannot be used
+/// directly for equivalence (EMPTY weights would make every template empty).
+fn assert_same_template_language(actual: &UnweightedDfa, expected: &UnweightedDfa) -> Result<(), String> {
+    fn booleanize(source: &UnweightedDfa) -> DWA {
+        let mut out = DWA::new(1, 0);
+        for _ in 1..source.states.len() { out.add_state(); }
+        out.set_start_state(source.start_state);
+        for (id, state) in source.states.iter().enumerate() {
+            if state.is_accepting { out.set_final_weight(id as u32, Weight::all()); }
+            for (&label, &target) in &state.transitions {
+                out.add_transition(id as u32, label, target, Weight::all());
+            }
+        }
+        out
+    }
+    let difference = crate::automata::weighted_u32::equivalence::find_difference(
+        &booleanize(actual), &booleanize(expected),
+    ).map_err(|error| error.to_string())?;
+    match difference {
+        None => Ok(()),
+        Some(word) => Err(format!("retained local template differs from fresh scoped template on {word:?}")),
+    }
+}
+
+fn build_fragment_library_cached_impl(
+    context: &SignedLinkContext,
+    cache: &FragmentTransferCache,
+    emitted: &[bool],
+    start_component: u32,
+    reuse_prepared: bool,
+) -> Result<FragmentLibrary, String> {
     let templates_started = Instant::now();
     let mut combined = cache.controls.clone();
     let mut by_owner = BTreeMap::<u32, Vec<(TerminalID, TerminalID)>>::new();
     let mut special_terminals = Vec::<TerminalID>::new();
     let mut ordinary_terms = 0usize;
+    let mut reused = Templates::default();
+    let mut relocated_states = BTreeMap::<u32, Vec<Vec<u32>>>::new();
+    let reuse_started = Instant::now();
     for (terminal, &demanded) in emitted.iter().enumerate() {
         if !demanded {
             continue;
@@ -1374,9 +1487,42 @@ pub(crate) fn build_fragment_library_cached(
         if owner_ignore {
             special_terminals.push(terminal);
         } else {
+            if reuse_prepared
+                && let Some(cached) = context.component_template_sources.get(owner as usize)
+                    .and_then(|by_terminal| by_terminal.get(local as usize))
+                    .and_then(Option::as_ref)
+            {
+                let table = context.component_table(owner)?;
+                let injection = context.injection(owner)?;
+                let relation = if let Some(relation) = relocated_states.get(&owner) {
+                    relation
+                } else {
+                    let relation = (0..table.num_states)
+                        .map(|state| injection.scope_state(state).map(|scoped| vec![scoped]))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    relocated_states.insert(owner, relation);
+                    relocated_states.get(&owner).expect("just inserted relocation")
+                };
+                // This is the ordinary compiler's existing exact template
+                // relocation + skeleton construction. Only concrete read/pop
+                // and write/push labels are renamed; DEFAULT remains universal.
+                // No cancellation or template specialization is done here.
+                if let Some((dfa, nwa)) =
+                    crate::compiler::constraint_compose::transport_composition_template_dfa_with_skeleton(
+                        cached.clone(), relation,
+                    )
+                {
+                    reused.by_terminal.insert(terminal, dfa);
+                    reused.by_terminal_nwa.insert(terminal, nwa);
+                    continue;
+                }
+            }
             by_owner.entry(owner).or_default().push((terminal, local));
         }
     }
+
+    let reused_count = reused.by_terminal.len();
+    let relocation_ms = reuse_started.elapsed().as_secs_f64() * 1000.0;
 
     if !special_terminals.is_empty() {
         let mut special_cache = cache
@@ -1462,8 +1608,14 @@ pub(crate) fn build_fragment_library_cached(
         }
     }
 
-    let templates = Templates::from_characterizations(&combined);
+    let mut templates = Templates::from_characterizations(&combined);
+    templates.by_terminal.append(&mut reused.by_terminal);
+    templates.by_terminal_nwa.append(&mut reused.by_terminal_nwa);
     let templates_ms = templates_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][boundary_prepared_templates] component={start_component} enabled={reuse_prepared} ordinary={ordinary_terms} reused={reused_count} rebuilt={} relocation_ms={relocation_ms:.3} total_ms={templates_ms:.3}",
+            ordinary_terms - reused_count);
+    }
     for (&key, fragment) in &templates.by_terminal_nwa {
         if !fragment.is_acyclic() {
             return Err(format!(
@@ -1592,6 +1744,11 @@ fn project_weight_to_kept(weight: &Weight, kept: &[bool]) -> Weight {
 struct ProjectionMemo<'a> {
     kept: &'a [bool],
     map: rustc_hash::FxHashMap<usize, (SharedTokenSet, SharedTokenSet)>,
+    // Cache repeated immutable whole weights, with both original and result
+    // pinned so an address cannot be recycled while its entry remains live.
+    outer: rustc_hash::FxHashMap<usize, (Weight, Weight)>,
+    outer_enabled: bool,
+    outer_hits: u64,
     cap: usize,
     calls: u64,
     hits: u64,
@@ -1614,6 +1771,9 @@ impl<'a> ProjectionMemo<'a> {
         Self {
             kept,
             map: rustc_hash::FxHashMap::default(),
+            outer: rustc_hash::FxHashMap::default(),
+            outer_enabled: std::env::var_os("GLRMASK_DISABLE_BOUNDARY_OUTER_PROJECTION_MEMO").is_none(),
+            outer_hits: 0,
             cap,
             calls: 0,
             hits: 0,
@@ -1694,6 +1854,15 @@ fn project_weight_to_kept_in_place(
     weight: &mut Weight,
     memo: &mut ProjectionMemo<'_>,
 ) -> bool {
+    if memo.outer_enabled {
+        if let Some((original, result)) = memo.outer.get(&weight.ptr_key()) {
+            let unchanged = original.ptr_key() == result.ptr_key();
+            if !unchanged { *weight = result.clone(); }
+            memo.outer_hits += 1;
+            return unchanged;
+        }
+    }
+    let original = memo.outer_enabled.then(|| weight.clone());
     // One extra scan, only over inner-set Arcs (no token enumeration): the
     // memo hit path is a pointer lookup + Arc clone, so unchanged weights
     // skip the TSID-map rebuild entirely. The scan's borrow must end before
@@ -1707,12 +1876,16 @@ fn project_weight_to_kept_in_place(
     }
     if !changed {
         memo.unchanged_weights += 1;
-        return true;
+    } else {
+        memo.remapped_weights += 1;
+        *weight = project_weight_to_kept_memo(weight, memo);
     }
-    memo.remapped_weights += 1;
-    let remapped = project_weight_to_kept_memo(weight, memo);
-    *weight = remapped;
-    false
+    if let Some(original) = original {
+        if memo.outer.len() < memo.cap {
+            memo.outer.insert(original.ptr_key(), (original, weight.clone()));
+        }
+    }
+    !changed
 }
 
 /// Compile one shard: bounded-DAG assembly, single exact negative resolution,
@@ -1745,6 +1918,792 @@ pub(crate) fn compile_signed_shard_parser(
     id_map: &InternalIdMap,
     start_component: u32,
 ) -> Result<SignedShardOutput, String> {
+    let original_dwa = shard_dwa;
+    // Prefix admission is existential: a successful extended terminal path
+    // necessarily executes its accepting prefix. This optional reduction is
+    // applied only to the completed crossing/follow-filtered lexical DWA.
+    let prefix_candidate = if std::env::var_os("GLRMASK_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+        let started = Instant::now();
+        let candidate = crate::compiler::boundary_prefix_dominance::reduce(shard_dwa);
+        if let Some((reduced,stats)) = candidate.as_ref() {
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some() {
+                let alphabet = shard_dwa.states().iter().flat_map(|state|state.transitions.keys())
+                    .filter(|&&label|label>=0).map(|&label|label as u32+1).max().unwrap_or(1);
+                let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+                    shard_dwa,reduced,alphabet,500_000,
+                )?;
+                if let Some(difference)=comparison.difference {
+                    return Err(format!("lexical prefix reduction changed weighted prefix language: {difference:?}"));
+                }
+                eprintln!("[glrmask/validate][boundary_prefix_minimal] component={start_component} exact_prefix=true pairs={} branches={}",
+                    comparison.product_states,comparison.compared_branches);
+            }
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=true elapsed_ms={:.3} stats={stats:?}",started.elapsed().as_secs_f64()*1000.0);
+            }
+        } else if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            eprintln!("[glrmask/profile][boundary_prefix_minimal] component={start_component} selected=false elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+        }
+        candidate
+    } else {None};
+    let shard_dwa=prefix_candidate.as_ref().map_or(shard_dwa,|(dwa,_)|dwa);
+
+    let result = compile_signed_shard_parser_impl(context, library, shard_dwa, id_map, start_component)?;
+    if prefix_candidate.is_some()
+        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREFIX_MINIMAL_TERMINALS").is_some()
+    {
+        // Genuinely untouched lexical reference. The implementation helper
+        // cannot reapply prefix reduction, irrespective of environment flags.
+        let reference = compile_signed_shard_parser_impl(
+            context, library, original_dwa, id_map, start_component,
+        )?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa, &result.parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference) = comparison.difference {
+            return Err(format!("lexical prefix dominance changed final parser masks: {difference:?}"));
+        }
+        if let Some(certificate) = context.predecessor_support.get().and_then(|c|c.as_ref().ok()) {
+            certificate.compare(&reference.parser_dwa, &result.parser_dwa)?;
+            let tables = std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+            super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+                context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        }
+        eprintln!("[glrmask/validate][boundary_prefix_minimal_parser] component={start_component} all_prefix_exact=true pairs={} branches={}", comparison.product_states, comparison.compared_branches);
+    }
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_RESULT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create compiled parser diagnostics");
+        let bytes = bincode::serialize(&(context.total_scoped_states,start_component,&result.parser_dwa))
+            .expect("serialize compiled parser diagnostics");
+        let compressed = zstd::stream::encode_all(bytes.as_slice(),1).expect("compress parser diagnostics");
+        std::fs::write(directory.join(format!("component-{start_component}.bin.zst")),compressed)
+            .expect("write compiled parser diagnostics");
+    }
+    Ok(result)
+}
+
+fn compile_signed_shard_parser_impl(
+    context: &SignedLinkContext,
+    library: &FragmentLibrary,
+    shard_dwa: &DWA,
+    id_map: &InternalIdMap,
+    start_component: u32,
+) -> Result<SignedShardOutput, String> {
+    let project = std::env::var_os("GLRMASK_BOUNDARY_CORRELATED_SUPPORT").is_some();
+    let atoms = std::env::var_os("GLRMASK_BOUNDARY_WEIGHT_ATOMS").is_some();
+    let tagged_bundles=std::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
+    let bundles = tagged_bundles||std::env::var_os("GLRMASK_BOUNDARY_DETERMINISTIC_BUNDLES").is_some();
+    let owner_program = std::env::var_os("GLRMASK_BOUNDARY_OWNER_PROGRAM").is_some();
+    let top_flow = std::env::var_os("GLRMASK_BOUNDARY_TOP_FLOW").is_some();
+    let admission_tails = std::env::var_os("GLRMASK_BOUNDARY_ADMISSION_TAILS").is_some();
+    let original_library=library;
+    let template_read_support=std::env::var_os("GLRMASK_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some();
+    if template_read_support&&(bundles||owner_program||top_flow||admission_tails){
+        return Err("template-domain experiment requires the ordinary unrestricted assembly control".into());
+    }
+    let prepared_library=if template_read_support {
+        prepare_domain_filtered_templates(context,library,start_component)
+    }else{None};
+    let library=prepared_library.as_ref().unwrap_or(library);
+    let backward=std::env::var_os("GLRMASK_BOUNDARY_BACKWARD_PREIMAGE").is_some();
+    if backward&&(project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support){
+        return Err("backward preimage must be tested against unrestricted ordinary assembly".into());
+    }
+    let direct_requested=std::env::var_os("GLRMASK_BOUNDARY_DIRECT_NATIVE_PROGRAM").is_some();
+    let direct=if direct_requested && !(backward||project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support)
+        && std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_none()
+    { direct_program::compile(context,library,shard_dwa,start_component) }else{None};
+    let used_direct=direct.is_some();
+    let preimage=if backward{try_compile_backward_preimage(context,library,shard_dwa,start_component)}else{None};
+    let used_preimage=preimage.is_some();
+    let result=match direct.or(preimage) {
+        Some(result)=>result,
+        None=>compile_signed_shard_parser_with_support(
+            context, library, shard_dwa, id_map, start_component, project, atoms, bundles, owner_program, top_flow, admission_tails,
+        )?,
+    };
+    if used_direct && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DIRECT_NATIVE_PROGRAM").is_some(){
+        // This calls the untouched range-arena implementation directly, never
+        // the wrapper that selects the new program representation.
+        let reference=compile_signed_shard_parser_with_support(
+            context,original_library,shard_dwa,id_map,start_component,false,false,false,false,false,false,
+        )?;
+        let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa,&result.parser_dwa,context.total_scoped_states,500_000)?;
+        if let Some(difference)=comparison.difference{
+            return Err(format!("direct native program changed original normalized all-prefix masks: {difference:?}"));
+        }
+        let certificate=context.predecessor_support.get().and_then(|c|c.as_ref().ok())
+            .expect("direct native program requires its issued certificate");
+        certificate.compare(&reference.parser_dwa,&result.parser_dwa)?;
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+            context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        eprintln!("[glrmask/validate][boundary_direct_program] component={start_component} all_prefix_exact=true complete_and_external=true products={} branches={}",comparison.product_states,comparison.compared_branches);
+    }
+    if used_preimage&&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BACKWARD_PREIMAGE").is_some(){
+        let reference=compile_signed_shard_parser_with_support(
+            context,original_library,shard_dwa,id_map,start_component,false,false,false,false,false,false,
+        )?;
+        let certificate=context.predecessor_support.get().and_then(|r|r.as_ref().ok())
+            .expect("backward compiler requires its certified domain");
+        certificate.compare(&reference.parser_dwa,&result.parser_dwa)?;
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+            context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        eprintln!("[glrmask/validate][boundary_backward_preimage] component={start_component} complete_and_external=true");
+    }
+    if prepared_library.is_some()
+        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TEMPLATE_READ_SUPPORT").is_some()
+    {
+        let reference=compile_signed_shard_parser_with_support(
+            context,original_library,shard_dwa,id_map,start_component,
+            project,atoms,bundles,owner_program,top_flow,admission_tails,
+        )?;
+        let certificate=context.predecessor_support.get().and_then(|r|r.as_ref().ok())
+            .expect("template restriction requires its exact issued certificate");
+        certificate.compare(&reference.parser_dwa,&result.parser_dwa)?;
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+            context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        eprintln!("[glrmask/validate][boundary_template_read_support] component={start_component} complete_and_external=true");
+    }
+    if (project || atoms) && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_CORRELATED_SUPPORT").is_some() {
+        let reference = compile_signed_shard_parser_with_support(
+            context, library, shard_dwa, id_map, start_component, false, false, bundles, owner_program, top_flow, admission_tails,
+        )?;
+        use crate::automata::weighted_u32::equivalence::find_difference;
+        assert_eq!(find_difference(&result.parser_dwa, &reference.parser_dwa).unwrap(), None,
+            "correlated support introduced parser-stack words/weights");
+        assert_eq!(find_difference(&reference.parser_dwa, &result.parser_dwa).unwrap(), None,
+            "correlated support omitted parser-stack words/weights");
+        eprintln!("[glrmask/validate][boundary_correlated_support] component={start_component} exact=true");
+    }
+    // An additional, independent validation mode observes the actual parser
+    // semantics: DEFAULT priority and accumulated acceptance over every stack
+    // prefix. Keep the old literal-word check available above; this flag does
+    // not suppress any of its assertions or reinterpret a real counterexample.
+    if (project || atoms) && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_PREFIX").is_some() {
+        let reference = compile_signed_shard_parser_with_support(
+            context, library, shard_dwa, id_map, start_component, false, false, bundles, owner_program, top_flow, admission_tails,
+        )?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa, &result.parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference) = comparison.difference {
+            return Err(format!(
+                "boundary atom compilation changed concrete-stack prefix mask: {:?}; reference={:?}; candidate={:?}",
+                difference.stack_top_first, difference.left_mask, difference.right_mask,
+            ));
+        }
+        eprintln!("[glrmask/validate][boundary_atom_prefix] component={start_component} exact=true pairs={} branches={}",
+            comparison.product_states, comparison.compared_branches);
+    }
+    if admission_tails && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ADMISSION_TAILS").is_some() {
+        let reference=compile_signed_shard_parser_with_support(
+            context,library,shard_dwa,id_map,start_component,project,atoms,bundles,owner_program,top_flow,false,
+        )?;
+        let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa,&result.parser_dwa,context.total_scoped_states,500_000,
+        )?;
+        if let Some(difference)=comparison.difference{return Err(format!("admission-tail changed arbitrary-prefix mask: {difference:?}"));}
+        eprintln!("[glrmask/validate][boundary_admission_tails] component={start_component} exact=true pairs={} branches={}",comparison.product_states,comparison.compared_branches);
+    }
+    if top_flow && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TOP_FLOW").is_some() {
+        let reference=compile_signed_shard_parser_with_support(
+            context,library,shard_dwa,id_map,start_component,project,atoms,bundles,owner_program,false,admission_tails,
+        )?;
+        let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa,&result.parser_dwa,context.total_scoped_states,500_000,
+        )?;
+        if let Some(difference)=comparison.difference{return Err(format!("top-flow changed arbitrary-prefix mask: {difference:?}"));}
+        eprintln!("[glrmask/validate][boundary_top_flow] component={start_component} exact=true pairs={} branches={}",comparison.product_states,comparison.compared_branches);
+    }
+    if owner_program && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_OWNER_PROGRAM").is_some() {
+        let reference = compile_signed_shard_parser_with_support(
+            context, library, shard_dwa, id_map, start_component, project, atoms, bundles, false, false, admission_tails,
+        )?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa, &result.parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference)=comparison.difference {
+            return Err(format!("owner-control program changed arbitrary-prefix mask: {difference:?}"));
+        }
+        eprintln!("[glrmask/validate][boundary_owner_program] component={start_component} exact=true pairs={} branches={}",
+            comparison.product_states,comparison.compared_branches);
+    }
+    if tagged_bundles&&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TAGGED_BUNDLES").is_some(){
+        let reference=compile_signed_shard_parser_with_support(
+            context,library,shard_dwa,id_map,start_component,project,atoms,false,owner_program,top_flow,admission_tails,
+        )?;
+        let certificate=context.predecessor_support.get().and_then(|r|r.as_ref().ok())
+            .expect("tagged template bundles require the certified comparison domain");
+        certificate.compare(&reference.parser_dwa,&result.parser_dwa)?;
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+            context.total_scoped_states,&reference.parser_dwa,&result.parser_dwa)?;
+        eprintln!("[glrmask/validate][boundary_tagged_bundles] component={start_component} complete_and_external=true");
+    }
+    if bundles && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_DETERMINISTIC_BUNDLES").is_some() {
+        let reference = compile_signed_shard_parser_with_support(
+            context, library, shard_dwa, id_map, start_component, project, atoms, false, owner_program, top_flow, admission_tails,
+        )?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference.parser_dwa, &result.parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference) = comparison.difference {
+            return Err(format!("deterministic boundary bundles changed prefix mask: {difference:?}"));
+        }
+        eprintln!("[glrmask/validate][boundary_deterministic_bundles] component={start_component} exact=true pairs={} branches={}",
+            comparison.product_states, comparison.compared_branches);
+    }
+    Ok(result)
+}
+
+fn try_compile_backward_preimage(
+    context:&SignedLinkContext,library:&FragmentLibrary,lexical:&DWA,start_component:u32,
+)->Option<SignedShardOutput>{
+    let started=Instant::now();
+    let controls=library.entry_keys.iter().chain(&library.finish_keys).copied().collect::<Vec<_>>();
+    let prepared=super::boundary_preimage::build(lexical,&library.templates.by_terminal_nwa,
+        &controls,context.closure.max_controls_per_gap as usize);
+    let Some(prepared)=prepared else{
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_backward_preimage] component={start_component} selected=false stage=preimage elapsed_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);}
+        return None;
+    };
+    let mut arena=prepared.nwa;
+    let signed_states=arena.states().len();let signed_transitions=arena.num_transitions();
+    let compose_ms=started.elapsed().as_secs_f64()*1000.0;
+    // Retain the ordinary DEFAULT/epsilon finality contract after algebraic
+    // push cancellation. The preimage exporter contains no negative labels.
+    let phase=Instant::now();resolve_negative_codes_in_nwa(&mut arena,false);
+    let resolve_ms=phase.elapsed().as_secs_f64()*1000.0;
+    let phase=Instant::now();
+    let certificate=context.predecessor_support.get_or_init(||{
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::build(&tables,&context.state_offsets,&context.links,context.total_scoped_states)
+    }).as_ref().ok()?;
+    certificate.restrict(&mut arena).ok()?;
+    let candidate=compile_native_global_atoms_impl(&arena,context.total_scoped_states,start_component,false,Some(&prepared.domain),None)
+        .map(|(dwa,_,_)|dwa).unwrap_or_else(||{
+            let dwa=normalize_weighted_parser_stack_nwa_for_parser_state_count(context.total_scoped_states,&arena);
+            crate::compiler::boundary_bit_minimize::minimize_finite_final_atoms(&dwa,crate::compiler::glr::labels::DEFAULT_LABEL)
+                .map(|(candidate,_)|candidate)
+                .unwrap_or_else(||minimize_acyclic_owned_with_pointwise_class_order(reverse_hashcons_owned(dwa),PointwiseClassOrder::DescendingDomain))
+        });
+    let normalize_ms=phase.elapsed().as_secs_f64()*1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        eprintln!("[glrmask/profile][boundary_backward_preimage] component={start_component} selected=true positive_states={signed_states} positive_edges={signed_transitions} result_states={} result_edges={} compose_ms={compose_ms:.3} resolve_ms={resolve_ms:.3} normalize_ms={normalize_ms:.3} total_ms={:.3} profile={:?}",candidate.num_states(),candidate.num_transitions(),started.elapsed().as_secs_f64()*1000.0,prepared.profile);
+    }
+    Some(SignedShardOutput{parser_dwa:candidate,templates_ms:library.templates_ms,compose_ms,resolve_ms,normalize_ms,signed_states,signed_transitions,terms:library.ordinary_terms})
+}
+
+/// Apply the certified input read language to template STRUCTURE before the
+/// ordinary stamping/copy operation. This is not the rejected first-top flow
+/// approximation: all input reads are checked, then output pushes are kept.
+/// The original library remains available for an independent contextual gate.
+fn prepare_domain_filtered_templates(
+    context:&SignedLinkContext,library:&FragmentLibrary,start_component:u32,
+)->Option<FragmentLibrary>{
+    let started=Instant::now();
+    let certificate=context.predecessor_support.get_or_init(||{
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::build(&tables,&context.state_offsets,&context.links,context.total_scoped_states)
+    }).as_ref().ok()?;
+    let support=certificate.template_support()?;
+    let mut result=library.clone();
+    let (mut selected,mut declined,mut before_states,mut after_states,mut before_edges,mut after_edges)=(0,0,0,0,0,0);
+    for (&terminal,original) in &library.templates.by_terminal_nwa {
+        if terminal>=context.num_terminals{continue;}
+        if let Some((candidate,stats))=support.restrict(original){
+            before_states+=stats.states_before;after_states+=stats.states_after;
+            before_edges+=stats.edges_before;after_edges+=stats.edges_after;
+            if stats.states_after<stats.states_before||stats.edges_after<stats.edges_before{
+                result.templates.by_terminal_nwa.insert(terminal,candidate);selected+=1;
+            }
+        }else{declined+=1;}
+    }
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        eprintln!("[glrmask/profile][boundary_template_read_support] component={start_component} selected={selected} declined={declined} before_states={before_states} after_states={after_states} before_edges={before_edges} after_edges={after_edges} prepare_ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+    }
+    (selected>0).then_some(result)
+}
+
+/// Compile in the finite Boolean algebra actually observed by this shard,
+/// using the ordinary small-coordinate signed parser compiler unchanged.
+/// Preserve global source-predicate support through native normalization;
+/// restrict to observable final coordinates only when publishing the DWA.
+fn try_compile_with_predecessor_support(
+    context:&SignedLinkContext, arena:&NWA, start_component:u32,
+)->Option<(DWA,f64,f64)> {
+    let start=Instant::now();
+    let certificate=context.predecessor_support.get_or_init(|| {
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::build(&tables,&context.state_offsets,&context.links,context.total_scoped_states)
+    });
+    let certificate=match certificate {Ok(value)=>value,Err(error)=>{
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} declined={error}");}
+        return None;
+    }};
+    let domain_ms=start.elapsed().as_secs_f64()*1000.0;
+    let output_domain=Weight::union_all(arena.states().iter().filter_map(|s|s.final_weight.as_ref()));
+    if output_domain.is_full(){return None;}
+    let fused=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_PREDECESSOR_SUPPORT").is_some();
+    let mut resolve_ms=0.0;
+    let mut support_ms=0.0;
+    let mut support=None;
+    let (candidate,encode_ms,compile_ms)=if fused {
+        let native_context=certificate.native_context()?;
+        compile_native_global_atoms_impl(arena,context.total_scoped_states,start_component,
+            true,Some(&output_domain),Some(&native_context))?
+    } else {
+        let mut positive=arena.clone();
+        let t=Instant::now();
+        resolve_negative_codes_in_nwa(&mut positive,false);
+        resolve_ms=t.elapsed().as_secs_f64()*1000.0;
+        let t=Instant::now();
+        support=Some(certificate.restrict(&mut positive).ok()?);
+        support_ms=t.elapsed().as_secs_f64()*1000.0;
+        let trim_reference=(std::env::var_os("GLRMASK_BOUNDARY_TRIM_POSITIVE").is_some()
+            &&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TRIM_POSITIVE").is_some()).then(||positive.clone());
+        if std::env::var_os("GLRMASK_BOUNDARY_TRIM_POSITIVE").is_some(){
+            let started=Instant::now();
+            if let Some((compacted,stats))=super::boundary_stack_support::trim::compact(&positive){
+                positive=compacted;
+                if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+                    eprintln!("[glrmask/profile][boundary_trim_positive] component={start_component} selected=true ms={:.3} stats={stats:?}",started.elapsed().as_secs_f64()*1000.0);
+                }
+            }
+        }
+        let compiled=compile_native_global_atoms_impl(&positive,context.total_scoped_states,start_component,
+            false,Some(&output_domain),None)?;
+        if let Some(reference)=trim_reference {
+            let reference=normalize_weighted_parser_stack_nwa_for_parser_state_count(context.total_scoped_states,&reference);
+            let comparison=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+                &reference,&compiled.0,context.total_scoped_states,500_000).expect("positive trim full-prefix comparison must complete");
+            assert!(comparison.difference.is_none(),"positive trim changed normalized arbitrary-prefix mask: {:?}",comparison.difference);
+            eprintln!("[glrmask/validate][boundary_trim_positive] component={start_component} all_prefix_exact=true products={} branches={}",comparison.product_states,comparison.compared_branches);
+        }
+        compiled
+    };
+    let total_ms=start.elapsed().as_secs_f64()*1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} fused={fused} selected=true domain_ms={domain_ms:.3} domain_states={} effects={} resolve_ms={resolve_ms:.3} support_ms={support_ms:.3} encode_ms={encode_ms:.3} compile_ms={compile_ms:.3} total_ms={total_ms:.3} stats={support:?}",
+            certificate.state_count(),certificate.effect_count());
+    }
+    if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_PREDECESSOR_SUPPORT").is_some(){
+        let mut reference=arena.clone();
+        resolve_negative_codes_in_nwa(&mut reference,false);
+        if fused {
+            let mut restricted=reference.clone();
+            certificate.restrict(&mut restricted).expect("range support oracle must complete");
+            let restricted=normalize_weighted_parser_stack_nwa_for_parser_state_count(context.total_scoped_states,&restricted);
+            let check=glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+                &restricted,&candidate,context.total_scoped_states,500_000).expect("native support comparison must complete");
+            assert!(check.difference.is_none(),"native support changed range-pruned ALL-prefix behavior: {:?}",check.difference);
+            eprintln!("[glrmask/validate][native_predecessor_fusion] exact=true products={} branches={}",check.product_states,check.compared_branches);
+        }
+        let reference=normalize_weighted_parser_stack_nwa_for_parser_state_count(context.total_scoped_states,&reference);
+        certificate.compare(&reference,&candidate).expect("predecessor-supported compiler must preserve the complete certified stack domain");
+        let tables=std::iter::once(context.parent_table).chain(context.child_tables.iter().copied()).collect::<Vec<_>>();
+        super::boundary_stack_support::compare_external(&tables,&context.state_offsets,&context.links,
+            context.total_scoped_states,&reference,&candidate)
+            .expect("predecessor-supported artifact must preserve arbitrary external caller tails");
+    }
+    Some((candidate,total_ms-compile_ms,compile_ms))
+}
+
+fn try_compile_with_native_global_atoms(
+    arena: &NWA,
+    parser_states: u32,
+    start_component: u32,
+) -> Option<(DWA, f64, f64)> {
+    compile_native_global_atoms_impl(arena, parser_states, start_component, true, None, None)
+}
+
+fn compile_native_global_atoms_impl(
+    arena:&NWA,parser_states:u32,start_component:u32,signed:bool,output_domain:Option<&Weight>,
+    read_context:Option<&crate::compiler::stages::parser_dwa::FiniteParserReadSupport>,
+)->Option<(DWA,f64,f64)> {
+    use rustc_hash::FxHashMap;
+    use crate::compiler::boundary_weight_codec::FaithfulWeightQuotient;
+    use crate::compiler::boundary_bit_minimize::{FiniteAtomDecoder, minimize_native_decoded};
+    let started = Instant::now();
+    if arena.states().len() > 200_000 || arena.num_transitions() > 2_000_000 { return None; }
+    let mut sources = FxHashMap::<usize, Weight>::default();
+    let mut finals = FxHashMap::<usize, &Weight>::default();
+    for state in arena.states() {
+        if let Some(weight) = state.final_weight.as_ref() {
+            if output_domain.is_none() && weight.is_full() { return None; }
+            finals.entry(weight.ptr_key()).or_insert(weight);
+        }
+        for weight in state.final_weight.iter()
+            .chain(state.transitions.values().flatten().map(|(_, weight)| weight))
+            .chain(state.epsilons.iter().map(|(_, weight)| weight))
+        {
+            sources.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+            if sources.len() > 2048 { return None; }
+        }
+    }
+    let domain = output_domain.cloned().unwrap_or_else(||Weight::union_all(finals.into_values()));
+    let quotient = FaithfulWeightQuotient::new(&domain, &sources.into_values().collect::<Vec<_>>())?;
+    let decoder = FiniteAtomDecoder::new_checked(quotient.atoms().to_vec())?;
+    let mut encoded = arena.clone();
+    for state in encoded.states_mut() {
+        if let Some(weight) = state.final_weight.as_mut() { *weight = quotient.encode(weight)?; }
+        for (_, weight) in state.transitions.values_mut().flatten() { *weight = quotient.encode(weight)?; }
+        for (_, weight) in &mut state.epsilons { *weight = quotient.encode(weight)?; }
+    }
+    let encode_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let compile_started = Instant::now();
+    let native = if let Some(read_context)=read_context {
+        crate::compiler::stages::parser_dwa::normalize_signed_parser_stack_nwa_finite_with_read_context(
+            &encoded,parser_states,quotient.rows(),64,None,read_context,
+        )
+    } else if signed {
+        crate::compiler::stages::parser_dwa::normalize_signed_parser_stack_nwa_finite_for_parser_state_count(
+            &encoded, parser_states, quotient.rows(), 64, None,
+        )
+    } else {
+        crate::compiler::stages::parser_dwa::normalize_weighted_parser_stack_nwa_finite_for_parser_state_count(
+            &encoded, parser_states, quotient.rows(), 64, None,
+        )
+    }?;
+    let (candidate, minimize_profile) = minimize_native_decoded(
+        &native, &decoder, crate::compiler::glr::labels::DEFAULT_LABEL,
+    )?;
+    let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][boundary_native_global] component={start_component} points={} atoms={} rows={} encode_ms={encode_ms:.3} compile_ms={compile_ms:.3} total_ms={:.3} states={} edges={} codec={:?} minimize={minimize_profile:?}",
+            quotient.point_count(), quotient.atom_count(), quotient.rows(), encode_ms + compile_ms,
+            candidate.num_states(), candidate.num_transitions(), quotient.stats);
+    }
+    if signed && read_context.is_none() && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_GLOBAL").is_some() {
+        // Independent reference: original coordinates, original signed arena,
+        // original resolver/normalizer, before legacy minimization. Budget
+        // exhaustion and any mismatch are hard failures, never equivalence.
+        let mut positive = arena.clone();
+        resolve_negative_codes_in_nwa(&mut positive, false);
+        let reference = normalize_weighted_parser_stack_nwa_for_parser_state_count(parser_states, &positive);
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference, &candidate, parser_states, 500_000,
+        ).expect("native global parser equivalence must be decidable within the diagnostic budget");
+        assert!(comparison.difference.is_none(), "native global parser changed original-coordinate prefix mask: {:?}",comparison.difference);
+        eprintln!("[glrmask/validate][boundary_native_global] component={start_component} exact=true pairs={} branches={}",
+            comparison.product_states, comparison.compared_branches);
+    }
+    Some((candidate, encode_ms, compile_ms))
+}
+
+fn try_compile_with_weight_atoms(
+    arena: &NWA,
+    shard_dwa: &DWA,
+    id_map: &InternalIdMap,
+    parser_states: u32,
+    start_component: u32,
+) -> Option<(DWA, f64, f64)> {
+    use crate::compiler::weight_observation_quotient::WeightObservationQuotient;
+    use crate::compiler::stages::parser_dwa::normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count;
+    use rustc_hash::FxHashMap;
+
+    if std::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER").as_deref() == Ok("late") {
+        return try_compile_with_late_weight_atoms(arena, parser_states, start_component);
+    }
+
+    let started = Instant::now();
+    let mut domain = crate::compiler::constraint_compose::accepted_weight_support(shard_dwa);
+    let candidates = boundary_accepted_tokens(shard_dwa, id_map);
+    let kept = candidate_kept_internal_tokens(id_map, &candidates);
+    project_weight_to_kept_in_place(&mut domain, &mut ProjectionMemo::new(&kept));
+    let mut sources = FxHashMap::<usize, Weight>::default();
+    let mut retain = |weight: &Weight| {
+        sources.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+    };
+    for state in arena.states() {
+        if let Some(weight) = &state.final_weight { retain(weight); }
+        for branches in state.transitions.values() {
+            for (_, weight) in branches { retain(weight); }
+        }
+        for (_, weight) in &state.epsilons { retain(weight); }
+    }
+    // Permuting signature columns does not change their equality classes.
+    // Atoms are assigned by first appearance in sorted observed-point order,
+    // not by hash-table order, so no expensive source-weight sorting is needed.
+    let sources = sources.into_values().collect::<Vec<_>>();
+    let quotient = match WeightObservationQuotient::new(&domain, &sources) {
+        Some(quotient) => quotient,
+        None => {
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!("[glrmask/profile][boundary_weight_atoms] component={start_component} selected=false stage=quotient sources={} elapsed_ms={:.3}",
+                    sources.len(), started.elapsed().as_secs_f64() * 1000.0);
+            }
+            return None;
+        }
+    };
+    let atom_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let mut encoded = arena.clone();
+    let keep_identity = std::env::var_os("GLRMASK_BOUNDARY_ATOM_KEEP_IDENTITY").is_some();
+    for state in encoded.states_mut() {
+        if let Some(weight) = state.final_weight.as_mut() {
+            if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
+        }
+        for branches in state.transitions.values_mut() {
+            for (_, weight) in branches {
+                if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
+            }
+        }
+        for (_, weight) in &mut state.epsilons {
+            if !keep_identity || !weight.is_full() { *weight = quotient.encode(weight)?; }
+        }
+    }
+    let encode_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let compile_started = Instant::now();
+    // Diagnostic isolation: changing weight coordinates and changing the NWA
+    // topology are separate transformations. The fused compiler internally
+    // hash-conses the positive NWA; DEFAULT support observes that topology.
+    // Keep an ordinary-topology reference before accepting the fused route.
+    let normalizer = std::env::var("GLRMASK_BOUNDARY_ATOM_NORMALIZER")
+        .unwrap_or_else(|_| "fused".to_owned());
+    let normalized = match normalizer.as_str() {
+        "fused" => normalize_signed_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+            parser_states, &encoded, quotient.rows(), 64,
+        ),
+        "generic" | "positive" => {
+            resolve_negative_codes_in_nwa(&mut encoded, false);
+            if normalizer == "generic" {
+                Some(normalize_weighted_parser_stack_nwa_for_parser_state_count(
+                    parser_states, &encoded,
+                ))
+            } else {
+                Some(crate::compiler::stages::parser_dwa::normalize_weighted_parser_stack_nwa_small_boundary_for_parser_state_count(
+                    parser_states, &encoded, quotient.rows(), 64, None,
+                ))
+            }
+        }
+        _ => panic!("unknown boundary atom normalizer {normalizer:?}"),
+    };
+    let mut parser_dwa = match normalized {
+        Some(dwa) => dwa,
+        None => {
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!("[glrmask/profile][boundary_weight_atoms] component={start_component} selected=false stage=normalize points={} atoms={} rows={} elapsed_ms={:.3}",
+                    quotient.point_count(), quotient.atom_count(), quotient.rows(), started.elapsed().as_secs_f64() * 1000.0);
+            }
+            return None;
+        }
+    };
+    if !parser_dwa.is_acyclic() { return None; }
+    let normalize_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
+    // Explicit diagnostic exports for independent minimizer experiments.
+    // No export is performed in measured production configurations.
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create atom diagnostic directory");
+        let stem = format!("component-{start_component}-{normalizer}");
+        let bytes = bincode::serialize(&parser_dwa).expect("serialize atom DWA diagnostic");
+        std::fs::write(directory.join(format!("{stem}-pre.bin")), bytes)
+            .expect("write atom DWA diagnostic");
+        let metadata = serde_json::json!({
+            "rows": quotient.rows(), "atoms": quotient.atom_count(),
+            "points": quotient.point_count(), "parser_states": parser_states,
+            "normalizer": normalizer, "states": parser_dwa.num_states(),
+            "transitions": parser_dwa.num_transitions(),
+        });
+        std::fs::write(directory.join(format!("{stem}.json")), metadata.to_string())
+            .expect("write atom DWA metadata");
+    }
+    // Compare the semantic stage itself, before any legacy minimization can
+    // introduce a representation-dependent DEFAULT guard difference.
+    if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_NORMALIZER").is_some() {
+        let mut positive = arena.clone();
+        resolve_negative_codes_in_nwa(&mut positive, false);
+        let reference = normalize_weighted_parser_stack_nwa_for_parser_state_count(
+            parser_states, &positive,
+        );
+        let mut decoded = parser_dwa.clone();
+        let mut decoded_weights = FxHashMap::<usize, (Weight, Weight)>::default();
+        let mut decode = |weight: &mut Weight| {
+            let entry = decoded_weights.entry(weight.ptr_key()).or_insert_with(||
+                (weight.clone(), quotient.decode(weight)));
+            *weight = entry.1.clone();
+        };
+        for state in decoded.states_mut() {
+            if let Some(weight) = state.final_weight.as_mut() { decode(weight); }
+            for (_, weight) in state.transitions.values_mut() { decode(weight); }
+        }
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference, &decoded, parser_states, 500_000,
+        ).expect("atom normalizer exact comparison must not be unknown");
+        assert!(comparison.difference.is_none(),
+            "atom normalizer changed PRE-minimization prefix mask: {:?}", comparison.difference);
+        eprintln!("[glrmask/validate][boundary_atom_normalizer] component={start_component} mode={normalizer} exact=true pairs={} branches={}",
+            comparison.product_states, comparison.compared_branches);
+    }
+    let minimize_started = Instant::now();
+    parser_dwa = if std::env::var_os("GLRMASK_BOUNDARY_ATOM_NATIVE_MINIMIZE").is_some() {
+        crate::compiler::boundary_bit_minimize::minimize_finite_bits(
+            &parser_dwa, quotient.rows(), crate::compiler::glr::labels::DEFAULT_LABEL,
+        )?.0
+    } else {
+        minimize_acyclic_owned_with_pointwise_class_order(
+            reverse_hashcons_owned(parser_dwa), PointwiseClassOrder::DescendingDomain,
+        )
+    };
+    let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
+    let decode_started = Instant::now();
+    let mut memo = FxHashMap::<usize, (Weight, Weight)>::default();
+    let mut decode = |weight: &mut Weight| {
+        let pair = memo.entry(weight.ptr_key()).or_insert_with(|| {
+            (weight.clone(), quotient.decode(weight))
+        });
+        *weight = pair.1.clone();
+    };
+    for state in parser_dwa.states_mut() {
+        if let Some(weight) = state.final_weight.as_mut() { decode(weight); }
+        for (_, weight) in state.transitions.values_mut() { decode(weight); }
+    }
+    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+    let compile_ms = compile_started.elapsed().as_secs_f64() * 1000.0;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][boundary_weight_atoms] component={} points={} atoms={} source_weights={} normalizer={} atom_ms={:.3} encode_total_ms={:.3} normalize_ms={:.3} minimize_ms={:.3} decode_ms={:.3} parser_states={} parser_trans={} total_ms={:.3}",
+            start_component, quotient.point_count(), quotient.atom_count(), quotient.source_count(),
+            normalizer, atom_ms, encode_ms, normalize_ms, minimize_ms, decode_ms,
+            parser_dwa.num_states(), parser_dwa.num_transitions(), encode_ms + compile_ms);
+    }
+    Some((parser_dwa, encode_ms, compile_ms))
+}
+
+/// Keep the guard-sensitive ordinary normalizer entirely unchanged. Only its
+/// completed deterministic output is encoded into the finite atom algebra.
+/// The observed domain is recomputed from that actual output, so every mask
+/// accepted at any finite stack prefix is covered, including DEFAULT paths.
+/// The identity-sentinel conventions inside normalization are therefore not
+/// silently replaced by exact finite complementation.
+fn try_compile_with_late_weight_atoms(
+    arena: &NWA,
+    parser_states: u32,
+    start_component: u32,
+) -> Option<(DWA, f64, f64)> {
+    use crate::compiler::weight_observation_quotient::WeightObservationQuotient;
+    use rustc_hash::FxHashMap;
+    let started = Instant::now();
+    let mut source_map = FxHashMap::<usize, Weight>::default();
+    for state in arena.states() {
+        if let Some(weight) = &state.final_weight {
+            source_map.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+        }
+        for branches in state.transitions.values() {
+            for (_, weight) in branches {
+                source_map.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+            }
+        }
+        for (_, weight) in &state.epsilons {
+            source_map.entry(weight.ptr_key()).or_insert_with(|| weight.clone());
+        }
+    }
+    let sources = source_map.into_values().collect::<Vec<_>>();
+    let mut positive = arena.clone();
+    resolve_negative_codes_in_nwa(&mut positive, false);
+    let mut parser_dwa = normalize_weighted_parser_stack_nwa_for_parser_state_count(
+        parser_states, &positive,
+    );
+    if !parser_dwa.is_acyclic() { return None; }
+    let normalize_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let quotient_started = Instant::now();
+    let domain = crate::compiler::constraint_compose::accepted_weight_support(&parser_dwa);
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create ordinary normalization diagnostic directory");
+        let stem = format!("component-{start_component}-original");
+        std::fs::write(directory.join(format!("{stem}-pre.bin")),
+            bincode::serialize(&parser_dwa).expect("serialize ordinary normalized DWA"))
+            .expect("write ordinary normalized DWA");
+        std::fs::write(directory.join(format!("{stem}-domain.bin")),
+            bincode::serialize(&domain).expect("serialize ordinary mask domain"))
+            .expect("write ordinary mask domain");
+        let metadata = serde_json::json!({"parser_states":parser_states, "normalizer":"original",
+            "states":parser_dwa.num_states(), "transitions":parser_dwa.num_transitions()});
+        std::fs::write(directory.join(format!("{stem}.json")), metadata.to_string())
+            .expect("write ordinary normalization metadata");
+    }
+    let quotient = match WeightObservationQuotient::new(&domain, &sources) {
+        Some(quotient) => quotient,
+        None => {
+            eprintln!("[glrmask/profile][boundary_weight_atoms_late] component={start_component} selected=false stage=quotient normalize_ms={normalize_ms:.3}");
+            return None;
+        }
+    };
+    let validate_derived = std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_ATOM_DERIVED").is_some();
+    let mut memo = FxHashMap::<usize, (Weight, Weight)>::default();
+    let mut encode = |weight: &mut Weight| {
+        let pair = memo.entry(weight.ptr_key()).or_insert_with(|| {
+            let encoded = quotient.encode_derived(weight);
+            if validate_derived {
+                assert_eq!(quotient.decode(&encoded), domain.intersection(weight),
+                    "normalized weight is not constant on a source observation atom");
+            }
+            (weight.clone(), encoded)
+        });
+        *weight = pair.1.clone();
+    };
+    for state in parser_dwa.states_mut() {
+        if let Some(weight) = state.final_weight.as_mut() { encode(weight); }
+        for (_, weight) in state.transitions.values_mut() { encode(weight); }
+    }
+    let encoded_weights = memo.len();
+    let encode_ms = quotient_started.elapsed().as_secs_f64() * 1000.0;
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_ATOM_DWA") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create late atom diagnostic directory");
+        let stem = format!("component-{start_component}-late");
+        std::fs::write(directory.join(format!("{stem}-pre.bin")),
+            bincode::serialize(&parser_dwa).expect("serialize late atom DWA"))
+            .expect("write late atom DWA");
+        let metadata = serde_json::json!({"rows":quotient.rows(), "atoms":quotient.atom_count(),
+            "points":quotient.point_count(), "parser_states":parser_states, "normalizer":"late",
+            "states":parser_dwa.num_states(), "transitions":parser_dwa.num_transitions()});
+        std::fs::write(directory.join(format!("{stem}.json")), metadata.to_string())
+            .expect("write late atom metadata");
+    }
+    let minimize_started = Instant::now();
+    parser_dwa = minimize_acyclic_owned_with_pointwise_class_order(
+        reverse_hashcons_owned(parser_dwa), PointwiseClassOrder::DescendingDomain,
+    );
+    let minimize_ms = minimize_started.elapsed().as_secs_f64() * 1000.0;
+    let decode_started = Instant::now();
+    let mut decoded = FxHashMap::<usize, (Weight, Weight)>::default();
+    let mut decode = |weight: &mut Weight| {
+        let pair = decoded.entry(weight.ptr_key()).or_insert_with(|| {
+            (weight.clone(), quotient.decode(weight))
+        });
+        *weight = pair.1.clone();
+    };
+    for state in parser_dwa.states_mut() {
+        if let Some(weight) = state.final_weight.as_mut() { decode(weight); }
+        for (_, weight) in state.transitions.values_mut() { decode(weight); }
+    }
+    let decode_ms = decode_started.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = started.elapsed().as_secs_f64() * 1000.0;
+    eprintln!("[glrmask/profile][boundary_weight_atoms_late] component={start_component} selected=true points={} atoms={} sources={} encoded_weights={} normalize_ms={normalize_ms:.3} encode_ms={encode_ms:.3} minimize_ms={minimize_ms:.3} decode_ms={decode_ms:.3} parser_states={} parser_trans={} total_ms={total_ms:.3}",
+        quotient.point_count(), quotient.atom_count(), quotient.source_count(), encoded_weights,
+        parser_dwa.num_states(), parser_dwa.num_transitions());
+    Some((parser_dwa, 0.0, total_ms))
+}
+
+fn compile_signed_shard_parser_with_support(
+    context: &SignedLinkContext,
+    library: &FragmentLibrary,
+    shard_dwa: &DWA,
+    id_map: &InternalIdMap,
+    start_component: u32,
+    project_support: bool,
+    atom_coordinates: bool,
+    deterministic_bundles: bool,
+    use_owner_program: bool,
+    top_flow: bool,
+    admission_tails: bool,
+) -> Result<SignedShardOutput, String> {
     if context.closure.max_controls_per_gap == 0 && !context.links.is_empty() {
         return Err(format!(
             "signed link shard {start_component} has links but a zero control bound",
@@ -1755,8 +2714,13 @@ pub(crate) fn compile_signed_shard_parser(
             "signed link shard {start_component} lexical terminal DWA is cyclic; bounded-DAG composition needs an acyclic candidate automaton",
         ));
     }
+    if admission_tails && (deterministic_bundles || use_owner_program || top_flow) {
+        return Err("admission-tail experiment must be independent of owner/bundle/flow assembly".into());
+    }
     let depths = context.closure.max_controls_per_gap as usize + 1;
     let compose_started = Instant::now();
+    let no_controls_diagnostic = std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
+    let assemble_unrestricted = || -> Result<(NWA,usize,usize),String> {
     let mut arena = NWA::new(0, 0);
     let mut ready = vec![u32::MAX; shard_dwa.states().len() * depths];
     let port = |ports: &[u32], vertex: usize, depth: usize| ports[vertex * depths + depth];
@@ -1766,7 +2730,7 @@ pub(crate) fn compile_signed_shard_parser(
         }
         // Depth-0 finals only (no trailing closure for admission endpoints).
         if let Some(weight) = state.final_weight.as_ref() {
-            if !weight.is_empty() {
+            if !weight.is_empty() && (!admission_tails || index==shard_dwa.start_state() as usize) {
                 arena.set_final_weight(port(&ready, index, 0), weight.clone());
             }
         }
@@ -1781,6 +2745,19 @@ pub(crate) fn compile_signed_shard_parser(
         ));
     }
     arena.set_start_states(vec![start_port]);
+    let accepting_sink=if admission_tails {
+        // Every ending branch carries W intersect F; F is contained in this finite union.
+        let domain=Weight::union_all(shard_dwa.states().iter().filter_map(|row|row.final_weight.as_ref()));
+        let sink=arena.add_state();arena.set_final_weight(sink,domain);Some(sink)
+    }else{None};
+    let mut admission_cache=BTreeMap::<TerminalID,Option<NWA>>::new();
+    let mut admission_build_ms=0.0;
+    let mut ending_edges=0usize;
+    let mut continuing_edges=0usize;
+    let mut ending_before_states=0usize;
+    let mut ending_after_states=0usize;
+    let mut admission_fallbacks=0usize;
+
     // Exact per-part contribution counters: appended template states from
     // ordinary edges vs control fragments (log-only size attribution).
     let mut ordinary_appended_states: usize = 0;
@@ -1789,7 +2766,71 @@ pub(crate) fn compile_signed_shard_parser(
     // depth (shared body, single exit — sound: entries converge, the exit
     // continuation is identical, so no cross-continuation leakage), exiting to
     // the destination depth 0 with the stamped lexical weight.
+    let tagged_requested=deterministic_bundles&&std::env::var_os("GLRMASK_BOUNDARY_TAGGED_BUNDLES").is_some();
+    let tagged_index=if tagged_requested{
+        let started=Instant::now();
+        let index=super::boundary_tagged_templates::TaggedTemplates::build(&library.templates.by_terminal_nwa);
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+            eprintln!("[glrmask/profile][boundary_tagged_index] component={start_component} selected={} ms={:.3} profile={:?}",index.is_some(),started.elapsed().as_secs_f64()*1000.0,index.as_ref().map(|i|&i.profile));
+        }
+        index
+    }else{None};
+    let mut bundle_cache = BTreeMap::<Vec<(TerminalID, usize)>, NWA>::new();
+    let mut tagged_instantiation_ms=0.0;
+    let mut bundle_count = 0usize;
+    let mut bundle_input_states = 0usize;
+    let bundle_started = Instant::now();
     for (index, state) in shard_dwa.states().iter().enumerate() {
+        if deterministic_bundles {
+            // This is the ordinary parser compiler's destination bundling:
+            // union weighted terminal transfers BEFORE composing the next
+            // fragment. Every alternative exits at the same lexical port.
+            let mut by_target = BTreeMap::<u32, BTreeMap<TerminalID, Weight>>::new();
+            for (label, target, weight) in state.transitions.entries() {
+                if label < 0 { return Err("negative terminal label in boundary bundle".into()); }
+                if weight.is_empty() { continue; }
+                let terminal = label as TerminalID;
+                if !library.templates.by_terminal_nwa.contains_key(&terminal) {
+                    return Err(format!("missing boundary bundle terminal {terminal}"));
+                }
+                by_target.entry(target).or_default().insert(terminal, weight.clone());
+            }
+            for (target, terminals) in by_target {
+                let target_port = *ready.get(target as usize * depths)
+                    .ok_or_else(|| "boundary bundle targets unknown lexical vertex".to_owned())?;
+                let key = terminals.iter().map(|(&t,w)| (t,w.ptr_key())).collect::<Vec<_>>();
+                // The input TDWA strongly owns the keyed weights for this
+                // entire cache lifetime. No address may be recycled here.
+                if !bundle_cache.contains_key(&key) {
+                    let input_states = terminals.keys().map(|t| library.templates.by_terminal_nwa[t].num_states() as usize).sum::<usize>();
+                    let instantiated=tagged_index.as_ref().and_then(|index|{
+                        let started=Instant::now();let result=index.instantiate(&terminals);
+                        tagged_instantiation_ms+=started.elapsed().as_secs_f64()*1000.0;result
+                    });
+                    let bundle=match instantiated {
+                        Some(bundle)=>bundle,
+                        None=>library.templates.build_bundle_profiled(&terminals).0,
+                    };
+                    if !bundle.is_acyclic() { return Err("ordinary boundary bundle unexpectedly cyclic".into()); }
+                    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                        eprintln!("[glrmask/profile][boundary_bundle] component={start_component} terminals={} tagged={} raw_states={input_states} states={} edges={}",
+                            terminals.len(), tagged_index.is_some(), bundle.num_states(), bundle.num_transitions());
+                    }
+                    bundle_input_states += input_states;
+                    bundle_cache.insert(key.clone(), bundle);
+                    bundle_count += 1;
+                }
+                let bundle = &bundle_cache[&key];
+                let body = crate::compiler::stages::parser_dwa::append_bundle_redirecting_finals(
+                    &mut arena, bundle, target_port,
+                );
+                ordinary_appended_states += bundle.num_states() as usize;
+                for depth in 0..depths { for &start in &body.start_states {
+                    arena.add_epsilon(port(&ready,index,depth), start, Weight::all());
+                }}
+            }
+            continue;
+        }
         for (label, target, weight) in state.transitions.entries() {
             if label < 0 {
                 return Err(format!(
@@ -1808,6 +2849,38 @@ pub(crate) fn compile_signed_shard_parser(
             let target_port = ready.get(target as usize * depths).copied().ok_or_else(|| {
                 format!("signed link shard {start_component} edge targets unknown state {target}")
             })?;
+            if let Some(sink)=accepting_sink {
+                let target_state=&shard_dwa.states()[target as usize];
+                if let Some(final_weight)=&target_state.final_weight {
+                    let ending=weight.intersection(final_weight);
+                    if !ending.is_empty() {
+                        if !admission_cache.contains_key(&terminal) {
+                            let started=Instant::now();
+                            let projected=library.templates.by_terminal.get(&terminal)
+                                .and_then(|template|admission::project(template,context.total_scoped_states))
+                                .map(|dfa| {
+                                    let mut prepared=Templates::from_terminal_dfas(BTreeMap::from([(terminal,dfa)]));
+                                    prepared.by_terminal_nwa.remove(&terminal).expect("admission template constructed")
+                                });
+                            admission_build_ms+=started.elapsed().as_secs_f64()*1000.0;
+                            admission_cache.insert(terminal,projected);
+                        }
+                        let projected=admission_cache.get(&terminal).and_then(Option::as_ref);
+                        let last=projected.unwrap_or(fragment);
+                        admission_fallbacks+=usize::from(projected.is_none());
+                        ending_edges+=1;ending_before_states+=fragment.states().len();ending_after_states+=last.states().len();
+                        let body=append_weighted_fragment(&mut arena,last,&ending,sink)?;
+                        ordinary_appended_states+=last.states().len();
+                        for depth in 0..depths {for &start in &body.start_states {
+                            arena.add_epsilon(port(&ready,index,depth),start,Weight::all());
+                        }}
+                    }
+                }
+                // No trailing zero-width closure accepts at depth>0. A leaf
+                // target has no subsequent terminal to observe output pushes.
+                if !target_state.transitions.values().any(|(_,w)|!w.is_empty()) {continue;}
+            }
+            continuing_edges+=1;
             let body = append_weighted_fragment(&mut arena, fragment, weight, target_port)?;
             ordinary_appended_states += fragment.states().len();
             for depth in 0..depths {
@@ -1816,6 +2889,13 @@ pub(crate) fn compile_signed_shard_parser(
                 }
             }
         }
+    }
+    if deterministic_bundles && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][boundary_bundles_total] component={start_component} unique={bundle_count} input_states={bundle_input_states} appended_states={ordinary_appended_states} tagged_instantiation_ms={tagged_instantiation_ms:.3} ms={:.3}",
+            bundle_started.elapsed().as_secs_f64()*1000.0);
+    }
+    if admission_tails && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+        eprintln!("[glrmask/profile][boundary_admission_tails] component={start_component} templates={} build_ms={admission_build_ms:.3} ending_edges={ending_edges} continuing_edges={continuing_edges} ending_before_states={ending_before_states} ending_after_states={ending_after_states} fallbacks={admission_fallbacks} ordinary_appended={ordinary_appended_states}",admission_cache.len());
     }
     // Bounded zero-width control program: Entry/Finish fragments cloned per
     // (port, depth), from Ready(k,d) to Ready(k,d+1). No C* self-loops: depth
@@ -1827,7 +2907,6 @@ pub(crate) fn compile_signed_shard_parser(
     // and only ordinary transfers compose. Comparing the minimized size
     // against the full build isolates the control-closure contribution. The
     // result is not a valid shard (controls required for exactness).
-    let no_controls_diagnostic = std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_some();
     if !no_controls_diagnostic {
         for (index, _) in shard_dwa.states().iter().enumerate() {
             for depth in 0..depths - 1 {
@@ -1870,6 +2949,121 @@ pub(crate) fn compile_signed_shard_parser(
             }
         }
     }
+        Ok((arena,ordinary_appended_states,control_appended_states))
+    };
+    if use_owner_program && (deterministic_bundles || no_controls_diagnostic) {
+        return Err("owner program must be tested separately from bundle/no-controls experiments".into());
+    }
+    if top_flow && !use_owner_program { return Err("top-flow requires owner program".into()); }
+    let scoped = if use_owner_program { owner_program::assemble(context,library,shard_dwa,top_flow)? } else { None };
+    let (mut arena,ordinary_appended_states,control_appended_states) = match scoped {
+        Some(program)=>program,
+        None=>assemble_unrestricted()?,
+    };
+    // Diagnostic only: retain the unchanged signed input for standalone
+    // exact parser/compiler experiments. No work when this flag is absent.
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_PARSER_NWA") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create parser NWA diagnostic directory");
+        let states = arena.states().iter().map(|state| (
+            &state.final_weight, &state.transitions, &state.epsilons,
+        )).collect::<Vec<_>>();
+        let bytes = bincode::serialize(&(context.total_scoped_states, arena.start_states(), states))
+            .expect("serialize signed parser NWA diagnostic");
+        std::fs::write(directory.join(format!("component-{start_component}-signed.bin")), bytes)
+            .expect("write signed parser NWA diagnostic");
+    }
+    // Diagnostic only; placed before the native early return so every
+    // backend exports the identical original table/link certificate input.
+    if let Some(directory) = std::env::var_os("GLRMASK_DUMP_BOUNDARY_STACK_DOMAIN") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("create stack-domain diagnostics");
+        let tables = (0..context.state_offsets.len()).map(|owner|
+            context.component_table(owner as u32).expect("checked component table")).collect::<Vec<_>>();
+        let links = context.links.iter().map(|link| (
+            link.parent_component, link.slot_terminal, link.child_component,
+            link.child_start, link.return_pop, link.child_start_nullable,
+        )).collect::<Vec<_>>();
+        let bytes = bincode::serialize(&(tables, &context.state_offsets, links, context.total_scoped_states))
+            .expect("serialize stack-domain inputs");
+        std::fs::write(directory.join(format!("component-{start_component}-tables.bin")), bytes)
+            .expect("write stack-domain inputs");
+    }
+    if std::env::var_os("GLRMASK_BOUNDARY_PREDECESSOR_SUPPORT").is_some() {
+        let assembly_ms=compose_started.elapsed().as_secs_f64()*1000.0;
+        if let Some((parser_dwa,prepare_ms,compile_ms))=try_compile_with_predecessor_support(context,&arena,start_component) {
+            return Ok(SignedShardOutput{parser_dwa,templates_ms:library.templates_ms,
+                compose_ms:assembly_ms+prepare_ms,resolve_ms:0.0,normalize_ms:compile_ms,
+                signed_states:arena.states().len(),signed_transitions:arena.num_transitions(),terms:library.ordinary_terms});
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} selected=false exact_original_fallback=true");}
+    }
+    if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_GLOBAL_ATOMS").is_some() {
+        let assembly_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
+        if let Some((parser_dwa, encode_ms, compile_ms)) = try_compile_with_native_global_atoms(
+            &arena, context.total_scoped_states, start_component,
+        ) {
+            return Ok(SignedShardOutput {
+                parser_dwa,
+                templates_ms: library.templates_ms,
+                compose_ms: assembly_ms + encode_ms,
+                resolve_ms: 0.0,
+                normalize_ms: compile_ms,
+                signed_states: arena.states().len(),
+                signed_transitions: arena.num_transitions(),
+                terms: library.ordinary_terms,
+            });
+        }
+    }
+    if atom_coordinates {
+        let assembly_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
+        if let Some((parser_dwa, encode_ms, compile_ms)) = try_compile_with_weight_atoms(
+            &arena, shard_dwa, id_map, context.total_scoped_states, start_component,
+        ) {
+            return Ok(SignedShardOutput {
+                parser_dwa,
+                templates_ms: library.templates_ms,
+                compose_ms: assembly_ms + encode_ms,
+                resolve_ms: 0.0, // Fused with normalization in compile_ms.
+                normalize_ms: compile_ms,
+                signed_states: arena.states().len(),
+                signed_transitions: arena.num_transitions(),
+                terms: library.ordinary_terms,
+            });
+        }
+    }
+    if project_support {
+        let started = Instant::now();
+        let support = crate::compiler::constraint_compose::accepted_weight_support(shard_dwa);
+        // A successful Ready-port path projects to an accepting lexical path;
+        // every lexical edge/final weight is stamped on that path. Its weight
+        // is consequently a subset of R, the union of lexical accepting
+        // weights. For phi(w)=w intersect R, phi distributes over union,
+        // intersection and difference, so exact cancellation/normalization
+        // preserves each accepted stack word and its full correlated weight.
+        // Clip identities as well: the new relative identity is R, not ALL.
+        let mut memo = BTreeMap::<usize, (Weight, Weight)>::new();
+        let mut project = |weight: &mut Weight| {
+            let pair = memo.entry(weight.ptr_key()).or_insert_with(|| {
+                (weight.clone(), weight.intersection(&support))
+            });
+            *weight = pair.1.clone();
+        };
+        for state in arena.states_mut() {
+            if let Some(weight) = state.final_weight.as_mut() { project(weight); }
+            for branches in state.transitions.values_mut() {
+                for (_, weight) in branches { project(weight); }
+            }
+            for (_, weight) in &mut state.epsilons { project(weight); }
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            let pairs = support.range_entries().map(|(lo, hi, tokens)| {
+                (u128::from(hi) - u128::from(lo) + 1) * (tokens.len() as u128)
+            }).sum::<u128>();
+            eprintln!("[glrmask/profile][boundary_correlated_support] component={} source_weights={} supported_pairs={} elapsed_ms={:.3}",
+                start_component, memo.len(), pairs, started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
     let signed_states = arena.states().len();
     let signed_transitions = arena.num_transitions();
     let compose_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
@@ -1901,12 +3095,86 @@ pub(crate) fn compile_signed_shard_parser(
             }
         }
     }
+    // The ordinary terminal compiler already has an exact acyclic NWA
+    // suffix quotient. Applying it after negative resolution preserves the
+    // positive weighted stack language while avoiding duplicate subset
+    // construction later. It must not be applied to unresolved transfers:
+    // their cancellation contexts still belong to the assembled program.
+    let pre_normalize_started = Instant::now();
+    let pre_normalize_states = arena.num_states();
+    let pre_normalize_edges = arena.num_transitions();
+    let hashcons_enabled = std::env::var_os("GLRMASK_EXPERIMENT_BOUNDARY_NWA_HASHCONS").is_some();
+    let support_mode = std::env::var("GLRMASK_EXPERIMENT_BOUNDARY_NWA_SUPPORT").ok();
+    let guarded_hashcons = std::env::var_os("GLRMASK_BOUNDARY_GUARDED_NWA_HASHCONS").is_some();
+    let pre_normalize_enabled = guarded_hashcons || hashcons_enabled || support_mode.is_some();
+    let pre_normalize_reference = (pre_normalize_enabled
+        && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NWA_HASHCONS").is_some())
+        .then(|| arena.clone());
+    if let Some(mode) = support_mode.as_deref() {
+        let profile = crate::automata::weighted_u32::nwa_support::restrict_acyclic_nwa_support(
+            &mut arena, mode != "backward",
+        )?;
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            eprintln!("[glrmask/profile][boundary_positive_nwa_support] start_component={start_component} mode={mode} states={} edges_before={} edges_after={} backward_ms={:.3} forward_ms={:.3}",
+                profile.states, profile.edges_before, profile.edges_after, profile.backward_ms, profile.forward_ms);
+        }
+    }
+    if guarded_hashcons {
+        crate::compiler::stages::id_map_and_terminal_dwa::l2p::postprocess::canonicalize_acyclic_nwa_preserving_label_support(
+            &mut arena,
+        );
+    } else if hashcons_enabled {
+        crate::compiler::stages::id_map_and_terminal_dwa::l2p::canonicalize_acyclic_nwa(
+            &mut arena,
+        );
+    }
+    let pre_normalize_ms = pre_normalize_started.elapsed().as_secs_f64() * 1000.0;
+    if pre_normalize_enabled && std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!(
+            "[glrmask/profile][boundary_positive_nwa_hashcons] start_component={start_component} before_states={pre_normalize_states} before_edges={pre_normalize_edges} after_states={} after_edges={} elapsed_ms={pre_normalize_ms:.3}",
+            arena.num_states(), arena.num_transitions(),
+        );
+    }
     let normalize_started = Instant::now();
     let mut parser_dwa = normalize_weighted_parser_stack_nwa_for_parser_state_count(
         context.total_scoped_states,
         &arena,
     );
-    let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0;
+    let normalize_ms = normalize_started.elapsed().as_secs_f64() * 1000.0
+        + pre_normalize_ms;
+    if let Some(reference) = pre_normalize_reference {
+        // First compare the positive NWAs as ordinary weighted languages.
+        // The quotient must preserve that stronger pre-normalization property.
+        let raw_reference = crate::automata::weighted_u32::determinize::determinize(&reference)
+            .map_err(|error| error.to_string())?;
+        let raw_candidate = crate::automata::weighted_u32::determinize::determinize(&arena)
+            .map_err(|error| error.to_string())?;
+        if let Some(word) = crate::automata::weighted_u32::equivalence::find_difference(
+            &raw_reference, &raw_candidate,
+        ).map_err(|error| error.to_string())? {
+            return Err(format!("positive boundary NWA quotient changed raw weighted language: {word:?}"));
+        }
+        let reference = normalize_weighted_parser_stack_nwa_for_parser_state_count(
+            context.total_scoped_states, &reference,
+        );
+        // Normalized parser machines are DEFAULT-fallback prefix-mask
+        // acceptors, not ordinary word acceptors. Preserve the literal-word
+        // difference as a diagnostic instead of mistaking representation
+        // differences for a runtime counterexample.
+        let literal_difference = crate::automata::weighted_u32::equivalence::find_difference(
+            &reference, &parser_dwa,
+        ).map_err(|error| error.to_string())?;
+        let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+            &reference, &parser_dwa, context.total_scoped_states, 500_000,
+        )?;
+        if let Some(difference) = comparison.difference {
+            return Err(format!(
+                "positive boundary NWA quotient changed parser mask: {:?}", difference.stack_top_first,
+            ));
+        }
+        eprintln!("[glrmask/validate][boundary_positive_nwa_hashcons] start_component={start_component} raw_weighted_exact=true exact=true parser_mask_products={} parser_mask_branches={} literal_word_difference={literal_difference:?}",
+            comparison.product_states, comparison.compared_branches);
+    }
     // Exact shard-local weight projection. Every mask bit the shard can ever
     // set corresponds to an original token carried by some accepting terminal
     // path to a lexical final: parser paths substitute terminal paths and
@@ -1924,16 +3192,18 @@ pub(crate) fn compile_signed_shard_parser(
     let kept = candidate_kept_internal_tokens(id_map, &candidates);
     let kept_count = kept.iter().filter(|&&keep| keep).count();
     let (mut cells_outer_before, mut cells_inner_before) = (0usize, 0usize);
-    for state in parser_dwa.states() {
-        for (_, edge_weight) in state.transitions.values() {
-            let (outer, inner) = weight_cell_count(edge_weight);
-            cells_outer_before += outer;
-            cells_inner_before += inner;
-        }
-        if let Some(final_weight) = state.final_weight.as_ref() {
-            let (outer, inner) = weight_cell_count(final_weight);
-            cells_outer_before += outer;
-            cells_inner_before += inner;
+    if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        let mut cells = rustc_hash::FxHashMap::<usize, (usize, usize)>::default();
+        for state in parser_dwa.states() {
+            for weight in state.transitions.entries().map(|(_, _, weight)| weight)
+                .chain(state.final_weight.iter())
+            {
+                // The immutable DWA pins all weight identities for this loop.
+                let (outer, inner) = *cells.entry(weight.ptr_key())
+                    .or_insert_with(|| weight_cell_count(weight));
+                cells_outer_before += outer;
+                cells_inner_before += inner;
+            }
         }
     }
     // Per-shard projection memo: `kept` is fixed for this shard, so inner
@@ -1950,6 +3220,7 @@ pub(crate) fn compile_signed_shard_parser(
     }
     let project_ms = project_started.elapsed().as_secs_f64() * 1000.0;
     if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+        eprintln!("[glrmask/profile][signed_shard_projection_outer] start_component={start_component} enabled={} entries={} hits={}", memo.outer_enabled, memo.outer.len(), memo.outer_hits);
         eprintln!(
             "[glrmask/profile][signed_shard_projection_memo] start_component={start_component} calls={} hits={} misses={} no_drop={} rebuilds={} entries={} cap_rejections={} unchanged_weights={} remapped_weights={}",
             memo.calls,
@@ -1988,6 +3259,56 @@ pub(crate) fn compile_signed_shard_parser(
     let pre_hash_states = parser_dwa.num_states();
     let pre_hash_trans = parser_dwa.num_transitions();
     let pre_hash_acyclic = parser_dwa.is_acyclic();
+    let atom_minimize = std::env::var_os("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE").is_some();
+    if atom_minimize || std::env::var_os("GLRMASK_BOUNDARY_FINITE_POINT_MINIMIZE").is_some() {
+        let finite_started = Instant::now();
+        let mut domain_ms = 0.0;
+        let result = if atom_minimize {
+            // All normalization/DEFAULT decisions are already fixed. Derive
+            // a finite final-weight universe, native backward support and an
+            // exact observation quotient without the range-weight prepass.
+            crate::compiler::boundary_bit_minimize::minimize_finite_final_atoms(
+                &parser_dwa, crate::compiler::glr::labels::DEFAULT_LABEL,
+            )
+        } else {
+            let domain = crate::compiler::constraint_compose::accepted_weight_support(&parser_dwa);
+            domain_ms = finite_started.elapsed().as_secs_f64() * 1000.0;
+            crate::compiler::boundary_bit_minimize::minimize_finite_points(
+                &parser_dwa, &domain, crate::compiler::glr::labels::DEFAULT_LABEL,
+            )
+        };
+        if let Some((candidate, profile)) = result {
+            let finite_ms = finite_started.elapsed().as_secs_f64() * 1000.0;
+            if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FINITE_MINIMIZE").is_some() {
+                let comparison = glrmask_parser_dwa::__private::parser_equivalence::compare_parser_mask_prefix_languages(
+                    &parser_dwa, &candidate, context.total_scoped_states, 500_000,
+                )?;
+                if let Some(difference) = comparison.difference {
+                    return Err(format!("finite boundary minimizer changed normalized prefix mask: {difference:?}"));
+                }
+                eprintln!("[glrmask/validate][boundary_finite_minimize] component={start_component} exact=true pairs={} branches={}",
+                    comparison.product_states, comparison.compared_branches);
+            }
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+                eprintln!("[glrmask/profile][boundary_finite_minimize] component={start_component} atom_mode={atom_minimize} selected=true input_states={pre_hash_states} input_transitions={pre_hash_trans} domain_ms={domain_ms:.3} total_ms={finite_ms:.3} output_states={} output_transitions={} profile={profile:?}",
+                    candidate.num_states(), candidate.num_transitions());
+            }
+            return Ok(SignedShardOutput {
+                parser_dwa: candidate,
+                templates_ms: library.templates_ms,
+                compose_ms,
+                resolve_ms,
+                normalize_ms: normalize_ms + project_ms + finite_ms,
+                signed_states,
+                signed_transitions,
+                terms: library.ordinary_terms,
+            });
+        }
+        if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some() {
+            eprintln!("[glrmask/profile][boundary_finite_minimize] component={start_component} selected=false domain_ms={domain_ms:.3} attempted_ms={:.3}",
+                finite_started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
     let hashcons_started = Instant::now();
     let parser_dwa = reverse_hashcons_owned(parser_dwa);
     let hashcons_ms = hashcons_started.elapsed().as_secs_f64() * 1000.0;
@@ -2148,7 +3469,110 @@ pub(crate) fn eof_terminal() -> TerminalID {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn retained_template_relocation_matches_fresh_characterization() {
+        let mut mixed = identity_transfer(5);
+        mixed.escapes.push(InitialEscape {
+            pop: vec![StackMatcher::States(vec![1, 3]), StackMatcher::Any],
+            pushes: vec![4, 2],
+        });
+        mixed.escapes.push(InitialEscape {
+            pop: vec![StackMatcher::Any], pushes: vec![0],
+        });
+        let mut chained = empty_transfer();
+        chained.reduces.push(InitialReduce {
+            pop: vec![StackMatcher::State(2)], nonterminal: 0,
+        });
+        chained.nt_escapes.push(NtEscape {
+            source_nonterminal: 0,
+            pop: vec![StackMatcher::Any], pushes: vec![3],
+        });
+        chained.all_nts.insert(0);
+        for local in [empty_transfer(), identity_transfer(5), mixed, chained] {
+            let original = Templates::from_characterizations(&BTreeMap::from([(0, local.clone())]));
+            for offset in [0, 7, 1031] {
+                let injection = StateInjection { offset };
+                let scoped = scope_characterization(&local, &injection).unwrap();
+                let fresh = Templates::from_characterizations(&BTreeMap::from([(0, scoped)]));
+                let relation = (0..5).map(|state| vec![state + offset]).collect::<Vec<_>>();
+                let (relocated, skeleton) =
+                    crate::compiler::constraint_compose::transport_composition_template_dfa_with_skeleton(
+                        original.by_terminal[&0].clone(), &relation,
+                    ).unwrap();
+                assert_same_template_language(&relocated, &fresh.by_terminal[&0]).unwrap();
+                let rebuilt = Templates::from_terminal_dfas(BTreeMap::from([(0, relocated)]));
+                assert_eq!(skeleton.start_states(), rebuilt.by_terminal_nwa[&0].start_states());
+                assert_eq!(skeleton.states(), rebuilt.by_terminal_nwa[&0].states());
+            }
+        }
+    }
+
+    #[test]
+    fn retained_template_comparator_does_not_compare_empty_skeletons() {
+        let mut left = UnweightedDfa::new();
+        let end = left.add_state();
+        left.add_transition(left.start_state, 3, end);
+        left.set_accepting(end, true);
+        let right = UnweightedDfa::new();
+        assert!(assert_same_template_language(&left, &right).is_err());
+    }
+
     use super::*;
+
+    #[test]
+    fn positive_boundary_nwa_hashcons_preserves_exact_weighted_language() {
+        use crate::automata::weighted_u32::{determinize::determinize, equivalence::find_difference};
+        use crate::compiler::stages::id_map_and_terminal_dwa::l2p::canonicalize_acyclic_nwa;
+
+        let weights = vec![
+            Weight::all(), Weight::empty(),
+            Weight::from_per_tsid_token_sets([(0, RangeSetBlaze::from_iter([0..=2]))]),
+            Weight::from_per_tsid_token_sets([
+                (0, RangeSetBlaze::from_iter([1..=3])),
+                (2, RangeSetBlaze::from_iter([7..=7])),
+            ]),
+        ];
+        let mut random = 19u64;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as usize
+        };
+        let mut reductions = 0usize;
+        for case in 0..256 {
+            let n = 5 + next() % 7;
+            let mut original = NWA::new(3, 8);
+            for _ in 0..n { original.add_state(); }
+            original.set_start_states(vec![0]);
+            // Two distinct but exactly equal leaves ensure suffix sharing is
+            // exercised, including nondeterministic edges into both copies.
+            original.set_final_weight((n - 2) as u32, weights[2].clone());
+            original.set_final_weight((n - 1) as u32, weights[2].clone());
+            original.add_transition(0, 7, (n - 2) as u32, weights[0].clone());
+            original.add_transition(0, 7, (n - 1) as u32, weights[3].clone());
+            for source in 0..n - 2 {
+                if next() % 4 == 0 {
+                    original.set_final_weight(source as u32, weights[next() % weights.len()].clone());
+                }
+                for target in source + 1..n {
+                    let kind = next() % 7;
+                    let weight = weights[next() % weights.len()].clone();
+                    if kind == 0 {
+                        original.add_epsilon(source as u32, target as u32, weight);
+                    } else if kind <= 3 {
+                        original.add_transition(source as u32, kind as i32, target as u32, weight);
+                    }
+                }
+            }
+            let mut reduced = original.clone();
+            canonicalize_acyclic_nwa(&mut reduced);
+            reductions += usize::from(reduced.num_states() < original.num_states());
+            let baseline = determinize(&original).expect("generated DAG determinizes");
+            let candidate = determinize(&reduced).expect("quotient DAG determinizes");
+            assert_eq!(find_difference(&baseline, &candidate).unwrap(), None, "case {case}");
+        }
+        assert_eq!(reductions, 256, "all fixtures must exercise an actual quotient");
+    }
 
     /// Memo must reproduce the exact reference on every input class.
     #[test]

@@ -1892,7 +1892,7 @@ pub(super) fn try_scalar_dispatch(
             return Ok(false);
         };
         let overflowed = std::cell::Cell::new(false);
-        let use_pair_map = !std::ptr::eq(tokenizer, &state.constraint.tokenizer);
+        let use_pair_map = !std::ptr::eq(tokenizer, state.constraint.tokenizer.as_ref());
         let Some((lazy_transitions, initial_lexer_state)) = FullWalkLazyUnion::new(
             tokenizer,
             transitions16,
@@ -2276,7 +2276,7 @@ pub(super) fn try_flat16<const HOT_SINGLE_ROOT: bool>(
                 subset_cache,
                 &root_states,
                 &overflowed,
-                !std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer),
+                !std::ptr::eq(lexer_scan_cache.tokenizer(), state.constraint.tokenizer.as_ref()),
             ) {
                 let mut collapsed = DynamicBranches::new();
                 collapsed.push(DynamicBranch {
@@ -5822,7 +5822,7 @@ fn try_full_walk_mask_with_table_from_initial<
         && root_branches[0].initial_prune_guard.is_passed()
         && root_branches[0].exact_tokenizer_state
             == Some(root_branches[0].tokenizer_config)
-        && std::ptr::eq(lexer_scan_cache.tokenizer(), &state.constraint.tokenizer)
+        && std::ptr::eq(lexer_scan_cache.tokenizer(), state.constraint.tokenizer.as_ref())
         && parser_cache.nodes[root_parser_nodes[0] as usize]
             .admitted_singleton.is_some_and(|terminal| {
                 let tokenizer = lexer_scan_cache.tokenizer();

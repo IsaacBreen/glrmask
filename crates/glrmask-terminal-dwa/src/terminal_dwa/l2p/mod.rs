@@ -11,9 +11,20 @@
 use crate::automata::lexer::Lexer;
 pub mod equivalence_analysis;
 pub mod nwa_builder;
+mod native_boundary;
+mod native_pipeline;
+pub(super) mod native_identity;
 pub mod postprocess;
 pub(crate) mod terminal_dwa_equivalence;
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub use terminal_dwa_equivalence::compare as compare_terminal_dwa_artifacts;
 mod terminal_interchangeability;
+#[cfg(feature = "internal-api")]
+#[doc(hidden)]
+pub use terminal_interchangeability::restore_raw_follow_constraints_after_expansion as apply_explicit_follow_constraints;
+#[cfg(feature="internal-api")]
+pub use terminal_interchangeability::restore_boundary_follow_constraints as apply_boundary_follow_constraints;
 
 #[cfg(feature = "internal-api")]
 pub use terminal_interchangeability::warm_ti_pool;
@@ -64,8 +75,9 @@ use terminal_interchangeability::{
     discover_one_round_with_transport_witnesses_in_context_permitted,
     fold_one_round_partition,
     expand_representative_dwa_after_minimization, partition_has_merges,
-    restrict_weights_to_forward_domains_in_place, restore_raw_follow_constraints_after_expansion,
+    restrict_weights_to_forward_domains_in_place,
     singleton_partition, transport_coordinate_quotient, visible_output_raw_labels,
+    restore_raw_follow_constraints_after_expansion_with_transparent,
     TiDiscoveryContext,
 };
 pub use postprocess::{
@@ -878,6 +890,7 @@ pub fn compute_shared_l2p_equivalence(
         false,
         None,
         None,
+        None,
         prebuilt_token_trie,
     );
     let id_map_ms = id_map_started_at.elapsed().as_secs_f64() * 1000.0;
@@ -1153,11 +1166,19 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                         .unwrap_or(0.0);
                     let restricted_observation_seed_started_at =
                         ti_profile_timing.then(Instant::now);
-                    let restricted_observation_seed = discovery_context
-                        .reusable_nfa_restricted_observation_state_map(
+                    let restricted_observation_seed = if shard_options
+                        .is_some_and(|options| options.initial_state_domain_is_exact)
+                        && grammar.requires_global_terminal_observation
+                    {
+                        discovery_context.reusable_nfa_full_observation_state_map(
+                            tokenizer, initial_state_map,
+                        )
+                    } else {
+                        discovery_context.reusable_nfa_restricted_observation_state_map(
                             tokenizer,
                             initial_state_map,
-                        );
+                        )
+                    };
                     let restricted_observation_seed_ms = restricted_observation_seed_started_at
                         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
                         .unwrap_or(0.0);
@@ -1235,12 +1256,21 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
         .as_deref()
         .unwrap_or(&analysis_active_terminals);
     let coalesced_disallowed_follows_started_at = ti_profile_timing.then(Instant::now);
+    // Scoped transparent labels are observable during byte equivalence even
+    // when raw grammar follow rows omit them. Use the same conservative
+    // relation as the non-TI equivalence path; the actual follow product still
+    // checks raw predecessor pairs while skipping transparent labels.
+    let coalescing_follows = if shard_options.and_then(|options| options.follow_transparent)
+        .is_some_and(|bits| !bits.is_empty())
+    {
+        token_path_disallowed_follows.unwrap_or(disallowed_follows)
+    } else { disallowed_follows };
     let coalesced_disallowed_follows = reference_terminal_expansion.then(|| {
         coalesced_disallowed_follows(
             terminal_partition
                 .as_ref()
                 .expect("active TI partition must be present"),
-            disallowed_follows,
+            coalescing_follows,
             grammar.num_terminals as usize,
         )
     });
@@ -1337,10 +1367,42 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
     // reconstruct, so observe every terminal residual conservatively.
     let equivalence_active_groups = (!grammar.requires_global_terminal_observation)
         .then_some(analysis_active_terminals.as_slice());
-    let equivalence_initial_state_map = ti_restricted_observation_seed
-        .as_ref()
-        .map(|seed| &seed.state_map)
-        .or(initial_state_map);
+    // Scope and quotient are distinct: query only Q(S), while continuation
+    // topology still uses the unchanged total right-congruence Q. Replacing S
+    // by the whole TI domain wastes work; replacing Q by singletons throws
+    // away discovery's useful reduction. The restricted map is never passed
+    // off as a total right-congruence after omitted states are split.
+    let scoped_exact_domain = shard_options
+        .is_some_and(|options| options.initial_state_domain_is_exact);
+    let scoped_ti_seed = scoped_exact_domain.then(|| {
+        let seed = ti_restricted_observation_seed.as_ref()?;
+        let matches_observations = equivalence_active_groups.map_or_else(
+            || seed.active_terminals.len() == tokenizer.num_terminals() as usize
+                && seed.active_terminals.iter().all(|&active| active),
+            |active| active == seed.active_terminals.as_ref(),
+        );
+        if !matches_observations
+            || relevant_bytes != seed.relevant_bytes
+        { return None; }
+        let domain = initial_state_map?;
+        let restricted = super::scope::restrict_quotient_to_initial_domain(&seed.state_map, domain)?;
+        Some((restricted, &seed.state_map))
+    }).flatten();
+    let equivalence_initial_state_map = if scoped_exact_domain {
+        scoped_ti_seed.as_ref().map(|(initial, _)| initial).or(initial_state_map)
+    } else {
+        ti_restricted_observation_seed
+            .as_ref()
+            .map(|seed| &seed.state_map)
+            .or(initial_state_map)
+    };
+    if scoped_exact_domain && l2p_timing_profile_enabled() {
+        eprintln!("[glrmask/profile][scoped_observation_domains] partition={} ti_present={} quotient_selected={} global_observations={} initial_classes={} continuation_classes={}",
+            partition_label, ti_restricted_observation_seed.is_some(), scoped_ti_seed.is_some(),
+            grammar.requires_global_terminal_observation,
+            equivalence_initial_state_map.map_or(0, |map| map.num_internal_ids()),
+            scoped_ti_seed.as_ref().map_or(0, |(_, map)| map.num_internal_ids()));
+    }
     if shard_options.is_some() && std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
         if let Some(map) = equivalence_initial_state_map {
             eprintln!(
@@ -1389,6 +1451,9 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             shared_transition_cache,
             equivalence_initial_state_map,
             equivalence_initial_state_map_has_stable_restricted_observation,
+            scoped_exact_domain.then_some(equivalence_analysis::combined::ScopedEquivalenceDomain {
+                continuation_state_map: scoped_ti_seed.as_ref().map(|(_, continuation)| *continuation),
+            }),
             token_position_partition_for_analysis,
             std::env::var_os("GLRMASK_TI_DISABLE_RAW_OBSERVATION_REUSE")
                 .is_none()
@@ -1582,6 +1647,42 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 None => seed_root_nodes(tokenizer, &mut nwa, start_state, &simplified_id_map),
             };
             seed_ms = seed_started_at.elapsed().as_secs_f64() * 1000.0;
+
+            let validate_native_pipeline=std::env::var_os("GLRMASK_VALIDATE_NATIVE_EVENT_PIPELINE").is_some();
+            let mut native_pipeline_raw=None;
+            let native_pipeline = if partition_label=="boundary_identity_refinement"
+                && !use_terminal_coloring
+                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
+                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+                && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none()
+                && internal_vocab.iter().any(|(_,word)|word.len()>2)
+            {
+                (|| {
+                    let filter=shard_options.and_then(|o|o.crossing_filter)?;
+                    let mut native=nwa_builder::native_builder::build(
+                        tokenizer_for_build,terminal_coloring,ignore_terminal,&nwa,
+                        leaf_state,simplified_id_map.num_tsids(),&full_tree.root,&roots,
+                        flat_trans.map(AsRef::as_ref),representative_core_active_terminals)?;
+                    if validate_native_pipeline {native_pipeline_raw=Some(native.sink.export_raw()?);}
+                    let started=Instant::now();
+                    let owners=(0..grammar.num_terminals).map(|t|filter.ownership.owner_of_terminal(t).map(|o|o.0)).collect::<Option<Vec<_>>>()?;
+                    let(dwa,post,core)=native.sink.finish(equivalence_disallowed_follows,grammar.num_terminals as usize,
+                        ignore_terminal,shard_options.and_then(|o|o.follow_transparent),&owners,filter.start_component.0)?;
+                    let kernel_ms=started.elapsed().as_secs_f64()*1000.;
+                    let graph_stats=dwa.stats();
+                    let post_ms=post.follows_ms+post.prune_ms+post.canonical_ms+post.crossing_ms;
+                    let det_ms=core.import_ms+core.compute_ms;
+                    if l2p_timing_profile_enabled() {
+                        eprintln!("[glrmask/profile][native_event_pipeline] tokens={internal_vocab_count} build_ms={:.3} kernel_ms={kernel_ms:.3} post={post:?} core={core:?}",native.build_ms);
+                    }
+                    Some((dwa,vocab_tree_ms,possible_matches_ms,seed_ms,native.build_ms,native.profile,
+                        0.0,0.0,post.follows_ms,post.prune_ms,post.canonical_ms,post.crossing_ms,
+                        det_ms,(kernel_ms-post_ms-det_ms).max(0.0),internal_vocab_count,
+                        post.input_states,post.input_states,post.follow_states,post.pruned_states,post.canonical_states,
+                        graph_stats,false))
+                })()
+            } else {None};
+            let ordinary = || {
             let build_profile = build_nwa_via_trie_walk(
                 tokenizer_for_build,
                 terminal_coloring,
@@ -1615,6 +1716,10 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let trie_build_ms = trie_build_started_at.elapsed().as_secs_f64() * 1000.0;
 
             let always_allowed_ms = 0.0;
+            if let Some(ref expected)=native_pipeline_raw {
+                assert_eq!(expected.start_states(),nwa.start_states(),"native pipeline seeded-start mismatch");
+                assert_eq!(expected.states(),nwa.states(),"native pipeline raw event NWA mismatch");
+            }
             let nwa_states_after_build = nwa.states().len();
 
             let collapse_started_at = Instant::now();
@@ -1728,6 +1833,29 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             } else {
                 (nwa, false)
             };
+            let native_started = Instant::now();
+            let native_eligible = std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+                && partition_label == "boundary_identity_refinement"
+                && shard_options.and_then(|options| options.crossing_filter).is_some()
+                && !path_conditioned_after_preminimize
+                && max_structural_label_depth_to_final(&nwa).is_some_and(|depth| depth > 2)
+                && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none();
+            let native = native_eligible.then(|| native_boundary::compile_sparse(&nwa)).flatten();
+            let native_ms = native_started.elapsed().as_secs_f64() * 1000.0;
+            let (dwa, determinize_ms, minimize_ms) = if let Some((dwa, stats)) = native {
+                if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some() {
+                    let reference = minimize_owned(determinize(&nwa)
+                        .expect("reference boundary determinization failed"));
+                    let states = native_boundary::graph_isomorphism(&dwa, &reference)
+                        .expect("native terminal graph differs from the ordinary compiler");
+                    eprintln!("[glrmask/validate][boundary_native_terminal] exact_graph=true states={states}");
+                }
+                if l2p_timing_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_native_terminal] input_states={} total_ms={native_ms:.3} stats={stats:?}", nwa.states().len());
+                }
+                let det_ms = stats.import_ms + stats.compute_ms;
+                (dwa, det_ms, (native_ms - det_ms).max(0.0))
+            } else {
             let structural_depth = max_structural_label_depth_to_final(&nwa);
             let determinize_started_at = Instant::now();
             let use_depth2 = structural_depth.is_some_and(|depth| depth <= 2);
@@ -1767,6 +1895,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 minimize_owned(det)
             };
             let minimize_ms = minimize_started_at.elapsed().as_secs_f64() * 1000.0;
+                (dwa, determinize_ms, minimize_ms)
+            };
             let dwa_stats_before_compact = dwa.stats();
 
             (
@@ -1793,6 +1923,17 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 dwa_stats_before_compact,
                 false,
             )
+            };
+            if let Some(native)=native_pipeline {
+                if validate_native_pipeline {
+                    let reference=ordinary();
+                    native_boundary::graph_isomorphism(&native.0,&reference.0)
+                        .expect("native full event pipeline graph differs from the original constructor");
+                    eprintln!("[glrmask/validate][native_event_pipeline] exact_raw_graph=true exact_final_graph=true tokens={internal_vocab_count}");
+                }
+                native
+            } else {ordinary()}
+
         }
     };
     if early_none {
@@ -1951,11 +2092,12 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             .unwrap_or(0.0);
 
         let raw_follow_started_at = ti_profile_timing.then(Instant::now);
-        let raw_follow_restoration = restore_raw_follow_constraints_after_expansion(
+        let raw_follow_restoration = restore_raw_follow_constraints_after_expansion_with_transparent(
             &expanded_dwa,
             disallowed_follows,
             grammar.num_terminals as usize,
             ignore_terminal,
+            shard_options.and_then(|options| options.follow_transparent),
         );
         let used_follow_row_quotient = raw_follow_restoration.used_follow_row_quotient;
         let expanded_dwa = raw_follow_restoration.dwa;
@@ -2447,6 +2589,101 @@ mod ti_mre_tests {
             &active,
             &BTreeMap::new(),
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&initial_state_map),
+            false,
+            Some(&seed_filter),
+            Some(&options),
+        )
+        .expect("scoped witnessed TI fixture must build");
+        assert!(!output.dwa.states().is_empty());
+    }
+
+    #[test]
+    fn scoped_ti_transparent_equivalence_and_restoration_match_strict_reference() {
+        let _lock = ENV_LOCK.lock().expect("TI MRE env lock poisoned");
+        let _enabled = EnvVarGuard::set("GLRMASK_DISABLE_L2P_TERMINAL_INTERCHANGEABILITY", "0");
+        let _strict = EnvVarGuard::set(
+            "GLRMASK_L2P_TERMINAL_INTERCHANGEABILITY_STRICT_REFERENCE",
+            "1",
+        );
+
+        let expressions = vec![
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"a".to_vec()),
+            Expr::U8Seq(b"x".to_vec()),
+            Expr::U8Seq(b" ".to_vec()),
+        ];
+        let tokenizer = build_regex_monolithic(&expressions).into_tokenizer(
+            4,
+            Some(Arc::from(expressions.into_boxed_slice())),
+        );
+        let grammar = AnalyzedGrammar::from_composed_rules(
+            vec![
+                Rule {
+                    lhs: 1,
+                    rhs: vec![Symbol::Nonterminal(0)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(0), Symbol::Terminal(2)],
+                },
+                Rule {
+                    lhs: 0,
+                    rhs: vec![Symbol::Terminal(1), Symbol::Terminal(2)],
+                },
+            ],
+            4,
+            vec!["A".into(), "B".into(), "X".into(), "IGNORE".into()],
+            vec!["doc".into(), "augmented".into()],
+            1,
+        );
+        let vocab = Vocab::new(vec![
+            (0, b"ax".to_vec()),
+            (1, b"aax".to_vec()),
+            (2, b"x".to_vec()),
+            (3, b"a ".to_vec()), (4, b"a%".to_vec()), (5, b"a x".to_vec()),
+        ]);
+        let active = vec![true; 4];
+        let mut transparent = crate::ds::bitset::BitSet::new(4); transparent.set(3);
+        let disallowed = BTreeMap::from([(0, transparent.clone()), (1, transparent.clone()), (3, crate::ds::bitset::BitSet::all(4))]);
+        let widened = BTreeMap::new();
+        let state_count = tokenizer.num_states() as usize;
+        let raw_ids = (0..state_count as u32).collect::<Vec<_>>();
+        let initial_state_map = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
+            raw_ids.clone(),
+            raw_ids,
+        );
+        let seed_filter = vec![true; state_count];
+        let permitted = vec![vec![0, 1]];
+        let options = L2pShardBuildOptions {
+            shared_equivalence: None,
+            skip_ti_discovery: false,
+            ti_candidate_groups: Some(&permitted),
+            crossing_filter: None,
+            skip_core_compact: true,
+            follow_transparent: Some(&transparent),
+            initial_state_domain_is_exact: true,
+        };
+        let output = build_l2p_id_map_and_terminal_dwa_mode(
+            "scoped_ti_transparent_mre",
+            &tokenizer,
+            &vocab,
+            &TerminalColoring::identity(4),
+            false,
+            None,
+            &grammar,
+            &vec![Vec::new(); 4],
+            &active,
+            &disallowed,
+            Some(&widened),
             None,
             None,
             None,

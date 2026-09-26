@@ -47,11 +47,27 @@ fn hash_weight(weight: &Weight, hasher: &mut impl Hasher) {
 }
 
 pub fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
+    canonicalize_acyclic_nwa_impl(nwa, false);
+}
+
+/// Exact structural quotient that also preserves each state's outgoing label
+/// support, including labels with an empty target vector. Parser DEFAULT
+/// normalization observes those keys independently of their weighted language.
+/// Every merged row has the same final, label keys, weighted successor classes
+/// and epsilon behavior. Do not substitute ordinary language-only pruning here.
+pub fn canonicalize_acyclic_nwa_preserving_label_support(nwa: &mut NWA) {
+    canonicalize_acyclic_nwa_impl(nwa, true);
+}
+
+fn canonicalize_acyclic_nwa_impl(nwa: &mut NWA, preserve_label_support: bool) {
     if nwa.states().len() <= 1 {
         return;
     }
 
-    prune_unreachable_states(nwa);
+    // The ordinary reachability helper drops empty label keys. Keeping the
+    // original arena here avoids changing that guard observation; unreachable
+    // rows cannot enter a weighted determinized support from the start.
+    if !preserve_label_support { prune_unreachable_states(nwa); }
     let topo_order = topological_order(nwa);
     if topo_order.len() != nwa.states().len() {
         return;
@@ -85,7 +101,7 @@ pub fn canonicalize_acyclic_nwa(nwa: &mut NWA) {
                     .and_modify(|existing| *existing = existing.union(weight))
                     .or_insert_with(|| weight.clone());
             }
-            if !canonical_targets.is_empty() {
+            if preserve_label_support || !canonical_targets.is_empty() {
                 transitions.insert(label, canonical_targets.into_iter().collect());
             }
         }
@@ -983,4 +999,29 @@ mod tests {
             "a genuinely disallowed X -> bad follow pair must still be removed",
         );
     }
+}
+
+#[cfg(test)]
+#[test]
+fn guard_preserving_quotient_keeps_empty_label_keys() {
+    let mut source = NWA::new(1, 2);
+    for _ in 0..4 { source.add_state(); }
+    source.set_start_states(vec![0]);
+    source.add_transition(0, 0, 1, Weight::all());
+    source.add_transition(0, 1, 2, Weight::all());
+    source.states_mut()[0].transitions.insert(2, Vec::new());
+    source.set_final_weight(1, Weight::all());
+    source.set_final_weight(2, Weight::all());
+    // A distinct unreachable guard row must not widen any reachable row.
+    source.states_mut()[3].transitions.insert(3, Vec::new());
+    let mut candidate = source.clone();
+    canonicalize_acyclic_nwa_preserving_label_support(&mut candidate);
+    assert!(candidate.num_states() < source.num_states());
+    let root = &candidate.states()[candidate.start_states()[0] as usize];
+    assert_eq!(root.transitions.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert!(root.transitions[&2].is_empty());
+    let mut ordinary = source.clone();
+    canonicalize_acyclic_nwa(&mut ordinary);
+    assert!(!ordinary.states()[ordinary.start_states()[0] as usize].transitions.contains_key(&2),
+        "fixture must distinguish the old language-only behavior");
 }

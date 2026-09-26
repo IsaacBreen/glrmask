@@ -6196,7 +6196,7 @@ fn boundary_visible_residual_starts_by_first_byte(
             if !relevant_terminals.contains(global_terminal as usize) {
                 continue;
             }
-            if std::ptr::eq(tokenizer, &component.tokenizer) {
+            if std::ptr::eq(tokenizer, component.tokenizer.as_ref()) {
                 let Some(live_states) = component.terminal_live_states.get(local_terminal as usize) else {
                     continue;
                 };
@@ -12334,7 +12334,7 @@ fn transport_composition_template_dfa(
 /// in the same transition traversal.  The eager composition fast path needs
 /// both representations immediately, so rebuilding the skeleton afterward
 /// would just walk and allocate every transported transition a second time.
-fn transport_composition_template_dfa_with_skeleton(
+pub(crate) fn transport_composition_template_dfa_with_skeleton(
     mut dfa: UnweightedDfa,
     state_relation: &[Vec<u32>],
 ) -> Option<(UnweightedDfa, NWA)> {
@@ -19121,7 +19121,7 @@ fn merged_terminal_live_states_owned_parent(
 
 fn build_composed_constraint_unfinalized(
     composed_table: ComposedTable,
-    tokenizer: Tokenizer,
+    tokenizer: impl Into<Arc<Tokenizer>>,
     tokenizer_state_offsets: Vec<u32>,
     parser_dwa: DWA,
     parser_state_domain_labels: Vec<i32>,
@@ -19139,6 +19139,7 @@ fn build_composed_constraint_unfinalized(
     defer_dynamic_mask_vocab: bool,
     vocab: &Vocab,
 ) -> ConstraintComposition {
+    let tokenizer = tokenizer.into();
     let total_started_at = Instant::now();
     let phase_started_at = Instant::now();
     let terminal_offsets = composed_table.terminal_offsets.clone();
@@ -19221,6 +19222,7 @@ fn build_composed_constraint_unfinalized(
         table,
         terminal_display_names,
         tokenizer,
+        boundary_completion_index: None,
         tokenizer_has_epsilon_transitions,
         ignore_terminal,
         special_token_terminals,
@@ -23378,10 +23380,9 @@ fn compose_constraints_owned_parent_impl(
 ///
 /// Fixpoint-free single topological pass; matches the fixpoint propagation
 /// on acyclic inputs. Used for shard candidate-token triggers and gates.
-pub(crate) fn accepted_original_tokens(
-    dwa: &DWA,
-    id_map: &InternalIdMap,
-) -> BTreeSet<u32> {
+/// Exact union of the correlated weights of all accepting paths.
+/// This is the ordinary accepted-token summary before projecting away TSIDs.
+pub(crate) fn accepted_weight_support(dwa: &DWA) -> Weight {
     assert!(dwa.is_acyclic(), "accepted-token summary expects acyclic DWA");
     let n = dwa.num_states() as usize;
     let mut indegree = vec![0usize; n];
@@ -23431,6 +23432,17 @@ pub(crate) fn accepted_original_tokens(
         }
     }
 
+    accepted
+}
+
+pub(crate) fn accepted_original_tokens(
+    dwa: &DWA,
+    id_map: &InternalIdMap,
+) -> BTreeSet<u32> {
+    let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
+    let started = profile.then(Instant::now);
+    let accepted = accepted_weight_support(dwa);
+    let support_ms = started.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0);
     let mut originals = BTreeSet::new();
     for (_, internal_tokens) in accepted.raw_range_values() {
         for range in internal_tokens.ranges() {
@@ -23444,6 +23456,10 @@ pub(crate) fn accepted_original_tokens(
                 }
             }
         }
+    }
+    if let Some(started) = started {
+        eprintln!("[glrmask/profile][accepted_token_support] states={} edges={} tokens={} support_ms={support_ms:.3} total_ms={:.3}",
+            dwa.num_states(), dwa.num_transitions(), originals.len(), started.elapsed().as_secs_f64() * 1000.0);
     }
     originals
 }
@@ -33507,9 +33523,7 @@ table: &child.table,
                 if component.tokenizer.terminal_exprs().is_none() {
                     let exprs = component.retained_terminal_exprs().map(|exprs| exprs.to_vec());
                     if let Some(exprs) = exprs {
-                        component
-                            .tokenizer
-                            .restore_terminal_exprs(Some(exprs))
+                        Arc::make_mut(&mut component.tokenizer).restore_terminal_exprs(Some(exprs))
                             .expect("restore component terminal exprs for minbound oracle");
                     }
                 }
@@ -33578,8 +33592,8 @@ table: &dispatch.table,
             let outer_table_ms = outer_table_started.elapsed().as_secs_f64() * 1000.0;
             let terminal_names = merged_terminal_display_names(&core, &children);
             let tokenizer_inputs = [
-                (&core.tokenizer, composed_table.terminal_offsets[0]),
-                (&dispatch.tokenizer, composed_table.terminal_offsets[1]),
+                (core.tokenizer.as_ref(), composed_table.terminal_offsets[0]),
+                (dispatch.tokenizer.as_ref(), composed_table.terminal_offsets[1]),
             ];
             let outer_tokenizer_started = Instant::now();
             let (mut merged_tokenizer, tokenizer_offsets) =
@@ -35469,9 +35483,7 @@ table: &dispatch.table,
         if component.tokenizer.terminal_exprs().is_none()
             && let Some(exprs) = component.retained_terminal_exprs().map(|exprs| exprs.to_vec())
         {
-            component
-                .tokenizer
-                .restore_terminal_exprs(Some(exprs))
+            Arc::make_mut(&mut component.tokenizer).restore_terminal_exprs(Some(exprs))
                 .expect("restore component terminal exprs");
         }
         let inline_rules = component.table.rules.len();

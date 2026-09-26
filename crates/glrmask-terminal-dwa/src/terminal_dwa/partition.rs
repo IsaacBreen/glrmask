@@ -1791,6 +1791,7 @@ pub(super) fn build_partition_vocab_equivalence(
                         false,
                         None,
                         None,
+                        None,
                         shared_l1_token_trie.as_deref(),
                     );
                 if compile_profile_enabled() {

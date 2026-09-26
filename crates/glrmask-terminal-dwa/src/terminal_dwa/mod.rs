@@ -15,6 +15,10 @@ use crate::automata::lexer::compile::{
 pub mod classify;
 mod definition_skeleton;
 mod finalize_ignore;
+#[cfg(any(test, feature = "internal-api"))]
+mod identity_refinement;
+#[cfg(feature = "internal-api")]
+pub use identity_refinement::{build_scoped_boundary_borrowed_identity_with_certificate,build_scoped_boundary_identity_refinement,build_scoped_boundary_identity_with_certificate,NativeMinimizationFixedPoint};
 pub mod grammar_helpers;
 pub mod l1;
 pub mod l2p;
@@ -2426,6 +2430,35 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
         let label = classify::vocab_partition_label(idx);
         if compile_profile_enabled() { eprintln!("[glrmask/profile][partition_build_entry] label={} tokens={}", label, sub_vocab.len()); }
 
+        // A character partition observes a subset of the component whitelist.
+        // The same necessary-prefix theorem applies independently to V_j;
+        // using its S_j instead of the union S avoids querying roots whose
+        // only completion witness belongs to a different partition. The
+        // ordinary exact family union preserves all original token IDs.
+        let mut local_boundary_scope = None;
+        if !sub_vocab.is_empty()
+            && let Some(scope) = boundary_scope.filter(|scope|
+                scope.require_crossing() && scope.automatic_prefix_support_enabled())
+            && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
+            && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PARTITION_PREFIX_SEEDS").is_none()
+        {
+            let started = Instant::now();
+            if let Some((support, observation_states)) = scope::crossing_prefix_seed_support(
+                tokenizer, sub_vocab, &flat_trans, scope.ownership(), scope.start_component(),
+            ) {
+                local_boundary_scope = scope.intersect_initial_support(&support);
+                // Empty domains conservatively retain the existing empty-
+                // language builder for now; its public scope is nonempty.
+                if compile_profile_enabled() {
+                    eprintln!("[glrmask/profile][boundary_partition_prefix_support] partition={} tokens={} seeds_before={} seeds_after={} observation_states={} elapsed_ms={:.3}",
+                        label, sub_vocab.len(), scope.initial_states().len(),
+                        local_boundary_scope.as_ref().map_or(scope.initial_states().len(), |s| s.initial_states().len()),
+                        observation_states, started.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+        }
+        let boundary_scope = local_boundary_scope.as_ref().or(boundary_scope);
+
         let ready_local = boundary_scope.is_none().then(|| {
             prepared_partition_local_tokenizers
                 .and_then(|prepared| prepared.prepare_if_available(idx, tokenizer, sub_vocab))
@@ -3070,6 +3103,30 @@ pub fn build_restricted_id_map_and_terminal_dwa_with_precomputed_global_max_leng
 /// after the ordinary exact transport witness is retained. L2P crossing is
 /// filtered before determinization and this final exact product also covers
 /// L1/split-L1 families.
+/// Only immutable-tokenizer/grammar analyses may be shared between scoped
+/// vocabulary queries. Borrowing the source objects and checking identity
+/// prevents a cache certified for one lexer/grammar from serving another.
+/// No token, start-state, ownership or crossing-dependent results live here.
+/// Construct inside one link; lazy initialization remains inside its timer.
+pub struct ScopedBoundarySharedContext<'a> {
+    tokenizer: &'a Tokenizer,
+    grammar: &'a AnalyzedGrammar,
+    classify: classify::SharedClassifyCache,
+    transitions: OnceLock<l2p::equivalence_analysis::compat::FlatTransitionCache>,
+    always_allowed: OnceLock<Vec<Vec<TerminalID>>>,
+}
+
+impl<'a> ScopedBoundarySharedContext<'a> {
+    pub fn new(tokenizer: &'a Tokenizer, grammar: &'a AnalyzedGrammar) -> Self {
+        Self { tokenizer, grammar, classify: OnceLock::new(), transitions: OnceLock::new(),
+            always_allowed: OnceLock::new() }
+    }
+    fn validate(&self, tokenizer: &Tokenizer, grammar: &AnalyzedGrammar) {
+        assert!(std::ptr::eq(self.tokenizer, tokenizer), "boundary shared context tokenizer mismatch");
+        assert!(std::ptr::eq(self.grammar, grammar), "boundary shared context grammar mismatch");
+    }
+}
+
 pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     tokenizer: &Tokenizer,
     vocab: &Vocab,
@@ -3080,6 +3137,42 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
     flat_trans: Arc<[u32]>,
     scope: &scope::BoundaryAnalysisScope,
 ) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    build_scoped_boundary_id_map_and_terminal_dwa_with_shared(
+        tokenizer, vocab, terminal_coloring, ignore_terminal, grammar,
+        disallowed_follows, flat_trans, scope, None,
+    )
+}
+
+pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_shared(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    scope: &scope::BoundaryAnalysisScope,
+    shared: Option<&ScopedBoundarySharedContext<'_>>,
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
+        tokenizer,vocab,terminal_coloring,ignore_terminal,grammar,disallowed_follows,
+        flat_trans,scope,shared,None,
+    )
+}
+
+pub fn build_scoped_boundary_id_map_and_terminal_dwa_with_filter(
+    tokenizer: &Tokenizer,
+    vocab: &Vocab,
+    terminal_coloring: &TerminalColoring,
+    ignore_terminal: Option<TerminalID>,
+    grammar: &AnalyzedGrammar,
+    disallowed_follows: &BTreeMap<u32, BitSet>,
+    flat_trans: Arc<[u32]>,
+    scope: &scope::BoundaryAnalysisScope,
+    shared: Option<&ScopedBoundarySharedContext<'_>>,
+    terminal_filter: Option<&[bool]>,
+) -> (MappedArtifact<TerminalAutomaton>, TerminalDwaPhaseProfile) {
+    if let Some(shared) = shared { shared.validate(tokenizer, grammar); }
     if std::env::var_os("GLRMASK_DEBUG_SCOPED_BOUNDARY").is_some() {
         eprintln!(
             "SCOPED_INPUT o2i={:?} classes={:?} reps={:?}",
@@ -3108,14 +3201,15 @@ pub fn build_scoped_boundary_id_map_and_terminal_dwa(
             ignore_terminal,
             grammar,
             disallowed_follows,
-            None,
+            shared.map(|context| context.always_allowed.get_or_init(||
+                compute_always_allowed_follows(grammar)).as_slice()),
             flat_trans,
             scope.initial_states().exact_singleton_map(),
+            shared.map(|context| &context.classify),
+            shared.map(|context| &context.transitions),
             None,
             None,
-            None,
-            None,
-            None,
+            terminal_filter,
             Some(scope),
             false,
         );

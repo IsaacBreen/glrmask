@@ -1029,6 +1029,16 @@ fn encode_composition_metadata(constraint: &Constraint) -> Vec<u8> {
 }
 
 fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
+    let bytes=encode_composition_metadata_base_for_save(constraint);
+    if let Some(wire)=crate::compiler::boundary_precomputed_completion::saved_wire(constraint) {
+        crate::compiler::boundary_precomputed_completion::wrap_envelope(bytes,wire)
+            .expect("certified component index fits its bounded envelope")
+    } else {
+        crate::compiler::boundary_precomputed_completion::split_envelope(&bytes)
+            .expect("retained composition envelope validated at load").0.to_vec()
+    }
+}
+fn encode_composition_metadata_base_for_save(constraint: &Constraint) -> Vec<u8> {
     let Some(blob) = constraint.deferred_composition_metadata_blob.as_ref() else {
         return encode_composition_metadata(constraint);
     };
@@ -1047,7 +1057,8 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
     let (link_raw_len, link_wire, link_compressed) =
         encode_composition_metadata_part(link_raw);
 
-    let input = blob.as_slice();
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())
+        .expect("retained composition envelope validated at load");
     if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
         || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
@@ -1088,6 +1099,7 @@ fn encode_composition_metadata_for_save(constraint: &Constraint) -> Vec<u8> {
 }
 
 fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     if input.is_empty() {
         return Ok(());
     }
@@ -1129,6 +1141,7 @@ fn validate_composition_metadata_wire(input: &[u8]) -> Result<(), String> {
 fn decode_composition_link_metadata(
     input: &[u8],
 ) -> Result<ConstraintCompositionLinkMetadata, String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
         return Ok(ConstraintCompositionLinkMetadata {
@@ -1185,6 +1198,7 @@ fn decode_composition_link_metadata(
 }
 
 fn decode_composition_metadata(input: &[u8]) -> Result<ConstraintCompositionMetadata, String> {
+    let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(input)?;
     validate_composition_metadata_wire(input)?;
     if input.is_empty() {
         return Ok(ConstraintCompositionMetadata {
@@ -5769,6 +5783,41 @@ impl Constraint {
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
+    /// Borrow already-materialized local templates, or decode only the template
+    /// vector from a deferred composition cache. Unlike full materialization,
+    /// this does not clone a Constraint or reconstruct unused characterizations,
+    /// token-reset rows, parser DWAs, or mutable runtime state.
+    pub(crate) fn retained_parser_templates_for_compilation(
+        &self,
+    ) -> Result<Cow<'_, [Option<crate::automata::unweighted_u32::dfa::DFA>]>, String> {
+        if !self.composition_parser_templates_by_terminal.is_empty() {
+            return Ok(Cow::Borrowed(&self.composition_parser_templates_by_terminal));
+        }
+        let Some(blob) = self.deferred_composition_metadata_blob.as_ref() else {
+            return Ok(Cow::Borrowed(&[]));
+        };
+        let (input, _) = crate::compiler::boundary_precomputed_completion::split_envelope(blob.as_slice())?;
+        validate_composition_metadata_wire(input)?;
+        if input.starts_with(&COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+            || input.starts_with(&PREVIOUS_PREVIOUS_COMPOSITION_METADATA_SPLIT_MAGIC)
+        {
+            let parts = split_composition_metadata_parts(input)?;
+            let cache_raw = decode_composition_metadata_part(
+                parts.cache_wire, parts.cache_raw_len, parts.cache_compressed,
+            )?;
+            // This vector is the first field of ConstraintCompositionCacheMetadata
+            // in every split format. Deserialize that field with a bounded slice
+            // reader, leaving its unrelated characterization vector untouched.
+            let templates = bincode::deserialize_from(cache_raw.as_ref())
+                .map_err(|error| error.to_string())?;
+            Ok(Cow::Owned(templates))
+        } else {
+            Ok(Cow::Owned(decode_composition_metadata(input)?
+                .composition_parser_templates_by_terminal))
+        }
+    }
+
     pub(crate) fn materialize_composition_metadata_for_compilation(
         &mut self,
     ) -> Result<(), String> {
@@ -6228,8 +6277,11 @@ impl Constraint {
                     },
                     || {
                         let started = profile.then(std::time::Instant::now);
-                        let bytes =
-                            crate::compiler::glr::table::artifact_serde::to_compact_bytes(&self.table);
+                        let rules = self.retained_table_rules()
+                            .expect("validated retained grammar rules must remain readable");
+                        let bytes = crate::compiler::glr::table::artifact_serde::to_compact_bytes_with_rules(
+                            &self.table, rules,
+                        );
                         if let Some(started) = started {
                             eprintln!(
                                 "[glrmask/profile][constraint_save_section] name=table ms={:.3} bytes={}",
@@ -6981,6 +7033,7 @@ impl Constraint {
         };
         let deserialize_started = profile.then(std::time::Instant::now);
         let mut packed_dwa_inventory = None;
+        let mut prepared_completion_wire: Option<Arc<[u8]>> = None;
         let mut loaded_packed_dwa_dense_masks = false;
         let mut constraint = if uses_external_runtime_sections(version)
             || version == PREVIOUS_VOCAB_SECTION_CONSTRAINT_VERSION
@@ -7997,7 +8050,7 @@ impl Constraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
             let mut constraint = artifact.constraint;
             if let Some(tokenizer) = tokenizer {
-                constraint.tokenizer = tokenizer;
+                constraint.tokenizer = tokenizer.into();
             }
             if let Some(original_token_map) = original_token_map {
                 match original_token_map {
@@ -8052,6 +8105,9 @@ impl Constraint {
             constraint.deferred_terminal_exprs_blob = artifact.terminal_exprs_blob;
             constraint.deferred_terminal_exprs = Default::default();
             constraint.deferred_composition_metadata_blob = if let Some(section) = composition_metadata_section {
+                let (_, prepared)=crate::compiler::boundary_precomputed_completion::split_envelope(section)
+                    .map_err(crate::GlrMaskError::Serialization)?;
+                prepared_completion_wire=prepared.map(Arc::from);
                 validate_composition_metadata_wire(section)
                     .map_err(crate::GlrMaskError::Serialization)?;
                 if section.is_empty() {
@@ -8149,9 +8205,7 @@ impl Constraint {
             }
             let restore_exprs_started = profile.then(std::time::Instant::now);
             if virtual_runtimes.is_empty() {
-                constraint
-                    .tokenizer
-                    .restore_terminal_exprs(artifact.terminal_exprs)
+                Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                     .map_err(crate::GlrMaskError::Serialization)?;
             } else {
                 let compiled_static_residual = !constraint.uses_dynamic_runtime()
@@ -8161,7 +8215,7 @@ impl Constraint {
                             && virtual_runtimes.iter().all(|entry| entry.kind == crate::automata::lexer::tokenizer::VirtualTokenizerRuntimeKind::ResidualExpr)
                     });
                 let restore_result = if compiled_static_residual {
-                    constraint.tokenizer.restore_compiled_static_residual_runtimes(
+                    Arc::make_mut(&mut constraint.tokenizer).restore_compiled_static_residual_runtimes(
                         &virtual_runtimes, static_virtual_residual_mask.as_ref().unwrap().projections(),
                     )
                 } else {
@@ -8169,7 +8223,7 @@ impl Constraint {
                         constraint.retained_terminal_exprs().map(|exprs| exprs.to_vec())
                     });
                     if constraint.uses_dynamic_runtime() {
-                        constraint.tokenizer.restore_terminal_exprs_with_virtual_runtime_metadata(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata(
                             terminal_exprs, &virtual_runtimes, false,
                         )
                     } else if let Some(static_mask) = static_virtual_residual_mask
@@ -8181,11 +8235,11 @@ impl Constraint {
                                 .all(|projection| !projection.oracle_bytes().is_empty())
                         })
                     {
-                        constraint.tokenizer.restore_terminal_exprs_with_precompiled_static_residual_oracles(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_precompiled_static_residual_oracles(
                             terminal_exprs, &virtual_runtimes, static_mask.projections(), false,
                         )
                     } else {
-                        constraint.tokenizer.restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
+                        Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs_with_virtual_runtime_metadata_preserving_residual_coordinates(
                             terminal_exprs, &virtual_runtimes, false,
                         )
                     }
@@ -8217,9 +8271,7 @@ impl Constraint {
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
             constraint.internal_token_buf_masks = artifact.internal_token_buf_masks;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_DOMAIN_LABELS_CONSTRAINT_VERSION {
@@ -8228,9 +8280,7 @@ impl Constraint {
             let mut constraint = artifact.constraint;
             constraint.ignore_expr = artifact.ignore_expr;
             constraint.parser_state_domain_labels = artifact.parser_state_domain_labels;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION {
@@ -8238,9 +8288,7 @@ impl Constraint {
                 .map_err(|err| crate::GlrMaskError::Serialization(err.to_string()))?;
             let mut constraint = artifact.constraint;
             constraint.ignore_expr = artifact.ignore_expr;
-            constraint
-                .tokenizer
-                .restore_terminal_exprs(artifact.terminal_exprs)
+            Arc::make_mut(&mut constraint.tokenizer).restore_terminal_exprs(artifact.terminal_exprs)
                 .map_err(crate::GlrMaskError::Serialization)?;
             constraint
         } else if version == PREVIOUS_EXPRLESS_CONSTRAINT_VERSION {
@@ -8328,6 +8376,16 @@ impl Constraint {
                     reason: crate::runtime::SummaryUnavailable::LegacyArtifact,
                 },
             );
+        }
+        if let Some(wire)=prepared_completion_wire {
+            let started=std::time::Instant::now();
+            let prepared=crate::compiler::boundary_precomputed_completion::PreparedCompletion::load(
+                Arc::clone(&constraint.tokenizer),wire,
+            ).map_err(crate::GlrMaskError::Serialization)?;
+            constraint.boundary_completion_index=Some(Arc::new(prepared));
+            if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
+                eprintln!("[glrmask/profile][component_completion_load] certified=true ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
+            }
         }
         Ok(constraint)
     }
@@ -9425,6 +9483,25 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.composition_reset_tokens_by_terminal, expected);
         assert_eq!(loaded.start().mask(), constraint.start().mask());
+    }
+
+    #[test]
+    fn retained_template_read_is_exact_and_does_not_materialize_constraint() {
+        let original = tiny_constraint();
+        let expected = original.composition_parser_templates_by_terminal.clone();
+        assert!(!expected.is_empty());
+        assert!(matches!(original.retained_parser_templates_for_compilation().unwrap(), Cow::Borrowed(_)));
+        let bytes = original.save();
+        let loaded = Constraint::load(&bytes).unwrap();
+        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        let templates = loaded.retained_parser_templates_for_compilation().unwrap();
+        assert!(matches!(templates, Cow::Owned(_)));
+        assert_eq!(templates.as_ref(), expected.as_slice());
+        assert!(loaded.composition_parser_templates_by_terminal.is_empty());
+        assert!(loaded.composition_parser_characterizations_by_terminal.is_empty());
+        assert!(loaded.deferred_composition_metadata_blob.is_some());
+        assert_eq!(loaded.save(), bytes);
+        assert_eq!(loaded.start().mask(), original.start().mask());
     }
 
     #[test]

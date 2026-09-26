@@ -1082,6 +1082,249 @@ impl TokenBoundedAnalysisTrie {
         const MAX_NODE_RATIO: usize = 8;
         self.len() <= token_count.saturating_mul(MAX_NODE_RATIO).max(256)
     }
+
+    /// Raw states from which an event can be reached on a vocabulary prefix.
+    ///
+    /// All trie positions (including the root and token endpoints) may witness
+    /// an event. The result is exact for this query; a caller may use a broad
+    /// event predicate to obtain a conservative semantic support filter.
+    /// `initial_events` optionally substitutes the event predicate only at the
+    /// zero-byte root; every positive prefix still uses `events`.
+    /// `epsilon_closures` supplies complete reflexive/transitive closures for
+    /// nontrivial epsilon sources; omitted sources have the singleton closure.
+    ///
+    /// For trie node p, E_p = eps_pre(events OR union_b pre_b(E_child(p,b))).
+    /// Induction on remaining trie height proves the recurrence. Nodes with
+    /// identical outgoing byte/child signatures have identical E_p and can
+    /// share one row. This quotients the *observation trie*, never lexer states,
+    /// terminal labels, parser coordinates, or token identities.
+    ///
+    /// A bounded analysis may decline without changing the caller's domain.
+    /// Unknown/virtual transitions also decline rather than become dead edges.
+    pub fn prefix_event_sources(
+        &self,
+        flat_trans: &[u32],
+        events: &[bool],
+        epsilon_closures: &[(usize, Box<[u32]>)],
+        initial_events: Option<&[bool]>,
+    ) -> Option<(Vec<bool>, usize)> {
+        let states = events.len();
+        if flat_trans.len() != states.checked_mul(256)? || self.nodes.is_empty()
+            || initial_events.is_some_and(|events| events.len() != states)
+        {
+            return None;
+        }
+        for (source, closure) in epsilon_closures {
+            if *source >= states || closure.iter().any(|&q| q as usize >= states) {
+                return None;
+            }
+        }
+
+        // Reuse the ordinary sorted-vocabulary trie. Bottom-up suffix sharing
+        // avoids evaluating repeated observation tails for every token prefix.
+        let mut classes = vec![0usize; self.nodes.len()];
+        let mut dag = Vec::<Vec<(u8, usize)>>::new();
+        let mut intern = FxHashMap::<Vec<(u8, usize)>, usize>::default();
+        for node in (0..self.nodes.len()).rev() {
+            let mut signature = self.nodes[node].children.iter()
+                .map(|&(byte, child)| (byte, classes[child])).collect::<Vec<_>>();
+            signature.sort_unstable();
+            classes[node] = if let Some(&id) = intern.get(&signature) {
+                id
+            } else {
+                let id = dag.len();
+                dag.push(signature.clone());
+                intern.insert(signature, id);
+                id
+            };
+        }
+        let edges = dag.iter().map(Vec::len).sum::<usize>()
+            + initial_events.map_or(0, |_| dag[classes[0]].len());
+        let epsilon_volume = epsilon_closures.iter().map(|(_, closure)| closure.len()).sum::<usize>();
+        let words = states.div_ceil(64);
+        if states.checked_mul(edges)?.checked_add(epsilon_volume.checked_mul(dag.len())?)? > 120_000_000
+            || words.checked_mul(dag.len())?.checked_mul(16)? > 64 * 1024 * 1024
+        {
+            return None;
+        }
+        let mut used_bytes = [false; 256];
+        for &(byte, _) in dag.iter().flatten() { used_bytes[byte as usize] = true; }
+        let byte_count = used_bytes.iter().filter(|&&used| used).count();
+        if states.checked_mul(byte_count)?.checked_mul(4)? > 64 * 1024 * 1024 {
+            return None;
+        }
+        let used_bytes=used_bytes.iter().enumerate().filter_map(|(b,&yes)|yes.then_some(b)).collect::<Vec<_>>();
+        let mut columns=vec![Vec::<(u32,u32)>::new();256];
+        let mut stored_pairs=0usize;
+        // Scan each contiguous raw transition row once, not one strided full
+        // lexer pass for every byte. This changes storage order only; each
+        // byte column remains sorted by original source-state identity.
+        for (source,row) in flat_trans.chunks_exact(256).enumerate(){
+            for &byte in &used_bytes{
+                let target=row[byte];
+                if target==u32::MAX{continue;}
+                if target as usize>=states{return None;}
+                stored_pairs=stored_pairs.checked_add(1)?;
+                if stored_pairs>8_000_000{return None;}
+                columns[byte].push((source as u32,target));
+            }
+        }
+        let mut event_words = vec![0u64; words];
+        for (state, &event) in events.iter().enumerate() {
+            if event { event_words[state / 64] |= 1u64 << (state % 64); }
+        }
+        let mut rows = Vec::<Vec<u64>>::with_capacity(dag.len());
+        let mut row_ids=Vec::<usize>::with_capacity(dag.len());
+        let mut interned_rows=FxHashMap::<Vec<u64>,usize>::default();
+        let mut preimages=FxHashMap::<(u8,usize),Vec<(usize,u64)>>::default();
+        let mut cache_words=0usize;
+        for children in &dag {
+            let mut live = event_words.clone();
+            for &(byte, child) in children {
+                let target_live = &rows[child];
+                let key=(byte,row_ids[child]);
+                if let Some(cached)=preimages.get(&key){
+                    for &(word,bits) in cached{live[word]|=bits;}
+                }else{
+                    let mut observed=vec![0u64;words];
+                    for &(source,target)in &columns[byte as usize]{
+                        if target_live[target as usize/64]&(1u64<<(target%64))!=0{
+                            observed[source as usize/64]|=1u64<<(source%64);
+                        }
+                    }
+                    let nonzero=observed.into_iter().enumerate().filter(|(_,bits)|*bits!=0).collect::<Vec<_>>();
+                    for &(word,bits)in &nonzero{live[word]|=bits;}
+                    // Stop caching rather than approximating if the auxiliary
+                    // index reaches its memory budget. This is only memoization.
+                    if cache_words+nonzero.len()<=2_000_000 && preimages.len()<65_536{
+                        cache_words+=nonzero.len();preimages.insert(key,nonzero);
+                    }
+                }
+            }
+            // Full closures make this order-independent, including cycles:
+            // any newly observed member's closure is already contained in the
+            // current source's transitive closure.
+            for (source, closure) in epsilon_closures {
+                if closure.iter().any(|&q| live[q as usize / 64] & (1u64 << (q % 64)) != 0) {
+                    live[source / 64] |= 1u64 << (source % 64);
+                }
+            }
+            let next_id=interned_rows.len();
+            let id=*interned_rows.entry(live.clone()).or_insert(next_id);
+            row_ids.push(id);
+            rows.push(live);
+        }
+        // Some observers distinguish the token's zero-byte entry from later
+        // positions (e.g. terminal completion requires consuming a byte, while
+        // an already-visible foreign future can matter at entry). This changes
+        // only the root event set; every child still uses ordinary events.
+        let initial_row;
+        let root = if let Some(initial_events) = initial_events {
+            let mut live = vec![0u64; words];
+            for (q, &event) in initial_events.iter().enumerate() {
+                if event { live[q / 64] |= 1u64 << (q % 64); }
+            }
+            for &(byte, child) in &dag[classes[0]] {
+                for &(source, target) in &columns[byte as usize] {
+                    let source=source as usize;
+                    if rows[child][target as usize / 64] & (1u64 << (target % 64)) != 0
+                    { live[source / 64] |= 1u64 << (source % 64); }
+                }
+            }
+            for (source, closure) in epsilon_closures {
+                if closure.iter().any(|&q| live[q as usize / 64] & (1u64 << (q % 64)) != 0) {
+                    live[source / 64] |= 1u64 << (source % 64);
+                }
+            }
+            initial_row = live;
+            &initial_row
+        } else { &rows[classes[0]] };
+        Some(((0..states).map(|q| root[q / 64] & (1u64 << (q % 64)) != 0).collect(), dag.len()))
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn prefix_event_sources_match_independent_forward_execution() {
+    // Generated byte DFAs with nondeterministic epsilon closures, cycles,
+    // duplicate spellings, empty tokens, and event-free graphs. Compare the
+    // backward DAG recurrence with explicit forward execution of every token
+    // from every raw source (no trie or quotient in that oracle).
+    let mut rng = 7u64;
+    let mut next = || {
+        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (rng >> 32) as usize
+    };
+    for case in 0..512 {
+        let n = 2 + next() % 13;
+        let mut flat = vec![u32::MAX; n * 256];
+        let mut eps = vec![Vec::<usize>::new(); n];
+        for q in 0..n {
+            for b in 0..3 {
+                let target = next() % (n + 2);
+                if target < n { flat[q * 256 + b] = target as u32; }
+            }
+            if next() % 3 == 0 { eps[q].push(next() % n); }
+        }
+        let mut closures = Vec::new();
+        let mut full_closures = Vec::new();
+        for q in 0..n {
+            let mut seen = vec![false; n];
+            let mut pending = vec![q];
+            while let Some(s) = pending.pop() {
+                if seen[s] { continue; }
+                seen[s] = true;
+                pending.extend(eps[s].iter().copied());
+            }
+            let closure = (0..n).filter(|&s| seen[s]).map(|s| s as u32).collect::<Vec<_>>();
+            if closure.len() > 1 { closures.push((q, closure.clone().into_boxed_slice())); }
+            full_closures.push(closure);
+        }
+        let events = (0..n).map(|_| next() % 4 == 0).collect::<Vec<_>>();
+        let mut tokens = (0..12).map(|_| {
+            let length = next() % 7;
+            (0..length).map(|_| (next() % 3) as u8).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+        tokens.sort();
+        let borrowed = tokens.iter().map(Vec::as_slice).collect::<Vec<_>>();
+        let trie = build_token_bounded_analysis_trie_sorted(&borrowed);
+        let initial_events = (0..n).map(|_| next() % 5 == 0).collect::<Vec<_>>();
+        for initial in [None, Some(initial_events.as_slice())] {
+        let (actual, _) = trie.prefix_event_sources(&flat, &events, &closures, initial).unwrap();
+        let expected = (0..n).map(|source| tokens.iter().any(|token| {
+            let mut current = full_closures[source].clone();
+            if current.iter().any(|&q| initial.unwrap_or(&events)[q as usize]) { return true; }
+            for &byte in token {
+                let mut target = Vec::new();
+                for &q in &current {
+                    let q = flat[q as usize * 256 + byte as usize];
+                    if q != u32::MAX { target.extend(full_closures[q as usize].iter().copied()); }
+                }
+                target.sort_unstable(); target.dedup(); current = target;
+                if current.iter().any(|&q| events[q as usize]) { return true; }
+            }
+            false
+        })).collect::<Vec<_>>();
+        assert_eq!(actual, expected, "generated prefix event case {case}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn prefix_event_sources_declines_unknown_targets_and_bad_domains() {
+    let trie = build_token_bounded_analysis_trie_sorted(&[b"ab"]);
+    assert!(trie.prefix_event_sources(&[], &[false], &[], None).is_none());
+    let mut flat = vec![u32::MAX; 256];
+    flat[b'a' as usize] = 3;
+    assert!(trie.prefix_event_sources(&flat, &[false], &[], None).is_none());
+    flat[b'a' as usize] = 0;
+    assert!(trie.prefix_event_sources(&flat, &[false], &[(0, vec![1].into_boxed_slice())], None).is_none());
+    assert_eq!(trie.prefix_event_sources(&flat, &[false], &[], None).unwrap().0, vec![false]);
+    assert_eq!(trie.prefix_event_sources(&flat, &[true], &[], None).unwrap().0, vec![true]);
+    flat[b'a' as usize] = u32::MAX;
+    assert_eq!(trie.prefix_event_sources(&flat, &[true], &[], Some(&[false])).unwrap().0, vec![false]);
+    assert!(trie.prefix_event_sources(&flat, &[true], &[], Some(&[])).is_none());
 }
 
 pub fn build_token_bounded_analysis_trie_sorted(

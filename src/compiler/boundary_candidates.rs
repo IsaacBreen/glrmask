@@ -982,6 +982,24 @@ pub(crate) fn prepare_boundary_candidate_summary(
     boundary_candidate_summary(constraint, vocab).1
 }
 
+/// Explicit component-only preparation for a mutable compiled artifact.
+///
+/// Unlike a read-only query, this entry point may replace deferred/stale
+/// metadata and invalidate unchanged-resave bytes. It never sees a caller,
+/// sibling component, or link graph. The same fingerprint and widening rules
+/// remain authoritative; Disabled is preserved rather than silently enabled.
+pub(crate) fn persist_boundary_candidate_summary(
+    constraint: &mut Constraint,
+    vocab: &crate::Vocab,
+) -> BoundaryCandidateStats {
+    let (summary, stats) = boundary_candidate_summary(constraint, vocab);
+    constraint.serialized_artifact_cache = None;
+    let _ = constraint.boundary_candidate_summary.take();
+    constraint.boundary_candidate_summary.set(summary)
+        .expect("exclusive mutable preparation leaves the summary cell empty");
+    stats
+}
+
 /// Return the checked original-ID candidate set for one component. `None`
 /// means the summary is unavailable and the caller must widen to the full
 /// vocabulary; `Some(empty)` is a proved empty proper-prefix candidate set.
@@ -1357,4 +1375,57 @@ mod tests {
         assert_eq!(stats.candidate_tokens, 2);
     }
 
+}
+
+#[cfg(test)]
+mod preparation_tests {
+    use super::*;
+
+    fn fixture() -> (Constraint, crate::Vocab) {
+        let vocab=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),
+            (2,b"ax".to_vec()),(3,b"b".to_vec()),(4,b"ba".to_vec())]);
+        let component=Constraint::from_glrm_grammar(r#"
+            start document; t SUB ::= @token(999);
+            nt document ::= "a" SUB | "b" SUB;
+        "#,&vocab).unwrap();
+        (component,vocab)
+    }
+
+    #[test]
+    fn explicit_preparation_persists_checked_summary_after_reload() {
+        let (mut source,vocab)=fixture();
+        source.boundary_candidate_summary.take();
+        source.boundary_candidate_summary.set(BoundaryCandidateSummary::Unknown {
+            reason:SummaryUnavailable::Deferred,
+        }).unwrap();
+        let original=source.save();
+        let expected=boundary_candidate_ids(&source,&vocab).0.unwrap();
+        let mut loaded=Constraint::load_with_vocab(&original,&vocab).unwrap();
+        loaded.prepare_for_composition_internal(&vocab).unwrap();
+        assert!(loaded.boundary_candidate_summary.get().unwrap().is_known());
+        assert_eq!(boundary_candidate_ids(&loaded,&vocab).0,Some(expected.clone()));
+        assert!(loaded.serialized_artifact_cache.is_none());
+        let saved=loaded.save();
+        let mut reloaded=Constraint::load_with_vocab(&saved,&vocab).unwrap();
+        reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
+        assert!(reloaded.boundary_candidate_summary.get().unwrap().is_known());
+        assert_eq!(boundary_candidate_ids(&reloaded,&vocab).0,Some(expected));
+        assert_eq!(reloaded.save(),saved,"unchanged reload must retain the newly prepared artifact");
+    }
+
+    #[test]
+    fn explicit_preparation_preserves_disabled_policy_after_reload() {
+        let (mut source,vocab)=fixture();
+        source.boundary_candidate_summary.take();
+        source.boundary_candidate_summary.set(BoundaryCandidateSummary::Unknown {
+            reason:SummaryUnavailable::Disabled,
+        }).unwrap();
+        let mut loaded=Constraint::load_with_vocab(&source.save(),&vocab).unwrap();
+        loaded.prepare_for_composition_internal(&vocab).unwrap();
+        assert!(matches!(loaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
+        let mut reloaded=Constraint::load_with_vocab(&loaded.save(),&vocab).unwrap();
+        reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
+        assert!(matches!(reloaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
+        assert!(boundary_candidate_ids(&reloaded,&vocab).0.is_none());
+    }
 }
