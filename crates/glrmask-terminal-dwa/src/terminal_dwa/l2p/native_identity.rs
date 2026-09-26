@@ -93,7 +93,7 @@ pub(in crate::terminal_dwa) fn try_build_borrowed(
     let owners = (0..grammar.num_terminals)
         .map(|t| scope.ownership().owner_of_terminal(t).map(|owner| owner.0))
         .collect::<Option<Vec<_>>>()?;
-    let direct_seed=std::env::var_os("GLRMASK_BOUNDARY_BORROWED_NATIVE_SEED").is_some();
+    let direct_seed=crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_BORROWED_NATIVE_SEED");
     let mut seed = NWA::new(id_map.num_tsids(), id_map.max_internal_token_id());
     let leaf = seed.add_state();
     seed.set_final_weight(leaf, Weight::all());

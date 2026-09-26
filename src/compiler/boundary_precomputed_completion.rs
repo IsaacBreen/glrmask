@@ -120,7 +120,7 @@ impl PreparedSourceSpan {
         ).map(|(mask,_)|mask)
     }
     pub(crate) fn refine(&self,merged:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope)->Option<FirstRefinement>{
-        let fast=std::env::var_os("GLRMASK_BOUNDARY_UNIFORM_FIRST_PROOF").is_some();
+        let fast=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_UNIFORM_FIRST_PROOF");
         let result=self.refine_impl(merged,vocab,scope,fast);
         if fast && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_UNIFORM_FIRST_PROOF").is_some(){
             let reference=self.refine_impl(merged,vocab,scope,false);

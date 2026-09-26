@@ -541,7 +541,7 @@ impl<'a> SignedLinkContext<'a> {
                 return Err(format!("prepared template source {index} is not the context's table"));
             }
         }
-        let decode = std::env::var_os("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES").is_some();
+        let decode = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES");
         let started = Instant::now();
         self.component_template_sources = components.iter()
             .map(|component| {
@@ -1402,7 +1402,7 @@ pub(crate) fn build_fragment_library_cached(
     emitted: &[bool],
     start_component: u32,
 ) -> Result<FragmentLibrary, String> {
-    let reuse = std::env::var_os("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES").is_some();
+    let reuse = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_RETAINED_TEMPLATES");
     let result = build_fragment_library_cached_impl(context, cache, emitted, start_component, reuse)?;
     if reuse && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_RETAINED_TEMPLATES").is_some() {
         let reference_cache = FragmentTransferCache::new(context)?;
@@ -2010,7 +2010,7 @@ fn compile_signed_shard_parser_impl(
     if backward&&(project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support){
         return Err("backward preimage must be tested against unrestricted ordinary assembly".into());
     }
-    let direct_requested=std::env::var_os("GLRMASK_BOUNDARY_DIRECT_NATIVE_PROGRAM").is_some();
+    let direct_requested=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_DIRECT_NATIVE_PROGRAM");
     let direct=if direct_requested && !(backward||project||atoms||bundles||owner_program||top_flow||admission_tails||template_read_support)
         && std::env::var_os("GLRMASK_SIGNED_SHARD_NO_CONTROLS").is_none()
     { direct_program::compile(context,library,shard_dwa,start_component) }else{None};
@@ -2265,9 +2265,9 @@ fn try_compile_with_predecessor_support(
         let t=Instant::now();
         support=Some(certificate.restrict(&mut positive).ok()?);
         support_ms=t.elapsed().as_secs_f64()*1000.0;
-        let trim_reference=(std::env::var_os("GLRMASK_BOUNDARY_TRIM_POSITIVE").is_some()
+        let trim_reference=(crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TRIM_POSITIVE")
             &&std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_TRIM_POSITIVE").is_some()).then(||positive.clone());
-        if std::env::var_os("GLRMASK_BOUNDARY_TRIM_POSITIVE").is_some(){
+        if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TRIM_POSITIVE"){
             let started=Instant::now();
             if let Some((compacted,stats))=super::boundary_stack_support::trim::compact(&positive){
                 positive=compacted;
@@ -2989,7 +2989,7 @@ fn compile_signed_shard_parser_with_support(
         std::fs::write(directory.join(format!("component-{start_component}-tables.bin")), bytes)
             .expect("write stack-domain inputs");
     }
-    if std::env::var_os("GLRMASK_BOUNDARY_PREDECESSOR_SUPPORT").is_some() {
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PREDECESSOR_SUPPORT") {
         let assembly_ms=compose_started.elapsed().as_secs_f64()*1000.0;
         if let Some((parser_dwa,prepare_ms,compile_ms))=try_compile_with_predecessor_support(context,&arena,start_component) {
             return Ok(SignedShardOutput{parser_dwa,templates_ms:library.templates_ms,
@@ -2998,7 +2998,7 @@ fn compile_signed_shard_parser_with_support(
         }
         if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){eprintln!("[glrmask/profile][boundary_predecessor_support] component={start_component} selected=false exact_original_fallback=true");}
     }
-    if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_GLOBAL_ATOMS").is_some() {
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_NATIVE_GLOBAL_ATOMS") {
         let assembly_ms = compose_started.elapsed().as_secs_f64() * 1000.0;
         if let Some((parser_dwa, encode_ms, compile_ms)) = try_compile_with_native_global_atoms(
             &arena, context.total_scoped_states, start_component,
@@ -3259,7 +3259,7 @@ fn compile_signed_shard_parser_with_support(
     let pre_hash_states = parser_dwa.num_states();
     let pre_hash_trans = parser_dwa.num_transitions();
     let pre_hash_acyclic = parser_dwa.is_acyclic();
-    let atom_minimize = std::env::var_os("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE").is_some();
+    let atom_minimize = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FINITE_ATOM_MINIMIZE");
     if atom_minimize || std::env::var_os("GLRMASK_BOUNDARY_FINITE_POINT_MINIMIZE").is_some() {
         let finite_started = Instant::now();
         let mut domain_ms = 0.0;

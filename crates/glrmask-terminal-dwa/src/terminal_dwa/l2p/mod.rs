@@ -1652,8 +1652,8 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
             let mut native_pipeline_raw=None;
             let native_pipeline = if partition_label=="boundary_identity_refinement"
                 && !use_terminal_coloring
-                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
-                && std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+                && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE")
+                && crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA")
                 && std::env::var_os("GLRMASK_SKIP_L2P_MINIMIZE").is_none()
                 && internal_vocab.iter().any(|(_,word)|word.len()>2)
             {
@@ -1834,7 +1834,7 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                 (nwa, false)
             };
             let native_started = Instant::now();
-            let native_eligible = std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some()
+            let native_eligible = crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA")
                 && partition_label == "boundary_identity_refinement"
                 && shard_options.and_then(|options| options.crossing_filter).is_some()
                 && !path_conditioned_after_preminimize

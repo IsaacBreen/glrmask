@@ -971,7 +971,7 @@ pub(crate) fn build_root_call_candidates(
     }
     let summary_ms = started.elapsed().as_secs_f64() * 1000.0;
     let map_started = Instant::now();
-    let indexed = std::env::var_os("GLRMASK_BOUNDARY_ROOT_PREFIX_INDEX").is_some();
+    let indexed = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_PREFIX_INDEX");
     let candidate_ids = if indexed {
         root_call_candidate_ids_indexed(vocab, language.bytes, entries.as_deref())
     } else {

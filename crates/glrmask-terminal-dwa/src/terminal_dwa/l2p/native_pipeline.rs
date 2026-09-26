@@ -75,7 +75,7 @@ struct Pool {
 impl Pool {
     fn new() -> Self {
         let mut p = Self::default();
-        p.bulk=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA").is_some();
+        p.bulk=crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_BULK_ALGEBRA");
         p.intern_bits([0; WORDS]);
         p.values.push(Runs::new());
         p.values.push(Runs::new());
@@ -606,7 +606,7 @@ fn run_imported(states:Vec<State>,starts:&[u32],mut p:Pool,minimize:bool,import_
         ..Default::default()
     };
     let t = Instant::now();
-    let leaf_fused=minimize&&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EARLY_LEAVES").is_some();
+    let leaf_fused=minimize&&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EARLY_LEAVES");
     let mut leaf_id=None::<u32>;let mut leaf_weights=Vec::new();
     let start = closure(
         &states,
@@ -917,12 +917,12 @@ impl RowMap {
 }
 
 fn minimize_sparse_graph(graph: Graph, p: &mut Pool,leaf:Option<u32>) -> Option<(Graph, u32)> {
-    minimize_sparse_graph_policy(graph,p,leaf,std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SINGLE_CLASS").is_some())
+    minimize_sparse_graph_policy(graph,p,leaf,crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_SINGLE_CLASS"))
 }
 fn minimize_sparse_graph_policy(mut graph: Graph, p: &mut Pool,leaf:Option<u32>,single_class:bool) -> Option<(Graph, u32)> {
     use rustc_hash::FxHasher;
     use std::hash::{Hash, Hasher};
-    let reuse_scratch=std::env::var_os("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH").is_some();
+    let reuse_scratch=crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_MIN_SCRATCH");
     let profiling = std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NATIVE_TERMINAL").is_some();
     let total = Instant::now();
     let mut phase = Instant::now();

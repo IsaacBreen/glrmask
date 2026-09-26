@@ -4,6 +4,34 @@
 
 pub(crate) use glrmask_vocab::Vocab;
 
+fn optimized_env_value_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "0" | "false" | "no" | "off"
+    )
+}
+
+pub(crate) fn optimized_env_flag(name: &str) -> bool {
+    std::env::var_os(name)
+        .map(|value| optimized_env_value_enabled(&value.to_string_lossy()))
+        .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod optimized_env_policy_tests {
+    use super::*;
+
+    #[test]
+    fn accepted_boolean_override_values_are_unambiguous() {
+        for value in ["", "0", "false", "FALSE", " no ", "Off"] {
+            assert!(!optimized_env_value_enabled(value), "{value:?}");
+        }
+        for value in ["1", "true", "yes", "on", "garbage"] {
+            assert!(optimized_env_value_enabled(value), "{value:?}");
+        }
+    }
+}
+
 pub(crate) mod automata {
     pub(crate) use glrmask_finite_automata::unweighted_u32;
     pub(crate) use glrmask_weighted_automata::weighted_u32;

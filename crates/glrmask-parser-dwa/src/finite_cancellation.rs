@@ -160,7 +160,7 @@ pub(super) fn compute_with_topology(
     topology: Option<&CheckedNativeTopology>,
 ) -> Option<(Vec<FastBoundaryDerivedRow>, SummaryStats)> {
     compute_with_topology_mode(states,interner,topology,
-        std::env::var_os("GLRMASK_BOUNDARY_CANCELLATION_READ_FILTER").is_some())
+        crate::optimized_env_flag("GLRMASK_BOUNDARY_CANCELLATION_READ_FILTER"))
 }
 
 fn compute_with_topology_mode(

@@ -136,7 +136,7 @@ struct Masks {
 impl Masks {
     fn new(rows: usize) -> Self {
         Self::with_storage(rows,
-            std::env::var_os("GLRMASK_BOUNDARY_MIN_MASK_INDEX").is_some(),
+            crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_MASK_INDEX"),
             std::env::var_os("GLRMASK_BOUNDARY_MIN_SPARSE_OVERLAP").is_some())
     }
 
@@ -144,7 +144,7 @@ impl Masks {
         let mut result = Self {
             rows, points: None, point_rows: Vec::new(), decoded_atoms: None, decoded_point_rows: None, values: Vec::new(), cardinalities: Vec::new(), ids: FxHashMap::default(),
             indexed: FxHashMap::default(), nonzero_words: Vec::new(), use_index,
-            borrow_rows: std::env::var_os("GLRMASK_BOUNDARY_MIN_BORROWED_ROWS").is_some(),
+            borrow_rows: crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_BORROWED_ROWS"),
             // Decline only this storage shortcut, not an otherwise valid
             // minimization, when word offsets do not fit the compact index.
             use_sparse_overlap: use_sparse_overlap && rows <= u16::MAX as usize,
@@ -670,7 +670,7 @@ fn minimize_prepared(
     let started=Instant::now();
     let mut needed=vec![0;n];
     let mut heights=vec![0usize;n];
-    let dedup_support=std::env::var_os("GLRMASK_BOUNDARY_MIN_DEDUP_SUPPORT").is_some();
+    let dedup_support=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_DEDUP_SUPPORT");
     let mut seen_contribution=Vec::<u32>::new();
     let mut duplicate_contributions=0usize;
     for &s in topo.iter().rev() {
@@ -764,7 +764,7 @@ fn minimize_prepared(
         bucket.sort_unstable_by_key(|&s|std::cmp::Reverse((masks.popcount(needed[s]),states[s].edges.len(),s)));
         let base=groups.len();
         let mut exact=FxHashMap::<Signature,u32>::default();
-        let reuse_rows=std::env::var_os("GLRMASK_BOUNDARY_MIN_ROW_REUSE").is_some();
+        let reuse_rows=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_ROW_REUSE");
         let mut row_keys=FxHashMap::<u64,smallvec::SmallVec<[(usize,u32);1]>>::default();
         for s in bucket {
             let signature=if reuse_rows {
@@ -811,7 +811,7 @@ fn minimize_prepared(
     }
     profile.merge_ms=started.elapsed().as_secs_f64()*1000.0;
     let started=Instant::now();
-    if std::env::var_os("GLRMASK_BOUNDARY_MIN_POINT_DECODE").is_some() {
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_MIN_POINT_DECODE") {
         let selected=masks.prepare_point_decoder().is_some();
         if std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some(){
             eprintln!("[glrmask/profile][min_point_decoder] selected={selected} rows={} points={} prepare_ms={:.3}",
@@ -821,7 +821,7 @@ fn minimize_prepared(
         }
     }
     let mut exported=FxHashMap::<Mask,Weight>::default();
-    if std::env::var_os("GLRMASK_BOUNDARY_PARALLEL_WEIGHT_EXPORT").is_some()
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PARALLEL_WEIGHT_EXPORT")
         && rayon::current_num_threads()>1 && groups.len()>=256 {
         use rayon::prelude::*;
         let mut seen=vec![false;masks.values.len()];let mut ids=Vec::new();

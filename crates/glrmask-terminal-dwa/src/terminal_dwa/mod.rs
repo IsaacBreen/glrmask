@@ -13,6 +13,7 @@ use crate::automata::lexer::compile::{
     VocabularyRepeatHorizonCache,
 };
 pub mod classify;
+pub(crate) mod env_policy;
 mod definition_skeleton;
 mod finalize_ignore;
 #[cfg(any(test, feature = "internal-api"))]

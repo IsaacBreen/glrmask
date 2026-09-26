@@ -1,4 +1,5 @@
 pub mod compile;
+pub(crate) mod boundary_env;
 pub(crate) mod boundary_transfer;
 pub(crate) mod boundary_bit_minimize;
 pub(crate) mod boundary_weight_codec;

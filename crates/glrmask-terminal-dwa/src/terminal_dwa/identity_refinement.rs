@@ -44,7 +44,7 @@ impl NativeMinimizationFixedPoint {
     // row order after generic hash-class enumeration. They must keep the old
     // second pass; a language or isomorphism proof alone is not sufficient.
     fn from_native(dwa:&crate::automata::weighted_u32::dwa::DWA,ignore:Option<TerminalID>)->Option<Self>{
-        Self::from_native_with_support(dwa,ignore,std::env::var_os("GLRMASK_BOUNDARY_CERTIFIED_ROOT_SUPPORT").is_some())
+        Self::from_native_with_support(dwa,ignore,crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_CERTIFIED_ROOT_SUPPORT"))
     }
     fn from_native_with_support(dwa:&crate::automata::weighted_u32::dwa::DWA,ignore:Option<TerminalID>,support:bool)->Option<Self>{
         let n=dwa.states().len();
@@ -148,7 +148,7 @@ fn build_identity_common(
         .map(|raw|borrowed.map_or(Some(raw),|m|m.logical(raw))).collect::<Option<Vec<_>>>()?;
     roots.sort_unstable(); roots.dedup();
     if roots != scope.reset_states() { return None; }
-    let packed = std::env::var_os("GLRMASK_BOUNDARY_PACK_INITIAL_TSIDS").is_some();
+    let packed = crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_PACK_INITIAL_TSIDS");
     let states = singleton_state_map(scope.initial_states().keep_raw(), packed);
     let mut words = BTreeMap::<Vec<u8>, Vec<u32>>::new();
     for (&id, word) in vocab.entries_map() {
@@ -210,9 +210,9 @@ fn build_identity_common(
         Some(scope.initial_states().keep_raw()), Some(&options),
         )
     };
-    let direct=(std::env::var_os("GLRMASK_BOUNDARY_DIRECT_IDENTITY_ENTRY").is_some()
-        &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE").is_some()
-        &&std::env::var_os("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA").is_some())
+    let direct=(crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_DIRECT_IDENTITY_ENTRY")
+        &&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_EVENT_PIPELINE")
+        &&crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_TERMINAL_ALGEBRA"))
         .then(||if let Some(map)=borrowed{l2p::native_identity::try_build_borrowed(tokenizer,vocab,ignore_terminal,grammar,
             disallowed_follows,Some(&flat_trans),scope,&shared.id_map,map)}else{l2p::native_identity::try_build(tokenizer,vocab,ignore_terminal,grammar,
             disallowed_follows,Some(&flat_trans),scope,&shared.id_map)}).flatten();

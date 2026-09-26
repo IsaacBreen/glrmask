@@ -156,7 +156,7 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             pruned_weight_cache: FxHashMap::default(),
             leaf_weight_cache: FxHashMap::default(),
             transition_buffer: FxHashMap::default(),
-            compact_buffer:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_COMPACT_EVENT_BUFFER").is_some().then(native_compact_buffer::CompactBuffer::default),
+            compact_buffer:crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_COMPACT_EVENT_BUFFER").then(native_compact_buffer::CompactBuffer::default),
             epsilon_buffer: FxHashMap::default(),
             profile: TerminalDwaBuildProfile::default(),
             flat_transitions: vec![None; num_tokenizer_states],
@@ -170,15 +170,15 @@ impl<'tok, 'pm, 'nwa> TerminalNwaBuilder<'tok, 'pm, 'nwa> {
             profile_timing: std::env::var_os("GLRMASK_PROFILE_L2P_TIMING").is_some(),
             has_epsilon_transitions,
             scalar_deterministic_dispatch,
-            scalar_cursor:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR").is_some(),
-            lean_frontiers:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(),
-            prove_future_absence:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FUTURE_ABSENCE").is_some()
+            scalar_cursor:crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_SCALAR_CURSOR"),
+            lean_frontiers:crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME"),
+            prove_future_absence:crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FUTURE_ABSENCE")
                 && !tokenizer.has_virtual_residual_runtime(),
             validate_future_absence:std::env::var_os("GLRMASK_VALIDATE_NATIVE_FUTURE_ABSENCE").is_some(),
             future_absence_hits:0,
-            batch_leaf_flush:std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FACTORED_LEAF_FLUSH").is_some(),
+            batch_leaf_flush:crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FACTORED_LEAF_FLUSH"),
             leaf_flush_failed:false,
-            cached_reset_roots:if std::env::var_os("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME").is_some(){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
+            cached_reset_roots:if crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_NATIVE_FRONTIER_LIFETIME"){tokenizer.deterministic_reset_states().into_vec()}else{Vec::new()},
             validate_scalar_cursor:std::env::var_os("GLRMASK_VALIDATE_NATIVE_SCALAR_CURSOR").is_some(),
             dfa_scan_strict_reference: std::env::var_os(
                 "GLRMASK_L2P_NWA_DFA_SCAN_STRICT_REFERENCE",
@@ -1260,7 +1260,7 @@ fn build_impl<'a>(tokenizer:&'a Tokenizer,coloring:&TerminalColoring,ignore:Opti
   builder.scalar_deterministic_dispatch=map.scalar_dispatch;
   builder.shared_flat_transitions=flat.filter(|rows|rows.len()==tokenizer.num_states()as usize*256);
   builder.cached_reset_roots=builder.reset_roots().into_vec();
-  if std::env::var_os("GLRMASK_BOUNDARY_BORROWED_COMPACT").is_some(){
+  if crate::terminal_dwa::env_policy::enabled("GLRMASK_BOUNDARY_BORROWED_COMPACT"){
    builder.borrowed_cursor=native_borrowed_cursor::BorrowedScalarCache::new(tokenizer,map,U8Set::from_words(*tree.subtree_bytes()),flat);
   }
   builder.lean_frontiers=true;

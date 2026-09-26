@@ -4,7 +4,9 @@
 
 This checkpoint consolidates the accepted boundary compiler through N70, the subsequent terminal-side optimizations through P11, and K01's exact sole-class minimizer shortcut. It does **not** claim that the complete pre-parser stage has reached its 10 ms objective. It is also not a new LR/template/cancellation algorithm.
 
-The measured configuration is explicitly opt-in. The complete selector set is checked in at `scripts/profiles/boundary-link-validated-20260926.json`; merely building the repository does not enable every selector in that file. Several selectors configure the previously accepted parser path as well as the terminal path, so this is a reproducibility profile for the whole benchmark, not a new public compiler API.
+The measured configuration is now the **normal compiler default**. The complete selector set remains checked in at `scripts/profiles/boundary-link-validated-20260926.json` as a frozen reproducibility record; ordinary callers do not need to export those variables. Several selectors configure the previously accepted parser path as well as the terminal path, so the profile still records the whole benchmark configuration rather than defining a new public compiler API.
+
+The positive optimization variables are now rollback/debug overrides: when absent, the validated path is enabled; explicit `0`, `false`, `no`, `off`, or an empty value disables that optimization. `GLRMASK_BOUNDARY_QUERY_TILE_SIZE` defaults to `32`; an explicit `0`, invalid value, or out-of-range value disables tiling. `RAYON_NUM_THREADS` is intentionally **not** baked into the defaults because the correct worker count is machine/workload dependent.
 
 Use the launcher to avoid inheriting stale experiment, validation, or dump switches:
 
@@ -16,7 +18,7 @@ python3 scripts/run_boundary_profile.py --threads 10 -- \
     target/release/examples/composition_build_static_artifact PREPARED_CACHE output.bin
 ```
 
-The launcher modifies only its child environment, does not use a shell, and leaves unrelated environment variables intact. It removes inherited `GLRMASK_*`, `PROBE_*`, `PROFILE_*`, `PHASE_*`, and `DYNAMIC_REFERENCE*` switches before installing the recorded profile. `--threads` sets the child's Rayon count; when omitted, an existing `RAYON_NUM_THREADS` value is retained. Many Rust switches are presence-based: setting them to `0` is **not** equivalent to unsetting them.
+The launcher modifies only its child environment, does not use a shell, and leaves unrelated environment variables intact. It removes inherited `GLRMASK_*`, `PROBE_*`, `PROFILE_*`, `PHASE_*`, and `DYNAMIC_REFERENCE*` switches before installing the recorded profile. `--threads` sets the child's Rayon count; when omitted, an existing `RAYON_NUM_THREADS` value is retained. The validated optimization switches are value-aware: explicit false-like values disable them, unlike the historical presence-only behavior.
 
 The existing selected10 example expects `core.bin`, `dispatch-literal.bin`, and `vocab_dump.bin` in `PREPARED_CACHE`. It composes the `PROGRAMMATIC_TOOL_SUFFIX` slot. That fixture and its prepared inputs are not supplied by this profile. The separate `composition_prepare_component` example prepares one component without a future partner; preparation and certified reload costs must be accounted for separately from link latency. Old component metadata remains supported by conservative fallback.
 
@@ -103,7 +105,7 @@ One initial merge build failed on the pointer type mismatch described above and 
 
 After integration, a separate shared-setup investigation found that the first cached candidate-summary lookup still computed the full vocabulary digest. It issued three small BLAKE3 update calls per model token: token ID, byte length and token bytes. S01 batches the **identical ordered byte transcript** through a 4 KiB buffer; large byte strings pass directly to the hasher. The digest algorithm/version, canonical field encoding, cached value and cache lifetime remain unchanged. No hashing work is moved outside the measured link.
 
-The additional switch `GLRMASK_BUFFERED_VOCAB_DIGEST=1` is included in the checked-in validated profile. It is not enabled by default outside that profile. This improves a fresh vocabulary's first digest computation; an already cached digest was already cheap and does not gain another four milliseconds on every reuse.
+The additional switch `GLRMASK_BUFFERED_VOCAB_DIGEST=1` remains in the checked-in profile as an explicit record, but buffered digesting is now enabled by default with the rest of the validated configuration. Setting `GLRMASK_BUFFERED_VOCAB_DIGEST=0` is the rollback path. This improves a fresh vocabulary's first digest computation; an already cached digest was already cheap and does not gain another four milliseconds on every reuse.
 
 Two new independent test functions cover 97 vocabulary cases and 13 update-boundary sizes, comparing both the original incremental calculation and a separately assembled canonical byte transcript. The full root suite now passes **894 tests, zero failures, 51 ignored**, under both default and accepted-plus-digest-validation configurations. Both thread-count artifact/mapping/arbitrary-prefix gates, all four 11,767-step replays, and the historical legacy artifact remain exact. Only `src/compiler/compile.rs` changes executable source for S01; all other Rust source is hash-locked.
 

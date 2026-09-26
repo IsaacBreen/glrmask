@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Run a command with the recorded, opt-in static boundary benchmark profile.
+"""Run a command with the recorded static-boundary validation profile.
 
-Only the launched child's environment is changed. This is an explicit research
-profile, not a claim that these options are production defaults or that every
-input benefits. Unsupported native shapes retain the compiler's normal fallback.
+The validated selectors are now the production defaults. This launcher remains
+useful for reproducible benchmarking because it clears stale experiment flags
+and then spells the frozen September 26 configuration out explicitly. Only the
+launched child's environment is changed. Unsupported native shapes retain the
+compiler's normal fallback.
 """
 import argparse
 import json

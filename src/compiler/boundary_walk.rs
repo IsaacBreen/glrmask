@@ -218,15 +218,16 @@ fn build_boundary_terminal_dwa_with_prepared(
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
     prepared: Option<&super::boundary_precomputed_completion::PreparedSourceSpan>,
 ) -> Option<BoundaryWalkOutput> {
-    let tile_size=std::env::var("GLRMASK_BOUNDARY_QUERY_TILE_SIZE").ok()
-        .and_then(|s|s.parse::<usize>().ok()).filter(|&n|(1..=4096).contains(&n));
-    let terminal_support=std::env::var_os("GLRMASK_BOUNDARY_QUERY_TERMINAL_SUPPORT").is_some();
-    let query_view=std::env::var_os("GLRMASK_BOUNDARY_QUERY_VIEW").is_some();
-    let identity = std::env::var_os("GLRMASK_BOUNDARY_IDENTITY_REFINEMENT").is_some();
+    let tile_size = crate::compiler::boundary_env::bounded_usize(
+        "GLRMASK_BOUNDARY_QUERY_TILE_SIZE", 32, 1, 4096,
+    );
+    let terminal_support=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_QUERY_TERMINAL_SUPPORT");
+    let query_view=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_QUERY_VIEW");
+    let identity = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_IDENTITY_REFINEMENT");
     let first_started = Instant::now();
-    let use_first = std::env::var_os("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT").is_some();
+    let use_first = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FIRST_COMPLETION_REFINEMENT");
     let precomputed = (use_first
-        && std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION").is_some())
+        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION"))
         .then(|| prepared.and_then(|span| span.refine(inputs.merged_tokenizer, inputs.vocab, inputs.scope)))
         .flatten();
     let precomputed_selected = precomputed.is_some();
@@ -322,7 +323,7 @@ fn build_boundary_terminal_dwa_synthesized(
     // or support reaching that new coordinate cannot certify this operation.
     let dead_class = output.id_map.tokenizer_states.num_internal_ids();
     if !proves_fresh_dead_class(&output.dwa, dead_class,
-        std::env::var_os("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND").is_some()) {
+        crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")) {
         return None;
     }
     output.id_map.tokenizer_states = output.id_map.tokenizer_states.fill_unmapped_with_new_class();
@@ -409,7 +410,7 @@ fn build_boundary_terminal_dwa_query(
     shared: Option<&tdwa::ScopedBoundarySharedContext<'_>>,
     tile_size:Option<usize>, terminal_support:bool, query_view:bool, identity:bool,
 ) -> Option<BoundaryWalkOutput> {
-    if identity && query_view && std::env::var_os("GLRMASK_BOUNDARY_BORROWED_QUERY").is_some(){
+    if identity && query_view && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_BORROWED_QUERY"){
         if let Some(candidate)=build_boundary_terminal_dwa_borrowed_query(inputs){
             if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_BORROWED_QUERY").is_some(){
                 let reference=build_boundary_terminal_dwa_query_reference(inputs,shared,tile_size,terminal_support,query_view,identity)?;
@@ -459,7 +460,7 @@ fn build_boundary_terminal_dwa_query_reference(
         // assigning all omitted states to it; symbolic ALL is not a finite row.
         let dead_class=output.id_map.tokenizer_states.num_internal_ids();
         if !proves_fresh_dead_class(&output.dwa,dead_class,
-            std::env::var_os("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND").is_some()){
+            crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")){
             return build_boundary_terminal_dwa_on_view(inputs,shared);
         }
         output.id_map.tokenizer_states=output.id_map.tokenizer_states.fill_unmapped_with_new_class();
@@ -631,8 +632,8 @@ fn finalize_scoped_terminal_output(
     // not carry dead terminal structure into template/parser construction and
     // so the empty-shard representation remains stable across family choices.
     let certified = native_fixed_point.is_some()
-        && std::env::var_os("GLRMASK_BOUNDARY_REUSE_NATIVE_MINIMUM").is_some();
-    let summarize_after=std::env::var_os("GLRMASK_BOUNDARY_SUMMARIZE_AFTER_MIN").is_some();
+        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_NATIVE_MINIMUM");
+    let summarize_after=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SUMMARIZE_AFTER_MIN");
     let reference=(certified && std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_NATIVE_MINIMUM").is_some())
         .then(||finalize_boundary_terminal_dwa(dwa.clone(),&id_map,summarize_after));
     let (finalized, accepted_tokens, final_minimize_ms) = if certified {
@@ -813,7 +814,7 @@ pub(crate) fn boundary_accepted_tokens(dwa: &DWA, id_map: &InternalIdMap) -> BTr
 // Terminal-only selection: parser support calculations retain their original
 // implementation. The candidate reads this graph without changing it.
 fn terminal_accepted_original_tokens(dwa: &DWA, id_map: &InternalIdMap) -> BTreeSet<u32> {
-    if std::env::var_os("GLRMASK_BOUNDARY_BATCHED_TOKEN_SUPPORT").is_some()
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_BATCHED_TOKEN_SUPPORT")
         && let Some(tokens) = super::boundary_terminal_summary::accepted_tokens(dwa, id_map)
     {
         return tokens;
@@ -1106,7 +1107,7 @@ where
 
     let flat_started = Instant::now();
     let make_original_flat=|| Arc::from(tdwa::l1::build_flat_transition_table(inputs.merged_tokenizer));
-    let use_direct_flat=std::env::var_os("GLRMASK_BOUNDARY_DIRECT_FLAT_ARC").is_some();
+    let use_direct_flat=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_DIRECT_FLAT_ARC");
     let prepared_flat=use_direct_flat.then(|| super::boundary_flat_transitions::build(inputs.merged_tokenizer,true)).flatten();
     let direct_flat_selected=prepared_flat.is_some();
     let flat: Arc<[u32]> = prepared_flat.unwrap_or_else(make_original_flat);
@@ -1123,15 +1124,15 @@ where
     // epsilon source/target rows preserve the exact original NFA operation.
     // Construction and every metadata query stay inside this link timer.
     let support_setup_started = Instant::now();
-    let support_transitions = (std::env::var_os("GLRMASK_BOUNDARY_TOKEN_LIVENESS").is_some()
-        && std::env::var_os("GLRMASK_BOUNDARY_TOKEN_FOLLOWS").is_some())
+    let support_transitions = (crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TOKEN_LIVENESS")
+        && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TOKEN_FOLLOWS"))
         .then(|| super::boundary_token_support::PreparedSupportTransitions::new(
             inputs.merged_tokenizer, &flat)).flatten();
     if compose_profile_enabled() {
         eprintln!("[glrmask/profile][boundary_support_transition_setup] states={} ms={:.3}",
             inputs.merged_tokenizer.num_states(), support_setup_started.elapsed().as_secs_f64() * 1000.0);
     }
-    let shared = std::env::var_os("GLRMASK_BOUNDARY_SHARED_COMPILE_CONTEXT").is_some()
+    let shared = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SHARED_COMPILE_CONTEXT")
         .then(|| tdwa::ScopedBoundarySharedContext::new(inputs.merged_tokenizer, inputs.grammar));
     let num_terms = inputs.grammar.num_terminals as usize;
     #[cfg(test)]
@@ -1243,8 +1244,8 @@ where
             && std::env::var_os("GLRMASK_DISABLE_BOUNDARY_PREFIX_SEEDS").is_none()
         {
             let started = Instant::now();
-            let prepared_support = std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS")
-                .and_then(|_| prepared_first)
+            let prepared_support = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_PREFIX_SEEDS")
+                .then_some(prepared_first).flatten()
                 .and_then(|spans| spans.get(plan.start_component))
                 .and_then(Option::as_ref)
                 .and_then(|span| span.prefix_seed_support(
@@ -1299,14 +1300,14 @@ where
         let original_candidate_vocab = candidate_vocab;
         let mut live_vocab = None;
         if !plan.retain_non_crossing_paths
-            && std::env::var_os("GLRMASK_BOUNDARY_TOKEN_LIVENESS").is_some()
+            && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TOKEN_LIVENESS")
         {
             let started = Instant::now();
-            let follow_aware = std::env::var_os("GLRMASK_BOUNDARY_TOKEN_FOLLOWS").is_some();
-            let cut = (follow_aware && std::env::var_os("GLRMASK_BOUNDARY_CUT_SUPPORT").is_some())
+            let follow_aware = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_TOKEN_FOLLOWS");
+            let cut = (follow_aware && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_CUT_SUPPORT"))
                 .then(|| {
-                    let prepared=std::env::var_os("GLRMASK_BOUNDARY_PREPARED_CUT")
-                        .and_then(|_|prepared_first).and_then(|spans|super::boundary_precomputed_completion::cut_support(
+                    let prepared=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PREPARED_CUT")
+                        .then_some(prepared_first).flatten().and_then(|spans|super::boundary_precomputed_completion::cut_support(
                             spans,inputs.merged_tokenizer,candidate_vocab,scope.initial_states().keep_raw(),
                             &ownership,plan.crossing_owner,inputs.disallowed_follows,
                             inputs.ignore_terminal,inputs.follow_transparent_ignores,early_adjacency,
@@ -1474,7 +1475,7 @@ where
         output.profile.input_tokens = inputs.vocab.len();
         output.profile.candidate_tokens = candidate_vocab.len();
         let reuse_inventory = output.profile.all_input_tokens_accepted
-            && std::env::var_os("GLRMASK_BOUNDARY_REUSE_TOKEN_INVENTORY").is_some();
+            && crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_REUSE_TOKEN_INVENTORY");
         let candidate_tokens = if reuse_inventory {
             candidate_vocab.entries_map().keys().copied().collect()
         } else { boundary_accepted_tokens(&output.dwa, &output.id_map) };
@@ -2410,8 +2411,8 @@ pub(crate) fn build_walk_static_boundary_link(
     // These spans are established at the actual disjoint-union boundary, from
     // the same immutable component allocations and its returned raw offsets.
     // The following Expr-sidecar restoration changes no byte/label topology.
-    let prepared_first = std::env::var_os("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION")
-        .map(|_| std::iter::once(parent)
+    let prepared_first = crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_PRECOMPUTED_COMPLETION")
+        .then(|| std::iter::once(parent)
             .chain(children.iter().map(|child| child.constraint))
             .zip(tokenizer_offsets.iter().copied())
             .zip(composed.terminal_offsets.iter().copied())
@@ -2525,7 +2526,7 @@ pub(crate) fn build_walk_static_boundary_link(
         }
     }
     let candidate_summary_ms = candidate_summary_started.elapsed().as_secs_f64() * 1000.0;
-    let scoped_adjacent = if std::env::var_os("GLRMASK_BOUNDARY_SCOPED_ADJACENCY").is_some()
+    let scoped_adjacent = if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY")
         && !global_ignores
     {
         let started = Instant::now();
@@ -2551,7 +2552,7 @@ pub(crate) fn build_walk_static_boundary_link(
             }
             relation
         };
-        let use_delta=std::env::var_os("GLRMASK_BOUNDARY_SCOPED_FOLLOW_DELTA").is_some();
+        let use_delta=crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_FOLLOW_DELTA");
         let candidate=use_delta.then(|| super::boundary_scoped_follow_delta::scoped_ignore_follow_relation(&grammar,&counts,&labels)).flatten();
         let delta_selected=candidate.is_some();
         let relation=if let Some(candidate)=candidate {
@@ -2588,7 +2589,7 @@ pub(crate) fn build_walk_static_boundary_link(
             let started = Instant::now();
             let before_states = shard.output.dwa.num_states();
             let before_tokens = shard.candidate_tokens.len();
-            let product = if std::env::var_os("GLRMASK_BOUNDARY_FOLLOW_ROW_QUOTIENT").is_some(){
+            let product = if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FOLLOW_ROW_QUOTIENT"){
                 tdwa::l2p::apply_boundary_follow_constraints
             }else{tdwa::l2p::apply_explicit_follow_constraints};
             let filtered = product(&shard.output.dwa,relation,grammar.num_terminals as usize,None).dwa;
@@ -2726,7 +2727,7 @@ pub(crate) fn build_walk_static_boundary_link(
             walk_plans: None,
         },
         &process_shard,
-        std::env::var_os("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY").is_some().then_some(scoped_adjacent.as_ref()).flatten(),
+        crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_SCOPED_ADJACENCY_EARLY").then_some(scoped_adjacent.as_ref()).flatten(),
         prepared_first.as_deref(),
     )? else {
         return Ok(empty_output());
@@ -7578,7 +7579,7 @@ fn build_boundary_terminal_dwa_borrowed_query(inputs:&BoundaryWalkInputs)->Optio
         // assigning all omitted states to it; symbolic ALL is not a finite row.
         let dead_class=output.id_map.tokenizer_states.num_internal_ids();
         if !proves_fresh_dead_class(&output.dwa,dead_class,
-            std::env::var_os("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND").is_some()){
+            crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_ROOT_SUPPORT_BOUND")){
             return None;
         }
         output.id_map.tokenizer_states=output.id_map.tokenizer_states.fill_unmapped_with_new_class();

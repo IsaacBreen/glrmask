@@ -4151,7 +4151,7 @@ fn fast_boundary_resolve_negative_codes_with_topology(
 ) -> Option<()> {
     let n = states.len();
     if topology.is_some_and(|order| !order.certifies(states)) { return None; }
-    let memo = std::env::var_os("GLRMASK_BOUNDARY_MEMO_CANCELLATIONS").is_some();
+    let memo = crate::optimized_env_flag("GLRMASK_BOUNDARY_MEMO_CANCELLATIONS");
     let result = if memo {
         let started = Instant::now();
         let (derived, stats) = finite_cancellation::compute_with_topology(states, interner, topology)?;
@@ -4786,7 +4786,7 @@ impl FastPossibleOutgoingIds {
 fn fast_boundary_possible_outgoing_ids(
     nwa:&[FastBoundaryNwaState], supports:&[Vec<u32>], num_parser_states:u32,
 )->Vec<FastPossibleOutgoingIds>{
-    if std::env::var_os("GLRMASK_BOUNDARY_POSSIBLE_SET_CACHE").is_some(){
+    if crate::optimized_env_flag("GLRMASK_BOUNDARY_POSSIBLE_SET_CACHE"){
         let result=fast_boundary_possible_outgoing_ids_cached(nwa,supports,num_parser_states);
         if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_GUARD_SET_CACHE").is_some(){
             validate_guard_observer(nwa,supports,num_parser_states,&result);

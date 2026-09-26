@@ -119,7 +119,7 @@ mod tests {
 pub(super) fn prepare_with_policy(
     tokenizer:&Tokenizer,vocab:&Vocab,scope:&BoundaryAnalysisScope,flat:Option<&[u32]>,
 )->Option<QueryView>{
-    if std::env::var_os("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW").is_some() {
+    if crate::compiler::boundary_env::enabled("GLRMASK_BOUNDARY_FACTORED_QUERY_VIEW") {
         if let Some(candidate)=flat.and_then(|flat|fast::prepare(tokenizer,vocab,scope,flat)) {
             if std::env::var_os("GLRMASK_VALIDATE_BOUNDARY_FACTORED_QUERY_VIEW").is_some(){
                 let reference=prepare(tokenizer,vocab,scope).expect("factored query view changed reference eligibility");
