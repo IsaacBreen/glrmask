@@ -393,7 +393,7 @@ mod tests {
             let mut words = vec![b"ab".to_vec(), b"abc".to_vec(), b"ba".to_vec(), vec![]];
             for _ in 0..10 { let len=next()%6; words.push((0..len).map(|_|b"abcxy !"[next()%7]).collect()); }
             let p = PrefixObserver::prepare(&tok,&words,Limits::default(),&mut Profile::default()).unwrap().certify(&tok).unwrap();
-            
+
             let data=UntrustedCompletionIndex::from_certified_prefix(&p).unwrap(); let wire=data.to_bytes().unwrap();
             let index=UntrustedCompletionIndex::from_bytes(&wire).unwrap().certify(&tok).unwrap();
             for _ in 0..4 {

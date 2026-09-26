@@ -82,4 +82,3 @@ impl StackDomain {
         Ok(())
     }
 }
-
