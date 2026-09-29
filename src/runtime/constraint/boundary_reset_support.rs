@@ -4,8 +4,11 @@
 //! It uses the existing VirtualStack operations and declines on unsupported
 //! actions, hidden-floor reads, cycles, or resource exhaustion. This module
 //! does not execute vocabulary bytes and does not cache parser answers.
-use super::*;
-use crate::compiler::glr::parser::{ParserActionProvider, ProvidedActionRef};
+use super::recursive_parser::RecursiveSegmentedParserTables;
+use crate::runtime::artifact::Constraint;
+use crate::compiler::glr::parser::{DisjointComponentActionProvider, ParserActionProvider, ProvidedActionRef};
+use crate::compiler::glr::table::Action;
+use smallvec::SmallVec;
 use crate::ds::leveled_gss::VirtualStack;
 
 type ControlCursor = VirtualStack<u32, ()>;
@@ -207,7 +210,8 @@ impl Constraint {
 #[cfg(test)]
 mod bounded_control_support_tests {
     use super::*;
-    use crate::compiler::glr::parser::ProvidedAction;
+    use crate::compiler::glr::parser::{ProvidedAction, close_provider_control_stacks};
+    use crate::compiler::glr::accumulator::TerminalsDisallowed;
     use crate::ds::leveled_gss::LeveledGSS;
     struct Controls {mode:u8,branch:Action}
     impl ParserActionProvider for Controls {

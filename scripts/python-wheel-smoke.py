@@ -4,8 +4,23 @@
 import ctypes
 import sys
 import types
+from pathlib import Path
+from importlib.metadata import metadata
 
 import glrmask
+from glrmask import _glrmask as native
+
+# A fresh artifact install must not silently import a checkout or older wheel.
+# Wheel and sdist installs must use the same Python package description.
+package_description = metadata("glrmask").get_payload()
+python_guide = Path(__file__).resolve().parents[1] / "python" / "PYTHON.md"
+assert package_description.strip() == python_guide.read_text(encoding="utf-8").strip()
+
+installed_root = Path(sys.prefix).resolve()
+for module in (glrmask, native):
+    assert Path(module.__file__).resolve().is_relative_to(installed_root), (
+        f"expected installed package under {installed_root}, got {module.__file__}"
+    )
 
 vocab = glrmask.Vocab.from_dict(
     {

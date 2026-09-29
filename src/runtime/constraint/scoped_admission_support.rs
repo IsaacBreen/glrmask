@@ -1,7 +1,13 @@
 //! Query-local native-terminal support for an already control-closed frontier.
 //! This is a rejection filter, not a replacement parser or admission oracle.
-use super::*;
-use crate::compiler::glr::parser::{ParserActionProvider, ProvidedAction};
+use super::recursive_parser::RecursiveSegmentedParserTables;
+use crate::compiler::glr::parser::{
+    DisjointComponentActionProvider, ParserActionProvider, ParserComponentTableSource,
+    ParserGSS, ProvidedAction, ScopedParserSymbol, close_provider_control_stacks,
+    find_admitted_symbol_with_provider,
+};
+use crate::ds::bitset::BitSet;
+use crate::runtime::artifact::{Constraint, RecursiveParserLayout};
 
 const MAX_TERMINALS: usize = 4096;
 const MAX_TOPS: usize = 16;
