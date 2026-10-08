@@ -27,7 +27,13 @@ fn with_nullable_return(program: &CommitTemplateDfas) -> Result<CommitTemplateDf
 /// Caller has chosen a dynamic boundary explicitly, or Auto. All supplied
 /// components are already compiled; this function never calls a grammar/LR
 /// compiler, including for previously saved components.
-pub(crate) fn compose(mut parent: Constraint, children: &[(String, Arc<Constraint>)], vocab: &Vocab) -> Result<Constraint> {
+pub(crate) fn compose(parent: Constraint, children: &[(String, Arc<Constraint>)], vocab: &Vocab) -> Result<Constraint> {
+    compose_owned(parent, children.to_vec(), vocab)
+}
+
+/// Consume private component handles before materializing deferred metadata.
+/// Shared inputs retain ordinary copy-on-write isolation through `make_mut`.
+pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<Constraint>)>, vocab: &Vocab) -> Result<Constraint> {
     parent.materialize_composition_link_metadata_for_compilation().map_err(fail)?;
     // Internal callers can register slots after ordinary source compilation.
     // Remove their non-vocabulary sentinels before retaining the component:
@@ -41,8 +47,8 @@ pub(crate) fn compose(mut parent: Constraint, children: &[(String, Arc<Constrain
     let mut components = vec![Arc::new(parent)];
     let mut slots = Vec::<Vec<u32>>::new();
     let mut binding_names = Vec::new();
-    for (name, child) in children {
-        let matching = components[0].late_grammar_slots.iter().filter(|slot| slot.name == *name)
+    for (name, mut child) in children {
+        let matching = components[0].late_grammar_slots.iter().filter(|slot| slot.name == name)
             .map(|slot| slot.terminal_id).collect::<Vec<_>>();
         if matching.is_empty() { continue; }
         for slot in &matching {
@@ -50,11 +56,10 @@ pub(crate) fn compose(mut parent: Constraint, children: &[(String, Arc<Constrain
                 return Err(fail(format!("slot {name:?} has no validated template CALL relation")));
             }
         }
-        let mut child = Arc::clone(child);
         if child.deferred_composition_metadata_blob.is_some() && !child.composition_link_metadata_materialized {
             Arc::make_mut(&mut child).materialize_composition_link_metadata_for_compilation().map_err(fail)?;
         }
-        components.push(child); slots.push(matching); binding_names.push(name.clone());
+        components.push(child); slots.push(matching); binding_names.push(name);
     }
     if components.len() == 1 { return Ok((*components.remove(0)).clone()); }
     let bound_slots = slots.iter().flatten().copied().collect::<BTreeSet<_>>();

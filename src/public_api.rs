@@ -2264,7 +2264,7 @@ impl UnlinkedConstraint {
             Ok((name.clone(), Arc::new(child)))
         }).collect::<Result<Vec<_>>>()?;
         crate::error::catch_internal_invariant(|| {
-            let mut linked = crate::runtime::parser_backend::link::compose(parent, &children, &vocab)?;
+            let mut linked = crate::runtime::parser_backend::link::compose_owned(parent, children, &vocab)?;
             if optimization == Optimization::FastRuntime {
                 crate::compiler::template_boundary::install(&mut linked, &vocab)?;
             }
@@ -2681,6 +2681,116 @@ impl ConstraintSpec<'_> {
 mod tests {
     use super::*;
     use crate::automata::lexer::tokenizer::Lexer;
+
+    fn compose_owned_test_fixture() -> (Vocab, UnlinkedConstraint, RuntimeConstraint) {
+        let vocab = Vocab::new_with_exact_token_ids(vec![
+            (0, b"<".to_vec()), (1, b"a".to_vec()), (2, b">".to_vec()),
+            (3, b"<a>".to_vec()), (4, b"a>".to_vec()), (5, b"<a".to_vec()),
+            (6, b"b".to_vec()), (7, b"ab".to_vec()), (8, b"<ab>".to_vec()),
+        ], [99]);
+        let parent = Grammar::glrm("glrm 1; start root; extern grammar child; nt root = \"<\" child \">\";")
+            .compile_unlinked(&vocab).unwrap();
+        let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
+            .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
+        let parent = UnlinkedConstraint::load_with_vocab(parent.save(), &vocab).unwrap();
+        let child = RuntimeConstraint::load_with_vocab(child.save(), &vocab).unwrap();
+        assert!(child.deferred_composition_metadata_blob.is_some());
+        assert!(!child.composition_link_metadata_materialized);
+        (vocab, parent, child)
+    }
+
+    fn assert_compose_owned_behavior_equal(left: &RuntimeConstraint, right: &RuntimeConstraint) {
+        let mut prefixes = vec![Vec::<u32>::new()];
+        let mut saw_eof = false;
+        for depth in 0..=4 {
+            let mut next = Vec::new();
+            for prefix in prefixes {
+                let mut a = left.start(); let mut b = right.start();
+                for &token in &prefix { a.commit_token(token).unwrap(); b.commit_token(token).unwrap(); }
+                let before_a = a.mask(); let before_b = b.mask();
+                assert_eq!(before_a, before_b, "mask at {prefix:?}");
+                assert_eq!(a.is_accepting(), b.is_accepting());
+                assert_eq!(token_allowed(&before_a, 99), a.is_accepting(), "root EOF policy");
+                for token in (0..=8).chain([99]) {
+                    let mut trial_a = a.clone(); let mut trial_b = b.clone();
+                    let ok_a = trial_a.commit_token(token).is_ok();
+                    let ok_b = trial_b.commit_token(token).is_ok();
+                    assert_eq!(ok_a, ok_b, "commit {token} at {prefix:?}");
+                    assert_eq!(trial_a.mask(), trial_b.mask());
+                    assert_eq!(trial_a.is_accepting(), trial_b.is_accepting());
+                    if token == 99 && token_allowed(&before_a, token) { assert!(ok_a); saw_eof = true; }
+                    if depth < 4 && token != 99 && token_allowed(&before_a, token) && ok_a {
+                        let mut path = prefix.clone(); path.push(token); next.push(path);
+                    }
+                }
+                assert_eq!(a.mask(), before_a, "cloned trial mutated original matcher");
+                assert_eq!(b.mask(), before_b);
+            }
+            prefixes = next;
+        }
+        assert!(saw_eof, "fixture must exercise accepting EOF commit");
+    }
+
+    #[test]
+    fn compose_owned_loaded_private_and_shared_children_preserve_inputs() {
+        let (vocab, parent, child) = compose_owned_test_fixture();
+        let parent_bytes = parent.save(); let parent_mask = parent.inner.start().mask();
+        let child_bytes = child.save(); let child_mask = child.start().mask();
+        let prepare = || {
+            let mut p = parent.inner.as_ref().clone();
+            prepare_immutable_template_component_boundary_summary(&mut p, &vocab);
+            p.install_template_parser().unwrap();
+            let mut c = child.clone(); c.end_tokens = Arc::from([]);
+            prepare_immutable_template_component_boundary_summary(&mut c, &vocab);
+            c.install_template_parser().unwrap();
+            (p, Arc::new(c))
+        };
+        let (p, c) = prepare(); let private_pointer = Arc::as_ptr(&c);
+        let owned = crate::runtime::parser_backend::link::compose_owned(p, vec![("child".into(), c)], &vocab)
+            .unwrap().with_end_tokens(&[99]).unwrap();
+        let retained = &owned.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components[1].constraint;
+        assert_eq!(Arc::as_ptr(retained), private_pointer, "private child was copied unnecessarily");
+        let (p, c) = prepare(); let borrowed_pointer = Arc::as_ptr(&c);
+        let borrowed = crate::runtime::parser_backend::link::compose(p, &[("child".into(), c.clone())], &vocab)
+            .unwrap().with_end_tokens(&[99]).unwrap();
+        assert_ne!(Arc::as_ptr(&borrowed.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components[1].constraint), borrowed_pointer);
+        let (p, c) = prepare(); let shared_bytes = c.save(); let shared_mask = c.start().mask();
+        let shared = crate::runtime::parser_backend::link::compose_owned(p, vec![("child".into(), c.clone())], &vocab)
+            .unwrap().with_end_tokens(&[99]).unwrap();
+        assert_ne!(Arc::as_ptr(&shared.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components[1].constraint), Arc::as_ptr(&c));
+        assert!(!c.composition_link_metadata_materialized, "shared child mutated in place");
+        assert_eq!(c.save(), shared_bytes); assert_eq!(c.start().mask(), shared_mask);
+        assert_eq!(owned.save(), borrowed.save()); assert_eq!(owned.save(), shared.save());
+        assert_compose_owned_behavior_equal(&owned, &borrowed);
+        assert_compose_owned_behavior_equal(&owned, &shared);
+        let reloaded = RuntimeConstraint::load_with_vocab(owned.save(), &vocab).unwrap();
+        assert_compose_owned_behavior_equal(&owned, &reloaded);
+        assert_eq!(parent.save(), parent_bytes); assert_eq!(parent.inner.start().mask(), parent_mask);
+        assert_eq!(child.save(), child_bytes); assert_eq!(child.start().mask(), child_mask);
+    }
+
+    #[test]
+    fn compose_owned_repeated_public_links_preserve_retained_inputs() {
+        let (vocab, parent, child) = compose_owned_test_fixture();
+        let parent_bytes = parent.save(); let parent_mask = parent.inner.start().mask();
+        let child = Arc::new(child); let child_bytes = child.save(); let child_mask = child.start().mask();
+        let options = BuildOptions::default().optimization(Optimization::FastBuild).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
+        let borrowed_bound = parent.bind("child", child.as_ref()).unwrap();
+        let owned_bound = parent.bind("child", Arc::clone(&child)).unwrap();
+        let borrowed_bytes = borrowed_bound.save(); let owned_bytes = owned_bound.save();
+        let mut first = None;
+        for _ in 0..3 {
+            let a = borrowed_bound.link_with(options.clone()).unwrap();
+            let b = owned_bound.link_with(options.clone()).unwrap();
+            assert_compose_owned_behavior_equal(&a, &b);
+            let bytes = a.save(); assert_eq!(bytes, b.save());
+            if let Some(previous) = first.as_ref() { assert_eq!(&bytes, previous); } else { first = Some(bytes); }
+            assert_eq!(borrowed_bound.save(), borrowed_bytes); assert_eq!(owned_bound.save(), owned_bytes);
+            assert_eq!(parent.save(), parent_bytes); assert_eq!(parent.inner.start().mask(), parent_mask);
+            assert_eq!(child.save(), child_bytes); assert_eq!(child.start().mask(), child_mask);
+        }
+        assert_eq!(RuntimeConstraint::load_with_vocab(first.unwrap(), &vocab).unwrap().parser_backend(), ParserBackend::TemplateDfa);
+    }
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {
         let word = token_id as usize / 32;
