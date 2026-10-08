@@ -986,6 +986,7 @@ pub mod __private {
     }
 
     pub trait ConstraintStateExt {
+        fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>);
         fn commit_token_timed_ns(&mut self, token_id: u32) -> std::result::Result<u64, String>;
         fn commit_token_profiled(
             &mut self,
@@ -1009,6 +1010,10 @@ pub mod __private {
     }
 
     impl ConstraintStateExt for ConstraintState<'_> {
+        fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
+            ConstraintState::copy_snapshot_from(self, source);
+        }
+
         fn commit_token_timed_ns(&mut self, token_id: u32) -> std::result::Result<u64, String> {
             ConstraintState::commit_token_timed_ns(self, token_id)
         }

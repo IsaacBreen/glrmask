@@ -562,6 +562,16 @@ enum GreedyTokenizationStep {
 }
 
 impl<'a> ConstraintState<'a> {
+    pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
+        assert!(std::ptr::eq(self.constraint, source.constraint));
+        self.terminated = source.terminated;
+        self.state = source.state.clone();
+        self.buffers = CommitBuffers::for_constraint(self.constraint);
+        self.generation = source.generation;
+        self.mask_cache = Mutex::new(None);
+        self.mask_scratch = Arc::new(Mutex::new(MaskScratch::for_constraint(self.constraint)));
+    }
+
     pub(crate) fn reserve_linear_stack_hot_path(&mut self) {
         // Runtime frontiers are commonly a small set of correlated tokenizer
         // continuations, each carrying one concrete parser stack. Detach and

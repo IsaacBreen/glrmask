@@ -1111,6 +1111,17 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
+    /// Copy this sequence's exact parser state without sharing mutable state.
+    fn clone(&self) -> Self {
+        let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
+        self.inner.with_dependent(|_, source| {
+            inner.with_dependent_mut(|_, destination| {
+                destination.copy_snapshot_from(source);
+            });
+        });
+        Self { inner, max_token: self.max_token }
+    }
+
     /// Whether an allowed final end token has completed this sequence.
     fn is_terminated(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_terminated())
