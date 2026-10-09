@@ -1,5 +1,10 @@
 # Acyclic template parser backend
 
+This is an internal repository-tooling API. Rust examples require the
+`internal-api` feature; Python parser programs and backend controls live in
+`glrmask._internal`. Public callers choose `Optimization` and do not select a
+parser backend.
+
 ## Select the backend for a built-in grammar
 
 ```rust
@@ -25,7 +30,7 @@ paths.
 
 The built-in grammar compiler may derive action relations using temporary LR
 analysis. It discards those tables before constructing a `Constraint`. Native
-`TemplateDfa` remains the public/O2/Static runtime. Ordinary internal Dynamic
+The native representation remains the public/O2/Static runtime. Ordinary internal Dynamic
 defaults to retained LR; `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects templates for
 that compilation only. Native runtime table access and implicit fallback panic. An unsupported native
 composition request returns an error.
@@ -203,7 +208,7 @@ contains the lexer, required masking data, complete finite template relations,
 completion, and minimal metadata, but no LR actions, gotos, or production table.
 Derived runtime lookup structures are rebuilt from validated template data.
 
-`Constraint::save_with_external_vocab()` omits the model vocabulary. Load such
+`Constraint::save_without_vocab()` omits the model vocabulary. Load such
 an artifact with `Constraint::load_with_vocab(bytes, &vocab)`. Loading without a
 vocabulary, or with a different mapping, fails. End-token policy uses
 `TemplateBuildOptions::end_tokens` for data-only parsers and ordinary

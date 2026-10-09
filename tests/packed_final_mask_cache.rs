@@ -121,13 +121,13 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
                 );
                 assert_eq!(cloned.save(), bytes);
                 if backend == ParserBackend::TemplateDfa {
-                    let external = fresh.save_with_external_vocab().unwrap();
+                    let external = fresh.save_without_vocab().unwrap();
                     let externally_loaded = Constraint::load_with_vocab(&external, &vocab).unwrap();
                     transition_checks += assert_tokenizer_transition_cache(&externally_loaded);
                     total_checks += assert_packed_final_mask_cache(&externally_loaded, 32);
                     check_prefixes(&fresh, &externally_loaded);
                     assert_eq!(
-                        externally_loaded.save_with_external_vocab().unwrap(),
+                        externally_loaded.save_without_vocab().unwrap(),
                         external
                     );
                 }

@@ -1236,10 +1236,18 @@ impl Constraint {
     /// only the conservative parser-state-independent token set. `Exact` first
     /// builds that set as a candidate prefilter, then upgrades to a full local
     /// Parser DWA when this component supports exact trigger compilation.
-    pub fn build_boundary_trigger(
-        &mut self,
-        detail: crate::runtime::BoundaryTriggerDetail,
-    ) -> Result<(), String> {
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn build_boundary_trigger(&mut self, detail: crate::runtime::BoundaryTriggerDetail) -> Result<(), String> {
+        self.build_boundary_trigger_impl(detail)
+    }
+
+    #[cfg(not(any(test, feature = "internal-api")))]
+    pub(crate) fn build_boundary_trigger(&mut self, detail: crate::runtime::BoundaryTriggerDetail) -> Result<(), String> {
+        self.build_boundary_trigger_impl(detail)
+    }
+
+    fn build_boundary_trigger_impl(&mut self, detail: crate::runtime::BoundaryTriggerDetail) -> Result<(), String> {
         match detail {
             crate::runtime::BoundaryTriggerDetail::None => Ok(()),
             crate::runtime::BoundaryTriggerDetail::Tokens => self.build_boundary_token_trigger(),
@@ -1255,7 +1263,18 @@ impl Constraint {
     /// than the component's whole-token TSID/token quotient. Recursive
     /// coordinators build a temporary lexical union and query their immutable
     /// scoped template relations. No parser table is reconstructed.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn build_exact_boundary_trigger(&mut self) -> Result<(), String> {
+        self.build_exact_boundary_trigger_impl()
+    }
+
+    #[cfg(not(any(test, feature = "internal-api")))]
+    pub(crate) fn build_exact_boundary_trigger(&mut self) -> Result<(), String> {
+        self.build_exact_boundary_trigger_impl()
+    }
+
+    fn build_exact_boundary_trigger_impl(&mut self) -> Result<(), String> {
         if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
             return Ok(());
         }

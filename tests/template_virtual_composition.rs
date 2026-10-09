@@ -16,7 +16,7 @@ fn verify_forms(reference: &Constraint, candidate: &Constraint, vocab: &Vocab, t
     let saved = candidate.save();
     let loaded = Constraint::load(&saved).unwrap();
     assert_eq!(saved, loaded.save());
-    let external = Constraint::load_with_vocab(candidate.save_with_external_vocab().unwrap(), vocab).unwrap();
+    let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), vocab).unwrap();
     for c in [candidate, &loaded, &external] { compare(reference, c, tokens, prefixes); }
 }
 
@@ -89,7 +89,7 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
     let saved = candidate.save();
     let loaded = Constraint::load(&saved).unwrap();
     assert_eq!(saved, loaded.save());
-    let external = Constraint::load_with_vocab(candidate.save_with_external_vocab().unwrap(), &vocab).unwrap();
+    let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), &vocab).unwrap();
     for c in [&candidate, &loaded, &external] { compare(&reference, c, &tokens, &prefixes); }
     let mut too_long = b"p\"x:".to_vec(); too_long.extend(std::iter::repeat_n(b'a', 4999));
     assert!(candidate.start().commit_bytes(&too_long).is_err());
@@ -357,7 +357,7 @@ mod product_review {
         let saved = candidate.save();
         let loaded = Constraint::load(&saved)?;
         assert_eq!(loaded.save(), saved);
-        let external = Constraint::load_with_vocab(candidate.save_with_external_vocab()?, &vocab)?;
+        let external = Constraint::load_with_vocab(candidate.save_without_vocab()?, &vocab)?;
         let mut prefixes = vec![vec![], b"p".to_vec(), b"pq".to_vec(), b"pabcq".to_vec()];
         for count in [1, 7, 1979, 1980, 1998, 1999, 2000] {
             let prefix = format!("p{}", "abc".repeat(count)).into_bytes();

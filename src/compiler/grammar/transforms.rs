@@ -1662,7 +1662,7 @@ mod tests {
         for optimization in [crate::Optimization::Auto, crate::Optimization::FastBuild] {
             let compiled = crate::Grammar::glrm(source).compile_with(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
             let loaded = crate::Constraint::load(compiled.save()).unwrap();
-            let external = crate::Constraint::load_with_vocab(compiled.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
                 for depth in [0, 1, 17, 257] {
                     let mut state = constraint.start();
@@ -1675,7 +1675,7 @@ mod tests {
         }
         let compiled = crate::DynamicConstraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
         let loaded = crate::DynamicConstraint::load(&compiled.save()).unwrap();
-        let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_with_external_vocab(), &vocab).unwrap();
+        let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_without_vocab(), &vocab).unwrap();
         for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
             for depth in [0, 1, 17, 257] {
                 let mut state = constraint.start();
@@ -1699,7 +1699,7 @@ mod tests {
         for optimization in [crate::Optimization::Auto, crate::Optimization::FastBuild] {
             let compiled = crate::Grammar::glrm(source).compile_with(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
             let loaded = crate::Constraint::load(compiled.save()).unwrap();
-            let external = crate::Constraint::load_with_vocab(compiled.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
             for constraint in [compiled, loaded, external] {
                 let mut state = constraint.start();
                 let mut mask = vec![0; 8];
@@ -1715,7 +1715,7 @@ mod tests {
         }
         let compiled = crate::DynamicConstraint::compile(crate::Grammar::glrm(source), &vocab).unwrap();
         let loaded = crate::DynamicConstraint::load(&compiled.save()).unwrap();
-        let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_with_external_vocab(), &vocab).unwrap();
+        let external = crate::DynamicConstraint::load_with_vocab(&compiled.save_without_vocab(), &vocab).unwrap();
         for constraint in [compiled, loaded, external] {
             let mut state = constraint.start();
             let mut mask = vec![0; 8];

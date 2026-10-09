@@ -236,6 +236,7 @@ required-features = ["internal-api"]
 [[test]]
 name = "template_parser_provider"
 path = "tests/template_parser_provider.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "template_parser_composition"
@@ -267,6 +268,7 @@ strip = "none"
 [[test]]
 name = "parser_grammar_constructor"
 path = "tests/parser_grammar_constructor.rs"
+required-features = ["internal-api"]
 
 [[test]]
 name = "template_control_closure_oracle"
@@ -298,4 +300,12 @@ required-features = ["internal-api"]
 [[test]]
 name = "template_virtual_composition"
 path = "tests/template_virtual_composition.rs"
+required-features = ["internal-api"]
+
+[[example]]
+name = "template_composition"
+required-features = ["internal-api"]
+
+[[example]]
+name = "template_composition_control"
 required-features = ["internal-api"]

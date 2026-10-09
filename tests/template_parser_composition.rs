@@ -30,12 +30,12 @@ fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
                         let loaded = Constraint::load(linked.save()).unwrap();
                         let external = if backend == ParserBackend::TemplateDfa {
                             Some(Constraint::load_with_vocab(
-                                linked.save_with_external_vocab().unwrap(), &vocab).unwrap())
+                                linked.save_without_vocab().unwrap(), &vocab).unwrap())
                         } else {
                             // External-vocabulary Constraint envelopes are a
                             // template-only API. Keep the LR rejection contract
                             // and compare its fresh/self-contained forms.
-                            assert!(linked.save_with_external_vocab().is_err());
+                            assert!(linked.save_without_vocab().is_err());
                             None
                         };
                         for c in [&linked, &loaded].into_iter().chain(external.as_ref()) {
@@ -114,7 +114,7 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
             let c = host.link_with(BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
             let loaded = Constraint::load(c.save()).unwrap();
-            let external = Constraint::load_with_vocab(c.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            let external = Constraint::load_with_vocab(c.save_without_vocab().unwrap(), &vocab).unwrap();
             for c in [&c, &loaded, &external] { assert_language(c, &tokens, words); }
             let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
                 .compile_unlinked(&vocab).unwrap().bind("C", &loaded).unwrap()
@@ -163,7 +163,7 @@ fn static_composition_with_no_crossing_tokens_needs_no_boundary_shards() {
         }
     }
     for c in [&outer, &Constraint::load(outer.save()).unwrap(),
-        &Constraint::load_with_vocab(outer.save_with_external_vocab().unwrap(), &vocab).unwrap()] {
+        &Constraint::load_with_vocab(outer.save_without_vocab().unwrap(), &vocab).unwrap()] {
         check_empty_shards(&glrmask::__private::parser_backend_report(c));
         assert_language(c, &tokens, &[b"pxayq"]);
     }
@@ -213,7 +213,7 @@ fn strict_static_crossings_preserve_delayed_lexemes_sparse_ids_and_aliases() {
         let bound = Grammar::from_glrm(HOST).compile_unlinked(&vocab).unwrap().bind("child", &child).unwrap();
         let candidate = bound.link_with(options()).unwrap();
         let loaded = Constraint::load(candidate.save()).unwrap();
-        let external = Constraint::load_with_vocab(candidate.save_with_external_vocab().unwrap(), &vocab).unwrap();
+        let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), &vocab).unwrap();
         for candidate in [&candidate, &loaded, &external] {
             assert_static_boundaries(candidate);
             assert_language(candidate, &tokens, words);
@@ -247,7 +247,7 @@ fn strict_static_table_free_nested_composition_uses_no_dynamic_boundary() {
         .compile_unlinked(&vocab).unwrap().bind("middle", &middle).unwrap().link_with(build(Optimization::FastRuntime)).unwrap();
     let words: &[&[u8]] = &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"];
     let loaded = Constraint::load(outer.save()).unwrap();
-    let external = Constraint::load_with_vocab(outer.save_with_external_vocab().unwrap(), &vocab).unwrap();
+    let external = Constraint::load_with_vocab(outer.save_without_vocab().unwrap(), &vocab).unwrap();
     for candidate in [&outer, &loaded, &external] {
         assert_static_boundaries(candidate);
         assert_language(candidate, &tokens, words);
@@ -280,7 +280,7 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
     let words = (0..=64).map(|count| format!("x{}y", "a".repeat(count)).into_bytes()).collect::<Vec<_>>();
     let words = words.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let loaded = Constraint::load(c.save()).unwrap();
-    let external = Constraint::load_with_vocab(c.save_with_external_vocab().unwrap(), &vocab).unwrap();
+    let external = Constraint::load_with_vocab(c.save_without_vocab().unwrap(), &vocab).unwrap();
     for c in [&c, &loaded, &external] { assert_static_boundaries(c); assert_language(c, &tokens, &words); }
 
     // Nullable repetition has no finite control-word enumeration bound.
@@ -355,7 +355,7 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
                         .compile_unlinked(&vocab).unwrap().bind("middle", middle).unwrap()
                         .link_with(options(outer_mode)).unwrap();
                     let loaded = Constraint::load(linked.save()).unwrap();
-                    let external = Constraint::load_with_vocab(linked.save_with_external_vocab().unwrap(), &vocab).unwrap();
+                    let external = Constraint::load_with_vocab(linked.save_without_vocab().unwrap(), &vocab).unwrap();
                     if outer_mode == Optimization::FastRuntime { assert_static_boundaries(&linked); }
                     for constraint in [&linked, &loaded, &external] {
                         for &prefix in &prefixes {
@@ -395,7 +395,7 @@ fn scoped_ignores_match_the_independent_lr_composition() {
     let candidate = parent.bind("child", &child).unwrap().link_with(BuildOptions::default()
         .optimization(Optimization::FastBuild).parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let loaded = Constraint::load(candidate.save()).unwrap();
-    let external = Constraint::load_with_vocab(candidate.save_with_external_vocab().unwrap(), &vocab).unwrap();
+    let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), &vocab).unwrap();
     let mut prefixes = vec![vec![]]; let mut layer = vec![vec![]];
     for _ in 0..4 {
         let mut next = Vec::new();

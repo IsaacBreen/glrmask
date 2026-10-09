@@ -13,8 +13,9 @@
 //!
 //! Direct programs can use the shared static token-mask DWA compiler through
 //! [`TemplateBuildOptions::optimization`] or the shared dynamic mask engine.
-//! Component composition is rejected explicitly. Built-in grammars can select
-//! [`crate::ParserBackend::TemplateDfa`] through their ordinary build options.
+//! Component composition is rejected explicitly. This provider API is available
+//! only to repository tooling through the `internal-api` feature. Public
+//! built-in grammar APIs select their parser representation internally.
 
 pub(crate) mod static_compile;
 mod grammar_constructor;

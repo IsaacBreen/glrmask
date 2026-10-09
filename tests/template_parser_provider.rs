@@ -96,7 +96,7 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     check_all_prefixes(&c);
     let bytes=c.save();let restored=Constraint::load(bytes.clone()).unwrap();
     check_all_prefixes(&restored);assert_eq!(restored.save(),bytes);
-    let external=c.save_with_external_vocab().unwrap();
+    let external=c.save_without_vocab().unwrap();
     assert!(Constraint::load(external.clone()).is_err());
     let wrong=Vocab::new(vec![(0,b"different".to_vec()),(64,Vec::new())]);
     assert!(Constraint::load_with_vocab(external.clone(),&wrong).is_err());
@@ -188,7 +188,7 @@ fn native_representations(compiled:&Constraint,vocab:&Vocab)->[Constraint;3] {
     let bytes=compiled.save();
     let loaded=Constraint::load(bytes.clone()).unwrap();
     assert_eq!(loaded.save(),bytes);
-    let external=compiled.save_with_external_vocab().unwrap();
+    let external=compiled.save_without_vocab().unwrap();
     assert!(Constraint::load(external.clone()).is_err());
     let external=Constraint::load_with_vocab(external,vocab).unwrap();
     [compiled.clone(),loaded,external]
@@ -358,7 +358,7 @@ fn epsilon_read_links_apply_after_popping_the_last_concrete_symbol() {
     let vocab=Vocab::new(words.iter().enumerate().map(|(i,s)|(i as u32,s.as_bytes().to_vec())).collect());
     let built=program.compile(&lexer,&vocab).unwrap();
     for constraint in [&built,&Constraint::load(built.save()).unwrap(),
-        &Constraint::load_with_vocab(built.save_with_external_vocab().unwrap(),&vocab).unwrap()]
+        &Constraint::load_with_vocab(built.save_without_vocab().unwrap(),&vocab).unwrap()]
     {
         for length in 0..=7 {
             for bits in 0..(1usize<<length) {
@@ -431,7 +431,7 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         let loaded = Constraint::load(compiled.save()).unwrap();
         let external = Constraint::load_with_vocab(
-            compiled.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            compiled.save_without_vocab().unwrap(), &vocab).unwrap();
         for constraint in [&compiled, &loaded, &external] {
             let report = parser_backend_report(constraint);
             assert_eq!(report["lr_table_present"], false);

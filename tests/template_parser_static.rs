@@ -25,7 +25,7 @@ fn representations(c: &Constraint, v: &Vocab) -> Vec<Constraint> {
     vec![
         c.clone(),
         loaded,
-        Constraint::load_with_vocab(c.save_with_external_vocab().unwrap(), v).unwrap(),
+        Constraint::load_with_vocab(c.save_without_vocab().unwrap(), v).unwrap(),
     ]
 }
 

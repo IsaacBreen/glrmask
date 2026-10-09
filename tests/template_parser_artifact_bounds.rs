@@ -44,7 +44,7 @@ fn fixture(optimization: Optimization, external: bool) -> Vec<u8> {
         )
         .unwrap();
     if external {
-        constraint.save_with_external_vocab().unwrap()
+        constraint.save_without_vocab().unwrap()
     } else {
         constraint.save()
     }
@@ -259,7 +259,7 @@ fn external_binding_accepts_reordered_identical_mapping_but_not_id_changes() {
         let mut state = good.start();
         state.commit_token(11).unwrap(); // duplicate token bytes, distinct token ID
         assert!(state.is_accepting());
-        assert_eq!(good.save_with_external_vocab().unwrap(), bytes);
+        assert_eq!(good.save_without_vocab().unwrap(), bytes);
         assert!(Constraint::load_with_vocab(bytes, &remapped).is_err());
     }
 }

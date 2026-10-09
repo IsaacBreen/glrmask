@@ -230,32 +230,9 @@ All three modes preserve accepted-language semantics and produce the same public
 
 ### Native template parser backend
 
-Public final-constraint APIs, O2/FastBuild and Static use the native acyclic
-template backend. Omitting the public backend selects `TEMPLATE_DFA` /
-`TemplateDfa`; it can also be stated explicitly:
-
-```python
-constraint = grammar.compile(
-    vocab,
-    optimization=glrmask.Optimization.FAST_RUNTIME,
-    parser_backend=glrmask.ParserBackend.TEMPLATE_DFA,
-)
-assert constraint.parser_backend == glrmask.ParserBackend.TEMPLATE_DFA
-```
-
-```rust
-# use glrmask::{BuildOptions, Grammar, Optimization, ParserBackend, Result, Vocab};
-# fn demo(grammar: &Grammar, vocab: &Vocab) -> Result<()> {
-let constraint = grammar.compile_with(
-    vocab,
-    BuildOptions::default()
-        .optimization(Optimization::FastRuntime)
-        .parser_backend(ParserBackend::TemplateDfa),
-)?;
-assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
-# Ok(())
-# }
-```
+Public final-constraint APIs select their parser representation internally.
+Callers choose `Optimization`; there is no public parser backend selector or
+accessor. Parser-provider construction remains internal repository tooling.
 
 The selected runtime and its artifact contain the template relations, not an
 LR table. Mask generation and token commitment use the existing shared engines;
@@ -263,9 +240,8 @@ parser advancement and admissibility use those relations. Built-in grammar
 compilation can use temporary LR analysis to derive the program, then discards
 the table before constructing a `Constraint`. Native runtime table access and implicit LR fallback panic. Ordinary internal
 Dynamic (O1) instead retains and executes its LR table for lower build latency.
-Data-only
-`ParserProgram` providers bypass that frontend and support both static and
-dynamic mask compilation.
+Data-only parser providers remain available through Rust's `internal-api`
+feature and Python's `_internal` namespace.
 
 Built-in compiled components with finite embedding transfers support nested
 and nullable [template composition](docs/template-parser-composition.md).
@@ -388,3 +364,20 @@ The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final 
 ## License
 
 Licensed under either the MIT License or the Apache License, Version 2.0, at your option.
+
+### Optional boundary queries
+
+Use `BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)`
+for a conservative token summary, or `BoundaryTriggerDetail::Exact` for the
+existing exact query where supported. The default is `None`. Compilation and
+final linking build requested metadata before returning; `Exact` reports an
+error if construction is unsupported.
+
+`Grammar::compile_unlinked_with(vocab, options)` retains the boundary request
+through binding and persistence, then builds it at final link. Other options
+are selected at link. `link_with` inherits the retained request unless its
+options explicitly select a boundary detail; explicit `None` suppresses that
+request. Requests retained by attached child modules remain scoped to those
+children. Python uses the keyword `boundary_trigger` with
+`glrmask.BoundaryTriggerDetail.NONE`, `.TOKENS`, or `.EXACT` on
+`Grammar.compile`, `Grammar.compile_unlinked`, and `UnlinkedConstraint.link`.

@@ -331,3 +331,63 @@ fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
         }
     }
 }
+
+#[test]
+fn review_boundary_request_is_eager_and_preserves_semantics() {
+    use glrmask::BoundaryTriggerDetail;
+    let v = vocab();
+    let grammar = Grammar::from_ebnf(r#"start ::= "a" "b"?"#);
+    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+        let options = BuildOptions::default().optimization(mode);
+        let plain = grammar.compile_with(&v, options.clone()).unwrap();
+        let none = grammar.compile_with(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        assert_eq!(plain.save(), none.save());
+        for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+            let requested = grammar.compile_with(&v, options.clone().boundary_trigger(detail)).unwrap();
+            // Inspect persistence before start/first mask: trigger construction is eager.
+            let bytes = requested.save();
+            assert_ne!(bytes, plain.save());
+            compare_prefixes(&requested, &plain, &[1, 2, 5, 7, 33], 3);
+            assert_eq!(requested.save(), bytes, "matching must not materialize trigger metadata");
+            compare_prefixes(&Constraint::load(bytes).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);
+        }
+    }
+}
+
+#[test]
+fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
+    use glrmask::BoundaryTriggerDetail;
+    let v = vocab();
+    let grammar = Grammar::from_glrm(OUTER);
+    let plain = grammar.compile_unlinked(&v).unwrap();
+    let explicit_none = grammar.compile_unlinked_with(&v,
+        BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+    assert_eq!(plain.save(), explicit_none.save());
+    let child = Grammar::from_ebnf(r#"start ::= "a" "b"?"#).compile(&v).unwrap();
+    for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+        let module = grammar.compile_unlinked_with(&v, BuildOptions::default().boundary_trigger(detail)).unwrap();
+        assert!(module.link().is_err(), "trigger request cannot bypass unresolved slots");
+        let saved = module.save();
+        assert_eq!(&saved[..8], b"GLRMOD04");
+        let loaded = UnlinkedConstraint::load(saved.clone()).unwrap();
+        assert_eq!(loaded.save(), saved);
+        let bound = loaded.bind("middle", &child).unwrap();
+        let plain_loaded = UnlinkedConstraint::load(plain.save()).unwrap();
+        let reference = plain_loaded.bind("middle", &child).unwrap().link().unwrap();
+        let inherited = bound.link().unwrap();
+        assert_ne!(inherited.save(), reference.save());
+        compare_prefixes(&inherited, &reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
+        let suppressed = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        assert_eq!(suppressed.save(), reference.save());
+        let tokens = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+        let tokens_reference = plain_loaded.bind("middle", &child).unwrap().link_with(
+            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+        assert_eq!(tokens.save(), tokens_reference.save());
+        let bound_loaded = UnlinkedConstraint::load(bound.save()).unwrap().link().unwrap();
+        compare_prefixes(&bound_loaded, &inherited, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
+        assert_ne!(bound_loaded.save(), suppressed.save());
+        let mut invalid = saved;
+        invalid[16] = 3;
+        assert!(UnlinkedConstraint::load(invalid).is_err());
+    }
+}

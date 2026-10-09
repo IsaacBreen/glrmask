@@ -141,55 +141,18 @@ The intent-level optimization choices are:
 
 They preserve language semantics and all return the same `Constraint` type. They do not expose GLRMask's internal static/dynamic/O1/O2/O3 engines.
 
-### Select a table-free parser
+### Parser representation
 
-`parser_backend` is independent of `optimization`. The default remains
-`ParserBackend.LR_TABLE`; select the acyclic template backend explicitly:
+Public compilation and linking select the native template representation
+internally. Choose `Optimization.AUTO`, `FAST_BUILD` (O2), or `FAST_RUNTIME`;
+there is no public parser backend selector or parser-program constructor.
 
-```python
-constraint = grammar.compile(
-    vocab,
-    optimization=glrmask.Optimization.FAST_RUNTIME,
-    parser_backend=glrmask.ParserBackend.TEMPLATE_DFA,
-)
-assert constraint.parser_backend == glrmask.ParserBackend.TEMPLATE_DFA
-```
+Runtime artifacts retain their representation and exact vocabulary identity.
+Compiled children with supported finite embedding transfers can be bound and
+linked through `UnlinkedConstraint`; unsupported links raise `ValueError`.
+Data-only parser construction and backend inspection remain tooling APIs in
+`glrmask._internal`, with no compatibility guarantees.
 
-The runtime and saved artifact do not retain an LR table. Built-in grammar
-compilation may use LR machinery transiently to derive the template relations.
-The ordinary mask and commit engines remain shared, and the backend selection
-survives serialization. This is not a promise that every grammar, latency
-percentile, or load operation is faster.
-
-To supply a parser without an LR grammar, construct
-`glrmask.ParserProgram(definition)` from a JSON string or a JSON-serializable
-mapping describing its acyclic POP/READ/PUSH graphs. The program validates and
-owns the data; no Python callback executes during token generation. Compile it
-with a matching ordered list of terminal patterns: `bytes` means a literal,
-and `str` means a regular expression.
-
-```python
-program = glrmask.ParserProgram(definition)
-constraint = program.compile(
-    vocab,
-    terminal_patterns,
-    optimization=glrmask.Optimization.FAST_RUNTIME,
-)
-```
-
-For data-only programs, `FAST_RUNTIME` requests the shared static mask compiler;
-`FAST_BUILD`, `AUTO`, and the default use the shared dynamic engine. An oversized
-static expansion raises an error instead of silently choosing a different mode.
-See the [template parser contract](../docs/template-parser.md) and the
-[executable Python examples](tests/test_template_parser.py) for the exact graph
-format and independent language checks.
-
-Built-in template-backed children with finite embedding transfers support
-[compiled composition](../docs/template-parser-composition.md). Select
-`parser_backend=glrmask.ParserBackend.TEMPLATE_DFA` when linking them. Arbitrary
-data-only or older artifacts may lack the required embedding transfer; those
-links raise `ValueError` rather than reconstructing an LR table. Ordinary
-LR-backed composition remains unchanged.
 The [validation report](../docs/template-parser-validation-2026-09-30.md)
 includes measured results and the remaining performance and compatibility
 tradeoffs behind the unchanged default.
@@ -286,11 +249,11 @@ constraint = glrmask.Constraint.load(artifact)
 
 Passing `vocab=` to `Constraint.load` or `UnlinkedConstraint.load` is optional and validates/shares an already-existing exact vocabulary object.
 
-For a template-backed `Constraint`, `save_with_external_vocab()` omits the model
+For a template-backed `Constraint`, `save(external_vocab=True)` omits the model
 vocabulary. Loading this form requires the original exact vocabulary mapping:
 
 ```python
-artifact = constraint.save_with_external_vocab()
+artifact = constraint.save(external_vocab=True)
 constraint = glrmask.Constraint.load(artifact, vocab=vocab)
 ```
 
@@ -327,3 +290,23 @@ python -m pip install ./python
 ```
 
 Building from source requires a Rust toolchain and the platform's native linker and build tools. On Windows, activate the environment with `.venv\Scripts\activate`.
+
+### Saving with an external vocabulary
+
+`constraint.save()` embeds the vocabulary. Use
+`constraint.save(external_vocab=True)` to omit it, then load with
+`Constraint.load(data, vocab)`. The external form requires the exact same token
+mapping. `external_vocab` is keyword-only; both forms retain the same artifact
+semantics as before. Default unlinked constraints keep their existing `save()` bytes.
+
+### Optional boundary queries
+
+Pass `boundary_trigger=glrmask.BoundaryTriggerDetail.TOKENS` to build a
+conservative token summary, or `.EXACT` for an exact query where supported.
+`Grammar.compile` and `UnlinkedConstraint.link` build it before returning.
+Unsupported exact construction raises an error. The default is `.NONE`.
+
+`Grammar.compile_unlinked(vocab, boundary_trigger=...)` retains this request
+through `save`, `load`, and `bind`, and builds it at final link. Omitting the
+link keyword (or passing Python `None`) inherits the retained request; passing
+the enum `.NONE` explicitly suppresses it.

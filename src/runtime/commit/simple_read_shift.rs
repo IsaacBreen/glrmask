@@ -330,7 +330,7 @@ mod tests {
             .unwrap();
         let loaded = Constraint::load(fresh.save()).unwrap();
         let external =
-            Constraint::load_with_vocab(fresh.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            Constraint::load_with_vocab(fresh.save_without_vocab().unwrap(), &vocab).unwrap();
         for constraint in [&fresh, &loaded, &external] {
             assert!(constraint.table.as_lr().is_none());
             MASK_SUCCESSES.with(|count| count.set(0));
@@ -529,7 +529,7 @@ mod tests {
                 .unwrap();
             let loaded = Constraint::load(fresh.save()).unwrap();
             let external =
-                Constraint::load_with_vocab(fresh.save_with_external_vocab().unwrap(), &vocab)
+                Constraint::load_with_vocab(fresh.save_without_vocab().unwrap(), &vocab)
                     .unwrap();
             for constraint in [&fresh, &loaded, &external] {
                 assert!(constraint.table.as_lr().is_none());

@@ -284,7 +284,7 @@ fn external_vocab_roundtrip_preserves_backend_and_behavior() {
     let source = r#"start ::= "(" start ")" start? | "a""#;
     for backend in [ParserBackend::LrTable, ParserBackend::TemplateDfa] {
         let constraint = compile(&vocab, source, backend);
-        let bytes = constraint.save_with_external_vocab().expect("external-vocab save");
+        let bytes = constraint.save_without_vocab().expect("external-vocab save");
         let loaded = Constraint::load_with_vocab(bytes.clone(), &vocab)
             .expect("external-vocab roundtrip");
         assert_eq!(loaded.parser_backend(), backend, "backend identity changed");
@@ -299,7 +299,7 @@ fn external_vocab_roundtrip_preserves_backend_and_behavior() {
 fn external_lr_rejects_wrong_vocabulary_with_same_ids() {
     let vocab = vocab();
     let constraint = compile(&vocab, r#"start ::= "a" "b""#, ParserBackend::LrTable);
-    let bytes = constraint.save_with_external_vocab().unwrap();
+    let bytes = constraint.save_without_vocab().unwrap();
     // Same IDs and byte lengths, different byte content.
     let wrong = Vocab::new(vec![
         (0, b"x".to_vec()),
@@ -386,7 +386,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
         BuildOptions::default().optimization(Optimization::FastBuild).end_tokens([END_TOKEN])).unwrap();
     for constraint in [&lr, &native] {
         for loaded in [Constraint::load(constraint.save()).unwrap(),
-            Constraint::load_with_vocab(constraint.save_with_external_vocab().unwrap(), &vocab).unwrap()] {
+            Constraint::load_with_vocab(constraint.save_without_vocab().unwrap(), &vocab).unwrap()] {
             for (trace, accepting) in [(&[][..], true), (&[1][..], true), (&[2][..], false),
                 (&[1, 2, 1][..], false), (&[2, 1, 3, 1][..], true)] {
                 assert_pair_trace(constraint, &loaded, trace, accepting);
@@ -430,12 +430,12 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
     for dynamic in [crate::DynamicConstraint::from_ebnf(source, &vocab).unwrap(),
         crate::DynamicConstraint::from_ebnf_with_vocab_partition(source, &vocab).unwrap()] {
         let backend = dynamic.clone().into_constraint().parser_backend();
-        let transfer = dynamic.save_with_external_vocab();
+        let transfer = dynamic.save_without_vocab();
         let version = u16::from_le_bytes(transfer[8..10].try_into().unwrap());
         assert_eq!(version, if backend == ParserBackend::LrTable { 15 } else { 14 });
         let self_loaded = crate::DynamicConstraint::load(&dynamic.save()).unwrap();
         let external_loaded = crate::DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
-        assert_eq!(external_loaded.save_with_external_vocab(), transfer);
+        assert_eq!(external_loaded.save_without_vocab(), transfer);
         for compiled in [&dynamic, &self_loaded, &external_loaded] {
             for prefix in [b"".as_slice(), b"(", b"()", b"()("] {
                 let mut state = compiled.start();
@@ -488,7 +488,7 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
     for compiled in constraints {
         for constraint in [&compiled,
             &Constraint::load(compiled.save()).unwrap(),
-            &Constraint::load_with_vocab(compiled.save_with_external_vocab().unwrap(), &vocab).unwrap()] {
+            &Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap()] {
             for (prefix, accepting) in [(b"".as_slice(),true),(b"(",false),(b"()",true)] {
                 let mut state = constraint.start();state.commit_bytes(prefix).unwrap();
                 for _ in 0..2 {
@@ -522,7 +522,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
     }
     for compiled in constraints {
         for constraint in [&compiled,&Constraint::load(compiled.save()).unwrap(),
-            &Constraint::load_with_vocab(compiled.save_with_external_vocab().unwrap(),&vocab).unwrap()] {
+            &Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(),&vocab).unwrap()] {
             let mut state=constraint.start();assert!(!allowed(&state.mask(),25));
             state.commit_token(0).unwrap();assert!(allowed(&state.mask(),25));
             assert!(!allowed(&state.mask(),26));state.commit_token(25).unwrap();
@@ -549,7 +549,7 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
         assert!(std::sync::Arc::ptr_eq(&constraint.empty_byte_token_ids, &expected));
         let self_loaded = Constraint::load(constraint.save()).unwrap();
         let external_loaded = Constraint::load_with_vocab(
-            constraint.save_with_external_vocab().unwrap(), &vocab,
+            constraint.save_without_vocab().unwrap(), &vocab,
         ).unwrap();
         for current in [constraint, &self_loaded, &external_loaded] {
             assert_eq!(current.empty_byte_token_ids.as_ref(), &[7, 31, 512]);

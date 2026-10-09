@@ -89,7 +89,7 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
         compare_dynamic(&reference,&loaded);
         compare_dynamic(&template,&loaded);
         assert_eq!(loaded.save(),bytes);
-        let transfer=template.save_with_external_vocab();
+        let transfer=template.save_without_vocab();
         assert!(DynamicConstraint::load(&transfer).is_err());
         let transfer=<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&transfer,&v).unwrap();
         compare_dynamic(&template,&transfer);
@@ -170,7 +170,7 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     let v = vocab();
     let reference = DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(GRAMMARS[1]), &v).unwrap();
     let template = reference.clone();
-    let external = template.save_with_external_vocab();
+    let external = template.save_without_vocab();
     assert_eq!(&external[..8], b"GLRDXF\0\0");
     assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 14);
     assert!(DynamicConstraint::load(&external).is_err(), "external artifact accepted without a vocabulary");
@@ -184,7 +184,7 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     assert_eq!(&parser[36..40],b"TPR7");
     let loaded = <DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external, &v).unwrap();
     compare_dynamic(&reference, &loaded);
-    assert_eq!(loaded.save_with_external_vocab(), external,"external re-save must use same-mode backing bytes");
+    assert_eq!(loaded.save_without_vocab(), external,"external re-save must use same-mode backing bytes");
     for report in dynamic_parser_backend_report(&loaded).as_array().unwrap() {
         assert_eq!(report["lr_table_present"], false);
     }
@@ -194,7 +194,7 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     assert_eq!(&self_contained[..8],b"GLRDYN\0\0");
     let restored = DynamicConstraint::load(&self_contained).unwrap();
     compare_dynamic(&template, &restored);
-    let external_again = restored.save_with_external_vocab();
+    let external_again = restored.save_without_vocab();
     compare_dynamic(&template, &<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external_again,&v).unwrap());
     let mut mapping = v.iter().map(|(id,bytes)| (id,bytes.to_vec())).collect::<std::collections::BTreeMap<_,_>>();
     mapping.insert(0,b"different token bytes".to_vec());
@@ -207,11 +207,11 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
 fn malformed_external_template_binding_is_rejected() {
     let v=vocab();
     let template=DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(GRAMMARS[0]),&v).unwrap();
-    let external=template.save_with_external_vocab();
+    let external=template.save_without_vocab();
     let baseline=<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external,&v)
         .expect("malformed binding cases must start from a valid current external artifact");
     compare_dynamic(&template,&baseline);
-    assert_eq!(baseline.save_with_external_vocab(),external);
+    assert_eq!(baseline.save_without_vocab(),external);
     for length in [0,7,8,17,18,21,25,external.len()-1] {
         assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&external[..length],&v).is_err(),"accepted dynamic truncation{length}");
     }
@@ -250,7 +250,7 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
             "pre-fix boundary artifacts must fail before executing a stored exclusion: {error}");
         assert!(Constraint::load_with_vocab(&old, &v).is_err());
     }
-    let mut external = static_constraint.save_with_external_vocab().unwrap();
+    let mut external = static_constraint.save_without_vocab().unwrap();
     external[8..10].copy_from_slice(&36u16.to_le_bytes());
     assert!(Constraint::load_with_vocab(&external, &v).is_err());
 
@@ -261,7 +261,7 @@ fn artifacts_with_pre_nullable_fix_boundary_programs_are_rejected() {
     old_dynamic[38..40].copy_from_slice(&35u16.to_le_bytes());
     assert!(DynamicConstraint::load(&old_dynamic).is_err());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&old_dynamic, &v).is_err());
-    let mut old_external_dynamic = dynamic.save_with_external_vocab();
+    let mut old_external_dynamic = dynamic.save_without_vocab();
     old_external_dynamic[38..40].copy_from_slice(&36u16.to_le_bytes());
     assert!(<DynamicConstraint as DynamicConstraintExt>::load_with_vocab(&old_external_dynamic, &v).is_err());
 

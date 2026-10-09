@@ -26,9 +26,27 @@ pub(super) enum PyOptimization {
     FAST_RUNTIME,
 }
 
+/// Optional boundary-query metadata, built before compile or link returns.
+#[allow(non_camel_case_types)]
+#[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PyBoundaryTriggerDetail { NONE, TOKENS, EXACT }
+
+impl From<PyBoundaryTriggerDetail> for glrmask::BoundaryTriggerDetail {
+    fn from(value: PyBoundaryTriggerDetail) -> Self {
+        match value { PyBoundaryTriggerDetail::NONE => Self::None,
+            PyBoundaryTriggerDetail::TOKENS => Self::Tokens,
+            PyBoundaryTriggerDetail::EXACT => Self::Exact }
+    }
+}
+
+fn with_boundary(options: glrmask::BuildOptions, detail: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> glrmask::BuildOptions {
+    match detail { Some(detail) => options.boundary_trigger((*detail).into()), None => options }
+}
+
 /// Parser execution and storage backend, independent of mask optimization.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask", eq, eq_int)]
+#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyParserBackend {
     LR_TABLE,
@@ -223,13 +241,13 @@ impl PyGrammar {
     ///
     /// end_tokens are reserved generation controls, allowed only at acceptance.
     /// Their policy is not inherited when the result is later embedded as a child.
-    #[pyo3(signature = (vocab, *, end_tokens=None, optimization=None, parser_backend=None))]
+    #[pyo3(signature = (vocab, *, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn compile(
         &self, py: Python<'_>, vocab: &PyVocab,
         end_tokens: Option<Vec<u32>>, optimization: Option<PyRef<'_, PyOptimization>>,
-        parser_backend: Option<PyRef<'_, PyParserBackend>>,
+        boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>,
     ) -> PyResult<PyConstraint> {
-        let options = options(end_tokens, optimization, parser_backend);
+        let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
         let grammar = self.as_rust().map_err(api_error)?;
         let vocab = vocab.inner.clone();
         py.allow_threads(move || grammar.compile_with(&vocab, options))
@@ -237,10 +255,13 @@ impl PyGrammar {
     }
 
     /// Compile reusable machinery while preserving unresolved grammar/token slots.
-    fn compile_unlinked(&self, py: Python<'_>, vocab: &PyVocab) -> PyResult<PyUnlinkedConstraint> {
+    #[pyo3(signature = (vocab, *, boundary_trigger=None))]
+    fn compile_unlinked(&self, py: Python<'_>, vocab: &PyVocab,
+        boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyUnlinkedConstraint> {
+        let options = with_boundary(glrmask::BuildOptions::default(), boundary_trigger);
         let grammar = self.as_rust().map_err(api_error)?;
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.compile_unlinked(&vocab))
+        py.allow_threads(move || grammar.compile_unlinked_with(&vocab, options))
             .map(|inner| PyUnlinkedConstraint { inner }).map_err(api_error)
     }
 }
@@ -268,13 +289,13 @@ impl PyUnlinkedConstraint {
     }
 
     /// Produce a runnable root. Every required slot must already be bound.
-    #[pyo3(signature = (*, end_tokens=None, optimization=None, parser_backend=None))]
+    #[pyo3(signature = (*, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn link(
         &self, py: Python<'_>, end_tokens: Option<Vec<u32>>,
         optimization: Option<PyRef<'_, PyOptimization>>,
-        parser_backend: Option<PyRef<'_, PyParserBackend>>,
+        boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>,
     ) -> PyResult<PyConstraint> {
-        let options = options(end_tokens, optimization, parser_backend);
+        let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
         py.allow_threads(|| self.inner.link_with(options)).map(constraint).map_err(api_error)
     }
 
@@ -303,7 +324,44 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyExactToken>()?;
     module.add_class::<PyExactTokens>()?;
     module.add_class::<PyOptimization>()?;
+    module.add_class::<PyBoundaryTriggerDetail>()?;
+    Ok(())
+}
+
+/// Tooling-only inspection of the stored parser representation.
+#[pyfunction]
+fn parser_backend(constraint: &PyConstraint) -> PyResult<PyParserBackend> {
+    constraint.inner.parser_backend().try_into()
+}
+
+#[pyfunction]
+#[pyo3(signature = (grammar, vocab, *, end_tokens=None, optimization=None, parser_backend=None))]
+fn compile_with_backend(
+    grammar: &PyGrammar, vocab: &PyVocab, py: Python<'_>,
+    end_tokens: Option<Vec<u32>>, optimization: Option<PyRef<'_, PyOptimization>>,
+    parser_backend: Option<PyRef<'_, PyParserBackend>>,
+) -> PyResult<PyConstraint> {
+    let options = options(end_tokens, optimization, parser_backend);
+    let grammar = grammar.as_rust().map_err(api_error)?;
+    py.allow_threads(|| grammar.compile_with(&vocab.inner, options)).map(constraint).map_err(api_error)
+}
+
+#[pyfunction]
+#[pyo3(signature = (module, *, end_tokens=None, optimization=None, parser_backend=None))]
+fn link_with_backend(
+    module: &PyUnlinkedConstraint, py: Python<'_>, end_tokens: Option<Vec<u32>>,
+    optimization: Option<PyRef<'_, PyOptimization>>,
+    parser_backend: Option<PyRef<'_, PyParserBackend>>,
+) -> PyResult<PyConstraint> {
+    let options = options(end_tokens, optimization, parser_backend);
+    py.allow_threads(|| module.inner.link_with(options)).map(constraint).map_err(api_error)
+}
+
+pub(super) fn register_internal(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyParserBackend>()?;
+    module.add_function(wrap_pyfunction!(parser_backend, module)?)?;
+    module.add_function(wrap_pyfunction!(compile_with_backend, module)?)?;
+    module.add_function(wrap_pyfunction!(link_with_backend, module)?)?;
     super::template_api::register(module)?;
     Ok(())
 }

@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased API cleanup
+
+- Keep parser backend selectors, inspectors, and data-only parser-provider
+  construction in Rust's `internal-api` feature and Python's `_internal`.
+  Public mode selection remains `Optimization`.
+- Python `Constraint.save(*, external_vocab=False)` replaces the separate
+  external-vocabulary save method; Rust names that form `save_without_vocab()`.
+  Constraint serialization bytes and load behavior are unchanged.
+- Select optional boundary queries through `BuildOptions.boundary_trigger` and
+  Python's `boundary_trigger` keyword. Direct trigger builders are internal.
+  Pre-link artifacts retain requests until final link; explicit link options
+  override the retained root request. Default pre-link artifact bytes remain
+  unchanged; non-default requests use the tagged GLRMOD04 manifest.
+
+
 ## Unreleased
 
 ### Added

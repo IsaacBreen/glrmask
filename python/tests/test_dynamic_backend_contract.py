@@ -60,7 +60,7 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     compiled = glrmask.Grammar.from_ebnf(SOURCE).compile(vocab, optimization=mode, end_tokens=[26])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save_with_external_vocab(), vocab)]:
+                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
             state = constraint.start()
             state.commit_bytes(prefix)

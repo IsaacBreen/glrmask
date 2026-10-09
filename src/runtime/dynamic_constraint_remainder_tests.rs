@@ -202,10 +202,10 @@ fn shared_cached_transfer_is_copied_without_invalidating_the_other_owner() {
     let mut dynamic = compile_dynamic(&vocab);
     dynamic.cache_external_vocab_artifact_for_save();
     let other = dynamic.clone();
-    let expected = other.save_with_external_vocab();
+    let expected = other.save_without_vocab();
     let saved = dynamic.into_saved();
     assert_eq!(saved, expected);
-    assert_eq!(other.save_with_external_vocab(), expected);
+    assert_eq!(other.save_without_vocab(), expected);
 }
 
 #[test]
@@ -214,7 +214,7 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
     let direct = compile_dynamic(&vocab);
     let self_contained = DynamicConstraint::load(&direct.save()).unwrap();
     let external =
-        DynamicConstraint::load_with_vocab(&direct.save_with_external_vocab(), &vocab)
+        DynamicConstraint::load_with_vocab(&direct.save_without_vocab(), &vocab)
             .unwrap();
 
     for constraint in [&direct, &self_contained, &external] {
@@ -261,7 +261,7 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
 fn current_dynamic_envelope_rejects_truncation_and_trailing_data() {
     let vocab = vocab();
     let dynamic = compile_dynamic(&vocab);
-    let bytes = dynamic.save_with_external_vocab();
+    let bytes = dynamic.save_without_vocab();
 
     for length in [0usize, 1, 17, bytes.len() - 1] {
         assert!(DynamicConstraint::load_with_vocab(&bytes[..length], &vocab).is_err());
@@ -288,7 +288,7 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
             .unwrap();
         let loaded = crate::Constraint::load(direct.save()).unwrap();
         let external = crate::Constraint::load_with_vocab(
-            direct.save_with_external_vocab().unwrap(),
+            direct.save_without_vocab().unwrap(),
             &vocab,
         )
         .unwrap();

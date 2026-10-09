@@ -11,7 +11,7 @@ use pyo3::types::{PyAny, PyBytes, PyModule, PyString};
 
 /// Immutable, validated acyclic parser program described by JSON-compatible
 /// POP/READ/PUSH phase graphs. It can be compiled with multiple vocabularies.
-#[pyclass(name = "ParserProgram", module = "glrmask", frozen)]
+#[pyclass(name = "ParserProgram", module = "glrmask._internal", frozen)]
 #[derive(Clone)]
 pub(super) struct PyParserProgram {
     inner: ParserProgram,

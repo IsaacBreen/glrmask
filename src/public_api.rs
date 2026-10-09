@@ -40,12 +40,14 @@ pub enum ParserBackend {
     TemplateDfa,
 }
 
-/// Options that apply only when producing a final runnable constraint.
+/// Options for a final runnable constraint. Pre-link compilation retains only
+/// the boundary-trigger request; all other options are selected at final link.
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
     end_tokens: Vec<u32>,
     optimization: Optimization,
     parser_backend: ParserBackend,
+    boundary_trigger: Option<BoundaryTriggerDetail>,
 }
 
 impl BuildOptions {
@@ -62,6 +64,16 @@ impl BuildOptions {
         self
     }
 
+    /// Build optional boundary-query metadata before returning a runnable constraint.
+    /// The default adds no metadata. An explicit request at link overrides the
+    /// request retained by `compile_unlinked_with`, including explicit `None`.
+    pub fn boundary_trigger(mut self, detail: BoundaryTriggerDetail) -> Self {
+        self.boundary_trigger = Some(detail);
+        self
+    }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn parser_backend(mut self, backend: ParserBackend) -> Self {
         assert!(backend != ParserBackend::LrTable,
             "LR-BACKED CONSTRAINT REQUEST IS FORBIDDEN: only native template Constraints may be materialized");
@@ -92,6 +104,7 @@ pub struct UnlinkedConstraint {
     /// Compiled-only immutable attachments. Delaying composition is what lets
     /// the terminal link call choose the boundary/runtime trade-off.
     bindings: BTreeMap<String, ModuleBinding>,
+    boundary_trigger: BoundaryTriggerDetail,
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +168,8 @@ impl<'a> Grammar<'a> {
     /// Resolve the parser-facing expression graph without selecting an LR
     /// normal form. Source bindings are not part of this constructor boundary;
     /// use a closed grammar or the ordinary compiled-component linker.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn prepare_parser_grammar(&self) -> Result<crate::template_parser::PreparedParserGrammar> {
         if !self.bindings.is_empty() {
             return Err(Error::Compilation("custom parser construction requires a source without external bindings".into()));
@@ -173,6 +188,8 @@ impl<'a> Grammar<'a> {
     /// Resolve this grammar, invoke a compile-time parser constructor once, and
     /// assemble its template relations using the ordinary masking machinery.
     /// For repeated experiments, retain `prepare_parser_grammar()` instead.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn compile_with_parser(&self, vocab: &Vocab,
         compiler: &(impl crate::template_parser::ParserCompiler + ?Sized),
         options: crate::template_parser::TemplateBuildOptions) -> Result<crate::Constraint> {
@@ -296,8 +313,9 @@ impl<'a> Grammar<'a> {
                 if components.len() != 1 {
                     return Err(Error::Compilation("a template-parser Constraint currently requires one compiled component; union composition is not implemented".into()));
                 }
-                let constraint = components.pop().unwrap();
+                let mut constraint = components.pop().unwrap();
                 ensure_runnable_constraint(&constraint)?;
+                constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or_default()).map_err(Error::Compilation)?;
                 return constraint.with_end_tokens(options.end_token_ids());
             }
         }
@@ -325,12 +343,20 @@ impl<'a> Grammar<'a> {
             );
             constraint.install_template_parser_from_compile()?;
         }
+        constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or_default()).map_err(Error::Compilation)?;
         constraint.with_end_tokens(options.end_token_ids())
     }
 
     /// Compile reusable local machinery while allowing unresolved grammar
     /// or exact-token slots to remain open.
     pub fn compile_unlinked(&self, vocab: &Vocab) -> Result<UnlinkedConstraint> {
+        self.compile_unlinked_with(vocab, BuildOptions::default())
+    }
+
+    /// Compile reusable machinery, retaining the boundary-trigger request until
+    /// final link. Unresolved slots prevent trigger construction at this stage.
+    /// End tokens and optimization are selected by `link_with`, not retained.
+    pub fn compile_unlinked_with(&self, vocab: &Vocab, options: BuildOptions) -> Result<UnlinkedConstraint> {
         // Compile this component locally. Grammar-child attachments remain
         // compiled values in the unlinked graph and are linked only by link_with,
         // where the caller's Optimization choice is finally known.
@@ -421,6 +447,7 @@ impl<'a> Grammar<'a> {
             inner: Arc::from(constraint),
             token_slots: placeholder_ids.keys().cloned().collect(),
             bindings,
+            boundary_trigger: options.boundary_trigger.unwrap_or_default(),
         };
         module.validate_slot_manifest()?;
         Ok(module)
@@ -1941,6 +1968,9 @@ enum ModuleBindingArtifact {
 }
 
 const MODULE_MAGIC: &[u8; 8] = b"GLRMOD03";
+// An explicit non-default deferred trigger request prefixes the manifest.
+// Default artifacts retain the existing bytes exactly.
+const MODULE_TRIGGER_MAGIC: &[u8; 8] = b"GLRMOD04";
 const MODULE_HEADER_LEN: usize = 16;
 
 impl UnlinkedConstraint {
@@ -2180,7 +2210,11 @@ impl UnlinkedConstraint {
             .par_iter()
             .map(|(name, binding)| {
                 let mut child = match binding {
-                    ModuleBinding::Module(module) => module.materialize(optimization)?,
+                    ModuleBinding::Module(module) => {
+                        let mut child = module.materialize(optimization)?;
+                        child.build_boundary_trigger(module.boundary_trigger).map_err(Error::Compilation)?;
+                        child
+                    },
                     ModuleBinding::Constraint(constraint) => constraint.as_ref().clone(),
                     ModuleBinding::ExactTokens(ids) => {
                         compile_exact_token_adapter(&vocab, ids.as_ref())?
@@ -2261,6 +2295,9 @@ impl UnlinkedConstraint {
                 );
             }
             child.install_template_parser()?;
+            if let ModuleBinding::Module(module) = binding {
+                child.build_boundary_trigger(module.boundary_trigger).map_err(Error::Compilation)?;
+            }
             Ok((name.clone(), Arc::new(child)))
         }).collect::<Result<Vec<_>>>()?;
         crate::error::catch_internal_invariant(|| {
@@ -2273,6 +2310,8 @@ impl UnlinkedConstraint {
     }
 
     /// Link a fully bound artifact with final build options.
+    /// An explicit boundary-trigger option overrides the retained request;
+    /// otherwise the request from pre-link compilation is inherited.
     pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
         if let Some((name, kind)) = self.first_open_slot()? {
             return Err(Error::Compilation(format!(
@@ -2287,6 +2326,7 @@ impl UnlinkedConstraint {
         if options.parser_backend == ParserBackend::TemplateDfa {
             constraint.install_template_parser()?;
         }
+        constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or(self.boundary_trigger)).map_err(Error::Compilation)?;
         constraint.with_end_tokens(options.end_token_ids())
     }
 
@@ -2318,14 +2358,21 @@ impl UnlinkedConstraint {
 
     /// Serialize compiled local machinery and deferred bindings as bytes.
     pub fn save(&self) -> Vec<u8> {
-        let manifest = bincode::serialize(&self.artifact_manifest())
+        let mut manifest = bincode::serialize(&self.artifact_manifest())
             .expect("in-memory unlinked-constraint manifest is serializable");
         // Open-module vocabulary metadata lives in this manifest. Keep the
         // embedded constraint bytes as the raw compiled body rather than
         // wrapping them in the closed-root vocabulary/policy envelope.
         let body = self.inner.save_body();
         let mut bytes = Vec::with_capacity(MODULE_HEADER_LEN + manifest.len() + body.len());
-        bytes.extend_from_slice(MODULE_MAGIC);
+        let magic = match self.boundary_trigger {
+            BoundaryTriggerDetail::None => MODULE_MAGIC,
+            detail => {
+                manifest.insert(0, match detail { BoundaryTriggerDetail::Tokens => 1, BoundaryTriggerDetail::Exact => 2, BoundaryTriggerDetail::None => unreachable!() });
+                MODULE_TRIGGER_MAGIC
+            }
+        };
+        bytes.extend_from_slice(magic);
         bytes.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
         bytes.extend_from_slice(&manifest);
         bytes.extend_from_slice(&body);
@@ -2335,6 +2382,7 @@ impl UnlinkedConstraint {
     fn from_artifact_parts(
         mut inner: RuntimeConstraint,
         manifest: ModuleArtifactManifest,
+        boundary_trigger: BoundaryTriggerDetail,
     ) -> Result<Self> {
         let mut previous = None;
         for &id in &manifest.exact_only_token_ids {
@@ -2395,6 +2443,7 @@ impl UnlinkedConstraint {
             inner: Arc::new(inner),
             token_slots,
             bindings,
+            boundary_trigger,
         };
         module.validate_slot_manifest()?;
         Ok(module)
@@ -2405,7 +2454,7 @@ impl UnlinkedConstraint {
         use bincode::Options;
         let bytes = bytes.into();
         let data = bytes.as_ref();
-        if data.len() < MODULE_HEADER_LEN || !data.starts_with(MODULE_MAGIC) {
+        if data.len() < MODULE_HEADER_LEN || !(data.starts_with(MODULE_MAGIC) || data.starts_with(MODULE_TRIGGER_MAGIC)) {
             return Err(Error::Serialization("invalid unlinked-constraint artifact header".to_owned()));
         }
         let manifest_len = u64::from_le_bytes(data[8..16].try_into().expect("header length checked"));
@@ -2414,11 +2463,19 @@ impl UnlinkedConstraint {
             .and_then(|len| MODULE_HEADER_LEN.checked_add(len))
             .filter(|&end| end < data.len())
             .ok_or_else(|| Error::Serialization("invalid unlinked-constraint manifest length".to_owned()))?;
+        let (boundary_trigger, manifest_start) = if data.starts_with(MODULE_TRIGGER_MAGIC) {
+            let detail = match data.get(MODULE_HEADER_LEN).copied().filter(|_| body_start > MODULE_HEADER_LEN + 1) {
+                Some(1) => BoundaryTriggerDetail::Tokens,
+                Some(2) => BoundaryTriggerDetail::Exact,
+                _ => return Err(Error::Serialization("invalid unlinked-constraint boundary-trigger request".to_owned())),
+            };
+            (detail, MODULE_HEADER_LEN + 1)
+        } else { (BoundaryTriggerDetail::None, MODULE_HEADER_LEN) };
         let manifest: ModuleArtifactManifest = bincode::DefaultOptions::new()
             .with_fixint_encoding()
             .with_limit(manifest_len)
             .reject_trailing_bytes()
-            .deserialize(&data[MODULE_HEADER_LEN..body_start])
+            .deserialize(&data[manifest_start..body_start])
             .map_err(|error| Error::Serialization(format!("invalid unlinked-constraint manifest: {error}")))?;
         let inner = match bytes {
             std::borrow::Cow::Owned(mut bytes) => {
@@ -2428,7 +2485,7 @@ impl UnlinkedConstraint {
                 RuntimeConstraint::load_body_artifact(&bytes[body_start..])?
             }
         };
-        Self::from_artifact_parts(inner, manifest)
+        Self::from_artifact_parts(inner, manifest, boundary_trigger)
     }
 
     fn bind_vocab_recursive(&mut self, vocab: &Vocab) -> Result<()> {
@@ -3086,7 +3143,7 @@ mod tests {
         // The production singleton path uses the flat alias representation and
         // deliberately defers its first transfer-artifact serialization. Verify
         // that both survive the real external-vocab save/load boundary.
-        let saved = optimized.save_with_external_vocab();
+        let saved = optimized.save_without_vocab();
         let loaded = DynamicConstraint::load_with_vocab(&saved, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), optimized.start().mask());
         let mut loaded_done = loaded.start();
@@ -3188,7 +3245,7 @@ mod tests {
             .dynamic_mask_vocab_for_runtime()
             .canonical_token_count();
         assert!(original_canonical < vocab.len());
-        let bytes = optimized.save_with_external_vocab();
+        let bytes = optimized.save_without_vocab();
         let loaded = DynamicConstraint::load_with_vocab(&bytes, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), optimized.start().mask());
         assert_eq!(
@@ -3242,7 +3299,7 @@ mod tests {
             "O2 must retain its grammar quotient for bounded-string residual schemas",
         );
 
-        let bytes = optimized.save_with_external_vocab();
+        let bytes = optimized.save_without_vocab();
         let loaded = DynamicConstraint::load_with_vocab(&bytes, &vocab).unwrap();
         assert!(
             loaded
@@ -3328,7 +3385,7 @@ mod tests {
         // The external-vocab transfer has per-alternative metadata and can keep
         // each quotient independently.
         let transferred = DynamicConstraint::load_with_vocab(
-            &optimized.save_with_external_vocab(),
+            &optimized.save_without_vocab(),
             &vocab,
         )
         .unwrap();
@@ -6001,10 +6058,73 @@ mod cached_parent_main_tests {
 
 impl RuntimeConstraint {
     /// Inspect the actual stored parser backend, not a process-wide switch.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn parser_backend(&self) -> ParserBackend {
         if self.has_template_parser() {
             assert!(!self.table.is_present(), "template parser retained LR storage");
             ParserBackend::TemplateDfa
         } else { ParserBackend::LrTable }
+    }
+}
+
+
+#[cfg(test)]
+mod final_boundary_option_tests {
+    use super::*;
+
+    fn vocab() -> Vocab {
+        Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec())])
+    }
+
+    #[test]
+    fn trigger_metadata_exists_before_first_use_in_every_public_mode() {
+        let v = vocab();
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#);
+        for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+            for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+                let constraint = grammar.compile_with(&v,
+                    BuildOptions::default().optimization(mode).boundary_trigger(detail)).unwrap();
+                assert!(match (&constraint.boundary_trigger, detail) {
+                    (crate::runtime::BoundaryTrigger::None, BoundaryTriggerDetail::None) |
+                    (crate::runtime::BoundaryTrigger::Tokens(_), BoundaryTriggerDetail::Tokens) |
+                    (crate::runtime::BoundaryTrigger::Exact(_), BoundaryTriggerDetail::Exact) => true,
+                    _ => false,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_trigger_metadata_is_built_at_link_and_explicit_none_overrides() {
+        let v = vocab();
+        let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
+            .compile_unlinked_with(&v, BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Exact)).unwrap();
+        assert!(matches!(parent.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
+        let parent = UnlinkedConstraint::load(parent.save()).unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "y""#).compile(&v).unwrap();
+        let bound = parent.bind("child", &child).unwrap();
+        assert!(matches!(bound.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
+        let exact = bound.link().unwrap();
+        assert!(matches!(exact.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)));
+        let none = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        assert!(matches!(none.boundary_trigger, crate::runtime::BoundaryTrigger::None));
+        assert_eq!(exact.start().mask(), none.start().mask());
+    }
+
+    #[test]
+    fn persisted_child_request_is_scoped_to_the_child() {
+        let v = vocab();
+        let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
+            .compile_unlinked(&v).unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "y""#).compile_unlinked_with(&v,
+            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+        parent.bindings.insert("child".to_owned(), ModuleBinding::Module(Box::new(child)));
+        let parent = UnlinkedConstraint::load(parent.save()).unwrap();
+        let linked = parent.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        assert!(matches!(linked.boundary_trigger, crate::runtime::BoundaryTrigger::None));
+        let overlay = linked.static_dynamic_overlay.as_ref().unwrap();
+        assert!(overlay.segmented_parser_components.iter().any(|component|
+            matches!(component.constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Tokens(_))));
     }
 }

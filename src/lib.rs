@@ -83,7 +83,13 @@ pub(crate) mod compiler;
 pub(crate) mod ds;
 mod error;
 mod public_api;
+// Data-only parser construction remains an unstable tooling API.
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
 pub mod template_parser;
+#[cfg(not(any(test, feature = "internal-api")))]
+#[allow(unused_imports)]
+pub(crate) mod template_parser;
 pub(crate) use glrmask_grammar::__private::grammar;
 pub(crate) mod import;
 pub(crate) mod programmatic_js;
@@ -95,7 +101,10 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{BuildOptions, Grammar, Optimization, ParserBackend, UnlinkedConstraint};
+pub use public_api::{BuildOptions, Grammar, Optimization, UnlinkedConstraint};
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use public_api::ParserBackend;
 
 /// Model token identifier.
 pub type TokenId = u32;
@@ -105,8 +114,6 @@ pub type TokenId = u32;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-#[cfg(any(test, feature = "internal-api"))]
-#[doc(hidden)]
 pub use runtime::BoundaryTriggerDetail;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]

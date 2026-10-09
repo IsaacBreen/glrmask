@@ -277,7 +277,7 @@ fn arbitrary_phase_programs_match_an_independent_full_token_mask_oracle() {
         );
         let c = p.compile_static(&lexer(2), &vocab()).unwrap();
         let loaded = Constraint::load(&c.save()).unwrap();
-        let external = c.save_with_external_vocab().unwrap();
+        let external = c.save_without_vocab().unwrap();
         let external_loaded = Constraint::load_with_vocab(&external, &vocab()).unwrap();
         let mut pending = vec![(Vec::<u32>::new(), BTreeSet::from([vec![0]]))];
         while let Some((prefix, words)) = pending.pop() {
@@ -382,7 +382,7 @@ fn overlapping_terminal_lexer_and_ignored_whitespace_match_byte_language() {
         .unwrap();
     let loaded = Constraint::load(&fresh.save()).unwrap();
     let external =
-        Constraint::load_with_vocab(&fresh.save_with_external_vocab().unwrap(), &vocab).unwrap();
+        Constraint::load_with_vocab(&fresh.save_without_vocab().unwrap(), &vocab).unwrap();
     let mut prefixes = vec![(Vec::<u32>::new(), Vec::<u8>::new())];
     while let Some((prefix, bytes)) = prefixes.pop() {
         for c in [&fresh, &loaded, &external] {

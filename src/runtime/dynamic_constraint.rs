@@ -1939,7 +1939,7 @@ impl DynamicConstraint {
     /// Compact transfer artifact that deliberately omits vocabulary bytes.
     /// Pair with `load_with_vocab`. This is the natural persisted format for
     /// APIs (such as Python) whose load operation already requires a Vocab.
-    pub fn save_with_external_vocab(&self) -> Vec<u8> {
+    pub fn save_without_vocab(&self) -> Vec<u8> {
         if let Some(bytes) = &self.external_vocab_artifact_cache {
             return bytes.as_ref().clone();
         }
@@ -3915,7 +3915,7 @@ mod parser_replacement_compile_tests {
         let candidate = replacement.into_constraints().pop().unwrap();
         let restored = Constraint::load(candidate.save()).unwrap();
         let external = Constraint::load_with_vocab(
-            candidate.save_with_external_vocab().unwrap(), &vocab,
+            candidate.save_without_vocab().unwrap(), &vocab,
         ).unwrap();
         for constraint in [&candidate, &restored, &external] {
             assert!(constraint.table.as_lr().is_none());
@@ -4918,7 +4918,7 @@ mod tests {
         assert!(constraint.inner.tokenizer.has_any_virtual_runtime());
 
         // Test current V13 save and load.
-        let v13_bytes = constraint.save_with_external_vocab();
+        let v13_bytes = constraint.save_without_vocab();
         assert_eq!(u16::from_le_bytes([v13_bytes[8], v13_bytes[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
         assert_eq!(TEMPLATE_DYNAMIC_TRANSFER_VERSION, 14);
 
@@ -7819,7 +7819,7 @@ nt start ::= A;
     fn dynamic_transfer_loads_v1_payload_without_ignore_descriptor() {
         let vocab = vocab();
         let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
-        let mut bytes = original.save_with_external_vocab();
+        let mut bytes = original.save_without_vocab();
         bytes[8..10].copy_from_slice(&1u16.to_le_bytes());
         assert!(DynamicConstraint::load_with_vocab(&bytes, &vocab).is_err(), "retired LR transfer must fail closed");
     }
@@ -7828,7 +7828,7 @@ nt start ::= A;
     fn dynamic_transfer_loads_v2_payload_without_terminal_exprs() {
         let vocab = vocab();
         let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
-        let mut bytes = original.save_with_external_vocab();
+        let mut bytes = original.save_without_vocab();
         bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
         assert!(DynamicConstraint::load_with_vocab(&bytes, &vocab).is_err(), "retired LR transfer must fail closed");
     }
@@ -7837,7 +7837,7 @@ nt start ::= A;
     fn dynamic_transfer_loads_v3_mask_quotient_payload_without_terminal_exprs() {
         let vocab = vocab();
         let original = DynamicConstraint::from_ebnf("start ::= 'a'+ 'b'", &vocab).unwrap();
-        let mut bytes = original.save_with_external_vocab();
+        let mut bytes = original.save_without_vocab();
         bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
         assert!(DynamicConstraint::load_with_vocab(&bytes, &vocab).is_err(), "retired LR transfer must fail closed");
     }

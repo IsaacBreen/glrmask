@@ -242,7 +242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let start = Instant::now(); let loaded = Constraint::load(&saved)?; let load_ns = start.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&loaded)); if args[3] == "static" { assert_static(&parser_backend_report(&loaded)); } assert_eq!(saved, loaded.save());
-    let external = candidate.save_with_external_vocab()?; let external_loaded = Constraint::load_with_vocab(&external, &vocab)?;
+    let external = candidate.save_without_vocab()?; let external_loaded = Constraint::load_with_vocab(&external, &vocab)?;
     assert_table_free(&parser_backend_report(&external_loaded)); if args[3] == "static" { assert_static(&parser_backend_report(&external_loaded)); }
     let mut csv = BufWriter::new(fs::File::create(output.join("exact-replay.csv"))?);
     writeln!(csv, "trace,step,token,inline_mask_ns,template_mask_ns,self_load_mask_ns,external_load_mask_ns,hash")?;

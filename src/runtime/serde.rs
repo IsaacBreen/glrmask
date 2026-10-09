@@ -6081,7 +6081,7 @@ impl Constraint {
     /// vocabulary; an absent or incompatible binding is rejected. Supported for
     /// both the table-free template backend and a retained LR
     /// backend with a retained table.
-    pub fn save_with_external_vocab(&self) -> crate::Result<Vec<u8>> {
+    pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
         if !self.has_template_parser() && !self.table.is_present() {
             return Err(crate::Error::Serialization(
                 "external-vocabulary Constraint artifacts require a template parser or a retained LR table".into()));
@@ -8615,7 +8615,7 @@ mod tests {
         let (original, vocab) = omitted_dynamic_vocab_fixture();
         assert!(!original.inner.dynamic_mask_vocab.is_grammar_quotiented());
         assert!(original.inner.dynamic_mask_vocab.to_template_external_vocab_artifact().is_none());
-        let transfer = original.save_with_external_vocab();
+        let transfer = original.save_without_vocab();
         let loaded = crate::DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         let prepared = crate::compiler::constraint_possible_matches::prepared_runtime_dynamic_vocab_for_vocab(&vocab);
         assert!(Arc::ptr_eq(&prepared.trie, &loaded.inner.dynamic_mask_vocab.trie),
@@ -8641,7 +8641,7 @@ mod tests {
             assert_eq!(expected.is_accepting(), actual.is_accepting());
         }
         assert!(actual.is_accepting());
-        assert_eq!(loaded.save_with_external_vocab(), transfer);
+        assert_eq!(loaded.save_without_vocab(), transfer);
         let reloaded = crate::DynamicConstraint::load_with_vocab(&loaded.save(), &vocab).unwrap();
         assert_eq!(loaded.start().mask(), reloaded.start().mask());
         let mismatch = Vocab::new(vec![(1, b"x".to_vec()), (7, b"a".to_vec()), (11, b"b".to_vec())]);
@@ -8658,7 +8658,7 @@ mod tests {
         ).unwrap();
         assert!(partitioned.inner.dynamic_mask_vocab.is_grammar_quotiented());
         assert!(partitioned.inner.dynamic_mask_vocab.to_template_external_vocab_artifact().is_some());
-        let transfer = partitioned.save_with_external_vocab();
+        let transfer = partitioned.save_without_vocab();
         let loaded = crate::DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert!(loaded.inner.dynamic_mask_vocab.is_grammar_quotiented());
         let prepared = crate::compiler::constraint_possible_matches::prepared_runtime_dynamic_vocab_for_vocab(&vocab);
@@ -8677,7 +8677,7 @@ mod tests {
             }
             assert!(actual.is_accepting());
         }
-        assert_eq!(loaded.save_with_external_vocab(), transfer);
+        assert_eq!(loaded.save_without_vocab(), transfer);
         let reloaded = crate::DynamicConstraint::load_with_vocab(&loaded.save(), &vocab).unwrap();
         assert!(reloaded.inner.dynamic_mask_vocab.is_grammar_quotiented());
         assert_eq!(loaded.start().mask(), reloaded.start().mask());
@@ -8695,7 +8695,7 @@ mod tests {
         original.inner.serialized_artifact_cache = None;
         // Use Constraint body saves, avoiding DynamicConstraint's unchanged
         // wrapper cache when deliberately mutating internal proof fixtures.
-        let valid = original.inner.save_with_external_vocab().unwrap();
+        let valid = original.inner.save_without_vocab().unwrap();
         let loaded = Constraint::load_with_vocab(&valid, &vocab).unwrap();
         assert!(loaded.dynamic_mask_vocab.projected_terminal_quotients_prepared());
         assert!(loaded.dynamic_mask_vocab.has_projected_terminal_quotients());
@@ -8705,7 +8705,7 @@ mod tests {
         let mut bad_rows = invalid.tokenizer.build_terminal_projected_quotients_for_containment();
         bad_rows[0].0 = invalid.tokenizer.num_terminals();
         invalid.dynamic_mask_vocab.set_projected_terminal_quotients(bad_rows);
-        let invalid_wire = invalid.save_with_external_vocab().unwrap();
+        let invalid_wire = invalid.save_without_vocab().unwrap();
         assert!(Constraint::load_with_vocab(&invalid_wire, &vocab).is_err(),
             "the cached Vocab must not authorize an invalid source-state proof");
     }
@@ -9395,7 +9395,7 @@ mod tests {
         assert!(Constraint::load(native_as_lr).is_err());
 
         // External LR requires the exact vocabulary and rejects a missing one.
-        let external = lr.save_with_external_vocab().unwrap();
+        let external = lr.save_without_vocab().unwrap();
         assert!(Constraint::load(external.clone()).is_err());
         assert!(Constraint::load_with_vocab(external, &vocab).is_ok());
     }

@@ -126,7 +126,7 @@ fn source_graph_is_resolved_not_flattened_and_callback_is_compile_time_only() {
         check_words(&c, &bytes, &[b"ab", b"abab"]);
         let saved = c.save(); let reloaded = Constraint::load(&saved).unwrap();
         check_words(&reloaded, &bytes, &[b"ab", b"abab"]); assert_eq!(reloaded.save(), saved);
-        let external = c.save_with_external_vocab().unwrap();
+        let external = c.save_without_vocab().unwrap();
         assert!(Constraint::load(&external).is_err());
         check_words(&Constraint::load_with_vocab(external, &v).unwrap(), &bytes, &[b"ab", b"abab"]);
     }

@@ -183,7 +183,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
 
     let restored = Constraint::load(candidate.save()).unwrap();
     let external = Constraint::load_with_vocab(
-        candidate.save_with_external_vocab().unwrap(), &vocab,
+        candidate.save_without_vocab().unwrap(), &vocab,
     ).unwrap();
     for constraint in [&restored, &external] {
         assert!(constraint.has_template_parser() && !constraint.table.is_present());
@@ -449,7 +449,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
         let self_bytes = fresh.save();
         let loaded = Constraint::load(&self_bytes).unwrap();
         assert_eq!(loaded.save(), self_bytes);
-        let external_bytes = fresh.save_with_external_vocab().unwrap();
+        let external_bytes = fresh.save_without_vocab().unwrap();
         let external = Constraint::load_with_vocab(&external_bytes, &vocab).unwrap();
         for constraint in [&fresh, &loaded, &external] {
             assert!(constraint.has_template_parser());
@@ -491,14 +491,14 @@ fn dynamic_envelope_contains_exactly_the_native_constraint_bodies() {
     );
     for external in [false, true] {
         let actual = if external {
-            dynamic.save_with_external_vocab()
+            dynamic.save_without_vocab()
         } else {
             dynamic.save()
         };
         let mut payload = 2u32.to_le_bytes().to_vec();
         for constraint in [&a, &b] {
             let body = if external {
-                constraint.save_with_external_vocab().unwrap()
+                constraint.save_without_vocab().unwrap()
             } else {
                 constraint.save()
             };

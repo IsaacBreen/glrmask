@@ -1,5 +1,8 @@
 # Compose template-DFA parsers
 
+Backend selectors and inspectors in these tooling examples require Rust's
+`internal-api` feature. Public callers choose `Optimization`.
+
 Composition keeps the ordinary lexer, graph-structured stack, token commitment,
 and mask engines. Parser advances and zero-width calls and returns are template
 relations. A linked template artifact contains no executable LR table, including
@@ -128,7 +131,7 @@ images before accepting the saved boundary. It does not rebuild the parser.
 Only current native artifact variants are accepted. Obsolete projected and
 non-projected variants must be rebuilt.
 
-`save_with_external_vocab()` omits the separately supplied model vocabulary and
+`save_without_vocab()` omits the separately supplied model vocabulary and
 requires `Constraint::load_with_vocab()` with the exact original binding. Both
 artifact forms retain parser, component, and final-root termination semantics.
 

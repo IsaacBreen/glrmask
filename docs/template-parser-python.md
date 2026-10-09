@@ -1,5 +1,8 @@
 # Table-free parsers from Python
 
+Parser programs and backend controls are internal tooling APIs in
+`glrmask._internal`; public callers choose `Optimization`.
+
 The Python API uses the same Rust compiler, artifact loader and runtime as the
 Rust API. Backend selection is per constraint. It does not change process-wide
 environment flags or install Python callbacks in token generation.
@@ -11,12 +14,12 @@ import glrmask
 
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
 grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
-constraint = grammar.compile(
-    vocab,
+constraint = glrmask._internal.compile_with_backend(
+    grammar, vocab,
     optimization=glrmask.Optimization.FAST_RUNTIME,
-    parser_backend=glrmask.ParserBackend.TEMPLATE_DFA,
+    parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA,
 )
-assert constraint.parser_backend == glrmask.ParserBackend.TEMPLATE_DFA
+assert glrmask._internal.parser_backend(constraint) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 
 state = constraint.start()
 state.commit_token(1)
@@ -30,15 +33,15 @@ Omitting `parser_backend` selects the native `TEMPLATE_DFA` backend. Explicit
 `LR_TABLE` requests trigger the forbidden-LR panic. Pass the enum, not a string,
 integer or Boolean flag.
 
-`constraint.parser_backend` is read-only and remains valid after loading.
+`glrmask._internal.parser_backend(constraint)` is read-only and remains valid after loading.
 The built-in compiler may use temporary LR analysis while deriving templates,
 then discards the table before constructing the constraint. The data-only
 provider below bypasses grammar analysis.
 
 ## Compile a parser definition directly
 
-`glrmask.ParserProgram(definition)` accepts a JSON string or a JSON-compatible
-mapping with the fields of Rust's public `ParserDefinition`. All input becomes
+`glrmask._internal.ParserProgram(definition)` accepts a JSON string or a JSON-compatible
+mapping with the fields of Rust's internal `ParserDefinition`. All input becomes
 owned, immutable Rust data during construction. Mutating or deleting the
 original mapping after construction cannot change a compiled parser.
 
@@ -61,7 +64,7 @@ identity = {
     "pop_to_push": [],
     "read_to_push": [],
 }
-program = glrmask.ParserProgram({
+program = glrmask._internal.ParserProgram({
     "stack_symbol_count": 1,
     "terminals": [identity],
     "completion": identity,
@@ -117,12 +120,12 @@ this is not a whole-process memory guarantee.
 ```python
 raw = constraint.save()
 loaded = glrmask.Constraint.load(raw)
-assert loaded.parser_backend == glrmask.ParserBackend.TEMPLATE_DFA
+assert glrmask._internal.parser_backend(loaded) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 assert loaded.save() == raw
 
-external = constraint.save_with_external_vocab()
+external = constraint.save(external_vocab=True)
 loaded = glrmask.Constraint.load(external, vocab=vocab)
-assert loaded.parser_backend == glrmask.ParserBackend.TEMPLATE_DFA
+assert glrmask._internal.parser_backend(loaded) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 ```
 
 An external-vocabulary artifact requires the exact original vocabulary
@@ -133,7 +136,7 @@ sufficient. Self-contained and external forms retain the end-token policy.
 
 Compiled native children support direct linking, including nested and nullable
 bodies. Binding records an immutable attachment; final linking shares prepared
-template graphs through scoped views. `UnlinkedConstraint.link` defaults to
-`TEMPLATE_DFA` and accepts that typed backend explicitly. Unsupported native
+template graphs through scoped views. `UnlinkedConstraint.link` selects the native representation internally.
+Explicit backend controls are available only through private helpers. Unsupported native
 composition raises `ValueError`; LR-backed execution is forbidden. Fresh,
 self-contained and exact external-vocabulary artifacts retain these semantics.

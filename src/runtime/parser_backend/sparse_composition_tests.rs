@@ -75,7 +75,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
         for mode in [Optimization::FastBuild, Optimization::FastRuntime] {
             let linked = host.link_with(options(mode)).unwrap();
             let loaded = Constraint::load(linked.save()).unwrap();
-            let external = Constraint::load_with_vocab(linked.save_with_external_vocab().unwrap(), &vocab).unwrap();
+            let external = Constraint::load_with_vocab(linked.save_without_vocab().unwrap(), &vocab).unwrap();
             for c in [&linked, &loaded, &external] { check(c, &tokens, &words); }
             let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
                 .compile_unlinked(&vocab).unwrap().bind("C", &loaded).unwrap().link_with(options(mode)).unwrap();

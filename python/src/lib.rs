@@ -792,24 +792,17 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// The parser backend retained by this artifact, including after load.
-    #[getter]
-    fn parser_backend(&self) -> PyResult<final_api::PyParserBackend> {
-        self.inner.parser_backend().try_into()
-    }
-
-    /// Serialize without embedding the model vocabulary. Loading requires the
-    /// exact same vocabulary mapping, not merely the same vocabulary size.
-    fn save_with_external_vocab<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.allow_threads(|| self.inner.save_with_external_vocab())
-            .map_err(final_api::api_error)?;
-        Ok(PyBytes::new(py, &bytes))
-    }
-
     /// Serialize the compiled body and final termination policy as bytes.
-    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let bytes = py.allow_threads(|| self.inner.save());
-        PyBytes::new(py, &bytes)
+    ///
+    /// external_vocab=False embeds the vocabulary. With external_vocab=True,
+    /// loading requires the exact same vocabulary mapping, not just its size.
+    #[pyo3(signature = (*, external_vocab=false))]
+    fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = py.allow_threads(|| {
+            if external_vocab { self.inner.save_without_vocab() }
+            else { Ok(self.inner.save()) }
+        }).map_err(final_api::api_error)?;
+        Ok(PyBytes::new(py, &bytes))
     }
 
     #[staticmethod]
@@ -966,7 +959,7 @@ impl PyDynamicConstraint {
     fn save(&self) -> Vec<u8> {
         // DynamicConstraint.load() already requires the vocabulary, so Python
         // persistence need not duplicate vocabulary bytes in the artifact.
-        self.inner.save_with_external_vocab()
+        self.inner.save_without_vocab()
     }
 
     fn mask_len(&self) -> usize {
@@ -1910,6 +1903,7 @@ fn commit_token_per_advance<'py>(
 
 fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let internal = PyModule::new(m.py(), "_internal")?;
+    final_api::register_internal(&internal)?;
     internal.setattr(
         "__doc__",
         "Unstable internal API for CFA and repository tooling. No compatibility guarantees.",
@@ -1981,8 +1975,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "ExactToken",
             "ExactTokens",
             "Optimization",
-            "ParserBackend",
-            "ParserProgram",
+            "BoundaryTriggerDetail",
             "Vocab",
             "Constraint",
             "ConstraintState",
