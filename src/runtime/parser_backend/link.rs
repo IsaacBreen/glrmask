@@ -324,7 +324,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(Optimization::FastBuild)
+                    .optimization(Optimization::Balanced)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();
@@ -364,7 +364,7 @@ mod candidate_tests {
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
-                let options = BuildOptions::default().optimization(Optimization::FastBuild)
+                let options = BuildOptions::default().optimization(Optimization::Balanced)
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).compile_with(&vocab, options.clone()).unwrap();
                 let linked = Grammar::from_glrm(parent).compile_unlinked(&vocab).unwrap()
@@ -408,7 +408,7 @@ mod candidate_tests {
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#)
             .compile_unlinked(&vocab).unwrap().bind("child", &child).unwrap()
-            .link_with(BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+            .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {
             reason: crate::runtime::SummaryUnavailable::Disabled }).unwrap();

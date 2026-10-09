@@ -53,6 +53,6 @@ compared against arithmetic for 548,931 signed value/divisor pairs, including
 divisors that share factors with ten and divisors coprime to ten. Additional
 tests cover malformed spellings, negative zero, and 2,048-digit prefixes and
 exact multiples. Public API tests exercise complete-token masks under Auto,
-FastBuild, and FastRuntime, and saved/loaded constraints. A large-divisor test
+Balanced, and FastRuntime, and saved/loaded constraints. A large-divisor test
 distinguishes exact finite-bound support from explicit unsupported unbounded
 construction.

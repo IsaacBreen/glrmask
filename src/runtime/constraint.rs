@@ -12454,6 +12454,7 @@ impl Constraint {
 
     /// Create a fresh state for one generated sequence.
     pub fn start(&self) -> ConstraintState<'_> {
+        if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();
         if self.tokenizer_has_epsilon_transitions && !self.tokenizer.has_packed_runtime_metadata() {
             drop(self.tokenizer.all_singleton_epsilon_closures());

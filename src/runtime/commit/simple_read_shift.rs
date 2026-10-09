@@ -325,7 +325,7 @@ mod tests {
             .compile_with(
                 &lexer,
                 &vocab,
-                TemplateBuildOptions::default().optimization(Optimization::FastBuild),
+                TemplateBuildOptions::default().optimization(Optimization::Balanced),
             )
             .unwrap();
         let loaded = Constraint::load(fresh.save()).unwrap();
@@ -519,7 +519,7 @@ mod tests {
         })
         .unwrap();
         let lexer = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-        for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
             let fresh = parser
                 .compile_with(
                     &lexer,

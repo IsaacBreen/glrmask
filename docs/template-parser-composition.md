@@ -27,7 +27,7 @@ let parent = Grammar::from_glrm(
     r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
 ).compile_unlinked(&vocab)?;
 
-for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
     let linked = parent.bind("child", &child)?.link_with(
         BuildOptions::default()
             .optimization(optimization)
@@ -65,7 +65,7 @@ analysis may derive their templates, but all tables are discarded before
 constructing a `Constraint`. Compiled children link through immutable prepared
 graphs and scoped views without reconstructing or retaining execution tables.
 
-An already table-free child takes the direct template linker. `FastBuild` and
+An already table-free child takes the direct template linker. `Balanced` and
 `Auto` use dynamic boundary traversal. `FastRuntime` compiles the boundary token
 queries to static parser automata. The local masking engine of an independently
 compiled child is retained: a dynamic child does not become a fully static

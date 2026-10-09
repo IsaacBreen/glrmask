@@ -72,7 +72,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             .compile_unlinked(&vocab).unwrap().bind("C", &child).unwrap();
         let mut words = vec![b"xay".to_vec(), b"xby".to_vec(), b"xaby".to_vec()];
         if nullable { words.push(b"xy".to_vec()); }
-        for mode in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for mode in [Optimization::Balanced, Optimization::FastRuntime] {
             let linked = host.link_with(options(mode)).unwrap();
             let loaded = Constraint::load(linked.save()).unwrap();
             let external = Constraint::load_with_vocab(linked.save_without_vocab().unwrap(), &vocab).unwrap();

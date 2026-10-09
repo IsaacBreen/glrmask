@@ -1262,7 +1262,7 @@ mod tests {
         use crate::{BuildOptions, Grammar, Optimization, ParserBackend};
         let vocabulary = crate::Vocab::new(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
-        let options = || BuildOptions::default().optimization(Optimization::FastBuild)
+        let options = || BuildOptions::default().optimization(Optimization::Balanced)
             .parser_backend(ParserBackend::TemplateDfa);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#)
             .compile_with(&vocabulary, options()).unwrap();
@@ -1700,7 +1700,7 @@ mod preparation_tests {
             (3, b"b".to_vec()),
             (4, b"ba".to_vec()),
         ]);
-        for optimization in [crate::Optimization::FastRuntime, crate::Optimization::FastBuild] {
+        for optimization in [crate::Optimization::FastRuntime, crate::Optimization::Balanced] {
             let source = crate::Grammar::from_glrm(
                 r#"glrm 1; start document; nt document = "a";"#,
             )
@@ -1734,7 +1734,7 @@ mod preparation_tests {
     fn persisted_pre_nullable_fix_proof_is_rejected_before_composition() {
         let vocab = crate::Vocab::new(vec![(0, b"X[a]!".to_vec()),
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-        let options = crate::BuildOptions::default().optimization(crate::Optimization::FastBuild)
+        let options = crate::BuildOptions::default().optimization(crate::Optimization::Balanced)
             .parser_backend(crate::ParserBackend::TemplateDfa);
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options.clone()).unwrap();

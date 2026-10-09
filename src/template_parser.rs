@@ -201,13 +201,13 @@ pub struct TemplateBuildOptions {
 
 impl Default for TemplateBuildOptions {
     fn default() -> Self {
-        Self { end_tokens: Vec::new(), optimization: crate::Optimization::FastBuild }
+        Self { end_tokens: Vec::new(), optimization: crate::Optimization::Balanced }
     }
 }
 
 impl TemplateBuildOptions {
     /// Select eager static masking with FastRuntime, or the shared dynamic
-    /// mask engine with FastBuild/Auto. Default is FastBuild.
+    /// mask engine with Balanced/Auto. Default is Balanced.
     pub fn optimization(mut self, optimization: crate::Optimization) -> Self {
         self.optimization = optimization;
         self
@@ -337,7 +337,9 @@ impl ParserProgram {
         names: Vec<String>, ignore: Option<u32>, specials: Vec<crate::runtime::SpecialTokenTerminal>,
         vocab: &Vocab, options: TemplateBuildOptions) -> Result<Constraint> {
         let mut constraint = match options.optimization {
-            crate::Optimization::Auto | crate::Optimization::FastBuild => {
+            crate::Optimization::FastBuild => return Err(crate::Error::Compilation(
+                "FastBuild ordinary Dynamic does not accept a custom native parser; use Balanced".into())),
+            crate::Optimization::Auto | crate::Optimization::Balanced => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
                     tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,

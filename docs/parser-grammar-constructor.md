@@ -84,7 +84,7 @@ obligation remains with the compiler and its tests.
 
 The validated `GrammarParserProgram` can be reused for multiple vocabularies and
 build policies without rerunning the parser compiler. `FastRuntime` uses the
-ordinary static mask compiler; `FastBuild` and `Auto` use the ordinary dynamic
+ordinary static mask compiler; `Balanced` and `Auto` use the ordinary dynamic
 engine. Both retain the common lexer, shared GSS and token commit machinery.
 An oversized static expansion returns an error; it does not silently fall back
 to a different parser or masking mode. Saved constraints contain the validated

@@ -309,3 +309,7 @@ required-features = ["internal-api"]
 [[example]]
 name = "template_composition_control"
 required-features = ["internal-api"]
+
+[[test]]
+name = "public_optimization_modes"
+path = "tests/public_optimization_modes.rs"

@@ -1,7 +1,7 @@
 # Ordinary Dynamic LR runtime
 
 Ordinary Dynamic (O1) retains an executable LR table by default. O2/vocabulary
-partition and public FastBuild explicitly use native templates; Static is
+partition and public Balanced explicitly use native templates; Static is
 unchanged. The internal development switch `GLRMASK_DYNAMIC_TEMPLATE_DFA=1`
 (or true/yes/on) selects ordinary Dynamic templates at compilation only. It is
 resolved once for a complete source build before alternatives/worker pools.

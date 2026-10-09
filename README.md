@@ -223,7 +223,8 @@ constraint = host.bind("payload", child).link(
 `Optimization` expresses intent rather than exposing internal engine names:
 
 - `AUTO` / `Auto`: let GLRMask choose.
-- `FAST_BUILD` / `FastBuild`: minimize compile/link work, leaving more work for runtime where useful.
+- `FAST_BUILD` / `FastBuild`: ordinary Dynamic compilation and masking (O1).
+- `BALANCED` / `Balanced`: bounded native parser with vocabulary partitioning (O2).
 - `FAST_RUNTIME` / `FastRuntime`: spend more build work to favor lower mask latency where supported.
 
 All three modes preserve accepted-language semantics and produce the same public `Constraint` type.
@@ -234,12 +235,12 @@ Public final-constraint APIs select their parser representation internally.
 Callers choose `Optimization`; there is no public parser backend selector or
 accessor. Parser-provider construction remains internal repository tooling.
 
-The selected runtime and its artifact contain the template relations, not an
+The native runtime and its artifact contain the template relations, not an
 LR table. Mask generation and token commitment use the existing shared engines;
 parser advancement and admissibility use those relations. Built-in grammar
 compilation can use temporary LR analysis to derive the program, then discards
-the table before constructing a `Constraint`. Native runtime table access and implicit LR fallback panic. Ordinary internal
-Dynamic (O1) instead retains and executes its LR table for lower build latency.
+the table before constructing a `Constraint`. Native runtime table access and implicit LR fallback panic. Ordinary Dynamic
+(O1), selected by FastBuild, retains and executes its LR table.
 Data-only parser providers remain available through Rust's `internal-api`
 feature and Python's `_internal` namespace.
 
@@ -259,7 +260,7 @@ not qualify the current native replacement.
 Ordinary Dynamic (O1) defaults to the retained LR runtime. Its grammar, lexer,
 vocabulary, masking and commit code share the existing compiler/runtime pipeline;
 it skips native parser characterization, template construction and native runtime
-metadata. O2/FastBuild continues to build templates, and Static is unchanged.
+metadata. O2/Balanced continues to build templates, and Static is unchanged.
 
 For internal development only, `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects native
 parser templates for an ordinary Dynamic compilation (`true`, `yes` and `on`
@@ -381,3 +382,24 @@ request. Requests retained by attached child modules remain scoped to those
 children. Python uses the keyword `boundary_trigger` with
 `glrmask.BoundaryTriggerDetail.NONE`, `.TOKENS`, or `.EXACT` on
 `Grammar.compile`, `Grammar.compile_unlinked`, and `UnlinkedConstraint.link`.
+
+Ordinary `FastBuild` / `FAST_BUILD` uses the same Dynamic compiler as the
+benchmark and returns the normal `Constraint` / `ConstraintState` interface.
+It retains the selected runtime representation after save/load. `Balanced` /
+`BALANCED` preserves the previous native O2 behavior. `Auto` remains the existing
+default, and `FastRuntime` selects Static.
+
+For source grammars, `FastBuild` resolves bound EBNF, Lark, JSON Schema, and
+GLRM children as typed grammar nodes, then compiles the complete language into
+one ordinary Dynamic body. Scoped ignores, lexer partitions, and exact-token
+bindings remain part of that language; root alternatives are not discarded.
+
+For precompiled `UnlinkedConstraint` modules, `FastBuild` retains the compiled
+constituents and selects Dynamic boundary traversal. It does not recompile
+those constituents as ordinary Dynamic. `Balanced` preserves the existing O2
+and native linking path. Compiled retained-LR children still require a supported
+embedding contract; unsupported native links return errors.
+
+`BoundaryTriggerDetail::Exact` / `BoundaryTriggerDetail.EXACT` requires native
+template components. Requesting it on a retained-LR Dynamic constraint returns
+a clear error before trigger construction.

@@ -228,10 +228,10 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
         (Grammar::from_json_schema(schema),"\"ab\""),
     ];
     for (source,word) in sources {
-        let c=source.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)
+        let c=source.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_eq!(c.parser_backend(),ParserBackend::TemplateDfa);
-        let ordinary=source.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        let ordinary=source.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
         let language: &[&[u8]]=if word.starts_with('"') {&[b"\"a\"",b"\"ab\""]} else {&[b"a",b"ab"]};
         for parser in native_representations(&c,&v).into_iter().chain(native_representations(&ordinary,&v)) {
             assert_finite_language(&parser,&v,language);
@@ -277,7 +277,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
     ).compile_unlinked(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();
-        for optimization in [glrmask::Optimization::Auto, glrmask::Optimization::FastRuntime, glrmask::Optimization::FastBuild] {
+        for optimization in [glrmask::Optimization::Auto, glrmask::Optimization::FastRuntime, glrmask::Optimization::Balanced] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 module.bind("child", &child).and_then(|bound| bound.link_with(
                     BuildOptions::default().optimization(optimization)))
@@ -400,7 +400,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
     let compiled = glrmask::Grammar::from_json_schema(
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#)
         .compile_with(&vocab, glrmask::BuildOptions::default()
-            .optimization(glrmask::Optimization::FastBuild)
+            .optimization(glrmask::Optimization::Balanced)
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
     let loaded = glrmask::Constraint::load(compiled.save()).unwrap();
     for constraint in [&compiled,&loaded] {
@@ -425,7 +425,7 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
         (2, b"t".to_vec()), (3, b"rue".to_vec())]);
-    for mode in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for mode in [Optimization::Balanced, Optimization::FastRuntime] {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#)
             .compile_with(&vocab, BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();

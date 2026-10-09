@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased optimization choices
+
+- `FastBuild` / `FAST_BUILD` now selects the actual ordinary Dynamic compiler.
+  `Balanced` / `BALANCED` preserves the previous native O2 path; `FastRuntime`
+  selects Static and `Auto` keeps the existing default. All return the same
+  public Constraint and ConstraintState types.
+- FastBuild resolves bound source grammars into one ordinary Dynamic body;
+  precompiled links retain their constituents and select Dynamic boundaries.
+  Exact boundary triggers on retained-LR Dynamic return a clear error.
+
 ## Unreleased API cleanup
 
 - Keep parser backend selectors, inspectors, and data-only parser-provider

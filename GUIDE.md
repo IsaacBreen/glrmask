@@ -219,7 +219,8 @@ constraint = host.bind("payload", child).link(
 `Optimization` expresses intent rather than exposing internal engine names:
 
 - `AUTO` / `Auto`: let GLRMask choose.
-- `FAST_BUILD` / `FastBuild`: minimize compile/link work, leaving more work for runtime where useful.
+- `FAST_BUILD` / `FastBuild`: ordinary Dynamic compilation and masking (O1).
+- `BALANCED` / `Balanced`: bounded native parser with vocabulary partitioning (O2).
 - `FAST_RUNTIME` / `FastRuntime`: spend more build work to favor lower mask latency where supported.
 
 All three modes preserve accepted-language semantics and produce the same public `Constraint` type.
@@ -358,3 +359,24 @@ request. Requests retained by attached child modules remain scoped to those
 children. Python uses the keyword `boundary_trigger` with
 `glrmask.BoundaryTriggerDetail.NONE`, `.TOKENS`, or `.EXACT` on
 `Grammar.compile`, `Grammar.compile_unlinked`, and `UnlinkedConstraint.link`.
+
+Ordinary `FastBuild` / `FAST_BUILD` uses the same Dynamic compiler as the
+benchmark and returns the normal `Constraint` / `ConstraintState` interface.
+It retains the selected runtime representation after save/load. `Balanced` /
+`BALANCED` preserves the previous native O2 behavior. `Auto` remains the existing
+default, and `FastRuntime` selects Static.
+
+For source grammars, `FastBuild` resolves bound EBNF, Lark, JSON Schema, and
+GLRM children as typed grammar nodes, then compiles the complete language into
+one ordinary Dynamic body. Scoped ignores, lexer partitions, and exact-token
+bindings remain part of that language; root alternatives are not discarded.
+
+For precompiled `UnlinkedConstraint` modules, `FastBuild` retains the compiled
+constituents and selects Dynamic boundary traversal. It does not recompile
+those constituents as ordinary Dynamic. `Balanced` preserves the existing O2
+and native linking path. Compiled retained-LR children still require a supported
+embedding contract; unsupported native links return errors.
+
+`BoundaryTriggerDetail::Exact` / `BoundaryTriggerDetail.EXACT` requires native
+template components. Requesting it on a retained-LR Dynamic constraint returns
+a clear error before trigger construction.

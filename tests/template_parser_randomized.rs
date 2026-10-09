@@ -281,7 +281,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
         };
         let program = ParserProgram::new(definition).unwrap();
         let mut compiled = Vec::new();
-        for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
             let c = program
                 .compile_with(
                     &lexer,
@@ -291,7 +291,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
                         .end_tokens([255]),
                 )
                 .unwrap();
-            let name = if optimization == Optimization::FastBuild {
+            let name = if optimization == Optimization::Balanced {
                 "dynamic"
             } else {
                 "static"
@@ -495,7 +495,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
         })
         .unwrap();
         let mut parsers = Vec::new();
-        for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
             let c = p
                 .compile_with(
                     &lex,
@@ -505,7 +505,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                         .end_tokens([255]),
                 )
                 .unwrap();
-            let name = if optimization == Optimization::FastBuild {
+            let name = if optimization == Optimization::Balanced {
                 "dynamic"
             } else {
                 "static"

@@ -23,6 +23,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 pub(super) enum PyOptimization {
     AUTO,
     FAST_BUILD,
+    BALANCED,
     FAST_RUNTIME,
 }
 
@@ -78,6 +79,7 @@ pub(super) fn optimization(value: PyOptimization) -> glrmask::Optimization {
     match value {
         PyOptimization::AUTO => glrmask::Optimization::Auto,
         PyOptimization::FAST_BUILD => glrmask::Optimization::FastBuild,
+        PyOptimization::BALANCED => glrmask::Optimization::Balanced,
         PyOptimization::FAST_RUNTIME => glrmask::Optimization::FastRuntime,
     }
 }
@@ -90,6 +92,7 @@ fn options(
     let mode = match optimization.as_deref().copied().unwrap_or(PyOptimization::AUTO) {
         PyOptimization::AUTO => glrmask::Optimization::Auto,
         PyOptimization::FAST_BUILD => glrmask::Optimization::FastBuild,
+        PyOptimization::BALANCED => glrmask::Optimization::Balanced,
         PyOptimization::FAST_RUNTIME => glrmask::Optimization::FastRuntime,
     };
     let backend = parser_backend.as_deref().copied().unwrap_or(PyParserBackend::TEMPLATE_DFA);

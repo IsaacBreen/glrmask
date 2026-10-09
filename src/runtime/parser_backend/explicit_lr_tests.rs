@@ -26,7 +26,7 @@ fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
     Grammar::from_ebnf(source)
         .compile_with(
             vocab,
-            BuildOptions::default().optimization(Optimization::FastBuild),
+            BuildOptions::default().optimization(Optimization::Balanced),
         )
         .expect("native template compile")
 }

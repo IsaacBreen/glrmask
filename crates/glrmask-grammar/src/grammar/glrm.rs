@@ -910,14 +910,12 @@ pub fn from_glrm_with_inline_subgrammars(
     let mut consumed = BTreeSet::<String>::new();
 
     let mut scope = parse_glrm_scope(parent)?;
-    bind_inline_subgrammars(
-        &mut scope,
-        "",
-        &bindings,
-        &mut consumed,
-        0,
-        MAX_INLINE_DEPTH,
-    )?;
+    let resolve = |path: &str| {
+        let source = bindings.get(path).copied().ok_or_else(||
+            err(&format!("external subgrammar {path:?} has no inline binding")))?;
+        parse_glrm_scope(source)
+    };
+    bind_inline_subgrammars(&mut scope, "", &resolve, &mut consumed, 0, MAX_INLINE_DEPTH)?;
 
     for key in bindings.keys() {
         if !consumed.contains(key) {
@@ -936,6 +934,48 @@ pub fn from_glrm_with_inline_subgrammars(
     Ok(lowered.grammar)
 }
 
+/// Resolve typed frontend grammars into GLRM occurrences using the same
+/// scope-aware lowering as inline GLRM sources. Child ASTs retain their lexer
+/// and ignore semantics; exact-token terminals remain model IDs, never bytes.
+#[cfg(feature = "internal-api")]
+pub fn from_glrm_with_named_subgrammars_and_external_terminals(
+    parent: &str,
+    children: &[(&str, NamedGrammar)],
+    terminal_bindings: &[(&str, &[u32])],
+) -> Result<NamedGrammar, GlrMaskError> {
+    let mut bindings = BTreeMap::new();
+    for (name, grammar) in children {
+        if bindings.insert(*name, grammar).is_some() {
+            return Err(err(&format!("inline subgrammar binding {name:?} was supplied more than once")));
+        }
+    }
+    let resolve = |path: &str| {
+        let child = bindings.get(path).ok_or_else(||
+            err(&format!("external subgrammar {path:?} has no inline binding")))?;
+        Ok(ParsedGlrmScope {
+            rules: child.rules.clone(), start: child.start.clone(), ignore: child.ignore.clone(),
+            lexer_partitions: child.lexer_partitions.clone(),
+            lexer_literal_partitions: child.lexer_literal_partitions.clone(),
+            default_lexer_partition: child.default_lexer_partition.clone(),
+            all_literals_partition: None, external_terminals: Vec::new(), subgrammars: Vec::new(),
+        })
+    };
+    let mut scope = parse_glrm_scope(parent)?;
+    let mut consumed = BTreeSet::new();
+    bind_inline_subgrammars(&mut scope, "", &resolve, &mut consumed, 0, 64)?;
+    for name in bindings.keys() {
+        if !consumed.contains(*name) {
+            return Err(err(&format!("inline subgrammar binding {name:?} did not match any external grammar occurrence")));
+        }
+    }
+    bind_external_terminals(&mut scope, terminal_bindings)?;
+    let lowered = lower_parsed_grammar(scope, &BTreeMap::new())?;
+    if !lowered.placeholders.is_empty() {
+        return Err(err("typed inline replacement left an unbound external placeholder"));
+    }
+    Ok(lowered.grammar)
+}
+
 #[cfg(feature = "internal-api")]
 fn parse_glrm_scope(source: &str) -> Result<ParsedGlrmScope, GlrMaskError> {
     let tokens = Lexer::new(source).tokenize()?;
@@ -949,14 +989,15 @@ fn parse_glrm_scope(source: &str) -> Result<ParsedGlrmScope, GlrMaskError> {
 /// `::`. `consumed` records which supplied bindings were actually used so
 /// unused bindings can be rejected after the walk.
 #[cfg(feature = "internal-api")]
-fn bind_inline_subgrammars(
+fn bind_inline_subgrammars<F>(
     scope: &mut ParsedGlrmScope,
     prefix: &str,
-    bindings: &BTreeMap<String, &str>,
+    resolve: &F,
     consumed: &mut BTreeSet<String>,
     depth: usize,
     max_depth: usize,
-) -> Result<(), GlrMaskError> {
+) -> Result<(), GlrMaskError>
+where F: Fn(&str) -> Result<ParsedGlrmScope, GlrMaskError> {
     if depth > max_depth {
         return Err(err(
             "inline subgrammar nesting exceeded the maximum supported depth",
@@ -969,17 +1010,12 @@ fn bind_inline_subgrammars(
             format!("{prefix}::{}", subgrammar.name)
         };
         if matches!(subgrammar.body, ParsedSubgrammarBody::External) {
-            let source = bindings.get(&path).copied().ok_or_else(|| {
-                err(&format!(
-                    "external subgrammar {path:?} has no inline binding",
-                ))
-            })?;
+            let mut child_scope = resolve(&path)?;
             consumed.insert(path.clone());
-            let mut child_scope = parse_glrm_scope(source)?;
             bind_inline_subgrammars(
                 &mut child_scope,
                 &path,
-                bindings,
+                resolve,
                 consumed,
                 depth + 1,
                 max_depth,
@@ -989,7 +1025,7 @@ fn bind_inline_subgrammars(
             bind_inline_subgrammars(
                 child_scope,
                 &path,
-                bindings,
+                resolve,
                 consumed,
                 depth + 1,
                 max_depth,
@@ -3332,14 +3368,18 @@ fn rewrite_scope_refs(
             separator: Box::new(rewrite_scope_refs(separator, name_map, scope_label)?),
             allow_empty: *allow_empty,
         },
-        GrammarExpr::ExprNFA(expr_nfa) => GrammarExpr::ExprNFA(Box::new(ExprNFA::new(
-            expr_nfa.nfa.clone(),
-            expr_nfa
-                .symbols
-                .iter()
+        GrammarExpr::ExprNFA(expr_nfa) => {
+            let mut rewritten = ExprNFA::new(expr_nfa.nfa.clone(), expr_nfa.symbols.iter()
                 .map(|symbol| rewrite_scope_refs(symbol, name_map, scope_label))
-                .collect::<Result<Vec<_>, _>>()?,
-        ))),
+                .collect::<Result<Vec<_>, _>>()?);
+            rewritten.is_determinized_and_minimized = expr_nfa.is_determinized_and_minimized;
+            rewritten.prefer_direct_nfa_emission = expr_nfa.prefer_direct_nfa_emission;
+            // Every scope has an entry wrapper, so even its original root FA
+            // is now an embedded region. Its complete-language certificate and
+            // canonical symbol coordinates cannot be reused by the outer root.
+            rewritten.complete_parser_language = false;
+            GrammarExpr::ExprNFA(Box::new(rewritten))
+        },
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
         | GrammarExpr::SpecialToken(_)

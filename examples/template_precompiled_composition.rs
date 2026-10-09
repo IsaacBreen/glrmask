@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("LOAD canonical selected10, traces={} positions=11767", traces.len());
     let options = BuildOptions::default()
-        .optimization(if args[3] == "static" { Optimization::FastRuntime } else { Optimization::FastBuild })
+        .optimization(if args[3] == "static" { Optimization::FastRuntime } else { Optimization::Balanced })
         .parser_backend(ParserBackend::TemplateDfa);
     // Prepare the complete native child before starting the link timer. Schema
     // lowering and child compilation are reported separately, never hidden.

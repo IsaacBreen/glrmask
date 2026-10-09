@@ -9387,7 +9387,7 @@ mod tests {
         let native = grammar
             .compile_with(
                 &vocab,
-                crate::BuildOptions::default().optimization(crate::Optimization::FastBuild),
+                crate::BuildOptions::default().optimization(crate::Optimization::Balanced),
             )
             .unwrap();
         let mut native_as_lr = native.save();

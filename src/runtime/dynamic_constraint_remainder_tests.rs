@@ -23,7 +23,7 @@ fn compile_dynamic(vocab: &Vocab) -> DynamicConstraint {
     // Select that representation explicitly so restoring ordinary Dynamic LR
     // does not change the subject or require a process-global environment switch.
     let native = crate::Grammar::glrm(source()).compile_with(
-        vocab, crate::BuildOptions::default().optimization(crate::Optimization::FastBuild),
+        vocab, crate::BuildOptions::default().optimization(crate::Optimization::Balanced),
     ).unwrap();
     DynamicConstraint::from_constraints(vec![native])
 }
@@ -276,7 +276,7 @@ fn current_dynamic_envelope_rejects_truncation_and_trailing_data() {
 fn canonical_and_static_public_routes_keep_complete_mask_words() {
     let vocab = vocab();
     for optimization in [
-        crate::Optimization::FastBuild,
+        crate::Optimization::Balanced,
         crate::Optimization::FastRuntime,
         crate::Optimization::Auto,
     ] {

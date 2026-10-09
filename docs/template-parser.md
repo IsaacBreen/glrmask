@@ -23,15 +23,15 @@ assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
 ```
 
 `FastRuntime` retains the existing static mask engine. With `TemplateDfa`,
-`FastBuild` uses the existing vocabulary-partitioned dynamic engine (O2), after
+`Balanced` uses the existing vocabulary-partitioned dynamic engine (O2), after
 normalizing the grammar so each terminal advance has a finite acyclic action
 relation. The normalization is exact; it does not truncate recursive action
 paths.
 
 The built-in grammar compiler may derive action relations using temporary LR
-analysis. It discards those tables before constructing a `Constraint`. Native
-The native representation remains the public/O2/Static runtime. Ordinary internal Dynamic
-defaults to retained LR; `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects templates for
+analysis. It discards those tables before constructing a native `Constraint`.
+The native representation serves Balanced/O2 and Static. Ordinary Dynamic,
+selected by FastBuild, defaults to retained LR; `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects templates for
 that compilation only. Native runtime table access and implicit fallback panic. An unsupported native
 composition request returns an error.
 
@@ -92,7 +92,7 @@ generation.
 
 `TemplateBuildOptions::optimization(Optimization::FastRuntime)` compiles the
 program through the existing static token-mask DWA pipeline.
-`FastBuild`, `Auto`, and the convenience `program.compile(...)` use the existing
+`Balanced`, `Auto`, and the convenience `program.compile(...)` use the existing
 dynamic mask engine. This is a build-time choice; an oversized static expansion
 returns an error rather than silently changing modes. Both choices retain the
 same token-level commit code and template parser primitives. Built-in compiled
@@ -186,7 +186,7 @@ subset construction. Across terminal relations, current ceilings are 131,072
 constructed states, 1,048,576 edges, 2,097,152 retained subset members and
 33,554,432 accounted work items. These are implementation resource ceilings,
 not language restrictions that truncate a result. Exceeding one returns a build
-error; the caller may explicitly choose `FastBuild` instead. The later shared
+error; the caller may explicitly choose `Balanced` instead. The later shared
 weighted compiler retains its own resource characteristics; these counters are
 not a whole-process memory or wall-clock guarantee.
 

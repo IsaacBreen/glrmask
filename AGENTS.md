@@ -5,16 +5,23 @@ formats are not compatibility requirements. Reject unsupported old formats
 explicitly instead of preserving obsolete adapters for hypothetical consumers.
 
 Ordinary Dynamic (O1) retains and executes its LR table by default. O2 and the
-public FastBuild path use native template parsers; Static behavior is unchanged.
+public Balanced path use native template parsers; public FastBuild selects
+the ordinary Dynamic compiler and retains its runtime representation; Static behavior is unchanged.
 `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` is an internal development override for
 ordinary Dynamic only. Resolve this choice before worker pools, pass it through
 shared preparation and assembly, and never let it alter O2, Static, existing
 objects or loaded artifacts. There is no new public backend selector.
 
+The public Optimization choices are FastBuild (ordinary Dynamic/O1), Balanced
+(native O2), FastRuntime (Static), and Auto (existing default). These all return
+the same Constraint/ConstraintState API. This is an optimization choice, not a
+public parser-backend selector.
+
 Native construction derives templates from temporary compiler LR analysis,
 discards the table, and materializes only a table-free Constraint. Do not create
 an LR-backed intermediate for a native compile. Native runtime table access and
-implicit LR fallback must still panic. The controlled
+implicit LR fallback must still panic. Explicit FastBuild compilation may retain
+the ordinary Dynamic LR representation through the shared compiler. The controlled
 `ParserTableStorage::explicit` constructor is for retained Dynamic LR and its
 versioned artifact loaders; generic `From<GLRTable>` remains forbidden. Shared
 compiler, vocabulary, masks and commits must not become two forked pipelines.

@@ -24,7 +24,7 @@ def test_parser_machinery_is_only_available_in_internal_namespace():
         module.link(parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
     public = grammar.compile(vocab, optimization=glrmask.Optimization.FAST_BUILD)
     internal = glrmask._internal.compile_with_backend(
-        grammar, vocab, optimization=glrmask.Optimization.FAST_BUILD,
+        grammar, vocab, optimization=glrmask.Optimization.BALANCED,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA,
     )
     assert np.array_equal(public.start().mask(), internal.start().mask())
@@ -32,6 +32,7 @@ def test_parser_machinery_is_only_available_in_internal_namespace():
 
 @pytest.mark.parametrize("mode", [glrmask.Optimization.AUTO,
                                   glrmask.Optimization.FAST_BUILD,
+                                  glrmask.Optimization.BALANCED,
                                   glrmask.Optimization.FAST_RUNTIME])
 def test_save_flag_preserves_default_and_external_roundtrips(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b", 3: b""})
@@ -62,6 +63,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
 
 @pytest.mark.parametrize("mode", [glrmask.Optimization.AUTO,
                                   glrmask.Optimization.FAST_BUILD,
+                                  glrmask.Optimization.BALANCED,
                                   glrmask.Optimization.FAST_RUNTIME])
 def test_boundary_option_is_eager_and_does_not_change_masks(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
@@ -70,6 +72,10 @@ def test_boundary_option_is_eager_and_does_not_change_masks(mode):
     assert grammar.compile(vocab, optimization=mode,
         boundary_trigger=glrmask.BoundaryTriggerDetail.NONE).save() == plain.save()
     for detail in [glrmask.BoundaryTriggerDetail.TOKENS, glrmask.BoundaryTriggerDetail.EXACT]:
+        if mode == glrmask.Optimization.FAST_BUILD and detail == glrmask.BoundaryTriggerDetail.EXACT:
+            with pytest.raises(ValueError, match="retained-LR Dynamic"):
+                grammar.compile(vocab, optimization=mode, boundary_trigger=detail)
+            continue
         requested = grammar.compile(vocab, optimization=mode, boundary_trigger=detail)
         saved = requested.save()
         assert saved != plain.save()

@@ -65,7 +65,7 @@ fn word_limit_totality_default_and_loaded_public_constraints() {
     let vocab = vocabulary();
     for words in 1..=4 {
         let source = schema(words);
-        for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+        for mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
             let constraint = Grammar::from_json_schema(&source)
                 .compile_with(&vocab, BuildOptions::default().optimization(mode))
                 .unwrap();
@@ -81,7 +81,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
     let vocab = vocabulary();
     let source = schema(2);
     let child = Grammar::from_json_schema(&source)
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::FastBuild))
+        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,

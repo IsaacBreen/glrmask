@@ -95,7 +95,7 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
     let mut transition_checks = 0;
     for schema in schemas {
         let source = schema.to_string();
-        for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+        for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
             for explicit_backend in [false, true] {
                 let backend = ParserBackend::TemplateDfa;
                 let options = BuildOptions::default().optimization(optimization);
@@ -166,7 +166,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
     ]);
     for explicit_backend in [false, true] {
         let backend = ParserBackend::TemplateDfa;
-        let options = BuildOptions::default().optimization(Optimization::FastBuild);
+        let options = BuildOptions::default().optimization(Optimization::Balanced);
         let options = if explicit_backend { options.parser_backend(backend) } else { options };
         let fresh = Grammar::from_glrm(&source)
             .compile_with(&vocab, options)

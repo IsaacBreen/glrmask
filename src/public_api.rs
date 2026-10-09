@@ -23,8 +23,10 @@ pub enum Optimization {
     /// Let GLRMask choose automatically.
     #[default]
     Auto,
-    /// Prefer low compile/link latency.
+    /// Use ordinary Dynamic compilation and runtime masking (O1).
     FastBuild,
+    /// Use the bounded native parser and vocabulary quotient (O2).
+    Balanced,
     /// Prefer lower per-token masking latency, accepting more build work.
     FastRuntime,
 }
@@ -298,8 +300,23 @@ impl<'a> Grammar<'a> {
         vocab: &Vocab,
         options: BuildOptions,
     ) -> Result<RuntimeConstraint> {
+        if options.optimization == Optimization::FastBuild {
+            // Use the ordinary Dynamic compiler with one complete, unsplit source
+            // body. Resolve bindings as typed nodes before compilation, without
+            // rebuilding the resulting Constraint through the native/O2 path.
+            let named = self.resolve_dynamic_source(vocab, false)?;
+            let construction = match self.source {
+                GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
+                _ => crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+            };
+            let mut constraint = crate::import::compile_dynamic_named_single(named, vocab, construction, matches!(self.source, GrammarSource::JsonSchema(_)))?;
+            let _ = constraint.late_bind_vocab.set(vocab.clone());
+            ensure_runnable_constraint(&constraint)?;
+            apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
+            return constraint.with_end_tokens(options.end_token_ids());
+        }
         if options.parser_backend == ParserBackend::TemplateDfa {
-            if options.optimization == Optimization::FastBuild && self.bindings.is_empty() {
+            if options.optimization == Optimization::Balanced && self.bindings.is_empty() {
                 // Use the existing O2 runtime with the bounded grammar normal
                 // form required by finite templates. Ordinary dynamic grammar
                 // preparation intentionally allows recursive action closures.
@@ -315,7 +332,7 @@ impl<'a> Grammar<'a> {
                 }
                 let mut constraint = components.pop().unwrap();
                 ensure_runnable_constraint(&constraint)?;
-                constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or_default()).map_err(Error::Compilation)?;
+                apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
                 return constraint.with_end_tokens(options.end_token_ids());
             }
         }
@@ -343,7 +360,7 @@ impl<'a> Grammar<'a> {
             );
             constraint.install_template_parser_from_compile()?;
         }
-        constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or_default()).map_err(Error::Compilation)?;
+        apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
         constraint.with_end_tokens(options.end_token_ids())
     }
 
@@ -451,6 +468,42 @@ impl<'a> Grammar<'a> {
         };
         module.validate_slot_manifest()?;
         Ok(module)
+    }
+
+    // Resolve source bindings as typed AST scopes before ordinary Dynamic
+    // compilation. No compiled component is converted into a parser table.
+    fn resolve_dynamic_source(&self, vocab: &Vocab, embedded: bool) -> Result<glrmask_grammar::NamedGrammar> {
+        match self.source {
+            GrammarSource::Ebnf(source) => crate::import::parse_ebnf_to_named(source),
+            GrammarSource::Lark(source) => crate::import::parse_lark_to_named(source),
+            GrammarSource::JsonSchema(source) => {
+                let mut named = crate::import::parse_json_schema_to_named_dynamic(source)?;
+                if embedded {
+                    named = crate::grammar::factoring::factor_named_grammar(named);
+                    crate::import::prepare_dynamic_json_schema_named(&mut named)?;
+                }
+                Ok(named)
+            }
+            GrammarSource::Glrm(source) => {
+                let mut children = Vec::new();
+                let mut tokens = Vec::new();
+                for (name, binding) in &self.bindings {
+                    match binding {
+                        GrammarValue::Source(child) => children.push((name.as_str(), child.resolve_dynamic_source(vocab, true)?)),
+                        GrammarValue::ExactToken(token) => {
+                            if !token.targets(vocab) { return Err(Error::Compilation(format!("external token {name:?} was built for an incompatible vocabulary"))); }
+                            tokens.push((name.as_str(), vec![token.id()]));
+                        }
+                        GrammarValue::ExactTokens(ids) => {
+                            if !ids.targets(vocab) { return Err(Error::Compilation(format!("external token {name:?} was built for an incompatible vocabulary"))); }
+                            tokens.push((name.as_str(), ids.ids().to_vec()));
+                        }
+                    }
+                }
+                let token_refs = tokens.iter().map(|(name, ids)| (*name, ids.as_slice())).collect::<Vec<_>>();
+                Ok(crate::grammar::glrm::from_glrm_with_named_subgrammars_and_external_terminals(source, &children, &token_refs)?)
+            }
+        }
     }
 
     fn unresolved_token_names(&self) -> Result<BTreeSet<String>> {
@@ -916,7 +969,8 @@ impl<'a> ConstraintSpec<'a> {
 
     fn compile_final(&self, optimization: Optimization) -> Result<RuntimeConstraint> {
         match optimization {
-            Optimization::FastBuild => {
+            Optimization::FastBuild => Ok(self.compile_dynamic()?.into_constraint()),
+            Optimization::Balanced => {
                 let dynamic = self.compile_dynamic()?;
                 collapse_dynamic_alternatives(
                     dynamic.into_constraints(),
@@ -1865,6 +1919,13 @@ fn prepare_immutable_template_component_boundary_summary(
     crate::compiler::boundary_candidates::persist_boundary_candidate_summary(constraint, vocab);
 }
 
+fn apply_final_boundary_trigger(constraint: &mut RuntimeConstraint, detail: BoundaryTriggerDetail) -> Result<()> {
+    if detail == BoundaryTriggerDetail::Exact && !constraint.has_template_parser() {
+        return Err(Error::Compilation("Exact boundary triggers require native template components; retained-LR Dynamic is unsupported".into()));
+    }
+    constraint.build_boundary_trigger(detail).map_err(Error::Compilation)
+}
+
 fn ensure_runnable_constraint(constraint: &RuntimeConstraint) -> Result<()> {
     if let Some(slot) = constraint.late_grammar_slots.first() {
         return Err(Error::Compilation(format!(
@@ -1946,7 +2007,7 @@ fn boundary_for_optimization(
     optimization: Optimization,
 ) -> Result<SegmentedBoundaryBackend> {
     match optimization {
-        Optimization::FastBuild => Ok(SegmentedBoundaryBackend::Dynamic),
+        Optimization::FastBuild | Optimization::Balanced => Ok(SegmentedBoundaryBackend::Dynamic),
         Optimization::Auto | Optimization::FastRuntime => {
             select_supported_boundary(parent, children)
         }
@@ -2326,7 +2387,7 @@ impl UnlinkedConstraint {
         if options.parser_backend == ParserBackend::TemplateDfa {
             constraint.install_template_parser()?;
         }
-        constraint.build_boundary_trigger(options.boundary_trigger.unwrap_or(self.boundary_trigger)).map_err(Error::Compilation)?;
+        apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or(self.boundary_trigger))?;
         constraint.with_end_tokens(options.end_token_ids())
     }
 
@@ -2831,7 +2892,7 @@ mod tests {
         let (vocab, parent, child) = compose_owned_test_fixture();
         let parent_bytes = parent.save(); let parent_mask = parent.inner.start().mask();
         let child = Arc::new(child); let child_bytes = child.save(); let child_mask = child.start().mask();
-        let options = BuildOptions::default().optimization(Optimization::FastBuild).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
+        let options = BuildOptions::default().optimization(Optimization::Balanced).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
         let borrowed_bound = parent.bind("child", child.as_ref()).unwrap();
         let owned_bound = parent.bind("child", Arc::clone(&child)).unwrap();
         let borrowed_bytes = borrowed_bound.save(); let owned_bytes = owned_bound.save();
@@ -5833,7 +5894,7 @@ mod final_unlinked_optimization_tests {
         assert!(bound.inner.static_dynamic_overlay.is_none(), "bind must not compile a boundary eagerly");
 
         let fast_build = bound.link_with(
-            BuildOptions::default().optimization(Optimization::FastBuild),
+            BuildOptions::default().optimization(Optimization::Balanced),
         ).unwrap();
         let fast_runtime = bound.link_with(
             BuildOptions::default().optimization(Optimization::FastRuntime),
@@ -5845,7 +5906,7 @@ mod final_unlinked_optimization_tests {
         let loaded = UnlinkedConstraint::load(bound.save()).unwrap();
         assert!(loaded.inner.late_grammar_slots.iter().any(|slot| slot.name == "child"));
         assert_dynamic_boundary(&loaded.link_with(
-            BuildOptions::default().optimization(Optimization::FastBuild),
+            BuildOptions::default().optimization(Optimization::Balanced),
         ).unwrap());
         assert_static_boundary(&loaded.link_with(
             BuildOptions::default().optimization(Optimization::FastRuntime),
@@ -6031,7 +6092,7 @@ mod cached_parent_main_tests {
         let fast_build = grammar
             .compile_with(
                 &vocab,
-                BuildOptions::default().optimization(Optimization::FastBuild),
+                BuildOptions::default().optimization(Optimization::Balanced),
             )
             .unwrap();
         let fast_runtime = grammar
@@ -6081,10 +6142,15 @@ mod final_boundary_option_tests {
     fn trigger_metadata_exists_before_first_use_in_every_public_mode() {
         let v = vocab();
         let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#);
-        for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+        for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
             for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
-                let constraint = grammar.compile_with(&v,
-                    BuildOptions::default().optimization(mode).boundary_trigger(detail)).unwrap();
+                let result = grammar.compile_with(&v,
+                    BuildOptions::default().optimization(mode).boundary_trigger(detail));
+                if mode == Optimization::FastBuild && detail == BoundaryTriggerDetail::Exact {
+                    assert!(result.unwrap_err().to_string().contains("retained-LR Dynamic"));
+                    continue;
+                }
+                let constraint = result.unwrap();
                 assert!(match (&constraint.boundary_trigger, detail) {
                     (crate::runtime::BoundaryTrigger::None, BoundaryTriggerDetail::None) |
                     (crate::runtime::BoundaryTrigger::Tokens(_), BoundaryTriggerDetail::Tokens) |
@@ -6126,5 +6192,83 @@ mod final_boundary_option_tests {
         let overlay = linked.static_dynamic_overlay.as_ref().unwrap();
         assert!(overlay.segmented_parser_components.iter().any(|component|
             matches!(component.constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Tokens(_))));
+    }
+}
+
+
+#[cfg(test)]
+mod final_ordinary_dynamic_selection_tests {
+    use super::*;
+    #[test]
+    fn fast_build_uses_the_actual_dynamic_compiler_and_preserves_loaded_representation() {
+        let v=Vocab::new(vec![(0,b"(".to_vec()),(1,b")".to_vec()),(2,b"()".to_vec()),(3,b"x".to_vec())]);
+        let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#);
+        let actual=g.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        let oracle=DynamicConstraint::compile(g.clone(),&v).unwrap().into_constraint();
+        assert!(actual.uses_dynamic_runtime());
+        assert!(!actual.has_template_parser()); assert!(actual.table.is_present());
+        assert_eq!(actual.dynamic_mask_vocab.is_grammar_quotiented(),oracle.dynamic_mask_vocab.is_grammar_quotiented());
+        for bytes in [actual.save(),actual.save_without_vocab().unwrap()] {
+            let restored=RuntimeConstraint::load_with_vocab(bytes,&v).unwrap();
+            assert!(restored.uses_dynamic_runtime());
+            assert!(!restored.has_template_parser()); assert!(restored.table.is_present());
+            for prefix in [b"".as_slice(),b"(",b"()",b"()("] {
+                let mut a=restored.start();let mut b=oracle.start_dynamic();
+                a.commit_bytes(prefix).unwrap();b.commit_bytes(prefix).unwrap();
+                assert_eq!(a.mask(),b.mask());assert_eq!(a.is_accepting(),b.is_accepting());
+            }
+        }
+        let balanced=g.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        assert!(balanced.uses_dynamic_runtime()); assert!(balanced.has_template_parser());
+        assert!(!balanced.table.is_present());
+        for mode in [Optimization::Auto,Optimization::FastRuntime] {
+            assert!(!g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap().uses_dynamic_runtime());
+        }
+    }
+}
+
+#[cfg(test)]
+mod final_unsplit_dynamic_tests {
+    use super::*;
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::expr_nfa::ExprNFA;
+    use crate::automata::unweighted_u32::nfa::NFA;
+
+    #[test]
+    fn unsplit_embedded_regions_match_existing_multiple_root_union() {
+        fn region(byte: u8) -> GrammarExpr {
+            let mut nfa=NFA::new_empty();let start=nfa.add_state();let end=nfa.add_state();
+            nfa.start_states.push(start);nfa.set_accepting(end);
+            nfa.add_transition(start,0,end);nfa.add_transition(end,0,end);
+            let mut expr=ExprNFA::new(nfa,vec![GrammarExpr::Literal(vec![byte])]);
+            expr.prefer_direct_nfa_emission=true;
+            GrammarExpr::ExprNFA(Box::new(expr))
+        }
+        let named=NamedGrammar {
+            start:"root".into(),ignore:None,lexer_partitions:BTreeMap::new(),
+            lexer_literal_partitions:BTreeMap::new(),default_lexer_partition:None,
+            rules:vec![
+                NamedRule {name:"root".into(),expr:GrammarExpr::Choice(vec![GrammarExpr::Sequence(vec![GrammarExpr::Ref("a".into()),GrammarExpr::Literal(b"x".to_vec())]),GrammarExpr::Sequence(vec![GrammarExpr::Ref("b".into()),GrammarExpr::Literal(b"x".to_vec())])]),is_terminal:false,is_internal:false},
+                NamedRule {name:"a".into(),expr:region(b'a'),is_terminal:false,is_internal:false},
+                NamedRule {name:"b".into(),expr:region(b'b'),is_terminal:false,is_internal:false},
+            ],
+        };
+        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),(3,b"bb".to_vec()),(4,b"ab".to_vec()),(5,b"x".to_vec()),(6,b"ax".to_vec()),(7,b"a".to_vec()),(8,b"bx".to_vec())]);
+        let oracle=crate::import::compile_dynamic_named_union_for_test(named.clone(),&v).unwrap();
+        assert!(oracle.clone_constraints().len()>1,"oracle must exercise the existing splitter");
+        let c=crate::import::compile_dynamic_named_single(named,&v,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false).unwrap();
+        assert!(c.uses_dynamic_runtime());assert!(!c.has_template_parser());
+        for actual in [c.clone(),RuntimeConstraint::load(c.save()).unwrap(),
+            RuntimeConstraint::load_with_vocab(c.save_without_vocab().unwrap(),&v).unwrap()] {
+            for prefix in [b"".as_slice(),b"a",b"aa",b"b",b"bb",b"ax",b"bx",b"ab",b"ba"] {
+                let mut a=actual.start();let mut o=oracle.start();
+                let _=a.commit_bytes(prefix);let _=o.commit_bytes(prefix);
+                assert_eq!(a.mask(),o.mask(),"after {prefix:?}");
+                assert_eq!(a.is_accepting(),o.is_accepting());
+                assert_eq!(a.is_rejected(),o.is_rejected());
+                assert_eq!(a.forced(),o.forced());
+            }
+        }
     }
 }

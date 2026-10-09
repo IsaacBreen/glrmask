@@ -103,7 +103,7 @@ def representations(constraint, vocab):
     return [constraint, loaded, glrmask.Constraint.load(external, vocab=vocab)]
 
 
-@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.FAST_BUILD])
+@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
     words, vocab = words_and_vocab()
     grammar = grammar_from_ebnf('start ::= "(" start ")" start | ""')
@@ -134,7 +134,7 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
     assert reference.save() == reference_bytes
 
 
-@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.FAST_BUILD])
+@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 @pytest.mark.parametrize("as_json", [False, True])
 def test_python_data_only_program_matches_literal_language(mode, as_json):
     definition = balanced_parentheses()
@@ -192,7 +192,7 @@ def test_python_template_validation_is_early_and_does_not_retain_python_callback
 
 
 @pytest.mark.parametrize("mode", [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_RUNTIME,
-                                  glrmask.Optimization.FAST_BUILD])
+                                  glrmask.Optimization.BALANCED])
 def test_python_compiled_composition_uses_native_defaults(mode):
     tokens = {0: b"a", 1: b"aa", 2: b"b"}
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
@@ -224,7 +224,7 @@ def test_python_compiled_composition_uses_native_defaults(mode):
                                 assert branch.is_accepting() == (prefix + word == b"a")
 
 
-@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.FAST_BUILD])
+@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 def test_python_precompiled_nullable_composition_preserves_crossings_and_root_end(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay",
                                           4: b"xy", 5: b"xx", 6: b""})
@@ -267,7 +267,7 @@ def test_python_explicit_lr_compile_and_link_requests_panic_loudly():
         assert type(rejected.value).__name__ == "PanicException"
 
 
-@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.FAST_BUILD])
+@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     tokens = {0: b"p", 1: b'"x:a"', 2: b"q", 3: b'p"x:a"q',
               4: b'a"q', 5: b"a", 6: b"aaa", 7: b'"q', 8: b""}
@@ -305,7 +305,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
 
 
 @pytest.mark.parametrize("backend", [None, glrmask._internal.ParserBackend.TEMPLATE_DFA])
-@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.FAST_BUILD])
+@pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, mode):
     tokens = {0: b"x", 1: b"a", 2: b"y", 3: b"xay", 4: b"xy",
               5: b"ay", 6: b"aa", 7: b"yx", 8: b""}

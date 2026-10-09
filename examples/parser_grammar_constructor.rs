@@ -107,7 +107,7 @@ fn main() -> Result<()> {
     let parser = grammar.compile_parser(&TerminalLeading)?;
     let vocab = Vocab::new(vec![(0, b"(".to_vec()), (1, b")".to_vec()), (2, b"a".to_vec()),
         (3, b"((a))".to_vec()), (4, b"()".to_vec())]);
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let constraint = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(optimization))?;
         let mut state = constraint.start();
         assert_eq!(state.mask()[0] & (1 << 4), 0, "empty parentheses are not in this grammar");
@@ -138,7 +138,7 @@ mod tests {
         let parser = prepared.compile_parser(&TerminalLeading).unwrap();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec()),
             (3, b"ab".to_vec()), (4, b"ac".to_vec()), (5, b"aa".to_vec())]);
-        for mode in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for mode in [Optimization::Balanced, Optimization::FastRuntime] {
             let c = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(mode)).unwrap();
             for c in [&c, &Constraint::load(c.save()).unwrap()] {
                 let mut state = c.start(); assert_eq!(state.mask()[0], 0b011001);

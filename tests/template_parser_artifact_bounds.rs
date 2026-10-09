@@ -116,7 +116,7 @@ fn assert_rejected(original: &[u8], parser: &[u8], external: bool, label: &str) 
 
 #[test]
 fn every_compact_graph_phase_and_link_rejects_out_of_bounds_fields() {
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         for external in [false, true] {
             let original = fixture(optimization, external);
             let parser = &original[parser_range(&original)];
@@ -215,7 +215,7 @@ fn every_compact_graph_phase_and_link_rejects_out_of_bounds_fields() {
 
 #[test]
 fn derived_certificate_limit_rejects_small_frames_before_large_allocation() {
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         for external in [false, true] {
             let original = fixture(optimization, external);
             let parser = &original[parser_range(&original)];
@@ -252,7 +252,7 @@ fn external_binding_accepts_reordered_identical_mapping_but_not_id_changes() {
     let mut remapped = mapping.clone();
     remapped[0].0 = 23;
     let remapped = Vocab::new(remapped);
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let bytes = fixture(optimization, true);
         let good = Constraint::load_with_vocab(bytes.clone(), &reversed).unwrap();
         assert_eq!(good.parser_backend(), ParserBackend::TemplateDfa);

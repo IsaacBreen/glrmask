@@ -26,7 +26,7 @@ state.commit_token(1)
 assert state.is_accepting()
 ```
 
-`FAST_RUNTIME` selects static masking. `FAST_BUILD` selects the existing
+`FAST_RUNTIME` selects static masking. `BALANCED` selects the existing
 vocabulary-partitioned dynamic masking path for built-in template grammars.
 Neither choice retains an LR table in the resulting template constraint.
 Omitting `parser_backend` selects the native `TEMPLATE_DFA` backend. Explicit
@@ -106,7 +106,7 @@ identity relation shown above. This prevents a lexer shortcut from discarding
 a meaningful parser action.
 
 For data-only programs, `FAST_RUNTIME` uses the shared static compiler;
-`FAST_BUILD`, `AUTO` and omission of `optimization` use the shared dynamic
+`BALANCED`, `AUTO` and omission of `optimization` use the shared dynamic
 mask engine. All choices remain table-free. Excessive static expansion raises
 `ValueError` rather than silently falling back to dynamic masking or LR.
 

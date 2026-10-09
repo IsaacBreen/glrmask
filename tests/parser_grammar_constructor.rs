@@ -121,7 +121,7 @@ fn source_graph_is_resolved_not_flattened_and_callback_is_compile_time_only() {
     let compiler = |g: &ParserGrammar| { calls.set(calls.get() + 1); finite_compiler(g) };
     let parser = prepared.compile_parser(&compiler).unwrap();
     let (v, bytes) = vocabulary();
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime, Optimization::Auto] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime, Optimization::Auto] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"ab", b"abab"]);
         let saved = c.save(); let reloaded = Constraint::load(&saved).unwrap();
@@ -159,7 +159,7 @@ fn nullable_lexical_terminals_preserve_epsilon_without_a_nullable_lexer() {
     assert!(matches!(&prepared.grammar().rules()[0].expr, ParserExpr::Sequence(parts)
         if matches!(&parts[0], ParserExpr::Choice(choices) if choices.contains(&ParserExpr::Epsilon))));
     let parser = prepared.compile_parser(&finite_compiler).unwrap(); let (v, bytes) = vocabulary();
-    for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+    for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"b", b"ab"]);
     }
@@ -172,7 +172,7 @@ fn zero_terminal_epsilon_and_empty_languages_are_distinct() {
         let p = PreparedParserGrammar::from_named(&named(vec![("root", false, expression)])).unwrap();
         assert_eq!(p.grammar().terminal_count(), 0);
         let parser = p.compile_parser(&finite_compiler).unwrap();
-        for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+        for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
             let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
             for c in [&c, &Constraint::load(c.save()).unwrap()] {
                 let state = c.start(); assert_eq!(state.is_accepting(), accepts);
@@ -195,7 +195,7 @@ fn separated_sequence_keeps_item_quantifiers_and_required_group_semantics() {
     assert_eq!(finite_words(&left, left.start, &mut BTreeSet::new(), &mut BTreeMap::new()).unwrap(),
         finite_words(&right, right.start, &mut BTreeSet::new(), &mut BTreeMap::new()).unwrap());
     let parser = prepared.compile_parser(&finite_compiler).unwrap(); let (v, bytes) = vocabulary();
-    for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+    for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"b", b"a,b", b"b,c", b"a,b,c"]);
     }
@@ -209,7 +209,7 @@ fn all_source_frontends_reach_the_public_constructor() {
         (Grammar::from_lark(r#"start: "a" "b"?"#), b"ab"),
         (Grammar::from_json_schema(r#"{"enum":["a","ab"]}"#), b"\"ab\"")];
     for (source, word) in sources {
-        for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
             let c = source.compile_with_parser(&v, &finite_compiler, TemplateBuildOptions::default().optimization(optimization)).unwrap();
             let mut state = c.start(); state.commit_bytes(word).unwrap(); assert!(state.is_accepting());
         }
@@ -222,7 +222,7 @@ fn exact_token_binding_is_not_its_vocabulary_byte_spelling() {
         E::Sequence(vec![E::SpecialToken(70), literal(b"b")]))])).unwrap();
     let parser = prepared.compile_parser(&finite_compiler).unwrap();
     let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (70, b"a".to_vec())]);
-    for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+    for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for c in [&c, &Constraint::load(c.save()).unwrap()] {
             let mut state = c.start(); let mask = state.mask(); assert!(bit(&mask, 70)); assert!(!bit(&mask, 0));
@@ -267,7 +267,7 @@ fn expression_automaton_preserves_epsilon_edges_shared_symbols_and_empty_languag
     assert_eq!(resolved.states[1].transitions, vec![(0, 2), (1, 2)]);
     assert_eq!(resolved.symbols[0], ParserExpr::Nonterminal(1));
     let (v, bytes) = vocabulary(); let parser = p.compile_parser(&finite_compiler).unwrap();
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"a", b"b"]);
         check_words(&Constraint::load(c.save()).unwrap(), &bytes, &[b"a", b"b"]);
@@ -292,7 +292,7 @@ fn ignores_internal_lexical_helpers_and_partition_conflicts_remain_host_owned() 
         result.terminals[ignore as usize] = StackTemplate::reject(); Ok(result) };
     assert!(p.compile_parser(&malformed).is_err());
     let parser = p.compile_parser(&finite_compiler).unwrap(); let (v, _) = vocabulary();
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for word in [b"a".as_slice(), b" a", b"a ", b"  a  "] {
             let mut state = c.start(); state.commit_bytes(word).unwrap(); assert!(state.is_accepting(), "{word:?}");
@@ -317,7 +317,7 @@ fn structural_subtraction_is_not_general_context_free_language_difference() {
         ("left", false, literal(b"a")), ("right", false, literal(b"b"))]);
     let p = PreparedParserGrammar::from_named(&source).unwrap(); let (v, bytes) = vocabulary();
     let parser = p.compile_parser(&finite_compiler).unwrap();
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
         check_words(&c, &bytes, &[b"b"]);
     }
@@ -348,7 +348,7 @@ fn required_nullable_separated_items_match_the_existing_grammar_semantics() {
             let flat = lower(&source).unwrap();
             let reference = Constraint::compile_grammar_def_json(&serde_json::to_string(&flat).unwrap(), &v).unwrap();
             let parser = PreparedParserGrammar::from_named(&source).unwrap().compile_parser(&finite_compiler).unwrap();
-            for optimization in [Optimization::FastRuntime, Optimization::FastBuild] {
+            for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
                 let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
                 let mut words = vec![Vec::new()];
                 for _ in 0..4 { let previous = words.clone(); for word in previous { for byte in b"ab," {

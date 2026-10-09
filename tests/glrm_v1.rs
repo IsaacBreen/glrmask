@@ -334,7 +334,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     let loaded_dynamic_bound = loaded_dynamic_parent
         .bind("child", &static_child)
         .unwrap()
-        .link_with(BuildOptions::default().optimization(Optimization::FastBuild))
+        .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
     assert_static_xy_matches(&reference, &loaded_dynamic_bound);
 
@@ -621,7 +621,7 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
         Constraint::compile(parent.clone(), &vocab).unwrap();
     assert_lr_composition_rejected(DynamicConstraint::compile(parent.clone(), &vocab));
     let dynamic_constraint =
-        parent.compile_with(&vocab, BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        parent.compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
 
     for token in [0, 1] {
         let mut static_state = static_constraint.start();
@@ -656,7 +656,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
     let constraint = parent.bind("MARK", vocab.token(7).unwrap()).unwrap()
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
     state.commit_token(8).unwrap();
@@ -746,7 +746,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     let dynamic_fully_bound = open
         .bind("child.nested", &leaf)
         .unwrap()
-        .link_with(BuildOptions::default().optimization(Optimization::FastBuild))
+        .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
     let mut state = dynamic_fully_bound.start();
     state.commit_token(0).unwrap();

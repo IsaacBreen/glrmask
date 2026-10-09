@@ -419,7 +419,7 @@ fn fast_build_module_link_is_safe_in_a_single_worker_rayon_pool() {
         let bound = host.bind("CHILD", &child).unwrap();
         let constraint = bound
             .link_with(
-                BuildOptions::default().optimization(Optimization::FastBuild),
+                BuildOptions::default().optimization(Optimization::Balanced),
             )
             .unwrap();
         let mut state = constraint.start();
@@ -483,7 +483,7 @@ fn one_shot_optimization_preserves_deferred_compiled_module_bindings() {
         .compile(&v)
         .unwrap();
 
-    for optimization in [Optimization::FastBuild, Optimization::Auto, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::Auto, Optimization::FastRuntime] {
         let actual = parent
             .link_with(
                 BuildOptions::default().optimization(optimization),

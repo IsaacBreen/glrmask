@@ -16,7 +16,7 @@ fn main() -> glrmask::Result<()> {
         r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
     ).compile_unlinked(&vocab)?;
     
-    for optimization in [Optimization::FastBuild, Optimization::FastRuntime] {
+    for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let linked = parent.bind("child", &child)?.link_with(
             BuildOptions::default()
                 .optimization(optimization)

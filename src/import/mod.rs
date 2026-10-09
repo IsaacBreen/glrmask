@@ -543,6 +543,23 @@ pub(crate) fn compile_dynamic_glrm_fixture(
     Ok(constraint)
 }
 
+/// Compile a single actual-Dynamic body without the optional root split.
+/// Embedded regular regions lower through the existing exact CFG path.
+pub(crate) fn compile_dynamic_named_single(
+    named: ast::NamedGrammar, vocab: &crate::Vocab,
+    table_construction: GlrTableConstruction, prepare_json_schema: bool,
+) -> crate::Result<Constraint> {
+    let mut named = factor_named_grammar(named);
+    if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
+    let dynamic = compile_dynamic_owned_with_backend(ast::lower(&named)?, vocab,
+        table_construction, crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())?;
+    Ok(dynamic.into_constraint())
+}
+
+pub(crate) fn prepare_dynamic_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<()> {
+    prepare_json_schema_named(grammar)
+}
+
 fn compile_dynamic_from_named(
     named: ast::NamedGrammar,
     vocab: &crate::Vocab,
@@ -864,7 +881,7 @@ pub(crate) fn parse_json_schema_to_named(schema_json: &str) -> crate::Result<ast
     Ok(named?)
 }
 
-fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
+pub(crate) fn parse_json_schema_to_named_dynamic(schema_json: &str) -> crate::Result<ast::NamedGrammar> {
     let json_parse_started_at = emit_import_phase_start("serde_json_from_str");
     let schema: serde_json::Value = serde_json::from_str(schema_json)
         .map_err(|e| crate::GlrMaskError::GrammarParse(format!("invalid JSON: {e}")))?;
@@ -2792,4 +2809,11 @@ mod tests {
             b"aa",
         );
     }
+}
+
+#[cfg(test)]
+pub(crate) fn compile_dynamic_named_union_for_test(
+    named: ast::NamedGrammar, vocab: &crate::Vocab,
+) -> crate::Result<DynamicConstraint> {
+    compile_dynamic_from_named(named, vocab, GlrTableConstruction::ExperimentalCoreMerged, &[])
 }

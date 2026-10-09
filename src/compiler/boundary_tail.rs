@@ -823,7 +823,7 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
     use crate::{BuildOptions, Grammar, Optimization, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"X[a]!".to_vec()), (1, b"a]!".to_vec()),
         (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-    for mode in [Optimization::FastRuntime, Optimization::FastBuild] {
+    for mode in [Optimization::FastRuntime, Optimization::Balanced] {
         let options = || BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa);
         let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options()).unwrap();
@@ -2397,7 +2397,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
         (format!("start ::= r0?\n{large_body}"), true, true)];
     for (source, nullable, large) in cases {
         let constraint = Grammar::ebnf(&source).compile_with(&vocab,
-            BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+            BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
         assert!(constraint.has_template_parser());
         assert!(!constraint.table.is_present());
         let rules = constraint.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap().rules().len();

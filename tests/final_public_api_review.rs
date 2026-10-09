@@ -271,7 +271,7 @@ fn review_optimization_choices_preserve_semantics_with_exact_bindings() {
         .compile_unlinked(&v).unwrap().bind("child", &child).unwrap();
     let baseline = Grammar::from_glrm(BOTH).bind("MARK", v.tokens([7, 63]).unwrap()).unwrap()
         .bind("child", Grammar::from_ebnf(r#"start ::= "b""#)).unwrap().compile(&v).unwrap();
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
         let actual = desc.link_with(BuildOptions::default().optimization(mode)).unwrap();
         compare_prefixes(&actual, &baseline, &[0, 1, 2, 3, 5, 7, 63], 4);
     }
@@ -337,12 +337,16 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
     use glrmask::BoundaryTriggerDetail;
     let v = vocab();
     let grammar = Grammar::from_ebnf(r#"start ::= "a" "b"?"#);
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
         let options = BuildOptions::default().optimization(mode);
         let plain = grammar.compile_with(&v, options.clone()).unwrap();
         let none = grammar.compile_with(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert_eq!(plain.save(), none.save());
         for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+            if mode == Optimization::FastBuild && detail == BoundaryTriggerDetail::Exact {
+                assert!(grammar.compile_with(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
+                continue;
+            }
             let requested = grammar.compile_with(&v, options.clone().boundary_trigger(detail)).unwrap();
             // Inspect persistence before start/first mask: trigger construction is eager.
             let bytes = requested.save();

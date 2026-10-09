@@ -136,16 +136,17 @@ constraint = grammar.compile(
 The intent-level optimization choices are:
 
 - `Optimization.AUTO`
-- `Optimization.FAST_BUILD`
+- `Optimization.FAST_BUILD` (ordinary Dynamic/O1)
+- `Optimization.BALANCED` (native O2)
 - `Optimization.FAST_RUNTIME`
 
-They preserve language semantics and all return the same `Constraint` type. They do not expose GLRMask's internal static/dynamic/O1/O2/O3 engines.
+They preserve language semantics and all return the same `Constraint` type. Their runtime trade-offs are Dynamic (O1), native O2, and Static; parser machinery stays internal.
 
 ### Parser representation
 
-Public compilation and linking select the native template representation
-internally. Choose `Optimization.AUTO`, `FAST_BUILD` (O2), or `FAST_RUNTIME`;
-there is no public parser backend selector or parser-program constructor.
+Public compilation selects ordinary Dynamic with `FAST_BUILD`, native O2 with
+`BALANCED`, and Static with `FAST_RUNTIME`; `AUTO` retains the existing default.
+There is no public parser backend selector or parser-program constructor.
 
 Runtime artifacts retain their representation and exact vocabulary identity.
 Compiled children with supported finite embedding transfers can be bound and
@@ -310,3 +311,24 @@ Unsupported exact construction raises an error. The default is `.NONE`.
 through `save`, `load`, and `bind`, and builds it at final link. Omitting the
 link keyword (or passing Python `None`) inherits the retained request; passing
 the enum `.NONE` explicitly suppresses it.
+
+Ordinary `FastBuild` / `FAST_BUILD` uses the same Dynamic compiler as the
+benchmark and returns the normal `Constraint` / `ConstraintState` interface.
+It retains the selected runtime representation after save/load. `Balanced` /
+`BALANCED` preserves the previous native O2 behavior. `Auto` remains the existing
+default, and `FastRuntime` selects Static.
+
+For source grammars, `FastBuild` resolves bound EBNF, Lark, JSON Schema, and
+GLRM children as typed grammar nodes, then compiles the complete language into
+one ordinary Dynamic body. Scoped ignores, lexer partitions, and exact-token
+bindings remain part of that language; root alternatives are not discarded.
+
+For precompiled `UnlinkedConstraint` modules, `FastBuild` retains the compiled
+constituents and selects Dynamic boundary traversal. It does not recompile
+those constituents as ordinary Dynamic. `Balanced` preserves the existing O2
+and native linking path. Compiled retained-LR children still require a supported
+embedding contract; unsupported native links return errors.
+
+`BoundaryTriggerDetail::Exact` / `BoundaryTriggerDetail.EXACT` requires native
+template components. Requesting it on a retained-LR Dynamic constraint returns
+a clear error before trigger construction.

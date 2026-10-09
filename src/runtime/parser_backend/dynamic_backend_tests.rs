@@ -30,7 +30,7 @@ fn compile(vocab: &Vocab, source: &str, backend: ParserBackend) -> Constraint {
             .with_end_tokens(&[END_TOKEN]).expect("end tokens")
     } else {
         Grammar::from_ebnf(source).compile_with(vocab,
-            BuildOptions::default().optimization(Optimization::FastBuild)
+            BuildOptions::default().optimization(Optimization::Balanced)
                 .end_tokens([END_TOKEN])).expect("O2 template compile")
     }
 }
@@ -383,7 +383,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
     let lr = crate::DynamicConstraint::from_lark(source, &vocab).unwrap()
         .into_constraint().with_end_tokens(&[END_TOKEN]).unwrap();
     let native = Grammar::from_lark(source).compile_with(&vocab,
-        BuildOptions::default().optimization(Optimization::FastBuild).end_tokens([END_TOKEN])).unwrap();
+        BuildOptions::default().optimization(Optimization::Balanced).end_tokens([END_TOKEN])).unwrap();
     for constraint in [&lr, &native] {
         for loaded in [Constraint::load(constraint.save()).unwrap(),
             Constraint::load_with_vocab(constraint.save_without_vocab().unwrap(), &vocab).unwrap()] {
@@ -408,7 +408,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[9])], &[]).unwrap().into_constraint();
     let native = Grammar::from_glrm(source).bind("MARK", vocab.token(9).unwrap()).unwrap()
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
         assert!(allowed(&state.mask(), 9));
@@ -481,7 +481,7 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
     let lr = crate::DynamicConstraint::from_ebnf(source, &vocab).unwrap()
         .into_constraint().with_end_tokens(&[26]).unwrap();
     let mut constraints = vec![lr];
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+    for mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
         constraints.push(Grammar::from_ebnf(source).compile_with(&vocab,
             BuildOptions::default().optimization(mode).end_tokens([26])).unwrap());
     }
@@ -516,7 +516,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source,&vocab,&[("MARK",&[25])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
-    for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::FastRuntime] {
+    for mode in [Optimization::Auto,Optimization::Balanced,Optimization::FastRuntime] {
         constraints.push(Grammar::from_glrm(source).bind("MARK",vocab.token(25).unwrap()).unwrap()
             .compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
@@ -541,7 +541,7 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
     let expected = crate::compiler::compile::vocab_empty_byte_token_ids(&vocab);
     let mut compiled = vec![crate::DynamicConstraint::from_ebnf(source, &vocab)
         .unwrap().into_constraint()];
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::FastRuntime] {
+    for mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
         compiled.push(Grammar::from_ebnf(source).compile_with(&vocab,
             BuildOptions::default().optimization(mode)).unwrap());
     }

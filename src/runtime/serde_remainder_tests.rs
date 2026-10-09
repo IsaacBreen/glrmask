@@ -95,7 +95,7 @@ fn ordinary_composition_metadata_unwrap_has_identical_bytes() {
         .compile_with(
             &vocab,
             crate::BuildOptions::default()
-                .optimization(crate::Optimization::FastBuild),
+                .optimization(crate::Optimization::Balanced),
         )
         .unwrap();
 
