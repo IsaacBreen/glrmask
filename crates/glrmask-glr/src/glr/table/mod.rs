@@ -22,7 +22,8 @@ pub use compose::{
     subgrammar_child_return_pop,
 };
 
-use build::{build_table, build_table_with_default_construction, Item, PendingAction};
+use build::{build_table, build_table_with_default_construction,
+    build_executable_table_with_default_construction, Item, PendingAction};
 #[allow(unused_imports)]
 pub use optimize::ControlEliminationReport;
 #[allow(unused_imports)]
@@ -1537,6 +1538,16 @@ impl GLRTable {
         default_construction: GlrTableConstruction,
     ) -> Self {
         build_table_with_default_construction(grammar, default_construction)
+    }
+
+    /// Build executable LR actions, including for a complete direct-regular
+    /// language. The compact admission-only table requires a separate retained
+    /// automaton runtime and cannot execute ordinary LR commits.
+    pub fn build_executable_with_default_construction(
+        grammar: &AnalyzedGrammar,
+        default_construction: GlrTableConstruction,
+    ) -> Self {
+        build_executable_table_with_default_construction(grammar, default_construction)
     }
 
     #[inline]

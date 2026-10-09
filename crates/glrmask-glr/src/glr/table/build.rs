@@ -1358,9 +1358,25 @@ pub(super) fn build_table_with_default_construction(
     grammar: &AnalyzedGrammar,
     default_construction: GlrTableConstruction,
 ) -> GLRTable {
+    build_table_with_direct_regular_policy(grammar, default_construction, true)
+}
+
+pub(super) fn build_executable_table_with_default_construction(
+    grammar: &AnalyzedGrammar,
+    default_construction: GlrTableConstruction,
+) -> GLRTable {
+    build_table_with_direct_regular_policy(grammar, default_construction, false)
+}
+
+fn build_table_with_direct_regular_policy(
+    grammar: &AnalyzedGrammar,
+    default_construction: GlrTableConstruction,
+    allow_compact_direct_regular: bool,
+) -> GLRTable {
     let t1 = std::time::Instant::now();
     let construction_override = glr_table_construction_override();
     if construction_override.is_none()
+        && allow_compact_direct_regular
         && direct_regular_compact_table_enabled()
         && let Some(table) = try_build_compact_direct_regular_table(grammar)
     {

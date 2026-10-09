@@ -7088,6 +7088,11 @@ fn compile_dynamic_owned_impl(
                         state_count.saturating_add(1) as u32,
                         num_terminals,
                     )
+                } else if use_lr {
+                    GLRTable::build_executable_with_default_construction(
+                        analyzed_grammar.as_ref().expect("generic grammar was analyzed"),
+                        default_table_construction,
+                    )
                 } else {
                     GLRTable::build_with_default_construction(
                         analyzed_grammar.as_ref().expect("generic grammar was analyzed"),

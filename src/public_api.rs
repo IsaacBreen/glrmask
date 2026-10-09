@@ -6272,3 +6272,54 @@ mod final_unsplit_dynamic_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod bare_direct_region_regression_tests {
+    use super::*;
+    use crate::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
+    use crate::grammar::expr_nfa::ExprNFA;
+    use crate::automata::unweighted_u32::nfa::NFA;
+
+    #[test]
+    fn bare_region_union_and_unsplit_lr_preserve_the_complete_language() {
+        fn region(byte:u8)->GrammarExpr {
+            let mut nfa=NFA::new_empty();let start=nfa.add_state();let end=nfa.add_state();
+            nfa.start_states.push(start);nfa.set_accepting(end);
+            nfa.add_transition(start,0,end);nfa.add_transition(end,0,end);
+            GrammarExpr::ExprNFA(Box::new(ExprNFA::new(nfa,vec![GrammarExpr::Literal(vec![byte])])
+                .with_embedded_direct_nfa_emission()))
+        }
+        let named=NamedGrammar { start:"root".into(),ignore:None,lexer_partitions:BTreeMap::new(),
+            lexer_literal_partitions:BTreeMap::new(),default_lexer_partition:None,
+            rules:vec![
+                NamedRule{name:"root".into(),expr:GrammarExpr::Choice(vec![GrammarExpr::Ref("a".into()),GrammarExpr::Ref("b".into())]),is_terminal:false,is_internal:false},
+                NamedRule{name:"a".into(),expr:region(b'a'),is_terminal:false,is_internal:false},
+                NamedRule{name:"b".into(),expr:region(b'b'),is_terminal:false,is_internal:false}] };
+        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
+            (3,b"bb".to_vec()),(4,b"ab".to_vec()),(7,b"a".to_vec())]);
+        let union=crate::import::compile_dynamic_named_union_for_test(named.clone(),&v).unwrap();
+        let single=crate::import::compile_dynamic_named_single(named,&v,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false).unwrap();
+        assert_eq!(union.clone_constraints().len(),2);
+        for c in union.clone_constraints() {
+            assert!(c.table.is_present()); assert!(!c.table.action.is_empty());
+            assert!(c.direct_regular_automaton.is_none()); assert!(!c.has_template_parser());
+        }
+        assert_eq!(union.start().mask(),vec![143]);
+        for actual in [single.clone(),RuntimeConstraint::load(single.save()).unwrap(),
+            RuntimeConstraint::load_with_vocab(single.save_without_vocab().unwrap(),&v).unwrap()] {
+            for (prefix,mask,accept,reject) in [(b"".as_slice(),143,false,false),(b"a",133,true,false),
+                (b"aa",133,true,false),(b"b",10,true,false),(b"bb",10,true,false),
+                (b"ab",0,false,true),(b"ba",0,false,true)] {
+                let mut a=actual.start();let mut o=union.start();
+                let ae=a.commit_bytes(prefix);let oe=o.commit_bytes(prefix);
+                assert_eq!(ae.is_err(),oe.is_err(),"after {prefix:?}");
+                assert_eq!(a.mask(),vec![mask],"unsplit after {prefix:?}");
+                assert_eq!(o.mask(),vec![mask],"union after {prefix:?}");
+                assert_eq!((a.is_accepting(),a.is_rejected()),(accept,reject));
+                assert_eq!((o.is_accepting(),o.is_rejected()),(accept,reject));
+                assert_eq!(a.forced(),o.forced());
+            }
+        }
+    }
+}

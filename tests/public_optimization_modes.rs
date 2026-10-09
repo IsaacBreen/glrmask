@@ -130,3 +130,33 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
     compare_prefixes(&actual,&reference,&[0,1,3,4,8,33,99],4);
     assert!(!allowed(&actual.start().mask(),4));
 }
+
+#[test]
+fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec())]);
+    // start + r0..r30 reaches the established 32-rule compression threshold.
+    let mut source=String::from("start: r0\n");
+    for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
+    source.push_str("r30: \"b\"\n");
+    let g=Grammar::from_lark(&source);
+    let oracle=g.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced).end_tokens([100])).unwrap();
+    let actual=g.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild).end_tokens([100])).unwrap();
+    assert_eq!(actual.start().mask()[0],5);
+    for c in [actual.clone(),Constraint::load(actual.save()).unwrap(),
+        Constraint::load_with_vocab(actual.save_without_vocab().unwrap(),&v).unwrap()] {
+        for n in [0,1,15,29,30] {
+            let prefix=vec![b'a';n]; let mut a=c.start();let mut o=oracle.start();
+            a.commit_bytes(&prefix).unwrap();o.commit_bytes(&prefix).unwrap();
+            assert_eq!(a.mask(),o.mask(),"after {n} a bytes");
+            assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced(),o.forced());
+            let snapshot=a.clone();
+            if n==30 { a.commit_token(1).unwrap();assert!(a.is_accepting());
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_terminated()); }
+            assert_eq!(snapshot.mask(),o.mask());
+        }
+        for n in [29,31] {
+            let mut state=c.start();let mut invalid=vec![b'a';n];invalid.push(b'b');
+            assert!(state.commit_bytes(&invalid).is_err());assert!(state.is_rejected());
+        }
+    }
+}

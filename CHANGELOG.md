@@ -2,6 +2,10 @@
 
 ## Unreleased optimization choices
 
+- Retained-LR Dynamic builds executable actions for compressed direct-regular
+  languages. Admission-only compact tables remain on the native/Static path.
+  This fixes empty masks and rejected valid Lark inputs after right-linear
+  compression, including the FastBuild public compilation path.
 - `FastBuild` / `FAST_BUILD` now selects the actual ordinary Dynamic compiler.
   `Balanced` / `BALANCED` preserves the previous native O2 path; `FastRuntime`
   selects Static and `Auto` keeps the existing default. All return the same

@@ -71,3 +71,27 @@ def test_exact_token_identity_survives_source_compilation(mode):
         assert not state.mask()[0]
         state.commit_token(15)
         assert state.is_accepting()
+
+
+def test_compressed_public_lark_masks_commit_clone_and_reload():
+    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa"})
+    source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(30)) + 'r30: "b"\n'
+    grammar = glrmask.Grammar.from_lark(source)
+    reference = grammar.compile(vocab, optimization=glrmask.Optimization.BALANCED, end_tokens=[100])
+    compiled = grammar.compile(vocab, optimization=glrmask.Optimization.FAST_BUILD, end_tokens=[100])
+    for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
+                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+        for n in [0, 1, 15, 29, 30]:
+            state, expected = constraint.start(), reference.start()
+            state.commit_bytes(b"a" * n)
+            expected.commit_bytes(b"a" * n)
+            assert np.array_equal(state.mask(), expected.mask())
+            assert state.forced() == expected.forced()
+            snapshot = state.clone()
+            if n == 30:
+                state.commit_token(1)
+                assert state.is_accepting()
+                assert state.mask()[100]
+                state.commit_token(100)
+                assert state.is_terminated()
+            assert np.array_equal(snapshot.mask(), expected.mask())
