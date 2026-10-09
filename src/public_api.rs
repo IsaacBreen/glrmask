@@ -6323,3 +6323,24 @@ mod bare_direct_region_regression_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod static_whole_token_regression_tests {
+    use super::*;
+    #[test]
+    fn compressed_whole_word_is_allowed_before_and_after_reload() {
+        let mut source=String::from("start: r0\n");for i in 0..30 {source.push_str(&format!("r{i}: \"a\" r{}\n",i+1));}source.push_str("r30: \"b\"\n");
+        let mut word=vec![b'a';30];word.push(b'b');
+        for entries in [vec![(3,word.clone())],vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),(3,word.clone())]] {
+            let singleton=entries.len()==1;let v=Vocab::new(entries);
+            for mode in [Optimization::Auto,Optimization::FastRuntime] {
+                let c=Grammar::from_lark(&source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                assert!(c.direct_regular_automaton.is_some());
+                for c in [c.clone(),RuntimeConstraint::load(c.save()).unwrap(),RuntimeConstraint::load_with_vocab(c.save_without_vocab().unwrap(),&v).unwrap()] {
+                    let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
+                    state.commit_token(3).unwrap();assert!(state.is_accepting());assert!(!state.is_rejected());
+                }
+            }
+        }
+    }
+}

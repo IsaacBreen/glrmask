@@ -2,6 +2,9 @@
 
 ## Unreleased optimization choices
 
+- Reject terminal-run stabilization proofs based on admission-only compact
+  parser tables. Static masks retain valid whole-word tokens after Lark
+  right-linear compression, including models containing only that token.
 - Retained-LR Dynamic builds executable actions for compressed direct-regular
   languages. Admission-only compact tables remain on the native/Static path.
   This fixes empty masks and rejected valid Lark inputs after right-linear

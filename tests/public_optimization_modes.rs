@@ -160,3 +160,50 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
         }
     }
 }
+
+#[test]
+fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
+    for n in [29,30,63] {
+        let mut source=String::from("start: r0\n");
+        for i in 0..n {source.push_str(&format!("r{i}: \"a\" r{}\n",i+1));}
+        source.push_str(&format!("r{n}: \"b\"\n"));
+        let word=|count:usize| {let mut bytes=vec![b'a';count];bytes.push(b'b');bytes};
+        let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
+            (3,word(n)),(7,word(n)),(8,word(n-1)),(9,word(n+1)),(11,b"x".to_vec())]);
+        let g=Grammar::from_lark(&source);
+        let reference=g.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild).end_tokens([100])).unwrap();
+        for mode in MODES {
+            let compiled=g.compile_with(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
+            for c in [compiled.clone(),Constraint::load(compiled.save()).unwrap(),
+                Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(),&v).unwrap()] {
+                for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
+                    let mut a=c.start();let mut expected=reference.start();
+                    a.commit_bytes(&prefix).unwrap();expected.commit_bytes(&prefix).unwrap();
+                    assert_eq!(a.mask(),expected.mask(),"{mode:?}, length {n}, prefix {prefix:?}");
+                    assert_eq!(a.is_accepting(),expected.is_accepting());
+                    assert_eq!(a.forced(),expected.forced());
+                    let snapshot=a.clone();assert_eq!(snapshot.mask(),expected.mask());
+                }
+                let mut a=c.start();
+                assert!(allowed(&a.mask(),3));assert!(allowed(&a.mask(),7));
+                assert!(!allowed(&a.mask(),8));assert!(!allowed(&a.mask(),9));
+                a.commit_token(7).unwrap();assert!(a.is_accepting());
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_terminated());
+                for invalid in [8,9,11] {
+                    let mut a=c.start();let mut expected=reference.start();
+                    assert_eq!(a.commit_token(invalid).is_err(),expected.commit_token(invalid).is_err());
+                    assert!(a.is_rejected());assert!(!a.is_terminated());
+                }
+            }
+        }
+    }
+    // A missing suggestion can empty the entire mask with a one-token model.
+    let mut source=String::from("start: r0\n");
+    for i in 0..30 {source.push_str(&format!("r{i}: \"a\" r{}\n",i+1));}
+    source.push_str("r30: \"b\"\n");let mut word=vec![b'a';30];word.push(b'b');
+    let v=Vocab::new(vec![(3,word)]);
+    for mode in MODES {
+        let c=Grammar::from_lark(&source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let mut a=c.start();assert_eq!(a.mask(),vec![8]);a.commit_token(3).unwrap();assert!(a.is_accepting());
+    }
+}

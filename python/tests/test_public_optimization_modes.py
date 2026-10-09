@@ -95,3 +95,32 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
                 state.commit_token(100)
                 assert state.is_terminated()
             assert np.array_equal(snapshot.mask(), expected.mask())
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("n", [29, 30, 63])
+def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
+    source = "start: r0\n" + "".join(f'r{i}: "a" r{i+1}\n' for i in range(n)) + f'r{n}: "b"\n'
+    word = b"a" * n + b"b"
+    vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"aa", 3: word, 7: word,
+                                         8: b"a" * (n-1) + b"b", 9: b"a" * (n+1) + b"b", 11: b"x"})
+    grammar = glrmask.Grammar.from_lark(source)
+    reference = grammar.compile(vocab, optimization=glrmask.Optimization.FAST_BUILD, end_tokens=[100])
+    compiled = grammar.compile(vocab, optimization=mode, end_tokens=[100])
+    for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
+                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+        for prefix in [b"", b"a", b"a" * (n-1), b"a" * n, word]:
+            state, expected = constraint.start(), reference.start()
+            state.commit_bytes(prefix)
+            expected.commit_bytes(prefix)
+            assert np.array_equal(state.mask(), expected.mask())
+            assert state.is_accepting() == expected.is_accepting()
+            assert state.forced() == expected.forced()
+            assert np.array_equal(state.clone().mask(), expected.mask())
+        state = constraint.start()
+        assert state.mask()[3] and state.mask()[7]
+        assert not state.mask()[8] and not state.mask()[9]
+        state.commit_token(7)
+        assert state.is_accepting()
+        state.commit_token(100)
+        assert state.is_terminated()

@@ -168,6 +168,13 @@ fn certify_caps(
     id_map: &InternalIdMap,
 ) -> BTreeMap<TerminalID, u8> {
     let mut caps = BTreeMap::new();
+    // A compact direct-regular table has admission rows but no executable
+    // actions. Its separate automaton drives commits, while this certificate
+    // builder consumes table actions/templates. Empty effect results here mean
+    // the proof is unavailable, not that repeated terminal effects stabilize.
+    if grammar.direct_regular_automaton.is_some() && table.action.is_empty() {
+        return caps;
+    }
     for (&terminal, &max_run) in candidates {
         if max_run < MIN_CANDIDATE_RUN {
             continue;
@@ -470,6 +477,23 @@ mod tests {
             },
             deferred_vocab_singleton_original_ids: None,
         }
+    }
+
+    #[test]
+    fn compact_regular_admission_table_cannot_certify_parser_effects() {
+        let mut source=String::from("start: r0\n");
+        for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
+        source.push_str("r30: \"b\"\n");
+        let named=crate::import::parse_lark_to_named(&source).unwrap();
+        let flat=lower(&named).unwrap();
+        let grammar=AnalyzedGrammar::from_grammar_def(&flat);
+        assert!(grammar.direct_regular_automaton.is_some());
+        let table=GLRTable::build(&grammar);
+        assert!(table.action.is_empty(), "fixture must use the compact admission table");
+        let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
+        let caps=certify_caps(&BTreeMap::from([(0,8)]), &table,&grammar,
+            &Templates::default(),&vocab,&identity_id_map());
+        assert!(caps.is_empty(), "missing execution effects cannot prove stabilization");
     }
 
     #[test]
