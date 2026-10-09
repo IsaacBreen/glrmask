@@ -1115,10 +1115,6 @@ impl PyConstraintState {
         Self { inner, max_token: self.max_token }
     }
 
-    /// Whether an allowed final end token has completed this sequence.
-    fn is_terminated(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_terminated())
-    }
 
     #[pyo3(signature = (size=None))]
     fn mask<'py>(

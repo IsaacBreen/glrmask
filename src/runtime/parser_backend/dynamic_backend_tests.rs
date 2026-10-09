@@ -496,13 +496,13 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
                     assert_eq!(allowed(&state.mask(),26),accepting);
                 }
                 if accepting {
-                    state.commit_token(26).unwrap();assert!(state.is_terminated());
+                    state.commit_token(26).unwrap();assert!(state.terminated);
                     assert!(state.mask().iter().all(|&word| word==0));
                 } else {
                     // Established root EOS API returns Ok while rejecting an
                     // early end token; the mask and resulting state are exact.
                     state.commit_token(26).unwrap();
-                    assert!(state.is_rejected());assert!(!state.is_terminated());
+                    assert!(state.is_rejected());assert!(!state.terminated);
                 }
             }
         }

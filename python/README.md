@@ -58,7 +58,8 @@ state.commit_token(2)
 assert state.is_accepting()
 assert state.mask()[3]
 state.commit_token(3)
-assert state.is_terminated()
+assert state.is_accepting() and not state.is_rejected()
+assert not state.mask().any()
 ```
 
 `state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass `state.mask(size)` when the model's logits vector is wider than the constraint's natural token coordinate.
@@ -208,12 +209,11 @@ Create one state per generated sequence:
 ```python
 state = constraint.start()
 
-while generating:
+# Stop at the first complete match:
+while not state.is_accepting():
     mask = state.mask(model_vocab_size)
     token_id = sample_with_mask(logits, mask)
     state.commit_token(token_id)
-    if state.is_terminated():
-        break
 ```
 
 The main state operations are:
@@ -225,7 +225,8 @@ The main state operations are:
 - `forced()`: return a forced token sequence when one can be determined.
 - `is_accepting()`: grammar-body acceptance at the current prefix.
 - `is_rejected()`: irrecoverably invalid prefix.
-- `is_terminated()`: an allowed final end token has been committed.
+
+Callers can stop at the first complete match using `state.is_accepting()`. To permit continuation past acceptance, sample and commit tokens until the chosen `token_id` belongs to your configured `end_tokens`. Always commit the chosen token before checking for an end-token break; acceptance alone does not mean an end token was consumed. Committing an allowed end token empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 ### End tokens
 

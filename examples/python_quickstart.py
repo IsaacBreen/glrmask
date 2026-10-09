@@ -37,7 +37,7 @@ for _ in range(64):
     state.commit_token(token)
     generated.append(token)
 
-    if state.is_terminated():
+    if state.is_accepting():
         break
 
 print(llm.detokenize(generated).decode())

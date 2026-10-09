@@ -433,7 +433,10 @@ fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
             let allowed = |mask: &[u32], token: u32| mask[token as usize / 32] & (1 << (token % 32)) != 0;
             let mask = state.mask(); assert!(allowed(&mask, special)); assert!(!allowed(&mask, 602)); assert!(!allowed(&mask, 700));
             state.commit_token(special).unwrap(); state.commit_bytes(&[letter, b'y']).unwrap(); assert!(state.is_accepting());
-            assert!(allowed(&state.mask(), 700)); state.commit_token(700).unwrap(); assert!(state.is_terminated());
+            assert!(allowed(&state.mask(), 700)); state.commit_token(700).unwrap();
+            assert!(state.is_accepting() && !state.is_rejected());
+            assert!(state.mask().iter().all(|&w| w == 0));
+            assert!(state.commit_token(special).is_err());
         }
     }
 }

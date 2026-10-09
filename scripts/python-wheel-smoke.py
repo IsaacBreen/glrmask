@@ -111,6 +111,7 @@ assert llama_state.mask(6).tolist() == [True, False, False, False, False, False]
 llama_state.commit_token(0)
 assert llama_state.mask(6).tolist() == [False, False, False, True, False, True]
 llama_state.commit_token(3)
-assert llama_state.is_terminated()
+assert llama_state.is_accepting() and not llama_state.is_rejected()
+assert not llama_state.mask(6).any()
 
 print("public Python API smoke test passed")

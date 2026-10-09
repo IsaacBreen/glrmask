@@ -31,15 +31,15 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
                 let snapshot = a.clone();
                 a.commit_token(100).unwrap();
                 if r.is_accepting() {
-                    assert!(a.is_terminated()); assert!(!a.is_rejected());
-                } else { assert!(a.is_rejected()); assert!(!a.is_terminated()); }
+                    assert!(a.is_accepting()); assert!(!a.is_rejected());
+                } else { assert!(a.is_rejected()); assert!(!a.is_accepting()); }
                 assert!(a.mask().iter().all(|&w|w==0));
                 a = snapshot;
                 assert_eq!(a.mask(), r.mask(), "clone restores prior state");
                 let actual_reject = a.commit_token(20);
                 let expected_reject = r.commit_token(20);
                 assert_eq!(actual_reject.is_err(), expected_reject.is_err());
-                assert!(a.is_rejected()); assert!(!a.is_terminated());
+                assert!(a.is_rejected()); assert!(!a.is_accepting());
             }
         }
     }
@@ -151,7 +151,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
             assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced(),o.forced());
             let snapshot=a.clone();
             if n==30 { a.commit_token(1).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_terminated()); }
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !a.is_rejected()); assert!(a.mask().iter().all(|&w|w==0)); }
             assert_eq!(snapshot.mask(),o.mask());
         }
         for n in [29,31] {
@@ -188,11 +188,11 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                 assert!(allowed(&a.mask(),3));assert!(allowed(&a.mask(),7));
                 assert!(!allowed(&a.mask(),8));assert!(!allowed(&a.mask(),9));
                 a.commit_token(7).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_terminated());
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !a.is_rejected()); assert!(a.mask().iter().all(|&w|w==0));
                 for invalid in [8,9,11] {
                     let mut a=c.start();let mut expected=reference.start();
                     assert_eq!(a.commit_token(invalid).is_err(),expected.commit_token(invalid).is_err());
-                    assert!(a.is_rejected());assert!(!a.is_terminated());
+                    assert!(a.is_rejected());assert!(!a.is_accepting());
                 }
             }
         }

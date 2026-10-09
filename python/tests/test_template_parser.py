@@ -244,7 +244,8 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
             assert state.is_accepting()
             assert state.mask()[6]
             state.commit_token(6)
-            assert state.is_terminated()
+            assert state.is_accepting() and not state.is_rejected()
+            assert not state.mask().any()
 
 
 def test_python_backend_selection_does_not_accept_untyped_flags():
@@ -288,7 +289,8 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
         state.commit_token(3)
         assert state.is_accepting() and state.mask()[8]
         state.commit_token(8)
-        assert state.is_terminated()
+        assert state.is_accepting() and not state.is_rejected()
+        assert not state.mask().any()
 
         for count in [0, 1, 31, 4996, 4997, 4998]:
             state = compiled.start()
@@ -342,4 +344,5 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                         assert branch.is_accepting() == (prefix + word in language)
                 if prefix in language:
                     state.commit_token(8)
-                    assert state.is_terminated()
+                    assert state.is_accepting() and not state.is_rejected()
+                    assert not state.mask().any()

@@ -38,12 +38,13 @@ GLRMask has three ordinary public layers:
 
 Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `UnlinkedConstraint`; the original remains reusable.
 
-At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one marks the state terminated.
+At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 ```text
 state = constraint.start()
 
-while generating:
+# Stop at the first complete match:
+while not state.is_accepting():
     in parallel:
         logits = llm.forward(...)
         mask = state.mask()
@@ -51,8 +52,6 @@ while generating:
     logits = apply_mask(logits, mask)
     token_id = sample(logits)
     state.commit_token(token_id)
-    if state.is_terminated():
-        break
 ```
 
 ### Python quickstart
@@ -97,11 +96,13 @@ for _ in range(64):
     llm.eval([token_id])
     generated.append(token_id)
     state.commit_token(token_id)
-    if state.is_terminated():
+    if state.is_accepting():
         break
 
 print(llm.detokenize(generated).decode())
 ```
+
+Acceptance indicates the grammar body is complete. Because an accepting state may also admit continuation tokens (or configured end tokens), callers that want to permit continuation past the first complete match can instead sample until a configured end token is chosen and committed.
 
 `state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass a size when the model's logits vector is wider than the constraint's natural token coordinate.
 
@@ -280,7 +281,7 @@ state = constraint.start()
 # eos_id is allowed only when the grammar body is accepting.
 ```
 
-A state reports `is_accepting()` for grammar-body acceptance, `is_rejected()` for an irrecoverable invalid prefix, and `is_terminated()` after an allowed final end token has been committed.
+A state reports `is_accepting()` for grammar-body acceptance and `is_rejected()` for an irrecoverable invalid prefix. Callers choose between stopping at the first complete match with `is_accepting()` or permitting continuation until a configured end-token ID is sampled and committed. Always commit the chosen token before checking for an end-token break; acceptance alone does not mean an end token was consumed. Committing an allowed end token empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 ### Persistence
 
@@ -362,10 +363,6 @@ Latest corrected engineering result: the **9,558 official JSONSchemaBench schema
 
 The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final native runner uses a different, stricter methodology. See the [20 August engineering benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-full-2026-08-20.md) for the exact corpus, hardware, fix/rerun provenance, build numbers, and interpretation limits.
 
-## License
-
-Licensed under either the MIT License or the Apache License, Version 2.0, at your option.
-
 ### Optional boundary queries
 
 Use `BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)`
@@ -403,3 +400,7 @@ embedding contract; unsupported native links return errors.
 `BoundaryTriggerDetail::Exact` / `BoundaryTriggerDetail.EXACT` requires native
 template components. Requesting it on a retained-LR Dynamic constraint returns
 a clear error before trigger construction.
+
+## License
+
+Licensed under either the MIT License or the Apache License, Version 2.0, at your option.

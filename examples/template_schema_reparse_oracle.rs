@@ -199,7 +199,7 @@ fn main() -> Result<()> {
             if a_result.is_ok() != b_result.is_ok()
                 || fresh_a.is_rejected() != fresh_b.is_rejected()
                 || fresh_a.is_accepting() != fresh_b.is_accepting()
-                || fresh_a.is_terminated() != fresh_b.is_terminated()
+                || fresh_a.mask() != fresh_b.mask()
             {
                 return Err(format!("token branch differs: frontier={index} token={token_id} original={a_result:?} reparsed={b_result:?}").into());
             }

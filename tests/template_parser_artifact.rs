@@ -383,9 +383,11 @@ fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
         assert_eq!(a.mask(),b.mask());
         a.commit_token(token).unwrap();b.commit_token(token).unwrap();
         assert_eq!(a.is_accepting(),b.is_accepting());
-        assert_eq!(a.is_terminated(),b.is_terminated());
+        assert_eq!(a.is_rejected(),b.is_rejected());
     }
-    assert!(b.is_terminated());
+    assert!(b.is_accepting() && !b.is_rejected());
+    assert!(b.mask().iter().all(|&w| w == 0));
+    assert!(b.commit_token(0).is_err());
     let missing=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
     assert!(Constraint::load_with_vocab(saved,&missing).is_err());
 }

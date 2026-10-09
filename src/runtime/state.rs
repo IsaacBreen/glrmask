@@ -582,8 +582,6 @@ impl<'a> ConstraintState<'a> {
         }
     }
 
-    /// Whether an allowed end token has completed this sequence.
-    pub fn is_terminated(&self) -> bool { self.terminated }
 
     /// Return whether the committed prefix has been irrecoverably rejected.
     pub fn is_rejected(&self) -> bool {

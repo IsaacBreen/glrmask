@@ -289,14 +289,18 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert!(allowed(&state.mask(), 255));
         let mut other = state.clone();
         state.commit_token(130).unwrap();
-        assert!(state.is_terminated() && state.is_accepting() && !state.is_rejected());
+        assert!(state.is_accepting() && !state.is_rejected());
         assert_eq!(state.mask(), vec![0; 8]);
         assert!(state.forced().is_empty());
         assert!(state.commit_token(1).is_err());
         assert!(state.commit_bytes(b"a").is_err());
-        assert!(!other.is_terminated());
+        assert!(other.is_accepting() && !other.is_rejected());
+        assert!(allowed(&other.mask(), 130));
+        assert!(allowed(&other.mask(), 255));
         other.commit_token(255).unwrap();
-        assert!(other.is_terminated());
+        assert!(other.is_accepting() && !other.is_rejected());
+        assert_eq!(other.mask(), vec![0; 8]);
+        assert!(other.commit_token(1).is_err());
         constraint = glrmask::Constraint::load_with_vocab(constraint.save(), &v).unwrap();
     }
     assert_eq!(module.link().unwrap().mask_len(), 1);
@@ -316,13 +320,15 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     assert!(!allowed(&state.mask(), 7));
     state.commit_token(7).unwrap();
     assert!(state.is_rejected());
-    assert!(!state.is_accepting() && !state.is_terminated());
+    assert!(!state.is_accepting());
     assert!(state.mask().iter().all(|word| *word == 0));
     let mut valid = constraint.start();
     valid.commit_token(1).unwrap();
     assert!(allowed(&valid.mask(), 7));
     valid.commit_token(7).unwrap();
-    assert!(valid.is_terminated());
+    assert!(valid.is_accepting() && !valid.is_rejected());
+    assert!(valid.mask().iter().all(|word| *word == 0));
+    assert!(valid.commit_token(1).is_err());
     assert!(Grammar::from_ebnf(r#"start ::= "a""#)
         .compile_with(&v, BuildOptions::default().end_tokens([7, 7])).is_err());
 }
@@ -346,7 +352,8 @@ fn root_policy_mask_and_commit_profilers_preserve_termination() {
             1 => { state.commit_token_profiled(130).unwrap(); }
             _ => { state.commit_token_per_advance(130).unwrap(); }
         }
-        assert!(state.is_terminated());
+        assert!(state.is_accepting() && !state.is_rejected());
+        assert!(state.commit_token(1).is_err());
         state.fill_mask_profiled(&mut buffer);
         assert!(buffer.iter().all(|word| *word == 0));
     }

@@ -118,7 +118,10 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     let mut near_end = b"xp\"x:a\"q.p\"x:".to_vec(); near_end.extend(std::iter::repeat_n(b'a', 4998)); prefixes.push(near_end);
     verify_forms(&reference, &candidate, &vocab, &tokens, &prefixes);
     let mut state = candidate.start(); state.commit_token(310).unwrap();
-    assert!(state.is_accepting()); state.commit_token(1000).unwrap(); assert!(state.is_terminated());
+    assert!(state.is_accepting()); state.commit_token(1000).unwrap();
+    assert!(state.is_accepting() && !state.is_rejected());
+    assert!(state.mask().iter().all(|&w| w == 0));
+    assert!(state.commit_token(310).is_err());
 }
 
 #[test]

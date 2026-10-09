@@ -30,6 +30,11 @@
   Pre-link artifacts retain requests until final link; explicit link options
   override the retained root request. Default pre-link artifact bytes remain
   unchanged; non-default requests use the tagged GLRMOD04 manifest.
+- Remove the public `ConstraintState::is_terminated()` accessor from Rust and
+  Python. Callers choose between stopping at the first complete match with
+  `is_accepting()` or permitting continuation until a configured end-token ID
+  is sampled and committed. Committing an allowed end token empties the next-token
+  mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 
 ## Unreleased

@@ -28,7 +28,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             assert not mask[25]
             snapshot = state.clone()
             state.commit_token(100)
-            assert state.is_terminated() == expected.is_accepting()
+            assert state.is_accepting() == expected.is_accepting()
             assert state.is_rejected() != expected.is_accepting()
             assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), mask)
@@ -93,7 +93,8 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
                 assert state.is_accepting()
                 assert state.mask()[100]
                 state.commit_token(100)
-                assert state.is_terminated()
+                assert state.is_accepting() and not state.is_rejected()
+                assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), expected.mask())
 
 
@@ -123,4 +124,5 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
         state.commit_token(7)
         assert state.is_accepting()
         state.commit_token(100)
-        assert state.is_terminated()
+        assert state.is_accepting() and not state.is_rejected()
+        assert not state.mask().any()

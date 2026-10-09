@@ -1,4 +1,5 @@
 import glrmask
+import pytest
 
 
 def test_clone_preserves_prefix_and_keeps_mutations_independent():
@@ -15,9 +16,15 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
     assert not state.is_accepting()
     assert state.mask().tolist() == [False, True, True, False]
     branch.commit_token(3)
-    assert branch.is_terminated()
-    assert branch.clone().is_terminated()
-    assert not state.is_terminated()
+    for ended in [branch, branch.clone()]:
+        assert ended.is_accepting() and not ended.is_rejected()
+        assert not ended.mask().any()
+        with pytest.raises(ValueError, match="already terminated"):
+            ended.commit_token(0)
+        with pytest.raises(ValueError, match="already terminated"):
+            ended.commit_bytes(b"a")
+    assert not state.is_accepting() and not state.is_rejected()
+    assert state.mask().tolist() == [False, True, True, False]
     state.commit_token(2)
     assert state.is_accepting()
 

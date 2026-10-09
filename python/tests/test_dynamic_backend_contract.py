@@ -69,11 +69,12 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
                 assert bool(state.mask()[26]) == accepting
             if accepting:
                 state.commit_token(26)
-                assert state.is_terminated()
+                assert state.is_accepting() and not state.is_rejected()
                 assert not state.mask().any()
             else:
                 state.commit_token(26)
-                assert state.is_rejected() and not state.is_terminated()
+                assert state.is_rejected() and not state.is_accepting()
+                assert not state.mask().any()
 
 
 @pytest.mark.parametrize("flag", ["0", "1"])

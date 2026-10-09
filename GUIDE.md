@@ -34,12 +34,13 @@ GLRMask has three ordinary public layers:
 
 Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `UnlinkedConstraint`; the original remains reusable.
 
-At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one marks the state terminated.
+At runtime, call `constraint.start()` once per generated sequence. Compute the next-token mask, sample an allowed model token, then commit that token. If the constraint was built with end tokens, those IDs become maskable only when the grammar body is accepting; committing one empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 ```text
 state = constraint.start()
 
-while generating:
+# Stop at the first complete match:
+while not state.is_accepting():
     in parallel:
         logits = llm.forward(...)
         mask = state.mask()
@@ -47,8 +48,6 @@ while generating:
     logits = apply_mask(logits, mask)
     token_id = sample(logits)
     state.commit_token(token_id)
-    if state.is_terminated():
-        break
 ```
 
 ### Python quickstart
@@ -93,11 +92,13 @@ for _ in range(64):
     llm.eval([token_id])
     generated.append(token_id)
     state.commit_token(token_id)
-    if state.is_terminated():
+    if state.is_accepting():
         break
 
 print(llm.detokenize(generated).decode())
 ```
+
+Acceptance indicates the grammar body is complete. Because an accepting state may also admit continuation tokens (or configured end tokens), callers that want to permit continuation past the first complete match can instead sample until a configured end token is chosen and committed.
 
 `state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass a size when the model's logits vector is wider than the constraint's natural token coordinate.
 
@@ -227,18 +228,18 @@ All three modes preserve accepted-language semantics and produce the same public
 
 ### Native template parser backend
 
-Public final-constraint APIs select the native acyclic template representation
-internally. Callers choose `Optimization`; there is no public parser backend
-selector or accessor.
+Public final-constraint APIs select their parser representation internally.
+Callers choose `Optimization`; there is no public parser backend selector or
+accessor. Parser-provider construction remains internal repository tooling.
 
-The selected runtime and its artifact contain the template relations, not an
+The native runtime and its artifact contain the template relations, not an
 LR table. Mask generation and token commitment use the existing shared engines;
 parser advancement and admissibility use those relations. Built-in grammar
 compilation can use temporary LR analysis to derive the program, then discards
-the table before constructing a `Constraint`. Explicit LR-backed construction,
-loading or runtime access panics. Data-only parser providers remain available
-to repository tooling through Rust's `internal-api` feature and Python's
-`_internal` namespace.
+the table before constructing a `Constraint`. Native runtime table access and implicit LR fallback panic. Ordinary Dynamic
+(O1), selected by FastBuild, retains and executes its LR table.
+Data-only parser providers remain available through Rust's `internal-api`
+feature and Python's `_internal` namespace.
 
 Built-in compiled components with finite embedding transfers support nested
 and nullable [template composition](docs/template-parser-composition.md).
@@ -251,6 +252,21 @@ The [September 30 validation report](docs/template-parser-validation-2026-09-30.
 records historical measurements at its pinned revision. Those measurements do
 not qualify the current native replacement.
 
+### Ordinary Dynamic development backend
+
+Ordinary Dynamic (O1) defaults to the retained LR runtime. Its grammar, lexer,
+vocabulary, masking and commit code share the existing compiler/runtime pipeline;
+it skips native parser characterization, template construction and native runtime
+metadata. O2/Balanced continues to build templates, and Static is unchanged.
+
+For internal development only, `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects native
+parser templates for an ordinary Dynamic compilation (`true`, `yes` and `on`
+also enable it). An absent/disabled variable selects LR. This choice is resolved
+before compiler worker pools and does not affect O2, Static, existing objects or
+artifact loading. There is no new public backend configuration. Serialized
+artifacts preserve their built representation and external-vocabulary artifacts
+require the exact original mapping.
+
 ### End tokens are final-root policy
 
 End-token policy belongs to the final `compile`/`compile_with` or `link`/`link_with` operation. It is not inherited when a completed `Constraint` is embedded as a child.
@@ -261,7 +277,7 @@ state = constraint.start()
 # eos_id is allowed only when the grammar body is accepting.
 ```
 
-A state reports `is_accepting()` for grammar-body acceptance, `is_rejected()` for an irrecoverable invalid prefix, and `is_terminated()` after an allowed final end token has been committed.
+A state reports `is_accepting()` for grammar-body acceptance and `is_rejected()` for an irrecoverable invalid prefix. Callers choose between stopping at the first complete match with `is_accepting()` or permitting continuation until a configured end-token ID is sampled and committed. Always commit the chosen token before checking for an end-token break; acceptance alone does not mean an end token was consumed. Committing an allowed end token empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
 
 ### Persistence
 

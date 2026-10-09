@@ -102,7 +102,10 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     assert!(Constraint::load_with_vocab(external.clone(),&wrong).is_err());
     let restored=Constraint::load_with_vocab(external,&v).unwrap();check_all_prefixes(&restored);
     let mut s=c.start();assert!(s.commit_bytes(b")").is_err());assert!(s.is_rejected());
-    let mut s=c.start();s.commit_token(64).unwrap();assert!(s.is_terminated());
+    let mut s=c.start();s.commit_token(64).unwrap();
+    assert!(s.is_accepting() && !s.is_rejected());
+    assert!(s.mask().iter().all(|&w| w == 0));
+    assert!(s.commit_token(64).is_err());
 }
 
 #[test]
