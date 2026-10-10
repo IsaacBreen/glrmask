@@ -12,6 +12,7 @@ on:
       - "scripts/python-artifact-smoke.py"
       - "scripts/python-wheel-smoke.py"
       - "src/**"
+      - "crates/**"
   push:
     tags:
       - "v*"

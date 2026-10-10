@@ -13,9 +13,9 @@ license-files = ["licenses/LICENSE-MIT", "licenses/LICENSE-APACHE"]
 dependencies = ["numpy>=1.21"]
 
 [project.urls]
-Documentation = "https://github.com/IsaacBreen/glrmask/tree/main/python"
+Documentation = "https://github.com/IsaacBreen/glrmask/tree/v0.2.0/python"
 Repository = "https://github.com/IsaacBreen/glrmask"
-Changelog = "https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/IsaacBreen/glrmask/blob/v0.2.0/CHANGELOG.md"
 
 [tool.maturin]
 features = []
