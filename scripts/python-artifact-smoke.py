@@ -51,7 +51,7 @@ def main() -> None:
         requirements = [str(artifact)]
         if args.numpy_version:
             requirements.append(f"numpy=={args.numpy_version}")
-        run(str(python), "-I", "-m", "pip", "install", *requirements, cwd=Path(tmp))
+        run(str(python), "-I", "-m", "pip", "install", "--only-binary=numpy", *requirements, cwd=Path(tmp))
         version = artifact.name.removeprefix("glrmask-").split("-")[0].removesuffix(".tar.gz")
         run(str(python), "-I", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
 

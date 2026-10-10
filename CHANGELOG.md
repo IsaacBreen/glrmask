@@ -5,7 +5,8 @@
 - Upgrade the Python bindings to PyO3 0.29.3 and rust-numpy 0.29.0, including
   fixes for RUSTSEC-2026-0176, RUSTSEC-2026-0177, and misaligned NumPy slice
   access. Misaligned mask buffers now raise `ValueError` instead of being
-  reinterpreted as aligned Rust slices.
+  reinterpreted as aligned Rust slices. Read-only or conflicting mask-buffer
+  borrows now raise `ValueError` instead of a Rust `PanicException`.
 - Preserve the existing GIL requirement, checked casts, extraction behavior,
   public signatures, optimization modes, matcher semantics, and artifact format.
   PyO3 may change argument-error diagnostics while retaining exception types.

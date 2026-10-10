@@ -57,6 +57,13 @@ for optimization in (glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
     else:
         raise AssertionError("misaligned packed mask must be rejected")
     assert sample.mask().tolist() == [True, False, False]
+    packed.flags.writeable = False
+    try:
+        sample.fill_mask(packed)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("read-only packed mask must raise ValueError")
 
 
 # Exercise the optional llama-cpp-python adapter without installing or loading a

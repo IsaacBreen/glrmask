@@ -115,6 +115,7 @@ jobs:
             3.9|3.10) numpy_version=1.21.6 ;;
             3.11) numpy_version=1.23.5 ;;
             3.12) numpy_version=1.26.4 ;;
+            *) echo "unsupported NumPy 1.x interpreter"; exit 1 ;;
           esac
           python scripts/python-artifact-smoke.py dist --kind wheel --numpy-version "$numpy_version"
 

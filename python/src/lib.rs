@@ -59,6 +59,34 @@ use self_cell::self_cell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Instant;
+
+// rust-numpy's FromPyObject for PyReadwriteArray calls readwrite(), which
+// panics for read-only arrays or conflicting borrows. Keep the same checked
+// array/dtype extraction, but surface borrowing failures as Python ValueError.
+struct MaskBuffer<'py>(PyReadwriteArray1<'py, i32>);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for MaskBuffer<'py> {
+    type Error = PyErr;
+
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let array = obj.cast::<PyArray1<i32>>()?;
+        array.try_readwrite().map(Self).map_err(|error| {
+            PyValueError::new_err(format!(
+                "mask buffer must be writable and exclusively borrowed: {error}"
+            ))
+        })
+    }
+}
+
+impl<'py> std::ops::Deref for MaskBuffer<'py> {
+    type Target = PyReadwriteArray1<'py, i32>;
+
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl std::ops::DerefMut for MaskBuffer<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+}
 use glrmask::__private::{
     ConstraintExt as _, ConstraintStateExt as _, DynamicConstraintExt as _, VocabExt as _,
 };
@@ -283,7 +311,7 @@ fn resolved_mask_size(max_token: u32, requested: Option<usize>) -> PyResult<usiz
 }
 
 fn bitmask_u32_view<'a, 'py>(
-    bitmask: &'a mut PyReadwriteArray1<'py, i32>,
+    bitmask: &'a mut MaskBuffer<'py>,
 ) -> PyResult<&'a mut [u32]> {
     let slice = bitmask
         .as_slice_mut()
@@ -738,7 +766,7 @@ impl PyVocabPartition {
     fn fill_expanded_mask(
         &self,
         internal_mask: Vec<u64>,
-        mut bitmask: PyReadwriteArray1<i32>,
+        mut bitmask: MaskBuffer<'_>,
     ) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         self.inner.fill_expanded_mask(&internal_mask, buf);
@@ -1045,7 +1073,7 @@ impl PyDynamicConstraintState {
         Ok(dict)
     }
 
-    fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
+    fn fill_mask(&self, mut bitmask: MaskBuffer<'_>) -> PyResult<()> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         self.inner
             .with_dependent(|_owner, state| state.fill_mask(buf));
@@ -1053,7 +1081,7 @@ impl PyDynamicConstraintState {
     }
 
     #[doc(hidden)]
-    fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
+    fn fill_mask_timed_ns(&self, mut bitmask: MaskBuffer<'_>) -> PyResult<u64> {
         let buf = bitmask_u32_view(&mut bitmask)?;
         Ok(self.inner.with_dependent(|_owner, state| {
             let start = Instant::now();
@@ -1129,7 +1157,7 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
+    fn fill_mask(&self, mut bitmask: MaskBuffer<'_>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
@@ -1172,7 +1200,7 @@ impl PyConstraintState {
     #[pyo3(name = "fill_mask_timed_allocation_stats")]
     fn py_fill_mask_timed_allocation_stats(
         &self,
-        bitmask: PyReadwriteArray1<i32>,
+        bitmask: MaskBuffer<'_>,
     ) -> PyResult<Vec<u64>> {
         self.fill_mask_timed_allocation_stats(bitmask)
     }
@@ -1208,7 +1236,7 @@ fn allocation_stats_tuple(
 }
 
 impl PyConstraintState {
-    fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
+    fn fill_mask_timed_ns(&self, mut bitmask: MaskBuffer<'_>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
@@ -1221,7 +1249,7 @@ impl PyConstraintState {
     #[cfg(feature = "allocation-tracking")]
     fn fill_mask_timed_allocation_stats(
         &self,
-        mut bitmask: PyReadwriteArray1<i32>,
+        mut bitmask: MaskBuffer<'_>,
     ) -> PyResult<Vec<u64>> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
@@ -1239,7 +1267,7 @@ impl PyConstraintState {
     fn fill_mask_profiled<'py>(
         &self,
         py: Python<'py>,
-        mut bitmask: PyReadwriteArray1<i32>,
+        mut bitmask: MaskBuffer<'_>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
@@ -1822,7 +1850,7 @@ fn terminal_display_name(
 #[pyfunction]
 fn fill_mask_timed_ns(
     state: PyRef<'_, PyConstraintState>,
-    bitmask: PyReadwriteArray1<i32>,
+    bitmask: MaskBuffer<'_>,
 ) -> PyResult<u64> {
     state.fill_mask_timed_ns(bitmask)
 }
@@ -1831,7 +1859,7 @@ fn fill_mask_timed_ns(
 #[pyfunction]
 fn fill_mask_timed_allocation_stats(
     state: PyRef<'_, PyConstraintState>,
-    bitmask: PyReadwriteArray1<i32>,
+    bitmask: MaskBuffer<'_>,
 ) -> PyResult<Vec<u64>> {
     state.fill_mask_timed_allocation_stats(bitmask)
 }
@@ -1840,7 +1868,7 @@ fn fill_mask_timed_allocation_stats(
 fn fill_mask_profiled<'py>(
     py: Python<'py>,
     state: PyRef<'py, PyConstraintState>,
-    bitmask: PyReadwriteArray1<i32>,
+    bitmask: MaskBuffer<'_>,
 ) -> PyResult<Bound<'py, PyDict>> {
     state.fill_mask_profiled(py, bitmask)
 }

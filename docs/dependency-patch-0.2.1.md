@@ -19,6 +19,9 @@ The public bindings do not directly use the reported PyO3 iterator operations or
 closure constructor. Version presence alone does not establish exploitability.
 The NumPy change is directly relevant to packed-mask mutable slices. Misaligned
 buffers now produce ValueError; aligned int32 buffers retain in-place behavior.
+Read-only or conflicting array borrows also return ValueError through checked
+borrowing, fixing an existing Rust PanicException in 0.2.0. This is a deliberate
+error-path improvement, with no valid-input signature or matcher change.
 
 Python detachment scopes and checked casts are preserved. Explicit gil_used=true
 retains the pre-upgrade GIL requirement, and from_py_object retains Clone class

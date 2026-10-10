@@ -31,7 +31,7 @@ def test_mask_buffer_alignment_and_validation(optimization):
         state.fill_mask(np.zeros(2, dtype=np.int64))
     readonly = np.zeros(2, dtype=np.int32)
     readonly.flags.writeable = False
-    with pytest.raises((ValueError, TypeError)):
+    with pytest.raises(ValueError, match="writable"):
         state.fill_mask(readonly)
     state.fill_mask(words)  # Failed borrows must not leave the array API poisoned.
     assert words.tolist() == [1, 0]
