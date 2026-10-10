@@ -1,0 +1,47 @@
+{
+  "schema": "glrmask-tail-chart-v1",
+  "width": 480,
+  "height": 330,
+  "grid": {
+    "left": 64,
+    "right": 18,
+    "top": 24,
+    "bottom": 64
+  },
+  "exceedance": {
+    "min": 0.001,
+    "max": 100,
+    "inverse": true,
+    "log_base": 10
+  },
+  "latency_us": {
+    "min": 0.5,
+    "max": 20000,
+    "log_base": 10
+  },
+  "line_width": 2.4,
+  "smoothing": false,
+  "palette": {
+    "light": {
+      "text": "#505b6b",
+      "rule": "#d5d8dd",
+      "static": "#cc243b",
+      "dynamic": "#9b5d8f",
+      "llguidance": "#2f6f89"
+    },
+    "dark": {
+      "text": "#c4cdc4",
+      "rule": "#3d4a44",
+      "static": "#d6a06f",
+      "dynamic": "#9b5d8f",
+      "llguidance": "#7f9090"
+    }
+  },
+  "font_family": "Inter, ui-sans-serif, system-ui, sans-serif",
+  "font_size": 13,
+  "source": "Website CanonicalTailPlot.astro log-axis geometry and no-grid presentation; static paths join measured samples without smoothing.",
+  "display_modes": [
+    "static",
+    "llguidance"
+  ]
+}

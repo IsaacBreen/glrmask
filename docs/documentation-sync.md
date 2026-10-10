@@ -1,55 +1,99 @@
 # Documentation synchronization
 
-`GUIDE.md` is the canonical source for repository usage documentation.
-`scripts/sync-guide.py` adds the README title and License section. The Guide
-sync GitHub workflow checks that the generated README is current.
+The website Overview is the baseline for the public introduction, section order
+and Getting started prose. `docs/content/` now holds that shared content.
+`scripts/sync-guide.py` generates:
 
-Benchmark blocks and light/dark SVGs are generated from a reviewed public
-aggregate snapshot by `scripts/sync-benchmarks.py`. To update measurements,
-add a dated snapshot only after checking its source revision, measurement date,
-hardware, APIs, policies, cohort, outcomes and raw-file digests against retained
-CFA results. Keep other datasets and experimental results separate. Update the
-generator's snapshot/asset paths and companion benchmark report together. Its
-`PROVENANCE_SHA256` pins the reviewed source, date, hardware, cohorts, APIs,
-outcomes, policies and evidence digests: changing them fails explicitly until
-the prose and report have been reviewed and that digest updated. Then run:
+- `README.md`: GitHub Overview, separate static JSON/JavaScript benchmarks,
+  Getting started, a short How it works link, and License.
+- `README.rust.md`: the same introduction and benchmarks, Rust installation and
+  quickstart, How it works, and License. Cargo selects this file.
+- `python/README.md` and `python/PYTHON.md`: the Python variant. `PYTHON.md` is the
+  package metadata input; the other copy is the GitHub directory landing page.
+- `GUIDE.md`: shared introduction and quickstarts plus the full technical
+  reference retained in `docs/content/reference.md`.
+- `docs/website-content.json`: a versioned shared-content payload for the website
+  owner. It includes the approved introduction, links, dynamic attribution,
+  installation commands, usage, quickstarts, cleaned usage details, chart spec
+  and dataset paths. Its canonical content digest detects stale imports.
+
+Edit the shared sources, not generated files. The package variants contain
+only their own language's installation and quickstart. Their images and
+benchmark-detail links are absolute; the GitHub README uses relative theme-aware
+SVG references. Each context omits its own top-level Website/GitHub link.
+
+## Benchmarks and plots
+
+Reviewed public snapshots live in `docs/benchmarks/`. `scripts/sync-benchmarks.py`
+generates the benchmark Markdown, light/dark SVGs and registry PNGs. The shared
+chart spec `docs/content/tail-chart.json` preserves the website's inverse
+log-exceedance axis, log latency axis, series palette, clean axes and lack of a
+grid. The static figures show Static versus llguidance, with measured samples
+joined by straight segments. No smoothing or extrapolation is added. JSON and
+JavaScript remain separate, including their source identities and timing limits.
+Dynamic is introduced below, linking to the interactive website.
+
+Use `rsvg-convert` from librsvg to regenerate opaque, 2× registry PNGs. Each PNG
+records its source SVG digest; checks validate that digest and all PNG chunk
+checksums without needing a renderer in CI.
 
 ```bash
-python scripts/sync-benchmarks.py
+python scripts/sync-benchmarks.py --render-png
 python scripts/sync-guide.py
 python scripts/sync-benchmarks.py --check
 python scripts/sync-guide.py --check
 ```
 
-CI checks the generated prose, tables, SVGs and README against that snapshot.
-It does not fetch a changing live website or qualify new benchmark results.
+Measurement updates require independent retained-CFA verification first. The
+JSON and JavaScript provenance pins cover dates, source revisions, cohort,
+APIs/timing policies, outcomes and evidence identities. Review the corresponding
+public report and caption before changing a pin. Do not silently combine other
+sources, experimental results, or package-version measurements. CI checks
+snapshot-to-prose/table/asset and shared-source-to-document consistency.
 
-## Website relationship
+## Website integration contract
 
-In `IsaacBreen/personal-website-2026`, `scripts/sync-glrmask-guide.mjs` imports
-`GUIDE.md` from an explicit source revision (or `GLRMASK_GUIDE_SOURCE` locally).
-It generates `src/content/glrmask-prototypes/handbook/guide.md`. Website prebuild
-runs that sync; predev uses the local source.
+In `IsaacBreen/personal-website-2026`, import `docs/website-content.json` from an
+explicit published GLRMask source revision (or a provided local source path).
+Reject unknown `schema` values and verify `content_sha256` over the payload
+without that key, using sorted-key compact JSON, UTF-8, and SHA-256. Import the
+same revision's benchmark snapshots and `tail-chart.json`. Avoid fetching a
+moving branch independently for each file.
 
-The website intentionally transforms installation into tabs, resolves relative
-documentation links, reformats examples for its layout, and omits the Guide's
-introduction, abbreviated implementation and Performance section. Its
-`PrototypeArticle.astro` combines `handbook/nutshell.md`,
-`CanonicalBenchmarks.astro`, and the generated Getting started article on the
-Overview page. `CanonicalBenchmarks.astro` reads separate reviewed JSON Schema
-and JavaScript data files. Overview introduction and interactive figures have
-their own website presentation; the full Overview is not a verbatim README.
+Render Overview in `overview_order`: introduction, context-specific links,
+benchmarks, Getting started. Website presentation can retain interactive
+JSON/JavaScript and Static/Dynamic controls. Use `introduction`, `dynamic`,
+`usage`, `quickstarts`, and `usage_details` directly; remove old regex prose
+corrections from `scripts/sync-glrmask-guide.mjs`. Keep installation tabs and
+syntax highlighting as presentation. Map the shared log domains, grid/palette
+and observed-support floor into `CanonicalTailPlot.astro`; website interaction
+may expose Dynamic while the static README figures show only Static/llguidance.
 
-Website edits do not write back into this repository. A website change to shared
-API facts belongs in `GUIDE.md` too; a newly qualified benchmark belongs in both
-aggregate sources. To detect benchmark drift against a website checkout:
+The website owner must perform this integration in their checkout. This
+repository generates the contract but does not change an independently
+deployed website. Its build should fail if generated content or the recorded
+source revision/digest is stale. To compare the current website aggregates:
 
 ```bash
 python scripts/sync-benchmarks.py --check --website-root /path/to/website
 ```
 
-This compares exact revisions, schema/position counts, membership hashes,
-outcomes, statistics and tail data. It reads aggregate JSON only. Coordinate
-website updates separately and verify its pinned Guide revision and transforms
-against current source before deployment; changing this repository cannot
-update an already deployed website.
+## Package archive checks
+
+Python's distinct `PYTHON.md` filename prevents a root GitHub README collision
+when maturin relocates `pyproject.toml` into the source archive. The root path
+dependency must also include its selected `README.rust.md`.
+
+```bash
+cargo package --no-verify --allow-dirty --locked --offline -p glrmask
+maturin sdist --manifest-path python/Cargo.toml --out /tmp/glrmask-docs-dist
+python scripts/check-readme-archives.py --crate /path/to/glrmask.crate --sdist /path/to/glrmask.tar.gz
+# For any future, explicitly authorized package build:
+python scripts/check-readme-archives.py --wheel /path/to/glrmask.whl
+```
+
+Those source-archive checks do not compile or publish a package. Existing
+registry versions retain their uploaded descriptions. Before a future package
+release, publish the referenced documentation assets, then verify descriptions
+in the newly built artifacts and their actual registry rendering. This docs
+workflow does not authorize a new version or replace an existing release.

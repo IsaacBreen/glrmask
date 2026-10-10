@@ -1,168 +1,208 @@
 #!/usr/bin/env python3
-"""Render the README benchmark blocks and SVGs from reviewed public aggregates.
+"""Generate shared benchmark Markdown, SVGs and portable registry PNGs.
 
---website-root checks that the site's canonical JSON data still matches this
-snapshot. This reads aggregate data only; it never runs a benchmark.
+Reads reviewed aggregates only. Never runs a benchmark. --render-png requires
+rsvg-convert; --check verifies source hashes and PNG integrity without it.
 """
 import argparse
-from datetime import date
-import html
 import hashlib
+import html
 import json
 import math
 from pathlib import Path
-import re
+import shutil
+import struct
+import subprocess
 import sys
+import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT / 'docs/benchmarks/json-schema-2026-10-08.json'
+CONTENT = ROOT/'docs/content'
 MODES = [('static', 'GLRMask Static'), ('dynamic', 'GLRMask Dynamic'), ('llguidance', 'llguidance 1.8.0')]
-# This dated report has reviewed prose about a specific source and methodology.
-# Changing provenance requires reviewing that prose and its companion report.
 PROVENANCE_SHA256 = '11f5b4704ecf9279d3d6b83c6a183e8ec7666a4eef8e7c58bf12256789e2cfbc'
+JS_PROVENANCE_SHA256 = '3653f392561164fd306df5715ce9eafffef1dedeaa7034e1ef2e504560a92dbd'
 
 
-def validate_provenance(data):
-    provenance = {key: value for key, value in data.items() if key not in ['tail', 'modes']}
-    provenance['modes'] = {mode: {key: value for key, value in row.items() if key != 'statistics_ns'}
-                           for mode, row in data['modes'].items()}
-    digest = hashlib.sha256(json.dumps(provenance, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-    if digest != PROVENANCE_SHA256:
-        raise ValueError('Benchmark provenance changed. Review the dated report and generator prose before updating PROVENANCE_SHA256; see docs/documentation-sync.md.')
+def digest(data):
+    return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def table(data):
-    lines = ['| Metric | Static | Dynamic | llguidance 1.8.0 |', '|---|---:|---:|---:|']
-    rows = [('TBM p50 (µs)', 'tbm', 'median', 1000),
-            ('TBM p99 (µs)', 'tbm', 'p99', 1000),
-            ('TBM p99.9 (µs)', 'tbm', 'p99_9', 1000),
-            ('TBM maximum (µs)', 'tbm', 'max', 1000),
-            ('Build p50 (ms)', 'build', 'median', 1000000),
-            ('TTFM p50 (ms)', 'ttfm', 'median', 1000000),
-            ('TTFM p99 (ms)', 'ttfm', 'p99', 1000000)]
-    for label, metric, key, scale in rows:
-        values = [data['modes'][mode]['statistics_ns'][metric][key] / scale for mode, _ in MODES]
-        lines.append('| ' + label + ' | ' + ' | '.join(f'{v:,.1f}' for v in values) + ' |')
-    return '\n'.join(lines)
+def load():
+    data = json.loads((ROOT/'docs/benchmarks/json-schema-2026-10-08.json').read_text())
+    prov = {k:v for k,v in data.items() if k not in ['tail','modes']}
+    prov['modes'] = {mode:{k:v for k,v in row.items() if k!='statistics_ns'} for mode,row in data['modes'].items()}
+    assert digest(prov)==PROVENANCE_SHA256, 'JSON provenance changed; review report and prose before updating pin'
+    js = json.loads((ROOT/'docs/benchmarks/javascript-2026-10-09.json').read_text())
+    prov = {k:v for k,v in js.items() if k not in ['tail','tables','ttfm_single']}
+    prov['ttfm_single'] = {k:v for k,v in js['ttfm_single'].items() if k!='values_ms'}
+    assert digest(prov)==JS_PROVENANCE_SHA256, 'JavaScript provenance changed; review report and prose before updating pin'
+    for tail in [data['tail'],js['tail']]:
+        xs=tail['exceedance_pct']
+        assert all(0<x<=100 for x in xs) and all(a<b for a,b in zip(xs,xs[1:]))
+        for mode,_ in MODES:
+            values=tail[mode+'_us']
+            assert len(values)==len(xs) and all(math.isfinite(v) and v>0 for v in values)
+            assert all(a>=b for a,b in zip(values,values[1:]))
+    return data, js
 
 
-def overview(data):
-    static = data['modes']['static']['statistics_ns']['tbm']
-    llg = data['modes']['llguidance']['statistics_ns']['tbm']
-    measured = date.fromisoformat(data['measurement_date'])
-    measurement_date = f'{measured.day} {measured:%B %Y}'
-    positions = data['modes']['static']['aligned_tbm_positions']
-    return f'''Time between masks (TBM) measures token commitment through the next ready mask. On the measured JSON Schema cohort, GLRMask Static has a {static['median']/1000:.1f} µs median and {static['p99']/1000:.1f} µs p99, compared with {llg['median']/1000:.1f} µs and {llg['p99']/1000:.1f} µs for llguidance. See [Performance](#performance) for compilation costs and methodology.
-
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-2026-10-08-dark.svg">
-    <img src="docs/assets/benchmark-tbm-2026-10-08.svg" alt="JSON Schema TBM percentile curves for GLRMask Static, Dynamic and llguidance 1.8.0; logarithmic latency axis" width="500">
-  </picture>
-</p>
-
-*JSONSchemaBench, {measurement_date}: {positions:,} aligned token positions; calling-thread CPU time, minimum of two native processes. Lower is better. See [measurement details](docs/benchmark-cfa-2026-10-08.md).*'''
+def table(rows):
+    return '\n'.join(['| Metric | GLRMask Static | llguidance 1.8.0 |','|---|---:|---:|'] +
+                     ['| '+label+' | '+' | '.join(f'{v:,.1f}' for v in values)+' |' for label,values in rows])
 
 
-def results(data):
-    static = data['modes']['static']['statistics_ns']['build']['median']/1000000
-    dynamic = data['modes']['dynamic']['statistics_ns']['build']['median']/1000000
-    return f'''Static favors mask latency; Dynamic favors compilation time. In this run, Static’s median build cost is {static:.1f} ms and Dynamic’s is {dynamic:.1f} ms. The benchmark’s Static and Dynamic implementations correspond to the current `FastRuntime` and `FastBuild` choices, respectively.
+def markdown(data, js):
+    rows=[]
+    for label,metric,key,scale in [('TBM p50 (µs)','tbm','median',1e3),('TBM p99 (µs)','tbm','p99',1e3),
+                                  ('TBM p99.9 (µs)','tbm','p99_9',1e3),('TBM maximum (µs)','tbm','max',1e3),
+                                  ('Build p50 (ms)','build','median',1e6),('TTFM p50 (ms)','ttfm','median',1e6),
+                                  ('TTFM p99 (ms)','ttfm','p99',1e6)]:
+        rows.append((label,[data['modes'][m]['statistics_ns'][metric][key]/scale for m in ['static','llguidance']]))
+    js_rows=[('TBM '+('maximum' if row['label']=='max' else row['label'])+' (µs)',[row['values'][0],row['values'][2]]) for row in js['tables']['tbm'] if row['label'] in ['p50','p99','max']]
+    js_rows.append(('TTFM selected (ms)',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]]))
+    return '''### JSON Schema
 
-''' + table(data) + '''
+Time between masks (TBM) measures token commitment through the next ready mask. Lower is better.
 
-Measured on 8 October 2026 using native Rust APIs at GLRMask source `f9f5c84` and CFA `5d3feb4`, with official llguidance 1.8.0, on macOS 27 ARM64 (10 logical CPUs, Rust 1.95.0) and the Llama 3.1 8B Instruct vocabulary. These are source measurements, not a benchmark of the published 0.2.0 packages.
+{{json-plot}}
 
-The full run contains 9,558 official JSONSchemaBench schemas. The matched build/TTFM cohorts contain 8,326 schemas for Static and 8,327 for Dynamic and llguidance; TBM uses 2,925,983 aligned error-free token positions, including valid and invalid examples up to their shared replay prefix. These conditional timing distributions do not establish full-corpus correctness or language equivalence. The full-run outcomes include 460 incorrect examples for each GLRMask mode, and 100 incorrect examples and six runtime-error examples for llguidance.
+'''+table(rows)+'''
 
-TBM measures commitment of a previously allowed token through the next ready mask, using calling-thread CPU time and the elementwise minimum of two independent native processes. Build and time to first mask (TTFM) use wall time from the first process; TTFM includes schema-dependent compilation. Vocabulary preparation is outside the timer. Production validation is enabled, with one schema at a time and a 60-second build timeout. See the [benchmark report](docs/benchmark-cfa-2026-10-08.md) and [website benchmarks](https://glrmask.com/#benchmarks) for provenance, outcomes and further results.'''
+*8 October 2026 · GLRMask source `f9f5c84`, CFA `5d3feb4` · macOS 27 ARM64, 10 logical CPUs, Rust 1.95.0 · Llama 3.1 8B Instruct vocabulary. TBM: 2,925,983 aligned token positions, calling-thread CPU time, minimum of two native processes. Build/TTFM: 8,326 matched schemas for Static and 8,327 for llguidance. These conditional timings do not establish full-corpus correctness. [Benchmark details](docs/benchmark-cfa-2026-10-08.md).*
 
+### JavaScript
 
-def svg(data, dark=False):
-    # A modest portrait-leaning canvas keeps labels readable in a phone README.
-    w, h = 500, 390
-    left, right, top, bottom = 69, 475, 82, 324
-    bg, ink, muted, rule = ('#0d1117', '#e6edf3', '#aeb8c4', '#30363d') if dark else ('#ffffff', '#20262e', '#57616e', '#e1e5ea')
-    colors = ['#58a6cf', '#c5966b', '#c1c8d1'] if dark else ['#26789b', '#a66837', '#67717e']
-    tail = data['tail']
-    # Ordered percentile axis expands the upper tail using log exceedance.
-    xmin, xmax = -math.log10(50), -math.log10(tail['exceedance_pct'][0])
-    x = lambda exceedance: left + (-math.log10(exceedance) - xmin) / (xmax - xmin) * (right - left)
-    y = lambda us: bottom - math.log10(us) / 4 * (bottom - top)
-    out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-labelledby="title desc">',
-           '<title id="title">Time between masks — JSON Schema</title>',
-           '<desc id="desc">8 October 2026. Empirical TBM tail at 2,925,983 aligned positions. Log latency in microseconds and log exceedance percentile spacing. Minimum of two native timing processes.</desc>',
-           f'<rect width="{w}" height="{h}" fill="{bg}"/>',
-           f'<g font-family="Arial, Helvetica, sans-serif" font-size="16" fill="{ink}">',
-           f'<text x="{left}" y="27" font-size="18">Time between masks · JSON Schema</text>']
-    for i, (_, label) in enumerate(MODES):
-        lx = [left, 200, 340][i]
-        dash = ['',' stroke-dasharray="7 4"',' stroke-dasharray="2 4"'][i]
-        out.append(f'<path d="M{lx} 52h24" stroke="{colors[i]}" stroke-width="2.6"{dash}/><text x="{lx + 31}" y="57" font-size="15">{html.escape(label.replace("GLRMask ", ""))}</text>')
-    out.append(f'<text x="{left}" y="76" fill="{muted}" font-size="14">TBM (µs) · log scale</text>')
-    for value in [1, 10, 100, 1000, 10000]:
-        yy = y(value)
-        out.append(f'<path d="M{left} {yy:.2f}H{right}" stroke="{rule}"/><text x="{left - 10}" y="{yy + 5:.2f}" text-anchor="end" fill="{muted}">{value:,}</text>')
-    out.append(f'<path d="M{left} {top}V{bottom}H{right}" fill="none" stroke="{muted}"/>')
-    for exceedance, label in [(50,'50'),(10,'90'),(1,'99'),(.1,'99.9'),(.01,'99.99')]:
-        xx = x(exceedance)
-        out.append(f'<path d="M{xx:.2f} {bottom}v5" stroke="{muted}"/><text x="{xx:.2f}" y="{bottom+24}" text-anchor="middle" fill="{muted}">{label}</text>')
-    out.append(f'<text x="{right}" y="{bottom+24}" text-anchor="end" fill="{muted}" font-size="14">max</text>')
-    out.append(f'<text x="{(left+right)/2}" y="{bottom+52}" text-anchor="middle" fill="{muted}" font-size="15">Percentile · upper tail expanded</text>')
-    for i, (mode, _) in enumerate(MODES):
-        points = [(x(ex), y(us)) for ex, us in zip(tail['exceedance_pct'], tail[mode+'_us']) if ex <= 50]
-        path = ' '.join(('M' if j == 0 else 'L') + f'{xx:.2f},{yy:.2f}' for j, (xx, yy) in enumerate(points))
-        dash = ['', ' stroke-dasharray="7 4"', ' stroke-dasharray="2 4"'][i]
-        out.append(f'<path d="{path}" fill="none" stroke="{colors[i]}" stroke-width="2.6" stroke-linejoin="round"{dash}/>')
-    return '\n'.join(out + ['</g>', '</svg>', ''])
+{{javascript-plot}}
+
+'''+table(js_rows)+'''
+
+*9 October 2026 · GLRMask source `5f2609ac`, CFA `159759c4` · macOS ARM64 · 31 examples, 4,099 token positions. TBM: same-pass mask plus commit CPU time; minimum of 20 Static traversals and one llguidance traversal, after one warmup. TTFM is a selected shared grammar build plus the initial trace’s first mask, not an independent distribution. Grammar policies differ; language equivalence is not established. [Benchmark details](docs/benchmark-javascript-2026-10-09.md).*
+
+Both datasets measure source builds, not the published 0.2 packages. The JSON plot shows exceedance probabilities down to 0.001%; JavaScript ends at its measured support (one token in 4,099). Maxima are retained in the tables.
+
+### Dynamic mode
+
+{{dynamic}}
+
+Compare modes in the [interactive benchmarks](https://glrmask.com/#benchmarks).
+'''
 
 
-def check_website(data, root):
-    website = json.loads((root / 'src/data/glrmask-canonical-20261008.json').read_text())
-    tail = json.loads((root / 'src/data/glrmask-canonical-tail-20261008.json').read_text())
-    assert data['source_commits'] == website['metadata']['current']['revisions'], 'Benchmark source revisions differ'
-    assert data['tail'] == tail, 'Benchmark tail differs'
-    for mode, _ in MODES:
-        actual = data['modes'][mode]
-        expected = website['modes'][mode]
-        for key in ['schemas', 'aligned_tbm_positions', 'membership_sha256', 'prefix_identity_sha256']:
-            assert actual[key] == expected[key], f'{mode}: {key} differs'
-        assert actual['outcomes'] == expected['outcomes']['current'], f'{mode}: outcomes differ'
-        for metric in ['tbm', 'ttfm', 'build']:
-            assert actual['statistics_ns'][metric] == expected['statistics']['current'][metric]['nearest_rank'], f'{mode}: {metric} differs'
+def svg(tail, spec, dark=False, label='JSON Schema'):
+    w,h=spec['width'],spec['height']; g=spec['grid']
+    left,right,top,bottom=g['left'],w-g['right'],g['top'],h-g['bottom']
+    xmin=max(spec['exceedance']['min'],tail['exceedance_pct'][0]); xmax=spec['exceedance']['max']
+    ymin,ymax=spec['latency_us']['min'],spec['latency_us']['max']
+    palette=spec['palette']['dark' if dark else 'light']; text,rule=palette['text'],palette['rule']
+    x=lambda v:left+(math.log10(xmax)-math.log10(v))/(math.log10(xmax)-math.log10(xmin))*(right-left)
+    y=lambda v:bottom-(math.log10(v)-math.log10(ymin))/(math.log10(ymax)-math.log10(ymin))*(bottom-top)
+    out=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-labelledby="title description">',
+         f'<title id="title">{label}: time between masks</title>',
+         '<desc id="description">Measured GLRMask Static and llguidance 1.8.0 curves. Inverse logarithmic exceedance probability and logarithmic latency axes. Lower is better. Straight segments join observed tail samples; no smoothing or extrapolation.</desc>',
+         f'<defs><clipPath id="plot"><rect x="{left}" y="{top}" width="{right-left}" height="{bottom-top}"/></clipPath></defs>',
+         f'<g font-family="{html.escape(spec["font_family"])}" font-size="14" fill="{text}">',
+         f'<path d="M{left},{top} V{bottom} H{right}" fill="none" stroke="{rule}"/>']
+    for value,label_y in [(1,'1 µs'),(10,'10 µs'),(100,'100 µs'),(1000,'1 ms'),(10000,'10 ms')]:
+        yy=y(value)
+        out += [f'<path d="M{left-4},{yy:.2f} H{left}" stroke="{rule}"/>',f'<text x="{left-9}" y="{yy+4:.2f}" text-anchor="end">{label_y}</text>']
+    ticks=[50,10,1,.1,.01,.001]
+    if xmin>spec['exceedance']['min']:
+        ticks=[v for v in ticks if v>=xmin and x(xmin)-x(v)>72]
+        ticks.append(xmin)
+    for value in ticks:
+        if value<xmin:continue
+        xx=x(value)
+        anchor='end' if abs(xx-right)<1 else 'middle'
+        out += [f'<path d="M{xx:.2f},{bottom} v4" stroke="{rule}"/>',f'<text x="{xx:.2f}" y="{bottom+23}" text-anchor="{anchor}">{value:.2g}%</text>']
+    out.append(f'<text x="{(left+right)/2}" y="{h-14}" text-anchor="middle">Exceedance probability · log scale</text>')
+    curves=[]
+    for mode,name in MODES:
+        if mode not in spec['display_modes']:continue
+        points=[(x(ex),y(us)) for ex,us in zip(tail['exceedance_pct'],tail[mode+'_us'])]
+        path=' '.join(('M' if i==0 else 'L')+f'{xx:.3f},{yy:.3f}' for i,(xx,yy) in enumerate(points))
+        dash=' stroke-dasharray="5 4"' if mode=='dynamic' else ''
+        out.append(f'<path d="{path}" fill="none" stroke="{palette[mode]}" stroke-width="{spec["line_width"]}" stroke-linejoin="round"{dash} clip-path="url(#plot)"/>')
+        # Boundary is a log-space segment of the retained points, never extrapolated.
+        visible=[p for p in points if p[0]<=right]
+        end_y=visible[0][1]
+        if points[0][0]>right:
+            a=points[len(points)-len(visible)-1]; b=visible[0]
+            end_y=a[1]+(b[1]-a[1])*(right-a[0])/(b[0]-a[0])
+        curves.append((end_y,mode,name,points))
+    previous=-100
+    for end_y,mode,name,points in sorted(curves):
+        baseline=end_y-10
+        if baseline-15<previous+6:
+            region=[yy for xx,yy in points if right-155<=xx<=right]
+            baseline=max(previous+24,max(region)+21)
+        baseline=min(bottom-8,max(top+16,baseline)); previous=baseline
+        if abs(baseline-(end_y-10))>2:
+            out.append(f'<path d="M{right},{end_y:.2f} V{baseline-6:.2f}" stroke="{palette[mode]}" stroke-width="0.8" opacity="0.65"/>')
+        out.append(f'<text x="{right-6}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end">{name}</text>')
+    return '\n'.join(out+['</g>','</svg>',''])
+
+
+def png_chunks(data):
+    assert data[:8]==b'\x89PNG\r\n\x1a\n', 'Invalid PNG signature'
+    pos=8
+    while pos<len(data):
+        size=struct.unpack('>I',data[pos:pos+4])[0]; kind=data[pos+4:pos+8]; body=data[pos+8:pos+8+size]
+        crc=struct.unpack('>I',data[pos+8+size:pos+12+size])[0]
+        assert zlib.crc32(kind+body)&0xffffffff==crc, 'PNG CRC failure'
+        yield kind,body
+        pos+=12+size
+    assert pos==len(data), 'Truncated PNG'
+
+
+def render_png(source, path, spec):
+    assert shutil.which('rsvg-convert'), 'Install librsvg / rsvg-convert to regenerate PNGs'
+    png=subprocess.run(['rsvg-convert','--width',str(2*spec['width']),'--height',str(2*spec['height']),'--background-color','#ffffff'],input=source.encode(),stdout=subprocess.PIPE,check=True).stdout
+    body=b'SourceSVG_SHA256\0'+hashlib.sha256(source.encode()).hexdigest().encode()
+    chunk=struct.pack('>I',len(body))+b'tEXt'+body+struct.pack('>I',zlib.crc32(b'tEXt'+body)&0xffffffff)
+    # IEND is the final 12-byte chunk. Keep raster source identity in the PNG.
+    path.write_bytes(png[:-12]+chunk+png[-12:])
+
+
+def check_website(data, js, root):
+    website=json.loads((root/'src/data/glrmask-canonical-20261008.json').read_text()); tail=json.loads((root/'src/data/glrmask-canonical-tail-20261008.json').read_text())
+    assert data['source_commits']==website['metadata']['current']['revisions']
+    assert data['tail']==tail
+    for mode,_ in MODES:
+        actual,expected=data['modes'][mode],website['modes'][mode]
+        for key in ['schemas','aligned_tbm_positions','membership_sha256','prefix_identity_sha256']:assert actual[key]==expected[key]
+        assert actual['outcomes']==expected['outcomes']['current']
+        for metric in ['tbm','ttfm','build']:assert actual['statistics_ns'][metric]==expected['statistics']['current'][metric]['nearest_rank']
+    website_js=json.loads((root/'src/data/glrmask-javascript-measured-5f2609-20261009.json').read_text())
+    for key in ['source_revision','cfa_revision','llguidance_version','examples','tokens','tail','tables','ttfm_single']:assert js[key]==website_js[key], 'JS '+key+' differs'
 
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--check', action='store_true')
-    parser.add_argument('--website-root', type=Path)
-    args = parser.parse_args()
-    data = json.loads(DATA.read_text())
-    validate_provenance(data)
-    if args.website_root:
-        check_website(data, args.website_root)
-    guide = ROOT / 'GUIDE.md'
-    expected = guide.read_text()
-    for block, body in [('overview', overview(data)), ('results', results(data))]:
-        pattern = rf'<!-- benchmark-{block}:start -->[\s\S]*?<!-- benchmark-{block}:end -->'
-        replacement = f'<!-- benchmark-{block}:start -->\n{body}\n<!-- benchmark-{block}:end -->'
-        expected, count = re.subn(pattern, lambda _: replacement, expected)
-        assert count == 1, f'Missing or duplicate benchmark {block} block'
-    files = {guide: expected}
-    for dark in [False, True]:
-        path = ROOT / ('docs/assets/benchmark-tbm-2026-10-08' + ('-dark' if dark else '') + '.svg')
-        files[path] = svg(data, dark)
-    stale = [str(path.relative_to(ROOT)) for path, body in files.items() if not path.exists() or path.read_text() != body]
-    if args.check:
-        if stale:
-            print('Stale benchmark outputs: ' + ', '.join(stale) + '; run python scripts/sync-benchmarks.py', file=sys.stderr)
-            return 1
-    else:
-        for path, body in files.items():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body)
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check',action='store_true');parser.add_argument('--render-png',action='store_true');parser.add_argument('--website-root',type=Path)
+    args=parser.parse_args();data,js=load()
+    if args.website_root:check_website(data,js,args.website_root)
+    spec=json.loads((CONTENT/'tail-chart.json').read_text())
+    files={CONTENT/'benchmarks.md':markdown(data,js)}
+    for dataset,measured,tail,label in [('json','2026-10-08',data['tail'],'JSON Schema'),('javascript','2026-10-09',js['tail'],'JavaScript')]:
+        stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
+        for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label)}
+    stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text()!=body]
+    if not args.check:
+        for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body)
+    for path,body in files.items():
+        if path.suffix!='.svg' or path.stem.endswith('-dark'):continue
+        png=path.with_suffix('.png')
+        if args.render_png and not args.check:render_png(body,png,spec)
+        expected=b'SourceSVG_SHA256\0'+hashlib.sha256(body.encode()).hexdigest().encode()
+        chunks=list(png_chunks(png.read_bytes())) if png.exists() else []
+        valid=bool(chunks) and chunks[0][0]==b'IHDR' and len(chunks[0][1])==13 and struct.unpack('>II',chunks[0][1][:8])==(2*spec['width'],2*spec['height'])
+        valid=valid and any(kind==b'IDAT' for kind,_ in chunks) and chunks[-1]==(b'IEND',b'')
+        if not valid or not any(kind==b'tEXt' and value==expected for kind,value in chunks):stale.append(str(png.relative_to(ROOT)))
+    if stale and args.check:
+        print('Stale benchmark outputs: '+', '.join(stale),file=sys.stderr);return 1
+    if stale and not args.render_png and not args.check:
+        print('Run with --render-png to refresh portable registry PNGs.',file=sys.stderr);return 1
     return 0
 
 
-if __name__ == '__main__':
-    raise SystemExit(main())
+if __name__=='__main__':raise SystemExit(main())
