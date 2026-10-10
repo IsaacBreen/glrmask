@@ -46,9 +46,10 @@ def main() -> None:
         environment = Path(tmp) / "venv"
         venv.EnvBuilder(with_pip=True).create(environment)
         python = venv_python(environment)
-        run(str(python), "-m", "pip", "install", "--upgrade", "pip")
-        run(str(python), "-m", "pip", "install", str(artifact))
-        run(str(python), str(repo_root / "scripts" / "python-wheel-smoke.py"))
+        run(str(python), "-I", "-m", "pip", "install", "--upgrade", "pip", cwd=Path(tmp))
+        run(str(python), "-I", "-m", "pip", "install", str(artifact), cwd=Path(tmp))
+        version = artifact.name.removeprefix("glrmask-").split("-")[0].removesuffix(".tar.gz")
+        run(str(python), "-I", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
 
     print(f"clean-install smoke test passed: {artifact.name}")
 
