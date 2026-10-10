@@ -46,39 +46,51 @@ def load():
     return data, js
 
 
-def table(rows):
-    return '\n'.join(['| Metric | GLRMask Static | llguidance 1.8.0 |','|---|---:|---:|'] +
-                     ['| '+label+' | '+' | '.join(f'{v:,.1f}' for v in values)+' |' for label,values in rows])
+def table(rows, column='Metric'):
+    return '\n'.join([f'| {column} | GLRMask Static | llguidance 1.8.0 |','|---|---:|---:|'] +
+                     ['| '+label.replace(' ', '&nbsp;')+' | '+' | '.join(f'{v:,.1f}' for v in values)+' |' for label,values in rows])
 
 
 def markdown(data, js):
     rows=[]
-    for label,metric,key,scale in [('TBM p50 (µs)','tbm','median',1e3),('TBM p99 (µs)','tbm','p99',1e3),
-                                  ('TBM p99.9 (µs)','tbm','p99_9',1e3),('TBM maximum (µs)','tbm','max',1e3),
-                                  ('Build p50 (ms)','build','median',1e6),('TTFM p50 (ms)','ttfm','median',1e6),
-                                  ('TTFM p99 (ms)','ttfm','p99',1e6)]:
+    for label,metric,key,scale in [('p50','tbm','median',1e3),('p99','tbm','p99',1e3),
+                                  ('p99.9','tbm','p99_9',1e3),('Max','tbm','max',1e3),
+                                  ('Build p50','build','median',1e6),('TTFM p50','ttfm','median',1e6),
+                                  ('TTFM p99','ttfm','p99',1e6)]:
         rows.append((label,[data['modes'][m]['statistics_ns'][metric][key]/scale for m in ['static','llguidance']]))
-    js_rows=[('TBM '+('maximum' if row['label']=='max' else row['label'])+' (µs)',[row['values'][0],row['values'][2]]) for row in js['tables']['tbm'] if row['label'] in ['p50','p99','max']]
-    js_rows.append(('TTFM selected (ms)',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]]))
+    js_rows=[('Max' if row['label']=='max' else row['label'],[row['values'][0],row['values'][2]]) for row in js['tables']['tbm'] if row['label'] in ['p50','p99','max']]
+    js_ttfm=[('Selected',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]])]
     return '''### JSON Schema
 
 Time between masks (TBM) measures token commitment through the next ready mask. Lower is better.
 
 {{json-plot}}
 
-'''+table(rows)+'''
+**TBM (µs)**
 
-*8 October 2026 · GLRMask source `f9f5c84`, CFA `5d3feb4` · macOS 27 ARM64, 10 logical CPUs, Rust 1.95.0 · Llama 3.1 8B Instruct vocabulary. TBM: 2,925,983 aligned token positions, calling-thread CPU time, minimum of two native processes. Build/TTFM: 8,326 matched schemas for Static and 8,327 for llguidance. These conditional timings do not establish full-corpus correctness. [Benchmark details](docs/benchmark-cfa-2026-10-08.md).*
+'''+table(rows[:4], 'Percentile')+'''
+
+**Build / time to first mask (TTFM), ms**
+
+'''+table(rows[4:])+'''
+
+8 October 2026 · 2,925,983 aligned token positions · macOS 27 ARM64, 10 logical CPUs. [Benchmark details](docs/benchmark-cfa-2026-10-08.md).
 
 ### JavaScript
 
 {{javascript-plot}}
 
-'''+table(js_rows)+'''
+**TBM (µs)**
 
-*9 October 2026 · GLRMask source `5f2609ac`, CFA `159759c4` · macOS ARM64 · 31 examples, 4,099 token positions. TBM: same-pass mask plus commit CPU time; minimum of 20 Static traversals and one llguidance traversal, after one warmup. TTFM is a selected shared grammar build plus the initial trace’s first mask, not an independent distribution. Grammar policies differ; language equivalence is not established. [Benchmark details](docs/benchmark-javascript-2026-10-09.md).*
+'''+table(js_rows, 'Percentile')+'''
 
-Both datasets measure source builds, not the published 0.2 packages. The JSON plot shows exceedance probabilities down to 0.001%; JavaScript ends at its measured support (one token in 4,099). Maxima are retained in the tables.
+**Time to first mask (TTFM), ms**
+
+'''+table(js_ttfm, 'Measurement')+'''
+
+9 October 2026 · 31 examples, 4,099 token positions · macOS ARM64. [Benchmark details](docs/benchmark-javascript-2026-10-09.md).
+
+Both datasets measure source builds, not the published 0.2 packages.
 
 ### Dynamic mode
 
@@ -189,6 +201,7 @@ def main():
     stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text()!=body]
     if not args.check:
         for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body)
+        stale=[]
     for path,body in files.items():
         if path.suffix!='.svg' or path.stem.endswith('-dark'):continue
         png=path.with_suffix('.png')
