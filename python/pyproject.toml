@@ -15,7 +15,7 @@ dependencies = ["numpy>=1.21"]
 [project.urls]
 Documentation = "https://glrmask.com/reference/python/"
 Repository = "https://github.com/IsaacBreen/glrmask"
-Changelog = "https://github.com/IsaacBreen/glrmask/blob/main/CHANGELOG.md"
+Changelog = "https://github.com/IsaacBreen/glrmask/blob/v0.2.0/CHANGELOG.md"
 
 [tool.maturin]
 features = []

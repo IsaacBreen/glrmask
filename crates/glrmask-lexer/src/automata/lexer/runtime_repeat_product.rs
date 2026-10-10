@@ -46,6 +46,9 @@ impl VirtualStateAllocator {
         })
     }
 
+    // Keep the same atomic operation on older Rust; newer Rust renames it
+    // to try_update. This allowance is limited to the compatibility call.
+    #[allow(deprecated)]
     pub(super) fn allocate(&self) -> Option<u32> {
         self.next
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {

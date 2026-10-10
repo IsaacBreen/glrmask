@@ -4,8 +4,19 @@
 import ctypes
 import sys
 import types
+import importlib.metadata
+from pathlib import Path
 
 import glrmask
+
+# A release smoke must execute the fresh installed distribution.
+assert Path(glrmask.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+metadata = importlib.metadata.metadata("glrmask")
+assert metadata["Name"] == "glrmask"
+assert metadata.get_payload().startswith("# GLRMask for Python")
+if len(sys.argv) > 1:
+    assert metadata["Version"] == sys.argv[1]
+
 
 vocab = glrmask.Vocab.from_dict(
     {
