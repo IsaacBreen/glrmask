@@ -253,6 +253,9 @@ impl CompletedStackEffectWork {
         })
     }
 
+    // Keep fetch_update for older Rust while accepting its newer try_update
+    // rename without changing the atomic update or its ordering.
+    #[allow(deprecated)]
     fn record_completed(&self, visits: usize) {
         use std::sync::atomic::Ordering::Relaxed;
         // One uncontended/local-budget total per job, not an atomic per visit.
