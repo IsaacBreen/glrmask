@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1 — Unreleased
+
+- Upgrade the Python bindings to PyO3 0.29.3 and rust-numpy 0.29.0, including
+  fixes for RUSTSEC-2026-0176, RUSTSEC-2026-0177, and misaligned NumPy slice
+  access. Misaligned mask buffers now raise `ValueError` instead of being
+  reinterpreted as aligned Rust slices.
+- Preserve the existing GIL requirement, checked casts, extraction behavior,
+  public signatures, optimization modes, matcher semantics, and artifact format.
+  PyO3 may change argument-error diagnostics while retaining exception types.
+  The CPython 3.9–3.13 and `numpy>=1.21` support declarations are unchanged.
+  PyO3 and rust-numpy require Rust 1.83 or later; the root Rust crate continues
+  to require an edition-2024-capable compiler (Rust 1.85 or later).
+- Raise the root rand minimum to 0.8.6 and lock its advisory fix
+  (RUSTSEC-2026-0097). Update locked anyhow to 1.0.103 (RUSTSEC-2026-0190) and
+  crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204). Helper crate versions remain 0.1.1.
+- Add wheel-install checks with NumPy 1.x where supported, and regressions for
+  packed mask alignment, writable buffers, error types, and repeated imports.
+
 ## 0.2.0 — 2026-10-10
 
 ### Public API

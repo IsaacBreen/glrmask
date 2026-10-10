@@ -18,7 +18,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 
 /// Preferred compilation/runtime trade-off; accepted-language semantics are unchanged.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "Optimization", module = "glrmask", eq, eq_int)]
+#[pyclass(name = "Optimization", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyOptimization {
     AUTO,
@@ -29,7 +29,7 @@ pub(super) enum PyOptimization {
 
 /// Optional boundary-query metadata, built before compile or link returns.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int)]
+#[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyBoundaryTriggerDetail { NONE, TOKENS, EXACT }
 
@@ -47,7 +47,7 @@ fn with_boundary(options: glrmask::BuildOptions, detail: Option<PyRef<'_, PyBoun
 
 /// Parser execution and storage backend, independent of mask optimization.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int)]
+#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyParserBackend {
     LR_TABLE,
@@ -101,7 +101,7 @@ fn options(
 }
 
 /// One exact model token, retaining its complete vocabulary identity.
-#[pyclass(name = "ExactToken", module = "glrmask", frozen)]
+#[pyclass(name = "ExactToken", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyExactToken {
     pub(super) inner: glrmask::ExactToken,
@@ -114,7 +114,7 @@ impl PyExactToken {
 }
 
 /// A nonempty set of exact model tokens, retaining its vocabulary identity.
-#[pyclass(name = "ExactTokens", module = "glrmask", frozen)]
+#[pyclass(name = "ExactTokens", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyExactTokens {
     pub(super) inner: glrmask::ExactTokens,
@@ -180,7 +180,7 @@ impl Binding {
 ///
 /// bind returns another description. compile produces a complete runnable
 /// Constraint; compile_unlinked intentionally preserves unresolved slots.
-#[pyclass(name = "Grammar", module = "glrmask", frozen)]
+#[pyclass(name = "Grammar", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
     source: String,
@@ -253,7 +253,7 @@ impl PyGrammar {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
         let grammar = self.as_rust().map_err(api_error)?;
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.compile_with(&vocab, options))
+        py.detach(move || grammar.compile_with(&vocab, options))
             .map(constraint).map_err(api_error)
     }
 
@@ -264,13 +264,13 @@ impl PyGrammar {
         let options = with_boundary(glrmask::BuildOptions::default(), boundary_trigger);
         let grammar = self.as_rust().map_err(api_error)?;
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.compile_unlinked_with(&vocab, options))
+        py.detach(move || grammar.compile_unlinked_with(&vocab, options))
             .map(|inner| PyUnlinkedConstraint { inner }).map_err(api_error)
     }
 }
 
 /// Immutable vocabulary-specific compiled constraint in pre-link form.
-#[pyclass(name = "UnlinkedConstraint", module = "glrmask", frozen)]
+#[pyclass(name = "UnlinkedConstraint", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyUnlinkedConstraint {
     inner: glrmask::UnlinkedConstraint,
@@ -282,7 +282,7 @@ impl PyUnlinkedConstraint {
     fn bind(&self, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let binding = Binding::extract_for_unlinked(value)?;
         let module = self.inner.clone();
-        let result = py.allow_threads(move || match binding {
+        let result = py.detach(move || match binding {
             Binding::Constraint(child) => module.bind(&name, child),
             Binding::Token(token) => module.bind(&name, token),
             Binding::Tokens(tokens) => module.bind(&name, tokens),
@@ -299,12 +299,12 @@ impl PyUnlinkedConstraint {
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>,
     ) -> PyResult<PyConstraint> {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
-        py.allow_threads(|| self.inner.link_with(options)).map(constraint).map_err(api_error)
+        py.detach(|| self.inner.link_with(options)).map(constraint).map_err(api_error)
     }
 
     /// Serialize compiled machinery and its open-slot manifest as bytes.
     fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let bytes = py.allow_threads(|| self.inner.save());
+        let bytes = py.detach(|| self.inner.save());
         PyBytes::new(py, &bytes)
     }
 
@@ -314,7 +314,7 @@ impl PyUnlinkedConstraint {
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.map(|v| v.inner.clone());
-        py.allow_threads(move || match vocab {
+        py.detach(move || match vocab {
             Some(vocab) => glrmask::UnlinkedConstraint::load_with_vocab(data, &vocab),
             None => glrmask::UnlinkedConstraint::load(data),
         }).map(|inner| Self { inner }).map_err(api_error)
@@ -346,7 +346,7 @@ fn compile_with_backend(
 ) -> PyResult<PyConstraint> {
     let options = options(end_tokens, optimization, parser_backend);
     let grammar = grammar.as_rust().map_err(api_error)?;
-    py.allow_threads(|| grammar.compile_with(&vocab.inner, options)).map(constraint).map_err(api_error)
+    py.detach(|| grammar.compile_with(&vocab.inner, options)).map(constraint).map_err(api_error)
 }
 
 #[pyfunction]
@@ -357,7 +357,7 @@ fn link_with_backend(
     parser_backend: Option<PyRef<'_, PyParserBackend>>,
 ) -> PyResult<PyConstraint> {
     let options = options(end_tokens, optimization, parser_backend);
-    py.allow_threads(|| module.inner.link_with(options)).map(constraint).map_err(api_error)
+    py.detach(|| module.inner.link_with(options)).map(constraint).map_err(api_error)
 }
 
 pub(super) fn register_internal(module: &Bound<'_, PyModule>) -> PyResult<()> {

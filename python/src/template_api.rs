@@ -11,7 +11,7 @@ use pyo3::types::{PyAny, PyBytes, PyModule, PyString};
 
 /// Immutable, validated acyclic parser program described by JSON-compatible
 /// POP/READ/PUSH phase graphs. It can be compiled with multiple vocabularies.
-#[pyclass(name = "ParserProgram", module = "glrmask._internal", frozen)]
+#[pyclass(name = "ParserProgram", module = "glrmask._internal", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyParserProgram {
     inner: ParserProgram,
@@ -25,10 +25,10 @@ impl PyParserProgram {
     /// invalid links and resource-limit violations raise ValueError.
     #[new]
     fn new(py: Python<'_>, definition: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let source = if let Ok(text) = definition.downcast::<PyString>() {
+        let source = if let Ok(text) = definition.cast::<PyString>() {
             text.clone()
         } else {
-            py.import("json")?.getattr("dumps")?.call1((definition,))?.downcast_into::<PyString>()?
+            py.import("json")?.getattr("dumps")?.call1((definition,))?.cast_into::<PyString>()?
         };
         let text = source.to_str()?;
         // Check before allocating the owned Rust input and decoding it.
@@ -39,7 +39,7 @@ impl PyParserProgram {
             return Err(PyValueError::new_err("parser definition exceeds the 64 MiB JSON input limit"));
         }
         let source = text.to_owned();
-        py.allow_threads(move || {
+        py.detach(move || {
             let definition: ParserDefinition = serde_json::from_str(&source).map_err(api_error)?;
             let terminal_count = definition.terminals.len();
             let inner = ParserProgram::new(definition).map_err(api_error)?;
@@ -71,9 +71,9 @@ impl PyParserProgram {
             if terminals.len() == self.terminal_count {
                 return Err(PyValueError::new_err("too many terminal patterns for the parser definition"));
             }
-            if let Ok(bytes) = value.downcast::<PyBytes>() {
+            if let Ok(bytes) = value.cast::<PyBytes>() {
                 terminals.push(TerminalPattern::literal(bytes.as_bytes().to_vec()));
-            } else if let Ok(regex) = value.downcast::<PyString>() {
+            } else if let Ok(regex) = value.cast::<PyString>() {
                 terminals.push(TerminalPattern::regex(regex.to_str()?.to_owned()));
             } else {
                 return Err(PyTypeError::new_err("a terminal pattern must be bytes (literal) or str (regex)"));
@@ -86,7 +86,7 @@ impl PyParserProgram {
             options = options.optimization(super::final_api::optimization(*value));
         }
         let vocab = vocab.inner.clone();
-        py.allow_threads(|| self.inner.compile_with(&lexer, &vocab, options))
+        py.detach(|| self.inner.compile_with(&lexer, &vocab, options))
             .map(constraint).map_err(api_error)
     }
 }

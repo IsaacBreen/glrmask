@@ -107,6 +107,17 @@ jobs:
       - name: Clean-install and smoke-test wheel
         run: python scripts/python-artifact-smoke.py dist --kind wheel
 
+      - name: Clean-install wheel with NumPy 1.x
+        if: ${{ matrix.python-version != '3.13' }}
+        shell: bash
+        run: |
+          case "${{ matrix.python-version }}" in
+            3.9|3.10) numpy_version=1.21.6 ;;
+            3.11) numpy_version=1.23.5 ;;
+            3.12) numpy_version=1.26.4 ;;
+          esac
+          python scripts/python-artifact-smoke.py dist --kind wheel --numpy-version "$numpy_version"
+
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
         with:

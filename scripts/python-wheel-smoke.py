@@ -8,6 +8,7 @@ import importlib.metadata
 from pathlib import Path
 
 import glrmask
+import numpy as np
 
 # A release smoke must execute the fresh installed distribution.
 assert Path(glrmask.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
@@ -37,6 +38,25 @@ state.commit_token(1)
 assert state.mask().tolist() == [False, False, True]
 state.commit_token(2)
 assert state.is_accepting()
+
+# Validate the NumPy C API on the actual installed runtime, including the
+# misalignment rejection added by rust-numpy 0.28. Keep the state exact after it.
+for optimization in (glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
+                     glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME):
+    sample = glrmask.Grammar.from_ebnf('start ::= "hello"').compile(
+        vocab, optimization=optimization,
+    ).start()
+    packed = np.zeros(1, dtype=np.int32)
+    sample.fill_mask(packed)
+    assert packed.tolist() == [1]
+    misaligned = np.ndarray((1,), dtype=np.int32, buffer=bytearray(5), offset=1)
+    try:
+        sample.fill_mask(misaligned)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("misaligned packed mask must be rejected")
+    assert sample.mask().tolist() == [True, False, False]
 
 
 # Exercise the optional llama-cpp-python adapter without installing or loading a

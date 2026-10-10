@@ -106,7 +106,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(token_to_id.len());
     for (key, value) in token_to_id.iter() {
         let token_bytes = key
-            .downcast::<PyBytes>()
+            .cast::<PyBytes>()
             .map_err(|_| PyValueError::new_err("vocab keys must be Python bytes"))?
             .as_bytes()
             .to_vec();
@@ -121,7 +121,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
     for (key, value) in id_to_bytes.iter() {
         let token_id: u32 = key.extract()?;
         let token_bytes = value
-            .downcast::<PyBytes>()
+            .cast::<PyBytes>()
             .map_err(|_| PyValueError::new_err("vocab values must be Python bytes"))?
             .as_bytes()
             .to_vec();
@@ -221,7 +221,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             continue;
         }
 
-        let raw = buffer.getattr("raw")?.downcast_into::<PyBytes>()?;
+        let raw = buffer.getattr("raw")?.cast_into::<PyBytes>()?;
         let length = length as usize;
         let raw = raw.as_bytes();
         if length > raw.len() {
@@ -287,7 +287,7 @@ fn bitmask_u32_view<'a, 'py>(
 ) -> PyResult<&'a mut [u32]> {
     let slice = bitmask
         .as_slice_mut()
-        .map_err(|e| PyValueError::new_err(format!("Array must be contiguous: {e:?}")))?;
+        .map_err(|e| PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}")))?;
     // Safety: i32 and u32 have identical size, alignment, and bit representation.
     Ok(unsafe {
         std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -576,7 +576,7 @@ fn advance_trace_step_to_dict<'py>(
 // PyVocab
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "Vocab")]
+#[pyclass(name = "Vocab", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
@@ -652,7 +652,7 @@ fn parse_vocab_partition_strategy(value: Option<&str>) -> PyResult<glrmask::Voca
         ))),
     }
 }
-#[pyclass(name = "VocabPartition")]
+#[pyclass(name = "VocabPartition", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocabPartition {
     inner: glrmask::VocabPartition,
@@ -751,7 +751,7 @@ impl PyVocabPartition {
 // ---------------------------------------------------------------------------
 
 /// Compiled grammar constraint. Immutable, thread-safe.
-#[pyclass(name = "Constraint")]
+#[pyclass(name = "Constraint", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
     inner: Arc<glrmask::Constraint>,
@@ -798,7 +798,7 @@ impl PyConstraint {
     /// loading requires the exact same vocabulary mapping, not just its size.
     #[pyo3(signature = (*, external_vocab=false))]
     fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.allow_threads(|| {
+        let bytes = py.detach(|| {
             if external_vocab { self.inner.save_without_vocab() }
             else { Ok(self.inner.save()) }
         }).map_err(final_api::api_error)?;
@@ -810,7 +810,7 @@ impl PyConstraint {
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.map(|vocab| vocab.inner.clone());
-        let loaded = py.allow_threads(move || match vocab {
+        let loaded = py.detach(move || match vocab {
             Some(vocab) => glrmask::Constraint::load_with_vocab(data, &vocab),
             None => glrmask::Constraint::load(data),
         });
@@ -836,7 +836,7 @@ impl PyConstraint {
 // PyDynamicConstraint
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "DynamicConstraint")]
+#[pyclass(name = "DynamicConstraint", from_py_object)]
 #[derive(Clone)]
 pub struct PyDynamicConstraint {
     inner: Arc<glrmask::DynamicConstraint>,
@@ -1131,7 +1131,7 @@ impl PyConstraintState {
 
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+            PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
         // Safety: i32 and u32 have identical size, alignment, and bit representation.
         // fill_mask writes valid u32 bitmask values where the high bit is meaningful.
@@ -1210,7 +1210,7 @@ fn allocation_stats_tuple(
 impl PyConstraintState {
     fn fill_mask_timed_ns(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<u64> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+            PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -1224,7 +1224,7 @@ impl PyConstraintState {
         mut bitmask: PyReadwriteArray1<i32>,
     ) -> PyResult<Vec<u64>> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+            PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -1242,7 +1242,7 @@ impl PyConstraintState {
         mut bitmask: PyReadwriteArray1<i32>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
-            PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
+            PyValueError::new_err(format!("Array must be contiguous and aligned: {e:?}"))
         })?;
         let buf: &mut [u32] = unsafe {
             std::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u32, slice.len())
@@ -1944,7 +1944,8 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-#[pymodule]
+// Preserve the GIL requirement of the pre-0.28 PyO3 module default.
+#[pymodule(gil_used = true)]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     configure_mimalloc_runtime_default();
     // rust-numpy lazily publishes and caches its mutable-borrow checking API on
