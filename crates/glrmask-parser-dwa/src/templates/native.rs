@@ -14,6 +14,7 @@
 //! is the sole authority for sharing.
 
 mod program;
+#[cfg(feature = "internal-api")]
 pub use program::ProgramCompiler;
 
 use std::collections::{BTreeSet, VecDeque};
