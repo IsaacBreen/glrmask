@@ -1,10 +1,21 @@
-GLRMask is a grammar-constrained generation library for high-throughput LLM decoding. It is optimized for fast next-token mask computation with extremely low tail latency, even for complex grammars.
+GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-> **Interim benchmark:** the figures below are the corrected official-9,558-schema view of the 20 August 2026 engineering run. They supersede the July figures, but are not the final native publication benchmark.
+GLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON Schema and Lark.
+
+[Website](https://glrmask.com/) · [Python docs](https://glrmask.com/reference/python/) · [Rust docs](https://docs.rs/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)
+
+<!-- benchmark-overview:start -->
+Time between masks (TBM) measures token commitment through the next ready mask. On the measured JSON Schema cohort, GLRMask Static has a 2.5 µs median and 9.5 µs p99, compared with 8.7 µs and 379.6 µs for llguidance. See [Performance](#performance) for compilation costs and methodology.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/2f8b1505d0cba2467a458eb8b45c4879710468dd/docs/assets/benchmark-tbm-tail-2026-08-21.webp" alt="TBM latency tail curves for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-2026-10-08-dark.svg">
+    <img src="docs/assets/benchmark-tbm-2026-10-08.svg" alt="JSON Schema TBM percentile curves for GLRMask Static, Dynamic and llguidance 1.8.0; logarithmic latency axis" width="500">
+  </picture>
 </p>
+
+*JSONSchemaBench, 8 October 2026: 2,925,983 aligned token positions; calling-thread CPU time, minimum of two native processes. Lower is better. See [measurement details](docs/benchmark-cfa-2026-10-08.md).*
+<!-- benchmark-overview:end -->
 
 ## Installation
 
@@ -13,8 +24,6 @@ GLRMask is a grammar-constrained generation library for high-throughput LLM deco
 ```bash
 python -m pip install glrmask
 ```
-
-Published wheels include the native extension. Building from source requires a Rust toolchain and the platform's native build tools.
 
 ### Rust
 
@@ -28,7 +37,7 @@ cargo add glrmask
 
 GLRMask has three ordinary public layers:
 
-- `Grammar` is a source or mixed description. It can contain source children, compiled children, and vocabulary-qualified exact-token bindings.
+- `Grammar` is a source grammar description. It can contain source children and vocabulary-qualified exact-token bindings.
 - `UnlinkedConstraint` is reusable compiled machinery for one exact vocabulary. It may deliberately remain open and is not runnable.
 - `Constraint` is closed, rooted, and immediately runnable. `ConstraintState` is the mutable per-sequence state.
 
@@ -131,7 +140,7 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 
 ### Source, compiled, and exact-token bindings
 
-GLRM declares child slots with `extern grammar NAME;` and exact-token slots with `extern token NAME;`. `Grammar::bind` is the one operation for both source and compiled attachments:
+GLRM declares child slots with `extern grammar NAME;` and exact-token slots with `extern token NAME;`. `Grammar::bind` attaches source grammars or vocabulary-qualified exact-token values. Attach compiled children with `UnlinkedConstraint::bind`:
 
 ```rust
 use glrmask::{Grammar, Result, Vocab};
@@ -143,11 +152,7 @@ let parent = Grammar::from_glrm(
 let source_child = Grammar::from_json_schema(r#"{"type":"null"}"#);
 let source_composition = parent.bind("payload", &source_child)?;
 
-let compiled_child = source_child.compile(vocab)?;
-let mixed_composition = parent.bind("payload", &compiled_child)?;
-
 let _a = source_composition.compile(vocab)?;
-let _b = mixed_composition.compile(vocab)?;
 # Ok(())
 # }
 ```
@@ -217,6 +222,8 @@ constraint = host.bind("payload", child).link(
 
 ### Build/runtime trade-off
 
+GLRMask’s dynamic mode is heavily based on [llguidance](https://github.com/guidance-ai/llguidance). It trades some mask-generation speed for lower cold-start latency.
+
 `Optimization` expresses intent rather than exposing internal engine names:
 
 - `AUTO` / `Auto`: let GLRMask choose.
@@ -224,7 +231,7 @@ constraint = host.bind("payload", child).link(
 - `BALANCED` / `Balanced`: bounded native parser with vocabulary partitioning (O2).
 - `FAST_RUNTIME` / `FastRuntime`: spend more build work to favor lower mask latency where supported.
 
-All three modes preserve accepted-language semantics and produce the same public `Constraint` type.
+All four modes preserve accepted-language semantics and produce the same public `Constraint` type.
 
 ### Native template parser backend
 
@@ -330,34 +337,25 @@ Each transition carries a Boolean mask over the model vocabulary. These masks ar
 
 ## Performance
 
-Current native integration checkpoint (`4c92d2457`, 3 October 2026): matched Mac/Rayon2 static linking measured a warm median of 352.89 ms, compared with 368.00 ms for the preceding qualified source. This performance level is accepted for the current integration work; further link optimization is future work. Loader reliability qualification remains open, so this checkpoint does not establish overall release readiness.
+<!-- benchmark-results:start -->
+Static favors mask latency; Dynamic favors compilation time. In this run, Static’s median build cost is 9.6 ms and Dynamic’s is 1.3 ms. The benchmark’s Static and Dynamic implementations correspond to the current `FastRuntime` and `FastBuild` choices, respectively.
 
-Latest corrected engineering result: the **9,558 official JSONSchemaBench schemas**, using their corresponding MaskBench replay payloads. The historical run originally contained 705 additional MaskBench-only cases; those are excluded from every number and graph shown here. The original full sweep used AWS M8azn, and the corrected GLRMask runtime tail was refreshed on the same CPU family after fixing a deterministic post-deserialization first-commit bug. This is intentionally not presented as the final native publication run.
+| Metric | Static | Dynamic | llguidance 1.8.0 |
+|---|---:|---:|---:|
+| TBM p50 (µs) | 2.5 | 4.4 | 8.7 |
+| TBM p99 (µs) | 9.5 | 145.0 | 379.6 |
+| TBM p99.9 (µs) | 22.7 | 525.4 | 1,360.9 |
+| TBM maximum (µs) | 59.3 | 3,345.2 | 7,843.4 |
+| Build p50 (ms) | 9.6 | 1.3 | 0.5 |
+| TTFM p50 (ms) | 9.7 | 1.4 | 0.5 |
+| TTFM p99 (ms) | 229.4 | 21.9 | 6.9 |
 
-| TBM | GLRMask | LLGuidance |
-|---|---:|---:|
-| p50 | **3 µs** | 10 µs |
-| p99 | **10 µs** | 223 µs |
-| p99.9 | **18 µs** | 788 µs |
-| p99.99 | **24 µs** | 2,290 µs |
-| maximum | **70 µs** | 14,426 µs |
+Measured on 8 October 2026 using native Rust APIs at GLRMask source `f9f5c84` and CFA `5d3feb4`, with official llguidance 1.8.0, on macOS 27 ARM64 (10 logical CPUs, Rust 1.95.0) and the Llama 3.1 8B Instruct vocabulary. These are source measurements, not a benchmark of the published 0.2.0 packages.
 
-| TTFM | GLRMask | LLGuidance |
-|---|---:|---:|
-| p50 | 10,421 µs | **1,109 µs** |
-| p90 | 59,350 µs | **2,738 µs** |
-| p99 | 229,809 µs | **12,023 µs** |
-| maximum | 779,588 µs | **81,104 µs** |
+The full run contains 9,558 official JSONSchemaBench schemas. The matched build/TTFM cohorts contain 8,326 schemas for Static and 8,327 for Dynamic and llguidance; TBM uses 2,925,983 aligned error-free token positions, including valid and invalid examples up to their shared replay prefix. These conditional timing distributions do not establish full-corpus correctness or language equivalence. The full-run outcomes include 460 incorrect examples for each GLRMask mode, and 100 incorrect examples and six runtime-error examples for llguidance.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/fbc60288c7d86701a03a3100fa7acfa3dc8fc5fd/docs/assets/benchmark-tbm-2026-08-21-v3.webp" alt="TBM latency comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/fbc60288c7d86701a03a3100fa7acfa3dc8fc5fd/docs/assets/benchmark-ttfm-2026-08-21-v3.webp" alt="TTFM comparison for GLRMask and LLGuidance in the corrected 20 August 2026 engineering run" width="100%">
-</p>
-
-The old CFA runner used llguidance 1.6.1 and Linux thread-CPU timing; the final native runner uses a different, stricter methodology. See the [20 August engineering benchmark report](https://github.com/IsaacBreen/glrmask/blob/main/docs/benchmark-cfa-full-2026-08-20.md) for the exact corpus, hardware, fix/rerun provenance, build numbers, and interpretation limits.
+TBM measures commitment of a previously allowed token through the next ready mask, using calling-thread CPU time and the elementwise minimum of two independent native processes. Build and time to first mask (TTFM) use wall time from the first process; TTFM includes schema-dependent compilation. Vocabulary preparation is outside the timer. Production validation is enabled, with one schema at a time and a 60-second build timeout. See the [benchmark report](docs/benchmark-cfa-2026-10-08.md) and [website benchmarks](https://glrmask.com/#benchmarks) for provenance, outcomes and further results.
+<!-- benchmark-results:end -->
 
 ### Optional boundary queries
 

@@ -6,6 +6,9 @@ on:
       - 'GUIDE.md'
       - 'README.md'
       - 'scripts/sync-guide.py'
+      - 'scripts/sync-benchmarks.py'
+      - 'docs/benchmarks/**'
+      - 'docs/assets/benchmark-tbm-2026-10-08*.svg'
       - '.github/workflows/guide-sync.yml'
   push:
     branches: [main, glrmask-main]
@@ -13,6 +16,9 @@ on:
       - 'GUIDE.md'
       - 'README.md'
       - 'scripts/sync-guide.py'
+      - 'scripts/sync-benchmarks.py'
+      - 'docs/benchmarks/**'
+      - 'docs/assets/benchmark-tbm-2026-10-08*.svg'
       - '.github/workflows/guide-sync.yml'
 
 jobs:
@@ -23,4 +29,5 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - run: python scripts/sync-benchmarks.py --check
       - run: python scripts/sync-guide.py --check
