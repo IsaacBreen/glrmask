@@ -29,6 +29,8 @@ extraction rather than adopting a new PyO3 default. Public Python signatures and
 exception types are retained; PyO3 can change argument-error diagnostics/notes.
 No free-threaded support is newly claimed. The CPython 3.9–3.13 wheel matrix and
 numpy>=1.21 declaration are unchanged. NumPy 1.x has no Python 3.13 wheels.
+An existing auto-policy diagnostic used Python 3.10-only zip(strict=True).
+Its explicit length check now preserves validation on Python 3.9 as declared.
 The oldest tested NumPy 1.x versions by interpreter are 1.21.6 (3.9/3.10),
 1.23.5 (3.11), and 1.26.4 (3.12); these checks do not test every older patch.
 PyO3/rust-numpy require Rust 1.83; the root already uses edition 2024 (Rust 1.85+).
@@ -71,6 +73,8 @@ The Python wheel workflow builds with --locked, installs each exact wheel in a
 fresh virtual environment, runs the public examples and alignment/mode smoke,
 and repeats supported installs with NumPy 1.x. The sdist is installed from its
 exact generated archive. Matrix completeness is checked before aggregation.
+Every wheel and the sdist also run the maintained Python test suites after
+installation; smoke checks alone missed the pre-existing Python 3.9 diagnostic.
 Local qualification includes the Rust workspace regressions, maintained Python
 suites, exact public surface/mask comparisons with installed 0.2.0, and loading
 0.2.0 external-vocabulary artifacts in the candidate. Final results, source

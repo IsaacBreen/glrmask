@@ -38,6 +38,7 @@ def main() -> None:
     parser.add_argument("directory", type=Path)
     parser.add_argument("--kind", choices=("wheel", "sdist"), required=True)
     parser.add_argument("--numpy-version", help="test an exact NumPy runtime version")
+    parser.add_argument("--full-tests", action="store_true", help="run the maintained Python suites")
     args = parser.parse_args()
 
     artifact = find_artifact(args.directory, args.kind)
@@ -51,9 +52,13 @@ def main() -> None:
         requirements = [str(artifact)]
         if args.numpy_version:
             requirements.append(f"numpy=={args.numpy_version}")
+        if args.full_tests:
+            requirements.append("pytest")
         run(str(python), "-I", "-m", "pip", "install", "--only-binary=numpy", *requirements, cwd=Path(tmp))
         version = artifact.name.removeprefix("glrmask-").split("-")[0].removesuffix(".tar.gz")
         run(str(python), "-I", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
+        if args.full_tests:
+            run(str(python), "-I", "-m", "pytest", "-q", str(repo_root / "python" / "tests"), cwd=Path(tmp))
 
     print(f"clean-install smoke test passed: {artifact.name}")
 

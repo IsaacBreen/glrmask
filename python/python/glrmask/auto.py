@@ -118,25 +118,24 @@ def json_schema_auto_shape(schema: Any) -> AutoSchemaShape:
     schema_obj = json.loads(schema) if isinstance(schema, str) else schema
     schema_text = schema if isinstance(schema, str) else json.dumps(schema, separators=(",", ":"))
     native = _native_internal.auto_json_schema_shape_counts(schema_text)
-    counts = dict(
-        zip(
-            (
-                "nodes",
-                "dicts",
-                "lists",
-                "leaves",
-                "properties",
-                "property_name_chars",
-                "string_types",
-                "number_types",
-                "array_types",
-                "pattern_chars",
-                "max_length",
-            ),
-            native,
-            strict=True,
-        )
+    names = (
+        "nodes",
+        "dicts",
+        "lists",
+        "leaves",
+        "properties",
+        "property_name_chars",
+        "string_types",
+        "number_types",
+        "array_types",
+        "pattern_chars",
+        "max_length",
     )
+    # zip(strict=True) is available only from Python 3.10. Keep the length
+    # validation explicitly so the declared Python 3.9 support remains exact.
+    if len(native) != len(names):
+        raise ValueError("native auto shape counts have an unexpected length")
+    counts = dict(zip(names, native))
     normalized = _normalize_auto_schema(schema_obj)
     counts["json_bytes"] = len(
         json.dumps(normalized, separators=(",", ":"), sort_keys=True)

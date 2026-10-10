@@ -18,6 +18,9 @@
   crossbeam-epoch to 0.9.20 (RUSTSEC-2026-0204). Helper crate versions remain 0.1.1.
 - Add wheel-install checks with NumPy 1.x where supported, and regressions for
   packed mask alignment, writable buffers, error types, and repeated imports.
+- Fix the auto-policy shape diagnostic on Python 3.9 by replacing Python 3.10's
+  `zip(strict=True)` with an explicit length check. Run the maintained Python
+  suites against every exact wheel and the generated sdist in CI.
 
 ## 0.2.0 — 2026-10-10
 
