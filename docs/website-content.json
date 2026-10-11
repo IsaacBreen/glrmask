@@ -6,7 +6,7 @@
     "benchmarks",
     "getting_started"
   ],
-  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON Schema and Lark.",
+  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON schemas and Lark.",
   "links": "[GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)",
   "dynamic": "GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).",
   "usage": "GLRMask has three core types:\n\n- `Grammar`: the language you want to generate.\n- `Constraint`: a grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.\n\nTo use it, compile a `Grammar` into a `Constraint`, then call `constraint.start()` to initiate a `ConstraintState`. Then in the decoding loop:\n\n1. Compute the next-token mask.\n2. Sample a token the mask allows.\n3. Commit that token to the state.\n\n```python pseudocode\nstate = constraint.start()\nend_token_ids = configured_end_token_ids\n\nwhile generating:\n    in parallel:\n        logits = llm.forward(...)\n        mask = state.mask()\n\n    logits = apply_mask(logits, mask)\n    token_id = sample(logits)\n    state.commit_token(token_id)\n    if token_id in end_token_ids:\n        break\n```",
@@ -83,5 +83,5 @@
     "json": "docs/benchmarks/json-schema-2026-10-08.json",
     "javascript": "docs/benchmarks/javascript-2026-10-09.json"
   },
-  "content_sha256": "63b259d3b0dd72fd8b8579372a9740af8cadde46df5b12d6df90a84bbecaa8cc"
+  "content_sha256": "e01b119c551d3bad0195a4face4a125dffd467a40a624d77212af930fda11360"
 }
