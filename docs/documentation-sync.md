@@ -28,11 +28,10 @@ Reviewed public snapshots live in `docs/benchmarks/`. `scripts/sync-benchmarks.p
 generates the benchmark Markdown, light/dark SVGs and registry PNGs. The shared
 chart spec `docs/content/tail-chart.json` preserves the website's inverse
 log-exceedance axis, log latency axis, series palette, clean axes and lack of a
-grid. The static figures show Static versus llguidance. JSON samples are joined
-by straight segments; JavaScript uses the website’s adaptive monotone cubic
-display policy through selected measured anchors. Additional anchors constrain
-latency error to 2% at every supplied quantile. Neither figure extrapolates;
-measurements and statistics remain unchanged. JSON and
+grid. The static figures show Static versus llguidance. Both JSON and JavaScript
+figures join every retained measured tail sample with straight segments,
+without numerical smoothing, anchor selection or extrapolation.
+Measurements and statistics remain unchanged. JSON and
 JavaScript remain separate, including their source identities and timing limits.
 Dynamic is introduced at the end of the JSON section with its own TBM plot:
 GLRMask is faded, GLRMask dynamic and llguidance remain prominent. A TTFM table

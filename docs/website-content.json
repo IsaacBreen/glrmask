@@ -45,7 +45,7 @@
     "smoothing": false,
     "interpolation": {
       "json": "linear",
-      "javascript": "adaptive-monotone"
+      "javascript": "linear"
     },
     "palette": {
       "light": {
@@ -65,7 +65,7 @@
     },
     "font_family": "Inter, ui-sans-serif, system-ui, sans-serif",
     "font_size": 13,
-    "source": "Website log-axis geometry and no-grid presentation. JSON uses straight segments. JavaScript shares the adaptive monotone derivative/anchor policy, preserving endpoints and extrema with at most 2% latency error at supplied quantiles; no extrapolation.",
+    "source": "Website log-axis geometry and no-grid presentation. Straight segments join every retained measured tail sample for JSON and JavaScript, without numerical smoothing, anchor selection or extrapolation.",
     "display_modes": [
       "static",
       "llguidance"
@@ -77,15 +77,11 @@
         "llguidance"
       ],
       "static_opacity": 0.18
-    },
-    "javascript_display": {
-      "screen_tolerance_px": 0.75,
-      "latency_tolerance": 0.02
     }
   },
   "datasets": {
     "json": "docs/benchmarks/json-schema-2026-10-08.json",
     "javascript": "docs/benchmarks/javascript-2026-10-09.json"
   },
-  "content_sha256": "dca45ccaec1593c4b4d2ba6df1fc05adec62438d9bfe19676ead109de39da137"
+  "content_sha256": "63b259d3b0dd72fd8b8579372a9740af8cadde46df5b12d6df90a84bbecaa8cc"
 }
