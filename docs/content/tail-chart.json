@@ -23,7 +23,7 @@
   "smoothing": false,
   "interpolation": {
     "json": "linear",
-    "javascript": "pchip"
+    "javascript": "adaptive-monotone"
   },
   "palette": {
     "light": {
@@ -43,13 +43,21 @@
   },
   "font_family": "Inter, ui-sans-serif, system-ui, sans-serif",
   "font_size": 13,
-  "source": "Website CanonicalTailPlot.astro log-axis geometry and no-grid presentation. JSON uses straight segments; JavaScript uses shape-preserving cubic interpolation through every measured sample, without extrapolation or statistical smoothing.",
+  "source": "Website log-axis geometry and no-grid presentation. JSON uses straight segments. JavaScript shares the adaptive monotone derivative/anchor policy, preserving endpoints and extrema with at most 2% latency error at supplied quantiles; no extrapolation.",
   "display_modes": [
     "static",
     "llguidance"
   ],
   "dynamic_preview": {
-    "display_modes": ["static", "dynamic", "llguidance"],
+    "display_modes": [
+      "static",
+      "dynamic",
+      "llguidance"
+    ],
     "static_opacity": 0.18
+  },
+  "javascript_display": {
+    "screen_tolerance_px": 0.75,
+    "latency_tolerance": 0.02
   }
 }

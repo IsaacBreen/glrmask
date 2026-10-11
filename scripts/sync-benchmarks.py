@@ -113,44 +113,83 @@ Both datasets measure source builds, not the published 0.2 packages.
 '''
 
 
-def monotone_segments(points):
-    """PCHIP in plot coordinates: all knots retained, with no extrapolation."""
-    points=sorted(points)
-    assert len(points)>=2 and all(a[0]<b[0] for a,b in zip(points,points[1:]))
-    widths=[b[0]-a[0] for a,b in zip(points,points[1:])]
-    secants=[(b[1]-a[1])/width for a,b,width in zip(points,points[1:],widths)]
-    slopes=[0.0]*len(points)
-    if len(points)==2:
-        slopes=[secants[0],secants[0]]
-    else:
-        def endpoint(h0,h1,d0,d1):
-            slope=((2*h0+h1)*d0-h0*d1)/(h0+h1)
-            if slope*d0<=0:return 0.0
-            if d0*d1<=0 and abs(slope)>3*abs(d0):return 3*d0
-            return slope
-        slopes[0]=endpoint(widths[0],widths[1],secants[0],secants[1])
-        slopes[-1]=endpoint(widths[-1],widths[-2],secants[-1],secants[-2])
-        for i in range(1,len(points)-1):
-            before,after=secants[i-1],secants[i]
-            if before*after<=0:continue
-            w1=2*widths[i]+widths[i-1];w2=widths[i]+2*widths[i-1]
-            slopes[i]=(w1+w2)/(w1/before+w2/after)
-    segments=[]
-    for i,(a,b,width) in enumerate(zip(points,points[1:],widths)):
-        c1=(a[0]+width/3,a[1]+width*slopes[i]/3)
-        c2=(b[0]-width/3,b[1]-width*slopes[i+1]/3)
-        # Bézier's convex hull bounds every segment by its measured endpoints.
-        lo,hi=sorted([a[1],b[1]])
-        assert all(lo-1e-9<=p[1]<=hi+1e-9 for p in [c1,c2]), 'Interpolation overshoot'
-        segments.append((a,c1,c2,b))
-    return segments
+def retained_indices(xs, ys, width, height, tolerance):
+    """Website shared policy: initial screen-space chord selection."""
+    xscale=width/(math.log(100)-xs[0]);yscale=height/(math.log(20000)-math.log(.5))
+    points=[(x*xscale,y*yscale) for x,y in zip(xs,ys)]
+    keep={0,len(xs)-1};stack=[(0,len(xs)-1)]
+    while stack:
+        a,b=stack.pop();px,py=points[a];qx,qy=points[b]
+        dx,dy=qx-px,qy-py;den=dx*dx+dy*dy;best=tolerance;index=-1
+        for i in range(a+1,b):
+            rx,ry=points[i]
+            t=max(0,min(1,((rx-px)*dx+(ry-py)*dy)/den)) if den else 0
+            distance=math.hypot(rx-px-t*dx,ry-py-t*dy)
+            if distance>best:best,index=distance,i
+        if index>=0:keep.add(index);stack.extend([(a,index),(index,b)])
+    anchors=[]
+    for i in sorted(keep):
+        if anchors and abs(ys[i]-ys[anchors[-1]])*yscale<=tolerance:
+            if i==len(xs)-1:
+                if len(anchors)>1:anchors.pop()
+                anchors.append(i)
+            continue
+        anchors.append(i)
+    return anchors
 
 
-def monotone_path(points):
-    segments=monotone_segments(points)
-    first=segments[0][0]
-    return ' '.join([f'M{first[0]:.3f},{first[1]:.3f}'] +
-                    ['C'+' '.join(f'{x:.3f},{y:.3f}' for x,y in segment[1:]) for segment in segments])
+def fit_curve(raw_xs, raw_ys, indices):
+    xs=[raw_xs[i] for i in indices];ys=[raw_ys[i] for i in indices]
+    secants=[(b-a)/(x2-x1) for a,b,x1,x2 in zip(ys,ys[1:],xs,xs[1:])]
+    slopes=[secants[0] if i==0 else secants[-1] if i==len(ys)-1 else
+            0 if secants[i-1]*secants[i]<=0 else 2/(1/secants[i-1]+1/secants[i]) for i in range(len(ys))]
+    for i,d in enumerate(secants):
+        if d==0:slopes[i]=slopes[i+1]=0;continue
+        a,b=slopes[i]/d,slopes[i+1]/d;radius=math.hypot(a,b)
+        if radius>3:slopes[i],slopes[i+1]=3*a*d/radius,3*b*d/radius
+    return {'xs':xs,'ys':ys,'slopes':slopes,'indices':indices}
+
+
+def evaluate_curve(curve, x):
+    from bisect import bisect_right
+    xs,ys,m=curve['xs'],curve['ys'],curve['slopes']
+    x=max(xs[0],min(xs[-1],x));lo=max(0,min(len(xs)-2,bisect_right(xs,x)-1));hi=lo+1
+    h=xs[hi]-xs[lo];t=(x-xs[lo])/h
+    return (2*t**3-3*t*t+1)*ys[lo]+(t**3-2*t*t+t)*h*m[lo]+(-2*t**3+3*t*t)*ys[hi]+(t**3-t*t)*h*m[hi]
+
+
+def display_curve(probabilities, latencies, width, height, settings):
+    """Monotone measured anchors, refined to the supplied-quantile error bound."""
+    xs=[math.log(v) for v in probabilities];ys=[math.log(v) for v in latencies]
+    assert len(xs)>=2 and len(xs)==len(ys) and all(a<b for a,b in zip(xs,xs[1:]))
+    assert all(a>=b for a,b in zip(ys,ys[1:]))
+    indices=retained_indices(xs,ys,width,height,settings['screen_tolerance_px'])
+    curve=fit_curve(xs,ys,indices);limit=math.log(1+settings['latency_tolerance'])
+    for _ in range(len(xs)):
+        additions=[]
+        for a,b in zip(curve['indices'],curve['indices'][1:]):
+            worst=limit;index=-1
+            for i in range(a+1,b):
+                error=abs(evaluate_curve(curve,xs[i])-ys[i])
+                if error>worst:worst,index=error,i
+            if index>=0:additions.append(index)
+        if not additions:break
+        curve=fit_curve(xs,ys,sorted(set(curve['indices']+additions)))
+    assert curve['indices'][0]==0 and curve['indices'][-1]==len(xs)-1
+    assert max(abs(evaluate_curve(curve,x)-y) for x,y in zip(xs,ys))<=limit+1e-12
+    return curve
+
+
+def monotone_path(curve, project_x, project_y):
+    xs,ys,m=curve['xs'],curve['ys'],curve['slopes']
+    path=[f'M{project_x(xs[0]):.5f},{project_y(ys[0]):.5f}']
+    for i in range(len(xs)-1):
+        h=xs[i+1]-xs[i]
+        controls=[(xs[i]+h/3,ys[i]+m[i]*h/3),(xs[i+1]-h/3,ys[i+1]-m[i+1]*h/3),(xs[i+1],ys[i+1])]
+        lo,hi=sorted([ys[i],ys[i+1]])
+        assert all(lo-1e-12<=y<=hi+1e-12 for _,y in controls), 'Interpolation overshoot'
+        path.append('C'+' '.join(f'{project_x(x):.5f},{project_y(y):.5f}' for x,y in controls))
+    return ' '.join(path)
 
 
 def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False):
@@ -160,9 +199,9 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
     ymin,ymax=spec['latency_us']['min'],spec['latency_us']['max']
     palette=spec['palette']['dark' if dark else 'light']; text,rule=palette['text'],palette['rule']
     interpolation=spec['interpolation'][dataset]
-    assert interpolation in ['linear','pchip']
-    curve_description=('Shape-preserving cubic interpolation passes through every observed tail sample; no extrapolation or statistical smoothing.'
-                       if interpolation=='pchip' else 'Straight segments join observed tail samples; no smoothing or extrapolation.')
+    assert interpolation in ['linear','adaptive-monotone']
+    curve_description=('Adaptive monotone cubic display through selected measured anchors, within 2% latency of every supplied quantile; endpoints and extrema preserved, without extrapolation.'
+                       if interpolation=='adaptive-monotone' else 'Straight segments join observed tail samples; no smoothing or extrapolation.')
     series_description=('Measured GLRMask, GLRMask dynamic and llguidance curves. GLRMask is faded for context.'
                         if include_dynamic else 'Measured GLRMask Static and llguidance 1.8.0 curves.')
     x=lambda v:left+(math.log10(xmax)-math.log10(v))/(math.log10(xmax)-math.log10(xmin))*(right-left)
@@ -192,7 +231,9 @@ def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dyn
         display_modes=spec['dynamic_preview']['display_modes'] if include_dynamic else spec['display_modes']
         if mode not in display_modes:continue
         points=[(x(ex),y(us)) for ex,us in zip(tail['exceedance_pct'],tail[mode+'_us'])]
-        path=(monotone_path(points) if interpolation=='pchip' else
+        curve=(display_curve(tail['exceedance_pct'],tail[mode+'_us'],right-left,bottom-top,spec['javascript_display'])
+               if interpolation=='adaptive-monotone' else None)
+        path=(monotone_path(curve,lambda v:x(math.exp(v)),lambda v:y(math.exp(v))) if curve else
               ' '.join(('M' if i==0 else 'L')+f'{xx:.3f},{yy:.3f}' for i,(xx,yy) in enumerate(points)))
         fade=f' opacity="{spec["dynamic_preview"]["static_opacity"]}"' if include_dynamic and mode=='static' else ''
         out.append(f'<path d="{path}" fill="none" stroke="{palette[mode]}" stroke-width="{spec["line_width"]}" stroke-linejoin="round"{fade} clip-path="url(#plot)"/>')

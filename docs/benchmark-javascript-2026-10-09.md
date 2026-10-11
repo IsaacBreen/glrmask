@@ -42,11 +42,16 @@ and maxima.
 
 Table quantiles use NumPy-compatible linear interpolation. Tail samples use
 the inverse empirical distribution at the retained 2,000 probabilities per
-mode. The figure uses shape-preserving piecewise cubic Hermite interpolation
-(PCHIP) in logarithmic coordinates through every retained sample. The curve
-preserves monotonicity and endpoints, stays within each pair of measured values,
-and applies no extrapolation or statistical smoothing. Its rarest supported
-probability is one token in 4,099, approximately 0.0244%.
+mode. The figure uses adaptive monotone cubic interpolation in logarithmic
+coordinates through selected measured anchors. Initial screen-space chord
+selection uses a 0.75-pixel tolerance; additional measured anchors are inserted
+until displayed latency differs from each of the 2,000 supplied quantiles by
+at most a factor of 1.02 in either direction. This is a display approximation,
+not an error bound between supplied quantiles or a statistical uncertainty band.
+The derivative limiter preserves monotonicity, endpoints and extrema without
+overshoot or extrapolation. Raw measurements, tables and stored tail samples are
+unchanged. The rarest supported probability is one token in 4,099, approximately
+0.0244%.
 
 ## Outcomes and limits
 

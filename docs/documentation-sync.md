@@ -29,9 +29,10 @@ generates the benchmark Markdown, light/dark SVGs and registry PNGs. The shared
 chart spec `docs/content/tail-chart.json` preserves the website's inverse
 log-exceedance axis, log latency axis, series palette, clean axes and lack of a
 grid. The static figures show Static versus llguidance. JSON samples are joined
-by straight segments; JavaScript uses shape-preserving cubic interpolation in
-logarithmic coordinates through every retained sample. Neither figure adds
-extrapolation or statistical smoothing. JSON and
+by straight segments; JavaScript uses the website’s adaptive monotone cubic
+display policy through selected measured anchors. Additional anchors constrain
+latency error to 2% at every supplied quantile. Neither figure extrapolates;
+measurements and statistics remain unchanged. JSON and
 JavaScript remain separate, including their source identities and timing limits.
 Dynamic is introduced at the end of the JSON section with its own TBM plot:
 GLRMask is faded, GLRMask dynamic and llguidance remain prominent. A TTFM table
@@ -43,6 +44,9 @@ together; a fragment-only benchmark link does not select Dynamic.
 Use `rsvg-convert` from librsvg to regenerate opaque, 2× registry PNGs. Each PNG
 records its source SVG digest; checks validate that digest and all PNG chunk
 checksums without needing a renderer in CI.
+
+JavaScript image URLs carry a generated-content digest so cached figures follow
+the current rendering; JSON image URLs and assets remain unchanged.
 
 ```bash
 python scripts/sync-benchmarks.py --render-png

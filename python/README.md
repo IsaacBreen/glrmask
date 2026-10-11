@@ -60,7 +60,7 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 Time between masks. Lower is better.
 
-<p><img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-javascript-2026-10-09.png" alt="JavaScript time between masks: measured GLRMask Static and llguidance 1.8.0 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480"></p>
+<p><img src="https://raw.githubusercontent.com/IsaacBreen/glrmask/main/docs/assets/benchmark-tbm-javascript-2026-10-09.png?v=bb478f08816b" alt="JavaScript time between masks: measured GLRMask Static and llguidance 1.8.0 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480"></p>
 
 **TBM (µs)**
 
