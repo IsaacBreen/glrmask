@@ -32,11 +32,21 @@ initial trace's first-mask CPU time: 3,674.372791, 94.165750, and 5.789959 ms.
 The 31 derived per-example first-mask values share the same grammar build;
 they are not 31 independent compilation observations.
 
+The README's Selected row is the initial example (index 0). Its Mean and Max
+rows use all 31 derived per-example TTFM values with equal weight. The maxima
+are 3,674.373791 ms (Static) and 5.973167 ms (llguidance); no separate component
+maxima are summed. TBM means give each of the 4,099 retained token positions
+equal weight, rather than averaging per-example means. All means are arithmetic
+averages of the same samples used for the corresponding reported percentiles
+and maxima.
+
 Table quantiles use NumPy-compatible linear interpolation. Tail samples use
 the inverse empirical distribution at the retained 2,000 probabilities per
-mode. The static figure joins those measured samples with straight segments
-in logarithmic coordinates, without smoothing or extrapolation. Its rarest
-supported probability is one token in 4,099, approximately 0.0244%.
+mode. The figure uses shape-preserving piecewise cubic Hermite interpolation
+(PCHIP) in logarithmic coordinates through every retained sample. The curve
+preserves monotonicity and endpoints, stays within each pair of measured values,
+and applies no extrapolation or statistical smoothing. Its rarest supported
+probability is one token in 4,099, approximately 0.0244%.
 
 ## Outcomes and limits
 

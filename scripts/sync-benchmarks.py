@@ -18,7 +18,7 @@ import zlib
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT/'docs/content'
-MODES = [('static', 'GLRMask Static'), ('dynamic', 'GLRMask Dynamic'), ('llguidance', 'llguidance 1.8.0')]
+MODES = [('static', 'GLRMask'), ('dynamic', 'GLRMask dynamic'), ('llguidance', 'llguidance')]
 PROVENANCE_SHA256 = '11f5b4704ecf9279d3d6b83c6a183e8ec7666a4eef8e7c58bf12256789e2cfbc'
 JS_PROVENANCE_SHA256 = '3653f392561164fd306df5715ce9eafffef1dedeaa7034e1ef2e504560a92dbd'
 
@@ -46,77 +46,137 @@ def load():
     return data, js
 
 
-def table(rows, column='Metric'):
-    return '\n'.join([f'| {column} | GLRMask Static | llguidance 1.8.0 |','|---|---:|---:|'] +
+def table(rows, column='Metric', names=('GLRMask','llguidance')):
+    return '\n'.join(['| '+column+' | '+' | '.join(names)+' |','|---|'+'---:|'*len(names)] +
                      ['| '+label.replace(' ', '&nbsp;')+' | '+' | '.join(f'{v:,.1f}' for v in values)+' |' for label,values in rows])
 
 
 def markdown(data, js):
-    rows=[]
-    for label,metric,key,scale in [('p50','tbm','median',1e3),('p99','tbm','p99',1e3),
-                                  ('p99.9','tbm','p99_9',1e3),('Max','tbm','max',1e3),
-                                  ('Build p50','build','median',1e6),('TTFM p50','ttfm','median',1e6),
-                                  ('TTFM p99','ttfm','p99',1e6)]:
-        rows.append((label,[data['modes'][m]['statistics_ns'][metric][key]/scale for m in ['static','llguidance']]))
-    js_rows=[('Max' if row['label']=='max' else row['label'],[row['values'][0],row['values'][2]]) for row in js['tables']['tbm'] if row['label'] in ['p50','p99','max']]
-    js_ttfm=[('Selected',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]])]
+    def json_rows(metric, scale, quantiles, modes=('static','llguidance')):
+        return [(label,[data['modes'][m]['statistics_ns'][metric][key]/scale for m in modes])
+                for label,key in quantiles]
+    rows=json_rows('tbm',1e3,[('Mean','mean'),('p50','median'),('p99','p99'),('p99.9','p99_9'),('Max','max')])
+    ttfm=json_rows('ttfm',1e6,[('Mean','mean'),('p50','median'),('p99','p99'),('Max','max')])
+    def js_rows(metric, labels):
+        return [(row['label'].capitalize() if row['label'] in ['mean','max'] else row['label'],
+                 [row['values'][0],row['values'][2]]) for row in js['tables'][metric] if row['label'] in labels]
+    js_tbm=js_rows('tbm',['mean','p50','p99','max'])
+    js_ttfm=js_rows('ttfm',['mean'])+[('Selected',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]])]+js_rows('ttfm',['max'])
+    dynamic_ttfm=json_rows('ttfm',1e6,[('Mean','mean'),('p50','median'),('p99','p99'),('Max','max')],('static','dynamic','llguidance'))
     return '''### JSON Schema
 
-Time between masks (TBM) measures token commitment through the next ready mask. Lower is better.
+Time between masks. Lower is better.
 
 {{json-plot}}
 
 **TBM (µs)**
 
-'''+table(rows[:4], 'Percentile')+'''
+'''+table(rows, 'Statistic')+'''
 
-**Build / time to first mask (TTFM), ms**
+**Time to first mask (ms)**
 
-'''+table(rows[4:])+'''
+'''+table(ttfm, 'Statistic')+'''
 
 8 October 2026 · 2,925,983 aligned token positions · macOS 27 ARM64, 10 logical CPUs. [Benchmark details](docs/benchmark-cfa-2026-10-08.md).
 
+#### Dynamic mode
+
+Care about compile times? Try dynamic mode.
+
+{{dynamic}}
+
+{{json-dynamic-plot}}
+
+**Time to first mask (ms)**
+
+'''+table(dynamic_ttfm,'Stat',('GLRMask','GLRMask<br>dynamic','llguidance'))+'''
+
+[Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).
+
 ### JavaScript
+
+Time between masks. Lower is better.
 
 {{javascript-plot}}
 
 **TBM (µs)**
 
-'''+table(js_rows, 'Percentile')+'''
+'''+table(js_tbm, 'Statistic')+'''
 
-**Time to first mask (TTFM), ms**
+**Time to first mask (ms)**
 
-'''+table(js_ttfm, 'Measurement')+'''
+'''+table(js_ttfm, 'Statistic')+'''
 
 9 October 2026 · 31 examples, 4,099 token positions · macOS ARM64. [Benchmark details](docs/benchmark-javascript-2026-10-09.md).
 
 Both datasets measure source builds, not the published 0.2 packages.
-
-### Dynamic mode
-
-{{dynamic}}
-
-Compare modes in the [interactive benchmarks](https://glrmask.com/#benchmarks).
 '''
 
 
-def svg(tail, spec, dark=False, label='JSON Schema'):
+def monotone_segments(points):
+    """PCHIP in plot coordinates: all knots retained, with no extrapolation."""
+    points=sorted(points)
+    assert len(points)>=2 and all(a[0]<b[0] for a,b in zip(points,points[1:]))
+    widths=[b[0]-a[0] for a,b in zip(points,points[1:])]
+    secants=[(b[1]-a[1])/width for a,b,width in zip(points,points[1:],widths)]
+    slopes=[0.0]*len(points)
+    if len(points)==2:
+        slopes=[secants[0],secants[0]]
+    else:
+        def endpoint(h0,h1,d0,d1):
+            slope=((2*h0+h1)*d0-h0*d1)/(h0+h1)
+            if slope*d0<=0:return 0.0
+            if d0*d1<=0 and abs(slope)>3*abs(d0):return 3*d0
+            return slope
+        slopes[0]=endpoint(widths[0],widths[1],secants[0],secants[1])
+        slopes[-1]=endpoint(widths[-1],widths[-2],secants[-1],secants[-2])
+        for i in range(1,len(points)-1):
+            before,after=secants[i-1],secants[i]
+            if before*after<=0:continue
+            w1=2*widths[i]+widths[i-1];w2=widths[i]+2*widths[i-1]
+            slopes[i]=(w1+w2)/(w1/before+w2/after)
+    segments=[]
+    for i,(a,b,width) in enumerate(zip(points,points[1:],widths)):
+        c1=(a[0]+width/3,a[1]+width*slopes[i]/3)
+        c2=(b[0]-width/3,b[1]-width*slopes[i+1]/3)
+        # Bézier's convex hull bounds every segment by its measured endpoints.
+        lo,hi=sorted([a[1],b[1]])
+        assert all(lo-1e-9<=p[1]<=hi+1e-9 for p in [c1,c2]), 'Interpolation overshoot'
+        segments.append((a,c1,c2,b))
+    return segments
+
+
+def monotone_path(points):
+    segments=monotone_segments(points)
+    first=segments[0][0]
+    return ' '.join([f'M{first[0]:.3f},{first[1]:.3f}'] +
+                    ['C'+' '.join(f'{x:.3f},{y:.3f}' for x,y in segment[1:]) for segment in segments])
+
+
+def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False):
     w,h=spec['width'],spec['height']; g=spec['grid']
     left,right,top,bottom=g['left'],w-g['right'],g['top'],h-g['bottom']
     xmin=max(spec['exceedance']['min'],tail['exceedance_pct'][0]); xmax=spec['exceedance']['max']
     ymin,ymax=spec['latency_us']['min'],spec['latency_us']['max']
     palette=spec['palette']['dark' if dark else 'light']; text,rule=palette['text'],palette['rule']
+    interpolation=spec['interpolation'][dataset]
+    assert interpolation in ['linear','pchip']
+    curve_description=('Shape-preserving cubic interpolation passes through every observed tail sample; no extrapolation or statistical smoothing.'
+                       if interpolation=='pchip' else 'Straight segments join observed tail samples; no smoothing or extrapolation.')
+    series_description=('Measured GLRMask, GLRMask dynamic and llguidance curves. GLRMask is faded for context.'
+                        if include_dynamic else 'Measured GLRMask Static and llguidance 1.8.0 curves.')
     x=lambda v:left+(math.log10(xmax)-math.log10(v))/(math.log10(xmax)-math.log10(xmin))*(right-left)
     y=lambda v:bottom-(math.log10(v)-math.log10(ymin))/(math.log10(ymax)-math.log10(ymin))*(bottom-top)
     out=[f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img" aria-labelledby="title description">',
          f'<title id="title">{label}: time between masks</title>',
-         '<desc id="description">Measured GLRMask Static and llguidance 1.8.0 curves. Inverse logarithmic exceedance probability and logarithmic latency axes. Lower is better. Straight segments join observed tail samples; no smoothing or extrapolation.</desc>',
+         '<desc id="description">'+series_description+' Inverse logarithmic exceedance probability and logarithmic latency axes. Lower is better. '+curve_description+'</desc>',
          f'<defs><clipPath id="plot"><rect x="{left}" y="{top}" width="{right-left}" height="{bottom-top}"/></clipPath></defs>',
          f'<g font-family="{html.escape(spec["font_family"])}" font-size="14" fill="{text}">',
          f'<path d="M{left},{top} V{bottom} H{right}" fill="none" stroke="{rule}"/>']
     for value,label_y in [(1,'1 µs'),(10,'10 µs'),(100,'100 µs'),(1000,'1 ms'),(10000,'10 ms')]:
         yy=y(value)
         out += [f'<path d="M{left-4},{yy:.2f} H{left}" stroke="{rule}"/>',f'<text x="{left-9}" y="{yy+4:.2f}" text-anchor="end">{label_y}</text>']
+    out.append(f'<text x="{left-9}" y="{top-10}" text-anchor="end" font-size="13">TBM</text>')
     ticks=[50,10,1,.1,.01,.001]
     if xmin>spec['exceedance']['min']:
         ticks=[v for v in ticks if v>=xmin and x(xmin)-x(v)>72]
@@ -129,11 +189,13 @@ def svg(tail, spec, dark=False, label='JSON Schema'):
     out.append(f'<text x="{(left+right)/2}" y="{h-14}" text-anchor="middle">Exceedance probability · log scale</text>')
     curves=[]
     for mode,name in MODES:
-        if mode not in spec['display_modes']:continue
+        display_modes=spec['dynamic_preview']['display_modes'] if include_dynamic else spec['display_modes']
+        if mode not in display_modes:continue
         points=[(x(ex),y(us)) for ex,us in zip(tail['exceedance_pct'],tail[mode+'_us'])]
-        path=' '.join(('M' if i==0 else 'L')+f'{xx:.3f},{yy:.3f}' for i,(xx,yy) in enumerate(points))
-        dash=' stroke-dasharray="5 4"' if mode=='dynamic' else ''
-        out.append(f'<path d="{path}" fill="none" stroke="{palette[mode]}" stroke-width="{spec["line_width"]}" stroke-linejoin="round"{dash} clip-path="url(#plot)"/>')
+        path=(monotone_path(points) if interpolation=='pchip' else
+              ' '.join(('M' if i==0 else 'L')+f'{xx:.3f},{yy:.3f}' for i,(xx,yy) in enumerate(points)))
+        fade=f' opacity="{spec["dynamic_preview"]["static_opacity"]}"' if include_dynamic and mode=='static' else ''
+        out.append(f'<path d="{path}" fill="none" stroke="{palette[mode]}" stroke-width="{spec["line_width"]}" stroke-linejoin="round"{fade} clip-path="url(#plot)"/>')
         # Boundary is a log-space segment of the retained points, never extrapolated.
         visible=[p for p in points if p[0]<=right]
         end_y=visible[0][1]
@@ -150,7 +212,8 @@ def svg(tail, spec, dark=False, label='JSON Schema'):
         baseline=min(bottom-8,max(top+16,baseline)); previous=baseline
         if abs(baseline-(end_y-10))>2:
             out.append(f'<path d="M{right},{end_y:.2f} V{baseline-6:.2f}" stroke="{palette[mode]}" stroke-width="0.8" opacity="0.65"/>')
-        out.append(f'<text x="{right-6}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end">{name}</text>')
+        fade=f' opacity="{spec["dynamic_preview"]["static_opacity"]}"' if include_dynamic and mode=='static' else ''
+        out.append(f'<text x="{right-6}" y="{baseline:.2f}" fill="{palette[mode]}" font-size="14" font-weight="600" text-anchor="end"{fade}>{name}</text>')
     return '\n'.join(out+['</g>','</svg>',''])
 
 
@@ -195,9 +258,9 @@ def main():
     if args.website_root:check_website(data,js,args.website_root)
     spec=json.loads((CONTENT/'tail-chart.json').read_text())
     files={CONTENT/'benchmarks.md':markdown(data,js)}
-    for dataset,measured,tail,label in [('json','2026-10-08',data['tail'],'JSON Schema'),('javascript','2026-10-09',js['tail'],'JavaScript')]:
+    for dataset,measured,tail,label in [('json','2026-10-08',data['tail'],'JSON Schema'),('json-dynamic','2026-10-08',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-09',js['tail'],'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
-        for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label)}
+        for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label,'json' if dataset=='json-dynamic' else dataset,dataset=='json-dynamic')}
     stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text()!=body]
     if not args.check:
         for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body)

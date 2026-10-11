@@ -60,6 +60,11 @@ invalid trajectories are included up to that prefix. The three displayed
 distributions have the same **2,925,983 aligned positions**, with prefix identity
 SHA-256 `d88697aefe4ef77060aa8c5bda7cf0a6dae0a0141acd0b45e65a794eafe00020`.
 
+Means are arithmetic averages: each of the 2,925,983 aligned positions has equal
+weight for TBM; each matched schema has equal weight for TTFM. TTFM maxima are
+the largest recorded sample-wise TTFM values in those same cohorts, not sums of
+separate component maxima.
+
 The table uses nearest-rank percentiles, with the conventional median averaging
 the two central observations for even-sized samples. The SVG samples the
 empirical inverse survival function; its percentile spacing expands the upper
