@@ -1,6 +1,6 @@
 use glrmask::{BuildOptions, Constraint, Grammar, Optimization, UnlinkedConstraint, Vocab};
 
-const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
+const ONE: &str = "glrm 1; start start; extern T; nt start = T;";
 const MODES: [Optimization; 4] = [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime];
 
 fn allowed(mask: &[u32], token: u32) -> bool {
@@ -58,7 +58,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
     let vocab = Vocab::new_with_exact_token_ids(Vec::<(u32, Vec<u8>)>::new(), 0..100);
     // At the start only A is live. After A only B is live. Their overlap must
     // not make either one's non-overlapping tail spuriously allowed.
-    let source = "glrm 1; start start; extern token A; extern token B; nt start = A B;";
+    let source = "glrm 1; start start; extern A; extern B; nt start = A B;";
     for mode in MODES {
         let constraint = Grammar::from_glrm(source)
             .bind("A", vocab.token_ranges([10..=30]).unwrap()).unwrap()
@@ -78,7 +78,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
 #[test]
 fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let vocab = Vocab::new_with_exact_token_ids(vec![(0, b"[".to_vec()), (1, b"]".to_vec())], 2..128);
-    let child_source = "glrm 1; start start; extern token T; nt start = T T;";
+    let child_source = "glrm 1; start start; extern T; nt start = T T;";
     let open = Grammar::from_glrm(child_source).compile_unlinked(&vocab).unwrap();
     let bound = open.bind("T", vocab.token_ranges([5..=15, 100..=120]).unwrap()).unwrap();
     let serialized = bound.save();
@@ -91,7 +91,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         // Composition intentionally accepts only native compiled components.
         // Test each final optimization without attaching a retained-LR child.
         let native_child = loaded.link().unwrap();
-        let outer = Grammar::from_glrm("glrm 1; start start; extern grammar C; nt start = \"[\" C \"]\";")
+        let outer = Grammar::from_glrm("glrm 1; start start; extern C; nt start = \"[\" C \"]\";")
             .compile_unlinked(&vocab).unwrap().bind("C", &native_child).unwrap()
             .link_with(options).unwrap();
         assert_mask(&outer, &[0], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));

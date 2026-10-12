@@ -9319,10 +9319,10 @@ mod tests {
         ] {
             let child = Constraint::compile(Grammar::glrm(source), &vocab).unwrap();
             let middle = Constraint::compile(Grammar::glrm(
-                r#"start middle; extern grammar child; nt middle ::= "[" child "]";"#,
+                r#"start middle; extern child; nt middle ::= "[" child "]";"#,
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("child", child).unwrap();
             let outer = Constraint::compile(Grammar::glrm(
-                r#"start outer; extern grammar middle; nt outer ::= middle "!";"#,
+                r#"start outer; extern middle; nt outer ::= middle "!";"#,
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let loaded = Constraint::load(outer.save()).unwrap();
             for constraint in [&outer, &loaded] {
@@ -9471,7 +9471,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern child; nt document = \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -9538,7 +9538,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
+                "glrm 1; start document; extern child; t X = \"X\"; t BANG = \"!\"; nt document = X child BANG;",
             ),
             &vocab,
         )
@@ -10521,7 +10521,7 @@ nt start ::= item item? item?;
         )
         .unwrap();
         let parent = Constraint::compile(
-            Grammar::glrm("glrm 1; start document; extern grammar body; nt document = body;"),
+            Grammar::glrm("glrm 1; start document; extern body; nt document = body;"),
             &vocab,
         )
         .unwrap();

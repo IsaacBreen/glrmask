@@ -41,10 +41,10 @@
 //!
 //! # Typed bindings
 //!
-//! Native GLRM can declare `extern grammar child;` and `extern token MARK;`.
-//! Both use [`Grammar::bind`]. Exact tokens come from [`Vocab::token`] or
-//! [`Vocab::tokens`], so a binding carries the vocabulary identity it belongs to
-//! rather than accepting an unqualified integer.
+//! Native GLRM can declare `extern child;` and `extern MARK;`.
+//! Both use [`Grammar::bind`]. [`Token::new`] describes a single exact ID;
+//! [`Vocab::tokens`] and [`Vocab::token_ranges`] describe vocabulary-qualified
+//! sets of IDs, including compact ranges. A set consumes one token, not a sequence.
 //!
 //! Source grammars compose with source grammars. Compiled children are attached
 //! only to [`UnlinkedConstraint`] values, keeping source compilation and compiled
@@ -99,7 +99,7 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use runtime::{Constraint, ConstraintState};
-pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
+pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
 pub use public_api::{BuildOptions, Grammar, Optimization, UnlinkedConstraint};
 #[cfg(any(test, feature = "internal-api"))]

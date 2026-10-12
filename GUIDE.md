@@ -222,14 +222,14 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 
 ### Source, compiled, and exact-token bindings
 
-GLRM declares child slots with `extern grammar NAME;` and exact-token slots with `extern token NAME;`. `Grammar::bind` attaches source grammars or vocabulary-qualified exact-token values. Attach compiled children with `UnlinkedConstraint::bind`:
+GLRM declares external references with `extern NAME;`. The value supplied to `Grammar::bind` determines whether a reference consumes exact token IDs or matches a source grammar. Attach compiled children with `UnlinkedConstraint::bind`:
 
 ```rust
 use glrmask::{Grammar, Result, Vocab};
 
 # fn demo(vocab: &Vocab) -> Result<()> {
 let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern grammar payload; nt document = payload;",
+    "glrm 1; start document; extern payload; nt document = payload;",
 );
 let source_child = Grammar::from_json_schema(r#"{"type":"null"}"#);
 let source_composition = parent.bind("payload", &source_child)?;
@@ -245,9 +245,9 @@ Exact token bindings come from the vocabulary rather than from naked IDs:
 # use glrmask::{Grammar, Result, Vocab};
 # fn demo(vocab: &Vocab, tool_call_id: u32) -> Result<()> {
 let grammar = Grammar::from_glrm(
-    "glrm 1; start message; extern token TOOL_CALL; nt message = TOOL_CALL;",
+    "glrm 1; start message; extern TOOL_CALL; nt message = TOOL_CALL;",
 );
-let grammar = grammar.bind("TOOL_CALL", vocab.token(tool_call_id)?)?;
+let grammar = grammar.bind("TOOL_CALL", glrmask::Token::new(tool_call_id))?;
 let _constraint = grammar.compile(vocab)?;
 # Ok(())
 # }
@@ -269,7 +269,7 @@ Use `compile_unlinked` when a compiled parent will be reused with request-specif
 # use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
 # fn demo(vocab: &Vocab) -> Result<()> {
 let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern grammar payload; nt document = payload;",
+    "glrm 1; start document; extern payload; nt document = payload;",
 );
 let host = parent.compile_unlinked(vocab)?;
 
@@ -287,13 +287,13 @@ let _constraint_b = b.link()?;
 # }
 ```
 
-`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a vocabulary-qualified exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
 
 Python uses the same lifecycle:
 
 ```python
 parent = glrmask.Grammar.from_glrm(
-    'glrm 1; start document; extern grammar payload; nt document = payload;'
+    'glrm 1; start document; extern payload; nt document = payload;'
 )
 host = parent.compile_unlinked(vocab)
 child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
@@ -394,18 +394,18 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern grammar name;` slots have the same language semantics, including scope-local ignores.
+Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern name;` slots have the same language semantics, including scope-local ignores.
 
-Special model-token IDs are declared with `extern token NAME;` and bound with vocabulary-qualified values:
+An external reference can consume one ordinary or special model-token ID when bound to `glrmask.Token(id)`:
 
 ```python
 grammar = glrmask.Grammar.from_glrm('''
 glrm 1;
 start message;
-extern token TOOL_CALL;
+extern TOOL_CALL;
 nt message = TOOL_CALL "lookup()";
 ''')
-constraint = grammar.bind("TOOL_CALL", vocab.token(tool_call_token_id)).compile(vocab)
+constraint = grammar.bind("TOOL_CALL", glrmask.Token(tool_call_token_id)).compile(vocab)
 ```
 
 Lark and EBNF also support explicit `@token(<id>)` atoms when the numeric ID is deliberately part of the grammar source.

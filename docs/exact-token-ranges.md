@@ -1,6 +1,6 @@
-﻿# Exact-token range bindings
+# Exact-token range bindings
 
-An `extern token` slot matches **one model token** from its bound set. It does
+An `extern` slot matches **one model token** from its bound set. It does
 not match a sequence of IDs, nor the byte spelling shared by those IDs. Two
 vocabulary IDs with identical bytes remain distinct; exact-only and empty-byte
 tokens are supported as well.
@@ -15,7 +15,7 @@ import glrmask
 
 vocab = glrmask.Vocab.from_id_to_bytes({i: b"" for i in range(131_072)})
 grammar = glrmask.Grammar.from_glrm(
-    "glrm 1; start start; extern token T; nt start = T;"
+    "glrm 1; start start; extern T; nt start = T;"
 )
 
 all_tokens = vocab.tokens(range(131_072))
@@ -64,12 +64,12 @@ assert_eq!(selection.len(), 131_071);
 assert_eq!(selection.ranges().count(), 2);
 
 let grammar = Grammar::from_glrm(
-    "glrm 1; start start; extern token T; nt start = T;"
+    "glrm 1; start start; extern T; nt start = T;"
 ).bind("T", selection)?;
 let constraint = grammar.compile(&vocab)?;
 ```
 
-The existing `vocab.token(id)` and `vocab.tokens(ids)` APIs remain available.
+The existing `Token::new(id)` and `vocab.tokens(ids)` APIs remain available.
 `ExactTokens::ids()` explicitly materializes a sorted slice on first use;
 `ExactTokens::ranges()` does not. Compilation and linking use compact intervals,
 not that materialized slice.

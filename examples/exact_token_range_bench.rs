@@ -1,4 +1,4 @@
-﻿//! Native, reproducible lifecycle measurements for compact exact-token sets.
+//! Native, reproducible lifecycle measurements for compact exact-token sets.
 //!
 //! cargo run --release --example exact_token_range_bench -- 131072 2000
 //! Prints JSON. Run without competing CPU-heavy jobs. Vocabulary preparation,
@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
 use serde_json::{json, Value};
 
-const SOURCE: &str = "glrm 1; start start; extern token T; nt start = T;";
+const SOURCE: &str = "glrm 1; start start; extern T; nt start = T;";
 
 fn ns(duration: Duration) -> f64 { duration.as_secs_f64() * 1e9 }
 

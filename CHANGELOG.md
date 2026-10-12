@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Replace `vocab.token(id)` / `ExactToken` with top-level Python `Token(id)` and Rust `Token::new(id)`. A token consumes exactly one ordinary or special model ID and stores no vocabulary. Compile or compiled-module binding validates membership against the target vocabulary; it cannot assert tokenizer identity.
+- Unify GLRM external declarations as `extern NAME;`. The bound value determines exact-token versus grammar semantics. Typed v1 declaration spellings and older typed-slot unlinked artifacts are explicitly rejected; migrate source and recompile.
+
 ## 0.2.0 — 2026-10-10
 
 ### Public API

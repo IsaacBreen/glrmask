@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dispatch = String::from("start suffix;\n");
     let mut schemas = Vec::new();
     for index in 0..10 {
-        dispatch.push_str(&format!("extern grammar ARGS_{index};\n"));
+        dispatch.push_str(&format!("extern ARGS_{index};\n"));
         let schema = serde_json::from_slice(&fs::read(fixture.join(format!("schema-{index:02}.json")))?)?;
         let named = glrmask_json_schema::schema_to_named_grammar(&schema)?;
         let mut factored = glrmask_grammar::__private::grammar::factoring::factor_named_grammar(named);
@@ -196,7 +196,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
     assert!(source.contains(needle), "canonical JS source shape changed");
     source = source.replacen(needle, "nt member_expression_with_suffixes ::=\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression", 1);
-    source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
+    source.push_str("\nextern PROGRAMMATIC_TOOL_SUFFIX;\n");
     fs::write(output.join("parent-source.glrm"), &source)?;
     let started = Instant::now(); let parent = Grammar::from_glrm(&source).compile_unlinked(&vocab)?;
     let parent_compile_ns = started.elapsed().as_nanos();

@@ -28,11 +28,11 @@ def digest(data):
 
 
 def load():
-    data = json.loads((ROOT/'docs/benchmarks/json-schema-2026-10-08.json').read_text())
+    data = json.loads((ROOT/'docs/benchmarks/json-schema-2026-10-08.json').read_text(encoding="utf-8"))
     prov = {k:v for k,v in data.items() if k not in ['tail','modes']}
     prov['modes'] = {mode:{k:v for k,v in row.items() if k!='statistics_ns'} for mode,row in data['modes'].items()}
     assert digest(prov)==PROVENANCE_SHA256, 'JSON provenance changed; review report and prose before updating pin'
-    js = json.loads((ROOT/'docs/benchmarks/javascript-2026-10-09.json').read_text())
+    js = json.loads((ROOT/'docs/benchmarks/javascript-2026-10-09.json').read_text(encoding="utf-8"))
     prov = {k:v for k,v in js.items() if k not in ['tail','tables','ttfm_single']}
     prov['ttfm_single'] = {k:v for k,v in js['ttfm_single'].items() if k!='values_ms'}
     assert digest(prov)==JS_PROVENANCE_SHA256, 'JavaScript provenance changed; review report and prose before updating pin'
@@ -197,7 +197,7 @@ def render_png(source, path, spec):
 
 
 def check_website(data, js, root):
-    website=json.loads((root/'src/data/glrmask-canonical-20261008.json').read_text()); tail=json.loads((root/'src/data/glrmask-canonical-tail-20261008.json').read_text())
+    website=json.loads((root/'src/data/glrmask-canonical-20261008.json').read_text(encoding="utf-8")); tail=json.loads((root/'src/data/glrmask-canonical-tail-20261008.json').read_text(encoding="utf-8"))
     assert data['source_commits']==website['metadata']['current']['revisions']
     assert data['tail']==tail
     for mode,_ in MODES:
@@ -205,7 +205,7 @@ def check_website(data, js, root):
         for key in ['schemas','aligned_tbm_positions','membership_sha256','prefix_identity_sha256']:assert actual[key]==expected[key]
         assert actual['outcomes']==expected['outcomes']['current']
         for metric in ['tbm','ttfm','build']:assert actual['statistics_ns'][metric]==expected['statistics']['current'][metric]['nearest_rank']
-    website_js=json.loads((root/'src/data/glrmask-javascript-measured-5f2609-20261009.json').read_text())
+    website_js=json.loads((root/'src/data/glrmask-javascript-measured-5f2609-20261009.json').read_text(encoding="utf-8"))
     for key in ['source_revision','cfa_revision','llguidance_version','examples','tokens','tail','tables','ttfm_single']:assert js[key]==website_js[key], 'JS '+key+' differs'
 
 
@@ -214,14 +214,14 @@ def main():
     parser.add_argument('--check',action='store_true');parser.add_argument('--render-png',action='store_true');parser.add_argument('--website-root',type=Path)
     args=parser.parse_args();data,js=load()
     if args.website_root:check_website(data,js,args.website_root)
-    spec=json.loads((CONTENT/'tail-chart.json').read_text())
+    spec=json.loads((CONTENT/'tail-chart.json').read_text(encoding="utf-8"))
     files={CONTENT/'benchmarks.md':markdown(data,js)}
     for dataset,measured,tail,label in [('json','2026-10-08',data['tail'],'JSON Schema'),('json-dynamic','2026-10-08',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-09',js['tail'],'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
         for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label,'json' if dataset=='json-dynamic' else dataset,dataset=='json-dynamic')}
-    stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text()!=body]
+    stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text(encoding="utf-8")!=body]
     if not args.check:
-        for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body)
+        for p,body in files.items():p.parent.mkdir(parents=True,exist_ok=True);p.write_text(body, encoding="utf-8")
         stale=[]
     for path,body in files.items():
         if path.suffix!='.svg' or path.stem.endswith('-dark'):continue

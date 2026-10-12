@@ -1,8 +1,8 @@
-﻿"""Exact token sets are model-ID sets, not byte strings or token sequences."""
+"""Exact token sets are model-ID sets, not byte strings or token sequences."""
 import pytest
 import glrmask
 
-ONE = "glrm 1; start start; extern token T; nt start = T;"
+ONE = "glrm 1; start start; extern T; nt start = T;"
 MODES = [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
          glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]
 
@@ -51,7 +51,7 @@ def test_missing_ids_and_duplicate_explicit_ids_are_rejected():
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
-    source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
+    source = "glrm 1; start start; extern A; extern B; nt start = A B;"
     c = (glrmask.Grammar.from_glrm(source)
          .bind("A", v.tokens(range(10, 31)))
          .bind("B", v.token_ranges([range(20, 41), range(70, 81)]))

@@ -45,28 +45,22 @@ pub struct Vocab {
     max_token_byte_len: OnceLock<usize>,
 }
 
-/// One exact model token, qualified by the Vocab it belongs to.
+/// Consume exactly one model token ID, ordinary or special, regardless of its bytes.
 ///
-/// This is the value accepted by GLRMask grammar/module binding APIs. Carrying
-/// the vocabulary reference prevents a naked token ID from being accidentally
-/// attached to a grammar compiled for a different tokenizer.
-#[derive(Debug, Clone)]
-pub struct ExactToken {
-    vocab: Vocab,
+/// This value owns no vocabulary. Compilation or binding to a compiled module
+/// validates membership in the actual vocabulary; equal IDs across vocabularies
+/// are not a tokenizer identity guarantee.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Token {
     id: u32,
 }
 
-impl ExactToken {
-    /// The exact model token ID.
-    pub fn id(&self) -> u32 {
-        self.id
-    }
+impl Token {
+    /// Describe consumption of one exact ID. Membership is checked at compile/link binding.
+    pub const fn new(id: u32) -> Self { Self { id } }
 
-    /// Whether this value belongs to exactly vocab's token-ID/byte mapping.
-    #[doc(hidden)]
-    pub fn targets(&self, vocab: &Vocab) -> bool {
-        self.vocab.same_model_vocab(vocab)
-    }
+    /// The exact model token ID.
+    pub const fn id(&self) -> u32 { self.id }
 }
 
 /// Several exact model tokens, qualified by the Vocab they belong to.
@@ -210,19 +204,6 @@ impl Vocab {
             exact_token_ranges,
             max_token_byte_len,
         }
-    }
-
-    /// Resolve one exact model token for use in a grammar/module binding.
-    pub fn token(&self, token_id: u32) -> Result<ExactToken, ExactTokenError> {
-        if !self.contains_exact_token_id(token_id) {
-            return Err(ExactTokenError::new(format!(
-                "token ID {token_id} is not present in this vocabulary",
-            )));
-        }
-        Ok(ExactToken {
-            vocab: self.clone(),
-            id: token_id,
-        })
     }
 
     /// Resolve a non-empty set of exact model tokens for one binding.
@@ -518,9 +499,9 @@ mod tests {
     #[test]
     fn exact_tokens_validate_membership_and_duplicates() {
         let vocab = Vocab::new(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
-        assert_eq!(vocab.token(2).unwrap().id(), 2);
+        assert_eq!(Token::new(2).id(), 2);
         assert_eq!(vocab.tokens([7, 2]).unwrap().ids(), &[2, 7]);
-        assert!(vocab.token(3).is_err());
+        assert_eq!(Token::new(3).id(), 3); // target membership is deferred
         assert!(vocab.tokens([]).is_err());
         assert!(vocab.tokens([2, 2]).is_err());
     }
@@ -528,7 +509,7 @@ mod tests {
     #[test]
     fn exact_only_ids_are_bindable_but_not_byte_entries() {
         let vocab = Vocab::new_with_exact_token_ids(vec![(0, b"a".to_vec())], [77, 78]);
-        assert_eq!(vocab.token(77).unwrap().id(), 77);
+        assert_eq!(Token::new(77).id(), 77);
         assert_eq!(vocab.tokens([78, 77]).unwrap().ids(), &[77, 78]);
         assert_eq!(vocab.get(77), None);
         assert!(vocab.contains_exact_token_id(78));
@@ -538,8 +519,8 @@ mod tests {
         let missing_domain = Vocab::new(vec![(0, b"a".to_vec())]);
         assert!(vocab.same_model_vocab(&same));
         assert!(!vocab.same_model_vocab(&missing_domain));
-        assert!(vocab.token(77).unwrap().targets(&same));
-        assert!(!vocab.token(77).unwrap().targets(&missing_domain));
+        assert!(same.contains_exact_token_id(Token::new(77).id()));
+        assert!(!missing_domain.contains_exact_token_id(Token::new(77).id()));
     }
 }
 #[cfg(test)]

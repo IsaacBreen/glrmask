@@ -1269,7 +1269,7 @@ mod tests {
             .parser_backend(ParserBackend::TemplateDfa);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#)
             .compile_with(&vocabulary, options()).unwrap();
-        let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc = "a" child "b";"#)
+        let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern child; nt doc = "a" child "b";"#)
             .compile_unlinked(&vocabulary).unwrap();
         let linked = parent.bind("child", &child).unwrap().link_with(options()).unwrap();
         let components = &linked.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components;
@@ -1741,7 +1741,7 @@ mod preparation_tests {
             .parser_backend(crate::ParserBackend::TemplateDfa);
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options.clone()).unwrap();
-        let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
+        let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern leaf; nt middle = "[" leaf "]";"#)
             .compile_unlinked(&vocab).unwrap().bind("leaf", &leaf).unwrap()
             .link_with(options.clone()).unwrap();
         materialize_deferred_composition_boundary_summary(&middle);
@@ -1757,7 +1757,7 @@ mod preparation_tests {
         let loaded = Constraint::load_with_vocab(middle.save(), &vocab).unwrap();
         assert!(persisted_boundary_candidate_ids(&loaded, &vocab).unwrap().is_none(),
             "pre-fix nullable candidate proof must widen before it can exclude []!");
-        let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
+        let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern middle; nt root = "X" middle "!";"#)
             .compile_unlinked(&vocab).unwrap().bind("middle", &loaded).unwrap()
             .link_with(options).unwrap();
         let mut state = root.start(); state.commit_bytes(b"X").unwrap();

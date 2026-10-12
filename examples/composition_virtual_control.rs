@@ -30,7 +30,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
             let start=Instant::now();
             let leaf=Constraint::compile(if json {Grammar::json_schema(source)} else {Grammar::glrm(source)},&vocab)?;
             let parent=Constraint::compile(Grammar::glrm(
-                r#"glrm 1; start root; extern grammar payload; nt root = "X" payload "!";"#),&vocab)?;
+                r#"glrm 1; start root; extern payload; nt root = "X" payload "!";"#),&vocab)?;
             let components_ms=start.elapsed().as_secs_f64()*1000.;
             let start=Instant::now();let bound=parent.bind_grammar_dynamic_boundary("payload",leaf)?;
             let link_ms=start.elapsed().as_secs_f64()*1000.;

@@ -100,15 +100,19 @@ fn options(
         .optimization(mode).parser_backend(backend.into())
 }
 
-/// One exact model token, retaining its complete vocabulary identity.
-#[pyclass(name = "ExactToken", module = "glrmask", frozen)]
+/// Consume exactly one token ID; membership is validated against the target vocabulary.
+#[pyclass(name = "Token", module = "glrmask", frozen)]
 #[derive(Clone)]
-pub(super) struct PyExactToken {
-    pub(super) inner: glrmask::ExactToken,
+pub(super) struct PyToken {
+    pub(super) inner: glrmask::Token,
 }
 
 #[pymethods]
-impl PyExactToken {
+impl PyToken {
+    #[new]
+    #[pyo3(signature = (id))]
+    fn new(id: u32) -> Self { Self { inner: glrmask::Token::new(id) } }
+
     #[getter]
     fn id(&self) -> u32 { self.inner.id() }
 }
@@ -145,7 +149,7 @@ enum SourceKind { Ebnf, Lark, Glrm, JsonSchema }
 enum Binding {
     Source(Box<PyGrammar>),
     Constraint(Arc<glrmask::Constraint>),
-    Token(glrmask::ExactToken),
+    Token(glrmask::Token),
     Tokens(glrmask::ExactTokens),
 }
 
@@ -154,27 +158,27 @@ impl Binding {
         if let Ok(value) = value.extract::<PyRef<'_, PyGrammar>>() {
             return Ok(Self::Source(Box::new(value.clone())));
         }
-        if let Ok(value) = value.extract::<PyRef<'_, PyExactToken>>() {
+        if let Ok(value) = value.extract::<PyRef<'_, PyToken>>() {
             return Ok(Self::Token(value.inner.clone()));
         }
         if let Ok(value) = value.extract::<PyRef<'_, PyExactTokens>>() {
             return Ok(Self::Tokens(value.inner.clone()));
         }
-        Err(PyTypeError::new_err("Grammar.bind accepts Grammar, ExactToken, or ExactTokens"))
+        Err(PyTypeError::new_err("Grammar.bind accepts Grammar, Token, or ExactTokens"))
     }
 
     fn extract_for_unlinked(value: &Bound<'_, PyAny>) -> PyResult<Self> {
         if let Ok(value) = value.extract::<PyRef<'_, PyConstraint>>() {
             return Ok(Self::Constraint(Arc::clone(&value.inner)));
         }
-        if let Ok(value) = value.extract::<PyRef<'_, PyExactToken>>() {
+        if let Ok(value) = value.extract::<PyRef<'_, PyToken>>() {
             return Ok(Self::Token(value.inner.clone()));
         }
         if let Ok(value) = value.extract::<PyRef<'_, PyExactTokens>>() {
             return Ok(Self::Tokens(value.inner.clone()));
         }
         Err(PyTypeError::new_err(
-            "UnlinkedConstraint.bind accepts Constraint, ExactToken, or ExactTokens",
+            "UnlinkedConstraint.bind accepts Constraint, Token, or ExactTokens",
         ))
     }
 
@@ -336,7 +340,7 @@ impl PyUnlinkedConstraint {
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGrammar>()?;
     module.add_class::<PyUnlinkedConstraint>()?;
-    module.add_class::<PyExactToken>()?;
+    module.add_class::<PyToken>()?;
     module.add_class::<PyExactTokens>()?;
     module.add_class::<PyOptimization>()?;
     module.add_class::<PyBoundaryTriggerDetail>()?;

@@ -84,7 +84,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
     let host = Grammar::from_glrm(
-        r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,
+        r#"glrm 1; start start; extern child; nt start = "[" child "]";"#,
     ).compile_unlinked(&vocab).unwrap();
     let loaded_host = UnlinkedConstraint::load(host.save()).unwrap();
     for parent in [&host, &loaded_host] {

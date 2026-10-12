@@ -315,7 +315,7 @@ mod candidate_tests {
         assert!(expected.len() < vocab.len());
 
         let parent = Grammar::from_glrm(
-            r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#,
+            r#"glrm 1; extern child; start root; nt root = "x" child "y";"#,
         )
         .compile_unlinked(&vocab)
         .unwrap();
@@ -358,9 +358,9 @@ mod candidate_tests {
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"xy".to_vec()),
             (5, b" xay".to_vec()), (6, b"xayxay".to_vec()), (7, b"yz".to_vec())]);
         for parent in [
-            r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
-            r#"glrm 1; start root; extern grammar child; nt root = "x" child "y" "x" child "y";"#,
-            r#"start root; extern grammar child; ignore WS; t WS ::= " "+; nt root ::= "x" child "y";"#,
+            r#"glrm 1; start root; extern child; nt root = "x" child "y";"#,
+            r#"glrm 1; start root; extern child; nt root = "x" child "y" "x" child "y";"#,
+            r#"start root; extern child; ignore WS; t WS ::= " "+; nt root ::= "x" child "y";"#,
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
@@ -405,7 +405,7 @@ mod candidate_tests {
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"yz".to_vec())]);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#)
             .compile(&vocab).unwrap();
-        let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
+        let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern child;
             nt root = "x" child "y";"#)
             .compile_unlinked(&vocab).unwrap().bind("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();

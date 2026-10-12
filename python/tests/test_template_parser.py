@@ -198,7 +198,7 @@ def test_python_compiled_composition_uses_native_defaults(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
     child = grammar_from_ebnf('start ::= "a"').compile(
         vocab, optimization=mode, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    parent = grammar_from_glrm('glrm 1; start root; extern grammar C; nt root = C;').compile_unlinked(vocab)
+    parent = grammar_from_glrm('glrm 1; start root; extern C; nt root = C;').compile_unlinked(vocab)
     assert glrmask._internal.parser_backend(child) == glrmask._internal.ParserBackend.TEMPLATE_DFA
     ordinary = grammar_from_ebnf('start ::= "a"').compile(vocab, optimization=mode)
     assert glrmask._internal.parser_backend(ordinary) == glrmask._internal.ParserBackend.TEMPLATE_DFA
@@ -232,7 +232,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
         vocab, optimization=glrmask.Optimization.FAST_RUNTIME,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').compile_unlinked(vocab)
+        'glrm 1; start root; extern C; nt root = "x" C "y";').compile_unlinked(vocab)
     linked = link_module(parent.bind("C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[6])
     for compiled in representations(linked, vocab):
@@ -279,7 +279,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
                 parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
     child = glrmask.Constraint.load(child.save())
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "p" C "q";').compile_unlinked(vocab)
+        'glrm 1; start root; extern C; nt root = "p" C "q";').compile_unlinked(vocab)
     compiled = link_module(parent.bind("C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[8])
     for compiled in representations(compiled, vocab):
@@ -317,7 +317,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
         'start root; t A ::= /a?/; nt root ::= A;').compile(
             vocab, optimization=mode, **selection)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').compile_unlinked(vocab)
+        'glrm 1; start root; extern C; nt root = "x" C "y";').compile_unlinked(vocab)
     language = [b"xy", b"xay"]
     for child in representations(child, vocab):
         child_bytes = child.save()

@@ -104,8 +104,8 @@ fn main() {
     let depth = args.get(3).map(|s| s.parse::<usize>().expect("vocab depth")).unwrap_or(2);
     let v = vocabulary(depth);
     eprintln!("PROBE_CONFIG vocabulary_depth={depth} repeats={repeats}");
-    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";";
-    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";";
+    let middle_source = "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";";
+    let outer_source = "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";";
     println!("case,prefix,repeats,mask_p50_us,mask_p90_us,mask_max_us,tbm_p50_us,tbm_p90_us,tbm_max_us,allowed,hash");
     for (fixture, leaf_source, monolithic_source, prefixes) in [
         ("literal", "glrm 1; start leaf; nt leaf = \"a\";",

@@ -1322,7 +1322,7 @@ impl Constraint {
         })
     }
 
-    /// Compile GLRM containing typed `extern grammar name;` declarations and bind
+    /// Compile GLRM containing typed `extern name;` declarations and bind
     /// each declaration to an already-compiled child constraint.
     ///
     /// Binding names are the source names of top-level externals. Externals
@@ -2508,7 +2508,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar payload;
+                extern payload;
                 nt document ::= "X" payload "!";
             "#,
             &[("payload", &child)],
@@ -2552,8 +2552,8 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar left;
-                extern grammar right;
+                extern left;
+                extern right;
                 nt document ::= "X" left right "!";
             "#,
             &[("left", &child), ("right", &child)],
@@ -2594,7 +2594,7 @@ mod tests {
                 start document;
                 g wrapper ::= {
                     start value;
-                    extern grammar leaf;
+                    extern leaf;
                     nt value ::= "[" leaf "]";
                 };
                 nt document ::= "<" wrapper ">";
@@ -2627,7 +2627,7 @@ mod tests {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                extern grammar child;
+                extern child;
                 nt document ::= "<" child ">";
             "#,
             &[("child", &child)],
@@ -2668,10 +2668,10 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let source = "start document; extern grammar child; nt document ::= child;";
+        let source = "start document; extern child; nt document ::= child;";
 
         let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
-            .expect("an unresolved extern grammar is a valid late-binding slot");
+            .expect("an unresolved extern is a valid late-binding slot");
         assert_eq!(unresolved.late_grammar_slots.len(), 1);
         assert_eq!(unresolved.late_grammar_slots[0].name, "child");
         let late_bound = unresolved
@@ -2715,7 +2715,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar child;
+                extern child;
                 nt document ::= child "!";
             "#,
             &[("child", &child)],
@@ -2754,7 +2754,7 @@ mod tests {
         )
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-            "start document; extern grammar child; nt document ::= child;",
+            "start document; extern child; nt document ::= child;",
             &[("child", &child)],
             &vocab,
             &[1],

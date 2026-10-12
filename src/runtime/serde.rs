@@ -9616,7 +9616,7 @@ mod tests {
     fn current_constraint_artifact_preserves_static_dynamic_overlay() {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let parent = Constraint::compile(crate::Grammar::glrm(
-            "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
+            "glrm 1; start root; extern child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let loaded = Constraint::load(&constraint.save()).unwrap();
