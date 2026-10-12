@@ -90,6 +90,10 @@ required-features = ["internal-api"]
 
 # Public API suites.
 [[test]]
+name = "token_range_bindings"
+path = "tests/token_range_bindings.rs"
+
+[[test]]
 name = "final_public_api_review"
 path = "tests/final_public_api_review.rs"
 

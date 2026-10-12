@@ -83,6 +83,8 @@ pub enum GrammarExpr {
     Literal(Vec<u8>),
     /// Match one exact LLM token id. This is not a byte-language expression.
     SpecialToken(u32),
+    /// Match one exact model token from an inclusive interval, without expansion.
+    SpecialTokenRange(u32, u32),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     LexerDfa(Arc<LexerDFA>),
@@ -105,6 +107,16 @@ pub enum GrammarExpr {
     /// nonterminal rule the labels denote parser terminals; in a terminal rule
     /// they denote byte-language expressions compiled into one lexer DFA.
     ExprNFA(Box<ExprNFA>),
+}
+
+impl GrammarExpr {
+    pub fn exact_token_range(&self) -> Option<(u32, u32)> {
+        match self {
+            Self::SpecialToken(id) => Some((*id, *id)),
+            Self::SpecialTokenRange(start, end) => Some((*start, *end)),
+            _ => None,
+        }
+    }
 }
 
 /// Controls the tree shape used when lowering [`GrammarExpr::SeparatedSequence`].
@@ -219,7 +231,7 @@ impl NamedGrammar {
                 | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte
-                | GrammarExpr::SpecialToken(_) => {}
+                | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => {}
             }
         }
 
@@ -352,7 +364,7 @@ impl NamedGrammar {
                         collect_refs(symbol, out);
                     }
                 }
-                GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_)
+                GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte => {}
@@ -526,6 +538,9 @@ fn grammar_expr_to_lark_with_indent(
         GrammarExpr::SpecialToken(token_id) => {
             write!(out, "@token({token_id})").unwrap();
         }
+        GrammarExpr::SpecialTokenRange(start, end) => {
+            write!(out, "@tokens({start}..={end})").unwrap();
+        }
         GrammarExpr::Quantified(inner, Quantifier::Optional) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
             out.push('?');
@@ -613,7 +628,7 @@ struct Lowerer<'a> {
     literal_terminal_ids: FxHashMap<Vec<u8>, (TerminalID, String)>,
     terminals: Vec<Terminal>,
     terminal_expr_hash_index: FxHashMap<u64, Vec<TerminalID>>,
-    special_terminal_ids: FxHashMap<u32, TerminalID>,
+    special_terminal_ids: FxHashMap<(u32, u32), TerminalID>,
     nonterminal_ids: FxHashMap<String, NonterminalID>,
     next_nonterminal_id: NonterminalID,
     generated_nonterminal_counter: u32,
@@ -948,7 +963,7 @@ impl<'a> Lowerer<'a> {
             })),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -1029,6 +1044,9 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::SpecialToken(token_id) => Ok(Some(Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
+            ))),
+            GrammarExpr::SpecialTokenRange(start, end) => Ok(Some(Symbol::Terminal(
+                self.special_range_terminal_id(&format!("@tokens({start}..={end})"), *start, *end),
             ))),
             GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
             GrammarExpr::CharClass { .. }
@@ -1121,7 +1139,7 @@ impl<'a> Lowerer<'a> {
                 self.nonnullable_terminal_symbol(expr)
             }
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
@@ -1187,7 +1205,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -1306,15 +1324,24 @@ impl<'a> Lowerer<'a> {
     }
 
     fn special_terminal_id(&mut self, name: &str, token_id: u32) -> TerminalID {
-        if let Some(&id) = self.special_terminal_ids.get(&token_id) {
+        self.special_range_terminal_id(name, token_id, token_id)
+    }
+
+    fn special_range_terminal_id(&mut self, name: &str, start: u32, end: u32) -> TerminalID {
+        assert!(start <= end, "an exact-token interval must be non-empty");
+        if let Some(&id) = self.special_terminal_ids.get(&(start, end)) {
             self.terminal_ids_by_name.insert(name.to_string(), id);
             return id;
         }
         let id = self.terminals.len() as TerminalID;
-        self.special_terminal_ids.insert(token_id, id);
+        self.special_terminal_ids.insert((start, end), id);
         self.terminal_names.insert(id, name.to_string());
         self.terminal_ids_by_name.insert(name.to_string(), id);
-        self.terminals.push(Terminal::SpecialToken { id, token_id });
+        self.terminals.push(if start == end {
+            Terminal::SpecialToken { id, token_id: start }
+        } else {
+            Terminal::SpecialTokenRange { id, start, end }
+        });
         id
     }
 
@@ -2108,7 +2135,7 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::Ref(_)
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -2527,6 +2554,9 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::SpecialToken(token_id) => Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
             ),
+            GrammarExpr::SpecialTokenRange(start, end) => Symbol::Terminal(
+                self.special_range_terminal_id(&format!("@tokens({start}..={end})"), *start, *end),
+            ),
             GrammarExpr::CharClass { def, negate, utf8 } => {
                 let pattern = char_class_pattern(def, *negate);
                 Symbol::Terminal(self.terminal_id(&pattern, &pattern, *utf8))
@@ -2835,7 +2865,7 @@ pub fn resolved_named_terminal_exprs(
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
     {
-        if matches!(rule.expr, GrammarExpr::SpecialToken(_)) {
+        if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
             continue;
         }
         let expr = if let Some(cached) = terminal_expr_cache.get(&rule.name) {
@@ -2874,6 +2904,11 @@ fn grammar_expr_to_expr(
             return Err(GlrMaskError::GrammarParse(format!(
                 "@token({token_id}) cannot be composed inside a byte terminal expression"
             )));
+        }
+        GrammarExpr::SpecialTokenRange(_, _) => {
+            return Err(GlrMaskError::GrammarParse(
+                "exact token ranges cannot be composed inside a byte terminal expression".into()
+            ));
         }
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let pattern = char_class_pattern(def, *negate);
@@ -3011,7 +3046,7 @@ fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3043,7 +3078,7 @@ fn grammar_expr_is_nullable(
             *min == 0 || grammar_expr_is_nullable(expr, rule_nullable)
         }
         GrammarExpr::Literal(bytes) => bytes.is_empty(),
-        GrammarExpr::SpecialToken(_) => false,
+        GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => false,
         GrammarExpr::CharClass { def, negate, utf8 } => {
             parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
         }
@@ -3182,7 +3217,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -3531,7 +3566,7 @@ fn lower_with_resolved_terminal_exprs_impl(
         // Terminal rules: convert the entire body to a single Terminal::Expr.
         // Refs to other terminal rules are resolved via Expr::Shared.
         if rule.is_terminal {
-            if let GrammarExpr::SpecialToken(token_id) = &rule.expr {
+            if let Some((start, end)) = rule.expr.exact_token_range() {
                 if rule.is_internal {
                     return Err(GlrMaskError::GrammarParse(format!(
                         "internal terminal {} cannot be a special LLM token",
@@ -3539,7 +3574,7 @@ fn lower_with_resolved_terminal_exprs_impl(
                     )));
                 }
                 let lhs = lowerer.nonterminal_id(&rule.name);
-                let tid = lowerer.special_terminal_id(&rule.name, *token_id);
+                let tid = lowerer.special_range_terminal_id(&rule.name, start, end);
                 lowerer.rules.push(Rule {
                     lhs,
                     rhs: vec![Symbol::Terminal(tid)],
@@ -3672,7 +3707,7 @@ fn lower_with_resolved_terminal_exprs_impl(
     });
     if ignore_terminal.is_some_and(|ignore_id| {
         lowerer.terminals.iter().any(|terminal| {
-            matches!(terminal, Terminal::SpecialToken { id, .. } if *id == ignore_id)
+            matches!(terminal, Terminal::SpecialToken { id, .. } | Terminal::SpecialTokenRange { id, .. } if *id == ignore_id)
         })
     }) {
         return Err(GlrMaskError::GrammarParse(

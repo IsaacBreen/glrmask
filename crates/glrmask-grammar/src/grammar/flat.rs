@@ -96,6 +96,12 @@ pub enum Terminal {
         id: TerminalID,
         token_id: u32,
     },
+    /// One exact model-token event selected from an inclusive interval.
+    SpecialTokenRange {
+        id: TerminalID,
+        start: u32,
+        end: u32,
+    },
 }
 
 impl Rule {
@@ -113,7 +119,7 @@ impl Terminal {
                 crate::automata::lexer::regex::parse_regex(pattern, *utf8).is_nullable()
             }
             Self::Expr { expr, .. } => expr.is_nullable(),
-            Self::SpecialToken { .. } => false,
+            Self::SpecialToken { .. } | Self::SpecialTokenRange { .. } => false,
         }
     }
 
@@ -122,7 +128,7 @@ impl Terminal {
             Terminal::Literal { id, .. } => *id,
             Terminal::Pattern { id, .. } => *id,
             Terminal::Expr { id, .. } => *id,
-            Terminal::SpecialToken { id, .. } => *id,
+            Terminal::SpecialToken { id, .. } | Terminal::SpecialTokenRange { id, .. } => *id,
         }
     }
 
@@ -132,6 +138,7 @@ impl Terminal {
             Terminal::Pattern { pattern, .. } => pattern.clone(),
             Terminal::Expr { expr, .. } => format!("{:?}", expr),
             Terminal::SpecialToken { token_id, .. } => format!("@token({token_id})"),
+            Terminal::SpecialTokenRange { start, end, .. } => format!("@tokens({start}..={end})"),
         }
     }
 }

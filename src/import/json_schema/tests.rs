@@ -666,7 +666,7 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -696,7 +696,7 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -728,7 +728,7 @@ fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => false,
@@ -1692,7 +1692,7 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1724,7 +1724,7 @@ fn contains_ref_with_prefix(expr: &GrammarExpr, prefix: &str) -> bool {
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1802,7 +1802,7 @@ fn contains_intersect(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1840,7 +1840,7 @@ fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1872,7 +1872,7 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1908,7 +1908,7 @@ fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
             .any(|symbol| contains_literal_bytes(symbol, bytes)),
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -1949,7 +1949,7 @@ fn contains_raw_regex_substring(expr: &GrammarExpr, substring: &str) -> bool {
             .any(|symbol| contains_raw_regex_substring(symbol, substring)),
         GrammarExpr::Ref(_)
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::Epsilon
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::LexerDfa(_)
@@ -9866,7 +9866,7 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
                 }
                 GrammarExpr::Epsilon
                 | GrammarExpr::Ref(_)
-                | GrammarExpr::SpecialToken(_)
+                | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
                 | GrammarExpr::CharClass { .. }
                 | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)

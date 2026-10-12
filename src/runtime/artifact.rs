@@ -1618,7 +1618,37 @@ impl FastCommitTemplateDfas {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SpecialTokenTerminal {
     pub(crate) terminal_id: TerminalID,
+    /// Inclusive lower and upper bounds of one exact-token event.
     pub(crate) token_id: u32,
+    pub(crate) token_id_end: u32,
+}
+
+impl SpecialTokenTerminal {
+    pub(crate) fn contains(&self, token_id: u32) -> bool {
+        self.token_id <= token_id && token_id <= self.token_id_end
+    }
+
+    pub(crate) fn token_ids(&self) -> std::ops::RangeInclusive<u32> {
+        self.token_id..=self.token_id_end
+    }
+
+    /// Union a live interval into the original-token mask in word-sized chunks.
+    pub(crate) fn or_mask(&self, mask: &mut [u32]) {
+        let first = self.token_id as usize / 32;
+        if first >= mask.len() || self.token_id > self.token_id_end { return; }
+        let last = (self.token_id_end as usize / 32).min(mask.len() - 1);
+        let first_bits = u32::MAX << (self.token_id % 32);
+        let last_bits = if last == self.token_id_end as usize / 32 {
+            u32::MAX >> (31 - self.token_id_end % 32)
+        } else { u32::MAX };
+        if first == last {
+            mask[first] |= first_bits & last_bits;
+        } else {
+            mask[first] |= first_bits;
+            mask[first + 1..last].fill(u32::MAX);
+            mask[last] |= last_bits;
+        }
+    }
 }
 
 /// Compact runtime-only vocabulary trie. It deliberately stores only the

@@ -8416,26 +8416,12 @@ pub(crate) fn or_blocked_internal_tokens_for_exclusions(
 }
 
 fn update_special_token_mask(state: &ConstraintState<'_>, buf: &mut [u32]) {
-    let mut previous_token_id = None;
     for special in &state.constraint.special_token_terminals {
-        if state
-            .constraint
-            .is_late_grammar_placeholder_terminal(special.terminal_id)
-        {
-            continue;
-        }
-        if previous_token_id == Some(special.token_id) {
-            continue;
-        }
-        previous_token_id = Some(special.token_id);
-        if super::commit::advance_special_token_paths(
-            state.constraint,
-            &state.state,
-            special.token_id,
-        )
-        .is_some_and(|gss| !gss.is_empty())
-        {
-            set_mask_bit(buf, special.token_id);
+        if state.constraint.is_late_grammar_placeholder_terminal(special.terminal_id) { continue; }
+        if super::commit::advance_special_terminal_paths(
+            state.constraint, &state.state, special.terminal_id,
+        ).is_some_and(|gss| !gss.is_empty()) {
+            special.or_mask(buf);
         }
     }
 }

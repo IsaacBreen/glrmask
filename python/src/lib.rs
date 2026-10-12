@@ -572,6 +572,27 @@ fn advance_trace_step_to_dict<'py>(
     Ok(dict)
 }
 
+/// Resolve a contiguous builtin Python range without iterating its members.
+/// A non-range or strided range returns None for the explicit-ID fallback.
+fn contiguous_exact_token_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
+    let range_type = value.py().import("builtins")?.getattr("range")?;
+    if !value.is_instance(&range_type)? { return Ok(None); }
+    let step: i128 = value.getattr("step")?.extract()?;
+    if step != 1 && step != -1 { return Ok(None); }
+    let start: i128 = value.getattr("start")?.extract()?;
+    let stop: i128 = value.getattr("stop")?.extract()?;
+    let (first, last) = if step == 1 && start < stop {
+        (start, stop - 1)
+    } else if step == -1 && start > stop {
+        (stop + 1, start)
+    } else {
+        return Err(PyValueError::new_err("exact-token range must not be empty"));
+    };
+    let convert = |id| u32::try_from(id).map_err(|_| PyValueError::new_err(
+        "exact-token range contains an ID outside the u32 token-ID domain"));
+    Ok(Some(convert(first)?..=convert(last)?))
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -592,8 +613,29 @@ impl PyVocab {
     }
 
     /// Resolve a nonempty set of distinct exact token IDs.
-    fn tokens(&self, ids: Vec<u32>) -> PyResult<final_api::PyExactTokens> {
-        self.inner.tokens(ids).map(|inner| final_api::PyExactTokens { inner })
+    /// Contiguous Python ranges are retained compactly; other iterables are
+    /// consumed once and compressed. This matches ONE token, not a sequence.
+    fn tokens(&self, ids: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
+        let result = if let Some(range) = contiguous_exact_token_range(ids)? {
+            self.inner.token_ranges([range])
+        } else {
+            let ids = ids.try_iter()?.map(|item| item?.extract::<u32>())
+                .collect::<PyResult<Vec<_>>>()?;
+            self.inner.tokens(ids)
+        };
+        result.map(|inner| final_api::PyExactTokens { inner })
+            .map_err(|error| PyValueError::new_err(error.to_string()))
+    }
+
+    /// Resolve a union of contiguous Python ranges without enumerating IDs.
+    /// Stops are exclusive, as in range(start, stop). Overlaps and adjacency
+    /// are merged. Each range must be nonempty with step 1 or -1.
+    fn token_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
+        let ranges = ranges.try_iter()?.map(|item| {
+            contiguous_exact_token_range(&item?)?.ok_or_else(|| PyValueError::new_err(
+                "token_ranges expects nonempty Python ranges with step 1 or -1; use tokens for individual or strided IDs"))
+        }).collect::<PyResult<Vec<_>>>()?;
+        self.inner.token_ranges(ranges).map(|inner| final_api::PyExactTokens { inner })
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 

@@ -388,7 +388,7 @@ fn public_constraint_load_rejects_an_open_module_body() {
     .compile_unlinked(&v)
     .unwrap();
     let bytes = module.save();
-    assert!(bytes.starts_with(b"GLRMOD03"));
+    assert!(bytes.starts_with(b"GLRMOD05"));
     let manifest_len =
         u64::from_le_bytes(bytes[8..16].try_into().expect("module header")) as usize;
     let body_start = 16 + manifest_len;

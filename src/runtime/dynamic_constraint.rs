@@ -86,10 +86,10 @@ const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18: u16 = 18;
 // v20 additionally persists exact terminal-projected lexer quotients used by
 // dynamic-mask subtree certificates. As documented above, the pre-release
 // wire is intentionally allowed to replace the previous current layout.
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 20;
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 22;
 // Template backends use the same table-free Constraint body as static mode.
 // This avoids a second parser codec and cannot restore an LR fallback.
-const TEMPLATE_DYNAMIC_CONSTRAINT_VERSION: u16 = 21;
+const TEMPLATE_DYNAMIC_CONSTRAINT_VERSION: u16 = 23;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
@@ -126,8 +126,8 @@ const LEGACY_DYNAMIC_TRANSFER_VERSION_V12: u16 = 12;
 // v15 retains the six raw sections and v13 metadata, but binds the envelope to
 // the exact canonical model vocabulary. v1-v13 lacked a mandatory identity
 // field and cannot safely validate an external vocabulary; recompile them.
-const DYNAMIC_TRANSFER_VERSION: u16 = 15;
-const TEMPLATE_DYNAMIC_TRANSFER_VERSION: u16 = 14;
+const DYNAMIC_TRANSFER_VERSION: u16 = 17;
+const TEMPLATE_DYNAMIC_TRANSFER_VERSION: u16 = 16;
 const DYNAMIC_TRANSFER_V12_PAYLOAD_HEADER_LEN: usize = 8;
 const DYNAMIC_TRANSFER_V15_PAYLOAD_HEADER_LEN: usize = 8 + 32;
 const DYNAMIC_TRANSFER_V12_ALT_DESCRIPTOR_LEN: usize = 6 * 8;
@@ -973,7 +973,7 @@ impl DynamicConstraint {
             .next_back()
             .copied()
             .into_iter()
-            .chain(special_token_terminals.iter().map(|special| special.token_id))
+            .chain(special_token_terminals.iter().map(|special| special.token_id_end))
             .max()
             .unwrap_or(0);
         // Compile callers own precisely this Vocab's immutable byte inventory.
@@ -1286,7 +1286,7 @@ impl DynamicConstraint {
         let special_by_terminal = constraint
             .special_token_terminals
             .iter()
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, (special.token_id, special.token_id_end)))
             .collect::<BTreeMap<_, _>>();
         let terminals = exprs
             .iter()
@@ -1296,7 +1296,9 @@ impl DynamicConstraint {
                 let id = id as u32;
                 special_by_terminal.get(&id).copied().map_or(
                     Terminal::Expr { id, expr },
-                    |token_id| Terminal::SpecialToken { id, token_id },
+                    |(start, end)| if start == end {
+                        Terminal::SpecialToken { id, token_id: start }
+                    } else { Terminal::SpecialTokenRange { id, start, end } },
                 )
             })
             .collect::<Vec<_>>();
@@ -3256,29 +3258,9 @@ impl DynamicConstraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if version <= 13 {
+        if !matches!(version, DYNAMIC_TRANSFER_VERSION | TEMPLATE_DYNAMIC_TRANSFER_VERSION) {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic transfer artifact version {version}: lacks mandatory exact vocabulary identity; recompile the pre-release artifact")));
-        }
-        if !matches!(
-            version,
-            DYNAMIC_TRANSFER_VERSION_V1
-                | DYNAMIC_TRANSFER_VERSION_V2
-                | DYNAMIC_TRANSFER_VERSION_V3
-                | DYNAMIC_TRANSFER_VERSION_V4
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V5
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V6
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V7
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V9
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V10
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V11
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V12
-                | DYNAMIC_TRANSFER_VERSION
-                | TEMPLATE_DYNAMIC_TRANSFER_VERSION
-        ) {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic transfer artifact version {version}",
-            )));
+                "unsupported dynamic transfer artifact version {version}: recompile the pre-release artifact")));
         }
         let payload_len = usize::try_from(u64::from_le_bytes(
             bytes[10..18]
@@ -3693,27 +3675,9 @@ impl DynamicConstraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if !matches!(
-            version,
-            1 | 2
-                | 7
-                | 8
-                | 9
-                | 10
-                | 11
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V12
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V13
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14_MAIN
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18
-                | DYNAMIC_CONSTRAINT_VERSION
-                | TEMPLATE_DYNAMIC_CONSTRAINT_VERSION
-        ) {
+        if !matches!(version, DYNAMIC_CONSTRAINT_VERSION | TEMPLATE_DYNAMIC_CONSTRAINT_VERSION) {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic constraint artifact version {version}",
-            )));
+                "unsupported dynamic constraint artifact version {version}: recompile the pre-release artifact")));
         }
         let payload_len = usize::try_from(u64::from_le_bytes(
             bytes[10..18]

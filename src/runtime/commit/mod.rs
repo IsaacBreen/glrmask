@@ -1156,43 +1156,42 @@ fn assert_commit_oracles(
     }
 }
 
+pub(super) fn advance_special_terminal_paths(
+    constraint: &Constraint,
+    state: &ParserStateMap,
+    terminal_id: u32,
+) -> Option<ParserGSS> {
+    let mut merged = None::<ParserGSS>;
+    for (&initial_state, initial_gss) in state.iter() {
+        if !runtime_tokenizer_is_reset_state(constraint, initial_state) { continue; }
+        let pruned = prune_single_initial_state_for_terminal(
+            initial_gss.clone(), initial_state, terminal_id, None,
+        );
+        if pruned.is_empty() { continue; }
+        let Some(advanced) = advance_parser_stacks_if_possible(constraint, &pruned, terminal_id)
+            else { continue; };
+        merged = Some(match merged.take() {
+            Some(existing) => existing.merge(&advanced),
+            None => advanced,
+        });
+    }
+    merged
+}
+
 pub(super) fn advance_special_token_paths(
     constraint: &Constraint,
     state: &ParserStateMap,
     token_id: u32,
 ) -> Option<ParserGSS> {
     let mut merged = None::<ParserGSS>;
-
-    for (&initial_state, initial_gss) in state.iter() {
-        if !runtime_tokenizer_is_reset_state(constraint, initial_state) {
-            continue;
-        }
-        for special in constraint
-            .special_token_terminals
-            .iter()
-            .filter(|special| special.token_id == token_id)
-        {
-            let pruned = prune_single_initial_state_for_terminal(
-                initial_gss.clone(),
-                initial_state,
-                special.terminal_id,
-                None,
-            );
-            if pruned.is_empty() {
-                continue;
-            }
-            let Some(advanced) =
-                advance_parser_stacks_if_possible(constraint, &pruned, special.terminal_id)
-            else {
-                continue;
-            };
-            merged = Some(match merged.take() {
-                Some(existing) => existing.merge(&advanced),
-                None => advanced,
-            });
-        }
+    for special in constraint.special_token_terminals.iter().filter(|special| special.contains(token_id)) {
+        let Some(advanced) = advance_special_terminal_paths(constraint, state, special.terminal_id)
+            else { continue; };
+        merged = Some(match merged.take() {
+            Some(existing) => existing.merge(&advanced),
+            None => advanced,
+        });
     }
-
     merged
 }
 
@@ -1223,7 +1222,7 @@ fn advance_special_token_paths_profiled(
         for special in constraint
             .special_token_terminals
             .iter()
-            .filter(|special| special.token_id == token_id)
+            .filter(|special| special.contains(token_id))
         {
             let prune_started_at = Instant::now();
             let pruned = prune_single_initial_state_for_terminal(

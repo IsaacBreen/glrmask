@@ -155,6 +155,8 @@ impl Resolver<'_> {
             GrammarExpr::Literal(bytes) => ParserExpr::Terminal(self.lexical.literal_terminal_id(bytes)),
             GrammarExpr::SpecialToken(token) => ParserExpr::Terminal(
                 self.lexical.special_terminal_id("<exact token>", *token)),
+            GrammarExpr::SpecialTokenRange(start, end) => ParserExpr::Terminal(
+                self.lexical.special_range_terminal_id("<exact token range>", *start, *end)),
             GrammarExpr::ExprNFA(graph) => {
                 let count = graph.nfa.states.len();
                 self.remaining_nodes = self.remaining_nodes.checked_sub(count)
@@ -218,13 +220,13 @@ pub fn resolve_parser_grammar(grammar: &NamedGrammar) -> Result<(ParserGrammar, 
     let mut resolver = Resolver { lexical, rule_ids, named_terminals: FxHashMap::default(), remaining_nodes: 4_000_000 };
     for rule in grammar.rules.iter().filter(|rule| rule.is_terminal) {
         if rule.is_internal {
-            if matches!(rule.expr, GrammarExpr::SpecialToken(_)) {
+            if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
                 return Err(error("an internal lexical helper cannot be an exact token"));
             }
             continue;
         }
-        let terminal = if let GrammarExpr::SpecialToken(token) = &rule.expr {
-            (resolver.lexical.special_terminal_id(&rule.name, *token), false)
+        let terminal = if let Some((start, end)) = rule.expr.exact_token_range() {
+            (resolver.lexical.special_range_terminal_id(&rule.name, start, end), false)
         } else {
             let expression = resolver.lexical.resolve_terminal_expr(Some(&rule.name), &rule.expr)?;
             resolver.terminal(&rule.name, expression)
@@ -244,7 +246,7 @@ pub fn resolve_parser_grammar(grammar: &NamedGrammar) -> Result<(ParserGrammar, 
     let ignore_terminal = grammar.ignore.as_ref().map(|name| {
         let &(terminal, _) = resolver.named_terminals.get(name)
             .ok_or_else(|| error(format!("ignore rule {name:?} is not an emitting terminal")))?;
-        if matches!(resolver.lexical.terminals[terminal as usize], Terminal::SpecialToken { .. }) {
+        if matches!(resolver.lexical.terminals[terminal as usize], Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. }) {
             return Err(error("an exact token cannot be an ignore terminal"));
         }
         Ok(terminal)

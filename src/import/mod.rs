@@ -41,9 +41,9 @@ pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGramm
 
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
-    bindings: &[(&str, &[u32])],
+    bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_with_external_terminals(
+    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
         source,
         bindings,
     )?)
@@ -318,28 +318,11 @@ pub(crate) fn compile_glrm_with_protected_shift_terminals(
 }
 
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
-    if vocab.is_empty() {
-        return Ok(0);
-    }
-    if let Some(next) = vocab.max_token_id().checked_add(1) {
+    if let Some(next) = vocab.max_exact_token_id().and_then(|id| id.checked_add(1)) {
         return Ok(next);
     }
-
-    // Only the pathological `u32::MAX` case needs a vocabulary scan. Normal
-    // dense model vocabularies stay on the constant-time max+1 path.
-    let mut expected = 0u32;
-    for (token_id, _) in vocab.iter() {
-        if token_id != expected {
-            return Ok(expected);
-        }
-        expected = expected.checked_add(1).ok_or_else(|| {
-            crate::GlrMaskError::Compilation(
-                "every u32 token ID is occupied; no external-subgrammar placeholder is available"
-                    .to_string(),
-            )
-        })?;
-    }
-    Ok(expected)
+    vocab.next_available_exact_token_id(0).ok_or_else(|| crate::GlrMaskError::Compilation(
+        "every u32 token ID is occupied; no external-subgrammar placeholder is available".into()))
 }
 
 pub(crate) fn external_placeholder_token_id_avoiding(
@@ -349,11 +332,9 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let reserved = reserved.into_iter().collect::<BTreeSet<_>>();
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
-        if !reserved.contains(&candidate)
-            && !vocab.contains_exact_token_id(candidate)
-        {
-            return Ok(candidate);
-        }
+        candidate = vocab.next_available_exact_token_id(candidate).ok_or_else(||
+            crate::GlrMaskError::Compilation("no external-subgrammar placeholder is available".into()))?;
+        if !reserved.contains(&candidate) { return Ok(candidate); }
         candidate = candidate.checked_add(1).ok_or_else(|| {
             crate::GlrMaskError::Compilation(
                 "every u32 token ID is occupied; no external-subgrammar placeholder is available"
@@ -525,7 +506,7 @@ pub(crate) fn compile_dynamic_glrm_fixture(
     source: &str, vocab: &crate::Vocab,
     backend: crate::runtime::parser_backend::DynamicParserBackend,
 ) -> crate::Result<DynamicConstraint> {
-    let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+    let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
         source, first_external_placeholder_token_id(vocab)?, std::iter::empty(), &[],
     )?;
     let placeholders = parsed.placeholders.iter()
@@ -1270,7 +1251,7 @@ impl Constraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[(&str, &[u32])],
+        bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -1292,12 +1273,12 @@ impl Constraint {
     pub(crate) fn from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 end_token_ids.iter().copied(),
@@ -1378,12 +1359,12 @@ impl Constraint {
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 end_token_ids.iter().copied().chain(
@@ -1860,7 +1841,7 @@ impl DynamicConstraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[(&str, &[u32])],
+        bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -1878,11 +1859,11 @@ impl DynamicConstraint {
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 children.iter().flat_map(|(_, child)| {

@@ -17,7 +17,7 @@ use crate::runtime::{
 
 // Version 4's r=2 child algebra could lose a validated nullable empty word.
 // Its persisted exclusion certificates must widen rather than be reused.
-const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 5;
+const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 6;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
 // Frontier steps manipulate grammar-position sets rather than raw bytes, so
 // one "step" is materially more expensive than a tokenizer transition. Keep
@@ -606,12 +606,13 @@ fn fingerprint_with_component_queries(
         let mut semantic_specials = constraint
             .special_token_terminals
             .iter()
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
             .collect::<Vec<_>>();
         semantic_specials.sort_unstable();
-        for (terminal, token) in semantic_specials {
+        for (terminal, token, end) in semantic_specials {
             semantics.update(&terminal.to_le_bytes());
             semantics.update(&token.to_le_bytes());
+            semantics.update(&end.to_le_bytes());
         }
 
         let mut interface = blake3::Hasher::new();
@@ -637,14 +638,15 @@ fn fingerprint_with_component_queries(
             .iter()
             .filter(|special| {
                 constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                    || constraint.token_bytes_for_id(special.token_id).is_none()
+                    || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
             })
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
             .collect::<Vec<_>>();
         specials.sort_unstable();
-        for (terminal, token) in specials {
+        for (terminal, token, end) in specials {
             interface.update(&terminal.to_le_bytes());
             interface.update(&token.to_le_bytes());
+            interface.update(&end.to_le_bytes());
         }
 
         return Ok(BoundaryCandidateFingerprint {
@@ -670,7 +672,7 @@ fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
                 .map(|special| special.terminal_id),
         )
@@ -1206,14 +1208,15 @@ pub(crate) fn persisted_boundary_candidate_ids(
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
-                .map(|special| (special.terminal_id, special.token_id))
+                .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
                 .collect::<Vec<_>>();
             specials.sort_unstable();
-            for (terminal, token) in specials {
+            for (terminal, token, end) in specials {
                 interface.update(&terminal.to_le_bytes());
                 interface.update(&token.to_le_bytes());
+            interface.update(&end.to_le_bytes());
             }
         }
         *interface.finalize().as_bytes() == fingerprint.public_interface

@@ -2183,7 +2183,7 @@ pub(crate) fn unbound_link_slot_terminals(
             continue;
         }
         if parent.is_late_grammar_placeholder_terminal(special.terminal_id)
-            || parent.token_bytes_for_id(special.token_id).is_none()
+            || (special.token_id != special.token_id_end || parent.token_bytes_for_id(special.token_id).is_none())
         {
             unbound.push(terminal_offsets[0].checked_add(special.terminal_id).ok_or_else(
                 || "unbound parent slot terminal offset overflow".to_string(),
@@ -2194,7 +2194,7 @@ pub(crate) fn unbound_link_slot_terminals(
         let constraint = child.constraint;
         for special in &constraint.special_token_terminals {
             if constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                || constraint.token_bytes_for_id(special.token_id).is_none()
+                || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
             {
                 unbound.push(
                     terminal_offsets[child_index + 1]
@@ -3173,7 +3173,7 @@ fn nested_unbound_slot_terminals(
                 continue;
             }
             if leaf.is_late_grammar_placeholder_terminal(special.terminal_id)
-                || leaf.token_bytes_for_id(special.token_id).is_none()
+                || (special.token_id != special.token_id_end || leaf.token_bytes_for_id(special.token_id).is_none())
             {
                 unbound.push(global);
             }
@@ -7089,7 +7089,7 @@ mod tests {
                     continue;
                 }
                 if constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                    || constraint.token_bytes_for_id(special.token_id).is_none()
+                    || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 {
                     unbound.insert(global);
                 }

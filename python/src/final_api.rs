@@ -122,8 +122,20 @@ pub(super) struct PyExactTokens {
 
 #[pymethods]
 impl PyExactTokens {
+    /// Materialize the individual token IDs. Use ranges for compact inspection.
     #[getter]
     fn ids(&self) -> Vec<u32> { self.inner.ids().to_vec() }
+
+    /// Normalized disjoint Python ranges (exclusive stops), without expansion.
+    #[getter]
+    fn ranges(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
+        let range_type = py.import("builtins")?.getattr("range")?;
+        self.inner.ranges().map(|range| {
+            range_type.call1((*range.start(), u64::from(*range.end()) + 1)).map(Bound::unbind)
+        }).collect()
+    }
+
+    fn __len__(&self) -> usize { self.inner.len() }
 }
 
 #[derive(Clone, Copy)]

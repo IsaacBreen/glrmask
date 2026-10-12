@@ -108,7 +108,7 @@ fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
                 .map(|special| special.terminal_id),
         )

@@ -113,7 +113,7 @@ pub struct UnlinkedConstraint {
 enum ModuleBinding {
     Module(Box<UnlinkedConstraint>),
     Constraint(Arc<RuntimeConstraint>),
-    ExactTokens(Arc<[u32]>),
+    ExactTokens(Arc<[(u32, u32)]>),
 }
 
 #[derive(Debug, Clone)]
@@ -389,7 +389,7 @@ impl<'a> Grammar<'a> {
                             "external token {name:?} was built for an incompatible vocabulary",
                         )));
                     }
-                    builder.token_bindings.insert(name, vec![token.id()]);
+                    builder.token_bindings.insert(name, vec![(token.id(), token.id())]);
                 }
                 GrammarValue::ExactTokens(tokens) => {
                     if !tokens.targets(vocab) {
@@ -397,7 +397,7 @@ impl<'a> Grammar<'a> {
                             "external token {name:?} was built for an incompatible vocabulary",
                         )));
                     }
-                    builder.token_bindings.insert(name, tokens.ids().to_vec());
+                    builder.token_bindings.insert(name, tokens.range_pairs().to_vec());
                 }
                 GrammarValue::Source(child) => {
                     source_children.push((name, child));
@@ -416,12 +416,8 @@ impl<'a> Grammar<'a> {
             if let GrammarSource::Glrm(source) = builder.grammar.source {
                 reserved.extend(crate::grammar::glrm::special_token_ids(source)?);
             }
-            reserved.extend(
-                builder
-                    .token_bindings
-                    .values()
-                    .flat_map(|ids| ids.iter().copied()),
-            );
+            // Qualified bound tokens are already occupied in `vocab`, which
+            // the placeholder allocator checks. Do not enumerate their ranges.
             for name in unbound_tokens {
                 let placeholder = crate::import::external_placeholder_token_id_avoiding(
                     vocab,
@@ -430,7 +426,7 @@ impl<'a> Grammar<'a> {
                 reserved.insert(placeholder);
                 builder
                     .token_bindings
-                    .insert(name.clone(), vec![placeholder]);
+                    .insert(name.clone(), vec![(placeholder, placeholder)]);
                 placeholder_ids.insert(name, placeholder);
             }
         }
@@ -492,11 +488,11 @@ impl<'a> Grammar<'a> {
                         GrammarValue::Source(child) => children.push((name.as_str(), child.resolve_dynamic_source(vocab, true)?)),
                         GrammarValue::ExactToken(token) => {
                             if !token.targets(vocab) { return Err(Error::Compilation(format!("external token {name:?} was built for an incompatible vocabulary"))); }
-                            tokens.push((name.as_str(), vec![token.id()]));
+                            tokens.push((name.as_str(), vec![(token.id(), token.id())]));
                         }
                         GrammarValue::ExactTokens(ids) => {
                             if !ids.targets(vocab) { return Err(Error::Compilation(format!("external token {name:?} was built for an incompatible vocabulary"))); }
-                            tokens.push((name.as_str(), ids.ids().to_vec()));
+                            tokens.push((name.as_str(), ids.range_pairs().to_vec()));
                         }
                     }
                 }
@@ -809,7 +805,7 @@ pub enum BoundarySummaryPolicy {
 pub struct ConstraintSpec<'a> {
     grammar: Grammar<'a>,
     vocab: &'a Vocab,
-    token_bindings: BTreeMap<String, Vec<u32>>,
+    token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     unbound_grammar_names: Vec<String>,
     // Only explicit module compilation may preserve unbound source token
@@ -831,7 +827,7 @@ pub struct ConstraintSpecBuilder<'a> {
     vocab: &'a Vocab,
     declared_tokens: BTreeSet<String>,
     declared_grammars: BTreeSet<String>,
-    token_bindings: BTreeMap<String, Vec<u32>>,
+    token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
     boundary_trigger_detail: BoundaryTriggerDetail,
     boundary_summary_policy: BoundarySummaryPolicy,
@@ -1124,7 +1120,7 @@ impl<'a> ConstraintSpec<'a> {
         compose_boxed_dynamic_parents(parents, &children, self.vocab)
     }
 
-    fn token_binding_refs(&self) -> Vec<(&str, &[u32])> {
+    fn token_binding_refs(&self) -> Vec<(&str, &[(u32, u32)])> {
         self.token_bindings
             .iter()
             .map(|(name, ids)| (name.as_str(), ids.as_slice()))
@@ -1187,7 +1183,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
                             "external token {name:?} was built for an incompatible vocabulary",
                         )));
                     }
-                    token_bindings.insert(name, vec![token.id()]);
+                    token_bindings.insert(name, vec![(token.id(), token.id())]);
                 }
                 GrammarValue::ExactTokens(tokens) => {
                     if !declared_tokens.contains(&name) {
@@ -1200,7 +1196,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
                             "external token {name:?} was built for an incompatible vocabulary",
                         )));
                     }
-                    token_bindings.insert(name, tokens.ids().to_vec());
+                    token_bindings.insert(name, tokens.range_pairs().to_vec());
                 }
                 GrammarValue::Source(child) => {
                     if !declared_grammars.contains(&name) {
@@ -1271,7 +1267,8 @@ impl<'a> ConstraintSpecBuilder<'a> {
             )));
         }
         self.token_bindings
-            .insert(name.to_owned(), unique.into_iter().collect());
+            .insert(name.to_owned(), range_set_blaze::RangeSetBlaze::from_iter(unique)
+                .ranges().map(|range| (*range.start(), *range.end())).collect());
         Ok(self)
     }
 
@@ -1721,7 +1718,7 @@ fn compose_named_children(
 fn compile_static_source(
     grammar: &Grammar<'_>,
     vocab: &Vocab,
-    token_bindings: &[(&str, &[u32])],
+    token_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<RuntimeConstraint> {
     match grammar.source {
         GrammarSource::Ebnf(source) => RuntimeConstraint::from_ebnf(source, vocab),
@@ -1739,7 +1736,7 @@ fn compile_static_source(
 fn compile_dynamic_source(
     grammar: &Grammar<'_>,
     vocab: &Vocab,
-    token_bindings: &[(&str, &[u32])],
+    token_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<DynamicConstraint> {
     match grammar.source {
         GrammarSource::Ebnf(source) => DynamicConstraint::from_ebnf(source, vocab),
@@ -1970,7 +1967,7 @@ fn select_supported_boundary(
     Ok(SegmentedBoundaryBackend::StaticParserDwa)
 }
 
-fn compile_exact_token_adapter(vocab: &Vocab, token_ids: &[u32]) -> Result<RuntimeConstraint> {
+fn compile_exact_token_adapter(vocab: &Vocab, token_ids: &[(u32, u32)]) -> Result<RuntimeConstraint> {
     if token_ids.is_empty() {
         return Err(Error::Compilation(
             "exact-token binding must contain at least one token ID".to_owned(),
@@ -1982,7 +1979,10 @@ fn compile_exact_token_adapter(vocab: &Vocab, token_ids: &[u32]) -> Result<Runti
         rules: vec![NamedRule {
             name: "__exact_tokens".to_owned(),
             expr: crate::import::choice_or_single(
-                token_ids.iter().copied().map(GrammarExpr::SpecialToken).collect(),
+                token_ids.iter().map(|&(start, end)| {
+                    if start == end { GrammarExpr::SpecialToken(start) }
+                    else { GrammarExpr::SpecialTokenRange(start, end) }
+                }).collect(),
             ),
             is_terminal: false,
             is_internal: false,
@@ -2025,13 +2025,13 @@ struct ModuleArtifactManifest {
 enum ModuleBindingArtifact {
     Module(Vec<u8>),
     Constraint(Vec<u8>),
-    ExactTokens(Vec<u32>),
+    ExactTokens(Vec<(u32, u32)>),
 }
 
-const MODULE_MAGIC: &[u8; 8] = b"GLRMOD03";
+const MODULE_MAGIC: &[u8; 8] = b"GLRMOD05";
 // An explicit non-default deferred trigger request prefixes the manifest.
 // Default artifacts retain the existing bytes exactly.
-const MODULE_TRIGGER_MAGIC: &[u8; 8] = b"GLRMOD04";
+const MODULE_TRIGGER_MAGIC: &[u8; 8] = b"GLRMOD06";
 const MODULE_HEADER_LEN: usize = 16;
 
 impl UnlinkedConstraint {
@@ -2093,7 +2093,7 @@ impl UnlinkedConstraint {
                     static_constraint_targets(child.as_ref(), vocab)
                 }
                 ModuleBinding::ExactTokens(ids) => {
-                    ids.iter().all(|&id| vocab.contains_exact_token_id(id))
+                    ids.iter().all(|&(start, end)| vocab.contains_exact_token_range(start, end))
                 }
             })
     }
@@ -2128,15 +2128,15 @@ impl UnlinkedConstraint {
                         )));
                     }
                     let mut previous = None;
-                    for &id in ids.iter() {
-                        if !vocab.contains_exact_token_id(id)
-                            || previous.is_some_and(|value| value >= id)
+                    for &(start, end) in ids.iter() {
+                        if !vocab.contains_exact_token_range(start, end)
+                            || previous.is_some_and(|value| u64::from(value) + 1 >= u64::from(start))
                         {
                             return Err(Error::Serialization(format!(
                                 "unlinked-constraint exact-token binding {name:?} is invalid for its vocabulary",
                             )));
                         }
-                        previous = Some(id);
+                        previous = Some(end);
                     }
                 }
                 ModuleBinding::Module(child) => {
@@ -2211,7 +2211,7 @@ impl UnlinkedConstraint {
                         "external token {name:?} was built for an incompatible vocabulary",
                     )));
                 }
-                ModuleBinding::ExactTokens(Arc::from([token.id()]))
+                ModuleBinding::ExactTokens(Arc::from([(token.id(), token.id())]))
             }
             UnlinkedValue::ExactTokens(tokens) => {
                 self.require_direct_slot_kind(name, ExternKind::Token)?;
@@ -2220,7 +2220,7 @@ impl UnlinkedConstraint {
                         "external token {name:?} was built for an incompatible vocabulary",
                     )));
                 }
-                ModuleBinding::ExactTokens(Arc::from(tokens.ids()))
+                ModuleBinding::ExactTokens(Arc::from(tokens.range_pairs()))
             }
             UnlinkedValue::StaticBorrowed(child) => {
                 self.require_direct_slot_kind(name, ExternKind::Grammar)?;
@@ -2488,14 +2488,10 @@ impl UnlinkedConstraint {
                 ModuleBindingArtifact::Constraint(bytes) => {
                     ModuleBinding::Constraint(Arc::new(RuntimeConstraint::load(bytes)?))
                 }
-                ModuleBindingArtifact::ExactTokens(mut ids) => {
-                    ids.sort_unstable();
-                    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
-                        return Err(Error::Serialization(
-                            "unlinked-constraint exact-token binding contains duplicate IDs".to_owned(),
-                        ));
-                    }
-                    ModuleBinding::ExactTokens(Arc::from(ids))
+                ModuleBindingArtifact::ExactTokens(ranges) => {
+                    // Validation below rejects empty, reversed, overlapping,
+                    // noncanonical or out-of-vocabulary ranges without expansion.
+                    ModuleBinding::ExactTokens(Arc::from(ranges))
                 }
             };
             bindings.insert(name, binding);
@@ -2560,7 +2556,7 @@ impl UnlinkedConstraint {
                     .bind_vocab_exact(vocab)
                     .map_err(Error::Serialization)?,
                 ModuleBinding::ExactTokens(ids) => {
-                    if ids.iter().any(|&id| !vocab.contains_exact_token_id(id)) {
+                    if ids.iter().any(|&(start, end)| !vocab.contains_exact_token_range(start, end)) {
                         return Err(Error::Serialization(
                             "unlinked-constraint exact-token binding is incompatible with supplied vocabulary"
                                 .to_owned(),

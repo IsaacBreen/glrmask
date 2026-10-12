@@ -6100,11 +6100,11 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
             let mut ordinary_token_by_bytes = FxHashMap::<&[u8], u32>::default();
             for (&token, bytes) in self.token_bytes.iter() {
-                if !special_tokens.contains(&token) {
+                if !special_tokens.contains(token) {
                     ordinary_token_by_bytes
                         .entry(bytes.as_slice())
                         .or_insert(token);
@@ -6298,8 +6298,8 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
 
             for full_source_state in first_match_step_states {
                 if full_source_state >= self.tokenizer.num_states() {
@@ -6337,7 +6337,7 @@ impl Constraint {
                 let mut known_reject = 0usize;
 
                 for (&token_id, bytes) in self.token_bytes.iter() {
-                    if special_tokens.contains(&token_id) || bytes.is_empty() {
+                    if special_tokens.contains(token_id) || bytes.is_empty() {
                         continue;
                     }
                     let execution = self
@@ -6993,8 +6993,8 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
 
             for full_source_state in root_effect_states {
                 if full_source_state >= self.tokenizer.num_states() {
@@ -7058,7 +7058,7 @@ impl Constraint {
                 struct RootEffectBuild<'a> {
                     tokenizer: &'a Tokenizer,
                     vocab: &'a DynamicMaskVocab,
-                    special_tokens: &'a BTreeSet<u32>,
+                    special_tokens: &'a range_set_blaze::RangeSetBlaze<u32>,
                     residual_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
                     exact_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
                     children_by_terminal:
@@ -7099,7 +7099,7 @@ impl Constraint {
                         let classified = !futures.is_empty() || !branches.is_empty();
 
                         for &token_id in token_ids {
-                            if build.special_tokens.contains(&token_id) || prefix.is_empty() {
+                            if build.special_tokens.contains(token_id) || prefix.is_empty() {
                                 continue;
                             }
                             if classified {
@@ -9507,14 +9507,14 @@ impl Constraint {
         let special_tokens = self
             .special_token_terminals
             .iter()
-            .map(|special| special.token_id)
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|special| special.token_ids())
+            .collect::<range_set_blaze::RangeSetBlaze<_>>();
         let mut tokens_by_bytes = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
         for (&token, bytes) in self.token_bytes.iter() {
             // A suffix is replayed as ordinary bytes inside a larger model
             // token. Do not use an exact-special-token-only identity as the
             // witness for that byte suffix.
-            if !special_tokens.contains(&token) {
+            if !special_tokens.contains(token) {
                 tokens_by_bytes.entry(bytes.as_slice()).or_default().push(token);
             }
         }
@@ -13210,7 +13210,7 @@ impl Constraint {
                     .filter(|special| {
                         !self.is_late_grammar_placeholder_terminal(special.terminal_id)
                     })
-                    .map(|special| special.token_id),
+                    .map(|special| special.token_id_end),
             )
             .max()
     }
@@ -13255,7 +13255,7 @@ impl Constraint {
             .filter(|special| self.token_bytes_for_id(special.token_id).is_none())
             .filter(|special| {
                 !self.special_token_terminals.iter().any(|other| {
-                    other.token_id == special.token_id
+                    other.contains(special.token_id)
                         && !placeholder_terminals.contains(&other.terminal_id)
                 })
             })
@@ -13343,7 +13343,7 @@ impl Constraint {
         self.special_token_terminals
             .iter()
             .any(|special| {
-                special.token_id == token_id
+                special.contains(token_id)
                     && !self.is_late_grammar_placeholder_terminal(special.terminal_id)
             })
     }

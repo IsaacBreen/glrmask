@@ -372,7 +372,7 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
         let module = grammar.compile_unlinked_with(&v, BuildOptions::default().boundary_trigger(detail)).unwrap();
         assert!(module.link().is_err(), "trigger request cannot bypass unresolved slots");
         let saved = module.save();
-        assert_eq!(&saved[..8], b"GLRMOD04");
+        assert_eq!(&saved[..8], b"GLRMOD06");
         let loaded = UnlinkedConstraint::load(saved.clone()).unwrap();
         assert_eq!(loaded.save(), saved);
         let bound = loaded.bind("middle", &child).unwrap();

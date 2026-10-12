@@ -21,7 +21,7 @@ fn contains_regex_features(expr: &GrammarExpr) -> bool {
         | GrammarExpr::LexerDfa(_)
         | GrammarExpr::AnyByte => true,
         GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon => false,
         GrammarExpr::Sequence(exprs) | GrammarExpr::Choice(exprs) => {
@@ -309,7 +309,7 @@ impl ChoiceFactorer {
             | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
             | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_impl(expr, refs),
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -461,7 +461,7 @@ impl ChoiceFactorer {
             | GrammarExpr::Quantified(expr, Quantifier::OnePlus)
             | GrammarExpr::Quantified(expr, Quantifier::Range(_, _)) => Self::collect_refs_static(expr, refs),
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

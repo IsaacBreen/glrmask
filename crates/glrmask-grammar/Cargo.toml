@@ -15,6 +15,7 @@ glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automa
 glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 rustc-hash = "1"
+range-set-blaze = "0.3.0"
 serde = { version = "1", features = ["derive", "rc"] }
 thiserror = "1"
 

@@ -699,7 +699,7 @@ fn terminal_domain_too_large_for_early_overlap(grammar: &GrammarDef) -> bool {
         let local_cost = match terminal {
             Terminal::Literal { bytes, .. } => 1usize.saturating_add(bytes.len()),
             Terminal::Pattern { pattern, .. } => 1usize.saturating_add(pattern.len()),
-            Terminal::SpecialToken { .. } => 1,
+            Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => 1,
             Terminal::Expr { expr, .. } => return consume_early_overlap_cost(expr, &mut remaining),
         };
         if local_cost >= remaining {
@@ -722,7 +722,7 @@ fn should_parallelize_terminal_factoring(grammar: &GrammarDef) -> bool {
     let mut remaining = MIN_PREPARSED_EXPR_NODES;
     grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_tree_reaches_budget(expr, &mut remaining),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => {
             false
         }
     })
@@ -1355,7 +1355,7 @@ fn build_vocab_partition_direct_mask_tokenizer(
     let preflight_started = Instant::now();
     let has_intersection = grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_contains_intersection(expr),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => {
             false
         }
     });
@@ -2595,7 +2595,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
         Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
         Terminal::Expr { expr, .. } => expr.clone(),
-        Terminal::SpecialToken { .. } => Expr::Choice(Vec::new()),
+        Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => Expr::Choice(Vec::new()),
     }
 }
 
@@ -2716,7 +2716,7 @@ fn grammar_has_potential_bounded_terminal_synthesis(
         }
         Terminal::Literal { .. }
         | Terminal::Pattern { .. }
-        | Terminal::SpecialToken { .. } => false,
+        | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => false,
     })
 }
 
@@ -3310,12 +3310,42 @@ fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerm
             Terminal::SpecialToken { id, token_id } => Some(SpecialTokenTerminal {
                 terminal_id: *id,
                 token_id: *token_id,
+                token_id_end: *token_id,
+            }),
+            Terminal::SpecialTokenRange { id, start, end } => Some(SpecialTokenTerminal {
+                terminal_id: *id, token_id: *start, token_id_end: *end,
             }),
             _ => None,
         })
         .collect::<Vec<_>>();
-    specials.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     specials
+}
+
+/// Exact-token membership changes only at interval boundaries. Keep a single
+/// internal vocabulary class per elementary interval rather than per model ID.
+/// The existing dense model-ID lookup is populated once; automata and weights
+/// remain proportional to the number of ranges, including overlapping ranges.
+pub(crate) fn special_token_id_map(specials: &[SpecialTokenTerminal]) -> ManyToOneIdMap {
+    if specials.is_empty() { return ManyToOneIdMap::empty(); }
+    let mut events = std::collections::BTreeMap::<u64, i64>::new();
+    for special in specials {
+        assert!(special.token_id <= special.token_id_end, "invalid exact-token interval");
+        *events.entry(u64::from(special.token_id)).or_default() += 1;
+        *events.entry(u64::from(special.token_id_end) + 1).or_default() -= 1;
+    }
+    let points = events.into_iter().collect::<Vec<_>>();
+    let maximum = points.last().unwrap().0 as usize;
+    let mut dense = vec![u32::MAX; maximum];
+    let mut active = 0i64;
+    let mut classes = 0u32;
+    for window in points.windows(2) {
+        active += window[0].1;
+        if active == 0 { continue; }
+        dense[window[0].0 as usize..window[1].0 as usize].fill(classes);
+        classes += 1;
+    }
+    ManyToOneIdMap::from_original_to_internal_allowing_unmapped(dense, classes)
 }
 
 fn build_special_token_terminal_family(
@@ -3326,22 +3356,7 @@ fn build_special_token_terminal_family(
         return None;
     }
 
-    let mut token_ids = specials
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<Vec<_>>();
-    token_ids.sort_unstable();
-    token_ids.dedup();
-
-    let max_token_id = *token_ids.last()? as usize;
-    let mut original_token_to_internal = vec![u32::MAX; max_token_id + 1];
-    for (internal, &token_id) in token_ids.iter().enumerate() {
-        original_token_to_internal[token_id as usize] = internal as u32;
-    }
-    let vocab_tokens = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-        original_token_to_internal,
-        token_ids,
-    );
+    let vocab_tokens = special_token_id_map(specials);
 
     let initial_state = tokenizer.initial_state();
     let mut original_state_to_internal = vec![u32::MAX; tokenizer.num_states() as usize];
@@ -3361,8 +3376,9 @@ fn build_special_token_terminal_family(
     let final_state = dwa.add_state();
     dwa.set_final_weight(final_state, Weight::all());
     for special in specials {
-        let internal_token = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
-        let tokens = RangeSetBlaze::from_iter([internal_token..=internal_token]);
+        let first = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
+        let last = id_map.vocab_tokens.original_to_internal[special.token_id_end as usize];
+        let tokens = RangeSetBlaze::from_iter([first..=last]);
         let weight = Weight::from_uniform(0..=0, tokens);
         dwa.add_transition(
             dwa.start_state(),
@@ -7313,4 +7329,52 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
+}
+#[cfg(test)]
+mod compact_special_range_tests {
+    use super::*;
+
+    fn interval(terminal_id: u32, start: u32, end: u32) -> SpecialTokenTerminal {
+        SpecialTokenTerminal { terminal_id, token_id: start, token_id_end: end }
+    }
+
+    #[test]
+    fn full_128k_exact_interval_has_one_internal_token_class() {
+        let map = special_token_id_map(&[interval(0, 0, 131_071)]);
+        assert_eq!(map.internal_to_original.len(), 1);
+        assert_eq!(map.original_to_internal.len(), 131_072);
+        assert!(map.original_to_internal.iter().all(|&class| class == 0));
+    }
+
+    #[test]
+    fn overlapping_and_adjacent_intervals_split_only_at_membership_boundaries() {
+        let map = special_token_id_map(&[
+            interval(0, 10, 20), interval(1, 15, 25), interval(2, 26, 30),
+        ]);
+        assert_eq!(map.internal_to_original.len(), 4);
+        for (range, class) in [(10..=14, 0), (15..=20, 1), (21..=25, 2), (26..=30, 3)] {
+            for token in range { assert_eq!(map.original_to_internal[token], class); }
+        }
+        assert!(map.original_to_internal[..10].iter().all(|&id| id == u32::MAX));
+    }
+
+    #[test]
+    fn word_mask_union_preserves_neighbors_and_short_buffers() {
+        for (start, end) in [(0, 0), (31, 31), (31, 32), (32, 63), (17, 95), (0, 127)] {
+            let terminal = interval(0, start, end);
+            let mut mask = [0u32; 4];
+            terminal.or_mask(&mut mask);
+            for id in 0..128 {
+                assert_eq!((mask[id / 32] >> (id % 32)) & 1 != 0,
+                    (start..=end).contains(&(id as u32)));
+            }
+            let mut short = [0u32; 1];
+            terminal.or_mask(&mut short);
+            assert_eq!(short[0], mask[0]);
+            terminal.or_mask(&mut []);
+        }
+        let mut mask = [1u32; 4];
+        interval(0, 31, 96).or_mask(&mut mask);
+        for id in [0, 32, 64, 96] { assert_ne!(mask[id / 32] & (1 << (id % 32)), 0); }
+    }
 }

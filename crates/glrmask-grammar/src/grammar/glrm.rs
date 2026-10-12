@@ -82,6 +82,7 @@
 //! form when the lowered grammar still contains enough source information to do
 //! so. Bound external-token names cannot be reconstructed from raw token IDs.
 
+use range_set_blaze::RangeSetBlaze;
 use crate::GlrMaskError;
 use crate::automata::lexer::ast::Expr;
 use crate::automata::lexer::regex::validate_regular_regex;
@@ -221,7 +222,7 @@ pub fn to_glrm(grammar: &NamedGrammar) -> String {
 pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
     fn contains_special(expr: &GrammarExpr) -> bool {
         match expr {
-            GrammarExpr::SpecialToken(_) => true,
+            GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => true,
             GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => contains_special(inner),
             GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => items.iter().any(contains_special),
             GrammarExpr::Exclude { expr, exclude } => contains_special(expr) || contains_special(exclude),
@@ -611,6 +612,7 @@ fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
         }
         GrammarExpr::Literal(bytes) => format_literal(bytes, flavor),
         GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
+        GrammarExpr::SpecialTokenRange(start, end) => format!("@tokens({start}, {end})"),
         GrammarExpr::RawRegex(pat) => format!("/{}/", escape_regex_for_slash(pat)),
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let inner = if *negate { format!("^{def}") } else { def.clone() };
@@ -744,12 +746,44 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
 }
 
+/// Convert an explicit ID-list binding to normalized intervals.
+fn binding_id_ranges<'a>(bindings: &[(&'a str, &[u32])]) -> Result<Vec<(&'a str, Vec<(u32, u32)>)>, GlrMaskError> {
+    bindings.iter().map(|&(name, ids)| {
+        let unique = ids.iter().copied().collect::<BTreeSet<_>>();
+        if unique.len() != ids.len() {
+            return Err(err(&format!("external terminal binding {name:?} contains a duplicate token ID")));
+        }
+        let ranges = RangeSetBlaze::from_iter(unique).ranges()
+            .map(|range| (*range.start(), *range.end())).collect();
+        Ok((name, ranges))
+    }).collect()
+}
+
+/// Bind explicit exact-token IDs. For compact inputs use the range variant.
+pub fn from_glrm_with_external_terminals(input: &str, bindings: &[(&str, &[u32])]) -> Result<NamedGrammar, GlrMaskError> {
+    let ranges = binding_id_ranges(bindings)?;
+    let refs = ranges.iter().map(|(name, ranges)| (*name, ranges.as_slice())).collect::<Vec<_>>();
+    from_glrm_with_external_terminal_ranges(input, &refs)
+}
+
+/// Bind explicit IDs while preserving unresolved grammar slots.
+pub fn from_glrm_with_bindings_and_external_subgrammars(
+    input: &str,
+    first_placeholder_token_id: u32,
+    reserved_token_ids: impl IntoIterator<Item = u32>,
+    terminal_bindings: &[(&str, &[u32])],
+) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
+    let ranges = binding_id_ranges(terminal_bindings)?;
+    let refs = ranges.iter().map(|(name, ranges)| (*name, ranges.as_slice())).collect::<Vec<_>>();
+    from_glrm_with_ranges_and_external_subgrammars(input, first_placeholder_token_id, reserved_token_ids, &refs)
+}
+
 /// Parse GLRM v1 and bind every `extern token NAME;` declaration to one or more
 /// exact model token IDs. These terminals are parser-visible and have no byte
 /// language; token IDs need not occur in the byte vocabulary.
-pub fn from_glrm_with_external_terminals(
+pub fn from_glrm_with_external_terminal_ranges(
     input: &str,
-    bindings: &[(&str, &[u32])],
+    bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<NamedGrammar, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = GlrmParser::new(tokens)?;
@@ -811,7 +845,7 @@ pub fn special_token_ids(input: &str) -> Result<Vec<u32>, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = GlrmParser::new(tokens)?;
     let scope = parser.parse_root_scope()?;
-    let mut ids = BTreeSet::new();
+    let mut ids = RangeSetBlaze::new();
     collect_scope_special_token_ids(&scope, &mut ids);
     Ok(ids.into_iter().collect())
 }
@@ -837,18 +871,18 @@ pub fn from_glrm_with_external_subgrammars(
 }
 
 /// Parse GLRM with both exact-token terminal and compiled-subgrammar manifests.
-pub fn from_glrm_with_bindings_and_external_subgrammars(
+pub fn from_glrm_with_ranges_and_external_subgrammars(
     input: &str,
     first_placeholder_token_id: u32,
     reserved_token_ids: impl IntoIterator<Item = u32>,
-    terminal_bindings: &[(&str, &[u32])],
+    terminal_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<GlrmWithExternalSubgrammars, GlrMaskError> {
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = GlrmParser::new(tokens)?;
     let mut scope = parser.parse_root_scope()?;
     bind_external_terminals(&mut scope, terminal_bindings)?;
 
-    let mut used_token_ids = reserved_token_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut used_token_ids = reserved_token_ids.into_iter().collect::<RangeSetBlaze<_>>();
     collect_scope_special_token_ids(&scope, &mut used_token_ids);
     let external_names = collect_external_subgrammar_names(&scope);
     let mut next_candidate = first_placeholder_token_id;
@@ -941,7 +975,7 @@ pub fn from_glrm_with_inline_subgrammars(
 pub fn from_glrm_with_named_subgrammars_and_external_terminals(
     parent: &str,
     children: &[(&str, NamedGrammar)],
-    terminal_bindings: &[(&str, &[u32])],
+    terminal_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<NamedGrammar, GlrMaskError> {
     let mut bindings = BTreeMap::new();
     for (name, grammar) in children {
@@ -1407,7 +1441,7 @@ struct ParsedGlrmScope {
 #[derive(Debug, Clone)]
 struct ParsedExternalTerminal {
     name: String,
-    token_ids: Vec<u32>,
+    token_ranges: Vec<(u32, u32)>,
 }
 
 fn collect_external_terminal_names(scope: &ParsedGlrmScope) -> Vec<String> {
@@ -1437,7 +1471,7 @@ fn collect_external_terminal_names(scope: &ParsedGlrmScope) -> Vec<String> {
 
 fn bind_external_terminals(
     scope: &mut ParsedGlrmScope,
-    bindings: &[(&str, &[u32])],
+    bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<(), GlrMaskError> {
     let declared_names = collect_external_terminal_names(scope);
     let declared = declared_names.iter().cloned().collect::<BTreeSet<_>>();
@@ -1451,7 +1485,7 @@ fn bind_external_terminals(
             "external terminal {duplicate:?} is declared more than once"
         )));
     }
-    let mut supplied = BTreeMap::<String, Vec<u32>>::new();
+    let mut supplied = BTreeMap::<String, Vec<(u32, u32)>>::new();
     for &(name, token_ids) in bindings {
         if supplied.contains_key(name) {
             return Err(err(&format!(
@@ -1463,13 +1497,12 @@ fn bind_external_terminals(
                 "external terminal binding {name:?} must contain at least one token ID"
             )));
         }
-        let unique = token_ids.iter().copied().collect::<BTreeSet<_>>();
-        if unique.len() != token_ids.len() {
-            return Err(err(&format!(
-                "external terminal binding {name:?} contains a duplicate token ID"
-            )));
+        if token_ids.iter().any(|&(start, end)| start > end) {
+            return Err(err(&format!("external terminal binding {name:?} contains a reversed token range")));
         }
-        supplied.insert(name.to_string(), unique.into_iter().collect());
+        let normalized = RangeSetBlaze::from_iter(token_ids.iter().map(|&(start, end)| start..=end))
+            .ranges().map(|range| (*range.start(), *range.end())).collect();
+        supplied.insert(name.to_string(), normalized);
     }
     if let Some(unknown) = supplied.keys().find(|name| !declared.contains(*name)) {
         return Err(err(&format!(
@@ -1487,7 +1520,7 @@ fn bind_external_terminals(
     fn assign(
         scope: &mut ParsedGlrmScope,
         prefix: &str,
-        supplied: &BTreeMap<String, Vec<u32>>,
+        supplied: &BTreeMap<String, Vec<(u32, u32)>>,
     ) {
         for terminal in &mut scope.external_terminals {
             let binding_name = if prefix.is_empty() {
@@ -1495,7 +1528,7 @@ fn bind_external_terminals(
             } else {
                 format!("{prefix}::{}", terminal.name)
             };
-            terminal.token_ids = supplied[&binding_name].clone();
+            terminal.token_ranges = supplied[&binding_name].clone();
         }
         for subgrammar in &mut scope.subgrammars {
             if let ParsedSubgrammarBody::Inline(child) = &mut subgrammar.body {
@@ -1518,17 +1551,12 @@ fn external_terminal_rules(scope: &ParsedGlrmScope) -> Vec<NamedRule> {
         .iter()
         .map(|terminal| NamedRule {
             name: terminal.name.clone(),
-            expr: if terminal.token_ids.len() == 1 {
-                GrammarExpr::SpecialToken(terminal.token_ids[0])
-            } else {
-                GrammarExpr::Choice(
-                    terminal
-                        .token_ids
-                        .iter()
-                        .copied()
-                        .map(GrammarExpr::SpecialToken)
-                        .collect(),
-                )
+            expr: {
+                let mut atoms = terminal.token_ranges.iter().map(|&(start, end)| {
+                    if start == end { GrammarExpr::SpecialToken(start) }
+                    else { GrammarExpr::SpecialTokenRange(start, end) }
+                }).collect::<Vec<_>>();
+                if atoms.len() == 1 { atoms.pop().unwrap() } else { GrammarExpr::Choice(atoms) }
             },
             // Exact-token terminals participate in parser tables, not the byte lexer.
             is_terminal: false,
@@ -1564,10 +1592,13 @@ fn collect_external_subgrammar_names(scope: &ParsedGlrmScope) -> Vec<String> {
     names
 }
 
-fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut BTreeSet<u32>) {
+fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut RangeSetBlaze<u32>) {
     match expr {
         GrammarExpr::SpecialToken(token_id) => {
             token_ids.insert(*token_id);
+        }
+        GrammarExpr::SpecialTokenRange(start, end) => {
+            *token_ids |= RangeSetBlaze::from_iter([*start..=*end]);
         }
         GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
             collect_expr_special_token_ids(inner, token_ids);
@@ -1608,12 +1639,12 @@ fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut BTreeSet<u
     }
 }
 
-fn collect_scope_special_token_ids(scope: &ParsedGlrmScope, token_ids: &mut BTreeSet<u32>) {
+fn collect_scope_special_token_ids(scope: &ParsedGlrmScope, token_ids: &mut RangeSetBlaze<u32>) {
     for rule in &scope.rules {
         collect_expr_special_token_ids(&rule.expr, token_ids);
     }
     for external in &scope.external_terminals {
-        token_ids.extend(external.token_ids.iter().copied());
+        *token_ids |= RangeSetBlaze::from_iter(external.token_ranges.iter().map(|&(start, end)| start..=end));
     }
     for subgrammar in &scope.subgrammars {
         if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
@@ -1623,18 +1654,14 @@ fn collect_scope_special_token_ids(scope: &ParsedGlrmScope, token_ids: &mut BTre
 }
 
 fn next_free_token_id(
-    used_token_ids: &BTreeSet<u32>,
+    used_token_ids: &RangeSetBlaze<u32>,
     preferred_start: u32,
 ) -> Result<u32, GlrMaskError> {
     let mut candidate = preferred_start;
-    for &used in used_token_ids.range(preferred_start..) {
-        if used < candidate {
-            continue;
-        }
-        if used > candidate {
-            return Ok(candidate);
-        }
-        candidate = candidate.checked_add(1).ok_or_else(|| {
+    for used in used_token_ids.ranges() {
+        if *used.end() < candidate { continue; }
+        if *used.start() > candidate { return Ok(candidate); }
+        candidate = used.end().checked_add(1).ok_or_else(|| {
             err("no token ID is available for an external subgrammar placeholder")
         })?;
     }
@@ -1805,7 +1832,7 @@ impl GlrmParser {
                                 self.consume(&Tok::Semi)?;
                                 external_terminals.push(ParsedExternalTerminal {
                                     name,
-                                    token_ids: Vec::new(),
+                                    token_ranges: Vec::new(),
                                 });
                                 continue;
                             }
@@ -2540,21 +2567,24 @@ impl GlrmParser {
                     return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern token NAME;' and bind it by name"));
                 }
                 self.advance();
-                match self.advance().clone() {
-                    Tok::Ident(keyword) if keyword == "token" => {}
-                    other => {
-                        return Err(err(&format!(
-                            "expected 'token' after '@' in expression, got {:?}",
-                            other
-                        )));
-                    }
-                }
+                let is_range = match self.advance().clone() {
+                    Tok::Ident(keyword) if keyword == "token" => false,
+                    Tok::Ident(keyword) if keyword == "tokens" => true,
+                    other => return Err(err(&format!(
+                        "expected 'token' or 'tokens' after '@' in expression, got {:?}", other))),
+                };
                 self.consume(&Tok::LParen)?;
-                let token_id = self.expect_int()?;
-                let token_id = u32::try_from(token_id)
+                let start = u32::try_from(self.expect_int()?)
                     .map_err(|_| err("special LLM token id does not fit in u32"))?;
+                let atom = if is_range {
+                    self.consume(&Tok::Comma)?;
+                    let end = u32::try_from(self.expect_int()?)
+                        .map_err(|_| err("special LLM token id does not fit in u32"))?;
+                    if start > end { return Err(err("exact-token range must not be reversed")); }
+                    GrammarExpr::SpecialTokenRange(start, end)
+                } else { GrammarExpr::SpecialToken(start) };
                 self.consume(&Tok::RParen)?;
-                Ok(GrammarExpr::SpecialToken(token_id))
+                Ok(atom)
             }
             Tok::LParen => {
                 self.advance();
@@ -2697,7 +2727,7 @@ fn validate_ignore_terminal(grammar: &NamedGrammar, scope_label: &str) -> Result
             "ignore '{ignore_name}' in {scope_label} must name a local emitting terminal",
         )));
     }
-    if matches!(rule.expr, GrammarExpr::SpecialToken(_)) {
+    if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
         return Err(err(
             "a special LLM token terminal cannot be the ignore terminal",
         ));
@@ -2751,7 +2781,7 @@ fn grammar_expr_contains_ref(expr: &GrammarExpr, name: &str) -> bool {
             .any(|symbol| grammar_expr_contains_ref(symbol, name)),
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3072,7 +3102,7 @@ fn flatten_scope(
         .filter(|rule| {
             rule.is_terminal
                 && !rule.is_internal
-                && !matches!(rule.expr, GrammarExpr::SpecialToken(_))
+                && !matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _))
         })
         .map(|rule| rule.name.clone())
         .collect::<HashSet<_>>();
@@ -3382,7 +3412,7 @@ fn rewrite_scope_refs(
         },
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3409,7 +3439,7 @@ impl DefaultPartitionAtomPromoter<'_> {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => self.promote_atom(expr.clone()),
-            GrammarExpr::SpecialToken(_) => expr.clone(),
+            GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => expr.clone(),
             GrammarExpr::Grouped(inner) => {
                 GrammarExpr::Grouped(Box::new(self.rewrite_expr(inner)?))
             }
@@ -3494,7 +3524,7 @@ impl DefaultPartitionAtomPromoter<'_> {
                 .any(|symbol| self.contains_nonterminal_ref(symbol)),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -3547,7 +3577,7 @@ impl IgnoreScopeRewriter<'_> {
             }
             GrammarExpr::Ref(_) | GrammarExpr::Epsilon => expr.clone(),
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -3638,7 +3668,7 @@ impl IgnoreScopeRewriter<'_> {
                 .any(|symbol| self.contains_nonterminalish_ref(symbol)),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

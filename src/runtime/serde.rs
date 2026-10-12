@@ -56,17 +56,17 @@ const PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION: u16 = 24;
 const PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION: u16 = 27;
 const PREVIOUS_STATIC_PROJECTION_CONSTRAINT_VERSION: u16 = 28;
 const PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION: u16 = 29;
-const CONSTRAINT_VERSION: u16 = 30;
+const CONSTRAINT_VERSION: u16 = 40;
 // V37 retains S30 framing with TPR7 views, compiler stack-effect analysis and
 // dynamic proof metadata in R35. V35/V36 could contain boundary programs built
 // from the pre-fix nullable proof; those pre-release artifacts are unsupported.
-const TEMPLATE_CONSTRAINT_VERSION: u16 = 37;
+const TEMPLATE_CONSTRAINT_VERSION: u16 = 41;
 // V38 is the same native body bound to an external vocabulary (TPX1).
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 38;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 42;
 /// Self-contained external-vocabulary envelope that retains an executable LR
 /// table for ordinary Dynamic's retained LR backend. Load with
 /// `Constraint::load_with_vocab` and the exact original vocabulary.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 39;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 43;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
