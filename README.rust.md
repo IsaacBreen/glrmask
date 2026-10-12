@@ -6,7 +6,7 @@ GLRMask is a grammar-constrained decoding library for high-throughput LLM servin
 
 GLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON schemas and Lark.
 
-[Website](https://glrmask.com) · [GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)
+[Website](https://glrmask.com) Â· [GitHub](https://github.com/IsaacBreen/glrmask) Â· [Paper](https://doi.org/10.5281/zenodo.23273556)
 
 ## Benchmarks
 

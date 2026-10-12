@@ -20,7 +20,7 @@ DATASETS = [('json', '2026-10-08', 'JSON Schema'), ('json-dynamic', '2026-10-08'
 
 
 def read(name):
-    return (CONTENT / (name + '.md')).read_text().strip()
+    return (CONTENT / (name + '.md')).read_text(encoding="utf-8").strip()
 
 
 def links(flavor):
@@ -108,7 +108,7 @@ def website_payload():
         'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
         'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
         'usage_details': read('usage-details'), 'benchmark_markdown': read('benchmarks'),
-        'chart': json.loads((CONTENT / 'tail-chart.json').read_text()),
+        'chart': json.loads((CONTENT / 'tail-chart.json').read_text(encoding="utf-8")),
         'datasets': {'json': 'docs/benchmarks/json-schema-2026-10-08.json',
                      'javascript': 'docs/benchmarks/javascript-2026-10-09.json'},
     }
@@ -126,18 +126,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    cargo = tomllib.loads((ROOT/'Cargo.toml').read_text())
-    python = tomllib.loads((ROOT/'python/pyproject.toml').read_text())
+    cargo = tomllib.loads((ROOT/'Cargo.toml').read_text(encoding="utf-8"))
+    python = tomllib.loads((ROOT/'python/pyproject.toml').read_text(encoding="utf-8"))
     assert cargo['package']['readme'] == 'README.rust.md', 'Cargo must select the Rust README'
     assert python['project']['readme'] == 'PYTHON.md', 'Python must select python/PYTHON.md'
     files = outputs()
-    stale = [str(p.relative_to(ROOT)) for p, content in files.items() if not p.exists() or p.read_text() != content]
+    stale = [str(p.relative_to(ROOT)) for p, content in files.items() if not p.exists() or p.read_text(encoding="utf-8") != content]
     if args.check and stale:
         print('Stale documentation: ' + ', '.join(stale) + '; run python scripts/sync-guide.py', file=sys.stderr)
         return 1
     if not args.check:
         for path, content in files.items():
-            path.write_text(content)
+            path.write_text(content, encoding="utf-8")
     return 0
 
 
