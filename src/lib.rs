@@ -41,7 +41,7 @@
 //!
 //! # Typed bindings
 //!
-//! Native GLRM can declare `extern grammar child;` and `extern token MARK;`.
+//! Native GLRM can declare `extern child;` and `extern MARK;`.
 //! Both use [`Grammar::bind`]. Exact tokens come from [`Vocab::token`] or
 //! [`Vocab::tokens`], so a binding carries the vocabulary identity it belongs to
 //! rather than accepting an unqualified integer.
@@ -99,7 +99,7 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use runtime::{Constraint, ConstraintState};
-pub use glrmask_vocab::{ExactToken, ExactTokens, Vocab};
+pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
 pub use public_api::{BuildOptions, Grammar, Optimization, UnlinkedConstraint};
 #[cfg(any(test, feature = "internal-api"))]

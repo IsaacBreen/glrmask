@@ -36,7 +36,7 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
         '''
         glrm 1;
         start document;
-        extern grammar payload;
+        extern payload;
         nt document = "X" payload "!";
         ''',
         vocab,
@@ -80,7 +80,7 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
         '''
         glrm 1;
         start document;
-        extern grammar payload;
+        extern payload;
         nt document = "X" payload "!";
         ''',
         vocab,
@@ -129,7 +129,7 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         '''
         glrm 1;
         start document;
-        extern grammar payload;
+        extern payload;
         nt document = "X" payload "!";
         ''',
         vocab,
@@ -172,7 +172,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         '''
         glrm 1;
         start middle;
-        extern grammar leaf;
+        extern leaf;
         nt middle = leaf?;
         ''',
         vocab,
@@ -183,7 +183,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         '''
         glrm 1;
         start document;
-        extern grammar middle;
+        extern middle;
         nt document = "X" middle "!";
         ''',
         vocab,
@@ -237,7 +237,7 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         start document;
         ignore WS;
         t WS = " "+;
-        extern grammar payload;
+        extern payload;
         nt document = "X" payload "!";
         ''',
         vocab,
@@ -289,8 +289,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         '''
         glrm 1;
         start document;
-        extern grammar left;
-        extern grammar right;
+        extern left;
+        extern right;
         nt document = "<" left ">,<" right ">";
         ''',
         vocab,
@@ -334,7 +334,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         """
         glrm 1;
         start document;
-        extern grammar payload;
+        extern payload;
         nt document = "X" payload "!";
         """,
         vocab,
@@ -372,7 +372,7 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     parent = glrmask.Grammar.from_glrm(
         """
         glrm 1;
-        extern grammar payload;
+        extern payload;
         start document;
         nt document = "x" | "<" payload ">";
         """

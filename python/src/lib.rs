@@ -585,12 +585,6 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Resolve one exact token, preserving this complete vocabulary identity.
-    fn token(&self, id: u32) -> PyResult<final_api::PyExactToken> {
-        self.inner.token(id).map(|inner| final_api::PyExactToken { inner })
-            .map_err(|error| PyValueError::new_err(error.to_string()))
-    }
-
     /// Resolve a nonempty set of distinct exact token IDs.
     fn tokens(&self, ids: Vec<u32>) -> PyResult<final_api::PyExactTokens> {
         self.inner.tokens(ids).map(|inner| final_api::PyExactTokens { inner })
@@ -1968,7 +1962,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         [
             "Grammar",
             "UnlinkedConstraint",
-            "ExactToken",
+            "Token",
             "ExactTokens",
             "Optimization",
             "BoundaryTriggerDetail",

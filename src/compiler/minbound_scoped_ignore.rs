@@ -27,7 +27,7 @@ fn mb_scoped_mask_bits(mask: &[u32]) -> Vec<u32> {
 /// One tiny scoped-ignore case. `parent_explicit` and `parent_inline` carry the
 /// *same* grammar rules and vocabulary; only the `SUB` binding differs
 /// (`t SUB ::= @token(999);` for the explicit segmented composition,
-/// `extern grammar SUB;` for the AST inline reference).
+/// `extern SUB;` for the AST inline reference).
 struct MbScopedIgnoreVariant {
     name: &'static str,
     parent_explicit: &'static str,
@@ -47,7 +47,7 @@ fn mb_scoped_ignore_variants() -> Vec<MbScopedIgnoreVariant> {
         MbScopedIgnoreVariant {
             name: "full",
             parent_explicit: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB \"!\";\n",
-            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern grammar SUB;\nnt document ::= \"X\" SUB \"!\";\n",
+            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern SUB;\nnt document ::= \"X\" SUB \"!\";\n",
             child: child_full,
             vocab: vec![(0, b"Xa!".to_vec()), (1, b"X\t a!".to_vec())],
             expected_valid: vec![0],
@@ -56,7 +56,7 @@ fn mb_scoped_ignore_variants() -> Vec<MbScopedIgnoreVariant> {
         MbScopedIgnoreVariant {
             name: "no_bang",
             parent_explicit: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB;\n",
-            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern grammar SUB;\nnt document ::= \"X\" SUB;\n",
+            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern SUB;\nnt document ::= \"X\" SUB;\n",
             child: child_full,
             vocab: vec![(0, b"Xa".to_vec()), (1, b"X\t a".to_vec())],
             expected_valid: vec![0],
@@ -65,7 +65,7 @@ fn mb_scoped_ignore_variants() -> Vec<MbScopedIgnoreVariant> {
         MbScopedIgnoreVariant {
             name: "single_ws",
             parent_explicit: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB \"!\";\n",
-            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nextern grammar SUB;\nnt document ::= \"X\" SUB \"!\";\n",
+            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nextern SUB;\nnt document ::= \"X\" SUB \"!\";\n",
             child: "start child;\nignore CHILD_WS;\nt CHILD_WS ::= \"\\t\";\nnt child ::= \"a\";\n",
             vocab: vec![(0, b"Xa!".to_vec()), (1, b"X\t a!".to_vec())],
             expected_valid: vec![0],
@@ -74,7 +74,7 @@ fn mb_scoped_ignore_variants() -> Vec<MbScopedIgnoreVariant> {
         MbScopedIgnoreVariant {
             name: "no_bang_single_ws",
             parent_explicit: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB;\n",
-            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nextern grammar SUB;\nnt document ::= \"X\" SUB;\n",
+            parent_inline: "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \";\nextern SUB;\nnt document ::= \"X\" SUB;\n",
             child: "start child;\nignore CHILD_WS;\nt CHILD_WS ::= \"\\t\";\nnt child ::= \"a\";\n",
             vocab: vec![(0, b"Xa".to_vec()), (1, b"X\t a".to_vec())],
             expected_valid: vec![0],
@@ -162,7 +162,7 @@ fn mb_run_scoped_ignore_variant(
 fn mb_distinct_grammar() -> (&'static str, &'static str, &'static str) {
     (
         "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB \"!\";\n",
-        "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern grammar SUB;\nnt document ::= \"X\" SUB \"!\";\n",
+        "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern SUB;\nnt document ::= \"X\" SUB \"!\";\n",
         "start child;\nignore CHILD_WS;\nt CHILD_WS ::= \"\\t\"+;\nnt child ::= \"a\";\n",
     )
 }
@@ -653,7 +653,7 @@ fn minimal_scoped_ignore_byte_level_control_sequence() {
         (4, b"\t".to_vec()),
     ]);
     let parent_explicit = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB \"!\";\n";
-    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern grammar SUB;\nnt document ::= \"X\" SUB \"!\";\n";
+    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern SUB;\nnt document ::= \"X\" SUB \"!\";\n";
     let child_src = "start child;\nignore CHILD_WS;\nt CHILD_WS ::= \"\\t\"+;\nnt child ::= \"a\";\n";
     let parent = Constraint::from_glrm_grammar(parent_explicit, &vocab).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
@@ -717,7 +717,7 @@ fn minimal_scoped_visible_parent_component_overadmits_after_partial_ignore() {
         (7, b"!".to_vec()),
     ]);
     let parent_explicit = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \"ab\";\nt X ::= \"X\";\nt BANG ::= \"!\";\nt SUB ::= @token(999);\nnt document ::= X SUB BANG;\n";
-    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \"ab\";\nt X ::= \"X\";\nt BANG ::= \"!\";\nextern grammar SUB;\nnt document ::= X SUB BANG;\n";
+    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \"ab\";\nt X ::= \"X\";\nt BANG ::= \"!\";\nextern SUB;\nnt document ::= X SUB BANG;\n";
     let child_src = "start child;\nt CHILD_T ::= \"t\";\nnt child ::= CHILD_T;\n";
     let parent = Constraint::from_glrm_grammar(parent_explicit, &vocab).unwrap();
     let child = Constraint::from_glrm_grammar(child_src, &vocab).unwrap();
@@ -789,7 +789,7 @@ fn test_scoped_ignore_vocab_mixed_first_byte_and_distinct_equivalent_bytes() {
         (6, b"!".to_vec()),
     ]);
     let parent_explicit = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nt SUB ::= @token(999);\nnt document ::= \"X\" SUB \"!\";\n";
-    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern grammar SUB;\nnt document ::= \"X\" SUB \"!\";\n";
+    let parent_inline = "start document;\nignore PARENT_WS;\nt PARENT_WS ::= \" \"+;\nextern SUB;\nnt document ::= \"X\" SUB \"!\";\n";
     let child_src = "start child;\nignore CHILD_WS;\nt CHILD_WS ::= \"\\t\"+;\nnt child ::= \"a\"+;\n";
 
     let parent = Constraint::from_glrm_grammar(parent_explicit, &vocab).unwrap();

@@ -404,10 +404,10 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
 #[test]
 fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (9, Vec::new()), (11, Vec::new())]);
-    let source = "glrm 1; start start; extern token MARK; nt start = MARK;";
+    let source = "glrm 1; start start; extern MARK; nt start = MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[9])], &[]).unwrap().into_constraint();
-    let native = Grammar::from_glrm(source).bind("MARK", vocab.token(9).unwrap()).unwrap()
+    let native = Grammar::from_glrm(source).bind("MARK", crate::Token::new(9)).unwrap()
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
@@ -512,12 +512,12 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
 #[test]
 fn focused_empty_special_token_is_live_after_prefix_across_reload() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(25,Vec::new()),(26,Vec::new())]);
-    let source = "glrm 1; start root; extern token MARK; nt root = \"a\" MARK;";
+    let source = "glrm 1; start root; extern MARK; nt root = \"a\" MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source,&vocab,&[("MARK",&[25])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
     for mode in [Optimization::Auto,Optimization::Balanced,Optimization::FastRuntime] {
-        constraints.push(Grammar::from_glrm(source).bind("MARK",vocab.token(25).unwrap()).unwrap()
+        constraints.push(Grammar::from_glrm(source).bind("MARK",crate::Token::new(25)).unwrap()
             .compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
     for compiled in constraints {

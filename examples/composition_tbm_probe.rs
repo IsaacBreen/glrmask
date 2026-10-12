@@ -98,8 +98,8 @@ fn main() {
     let filter = args.get(3).map(String::as_str).unwrap_or("");
     let vocab = read_vocab(&args[1]);
     println!("metric,case,prefix,samples,p50_us,p90_us,p99_us,max_us,allowed,mask_hash");
-    let middle_source = "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";";
-    let outer_source = "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";";
+    let middle_source = "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";";
+    let outer_source = "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";";
     for (fixture, leaf_source, prefixes) in [
         ("literal", r#"glrm 1; start leaf; nt leaf = "a";"#, vec![
             ("root", &b""[..]), ("outer", &b"X"[..]), ("leaf", &b"X["[..]),

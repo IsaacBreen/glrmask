@@ -13,7 +13,7 @@
 //!
 //! internal t DIGIT = /[0-9]/;
 //! t NUMBER = /-?(0|[1-9][0-9]*)/;
-//! extern token END_TURN;
+//! extern END_TURN;
 //! nt value = NUMBER | "null" | END_TURN;
 //! ```
 //!
@@ -22,8 +22,9 @@
 //! and double quoted literals have the same byte-string semantics; the v1
 //! formatter chooses the delimiter requiring fewer escapes and prefers double
 //! quotes on a tie. Exact
-//! model-token IDs do not appear in v1 source: `extern token NAME;` declares a
-//! parser-visible exact-token terminal whose ID or IDs are supplied by the host.
+//! model-token IDs do not appear in v1 source: `extern NAME;` declares a
+//! reference whose binding supplies a grammar or exact token IDs. Token bindings
+//! consume model IDs directly, never their byte spellings.
 //! External terminals may appear in nonterminal expressions and nonterminal FA
 //! edges, but not in byte-level terminal expressions.
 //!
@@ -49,8 +50,8 @@
 //! }
 //! ```
 //!
-//! Inline subgrammars use `g name = { ... };`; `extern grammar name;` declares a
-//! compiled subgrammar supplied by the host. Scope and ignore semantics remain
+//! Inline subgrammars use `g name = { ... };`; `extern name;` declares an
+//! external reference supplied by the host. Scope and ignore semantics remain
 //! local to each grammar.
 //!
 //! ## Expressions
@@ -276,7 +277,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
 }
 
 /// Canonically format a versioned GLRM v1 source document without lowering
-/// source-level declarations such as `extern token NAME;`.
+/// source-level declarations such as `extern NAME;`.
 ///
 /// This is intentionally a source-layer formatter: exact token IDs are not
 /// accepted or emitted, and externally bound terminal names survive unchanged.
@@ -368,13 +369,13 @@ fn dump_parsed_scope_v1(
     }
 
     for terminal in &scope.external_terminals {
-        push_indented_line(out, indent, &format!("extern token {};", terminal.name));
+        push_indented_line(out, indent, &format!("extern {};", terminal.name));
     }
 
     for subgrammar in &scope.subgrammars {
         match &subgrammar.body {
             ParsedSubgrammarBody::External => {
-                push_indented_line(out, indent, &format!("extern grammar {};", subgrammar.name));
+                push_indented_line(out, indent, &format!("extern {};", subgrammar.name));
             }
             ParsedSubgrammarBody::Inline(child) => {
                 push_indented_line(out, indent, &format!("g {} = {{", subgrammar.name));
@@ -744,7 +745,7 @@ pub fn from_glrm(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
 }
 
-/// Parse GLRM v1 and bind every `extern token NAME;` declaration to one or more
+/// Parse GLRM v1 and bind every `extern NAME;` declaration to one or more
 /// exact model token IDs. These terminals are parser-visible and have no byte
 /// language; token IDs need not occur in the byte vocabulary.
 pub fn from_glrm_with_external_terminals(
@@ -754,12 +755,12 @@ pub fn from_glrm_with_external_terminals(
     let tokens = Lexer::new(input).tokenize()?;
     let mut parser = GlrmParser::new(tokens)?;
     let mut scope = parser.parse_root_scope()?;
+    bind_external_terminals(&mut scope, bindings)?;
     if contains_external_subgrammar(&scope) {
         return Err(err(
             "external subgrammars require from_glrm_with_external_subgrammars and explicit bindings",
         ));
     }
-    bind_external_terminals(&mut scope, bindings)?;
     lower_parsed_grammar(scope, &BTreeMap::new()).map(|parsed| parsed.grammar)
 }
 
@@ -782,8 +783,7 @@ pub struct GlrmWithExternalSubgrammars {
 /// The target-independent external declarations in a GLRM source descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GlrmExternalDeclarations {
-    pub token_names: Vec<String>,
-    pub grammar_names: Vec<String>,
+    pub names: Vec<String>,
 }
 
 /// Parse and validate GLRM declarations without binding or lowering them.
@@ -797,8 +797,7 @@ pub fn external_declarations(
     let scope = parser.parse_root_scope()?;
     validate_scope_for_v1_format(&scope, "grammar")?;
     Ok(GlrmExternalDeclarations {
-        token_names: collect_external_terminal_names(&scope),
-        grammar_names: collect_external_subgrammar_names(&scope),
+        names: collect_external_subgrammar_names(&scope),
     })
 }
 
@@ -816,7 +815,7 @@ pub fn special_token_ids(input: &str) -> Result<Vec<u32>, GlrMaskError> {
     Ok(ids.into_iter().collect())
 }
 
-/// Parse GLRM containing `extern grammar name;` declarations.
+/// Parse GLRM containing `extern name;` declarations.
 ///
 /// `first_placeholder_token_id` must lie outside the model vocabulary.
 /// `reserved_token_ids` contains end-token and other caller-reserved IDs.
@@ -868,15 +867,15 @@ pub fn from_glrm_with_bindings_and_external_subgrammars(
 }
 
 /// Debug/internal grammar construction: parse a GLRM parent and structurally
-/// replace selected `extern grammar NAME;` occurrences with inline subgrammars
+/// replace selected `extern NAME;` occurrences with inline subgrammars
 /// taken from the supplied child GLRM sources.
 ///
 /// `children` keys are fully qualified occurrence paths, not global names:
 ///
-/// * `"child"` binds a direct `extern grammar child;` in the parent scope;
-/// * `"outer::inner"` binds an `extern grammar inner;` nested inside an inline
+/// * `"child"` binds a direct `extern child;` in the parent scope;
+/// * `"outer::inner"` binds an `extern inner;` nested inside an inline
 ///   `g outer ::= { ... };` subgrammar already present in the parent source;
-/// * `"child::grandchild"` binds an `extern grammar grandchild;` inside the
+/// * `"child::grandchild"` binds an `extern grandchild;` inside the
 ///   child source bound to `"child"`.
 ///
 /// Each occurrence is parsed once from its own source string and keeps its own
@@ -961,6 +960,7 @@ pub fn from_glrm_with_named_subgrammars_and_external_terminals(
         })
     };
     let mut scope = parse_glrm_scope(parent)?;
+    bind_external_terminals(&mut scope, terminal_bindings)?;
     let mut consumed = BTreeSet::new();
     bind_inline_subgrammars(&mut scope, "", &resolve, &mut consumed, 0, 64)?;
     for name in bindings.keys() {
@@ -968,7 +968,6 @@ pub fn from_glrm_with_named_subgrammars_and_external_terminals(
             return Err(err(&format!("inline subgrammar binding {name:?} did not match any external grammar occurrence")));
         }
     }
-    bind_external_terminals(&mut scope, terminal_bindings)?;
     let lowered = lower_parsed_grammar(scope, &BTreeMap::new())?;
     if !lowered.placeholders.is_empty() {
         return Err(err("typed inline replacement left an unbound external placeholder"));
@@ -1439,6 +1438,27 @@ fn bind_external_terminals(
     scope: &mut ParsedGlrmScope,
     bindings: &[(&str, &[u32])],
 ) -> Result<(), GlrMaskError> {
+    fn select_token_bindings(scope: &mut ParsedGlrmScope, prefix: &str, names: &BTreeSet<&str>) {
+        let mut remaining = Vec::new();
+        for mut declaration in std::mem::take(&mut scope.subgrammars) {
+            let path = if prefix.is_empty() { declaration.name.clone() }
+                else { format!("{prefix}::{}", declaration.name) };
+            match &mut declaration.body {
+                ParsedSubgrammarBody::External if names.contains(path.as_str()) => {
+                    scope.external_terminals.push(ParsedExternalTerminal {
+                        name: declaration.name, token_ids: Vec::new(),
+                    });
+                    continue;
+                }
+                ParsedSubgrammarBody::Inline(child) => select_token_bindings(child, &path, names),
+                ParsedSubgrammarBody::External => {}
+            }
+            remaining.push(declaration);
+        }
+        scope.subgrammars = remaining;
+    }
+    let binding_names = bindings.iter().map(|(name, _)| *name).collect();
+    select_token_bindings(scope, "", &binding_names);
     let declared_names = collect_external_terminal_names(scope);
     let declared = declared_names.iter().cloned().collect::<BTreeSet<_>>();
     if declared.len() != declared_names.len() {
@@ -1740,7 +1760,7 @@ impl GlrmParser {
         let mut start: Option<String> = None;
         let mut ignore: Option<String> = None;
         let mut rules: Vec<NamedRule> = Vec::new();
-        let mut external_terminals = Vec::new();
+        let external_terminals = Vec::new();
         let mut subgrammars = Vec::new();
         let mut lexer_partitions = BTreeMap::<String, String>::new();
         let mut lexer_literal_partitions = BTreeMap::<Vec<u8>, String>::new();
@@ -1796,28 +1816,10 @@ impl GlrmParser {
                     }
                     "extern" => {
                         self.advance();
-                        match self.advance().clone() {
-                            Tok::Ident(ref kind) if kind == "token" => {
-                                if self.version != GlrmVersion::V1 {
-                                    return Err(err("extern token declarations require a leading 'glrm 1;' header"));
-                                }
-                                let name = self.expect_ident()?;
-                                self.consume(&Tok::Semi)?;
-                                external_terminals.push(ParsedExternalTerminal {
-                                    name,
-                                    token_ids: Vec::new(),
-                                });
-                                continue;
-                            }
-                            Tok::Ident(ref kind) if kind == "grammar" => {}
-                            other => {
-                                return Err(err(&format!(
-                                    "expected 'token' or 'grammar' after 'extern', got {:?}",
-                                    other,
-                                )));
-                            }
-                        }
                         let name = self.expect_ident()?;
+                        if (name == "token" || name == "grammar") && matches!(self.peek(), Tok::Ident(_)) {
+                            return Err(err("typed external declarations are no longer supported; use 'extern NAME;' and supply a token or grammar binding"));
+                        }
                         self.consume(&Tok::Semi)?;
                         subgrammars.push(ParsedSubgrammar {
                             name,
@@ -2537,7 +2539,7 @@ impl GlrmParser {
             }
             Tok::At => {
                 if self.version == GlrmVersion::V1 {
-                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern token NAME;' and bind it by name"));
+                    return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern NAME;' and bind it by name"));
                 }
                 self.advance();
                 match self.advance().clone() {
@@ -3737,6 +3739,26 @@ mod tests {
     use crate::grammar::ast::lower;
 
     #[test]
+    fn unified_external_manifest_format_and_binding_semantics() {
+        let source = "glrm 1; start s; extern item; nt s = item;";
+        assert_eq!(external_declarations(source).unwrap().names, ["item"]);
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(formatted.contains("extern item;"));
+        assert!(!formatted.contains("extern grammar") && !formatted.contains("extern token"));
+        let tokens = from_glrm_with_external_terminals(&formatted, &[("item", &[7])]).unwrap();
+        assert!(tokens.rules.iter().any(|r| r.name == "item" && r.expr == GrammarExpr::SpecialToken(7)));
+        let open = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
+        assert_eq!(open.placeholders[0].binding_name, "item");
+        let nested = "glrm 1; start s; g child = { start x; extern item; nt x = item; }; nt s = child;";
+        assert_eq!(external_declarations(nested).unwrap().names, ["child::item"]);
+        assert!(from_glrm_with_external_terminals(nested, &[("child::item", &[7])]).is_ok());
+        for typed in ["extern token item;", "extern grammar item;"] {
+            let source = format!("glrm 1; start s; {typed} nt s = item;");
+            assert!(external_declarations(&source).unwrap_err().to_string().contains("use 'extern NAME;'"));
+        }
+    }
+
+    #[test]
     fn direct_unicode_is_preserved_in_glrm_regexes_and_classes() {
         let tokens = Lexer::new("t RX ::= /é — 😀/; t CLASS ::= [é—😀]/utf8;")
             .tokenize()
@@ -4320,7 +4342,7 @@ nt document ::= A inner;
         let error = from_glrm(
             r#"
 start document;
-extern grammar payload;
+extern payload;
 nt document ::= "<" payload ">";
 "#,
         )
@@ -4334,10 +4356,10 @@ nt document ::= "<" payload ">";
         let parsed = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern grammar payload;
+extern payload;
 g wrapper ::= {
     start value;
-    extern grammar leaf;
+    extern leaf;
     nt value ::= "[" leaf "]";
 };
 t END ::= @token(52);
@@ -4382,8 +4404,8 @@ nt document ::= "<" payload wrapper ">" END?;
         let error = from_glrm_with_external_subgrammars(
             r#"
 start document;
-extern grammar left;
-extern grammar right;
+extern left;
+extern right;
 nt document ::= left right;
 "#,
             u32::MAX,
@@ -4494,7 +4516,7 @@ nt start = '"' | "'" | "plain";
             r#"
 glrm 1;
 start start;
-extern token END_TURN;
+extern END_TURN;
 nt start = "a" END_TURN;
 "#,
             &[("END_TURN", &ids)],
@@ -4513,9 +4535,9 @@ nt start = "a" END_TURN;
 
     #[test]
     fn glrm_v1_external_terminal_binding_errors_are_explicit() {
-        let source = "glrm 1; start start; extern token X; nt start = X;";
+        let source = "glrm 1; start start; extern X; nt start = X;";
         let missing = from_glrm(source).unwrap_err().to_string();
-        assert!(missing.contains("no exact-token binding"), "{missing}");
+        assert!(missing.contains("explicit bindings"), "{missing}");
         let empty = from_glrm_with_external_terminals(source, &[("X", &[])])
             .unwrap_err()
             .to_string();
@@ -4536,7 +4558,7 @@ nt start = "a" END_TURN;
     fn glrm_v1_external_terminal_is_not_visible_inside_terminal_bodies() {
         let ids = [100];
         let error = from_glrm_with_external_terminals(
-            "glrm 1; start start; extern token X; t BAD = X; nt start = BAD;",
+            "glrm 1; start start; extern X; t BAD = X; nt start = BAD;",
             &[("X", &ids)],
         )
         .unwrap_err()
@@ -4609,10 +4631,10 @@ start message;
 pragma glrmask {
     lexer group words = WORD;
 }
-extern token END_TURN;
+extern END_TURN;
 g inner = {
     start value;
-    extern token BEGIN_ASSISTANT;
+    extern BEGIN_ASSISTANT;
     nt value = BEGIN_ASSISTANT "x";
 };
 t WORD = /[a-z]+/;
@@ -4627,8 +4649,8 @@ nt message = inner WORD END_TURN;
         let before = from_glrm_with_external_terminals(source, &bindings).unwrap();
         let formatted = format_glrm_v1(source).unwrap();
         assert!(formatted.starts_with("glrm 1;\n"), "{formatted}");
-        assert!(formatted.contains("extern token END_TURN;"), "{formatted}");
-        assert!(formatted.contains("extern token BEGIN_ASSISTANT;"), "{formatted}");
+        assert!(formatted.contains("extern END_TURN;"), "{formatted}");
+        assert!(formatted.contains("extern BEGIN_ASSISTANT;"), "{formatted}");
         assert!(formatted.contains("g inner = {"), "{formatted}");
         assert!(formatted.contains("pragma glrmask {"), "{formatted}");
         assert!(!formatted.contains("@token"), "{formatted}");
@@ -4653,11 +4675,11 @@ nt message = inner WORD END_TURN;
         let source = r#"
 glrm 1;
 start document;
-extern grammar payload;
+extern payload;
 nt document = "<" payload ">";
 "#;
         let formatted = format_glrm_v1(source).unwrap();
-        assert!(formatted.contains("extern grammar payload;"), "{formatted}");
+        assert!(formatted.contains("extern payload;"), "{formatted}");
         let before = from_glrm_with_external_subgrammars(source, 100, []).unwrap();
         let after = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
         assert_eq!(after.grammar.rules, before.grammar.rules);
@@ -4779,7 +4801,7 @@ mod inline_subgrammar_tests {
     #[test]
     fn direct_external_binding_matches_hand_inlined_grammar() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            "start document; extern SUB; nt document ::= \"X\" SUB \"!\";",
             &[("SUB", "start child; nt child ::= \"a\";")],
         )
         .unwrap();
@@ -4793,11 +4815,11 @@ mod inline_subgrammar_tests {
     #[test]
     fn nested_external_child_and_grandchild_are_bound() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            "start document; extern SUB; nt document ::= \"X\" SUB \"!\";",
             &[
                 (
                     "SUB",
-                    "start child; extern grammar GRAND; nt child ::= \"a\" GRAND;",
+                    "start child; extern GRAND; nt child ::= \"a\" GRAND;",
                 ),
                 ("SUB::GRAND", "start grand; nt grand ::= \"b\";"),
             ],
@@ -4813,7 +4835,7 @@ mod inline_subgrammar_tests {
     #[test]
     fn existing_inline_subgrammar_containing_external_is_bound() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; g OUTER ::= { start outer; extern grammar INNER; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
+            "start document; g OUTER ::= { start outer; extern INNER; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
             &[("OUTER::INNER", "start inner; nt inner ::= \"b\";")],
         )
         .unwrap();
@@ -4827,7 +4849,7 @@ mod inline_subgrammar_tests {
     #[test]
     fn identical_rule_and_terminal_names_stay_in_separate_scopes() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; t X ::= \"X\"; extern grammar SUB; nt document ::= X SUB;",
+            "start document; t X ::= \"X\"; extern SUB; nt document ::= X SUB;",
             &[("SUB", "start child; t X ::= \"Y\"; nt child ::= X;")],
         )
         .unwrap();
@@ -4847,7 +4869,7 @@ mod inline_subgrammar_tests {
     fn repeated_identical_child_sources_are_independent_occurrences() {
         const CHILD: &str = "start child; nt child ::= \"a\";";
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar LEFT; extern grammar RIGHT; nt document ::= LEFT RIGHT;",
+            "start document; extern LEFT; extern RIGHT; nt document ::= LEFT RIGHT;",
             &[("LEFT", CHILD), ("RIGHT", CHILD)],
         )
         .unwrap();
@@ -4861,7 +4883,7 @@ mod inline_subgrammar_tests {
     #[test]
     fn missing_duplicate_and_unused_bindings_are_rejected() {
         let missing = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= SUB;",
+            "start document; extern SUB; nt document ::= SUB;",
             &[],
         )
         .unwrap_err();
@@ -4871,7 +4893,7 @@ mod inline_subgrammar_tests {
         );
 
         let duplicate = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= SUB;",
+            "start document; extern SUB; nt document ::= SUB;",
             &[
                 ("SUB", "start child; nt child ::= \"a\";"),
                 ("SUB", "start other; nt other ::= \"b\";"),
@@ -4897,7 +4919,7 @@ mod inline_subgrammar_tests {
     #[test]
     fn child_ignore_and_lexer_partitions_survive_inlining() {
         let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern grammar SUB; nt document ::= \"X\" SUB \"!\";",
+            "start document; extern SUB; nt document ::= \"X\" SUB \"!\";",
             &[(
                 "SUB",
                 "start child; ignore WS; t WS ::= \" \"+; t WORD ::= /[a-z]+/; nt child ::= WORD;",

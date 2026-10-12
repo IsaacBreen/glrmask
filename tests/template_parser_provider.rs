@@ -253,7 +253,7 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
 fn source_and_precompiled_composition_use_native_defaults() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"xa".to_vec()),(2,b"x".to_vec())]);
     let child=Grammar::from_glrm(r#"start root; nt root ::= "a";"#);
-    let parent=Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#);
+    let parent=Grammar::from_glrm(r#"glrm 1; start root; extern child; nt root = "x" child;"#);
     let bound=parent.clone().bind("child",&child).unwrap();
     let template=bound.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
@@ -276,7 +276,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
         .compile_with(&v, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa))
         .unwrap();
     let module = Grammar::from_glrm(
-        r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#,
+        r#"glrm 1; start root; extern child; nt root = "x" child;"#,
     ).compile_unlinked(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();

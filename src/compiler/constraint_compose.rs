@@ -23669,7 +23669,7 @@ mod tests {
 
         let inline_parent = r#"
             start document;
-            extern grammar SUB;
+            extern SUB;
             nt document ::= "X" SUB "!";
         "#;
         let inline_children = [("SUB", "start child; nt child ::= \"a\" \"b\";")];
@@ -23943,13 +23943,13 @@ mod tests {
         let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
             r#"
                 start document;
-                extern grammar OUTER;
+                extern OUTER;
                 nt document ::= "<" OUTER ">";
             "#,
             &[
                 (
                     "OUTER",
-                    "start outer; extern grammar INNER; nt outer ::= \"a\" INNER;",
+                    "start outer; extern INNER; nt outer ::= \"a\" INNER;",
                 ),
                 ("OUTER::INNER", "start inner; nt inner ::= \"b\";"),
             ],
@@ -25563,7 +25563,7 @@ table: &child_table,
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[("SUB", "start child; nt child ::= \"a\";")],
@@ -25753,7 +25753,7 @@ table: &child_table,
                 t PARENT_WS ::= "ab";
                 t X ::= "X";
                 t BANG ::= "!";
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= X SUB BANG;
             "#,
             &[(
@@ -25911,7 +25911,7 @@ table: &child_table,
         let source_oracle = compile_inline_source_oracle(
             r#"
                 start document;
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[(

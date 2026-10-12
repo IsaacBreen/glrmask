@@ -12,8 +12,8 @@ import glrmask
 
 
 TOKENS = {0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 7: b"a", 63: b"", 127: b""}
-HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
-MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
+HOST = 'glrm 1; start start; extern child; nt start = "x" child "y";'
+MARK = 'glrm 1; start start; extern MARK; nt start = MARK;'
 
 
 def vocab(entries=None):
@@ -26,7 +26,7 @@ def accepting(state):
 
 
 def test_public_types_exist_without_exposing_backend_selection():
-    for name in ["Grammar", "UnlinkedConstraint", "Constraint", "ConstraintState", "Vocab", "ExactToken", "ExactTokens", "Optimization"]:
+    for name in ["Grammar", "UnlinkedConstraint", "Constraint", "ConstraintState", "Vocab", "Token", "ExactTokens", "Optimization"]:
         assert hasattr(glrmask, name), name
     for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME"]:
         assert hasattr(glrmask.Optimization, name), name
@@ -75,7 +75,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     assert mask[7] and mask[63]
     assert not mask[1]  # Same bytes as token 7, not the same token ID.
     with pytest.raises((ValueError, RuntimeError)):
-        v.token(126)
+        glrmask.Grammar.from_glrm(MARK).bind("MARK", glrmask.Token(126)).compile(v)
     with pytest.raises((ValueError, RuntimeError)):
         v.tokens([])
     with pytest.raises((ValueError, RuntimeError)):
@@ -89,7 +89,7 @@ def test_source_nested_open_token_survives_unlinked_save_and_late_binding():
     nested = glrmask.UnlinkedConstraint.load(parent.compile_unlinked(v).save())
     with pytest.raises((ValueError, RuntimeError)):
         nested.link()
-    c = nested.bind("child.MARK", v.token(7)).link()
+    c = nested.bind("child.MARK", glrmask.Token(7)).link()
     state = c.start()
     assert not state.mask()[4]
     state.commit_token(0)
@@ -118,14 +118,16 @@ def test_state_retains_constraint_after_python_owner_is_collected():
     assert accepting(state)
 
 
-def test_vocab_compatibility_checks_the_entire_mapping():
+def test_token_membership_is_checked_against_target_without_identity_guarantees():
     v = vocab()
     different = dict(TOKENS)
-    different[2] = b"changed"
-    wrong_value = vocab(different).token(7)
-    desc = glrmask.Grammar.from_glrm(MARK).bind("MARK", wrong_value)
-    with pytest.raises((ValueError, RuntimeError)):
-        desc.compile(v)
+    different[7] = b"changed"
+    desc = glrmask.Grammar.from_glrm(MARK).bind("MARK", glrmask.Token(7))
+    for target in [v, vocab(different)]:
+        mask = desc.compile(target).start().mask()
+        assert mask[7] and not mask[1]
+    with pytest.raises(ValueError):
+        desc.bind("missing", glrmask.Token(7))
 
 
 def test_packed_numpy_fill_mask_agrees_with_boolean_mask():

@@ -4,7 +4,7 @@ GLRMask is a grammar-constrained decoding library for high-throughput LLM servin
 
 GLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON schemas and Lark.
 
-[Website](https://glrmask.com) Â· [Paper](https://doi.org/10.5281/zenodo.23273556)
+[Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
 ## Benchmarks
 
@@ -70,8 +70,8 @@ Time between masks. Lower is better.
 
 <p align="center">
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-09-dark.svg?v=d65a4b1d8661">
-  <img src="docs/assets/benchmark-tbm-javascript-2026-10-09.svg?v=5e06f3eed94d" alt="JavaScript time between masks: measured GLRMask Static and llguidance 1.8.0 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/benchmark-tbm-javascript-2026-10-09-dark.svg?v=c26f751fe00e">
+  <img src="docs/assets/benchmark-tbm-javascript-2026-10-09.svg?v=4e4117917b18" alt="JavaScript time between masks: measured GLRMask Static and llguidance 1.8.0 curves; logarithmic exceedance probability and latency axes. Lower is better." width="480">
 </picture>
 </p>
 
@@ -222,14 +222,14 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 
 ### Source, compiled, and exact-token bindings
 
-GLRM declares child slots with `extern grammar NAME;` and exact-token slots with `extern token NAME;`. `Grammar::bind` attaches source grammars or vocabulary-qualified exact-token values. Attach compiled children with `UnlinkedConstraint::bind`:
+GLRM declares external references with `extern NAME;`. The value supplied to `Grammar::bind` determines whether a reference consumes exact token IDs or matches a source grammar. Attach compiled children with `UnlinkedConstraint::bind`:
 
 ```rust
 use glrmask::{Grammar, Result, Vocab};
 
 # fn demo(vocab: &Vocab) -> Result<()> {
 let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern grammar payload; nt document = payload;",
+    "glrm 1; start document; extern payload; nt document = payload;",
 );
 let source_child = Grammar::from_json_schema(r#"{"type":"null"}"#);
 let source_composition = parent.bind("payload", &source_child)?;
@@ -245,9 +245,9 @@ Exact token bindings come from the vocabulary rather than from naked IDs:
 # use glrmask::{Grammar, Result, Vocab};
 # fn demo(vocab: &Vocab, tool_call_id: u32) -> Result<()> {
 let grammar = Grammar::from_glrm(
-    "glrm 1; start message; extern token TOOL_CALL; nt message = TOOL_CALL;",
+    "glrm 1; start message; extern TOOL_CALL; nt message = TOOL_CALL;",
 );
-let grammar = grammar.bind("TOOL_CALL", vocab.token(tool_call_id)?)?;
+let grammar = grammar.bind("TOOL_CALL", glrmask::Token::new(tool_call_id))?;
 let _constraint = grammar.compile(vocab)?;
 # Ok(())
 # }
@@ -269,7 +269,7 @@ Use `compile_unlinked` when a compiled parent will be reused with request-specif
 # use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
 # fn demo(vocab: &Vocab) -> Result<()> {
 let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern grammar payload; nt document = payload;",
+    "glrm 1; start document; extern payload; nt document = payload;",
 );
 let host = parent.compile_unlinked(vocab)?;
 
@@ -287,13 +287,13 @@ let _constraint_b = b.link()?;
 # }
 ```
 
-`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a vocabulary-qualified exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
 
 Python uses the same lifecycle:
 
 ```python
 parent = glrmask.Grammar.from_glrm(
-    'glrm 1; start document; extern grammar payload; nt document = payload;'
+    'glrm 1; start document; extern payload; nt document = payload;'
 )
 host = parent.compile_unlinked(vocab)
 child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
@@ -394,18 +394,18 @@ t NUMBER = /-?(0|[1-9][0-9]*)/;
 nt value = NUMBER | "null";
 ```
 
-Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern grammar name;` slots have the same language semantics, including scope-local ignores.
+Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern name;` slots have the same language semantics, including scope-local ignores.
 
-Special model-token IDs are declared with `extern token NAME;` and bound with vocabulary-qualified values:
+An external reference can consume one ordinary or special model-token ID when bound to `glrmask.Token(id)`:
 
 ```python
 grammar = glrmask.Grammar.from_glrm('''
 glrm 1;
 start message;
-extern token TOOL_CALL;
+extern TOOL_CALL;
 nt message = TOOL_CALL "lookup()";
 ''')
-constraint = grammar.bind("TOOL_CALL", vocab.token(tool_call_token_id)).compile(vocab)
+constraint = grammar.bind("TOOL_CALL", glrmask.Token(tool_call_token_id)).compile(vocab)
 ```
 
 Lark and EBNF also support explicit `@token(<id>)` atoms when the numeric ID is deliberately part of the grammar source.

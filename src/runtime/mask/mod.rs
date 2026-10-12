@@ -2081,7 +2081,7 @@ mod tests {
         for ids in vocabularies {
             let vocab = Vocab::new(ids.iter().map(|&id| (id, b"a".to_vec())).collect());
             let original = crate::ConstraintSpec::builder(
-                Grammar::glrm("glrm 1; start document; extern token SPECIAL; nt document = \"a\" | SPECIAL;"),
+                Grammar::glrm("glrm 1; start document; extern SPECIAL; nt document = \"a\" | SPECIAL;"),
                 &vocab,
             ).unwrap().bind_token("SPECIAL", [70, 130]).unwrap().build().unwrap().compile().unwrap();
             let loaded = Constraint::load(original.save()).unwrap();
@@ -2117,7 +2117,7 @@ mod tests {
             r#"start child; ignore WS; t WS ::= " "+; t WORD ::= /[a-z]+/; nt child ::= WORD;"#
         ), &vocab).unwrap();
         let parent = Constraint::compile(Grammar::glrm(
-            r#"start document; extern grammar child; nt document ::= "[" child "]!";"#
+            r#"start document; extern child; nt document ::= "[" child "]!";"#
         ), &vocab).unwrap();
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
@@ -2197,7 +2197,7 @@ mod tests {
             (2, b"y".to_vec()),
         ]);
         let mut parent = Constraint::from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
-            "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
+            "glrm 1; start start; extern child; nt start = \"x\" child;",
             &vocab,
             &[],
             &[],
@@ -2229,7 +2229,7 @@ mod tests {
         .unwrap();
         let parent = Constraint::compile(
             Grammar::glrm(
-                "glrm 1; start document; extern grammar child; nt document = \"X\" child \"!\";",
+                "glrm 1; start document; extern child; nt document = \"X\" child \"!\";",
             ),
             &vocab,
         )
@@ -2362,19 +2362,19 @@ mod tests {
         let vocab = Vocab::new(entries);
         for nullable in [false, true] {
             let leaf_source = if nullable {
-                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\"? | SPECIAL;"
+                "glrm 1; start leaf; extern SPECIAL; nt leaf = \"a\"? | SPECIAL;"
             } else {
-                "glrm 1; start leaf; extern token SPECIAL; nt leaf = \"a\" | SPECIAL;"
+                "glrm 1; start leaf; extern SPECIAL; nt leaf = \"a\" | SPECIAL;"
             };
             let leaf = crate::ConstraintSpec::builder(Grammar::glrm(leaf_source), &vocab)
                 .unwrap().bind_token("SPECIAL", [11, 9001]).unwrap()
                 .build().unwrap().compile().unwrap();
             let middle_parent = Constraint::compile(Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
             ), &vocab).unwrap();
             let middle = middle_parent.bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
             let outer_parent = Constraint::compile(Grammar::glrm(
-                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
+                "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";",
             ), &vocab).unwrap();
             let bound = outer_parent.bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let loaded = Constraint::load(bound.save()).unwrap();
@@ -2447,10 +2447,10 @@ mod tests {
         ] {
             let leaf = Constraint::compile(Grammar::glrm(leaf_source), &vocab).unwrap();
             let middle = Constraint::compile(Grammar::glrm(
-                "glrm 1; start middle; extern grammar leaf; nt middle = \"[\" leaf \"]\";",
+                "glrm 1; start middle; extern leaf; nt middle = \"[\" leaf \"]\";",
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("leaf", leaf).unwrap();
             let bound = Constraint::compile(Grammar::glrm(
-                "glrm 1; start outer; extern grammar middle; nt outer = \"X\" middle \"!\";",
+                "glrm 1; start outer; extern middle; nt outer = \"X\" middle \"!\";",
             ), &vocab).unwrap().bind_grammar_dynamic_boundary("middle", middle).unwrap();
             let alphabet = super::recursive_mask_byte_representatives(&bound);
             assert_eq!(alphabet[b'a' as usize], alphabet[b'b' as usize]);
