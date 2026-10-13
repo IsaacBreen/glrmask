@@ -2,6 +2,7 @@
 pub(crate) mod boundary_cpu_profile;
 mod artifact;
 mod commit;
+pub(crate) use commit::forced::{force as force_for_states, force_token_ids as force_ids_for_states};
 mod constraint;
 pub(crate) mod parser_backend;
 mod dynamic_mask;

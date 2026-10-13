@@ -46,10 +46,13 @@ impl BoundaryOwnership {
         if num_immediate_components == 0 {
             return Err("boundary ownership has no immediate components".to_owned());
         }
-        if terminal_offsets.windows(2).any(|pair| pair[0] >= pair[1]) {
-            return Err("boundary ownership terminal offsets are not strictly increasing".to_owned());
+        // Empty-language and epsilon-only components can own no terminal
+        // labels. Their half-open intervals have equal adjacent offsets; the
+        // rightmost start still selects exactly the owner of each real label.
+        if terminal_offsets.windows(2).any(|pair| pair[0] > pair[1]) {
+            return Err("boundary ownership terminal offsets are decreasing".to_owned());
         }
-        if terminal_offsets.last().copied().unwrap_or(0) >= num_terminals && num_terminals != 0 {
+        if terminal_offsets.last().copied().unwrap_or(0) > num_terminals {
             return Err("boundary ownership final leaf starts outside terminal domain".to_owned());
         }
         if leaf_to_immediate
@@ -559,5 +562,21 @@ mod tests {
         complete_with_continuation_singletons(&mut map);
         assert_eq!(map.original_to_internal, vec![2, 0, 1, 3, 4]);
         assert_eq!(map.internal_to_originals, vec![vec![1], vec![2], vec![0], vec![3], vec![4]]);
+    }
+}
+
+#[cfg(test)]
+mod empty_owner_tests {
+    use super::*;
+    #[test]
+    fn empty_leaf_intervals_do_not_claim_any_terminal() {
+        let owners=BoundaryOwnership::flat(&[0,0,2,2],2).unwrap();
+        assert_eq!(owners.num_immediate_components(),4);
+        assert_eq!(owners.owner_of_terminal(0),Some(ImmediateComponentId(1)));
+        assert_eq!(owners.owner_of_terminal(1),Some(ImmediateComponentId(1)));
+        assert_eq!(owners.owner_of_terminal(2),None);
+        assert_eq!(BoundaryOwnership::flat(&[0,0],0).unwrap().num_terminals(),0);
+        assert!(BoundaryOwnership::flat(&[0,1],0).is_err());
+        assert!(BoundaryOwnership::flat(&[0,2,1],2).is_err());
     }
 }

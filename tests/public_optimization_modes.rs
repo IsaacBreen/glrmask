@@ -59,7 +59,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
         assert_eq!(a.forced(),r.forced()); assert_eq!(a.mask(),r.mask());
         a.commit_token(2).unwrap(); assert!(a.is_accepting());
     }
-    let g = Grammar::from_glrm("glrm 1; start start; extern MARK; nt start = MARK;")
+    let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
         .bind("MARK", glrmask::Token::new(15)).unwrap();
     for mode in MODES {
         let c = g.compile_with(&v, BuildOptions::default().optimization(mode)).unwrap();
@@ -72,14 +72,14 @@ fn force_and_exact_token_aliases_agree_across_modes() {
 fn source_dynamic_composition_and_precompiled_link_have_distinct_scopes() {
     let v = vocab();
     let child = Grammar::from_ebnf(r#"start ::= ")""#);
-    let grammar = Grammar::from_glrm("glrm 1; start start; extern child; nt start = \"(\" child;")
+    let grammar = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"(\" child;")
         .bind("child", &child).unwrap();
     let reference = grammar.compile(&v).unwrap();
     for mode in MODES {
         let c=grammar.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
         compare_prefixes(&c,&reference,&[0,2,7,15,20],3);
     }
-    let module = grammar.compile_unlinked(&v).unwrap();
+    let module = grammar.prepare(&v).unwrap();
     for mode in MODES {
         let c=module.link_with(BuildOptions::default().optimization(mode)).unwrap();
         compare_prefixes(&c,&reference,&[0,2,7,15,20],3);
@@ -106,7 +106,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         (2,b"b".to_vec()),(3,b"y".to_vec()),(4,b"xaby".to_vec()),(5,b"ab".to_vec()),
         (6,b" ".to_vec()),(7,b"\t".to_vec()),(8,b"x ab y".to_vec()),(9,b"xab\ty".to_vec()),
         (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())],[99]);
-    let parent=Grammar::from_glrm("glrm 1; start root; extern child; nt root = \"x\" child \"y\";");
+    let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";");
     let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#),
         Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/"),
         Grammar::from_glrm("glrm 1; start root; pragma glrmask { lexer group letters = A, B; } t A = \"a\"; t B = \"b\"; nt root = A B?;"),
@@ -120,9 +120,9 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
             compare_prefixes(&c,&reference,&[0,1,2,3,4,5,6,7,8,9,10,11,33,99],5);
         }
     }
-    let exact=Grammar::from_glrm("glrm 1; start root; extern MARK; nt root = MARK;")
+    let exact=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK;")
         .bind("MARK",v.tokens([33,99]).unwrap()).unwrap();
-    let middle=Grammar::from_glrm("glrm 1; start root; extern leaf; nt root = leaf;")
+    let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;")
         .bind("leaf",exact).unwrap();
     let description=parent.bind("child",middle).unwrap();
     let reference=description.compile(&v).unwrap();

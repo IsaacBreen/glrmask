@@ -4030,14 +4030,13 @@ impl<'a> DynamicConstraintState<'a> {
 
     /// Return a forced token sequence when one can be determined.
     pub fn forced(&self) -> Vec<u32> {
-        let Some((first, rest)) = self.alternatives.split_first() else {
-            return Vec::new();
-        };
-        let forced = first.forced();
-        (!forced.is_empty()
-            && rest.iter().all(|state| state.forced() == forced))
-            .then_some(forced)
-            .unwrap_or_default()
+        crate::runtime::force_for_states(&self.alternatives, Some(true))
+    }
+
+    /// Return only inevitable original token IDs across all live alternatives.
+    /// Unlike canonical-byte [`Self::forced`], alternate encodings are choices.
+    pub fn forced_token_ids(&self) -> Vec<u32> {
+        crate::runtime::force_ids_for_states(&self.alternatives, Some(true))
     }
 
     /// Return whether the committed prefix is currently accepted by the grammar.

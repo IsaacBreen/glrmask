@@ -5,12 +5,12 @@
 //! GLRMask has three core immutable/reusable layers:
 //!
 //! - [`Grammar`] describes source grammar semantics and bindings.
-//! - [`UnlinkedConstraint`] stores reusable compiled machinery for one exact
+//! - [`PreparedGrammar`] stores reusable compiled machinery for one exact
 //!   [`Vocab`] in pre-link form; it may retain unresolved request-specific slots.
 //! - [`Constraint`] is closed and immediately runnable. Call [`Constraint::start`]
 //!   to create one mutable [`ConstraintState`] per generated sequence.
 //!
-//! `Grammar::bind` and `UnlinkedConstraint::bind` are immutable: they return a
+//! `Grammar::bind` and `PreparedGrammar::bind` are immutable: they return a
 //! new value and leave the receiver reusable.
 //!
 //! # Quick start
@@ -41,37 +41,39 @@
 //!
 //! # Typed bindings
 //!
-//! Native GLRM can declare `extern child;` and `extern MARK;`.
+//! Native GLRM declares `extern grammar child` and `extern token MARK`.
 //! Both use [`Grammar::bind`]. [`Token::new`] describes a single exact ID;
 //! [`Vocab::tokens`] and [`Vocab::token_ranges`] describe vocabulary-qualified
-//! sets of IDs, including compact ranges. A set consumes one token, not a sequence.
+//! sets of IDs, including compact ranges. A match consumes one event, not a sequence;
+//! an empty event set recognizes no sequence, including epsilon.
 //!
 //! Source grammars compose with source grammars. Compiled children are attached
-//! only to [`UnlinkedConstraint`] values, keeping source compilation and compiled
+//! only to [`PreparedGrammar`] values, keeping source compilation and compiled
 //! linking as separate lifecycle stages.
 //!
 //! # Cached parents
 //!
-//! Use [`Grammar::compile_unlinked`] when a compiled parent will be reused. Bind
-//! compiled request-specific [`Constraint`] children or exact-token values with
-//! [`UnlinkedConstraint::bind`], then call [`UnlinkedConstraint::link`] or
-//! [`UnlinkedConstraint::link_with`]. Binding itself does not compile
+//! Use [`Grammar::prepare`] when a compiled parent will be reused. Bind
+//! request-specific [`PreparedGrammar`] children or exact-token values with
+//! [`PreparedGrammar::bind`], then call [`PreparedGrammar::link`] or
+//! [`PreparedGrammar::link_with`]. Binding itself does not compile
 //! cross-component boundaries; final link options select the build/runtime trade-off.
 //!
 //! # Final options and termination
 //!
 //! [`BuildOptions`] belongs only to the final compile/link operation. In
 //! particular, `end_tokens` is generation-root policy: an end token is admitted
-//! only once the grammar is accepting and is not inherited if that constraint is
-//! later embedded as a child. [`Optimization`] expresses build/runtime intent
+//! only once the grammar is accepting. Root policy is never part of a prepared
+//! child definition. [`Optimization`] expresses build/runtime intent
 //! without exposing GLRMask's internal engines.
 //!
 //! # Persistence
 //!
-//! [`UnlinkedConstraint::save`] / [`UnlinkedConstraint::load`] retain open
+//! [`PreparedGrammar::save`] / [`PreparedGrammar::load`] retain open
 //! compiled bindings. A
 //! [`Constraint`] has its own [`Constraint::save`] / [`Constraint::load`] artifact
-//! and remains embeddable after loading. Artifacts are pre-release formats and
+//! and remains runnable after loading; retain prepared artifacts for embedding.
+//! Artifacts are pre-release formats and
 //! are not yet promised to remain compatible across GLRMask releases.
 
 #![deny(warnings)]
@@ -101,7 +103,13 @@ pub(crate) use glrmask_vocab::__private as vocab;
 pub use runtime::{Constraint, ConstraintState};
 pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{BuildOptions, Grammar, Optimization, UnlinkedConstraint};
+pub use public_api::{BuildOptions, Grammar, Optimization, PreparedGrammar, Requirement, LarkOptions};
+#[cfg(any(test,feature="internal-api"))]
+#[doc(hidden)]
+pub use public_api::UnlinkedConstraint;
+pub use glrmask_grammar::SourceSpan;
+pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
+pub use glrmask_grammar::LarkProfile;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::ParserBackend;

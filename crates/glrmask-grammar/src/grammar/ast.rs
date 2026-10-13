@@ -66,6 +66,8 @@ impl Quantifier {
 pub enum GrammarExpr {
     Ref(String),
     Grouped(Box<GrammarExpr>),
+    /// Prefix-minimal regular terminal language. Never a CFG commit policy.
+    Shortest(Box<GrammarExpr>),
     Sequence(Vec<GrammarExpr>),
     Choice(Vec<GrammarExpr>),
     /// Empty string / epsilon. Equivalent to `Sequence([])` for grammar purposes;
@@ -202,7 +204,7 @@ impl NamedGrammar {
                         literals.insert(bytes.clone());
                     }
                 }
-                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                     collect(inner, literals);
                 }
                 GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -342,7 +344,7 @@ impl NamedGrammar {
         fn collect_refs(expr: &GrammarExpr, out: &mut HashSet<String>) {
             match expr {
                 GrammarExpr::Ref(name) => { out.insert(name.clone()); }
-                GrammarExpr::Grouped(inner) => collect_refs(inner, out),
+                GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => collect_refs(inner, out),
                 GrammarExpr::Sequence(items) => { for e in items { collect_refs(e, out); } }
                 GrammarExpr::Choice(alts) => { for e in alts { collect_refs(e, out); } }
                 GrammarExpr::Exclude { expr, exclude } => {
@@ -422,7 +424,7 @@ impl NamedGrammar {
     /// reflects the full original grammar structure.
     pub fn to_lark(&self) -> String {
         use std::fmt::Write;
-        let mut out = String::new();
+        let mut out = String::from("// Diagnostic Lark-like view only; not a round-trippable grammar export.\n");
 
         // Start rule
         writeln!(out, "// start: {}", self.start).unwrap();
@@ -476,6 +478,11 @@ fn grammar_expr_to_lark_with_indent(
     match expr {
         GrammarExpr::Ref(name) => {
             out.push_str(name);
+        }
+        GrammarExpr::Shortest(inner) => {
+            out.push_str("/* shortest(");
+            grammar_expr_to_lark_with_indent(inner, out, false, indent);
+            out.push_str(") */");
         }
         GrammarExpr::Grouped(inner) => {
             out.push('(');
@@ -905,6 +912,7 @@ impl<'a> Lowerer<'a> {
                 canonical
             }
             GrammarExpr::Grouped(inner) => self.canonical_exact_expr_inner(inner, visiting, memo),
+            GrammarExpr::Shortest(inner) => GrammarExpr::Shortest(Box::new(self.canonical_exact_expr_inner(inner, visiting, memo))),
             GrammarExpr::Sequence(items) => GrammarExpr::Sequence(
                 items
                     .iter()
@@ -1049,7 +1057,7 @@ impl<'a> Lowerer<'a> {
                 self.special_range_terminal_id(&format!("@tokens({start}..={end})"), *start, *end),
             ))),
             GrammarExpr::Grouped(inner) => self.nonnullable_terminal_symbol(inner),
-            GrammarExpr::CharClass { .. }
+            GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
             | GrammarExpr::Exclude { .. }
@@ -1140,7 +1148,7 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
-            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
             | GrammarExpr::Intersect { .. } => self.nonnullable_terminal_symbol(expr),
@@ -1206,7 +1214,7 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::Literal(_)
             | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
-            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte
@@ -2136,7 +2144,7 @@ impl<'a> Lowerer<'a> {
             GrammarExpr::Ref(_)
             | GrammarExpr::Literal(_)
             | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
-            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte
@@ -2565,7 +2573,7 @@ impl<'a> Lowerer<'a> {
                 // assume utf8 true for raw regex from lark/ebnf
                 Symbol::Terminal(self.terminal_id(pattern, pattern, true))
             }
-            GrammarExpr::LexerDfa(_) => {
+            GrammarExpr::Shortest(_) | GrammarExpr::LexerDfa(_) => {
                 let expr = self.resolve_terminal_expr(None, expr)?;
                 let name = format!("__terminal_expr_{}", self.generated_nonterminal_counter);
                 Symbol::Terminal(self.register_terminal_expr(&name, expr))
@@ -2848,6 +2856,35 @@ pub fn resolve_terminal_subexpressions(
 /// Resolve every externally emitting named terminal to the exact lexer-level
 /// expression used by [`lower`]. Equal values here are precisely the terminal
 /// expressions that `register_terminal_expr` deduplicates to one `TerminalID`.
+/// Validate the category before any parser macro factoring can erase it.
+/// shortest is defined over lexical terminal languages, never parser productions.
+pub fn validate_shortest_operands(grammar: &NamedGrammar) -> Result<(), GlrMaskError> {
+    let bodies = grammar.rules.iter().filter(|r| r.is_terminal)
+        .map(|r| (r.name.clone(), &r.expr)).collect::<FxHashMap<_, _>>();
+    let mut cache = FxHashMap::default();
+    let mut pending = grammar.rules.iter().map(|r| &r.expr).collect::<Vec<_>>();
+    while let Some(expr) = pending.pop() {
+        match expr {
+            GrammarExpr::Shortest(inner) => {
+                grammar_expr_to_expr(inner, &bodies, &mut cache, &mut HashSet::new())
+                    .map_err(|e| GlrMaskError::GrammarParse(format!("shortest/[lazy] requires a regular terminal expression: {e}")))?;
+                pending.push(inner);
+            }
+            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => pending.push(inner),
+            GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => pending.extend(parts),
+            GrammarExpr::Exclude { expr, exclude } | GrammarExpr::Intersect { expr, intersect: exclude } => {
+                pending.push(expr); pending.push(exclude);
+            }
+            GrammarExpr::SeparatedSequence { items, separator, .. } => {
+                pending.push(separator); pending.extend(items.iter().map(|(e,_)| e));
+            }
+            GrammarExpr::ExprNFA(nfa) => pending.extend(&nfa.symbols),
+            _ => {},
+        }
+    }
+    Ok(())
+}
+
 pub fn resolved_named_terminal_exprs(
     grammar: &NamedGrammar,
 ) -> Result<BTreeMap<String, Expr>, GlrMaskError> {
@@ -2899,6 +2936,8 @@ fn grammar_expr_to_expr(
         GrammarExpr::Grouped(inner) => {
             return grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting);
         }
+        GrammarExpr::Shortest(inner) => crate::automata::lexer::ast::shortest(
+            grammar_expr_to_expr(inner, terminal_bodies, terminal_expr_cache, visiting)?),
         GrammarExpr::Literal(bytes) => Expr::U8Seq(bytes.clone()),
         GrammarExpr::SpecialToken(token_id) => {
             return Err(GlrMaskError::GrammarParse(format!(
@@ -3015,7 +3054,7 @@ fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'
         GrammarExpr::Ref(name) => {
             refs.insert(name.as_str());
         }
-        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
             collect_terminal_rule_refs(inner, refs)
         }
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -3060,7 +3099,7 @@ fn grammar_expr_is_nullable(
 ) -> bool {
     match expr {
         GrammarExpr::Ref(name) => rule_nullable.get(name).copied().unwrap_or(false),
-        GrammarExpr::Grouped(inner) => grammar_expr_is_nullable(inner, rule_nullable),
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => grammar_expr_is_nullable(inner, rule_nullable),
         GrammarExpr::Sequence(parts) => parts.iter().all(|part| grammar_expr_is_nullable(part, rule_nullable)),
         GrammarExpr::Choice(options) => options.iter().any(|option| grammar_expr_is_nullable(option, rule_nullable)),
         GrammarExpr::Epsilon => true,
@@ -3191,7 +3230,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
                     walk(part, false, rule_name)?;
                 }
             }
-            GrammarExpr::Grouped(inner) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => {
                 walk(inner, false, rule_name)?;
             }
             GrammarExpr::Exclude { expr, exclude } => {
@@ -3241,6 +3280,7 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
     match expr {
         Expr::Shared(inner) => expr_to_grammar_expr(inner),
         Expr::U8Seq(bytes) => GrammarExpr::Literal(bytes.clone()),
+        Expr::U8Class(set) if set.is_empty()=>GrammarExpr::Choice(Vec::new()),
         Expr::U8Class(set) => GrammarExpr::CharClass {
             def: u8set_to_class_def(set),
             negate: false,
@@ -3259,7 +3299,7 @@ pub fn expr_to_grammar_expr(expr: &Expr) -> GrammarExpr {
         Expr::Choice(alts) => {
             let items: Vec<_> = alts.iter().map(expr_to_grammar_expr).collect();
             match items.len() {
-                0 => GrammarExpr::Epsilon,
+                0 => GrammarExpr::Choice(Vec::new()),
                 1 => items.into_iter().next().unwrap(),
                 _ => GrammarExpr::Choice(items),
             }
@@ -3350,6 +3390,7 @@ fn dedup_rules_preserving_first_occurrence(rules: &mut Vec<Rule>) {
 }
 
 pub fn lower(grammar: &NamedGrammar) -> Result<GrammarDef, GlrMaskError> {
+    validate_shortest_operands(grammar)?;
     lower_with_resolved_terminal_exprs_impl(grammar, None, None)
 }
 
@@ -3369,7 +3410,7 @@ pub fn lower_with_resolved_terminal_exprs(
 
 fn grammar_expr_node_count(expr: &GrammarExpr) -> usize {
     1 + match expr {
-        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
             grammar_expr_node_count(inner)
         }
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {

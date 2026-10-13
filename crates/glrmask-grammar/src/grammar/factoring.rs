@@ -15,6 +15,7 @@ use super::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 fn contains_regex_features(expr: &GrammarExpr) -> bool {
     match expr {
+        GrammarExpr::Shortest(_) => true,
         GrammarExpr::Grouped(inner) => contains_regex_features(inner),
         GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
@@ -285,7 +286,7 @@ impl ChoiceFactorer {
 
     fn collect_refs_impl(expr: &GrammarExpr, refs: &mut HashSet<String>) {
         match expr {
-            GrammarExpr::Grouped(inner) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => {
                 Self::collect_refs_impl(inner, refs);
             }
             GrammarExpr::Ref(name) => {
@@ -437,7 +438,7 @@ impl ChoiceFactorer {
 
     fn collect_refs_static(expr: &GrammarExpr, refs: &mut HashSet<String>) {
         match expr {
-            GrammarExpr::Grouped(inner) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => {
                 Self::collect_refs_static(inner, refs);
             }
             GrammarExpr::Ref(name) => {

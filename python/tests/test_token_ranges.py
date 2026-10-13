@@ -2,7 +2,7 @@
 import pytest
 import glrmask
 
-ONE = "glrm 1; start start; extern T; nt start = T;"
+ONE = "glrm 1; start start; extern token T; nt start = T;"
 MODES = [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
          glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]
 
@@ -28,7 +28,7 @@ def test_range_inputs_are_normalized_and_introspection_stays_compact():
     assert v.tokens(range(2, 12, 3)).ids == [2, 5, 8, 11]
 
 
-@pytest.mark.parametrize("ranges", [[], [range(0)], [range(7, 2)], [range(-1, 2)],
+@pytest.mark.parametrize("ranges", [[range(0)], [range(7, 2)], [range(-1, 2)],
                                     [range(127, 129)], [range(2, 10, 2)], [(2, 10)]])
 def test_invalid_compact_ranges_are_rejected(ranges):
     with pytest.raises((ValueError, OverflowError)):
@@ -43,15 +43,15 @@ def test_missing_ids_and_duplicate_explicit_ids_are_rejected():
         v.token_ranges([range(1, 4)])
     with pytest.raises(ValueError):
         v.tokens([1, 1])
-    with pytest.raises(ValueError):
-        v.tokens(range(0))
+    assert len(v.tokens(range(0))) == 0
+    assert len(v.token_ranges([])) == 0
     assert v.token_ranges([range(0, 2), range(3, 4)]).ids == [0, 1, 3]
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
-    source = "glrm 1; start start; extern A; extern B; nt start = A B;"
+    source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
     c = (glrmask.Grammar.from_glrm(source)
          .bind("A", v.tokens(range(10, 31)))
          .bind("B", v.token_ranges([range(20, 41), range(70, 81)]))
@@ -69,10 +69,10 @@ def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
 
 def test_deferred_range_binding_and_serialization():
     v = vocab()
-    module = glrmask.Grammar.from_glrm(ONE).compile_unlinked(v)
+    module = glrmask.Grammar.from_glrm(ONE).prepare(v)
     bound = module.bind("T", v.token_ranges([range(3, 9), range(90, 100)]))
     expected = set(range(3, 9)) | set(range(90, 100))
-    loaded = glrmask.UnlinkedConstraint.load(bound.save())
+    loaded = glrmask.PreparedGrammar.load(bound.save())
     for mode in MODES:
         constraint = loaded.link(optimization=mode)
         assert accepted_ids(constraint.start()) == expected
@@ -104,7 +104,7 @@ def pointwise_token_grammar(ids):
     """Independent singleton alternatives; deliberately do not use Vocab.tokens."""
     ids = list(ids)
     names = [f"E{i}" for i in range(len(ids))]
-    source = ("glrm 1; start item; " + " ".join(f"extern {name};" for name in names)
+    source = ("glrm 1; start item; " + " ".join(f"extern token {name};" for name in names)
               + " nt item = " + " | ".join(names) + ";")
     grammar = glrmask.Grammar.from_glrm(source)
     for name, token in zip(names, ids):
@@ -123,16 +123,16 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
     selections = {"A": [range(1, 4), range(6, 10)], "B": [range(3, 8)]}
     for expression in ["A B", "(A | B) A", '\"a\" A \"b\" | \"ab\" B',
                        "A? B+", "(A B)*"]:
-        source = "glrm 1; start start; extern A; extern B; nt start = " + expression + ";"
+        source = "glrm 1; start start; extern token A; extern token B; nt start = " + expression + ";"
         compact = glrmask.Grammar.from_glrm(source)
-        pointwise = glrmask.Grammar.from_glrm(source)
+        pointwise = glrmask.Grammar.from_glrm(source.replace("extern token A;", "extern grammar A;").replace("extern token B;", "extern grammar B;"))
         if deferred:
-            compact = compact.compile_unlinked(v)
-            pointwise = pointwise.compile_unlinked(v)
+            compact = compact.prepare(v)
+            pointwise = pointwise.prepare(v)
         for name, ranges in selections.items():
             compact = compact.bind(name, v.token_ranges(ranges))
             oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
-            pointwise = pointwise.bind(name, oracle.compile(v) if deferred else oracle)
+            pointwise = pointwise.bind(name, oracle.prepare(v) if deferred else oracle)
         if deferred:
             actual = compact.link(optimization=mode)
             expected = pointwise.link(optimization=mode)
@@ -163,7 +163,7 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa", 4: b"ba",
                                       5: b"x", 6: b"a", 7: b"", 8: b"b", 9: b"c",
                                       10: b"bb", 11: b"x"})
-    grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");')
+    grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = grammar.bind("A", v.tokens(range(6)) if compact else glrmask.Token(0))
     grammar = grammar.bind("B", v.tokens(range(3, 10)) if compact else glrmask.Token(1))
     constraint = grammar.compile(v, optimization=mode, end_tokens=[15])
@@ -182,7 +182,7 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
                                       4: b"ba", 5: b"x", 6: b"a", 7: b"",
                                       8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm(
-        'glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");')
+        'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     constraint = grammar.bind("A", v.tokens(a)).bind("B", v.tokens(b)).compile(
         v, optimization=mode, end_tokens=[15])
     state = constraint.start()

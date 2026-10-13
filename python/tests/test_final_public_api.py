@@ -12,7 +12,8 @@ def vocab():
 def test_top_level_surface_hides_engine_and_experimental_policy_types():
     for name in [
         "Grammar",
-        "UnlinkedConstraint",
+        "PreparedGrammar",
+        "Requirement",
         "Token",
         "ExactTokens",
         "Optimization",
@@ -52,18 +53,20 @@ def test_json_schema_constructor_accepts_text_and_objects():
 
 def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     v = vocab()
-    g = glrmask.Grammar.from_glrm('glrm 1; start start; extern T; extern C; nt start = T C;')
+    g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
     child = glrmask.Grammar.from_ebnf('start ::= "a"')
     with pytest.raises(TypeError):
         g.bind('T', 7)
-    assert g.bind('T', child)
-    assert g.bind('C', glrmask.Token(7))
+    with pytest.raises(ValueError):
+        g.bind('T', child)
+    with pytest.raises(ValueError):
+        g.bind('C', glrmask.Token(7))
     bound = g.bind('T', glrmask.Token(7))
     with pytest.raises(ValueError):
         bound.bind('T', glrmask.Token(8))
     with pytest.raises(ValueError):
         bound.bind('missing', child)
-    m = g.compile_unlinked(v)
+    m = g.prepare(v)
     with pytest.raises(TypeError):
         m.bind('C', child)
     with pytest.raises(TypeError):
@@ -94,7 +97,7 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
 
 def test_description_owns_source_bindings_after_collection():
     v = vocab()
-    parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern C; nt start = C;')
+    parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
     child_source = glrmask.Grammar.from_ebnf('start ::= "a"')
     a = parent.bind('C', child_source)
     del parent, child_source, v
@@ -134,8 +137,8 @@ def test_token_constructor_and_sparse_membership_validation():
     with pytest.raises(AttributeError):
         token.id = 8
     v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
-    g = glrmask.Grammar.from_glrm("glrm 1; start s; extern item; nt s = item;")
-    m = glrmask.UnlinkedConstraint.load(g.compile_unlinked(v).save())
+    g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
+    m = glrmask.PreparedGrammar.load(g.prepare(v).save())
     for id in [0, 3, 62, 64, 2**32-1]:
         value = glrmask.Token(id)
         bound = g.bind("item", value)
@@ -147,4 +150,7 @@ def test_token_constructor_and_sparse_membership_validation():
         c = m.bind("item", glrmask.Token(id)).link()
         assert np.flatnonzero(c.start().mask()).tolist() == [id]
     text = glrmask.Grammar.from_ebnf('s ::= "a"')
-    assert np.flatnonzero(g.bind("item", text).compile(v).start().mask()).tolist() == [2, 7]
+    with pytest.raises(ValueError):
+        g.bind("item", text)
+    general = glrmask.Grammar.from_glrm("extern grammar item start s nt s = item")
+    assert np.flatnonzero(general.bind("item", text).compile(v).start().mask()).tolist() == [2, 7]

@@ -1576,7 +1576,7 @@ impl<'a> Lowerer<'a> {
     fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
         match expr {
             GrammarExpr::RawRegex(_) => true,
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                 Self::expr_contains_raw_regex(inner)
             }
             GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
@@ -1733,7 +1733,7 @@ fn collect_repeated_terminal_sites(
             }
             collect_repeated_terminal_sites(rule_name, inner, terminal_names, sites);
         }
-        GrammarExpr::Grouped(inner) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => {
             collect_repeated_terminal_sites(rule_name, inner, terminal_names, sites);
         }
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -2421,7 +2421,7 @@ fn prune_generated_rules_in_place(rules: &mut Vec<NamedRule>, start: &str) {
     fn references<'a>(expr: &'a GrammarExpr, pending: &mut Vec<&'a str>) {
         match expr {
             GrammarExpr::Ref(name) => pending.push(name.as_str()),
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => references(inner, pending),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => references(inner, pending),
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 for part in parts { references(part, pending); }
             }

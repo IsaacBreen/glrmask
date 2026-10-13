@@ -188,7 +188,7 @@ impl Resolver<'_> {
                     .collect::<Result<_, _>>()?;
                 ParserExpr::Automaton(ParserAutomaton { start_states: graph.nfa.start_states.clone(), states, symbols })
             }
-            GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::LexerDfa(_)
+            GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_) | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte | GrammarExpr::Intersect { .. } => {
                 // The existing lexical resolver rejects nonterminal intersection
                 // and recursive lexical references rather than approximating them.

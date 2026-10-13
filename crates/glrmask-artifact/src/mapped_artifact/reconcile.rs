@@ -260,7 +260,15 @@ fn many_to_one_id_map_refines(
     allow_unmapped: bool,
 ) -> bool {
     if finer.original_to_internal.len() < coarser.original_to_internal.len() {
-        return false;
+        // Vocabulary maps are partial: an omitted trailing ID and an explicit
+        // UNMAPPED entry have identical meaning. A prepared common partition
+        // may trim such padding while a later artifact retains vocabulary size.
+        // Do not accept the omission of any mapped ID, or of tokenizer states.
+        if !allow_unmapped || coarser.original_to_internal[finer.original_to_internal.len()..]
+            .iter().any(|&internal| internal != u32::MAX)
+        {
+            return false;
+        }
     }
 
     let mut coarser_by_finer = vec![None; finer.internal_to_originals.len()];
@@ -2233,4 +2241,52 @@ mod tests {
         assert_eq!(id_map_key(&fast_right_id_map), id_map_key(&left_id_map));
         assert_eq!(entries_key(&fast_left_weight), entries_key(&left_weight));
     }
+
+    #[test]
+    fn vocabulary_refinement_ignores_only_unmapped_trailing_padding() {
+        let shorter = map(vec![0, 1], 2);
+        let padded = map(vec![0, 0, u32::MAX, u32::MAX], 1);
+        assert!(many_to_one_id_map_refines(&shorter, &padded, true));
+        assert!(!many_to_one_id_map_refines(&shorter, &padded, false),
+            "tokenizer-state domain omissions are not vocabulary padding");
+        let missing_real_id = map(vec![0, 0, 0, u32::MAX], 1);
+        assert!(!many_to_one_id_map_refines(&shorter, &missing_real_id, true));
+        let merged = map(vec![0, 0], 1);
+        let split = map(vec![0, 1, u32::MAX], 2);
+        assert!(!many_to_one_id_map_refines(&merged, &split, true),
+            "padding equivalence must not erase a real partition distinction");
+    }
+
+    #[test]
+    fn precomputed_refinement_with_unmapped_tail_preserves_original_coordinates() {
+        let u = u32::MAX;
+        let local = id_map(vec![0,1,1,0], 2, vec![1,0,1,1,u,2,2,u,u,u,u], 3);
+        let common = id_map(vec![2,0,0,1], 3, vec![3,4,0,2,u,5,1,u,u,u], 6);
+        assert!(internal_id_map_refines(&common, &local));
+        let original = Weight::from_per_tsid_token_sets([
+            (0, RangeSetBlaze::from_iter([0..=1])),
+            (1, RangeSetBlaze::from_iter([2..=2])),
+        ]);
+        fn original_pairs(weight: &Weight, map: &InternalIdMap) -> BTreeSet<(u32,u32)> {
+            let mut out = BTreeSet::new();
+            for (states, tokens) in weight.raw_range_values() {
+                for internal_state in states {
+                    for internal_token in tokens.iter() {
+                        for &state in &map.tokenizer_states.internal_to_originals[internal_state as usize] {
+                            for &token in &map.vocab_tokens.internal_to_originals[internal_token as usize] {
+                                out.insert((state,token));
+                            }
+                        }
+                    }
+                }
+            }
+            out
+        }
+        let expected = original_pairs(&original, &local);
+        let mut remapped = original.clone();
+        remap_weights_into_existing_common(&mut [&mut remapped], &local, &common);
+        assert_eq!(original_pairs(&remapped, &common), expected);
+        assert!(!expected.iter().any(|&(_,id)| id==10), "padding never acquires a weight");
+    }
+
 }

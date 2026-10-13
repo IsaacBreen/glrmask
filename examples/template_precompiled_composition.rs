@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let named = glrmask_grammar::__private::grammar::glrm::from_glrm_with_inline_subgrammars(&dispatch, &bindings)?;
     let child_source = source_for_reparse(named);
     fs::write(output.join("child-source.glrm"), &child_source)?;
-    let child = Grammar::from_glrm(&child_source).compile_with(&vocab, options.clone())?;
+    let child = Grammar::glrm(&child_source).compile_with(&vocab, options.clone())?;
     let child_compile_ns = started.elapsed().as_nanos();
     let child_report = parser_backend_report(&child); assert_table_free(&child_report);
     fs::write(output.join("child-backend.json"),serde_json::to_vec_pretty(&child_report)?)?;
@@ -196,9 +196,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let needle = "nt member_expression_with_suffixes ::=\n    primary_expression";
     assert!(source.contains(needle), "canonical JS source shape changed");
     source = source.replacen(needle, "nt member_expression_with_suffixes ::=\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression", 1);
-    source.push_str("\nextern PROGRAMMATIC_TOOL_SUFFIX;\n");
+    source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     fs::write(output.join("parent-source.glrm"), &source)?;
-    let started = Instant::now(); let parent = Grammar::from_glrm(&source).compile_unlinked(&vocab)?;
+    let started = Instant::now(); let parent = Grammar::glrm(&source).prepare(&vocab)?;
     let parent_compile_ns = started.elapsed().as_nanos();
     eprintln!("PARENT source_compile_ns={parent_compile_ns}");
     fs::write(output.join("prepared-child-backend.json"),serde_json::to_vec_pretty(&child_report)?)?;

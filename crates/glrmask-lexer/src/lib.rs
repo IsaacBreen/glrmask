@@ -28,7 +28,7 @@ mod possible_matches;
 
 pub use automata::lexer::ast::Expr;
 pub use automata::lexer::dfa::DFA;
-pub use automata::lexer::regex::parse_regex;
+pub use automata::lexer::regex::{parse_regex, checked_pattern, parse_checked_regex, source_regex_literal};
 pub use ds::u8set::U8Set;
 
 /// Implementation details shared by the GLRMask workspace.

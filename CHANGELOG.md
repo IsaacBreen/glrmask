@@ -2,8 +2,61 @@
 
 ## Unreleased
 
-- Replace `vocab.token(id)` / `ExactToken` with top-level Python `Token(id)` and Rust `Token::new(id)`. A token consumes exactly one ordinary or special model ID and stores no vocabulary. Compile or compiled-module binding validates membership against the target vocabulary; it cannot assert tokenizer identity.
-- Unify GLRM external declarations as `extern NAME;`. The bound value determines exact-token versus grammar semantics. Typed v1 declaration spellings and older typed-slot unlinked artifacts are explicitly rejected; migrate source and recompile.
+### Components and public APIs
+
+- Use the `Grammar` → `PreparedGrammar` → `Constraint` → `ConstraintState`
+  lifecycle. Source descriptions are parsed and cached once; `prepare()` retains
+  reusable vocabulary-specific machinery and `link()` creates a closed runnable
+  root. The old public `UnlinkedConstraint` / `compile_unlinked` spellings and
+  implicit runnable-constraint child bindings are no longer exposed.
+- Support immutable open-to-open attachment at both source and prepared stages,
+  with isolated inline components and qualified `child::NAME` requirements.
+  Separate attachments share compiled definitions without sharing bindings.
+  Requirements retain expected kinds and original source spans; final linking
+  checks every declared dependency.
+- Keep explicit `extern token NAME` and `extern grammar NAME` contracts.
+  `Token(id)` / `Token::new(id)` consumes one original ID and is checked against
+  the target vocabulary. Vocabulary-qualified `ExactTokens` provides compact
+  sets/ranges; `Grammar.exact` explicitly adapts an event set to a grammar slot.
+  Empty sets denote the empty language, never epsilon.
+- Store prepared assemblies as a bounded DAG with shared compiled definitions
+  and distinct instance environments. Reject malformed, excessively deep,
+  unreachable or wrong-kind manifests before decoding compiled bodies. Older
+  private artifact versions are rejected rather than guessed or upgraded.
+
+### Grammar frontends
+
+- Make native GLRM declarations layout-independent with optional semicolons,
+  no required version header, `grammar NAME { ... }` scopes, backtick-escaped
+  identifiers, explicit `edge` FA statements, and canonical formatting. Preserve
+  `internal t`, maximal munch, ambiguous CFG recognition, regular algebra,
+  structural alternative subtraction, and separated-sequence presence semantics.
+- Add explicit Unicode/byte strings and regexes, checked useful flags and
+  escapes, original-source diagnostics, and regular-terminal `shortest(...)`.
+  Keep independent ignored-terminal identities and component-local skip policy.
+  Regex-internal reluctant quantifiers and nonregular assertions fail explicitly.
+- Add a documented Lark recognition profile and an explicit LLM compatibility
+  profile. Fix exact/bounded repetition, common imports, Unicode ranges, flags,
+  start-rule handling and directive errors. The LLM profile supports exact-ID
+  sets/ranges/complements, explicit named-token maps, `@name` grammar requirements,
+  isolated `%json` fragments, and regular-body `[lazy]`.
+- Do not add numeric-token, named-special or inline-JSON literals to native
+  GLRM. Both frontends share the component/compiler machinery; neither accepts
+  priorities, captures, substring generation, sampling annotations or rule budgets.
+
+### Correctness and packaging
+
+- Repair forcing around exact events, spelling-less IDs, duplicate spellings,
+  accepting alternatives and correlated dynamic states. `forced()` chooses a
+  canonical admitted encoding of determined bytes; `forced_token_ids()` requires
+  unavoidable original IDs. Canonical encoding is not a claim of unchanged model
+  sampling probabilities. Every returned ID is replayable through normal commit.
+- Correct trailing-unmapped vocabulary-coordinate refinement, productionless
+  start coordinates and zero-terminal component ownership, with independent
+  byte/event and empty-language regressions.
+- Include Python type stubs and `py.typed`, and exclude development interpreter
+  caches from distributable wheels. Updated guides describe the canonical API
+  and the deliberate native/Lark dialect differences.
 
 ## 0.2.0 — 2026-10-10
 

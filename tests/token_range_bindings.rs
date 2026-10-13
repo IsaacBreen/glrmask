@@ -1,6 +1,6 @@
-use glrmask::{BuildOptions, Constraint, Grammar, Optimization, UnlinkedConstraint, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, Optimization, PreparedGrammar, Vocab};
 
-const ONE: &str = "glrm 1; start start; extern T; nt start = T;";
+const ONE: &str = "glrm 1; start start; extern token T; nt start = T;";
 const MODES: [Optimization; 4] = [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime];
 
 fn allowed(mask: &[u32], token: u32) -> bool {
@@ -58,7 +58,7 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
     let vocab = Vocab::new_with_exact_token_ids(Vec::<(u32, Vec<u8>)>::new(), 0..100);
     // At the start only A is live. After A only B is live. Their overlap must
     // not make either one's non-overlapping tail spuriously allowed.
-    let source = "glrm 1; start start; extern A; extern B; nt start = A B;";
+    let source = "glrm 1; start start; extern token A; extern token B; nt start = A B;";
     for mode in MODES {
         let constraint = Grammar::from_glrm(source)
             .bind("A", vocab.token_ranges([10..=30]).unwrap()).unwrap()
@@ -78,21 +78,21 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
 #[test]
 fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let vocab = Vocab::new_with_exact_token_ids(vec![(0, b"[".to_vec()), (1, b"]".to_vec())], 2..128);
-    let child_source = "glrm 1; start start; extern T; nt start = T T;";
-    let open = Grammar::from_glrm(child_source).compile_unlinked(&vocab).unwrap();
+    let child_source = "glrm 1; start start; extern token T; nt start = T T;";
+    let open = Grammar::from_glrm(child_source).prepare(&vocab).unwrap();
     let bound = open.bind("T", vocab.token_ranges([5..=15, 100..=120]).unwrap()).unwrap();
     let serialized = bound.save();
-    let loaded = UnlinkedConstraint::load(&serialized).unwrap();
+    let loaded = PreparedGrammar::load(&serialized).unwrap();
     for mode in MODES {
         let options = BuildOptions::default().optimization(mode);
         let child = loaded.link_with(options.clone()).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         assert_mask(&child, &[], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
         assert_mask(&child, &[15], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
-        // Composition intentionally accepts only native compiled components.
-        // Test each final optimization without attaching a retained-LR child.
-        let native_child = loaded.link().unwrap();
-        let outer = Grammar::from_glrm("glrm 1; start start; extern C; nt start = \"[\" C \"]\";")
-            .compile_unlinked(&vocab).unwrap().bind("C", &native_child).unwrap()
+        // Reuse the same closed prepared body without linking it prematurely.
+        // Each root link chooses its requested optimization independently.
+        let prepared_child = loaded.clone();
+        let outer = Grammar::from_glrm("glrm 1; start start; extern grammar C; nt start = \"[\" C \"]\";")
+            .prepare(&vocab).unwrap().bind("C", &prepared_child).unwrap()
             .link_with(options).unwrap();
         assert_mask(&outer, &[0], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
         let mut state = outer.start();
@@ -112,7 +112,8 @@ fn range_construction_normalizes_and_rejects_missing_ids() {
     assert_eq!(ranges.ranges().collect::<Vec<_>>(), [5..=25]);
     assert_eq!(ranges.len(), 21);
     assert_eq!(ranges.ids(), &(5..=25).collect::<Vec<_>>());
-    assert!(vocab.token_ranges([]).is_err());
+    assert!(vocab.token_ranges([]).unwrap().is_empty());
+    assert!(vocab.tokens([]).unwrap().is_empty());
     assert!(vocab.token_ranges([std::ops::RangeInclusive::new(20, 10)]).is_err());
     assert!(vocab.token_ranges([39..=48]).is_err());
     assert!(vocab.token_ranges([79..=80]).is_err());
@@ -178,7 +179,7 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
     ];
     entries.extend((8..20).map(|id| (id, b"x".to_vec())));
     let vocab = Vocab::new(entries);
-    let source = r#"glrm 1; start start; extern A; extern B;
+    let source = r#"glrm 1; start start; extern token A; extern token B;
         nt start = ("a" A "b") | ("a" B "bb");"#;
     for mode in MODES {
         let constraint = Grammar::from_glrm(source)
@@ -215,7 +216,7 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
             .bind("T", vocab.token_ranges([5..=5]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
         assert_eq!(singleton.start().forced(), vec![5]);
-        let repeated = Grammar::from_glrm("glrm 1; start start; extern T; nt start = T T;")
+        let repeated = Grammar::from_glrm("glrm 1; start start; extern token T; nt start = T T;")
             .bind("T", vocab.token_ranges([0..=15]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode).end_tokens([8])).unwrap();
         assert_mask(&repeated, &[], 16, |id| id != 8);
@@ -236,13 +237,13 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
 #[test]
 fn neutral_scalar_module_formats_are_not_misread_as_range_artifacts() {
     let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..128);
-    let module = Grammar::from_glrm(ONE).compile_unlinked(&vocab).unwrap()
+    let module = Grammar::from_glrm(ONE).prepare(&vocab).unwrap()
         .bind("T", vocab.token_ranges([0..=127]).unwrap()).unwrap();
     let bytes = module.save();
     for version in [b"GLRMOD03", b"GLRMOD04", b"GLRMOD05", b"GLRMOD06"] {
         let mut old = bytes.clone();
         old[..8].copy_from_slice(version);
-        assert!(UnlinkedConstraint::load(&old).is_err());
+        assert!(PreparedGrammar::load(&old).is_err());
     }
 }
 
@@ -254,7 +255,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
         (6, b"a".to_vec()), (7, Vec::new()), (8, b"b".to_vec()),
         (9, b"c".to_vec()), (10, b"bb".to_vec()), (11, b"x".to_vec()),
     ]);
-    let source = r#"glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");"#;
+    let source = r#"glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");"#;
     for mode in MODES {
         for (a, b) in [(0..=0, 1..=1), (0..=5, 3..=9), (0..=11, 0..=10)] {
             let grammar = Grammar::from_glrm(source)
@@ -279,7 +280,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
     let n = 32_768u32;
     let vocab = Vocab::new((0..n).map(|id| (id, Vec::new())).collect());
     for mode in MODES {
-        let grammar = Grammar::from_glrm("glrm 1; start start; extern A; extern B; nt start = A B;")
+        let grammar = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start = A B;")
             .bind("A", vocab.token_ranges([0..=n - 1]).unwrap()).unwrap()
             .bind("B", vocab.token_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1]).unwrap()).unwrap();
         let original = grammar.compile_with(&vocab,

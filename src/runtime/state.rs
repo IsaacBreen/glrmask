@@ -554,18 +554,6 @@ impl<'a> std::fmt::Debug for ConstraintState<'a> {
     }
 }
 
-enum ForcedFirstByte {
-    None,
-    Unique(u8),
-    Ambiguous,
-}
-
-enum GreedyTokenizationStep {
-    Match { token_id: u32, width: usize },
-    BlockedByLongerToken,
-    NoMatch,
-}
-
 impl<'a> ConstraintState<'a> {
     pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
         assert!(std::ptr::eq(self.constraint, source.constraint));
@@ -597,49 +585,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// An accepting prefix may still admit additional tokens.
     pub fn is_accepting(&self) -> bool {
-        if self.terminated { return true; }
-        if self.constraint.uses_compact_segmented_parser_runtime() {
-            let Some(root_reset) = self.constraint.recursive_tokenizer_reset_state(0) else {
-                return false;
-            };
-            return self.state.values_for_key(root_reset).any(|stack| {
-                !stack.is_empty()
-                    && self
-                        .constraint
-                        .compact_segmented_parser_is_finished(stack)
-                        .unwrap_or(false)
-            });
-        }
-        let product_initial = self.constraint.tokenizer.initial_state();
-        let commit_initial = self.constraint.runtime_commit_initial_state();
-        self.state
-            .values_for_key(product_initial)
-            .chain(
-                (commit_initial != product_initial)
-                    .then(|| self.state.values_for_key(commit_initial))
-                    .into_iter()
-                    .flatten(),
-            )
-            .any(|stack| {
-                if let Some(parser) = &self.constraint.template_parser {
-                    return parser.finished(stack);
-                }
-                !stack.is_empty()
-                    && self
-                        .constraint
-                        .sparse_direct_regular_gss_is_complete(stack)
-                        .unwrap_or_else(|| {
-                            if let Some(finished) =
-                                self.constraint.compact_segmented_parser_is_finished(stack)
-                            {
-                                finished
-                            } else if !self.constraint.parser_has_controls() {
-                                stacks_finished(&self.constraint.table, stack)
-                            } else {
-                                stacks_finished_control_closed(&self.constraint.table, stack)
-                            }
-                        })
-            })
+        frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
 
     pub(crate) fn parser_root_count(&self) -> usize {
@@ -681,197 +627,83 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Return a forced token sequence when one can be determined.
+    /// Return a safe prefix of library-canonical forced output.
+    ///
+    /// Ordinary deterministic text uses longest admitted token spelling, with
+    /// original-ID order breaking byte-alias ties. This is not token-sequence
+    /// probability preservation or the model tokenizer's BPE algorithm. Stops
+    /// at acceptance, text/event ambiguity, unstable tokenization or proof limits.
+    /// Exact-token events retain their IDs and complete semantic successors.
+    /// The original state is unchanged.
     pub fn forced(&self) -> Vec<u32> {
-        self.forced_impl(self.constraint.uses_dynamic_runtime())
+        super::commit::forced::force(std::slice::from_ref(self), None)
+    }
+
+    /// Return an inevitable prefix of original token IDs, without choosing an
+    /// encoding for deterministic text. A step requires a singleton allowed-ID
+    /// mask; byte aliases and alternate token segmentations remain choices.
+    /// Stops at acceptance, ID ambiguity, an error, or the library ID limit.
+    /// Unlike [`Self::forced`], this never canonicalizes several valid IDs.
+    pub fn forced_token_ids(&self) -> Vec<u32> {
+        super::commit::forced::force_token_ids(std::slice::from_ref(self), None)
     }
 
     pub(crate) fn forced_dynamic(&self) -> Vec<u32> {
-        self.forced_impl(true)
+        super::commit::forced::force(std::slice::from_ref(self), Some(true))
     }
 
-    fn forced_impl(&self, dynamic: bool) -> Vec<u32> {
-        if self.is_accepting() {
-            return Vec::new();
-        }
-
-        self.forced_by_bytes(dynamic)
-            .unwrap_or_else(|| self.single_token_forced(dynamic))
-    }
-
-    fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
+    pub(super) fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
         if !self.constraint.end_tokens.is_empty() { return self.mask(); }
         if dynamic {
             let mut mask = vec![0u32; self.constraint.body_mask_len()];
             self.fill_mask_dynamic(&mut mask);
             mask
-        } else {
-            self.mask()
-        }
+        } else { self.mask() }
     }
 
-    fn forced_by_bytes(&self, dynamic: bool) -> Option<Vec<u32>> {
-        let forced_bytes = self.compute_forced_byte_prefix(dynamic);
-        let tokens = self.tokenize_forced_with_stop(&forced_bytes);
-        (!tokens.is_empty()).then_some(tokens)
-    }
-
-    fn single_token_forced(&self, dynamic: bool) -> Vec<u32> {
-        let mut forced = Vec::new();
-        let mut cursor = self.clone();
-
-        loop {
-            let mask = cursor.mask_for_forced(dynamic);
-            let Some(token) = single_allowed_token(&mask) else {
-                break;
-            };
-            forced.push(token);
-            if dynamic {
-                cursor
-                    .commit_token_dynamic(token)
-                    .expect("forced token should be in vocabulary");
-            } else {
-                cursor
-                    .commit_token(token)
-                    .expect("forced token should be in vocabulary");
-            }
-            if cursor.state.is_empty() || cursor.is_accepting() {
-                break;
-            }
-        }
-
-        forced
-    }
-
-    fn compute_forced_byte_prefix(&self, dynamic: bool) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        let mut cursor = self.clone();
-        const MAX_FORCED_BYTES: usize = 10_000;
-
-        loop {
-            if bytes.len() >= MAX_FORCED_BYTES {
-                break;
-            }
-
-            let mask = cursor.mask_for_forced(dynamic);
-            match cursor.forced_first_byte(&mask) {
-                ForcedFirstByte::Unique(byte) => {
-                    bytes.push(byte);
-                    let _ = cursor.commit_bytes(&[byte]);
-                    if cursor.state.is_empty() {
-                        bytes.pop();
-                        break;
-                    }
-                }
-                ForcedFirstByte::None | ForcedFirstByte::Ambiguous => break,
-            }
-        }
-
-        bytes
-    }
-
-    fn forced_first_byte(&self, mask: &[u32]) -> ForcedFirstByte {
-        let mut first_byte = None;
-        let mut ambiguous = false;
-        let mut saw_token = false;
-
-        for_each_set_bit(mask, |token_id| {
-            let Some(token_bytes) = self.constraint.token_bytes_for_id(token_id) else {
-                return;
-            };
-            let Some(byte) = token_bytes.first().copied() else {
-                return;
-            };
-
-            saw_token = true;
-            match first_byte {
-                None => first_byte = Some(byte),
-                Some(existing) if existing == byte => {}
-                Some(_) => ambiguous = true,
-            }
-        });
-
-        if !saw_token {
-            ForcedFirstByte::None
-        } else if ambiguous {
-            ForcedFirstByte::Ambiguous
-        } else {
-            ForcedFirstByte::Unique(first_byte.expect("saw_token implies a first byte"))
-        }
-    }
-
-    fn tokenize_forced_with_stop(&self, forced_bytes: &[u8]) -> Vec<u32> {
-        let mut tokens = Vec::new();
-        let mut pos = 0;
-
-        while pos < forced_bytes.len() {
-            match self.greedy_tokenization_step(&forced_bytes[pos..]) {
-                GreedyTokenizationStep::Match { token_id, width } => {
-                    tokens.push(token_id);
-                    pos += width;
-                }
-                GreedyTokenizationStep::BlockedByLongerToken
-                | GreedyTokenizationStep::NoMatch => break,
-            }
-        }
-
-        tokens
-    }
-
-    fn greedy_tokenization_step(&self, remaining: &[u8]) -> GreedyTokenizationStep {
-        let mut best_match = None;
-        let mut blocked_by_longer_token = false;
-
-        for (token_id, token_bytes) in self.constraint.token_bytes_iter() {
-            if token_bytes.is_empty() {
-                continue;
-            }
-            if remaining.starts_with(token_bytes) {
-                match best_match {
-                    Some((_, best_width)) if token_bytes.len() <= best_width => {}
-                    _ => best_match = Some((token_id, token_bytes.len())),
-                }
-                continue;
-            }
-            if token_bytes.starts_with(remaining) && token_bytes.len() > remaining.len() {
-                blocked_by_longer_token = true;
-            }
-        }
-
-        if blocked_by_longer_token {
-            GreedyTokenizationStep::BlockedByLongerToken
-        } else if let Some((token_id, width)) = best_match {
-            GreedyTokenizationStep::Match { token_id, width }
-        } else {
-            GreedyTokenizationStep::NoMatch
-        }
-    }
 }
 
-fn single_allowed_token(mask: &[u32]) -> Option<u32> {
-    let mut found = None;
-    for (word_index, &word) in mask.iter().enumerate() {
-        let mut bits = word;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as u32;
-            let token = word_index as u32 * 32 + bit;
-            if found.replace(token).is_some() {
-                return None;
-            }
-            bits &= bits - 1;
+/// The authoritative acceptance predicate, shared with read-only forcing probes.
+pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserStateMap, terminated: bool) -> bool {
+        if terminated { return true; }
+        if constraint.uses_compact_segmented_parser_runtime() {
+            let Some(root_reset) = constraint.recursive_tokenizer_reset_state(0) else {
+                return false;
+            };
+            return state.values_for_key(root_reset).any(|stack| {
+                !stack.is_empty()
+                    && constraint
+                        .compact_segmented_parser_is_finished(stack)
+                        .unwrap_or(false)
+            });
         }
+        let product_initial = constraint.tokenizer.initial_state();
+        let commit_initial = constraint.runtime_commit_initial_state();
+        state
+            .values_for_key(product_initial)
+            .chain(
+                (commit_initial != product_initial)
+                    .then(|| state.values_for_key(commit_initial))
+                    .into_iter()
+                    .flatten(),
+            )
+            .any(|stack| {
+                if let Some(parser) = &constraint.template_parser {
+                    return parser.finished(stack);
+                }
+                !stack.is_empty()
+                    && constraint
+                        .sparse_direct_regular_gss_is_complete(stack)
+                        .unwrap_or_else(|| {
+                            if let Some(finished) =
+                                constraint.compact_segmented_parser_is_finished(stack)
+                            {
+                                finished
+                            } else if !constraint.parser_has_controls() {
+                                stacks_finished(&constraint.table, stack)
+                            } else {
+                                stacks_finished_control_closed(&constraint.table, stack)
+                            }
+                        })
+            })
     }
-    found
-}
-
-fn for_each_set_bit(mask: &[u32], mut f: impl FnMut(u32)) {
-    for (word_index, &word) in mask.iter().enumerate() {
-        let mut bits = word;
-        while bits != 0 {
-            let bit = bits.trailing_zeros() as u32;
-            let token_id = word_index as u32 * 32 + bit;
-            f(token_id);
-            bits &= bits - 1;
-        }
-    }
-}

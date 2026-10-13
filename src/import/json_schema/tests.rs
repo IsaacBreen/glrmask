@@ -649,7 +649,7 @@ fn overlapping_pattern_properties_preflight_allows_non_disjoint_regexes_without_
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::SeparatedSequence { .. } => true,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_separated_sequence(inner),
@@ -678,7 +678,7 @@ fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
 fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::ExprNFA(_) => true,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_expr_nfa(inner),
@@ -708,7 +708,7 @@ fn contains_expr_nfa(expr: &GrammarExpr) -> bool {
 fn expr_contains_raw_regex(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::RawRegex(_) => true,
-        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
             expr_contains_raw_regex(inner)
         }
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
@@ -1679,7 +1679,7 @@ fn mask_does_not_enable_json_u_by_runtime_patch() {
 fn contains_exclude(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Exclude { .. } => true,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_exclude(inner),
@@ -1704,7 +1704,7 @@ fn contains_exclude(expr: &GrammarExpr) -> bool {
 fn contains_ref_with_prefix(expr: &GrammarExpr, prefix: &str) -> bool {
     match expr {
         GrammarExpr::Ref(name) => name.starts_with(prefix),
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_ref_with_prefix(inner, prefix),
@@ -1789,7 +1789,7 @@ fn recursive_array_additional_properties_schema_does_not_reproduce_all_pop1_stac
 fn contains_intersect(expr: &GrammarExpr) -> bool {
     match expr {
         GrammarExpr::Intersect { .. } => true,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_intersect(inner),
@@ -1819,7 +1819,7 @@ fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
                 || contains_intersect_with_separated_sequence(expr)
                 || contains_intersect_with_separated_sequence(intersect)
         }
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_intersect_with_separated_sequence(inner),
@@ -1852,7 +1852,7 @@ fn contains_intersect_with_separated_sequence(expr: &GrammarExpr) -> bool {
 fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
     match expr {
         GrammarExpr::Ref(rule_name) => rule_name == name,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_ref_named(inner, name),
@@ -1884,7 +1884,7 @@ fn contains_ref_named(expr: &GrammarExpr, name: &str) -> bool {
 fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
     match expr {
         GrammarExpr::Literal(literal) => literal == bytes,
-        GrammarExpr::Grouped(inner)
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_literal_bytes(inner, bytes),
@@ -1919,7 +1919,7 @@ fn contains_literal_bytes(expr: &GrammarExpr, bytes: &[u8]) -> bool {
 fn contains_raw_regex_substring(expr: &GrammarExpr, substring: &str) -> bool {
     match expr {
         GrammarExpr::RawRegex(pat) => pat.contains(substring),
-        GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
             contains_raw_regex_substring(inner, substring)
         }
         GrammarExpr::Sequence(items) | GrammarExpr::Choice(items) => {
@@ -9842,7 +9842,7 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
         fn count_quote_literals(expr: &GrammarExpr) -> usize {
             match expr {
                 GrammarExpr::Literal(bytes) => usize::from(bytes.as_slice() == b"\""),
-                GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+                GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                     count_quote_literals(inner)
                 }
                 GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {

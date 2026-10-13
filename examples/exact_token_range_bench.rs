@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
 use serde_json::{json, Value};
 
-const SOURCE: &str = "glrm 1; start start; extern T; nt start = T;";
+const SOURCE: &str = "glrm 1; start start; extern token T; nt start = T;";
 
 fn ns(duration: Duration) -> f64 { duration.as_secs_f64() * 1e9 }
 
@@ -84,7 +84,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: Optimizati
     }
     // Components are genuinely precompiled before the link timer. This runs
     // after source compilation, so shared vocabulary caches are already warm.
-    let (open, precompile_ns) = timed(|| Grammar::from_glrm(SOURCE).compile_unlinked(&vocab));
+    let (open, precompile_ns) = timed(|| Grammar::from_glrm(SOURCE).prepare(&vocab));
     let open = open?;
     let (attached, compiled_bind_ns) = timed(|| open.bind("T", tokens.clone()));
     let attached = attached?;
@@ -146,7 +146,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: Optimization, mixed: b
     let (grammar, prepare_ns) = timed(|| -> Result<Grammar<'static>, Box<dyn std::error::Error>> {
         if mixed {
             Ok(Grammar::from_glrm(
-                "glrm 1; start start; extern A; extern B; nt start = (A | B) (A | \"x\");",
+                "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
             ).bind("A", vocab.token_ranges([0..=n - 1])?)?
                 .bind("B", vocab.token_ranges([0..=n - 2])?)?)
         } else {

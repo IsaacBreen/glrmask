@@ -27,8 +27,8 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     let mut rows=Vec::<serde_json::Value>::new();
     let mut builds=Vec::<serde_json::Value>::new();
     let case_filter=std::env::var("CONTROL_CASE").ok();
-    let middle=r#"glrm 1; start middle; extern leaf; nt middle = "[" leaf "]";"#;
-    let outer=r#"glrm 1; start outer; extern middle; nt outer = "X" middle "!";"#;
+    let middle=r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#;
+    let outer=r#"glrm 1; start outer; extern grammar middle; nt outer = "X" middle "!";"#;
     for (name,leaf,flat,prefixes) in [
         ("literal",r#"glrm 1; start leaf; nt leaf = "a";"#,
          r#"glrm 1; start document; nt document = "X" "[" "a" "]" "!";"#,

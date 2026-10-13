@@ -1,107 +1,127 @@
-### Source, compiled, and exact-token bindings
+### Isolated components and typed bindings
 
-GLRM declares external references with `extern NAME;`. The value supplied to `Grammar::bind` determines whether a reference consumes exact token IDs or matches a source grammar. Attach compiled children with `UnlinkedConstraint::bind`:
+GLRM distinguishes two external contracts. `extern token NAME` consumes one exact
+model-token event from a bound ID set. `extern grammar NAME` invokes a separately
+scoped grammar, which can contain bytes, exact events, or epsilon. Binding a value
+of the wrong kind is an error; an exact ID is never replaced by its decoded text.
 
 ```rust
 use glrmask::{Grammar, Result, Vocab};
 
-# fn demo(vocab: &Vocab) -> Result<()> {
-let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern payload; nt document = payload;",
-);
-let source_child = Grammar::from_json_schema(r#"{"type":"null"}"#);
-let source_composition = parent.bind("payload", &source_child)?;
-
-let _a = source_composition.compile(vocab)?;
+# fn demo(vocab: &Vocab, end_id: u32) -> Result<()> {
+let parent = Grammar::from_glrm(r#"
+    extern grammar PAYLOAD
+    extern token END
+    start response
+    nt response = PAYLOAD END
+"#);
+let child = Grammar::from_json_schema(r#"{"type":"null"}"#);
+let complete = parent
+    .bind("PAYLOAD", &child)?
+    .bind("END", glrmask::Token::new(end_id))?;
+let constraint = complete.compile(vocab)?;
+# let _ = constraint;
 # Ok(())
 # }
 ```
 
-Use `Token::new(id)` to bind one exact token ID. Compilation checks it against the actual vocabulary:
+Use `vocab.tokens(ids)` or `vocab.token_ranges(ranges)` for exact sets. Rust ranges
+are inclusive; Python `range` stops are exclusive. The set consumes **one** ID,
+not a sequence. Sparse vocabulary holes and incompatible vocabulary identities
+are errors. IDs with the same spelling remain distinct, and spelling-less IDs
+are not epsilon. See [exact-token ranges](docs/exact-token-ranges.md).
 
-```rust
-# use glrmask::{Grammar, Result, Vocab};
-# fn demo(vocab: &Vocab, tool_call_id: u32) -> Result<()> {
-let grammar = Grammar::from_glrm(
-    "glrm 1; start message; extern TOOL_CALL; nt message = TOOL_CALL;",
-);
-let grammar = grammar.bind("TOOL_CALL", glrmask::Token::new(tool_call_id))?;
-let _constraint = grammar.compile(vocab)?;
-# Ok(())
-# }
-```
+For a deliberately general grammar parameter, adapt exact events explicitly:
+`Grammar::exact(vocab.tokens([id])?)` in Rust or
+`glrmask.Grammar.exact(vocab.tokens([id]))` in Python. This is an event-aware grammar
+fragment, not a regex over token spellings.
 
-For a set of possible IDs, use `Vocab::tokens(ids)` or compact inclusive Rust ranges:
+### Prepare, attach, specialize, link
 
-```rust
-# use glrmask::{Grammar, Result, Vocab};
-# fn demo(vocab: &Vocab) -> Result<()> {
-let selection = vocab.token_ranges([0..=999, 2000..=2999])?;
-let grammar = Grammar::from_glrm("glrm 1; start message; extern T; nt message = T;")
-    .bind("T", selection)?;
-let _constraint = grammar.compile(vocab)?;
-# Ok(())
-# }
-```
-
-Python retains contiguous `range` inputs without expanding their IDs. Python stops are exclusive:
+`Grammar.prepare(vocab)` creates a non-runnable `PreparedGrammar`. The parent and
+its children may both have unresolved parameters. Binding is immutable and does
+not link a child prematurely. Reuse one prepared definition with separate binding
+environments:
 
 ```python
-all_tokens = vocab.tokens(range(vocab_size))
-selection = vocab.token_ranges([range(0, 1000), range(2000, 3000)])
-constraint = grammar.bind("T", selection).compile(vocab)
+import glrmask
+
+vocab = glrmask.Vocab.from_id_to_bytes({
+    0: b"x", 1: b"|", 2: b"x", 4: b"", 5: b"",
+})
+leaf = glrmask.Grammar.from_glrm('''
+    extern token MARK
+    start body
+    nt body = "x" MARK
+''').prepare(vocab)
+parent = glrmask.Grammar.from_glrm('''
+    extern grammar LEFT
+    extern grammar RIGHT
+    start pair
+    nt pair = LEFT "|" RIGHT
+''').prepare(vocab)
+
+package = parent.bind("LEFT", leaf).bind("RIGHT", leaf)
+assert [r.name for r in package.requirements] == ["LEFT::MARK", "RIGHT::MARK"]
+complete = package.bind("LEFT::MARK", vocab.tokens([4])).bind(
+    "RIGHT::MARK", vocab.tokens([5]),
+)
+constraint = complete.link()
+state = constraint.start()
+for token_id in [0, 4, 1, 2, 5]:
+    assert state.mask()[token_id]
+    state.commit_token(token_id)
+assert state.is_accepting()
+assert [r.name for r in leaf.requirements] == ["MARK"]
 ```
 
-A set consumes **one** token selected from the set, not a token sequence. Overlapping and adjacent ranges are normalized; undefined IDs, including gaps inside a range, are rejected. Set bindings retain their vocabulary identity. A set from an incompatible vocabulary is rejected even if its numeric IDs happen to exist in both vocabularies. `Token::new(id)` itself remains an unqualified single ID.
+Rust uses the same operations: `prepare(&vocab)?`, `bind(name, &child)?`, and
+`link()?` or `link_with(options)?`. Source `Grammar` objects also support open
+attachment and later `CHILD::PARAM` binding. A descendant can be bound only after
+its attachment exists. Unknown names and attempts to rebind a filled parameter
+are rejected.
 
-`ExactTokens::ranges()` (Python: `.ranges`) and `.len()` (Python: `len(...)`) inspect the compact set. `.ids()` (Python: `.ids`) deliberately materializes the IDs. Grammar transitions scale with the number of ranges, not the number of selected IDs; vocabulary preparation and writing a dense output mask still have their usual costs. The final root's end-token policy still applies, even when an end-token ID lies inside a selected range.
+Each inline `grammar NAME { ... }` has an isolated interface, start rule, terminals,
+and ignore policy. It does not inherit enclosing externs. Two references to the
+same named inline grammar share that definition's bindings. Attaching the same
+prepared child at two different names creates independently bindable occurrences.
 
-Model control/tool tokens do not need fake byte spellings. When constructing a
-Rust vocabulary manually, use `Vocab::new_with_exact_token_ids(byte_entries,
-exact_only_ids)` for IDs that are valid exact-token bindings but must never
-enter the byte language. Python's `Vocab.from_llama_cpp()` records omitted
-control/EOG/empty-piece IDs this way automatically.
+`requirements()` in Rust, or `.requirements` in Python, reports structured paths,
+expected kinds, and available original source spans. Preparation is allowed while
+requirements remain; final `compile()` or `link()` requires every declared
+parameter to be bound, including declarations whose uses are unreachable.
+Introspection has finite traversal limits rather than expanding arbitrary shared
+graphs without a bound.
 
-### Cached parents with `UnlinkedConstraint`
+### Persistence and root policy
 
-Use `compile_unlinked` when a compiled parent will be reused with request-specific children. A `UnlinkedConstraint` may remain open, can be saved and loaded, and is deliberately not runnable.
-
-```rust
-# use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
-# fn demo(vocab: &Vocab) -> Result<()> {
-let parent = Grammar::from_glrm(
-    "glrm 1; start document; extern payload; nt document = payload;",
-);
-let host = parent.compile_unlinked(vocab)?;
-
-let child_a = Grammar::from_ebnf(r#"start ::= "a""#).compile(vocab)?;
-let child_b = Grammar::from_ebnf(r#"start ::= "b""#).compile(vocab)?;
-
-let a = host.bind("payload", &child_a)?;
-let b = host.bind("payload", &child_b)?;
-
-let _constraint_a = a.link_with(
-    BuildOptions::default().optimization(Optimization::FastRuntime),
-)?;
-let _constraint_b = b.link()?;
-# Ok(())
-# }
-```
-
-`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or an exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
-
-Python uses the same lifecycle:
+Prepared components can be saved while incomplete:
 
 ```python
-parent = glrmask.Grammar.from_glrm(
-    'glrm 1; start document; extern payload; nt document = payload;'
-)
-host = parent.compile_unlinked(vocab)
-child = glrmask.Grammar.from_json_schema(payload_schema).compile(vocab)
-constraint = host.bind("payload", child).link(
-    optimization=glrmask.Optimization.FAST_RUNTIME,
-)
+saved = package.save()
+restored = glrmask.PreparedGrammar.load(saved, vocab=vocab)
+assert [r.name for r in restored.requirements] == ["LEFT::MARK", "RIGHT::MARK"]
 ```
+
+Runnable constraints separately support `save()` and `Constraint.load(...)`.
+Artifacts preserve original token coordinates and vocabulary identity, not merely
+a set of decoded spellings. Unsupported older pre-release formats are rejected.
+Prepared artifacts are vocabulary-specific, not portable across arbitrary models.
+
+Configure `end_tokens` on the final compile or link operation. Acceptance means a
+complete grammar match exists; it does not require generation to stop when longer
+matches remain possible. A configured end ID is admitted only at acceptance. Commit
+the sampled end ID before ending the generation loop. Child components do not
+supply the enclosing generation's root termination policy.
+
+### Determined output
+
+`state.forced()` selects a declared canonical, admitted encoding of proved common
+bytes; `state.forced_token_ids()` returns locally inevitable original IDs without
+choosing between encodings. Both are read-only and conservative. Canonical encoding
+can change subsequent model logits and is not a probability-preserving optimization.
+See [forcing contracts](docs/forcing.md) for acceptance barriers, exact events,
+aliases, proof limits, and replay requirements.
 
 ### Build/runtime trade-off
 
@@ -157,56 +177,34 @@ artifact loading. There is no new public backend configuration. Serialized
 artifacts preserve their built representation and external-vocabulary artifacts
 require the exact original mapping.
 
-### End tokens are final-root policy
-
-End-token policy belongs to the final `compile`/`compile_with` or `link`/`link_with` operation. It is not inherited when a completed `Constraint` is embedded as a child.
-
-```python
-constraint = grammar.compile(vocab, end_tokens=[eos_id])
-state = constraint.start()
-# eos_id is allowed only when the grammar body is accepting.
-```
-
-A state reports `is_accepting()` for grammar-body acceptance and `is_rejected()` for an irrecoverable invalid prefix. Callers choose between stopping at the first complete match with `is_accepting()` or permitting continuation until a configured end-token ID is sampled and committed. Always commit the chosen token before checking for an end-token break; acceptance alone does not mean an end token was consumed. Committing an allowed end token empties the next-token mask, keeps the state accepting and non-rejected, and rejects further commits.
-
-### Persistence
-
-Both compiled object types are serializable:
-
-```python
-module_bytes = host.save()
-host = glrmask.UnlinkedConstraint.load(module_bytes)
-
-constraint_bytes = constraint.save()
-constraint = glrmask.Constraint.load(constraint_bytes)
-```
-
-A loaded `Constraint` retains its selected backend. Built-in template-backed children retain their finite embedding transfers and can be linked with the template backend; arbitrary data-only and older artifacts may lack those transfers. A child's standalone end-token policy is stripped when embedded, while its compiled grammar body is retained.
 
 ## Grammar formats
 
-GLRMask accepts JSON Schema, GLRM, Lark, and EBNF. GLRM is the native composition format. A grammar begins with `glrm 1;` and a `start` declaration:
+GLRM is the native recognition language. A version header and statement semicolons
+are not required; canonical source uses explicit declarations and insignificant
+line breaks:
 
 ```glrm
-glrm 1;
-start value;
-
-t NUMBER = /-?(0|[1-9][0-9]*)/;
-nt value = NUMBER | "null";
+start value
+internal t DIGIT = /[0-9]/
+t INTEGER = /-?(0|[1-9][0-9]*)/
+nt value = INTEGER | "null"
 ```
 
-Declarations use `=`, epsilon is written as `eps`, and regexes use full-match semantics. Inline `g name = { ... };` grammars and externally bound `extern name;` slots have the same language semantics, including scope-local ignores.
+It retains `internal t`, unordered context-free alternatives, scoped grammars,
+regular intersection/subtraction, structural nonterminal-alternative subtraction,
+separated sequences, explicit finite automata, Unicode/byte expressions and
+terminal-only `shortest(...)`. See [the native format](docs/glrm-format.md).
 
-An external reference can consume one ordinary or special model-token ID when bound to `glrmask.Token(id)`:
+Lark is a recognition-focused frontend with an explicit optional LLM compatibility
+profile. That profile adds selected exact-token syntax, named token resolution,
+`@name` grammar bindings and isolated inline `%json` schemas. Those literal families
+are **not native GLRM syntax**; native callers provide equivalent components through
+typed host bindings. The regular-body `[lazy]` annotation uses the same shortest
+terminal operation. See [the Lark dialect](docs/lark-dialect.md).
 
-```python
-grammar = glrmask.Grammar.from_glrm('''
-glrm 1;
-start message;
-extern TOOL_CALL;
-nt message = TOOL_CALL "lookup()";
-''')
-constraint = grammar.bind("TOOL_CALL", glrmask.Token(tool_call_token_id)).compile(vocab)
-```
-
-Lark and EBNF also support explicit `@token(<id>)` atoms when the numeric ID is deliberately part of the grammar source.
+Regex-internal reluctant quantifiers, priorities, captures, substring generation,
+sampling annotations and grammar token/character budgets are not supported.
+Unsupported semantic features produce errors rather than being silently discarded.
+The Lark frontend does not claim Python regex endpoint ordering or compatibility
+with every Python Lark lexer mode.

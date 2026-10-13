@@ -91,13 +91,14 @@ python -m pip install glrmask
 
 ## Usage
 
-GLRMask has three core types:
+GLRMask has four core types:
 
-- `Grammar`: the language you want to generate.
-- `Constraint`: a grammar compiled against a specific vocabulary.
+- `Grammar`: an immutable source or constructed grammar, with its bindings.
+- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
+- `Constraint`: a complete, runnable grammar compiled against that vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
-To use it, compile a `Grammar` into a `Constraint`, then call `constraint.start()` to initiate a `ConstraintState`. Then in the decoding loop:
+For direct use, compile a `Grammar` into a `Constraint`. Use `prepare()` and `link()` when you need reusable components or late binding. Then call `constraint.start()` to initiate a `ConstraintState`. Then in the decoding loop:
 
 1. Compute the next-token mask.
 2. Sample a token the mask allows.

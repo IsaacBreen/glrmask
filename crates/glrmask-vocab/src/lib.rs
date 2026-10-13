@@ -91,8 +91,8 @@ impl ExactTokens {
         self.ranges.iter().map(|&(start, end)| (u64::from(end) - u64::from(start) + 1) as usize).sum()
     }
 
-    /// Exact-token bindings are non-empty by construction.
-    pub fn is_empty(&self) -> bool { false }
+    /// An empty event set recognizes no token event; it is not epsilon.
+    pub fn is_empty(&self) -> bool { self.ranges.is_empty() }
 
     #[doc(hidden)]
     pub fn range_pairs(&self) -> &[(u32, u32)] { &self.ranges }
@@ -206,17 +206,12 @@ impl Vocab {
         }
     }
 
-    /// Resolve a non-empty set of exact model tokens for one binding.
+    /// Resolve an exact event set for one binding. Empty sets denote the empty language.
     pub fn tokens(
         &self,
         token_ids: impl IntoIterator<Item = u32>,
     ) -> Result<ExactTokens, ExactTokenError> {
         let mut ids = token_ids.into_iter().collect::<Vec<_>>();
-        if ids.is_empty() {
-            return Err(ExactTokenError::new(
-                "exact-token binding must contain at least one token ID",
-            ));
-        }
         ids.sort_unstable();
         for pair in ids.windows(2) {
             if pair[0] == pair[1] {
@@ -243,7 +238,7 @@ impl Vocab {
     /// Resolve a union of inclusive token-ID ranges without enumerating IDs.
     ///
     /// Ranges may be unordered or overlap; adjacent ranges are merged. Empty
-    /// input, reversed ranges and IDs missing from this vocabulary are errors.
+    /// input is an empty event set. Reversed ranges and unknown IDs are errors.
     /// Construction depends on the number of ranges, not their cardinality.
     /// For example, `vocab.token_ranges([0..=999, 2000..=2999])` binds one
     /// token drawn from those ranges, not a sequence of tokens.
@@ -257,9 +252,6 @@ impl Vocab {
                 return Err(ExactTokenError::new("exact-token range must not be reversed or empty"));
             }
             pairs.push((*range.start(), *range.end()));
-        }
-        if pairs.is_empty() {
-            return Err(ExactTokenError::new("exact-token binding must contain at least one token ID"));
         }
         pairs.sort_unstable();
         let mut normalized = Vec::<(u32, u32)>::with_capacity(pairs.len());
@@ -288,6 +280,13 @@ impl Vocab {
 
     /// Whether every ID in the inclusive range is defined (including exact-only IDs).
     #[doc(hidden)]
+    /// All IDs that may be consumed as grammar events, including IDs without
+    /// ordinary byte spellings. This view does not include root-only controls
+    /// merely because they are present in a caller's termination policy.
+    pub fn exact_token_ranges(&self) -> impl ExactSizeIterator<Item=std::ops::RangeInclusive<u32>> + '_ {
+        self.exact_token_ranges.iter().map(|&(start,end)|start..=end)
+    }
+
     pub fn contains_exact_token_range(&self, start: u32, end: u32) -> bool {
         if start > end { return false; }
         let index = self.exact_token_ranges.partition_point(|&(lower, _)| lower <= start);
@@ -502,7 +501,11 @@ mod tests {
         assert_eq!(Token::new(2).id(), 2);
         assert_eq!(vocab.tokens([7, 2]).unwrap().ids(), &[2, 7]);
         assert_eq!(Token::new(3).id(), 3); // target membership is deferred
-        assert!(vocab.tokens([]).is_err());
+        let empty = vocab.tokens([]).unwrap();
+        assert!(empty.is_empty());
+        assert_eq!(empty.len(), 0);
+        assert!(empty.ids().is_empty());
+        assert!(empty.targets(&vocab));
         assert!(vocab.tokens([2, 2]).is_err());
     }
 

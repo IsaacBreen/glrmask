@@ -40,12 +40,12 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xaby", 5: b"ab", 7: b"\t"})
     parent = glrmask.Grammar.from_glrm(
-        'glrm 1; start root; extern child; nt root = "x" child "y";')
+        'glrm 1; start root; extern grammar child; nt root = "x" child "y";')
     child = glrmask.Grammar.from_lark('start: "a" "b"?\n%ignore /\\t+/')
     description = parent.bind("child", child)
     reference = description.compile(vocab)
     compiled = description.compile(vocab, optimization=mode)
-    module = parent.compile_unlinked(vocab).bind("child", child.compile(vocab))
+    module = parent.prepare(vocab).bind("child", child.prepare(vocab))
     linked = module.link(optimization=mode)
     for constraint in [compiled, linked, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
@@ -62,7 +62,7 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
 def test_exact_token_identity_survives_source_compilation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 15: b"a"})
     grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern MARK; nt root = MARK;").bind("MARK", glrmask.Token(15))
+        "glrm 1; start root; extern token MARK; nt root = MARK;").bind("MARK", glrmask.Token(15))
     compiled = grammar.compile(vocab, optimization=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:

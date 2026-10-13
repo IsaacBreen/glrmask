@@ -253,7 +253,7 @@ impl CandidateCollector {
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
             | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
-            | GrammarExpr::CharClass { .. }
+            | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte => {

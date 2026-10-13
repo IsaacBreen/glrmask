@@ -1436,7 +1436,7 @@ fn commit_bytes_and_repeated_commit_token_agree() {
 fn forced_reports_deterministic_prefix() {
     let constraint = ebnf(&["a", "b", "c"], r#"start ::= "a" "b" ("c")?"#);
     let mut state = constraint.start();
-    assert_eq!(state.forced(), vec![0, 1, 2]);
+    assert_eq!(state.forced(), vec![0, 1]); // acceptance competes with the optional c
 
     state.commit_token(0).unwrap();
     state.commit_token(1).unwrap();
@@ -2410,3 +2410,9 @@ fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
     "#;
     let _ = lark_unlocked(&entries, grammar);
 }
+
+#[path = "forcing_semantics.rs"]
+mod forcing_semantics;
+
+#[path = "forcing_semantics_oracle.rs"]
+mod forcing_semantics_oracle;

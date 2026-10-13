@@ -574,9 +574,15 @@ fn advance_trace_step_to_dict<'py>(
 
 /// Resolve a contiguous builtin Python range without iterating its members.
 /// A non-range or strided range returns None for the explicit-ID fallback.
-fn contiguous_exact_token_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
+fn contiguous_exact_token_range(value: &Bound<'_, PyAny>, allow_empty:bool) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
     let range_type = value.py().import("builtins")?.getattr("range")?;
     if !value.is_instance(&range_type)? { return Ok(None); }
+    if !value.is_truthy()? {
+        // tokens(iterable) admits an empty iterable, even when its optimized
+        // representation is a range. token_ranges still rejects an individually
+        // empty range rather than silently erasing a malformed range member.
+        return if allow_empty {Ok(None)} else {Err(PyValueError::new_err("exact-token range must not be empty"))};
+    }
     let step: i128 = value.getattr("step")?.extract()?;
     if step != 1 && step != -1 { return Ok(None); }
     let start: i128 = value.getattr("start")?.extract()?;
@@ -606,11 +612,11 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Resolve a nonempty set of distinct exact token IDs.
+    /// Resolve a possibly empty set of distinct exact token IDs.
     /// Contiguous Python ranges are retained compactly; other iterables are
     /// consumed once and compressed. This matches ONE token, not a sequence.
     fn tokens(&self, ids: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
-        let result = if let Some(range) = contiguous_exact_token_range(ids)? {
+        let result = if let Some(range) = contiguous_exact_token_range(ids,true)? {
             self.inner.token_ranges([range])
         } else {
             let ids = ids.try_iter()?.map(|item| item?.extract::<u32>())
@@ -626,7 +632,7 @@ impl PyVocab {
     /// are merged. Each range must be nonempty with step 1 or -1.
     fn token_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
         let ranges = ranges.try_iter()?.map(|item| {
-            contiguous_exact_token_range(&item?)?.ok_or_else(|| PyValueError::new_err(
+            contiguous_exact_token_range(&item?,false)?.ok_or_else(|| PyValueError::new_err(
                 "token_ranges expects nonempty Python ranges with step 1 or -1; use tokens for individual or strided IDs"))
         }).collect::<PyResult<Vec<_>>>()?;
         self.inner.token_ranges(ranges).map(|inner| final_api::PyExactTokens { inner })
@@ -1099,8 +1105,14 @@ impl PyDynamicConstraintState {
     }
 
 
+    /// Safe library-canonical encoding of determined text; not BPE or token-ID inevitability.
     fn forced(&self) -> Vec<u32> {
         self.inner.with_dependent(|_owner, state| state.forced())
+    }
+
+    /// Inevitable original token IDs only; never chooses between byte aliases or segmentations.
+    fn forced_token_ids(&self) -> Vec<u32> {
+        self.inner.with_dependent(|_owner, state| state.forced_token_ids())
     }
 
     fn is_accepting(&self) -> bool {
@@ -1196,8 +1208,14 @@ impl PyConstraintState {
         self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
+    /// Safe library-canonical encoding of determined text; not BPE or token-ID inevitability.
     fn forced(&self) -> Vec<u32> {
         self.inner.with_dependent(|_owner, state| state.forced())
+    }
+
+    /// Inevitable original token IDs only; never chooses between byte aliases or segmentations.
+    fn forced_token_ids(&self) -> Vec<u32> {
+        self.inner.with_dependent(|_owner, state| state.forced_token_ids())
     }
 
     fn is_accepting(&self) -> bool {
@@ -1833,7 +1851,7 @@ fn compile_glrm_serialized(
 }
 
 // ---------------------------------------------------------------------------
-// UnlinkedConstraint
+// PreparedGrammar
 // ---------------------------------------------------------------------------
 
 
@@ -2003,7 +2021,8 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Grammar",
-            "UnlinkedConstraint",
+            "PreparedGrammar",
+            "Requirement",
             "Token",
             "ExactTokens",
             "Optimization",

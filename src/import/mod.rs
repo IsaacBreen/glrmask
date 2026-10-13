@@ -449,12 +449,17 @@ fn dynamic_named_alternatives_from_named(
 }
 
 fn compile_bounded_template_from_source(
-    source: &str, vocab: &crate::Vocab, table_construction: GlrTableConstruction,
-    parse: fn(&str) -> crate::Result<ast::NamedGrammar>,
-    transform: Option<NamedGrammarTransform>,
-) -> crate::Result<DynamicConstraint> {
-    with_large_import_stack(source.len(), || {
-        let alternatives = dynamic_named_alternatives(source, parse, transform, &[])?;
+    source:&str,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    parse:fn(&str)->crate::Result<ast::NamedGrammar>,transform:Option<NamedGrammarTransform>,
+)->crate::Result<DynamicConstraint> {
+    with_large_import_stack(source.len(),||compile_bounded_template_from_named(parse(source)?,vocab,table_construction,transform))
+}
+
+pub(crate) fn compile_bounded_template_from_named(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    transform:Option<NamedGrammarTransform>,
+)->crate::Result<DynamicConstraint> {
+    let alternatives=dynamic_named_alternatives_from_named(named,transform,&[])?;
         let mut compiled = Vec::with_capacity(alternatives.len());
         for alternative in alternatives {
             let grammar = ast::lower(&alternative)?;
@@ -494,7 +499,36 @@ fn compile_bounded_template_from_source(
             emit_import_phase_end("bounded_install_template_parser", install_started);
         }
         Ok(constraint)
-    })
+
+}
+
+/// Compile a source-independent component shell. Both GLRM and Lark use the
+/// same slot lowering and boundary metadata; exact events never become bytes.
+pub(crate) fn compile_component_shell(
+    component:&crate::grammar::glrm::ParsedComponent,
+    vocab:&crate::Vocab,token_bindings:&[(&str,&[(u32,u32)])],dynamic:bool,
+)->crate::Result<Constraint> {
+    let has_open=component.declarations().names.iter().any(|name|!token_bindings.iter().any(|(bound,_)|*bound==name));
+    let first=if has_open {first_external_placeholder_token_id(vocab)?}else{0};
+    let parsed=component.lower_shell(first,std::iter::empty(),token_bindings)?;
+    let mut parent=if dynamic {
+        compile_dynamic_named_single(parsed.grammar,vocab,GlrTableConstruction::ExperimentalCoreMerged,false)?
+    } else {
+        compile_from_named_grammar(parsed.grammar,vocab,"component",GlrTableConstruction::ExperimentalCoreMerged,&[])?
+    };
+    for placeholder in parsed.placeholders {
+        let terminals=parent.special_token_terminals.iter().filter(|t|t.token_id==placeholder.token_id)
+            .map(|t|t.terminal_id).collect::<BTreeSet<_>>();
+        if terminals.len()>1 {return Err(crate::Error::Compilation(format!("component slot {:?} has multiple internal terminals",placeholder.binding_name)));}
+        // Optimizers may remove an unreachable occurrence, but the prepared
+        // artifact's independent authored interface still requires a binding.
+        if let Some(&terminal_id)=terminals.first() {
+            parent.late_grammar_slots.push(crate::runtime::LateGrammarSlot {name:placeholder.binding_name,terminal_id});
+        }
+    }
+    if parent.sanitize_late_grammar_placeholder_token_domain(){parent.rebuild_runtime_caches();}
+    let _=parent.late_bind_vocab.set(vocab.clone());
+    Ok(parent)
 }
 
 

@@ -1,0 +1,343 @@
+{
+  "root": {
+    "passed": 1186,
+    "ignored": 51,
+    "receipt": "mac-root-full-final-r3.json"
+  },
+  "workspace": {
+    "passed": 1264,
+    "ignored": 7,
+    "receipts": [
+      "mac-workspace-libraries-final-r1.log (complete crate results only)",
+      "mac-workspace-libraries-tail-r2.json"
+    ]
+  },
+  "integrations": {
+    "passed": 410,
+    "ignored": 0,
+    "target_count": 44,
+    "targets": {
+      "lark_compatibility": {
+        "passed": 7,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-01-lark_compatibility.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-01-lark_compatibility.json"
+      },
+      "prepared_components": {
+        "passed": 13,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-02-prepared_components.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-02-prepared_components.json"
+      },
+      "token_range_bindings": {
+        "passed": 11,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-03-token_range_bindings.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-03-token_range_bindings.json"
+      },
+      "final_public_api_review": {
+        "passed": 21,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-04-final_public_api_review.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-04-final_public_api_review.json"
+      },
+      "final_public_api": {
+        "passed": 24,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-05-final_public_api.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-05-final_public_api.json"
+      },
+      "integration": {
+        "passed": 124,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-06-integration.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-06-integration.json"
+      },
+      "end_tokens": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-07-end_tokens.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-07-end_tokens.json"
+      },
+      "glrm_v1": {
+        "passed": 21,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-08-glrm_v1.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-08-glrm_v1.json"
+      },
+      "json_schema_unicode_class_pattern": {
+        "passed": 14,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-09-json_schema_unicode_class_pattern.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-09-json_schema_unicode_class_pattern.json"
+      },
+      "json_schema_unicode_escape_characterization": {
+        "passed": 7,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-10-json_schema_unicode_escape_characterization.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-10-json_schema_unicode_escape_characterization.json"
+      },
+      "mre": {
+        "passed": 12,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-11-mre.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-11-mre.json"
+      },
+      "direct_glrm_ordered_suffix_ambiguity": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-12-direct_glrm_ordered_suffix_ambiguity.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-12-direct_glrm_ordered_suffix_ambiguity.json"
+      },
+      "direct_glrm_ordered_suffix_fixed_n5": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-13-direct_glrm_ordered_suffix_fixed_n5.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-13-direct_glrm_ordered_suffix_fixed_n5.json"
+      },
+      "ordered_anyof_ambiguity": {
+        "passed": 3,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-14-ordered_anyof_ambiguity.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-14-ordered_anyof_ambiguity.json"
+      },
+      "o13029_unit_inlining_false_negative": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-15-o13029_unit_inlining_false_negative.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-15-o13029_unit_inlining_false_negative.json"
+      },
+      "o15627_schema_gss_split_mre": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-16-o15627_schema_gss_split_mre.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-16-o15627_schema_gss_split_mre.json"
+      },
+      "o17408_repro": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-17-o17408_repro.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-17-o17408_repro.json"
+      },
+      "o25804_mask_commit_mismatch": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-18-o25804_mask_commit_mismatch.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-18-o25804_mask_commit_mismatch.json"
+      },
+      "word_limit_totality": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-19-word_limit_totality.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-19-word_limit_totality.json"
+      },
+      "o4836_unicode_escape_key": {
+        "passed": 4,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-20-o4836_unicode_escape_key.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-20-o4836_unicode_escape_key.json"
+      },
+      "o6363_required_anyof": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-21-o6363_required_anyof.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-21-o6363_required_anyof.json"
+      },
+      "o67291_recursive_anyof_ref": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-22-o67291_recursive_anyof_ref.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-22-o67291_recursive_anyof_ref.json"
+      },
+      "o82710_repro": {
+        "passed": 8,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-23-o82710_repro.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-23-o82710_repro.json"
+      },
+      "resjson_repro": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-24-resjson_repro.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-24-resjson_repro.json"
+      },
+      "byte_restricted_state_equivalence_mre": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-r1-25-byte_restricted_state_equivalence_mre.log",
+        "source": "f57a126a6f47decc575550872c88ac3985832255a365de63d6f8e0e04cd30435",
+        "receipt": "mac-all-integration-r1-25-byte_restricted_state_equivalence_mre.json"
+      },
+      "o35155_tokenizer_scaling": {
+        "passed": 19,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-01-o35155_tokenizer_scaling.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-01-o35155_tokenizer_scaling.json"
+      },
+      "unicode_escape_progression_glrm_mre": {
+        "passed": 7,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-02-unicode_escape_progression_glrm_mre.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-02-unicode_escape_progression_glrm_mre.json"
+      },
+      "ti_mre_final": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-03-ti_mre_final.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-03-ti_mre_final.json"
+      },
+      "ti_separator_transport_mre": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-04-ti_separator_transport_mre.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-04-ti_separator_transport_mre.json"
+      },
+      "snowplow_hostname_replay_mre": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-05-snowplow_hostname_replay_mre.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-05-snowplow_hostname_replay_mre.json"
+      },
+      "integer_multiple_exact": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-06-integer_multiple_exact.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-06-integer_multiple_exact.json"
+      },
+      "template_parser_static": {
+        "passed": 9,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-11-template_parser_static.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-11-template_parser_static.json"
+      },
+      "template_parser_static_oracle": {
+        "passed": 6,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-12-template_parser_static_oracle.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-12-template_parser_static_oracle.json"
+      },
+      "parser_grammar_constructor": {
+        "passed": 12,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-13-parser_grammar_constructor.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-13-parser_grammar_constructor.json"
+      },
+      "template_control_closure_oracle": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-14-template_control_closure_oracle.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-14-template_control_closure_oracle.json"
+      },
+      "template_follow_support_oracle": {
+        "passed": 1,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-15-template_follow_support_oracle.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-15-template_follow_support_oracle.json"
+      },
+      "template_parser_randomized": {
+        "passed": 3,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-16-template_parser_randomized.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-16-template_parser_randomized.json"
+      },
+      "template_parser_artifact_bounds": {
+        "passed": 3,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-17-template_parser_artifact_bounds.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-17-template_parser_artifact_bounds.json"
+      },
+      "public_optimization_modes": {
+        "passed": 6,
+        "ignored": 0,
+        "log": "mac-all-integration-tail-r2-19-public_optimization_modes.log",
+        "source": "6e75d101e2163ac5c99ed2b8f5cf9f4726f2cd2f31b65b5f9b6995e9395a8ad2",
+        "receipt": "mac-all-integration-tail-r2-19-public_optimization_modes.json"
+      },
+      "packed_final_mask_cache": {
+        "passed": 2,
+        "ignored": 0,
+        "log": "mac-final-five-integration-r4.log",
+        "source": "30922019f8b30464615f4372d2798ae97db2bf2cb098e7a41cf769ac7a75808a",
+        "receipt": "mac-final-five-integration-r4.json"
+      },
+      "template_parser_artifact": {
+        "passed": 12,
+        "ignored": 0,
+        "log": "mac-final-five-integration-r4.log",
+        "source": "30922019f8b30464615f4372d2798ae97db2bf2cb098e7a41cf769ac7a75808a",
+        "receipt": "mac-final-five-integration-r4.json"
+      },
+      "template_parser_composition": {
+        "passed": 17,
+        "ignored": 0,
+        "log": "mac-final-five-integration-r4.log",
+        "source": "30922019f8b30464615f4372d2798ae97db2bf2cb098e7a41cf769ac7a75808a",
+        "receipt": "mac-final-five-integration-r4.json"
+      },
+      "template_parser_provider": {
+        "passed": 15,
+        "ignored": 0,
+        "log": "mac-final-five-integration-r4.log",
+        "source": "30922019f8b30464615f4372d2798ae97db2bf2cb098e7a41cf769ac7a75808a",
+        "receipt": "mac-final-five-integration-r4.json"
+      },
+      "template_virtual_composition": {
+        "passed": 7,
+        "ignored": 0,
+        "log": "mac-final-five-integration-r4.log",
+        "source": "30922019f8b30464615f4372d2798ae97db2bf2cb098e7a41cf769ac7a75808a",
+        "receipt": "mac-final-five-integration-r4.json"
+      }
+    }
+  },
+  "python": {
+    "passed": 191,
+    "receipt": "mac-installed-wheel-suite-r1.json",
+    "wheel_sha256": "53a6f369740f607675323afc15595201c01e9c51a54003d204883dbe18e171a5",
+    "native_sha256": "b6d5dacaa185a024ecc7e4e3700aec93e37106ae668be230b1bb40214e12e84f"
+  },
+  "docs": {
+    "workspace_rustdoc": 1,
+    "markdown_rust": 9,
+    "native_and_python_blocks": 20,
+    "model_dependent_examples_syntax_only": 2
+  },
+  "performance": "Separate matched production-profile gate; not represented by these correctness counts."
+}

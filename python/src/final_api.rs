@@ -3,8 +3,7 @@ use super::{PyConstraint, PyVocab};
 use glrmask::__private::ConstraintExt as _;
 use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyModule};
-use std::collections::BTreeMap;
+use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
 use std::sync::Arc;
 
 pub(super) fn api_error(error: impl std::fmt::Display) -> PyErr {
@@ -117,7 +116,7 @@ impl PyToken {
     fn id(&self) -> u32 { self.inner.id() }
 }
 
-/// A nonempty set of exact model tokens, retaining its vocabulary identity.
+/// An exact event set (possibly empty), retaining its vocabulary identity.
 #[pyclass(name = "ExactTokens", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyExactTokens {
@@ -143,12 +142,12 @@ impl PyExactTokens {
 }
 
 #[derive(Clone, Copy)]
-enum SourceKind { Ebnf, Lark, Glrm, JsonSchema }
+enum SourceKind { Ebnf, Glrm, JsonSchema }
 
 #[derive(Clone)]
 enum Binding {
-    Source(Box<PyGrammar>),
-    Constraint(Arc<glrmask::Constraint>),
+    Source(glrmask::Grammar<'static>),
+    Prepared(glrmask::PreparedGrammar),
     Token(glrmask::Token),
     Tokens(glrmask::ExactTokens),
 }
@@ -156,7 +155,7 @@ enum Binding {
 impl Binding {
     fn extract_for_grammar(value: &Bound<'_, PyAny>) -> PyResult<Self> {
         if let Ok(value) = value.extract::<PyRef<'_, PyGrammar>>() {
-            return Ok(Self::Source(Box::new(value.clone())));
+            return Ok(Self::Source(value.inner.clone()));
         }
         if let Ok(value) = value.extract::<PyRef<'_, PyToken>>() {
             return Ok(Self::Token(value.inner.clone()));
@@ -168,9 +167,10 @@ impl Binding {
     }
 
     fn extract_for_unlinked(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if let Ok(value) = value.extract::<PyRef<'_, PyConstraint>>() {
-            return Ok(Self::Constraint(Arc::clone(&value.inner)));
+        if let Ok(value)=value.extract::<PyRef<'_,PyPreparedGrammar>>() {
+            return Ok(Self::Prepared(value.inner.clone()));
         }
+
         if let Ok(value) = value.extract::<PyRef<'_, PyToken>>() {
             return Ok(Self::Token(value.inner.clone()));
         }
@@ -178,47 +178,64 @@ impl Binding {
             return Ok(Self::Tokens(value.inner.clone()));
         }
         Err(PyTypeError::new_err(
-            "UnlinkedConstraint.bind accepts Constraint, Token, or ExactTokens",
+            "PreparedGrammar.bind accepts PreparedGrammar, Token, or ExactTokens",
         ))
     }
 
-    fn apply<'a>(&'a self, grammar: glrmask::Grammar<'a>, name: &str) -> glrmask::Result<glrmask::Grammar<'a>> {
+    fn apply(&self,grammar:glrmask::Grammar<'static>,name:&str)->glrmask::Result<glrmask::Grammar<'static>> {
         match self {
-            Self::Source(child) => grammar.bind(name, child.as_rust()?),
-            Self::Token(token) => grammar.bind(name, token.clone()),
-            Self::Tokens(tokens) => grammar.bind(name, tokens.clone()),
-            Self::Constraint(_) => unreachable!("compiled bindings are rejected by Grammar.bind"),
+            Self::Source(child)=>grammar.bind(name,child),
+            Self::Token(token)=>grammar.bind(name,token.clone()),
+            Self::Tokens(tokens)=>grammar.bind(name,tokens.clone()),
+            Self::Prepared(_)=>unreachable!("compiled bindings rejected by source bind"),
         }
     }
+
 }
 
 /// Immutable grammar description with source-grammar or exact-token bindings.
 ///
 /// bind returns another description. compile produces a complete runnable
-/// Constraint; compile_unlinked intentionally preserves unresolved slots.
+/// Constraint; prepare intentionally preserves unresolved slots.
 #[pyclass(name = "Grammar", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
-    source: String,
-    kind: SourceKind,
-    bindings: BTreeMap<String, Binding>,
+    inner:glrmask::Grammar<'static>,
 }
 
 impl PyGrammar {
-    fn new(source: String, kind: SourceKind) -> Self {
-        Self { source, kind, bindings: BTreeMap::new() }
-    }
-
-    fn as_rust(&self) -> glrmask::Result<glrmask::Grammar<'_>> {
-        let mut grammar = match self.kind {
-            SourceKind::Ebnf => glrmask::Grammar::from_ebnf(&self.source),
-            SourceKind::Lark => glrmask::Grammar::from_lark(&self.source),
-            SourceKind::Glrm => glrmask::Grammar::from_glrm(&self.source),
-            SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(&self.source),
+    fn new(source:String,kind:SourceKind)->Self {
+        let inner=match kind {
+            SourceKind::Ebnf=>glrmask::Grammar::from_ebnf_owned(source),
+            SourceKind::Glrm=>glrmask::Grammar::from_glrm_owned(source),
+            SourceKind::JsonSchema=>glrmask::Grammar::from_json_schema_owned(source),
         };
-        for (name, value) in &self.bindings { grammar = value.apply(grammar, name)?; }
-        Ok(grammar)
+        Self {inner}
     }
+    fn as_rust(&self)->glrmask::Result<glrmask::Grammar<'static>> {Ok(self.inner.clone())}
+}
+
+/// One outstanding typed component dependency. Qualified names are a display
+/// of the structured path; identical local names in siblings remain distinct.
+#[pyclass(name="Requirement",module="glrmask",frozen)]
+#[derive(Clone)]
+pub(super) struct PyRequirement {inner:glrmask::Requirement}
+#[pymethods]
+impl PyRequirement {
+    #[getter]
+    fn name(&self)->String {self.inner.name()}
+    #[getter]
+    fn path(&self)->Vec<String> {self.inner.path.clone()}
+    /// (start_byte, end_byte, one_based_line, one_based_scalar_column), or None.
+    #[getter]
+    fn source_span(&self)->Option<(usize,usize,usize,usize)> {
+        self.inner.source_span.map(|span|(span.start,span.end,span.line,span.column))
+    }
+    #[getter]
+    fn kind(&self)->&'static str {match self.inner.kind {
+        glrmask::ExternalKind::Token=>"token",glrmask::ExternalKind::Grammar=>"grammar",glrmask::ExternalKind::LegacyGeneric=>"legacy",
+    }}
+    fn __repr__(&self)->String {format!("Requirement({:?}, kind={:?})",self.name(),self.kind())}
 }
 
 #[pymethods]
@@ -229,7 +246,31 @@ impl PyGrammar {
 
     /// Create a grammar from Lark source text.
     #[staticmethod]
-    fn from_lark(source: String) -> Self { Self::new(source, SourceKind::Lark) }
+    #[pyo3(signature=(source, *, profile="recognition", token_names=None))]
+    fn from_lark(source:String,profile:&str,token_names:Option<&Bound<'_,PyDict>>)->PyResult<Self> {
+        let mut options=match profile {
+            "recognition"=>glrmask::LarkOptions::default(),
+            "llm"=>glrmask::LarkOptions::llm(),
+            _=>return Err(PyValueError::new_err("Lark profile must be 'recognition' or 'llm'")),
+        };
+        if let Some(names)=token_names {
+            for (name,value) in names.iter() {
+                let name:String=name.extract()?;
+                let ids=match value.extract::<u32>() {Ok(id)=>vec![id],Err(_)=>value.extract::<Vec<u32>>()?};
+                options=options.token(name,ids);
+            }
+        }
+        Ok(Self {inner:glrmask::Grammar::from_lark_owned(source,options)})
+    }
+
+    /// Explicitly adapt exact token events to a grammar-valued port.
+    #[staticmethod]
+    fn exact(tokens:&PyExactTokens)->Self {Self {inner:glrmask::Grammar::exact(tokens.inner.clone())}}
+
+    #[getter]
+    fn requirements(&self)->PyResult<Vec<PyRequirement>> {
+        self.inner.requirements().map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
+    }
 
     /// Create a grammar from native GLRM source text.
     #[staticmethod]
@@ -246,15 +287,11 @@ impl PyGrammar {
     }
 
     /// Return a new description with one declared slot bound. No compilation occurs.
-    fn bind(&self, name: String, value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        if self.bindings.contains_key(&name) {
-            return Err(PyValueError::new_err(format!("external {name:?} was bound more than once")));
-        }
-        let mut next = self.clone();
-        next.bindings.insert(name, Binding::extract_for_grammar(value)?);
-        next.as_rust().map_err(api_error)?; // Validate declaration/kind before storing the description.
-        Ok(next)
+    fn bind(&self,name:String,value:&Bound<'_,PyAny>)->PyResult<Self> {
+        let binding=Binding::extract_for_grammar(value)?;
+        binding.apply(self.inner.clone(),&name).map(|inner|Self {inner}).map_err(api_error)
     }
+
 
     /// Compile a closed, immediately runnable constraint for this vocabulary.
     ///
@@ -275,31 +312,35 @@ impl PyGrammar {
 
     /// Compile reusable machinery while preserving unresolved grammar/token slots.
     #[pyo3(signature = (vocab, *, boundary_trigger=None))]
-    fn compile_unlinked(&self, py: Python<'_>, vocab: &PyVocab,
-        boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyUnlinkedConstraint> {
+    fn prepare(&self, py: Python<'_>, vocab: &PyVocab,
+        boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyPreparedGrammar> {
         let options = with_boundary(glrmask::BuildOptions::default(), boundary_trigger);
         let grammar = self.as_rust().map_err(api_error)?;
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.compile_unlinked_with(&vocab, options))
-            .map(|inner| PyUnlinkedConstraint { inner }).map_err(api_error)
+        py.allow_threads(move || grammar.prepare_with(&vocab, options))
+            .map(|inner| PyPreparedGrammar { inner }).map_err(api_error)
     }
 }
 
 /// Immutable vocabulary-specific compiled constraint in pre-link form.
-#[pyclass(name = "UnlinkedConstraint", module = "glrmask", frozen)]
+#[pyclass(name = "PreparedGrammar", module = "glrmask", frozen)]
 #[derive(Clone)]
-pub(super) struct PyUnlinkedConstraint {
-    inner: glrmask::UnlinkedConstraint,
+pub(super) struct PyPreparedGrammar {
+    inner: glrmask::PreparedGrammar,
 }
 
 #[pymethods]
-impl PyUnlinkedConstraint {
-    /// Bind a compiled Constraint child or exact-token value, returning a new value.
+impl PyPreparedGrammar {
+    #[getter]
+    fn requirements(&self)->PyResult<Vec<PyRequirement>> {
+        self.inner.requirements().map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
+    }
+    /// Bind a prepared child or exact-token value, returning a new value.
     fn bind(&self, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let binding = Binding::extract_for_unlinked(value)?;
         let module = self.inner.clone();
         let result = py.allow_threads(move || match binding {
-            Binding::Constraint(child) => module.bind(&name, child),
+            Binding::Prepared(child)=>module.bind(&name,child),
             Binding::Token(token) => module.bind(&name, token),
             Binding::Tokens(tokens) => module.bind(&name, tokens),
             Binding::Source(_) => unreachable!("source binding rejected above"),
@@ -331,15 +372,16 @@ impl PyUnlinkedConstraint {
         let data = data.to_vec();
         let vocab = vocab.map(|v| v.inner.clone());
         py.allow_threads(move || match vocab {
-            Some(vocab) => glrmask::UnlinkedConstraint::load_with_vocab(data, &vocab),
-            None => glrmask::UnlinkedConstraint::load(data),
+            Some(vocab) => glrmask::PreparedGrammar::load_with_vocab(data, &vocab),
+            None => glrmask::PreparedGrammar::load(data),
         }).map(|inner| Self { inner }).map_err(api_error)
     }
 }
 
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyGrammar>()?;
-    module.add_class::<PyUnlinkedConstraint>()?;
+    module.add_class::<PyPreparedGrammar>()?;
+    module.add_class::<PyRequirement>()?;
     module.add_class::<PyToken>()?;
     module.add_class::<PyExactTokens>()?;
     module.add_class::<PyOptimization>()?;
@@ -368,7 +410,7 @@ fn compile_with_backend(
 #[pyfunction]
 #[pyo3(signature = (module, *, end_tokens=None, optimization=None, parser_backend=None))]
 fn link_with_backend(
-    module: &PyUnlinkedConstraint, py: Python<'_>, end_tokens: Option<Vec<u32>>,
+    module: &PyPreparedGrammar, py: Python<'_>, end_tokens: Option<Vec<u32>>,
     optimization: Option<PyRef<'_, PyOptimization>>,
     parser_backend: Option<PyRef<'_, PyParserBackend>>,
 ) -> PyResult<PyConstraint> {

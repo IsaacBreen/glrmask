@@ -1514,6 +1514,7 @@ fn all_of_intersection_terminal_safe_inner(
             safe
         }
         GrammarExpr::Grouped(inner)
+        | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {

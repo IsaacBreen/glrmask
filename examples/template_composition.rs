@@ -13,8 +13,8 @@ fn main() -> glrmask::Result<()> {
             .parser_backend(ParserBackend::TemplateDfa),
     )?;
     let parent = Grammar::from_glrm(
-        r#"glrm 1; start root; extern child; nt root = "x" child "y";"#,
-    ).compile_unlinked(&vocab)?;
+        r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
+    ).prepare(&vocab)?;
     
     for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
         let linked = parent.bind("child", &child)?.link_with(

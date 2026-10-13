@@ -90,6 +90,14 @@ required-features = ["internal-api"]
 
 # Public API suites.
 [[test]]
+name = "lark_compatibility"
+path = "tests/lark_compatibility.rs"
+
+[[test]]
+name = "prepared_components"
+path = "tests/prepared_components.rs"
+
+[[test]]
 name = "token_range_bindings"
 path = "tests/token_range_bindings.rs"
 

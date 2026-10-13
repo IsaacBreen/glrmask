@@ -184,7 +184,7 @@ fn js_core_source(cfa_root: &Path, layout: Layout) -> String {
     assert!(source.contains(needle), "JS grammar shape changed; cannot insert programmatic-tools alternative");
     source = source.replacen(needle, &replacement, 1);
     if matches!(layout, Layout::ParentClose | Layout::PublicOpen) {
-        source.push_str("\nextern PROGRAMMATIC_TOOL_SUFFIX;\n");
+        source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     } else {
         source.push_str(&format!(
             "\n// selected10 programmatic-tools external-call sentinel\nt PROGRAMMATIC_TOOL_SUFFIX ::= @token({JS_PLACEHOLDER_TOKEN});\n"
