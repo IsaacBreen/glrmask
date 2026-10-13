@@ -383,7 +383,10 @@ pub(crate) struct CommitBuffers {
         crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
     pub prune_tokenizer_exec:
         crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch,
-    pub small_queue: crate::runtime::commit::SmallCommitQueueScratch,
+    // Read-only mask projections do not need the large commit-only bucket
+    // arrays. Ordinary states still prepare them eagerly at construction;
+    // owning them indirectly also keeps recursive mask/state frames small.
+    pub small_queue: Option<Box<crate::runtime::commit::SmallCommitQueueScratch>>,
     pub flat_frontier: crate::runtime::commit::FlatFrontierScratch,
     pub linear_stack_original: Vec<u32>,
     pub linear_stack_work: Vec<u32>,
@@ -433,7 +436,9 @@ impl CommitBuffers {
                 crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
             prune_tokenizer_exec:
                 crate::runtime::commit::tokenizer_scan::ReusableTokenizerExecScratch::with_capacity(if MASK_ONLY { 0 } else { 512 }),
-            small_queue: crate::runtime::commit::SmallCommitQueueScratch::default(),
+            small_queue: if MASK_ONLY { None } else {
+                Some(crate::runtime::commit::SmallCommitQueueScratch::boxed())
+            },
             flat_frontier: {
                 static LAZY_MASK_STACKS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
                 if MASK_ONLY && *LAZY_MASK_STACKS.get_or_init(|| {
@@ -489,7 +494,7 @@ impl CommitBuffers {
         self.reusable_tokenizer_exec.matches.clear();
         self.prune_tokenizer_exec.states.clear();
         self.prune_tokenizer_exec.matches.clear();
-        self.small_queue.clear();
+        if let Some(queue) = self.small_queue.as_mut() { queue.clear(); }
         self.flat_frontier.clear();
         self.linear_stack_original.clear();
         self.linear_stack_work.clear();

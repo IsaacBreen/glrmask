@@ -38,6 +38,8 @@ let grammar = grammar.bind("TOOL_CALL", token)?;
 let _constraint = grammar.compile(vocab)?;
 ```
 
+To select one token from many IDs, bind `vocab.tokens(range(vocab_size))` in Python, or `vocab.token_ranges([0..=last_id])` in Rust. For disjoint sets, Python accepts `vocab.token_ranges([range(0, 1000), range(2000, 3000)])`; Rust uses inclusive ranges such as `[0..=999, 2000..=2999]`. Ranges stay compact through compilation, linking and masking rather than becoming one grammar alternative per ID. Overlaps are merged, and ranges containing undefined IDs are rejected. A set consumes one token, not a sequence. Inspect `.ranges` in Python or `.ranges()` in Rust without materializing all IDs.
+
 Bindings are immutable. Calling `bind(...)` returns a new `Grammar` or `UnlinkedConstraint`; the original remains reusable.
 
 Compilation fails if any required bindings are unresolved.
@@ -90,7 +92,7 @@ let _constraint_a = a.link_with(
 let _constraint_b = b.link()?;
 ```
 
-`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or an exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
 
 Python follows the same basic idea.
 

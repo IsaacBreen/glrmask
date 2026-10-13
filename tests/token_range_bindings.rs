@@ -169,3 +169,125 @@ fn range_grammar_structure_depends_on_intervals_not_cardinality() {
     assert!(flat.terminals.len() <= 3);
     assert!(flat.rules.len() <= 6);
 }
+#[test]
+fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases() {
+    let mut entries = vec![
+        (0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"bb".to_vec()),
+        (3, b"ab".to_vec()), (4, b"abb".to_vec()), (5, Vec::new()),
+        (6, b"x".to_vec()), (7, b"b".to_vec()),
+    ];
+    entries.extend((8..20).map(|id| (id, b"x".to_vec())));
+    let vocab = Vocab::new(entries);
+    let source = r#"glrm 1; start start; extern A; extern B;
+        nt start = ("a" A "b") | ("a" B "bb");"#;
+    for mode in MODES {
+        let constraint = Grammar::from_glrm(source)
+            .bind("A", vocab.token_ranges([8..=12]).unwrap()).unwrap()
+            .bind("B", vocab.token_ranges([10..=14]).unwrap()).unwrap()
+            .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+        assert_mask(&constraint, &[], 20, |id| id == 0);
+        assert_mask(&constraint, &[0], 20, |id| (8..=14).contains(&id));
+        for exact in 8..=14 {
+            assert_mask(&constraint, &[0, exact], 20,
+                |id| id == 1 || id == 7 || (exact >= 10 && id == 2));
+            let mut state = constraint.start();
+            state.commit_token(0).unwrap();
+            let mut independent = state.clone();
+            let before = independent.mask();
+            state.commit_token(exact).unwrap();
+            assert_eq!(independent.mask(), before);
+            // Byte aliases outside the set are not accepted as exact IDs.
+            assert!(independent.commit_token(6).is_err());
+            state.commit_token(1).unwrap();
+            assert_eq!(state.is_accepting(), exact <= 12);
+            if exact >= 10 {
+                state.commit_token(1).unwrap();
+                assert!(state.is_accepting());
+            }
+        }
+    }
+}
+#[test]
+fn ranges_preserve_forcing_and_reserved_end_token_policy() {
+    let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..16);
+    for mode in MODES {
+        let singleton = Grammar::from_glrm(ONE)
+            .bind("T", vocab.token_ranges([5..=5]).unwrap()).unwrap()
+            .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+        assert_eq!(singleton.start().forced(), vec![5]);
+        let repeated = Grammar::from_glrm("glrm 1; start start; extern T; nt start = T T;")
+            .bind("T", vocab.token_ranges([0..=15]).unwrap()).unwrap()
+            .compile_with(&vocab, BuildOptions::default().optimization(mode).end_tokens([8])).unwrap();
+        assert_mask(&repeated, &[], 16, |id| id != 8);
+        assert_mask(&repeated, &[7], 16, |id| id != 8);
+        assert_mask(&repeated, &[7, 9], 16, |id| id == 8);
+        let mut early = repeated.start();
+        early.commit_token(8).unwrap();
+        assert!(early.is_rejected());
+        assert!(!early.is_accepting());
+        assert!(early.mask().iter().all(|&word| word == 0));
+        let mut state = repeated.start();
+        for id in [7, 9, 8] { state.commit_token(id).unwrap(); }
+        assert!(state.is_accepting());
+        assert!(state.mask().iter().all(|&word| word == 0));
+    }
+}
+
+#[test]
+fn neutral_scalar_module_formats_are_not_misread_as_range_artifacts() {
+    let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..128);
+    let module = Grammar::from_glrm(ONE).compile_unlinked(&vocab).unwrap()
+        .bind("T", vocab.token_ranges([0..=127]).unwrap()).unwrap();
+    let bytes = module.save();
+    for version in [b"GLRMOD03", b"GLRMOD04", b"GLRMOD05", b"GLRMOD06"] {
+        let mut old = bytes.clone();
+        old[..8].copy_from_slice(version);
+        assert!(UnlinkedConstraint::load(&old).is_err());
+    }
+}
+
+#[test]
+fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
+    let vocab = Vocab::new(vec![
+        (0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec()),
+        (3, b"aa".to_vec()), (4, b"ba".to_vec()), (5, b"x".to_vec()),
+        (6, b"a".to_vec()), (7, Vec::new()), (8, b"b".to_vec()),
+        (9, b"c".to_vec()), (10, b"bb".to_vec()), (11, b"x".to_vec()),
+    ]);
+    let source = r#"glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");"#;
+    for mode in MODES {
+        for (a, b) in [(0..=0, 1..=1), (0..=5, 3..=9), (0..=11, 0..=10)] {
+            let grammar = Grammar::from_glrm(source)
+                .bind("A", vocab.token_ranges([a]).unwrap()).unwrap()
+                .bind("B", vocab.token_ranges([b]).unwrap()).unwrap();
+            let options = BuildOptions::default().optimization(mode).end_tokens([15]);
+            let constraint = grammar.compile_with(&vocab, options).unwrap();
+            for constraint in [constraint.clone(), Constraint::load(&constraint.save()).unwrap()] {
+                assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
+                let mut state = constraint.start();
+                state.commit_token(0).unwrap();
+                state.commit_token(0).unwrap();
+                assert!(state.is_accepting());
+                assert!(state.commit_token(0).is_err(), "{mode:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
+    let n = 32_768u32;
+    let vocab = Vocab::new((0..n).map(|id| (id, Vec::new())).collect());
+    for mode in MODES {
+        let grammar = Grammar::from_glrm("glrm 1; start start; extern A; extern B; nt start = A B;")
+            .bind("A", vocab.token_ranges([0..=n - 1]).unwrap()).unwrap()
+            .bind("B", vocab.token_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1]).unwrap()).unwrap();
+        let original = grammar.compile_with(&vocab,
+            BuildOptions::default().optimization(mode).end_tokens([n])).unwrap();
+        for constraint in [original.clone(), Constraint::load(&original.save()).unwrap()] {
+            assert_mask(&constraint, &[], n + 1, |id| id < n);
+            assert_mask(&constraint, &[0], n + 1, |id| id < n && id != n / 2);
+            assert_mask(&constraint, &[0, n - 1], n + 1, |id| id == n);
+        }
+    }
+}

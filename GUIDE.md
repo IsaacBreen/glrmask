@@ -239,7 +239,7 @@ let _a = source_composition.compile(vocab)?;
 # }
 ```
 
-Exact token bindings come from the vocabulary rather than from naked IDs:
+Use `Token::new(id)` to bind one exact token ID. Compilation checks it against the actual vocabulary:
 
 ```rust
 # use glrmask::{Grammar, Result, Vocab};
@@ -253,7 +253,30 @@ let _constraint = grammar.compile(vocab)?;
 # }
 ```
 
-`Vocab::token(...)` and `Vocab::tokens(...)` retain the complete vocabulary identity. A value from an incompatible vocabulary is rejected even if the bound numeric ID happens to exist in both vocabularies.
+For a set of possible IDs, use `Vocab::tokens(ids)` or compact inclusive Rust ranges:
+
+```rust
+# use glrmask::{Grammar, Result, Vocab};
+# fn demo(vocab: &Vocab) -> Result<()> {
+let selection = vocab.token_ranges([0..=999, 2000..=2999])?;
+let grammar = Grammar::from_glrm("glrm 1; start message; extern T; nt message = T;")
+    .bind("T", selection)?;
+let _constraint = grammar.compile(vocab)?;
+# Ok(())
+# }
+```
+
+Python retains contiguous `range` inputs without expanding their IDs. Python stops are exclusive:
+
+```python
+all_tokens = vocab.tokens(range(vocab_size))
+selection = vocab.token_ranges([range(0, 1000), range(2000, 3000)])
+constraint = grammar.bind("T", selection).compile(vocab)
+```
+
+A set consumes **one** token selected from the set, not a token sequence. Overlapping and adjacent ranges are normalized; undefined IDs, including gaps inside a range, are rejected. Set bindings retain their vocabulary identity. A set from an incompatible vocabulary is rejected even if its numeric IDs happen to exist in both vocabularies. `Token::new(id)` itself remains an unqualified single ID.
+
+`ExactTokens::ranges()` (Python: `.ranges`) and `.len()` (Python: `len(...)`) inspect the compact set. `.ids()` (Python: `.ids`) deliberately materializes the IDs. Grammar transitions scale with the number of ranges, not the number of selected IDs; vocabulary preparation and writing a dense output mask still have their usual costs. The final root's end-token policy still applies, even when an end-token ID lies inside a selected range.
 
 Model control/tool tokens do not need fake byte spellings. When constructing a
 Rust vocabulary manually, use `Vocab::new_with_exact_token_ids(byte_entries,
@@ -287,7 +310,7 @@ let _constraint_b = b.link()?;
 # }
 ```
 
-`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or a exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
+`UnlinkedConstraint::bind` is compiled-only: it accepts a compiled `Constraint` or an exact-token value. It does not accept an unresolved `UnlinkedConstraint`, and it does not parse or compile source children. Link a child first before binding it to the parent. Composition stays deferred until `link`/`link_with`, so the final optimization preference can choose the boundary construction strategy.
 
 Python uses the same lifecycle:
 

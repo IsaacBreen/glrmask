@@ -4557,8 +4557,7 @@ nt start = "a" END_TURN;
             rule.name == "END_TURN"
                 && matches!(
                     &rule.expr,
-                    GrammarExpr::Choice(items)
-                        if items == &vec![GrammarExpr::SpecialToken(100), GrammarExpr::SpecialToken(101)]
+                    GrammarExpr::SpecialTokenRange(100, 101)
                 )
         }));
     }

@@ -7341,7 +7341,7 @@ mod compact_special_range_tests {
     #[test]
     fn full_128k_exact_interval_has_one_internal_token_class() {
         let map = special_token_id_map(&[interval(0, 0, 131_071)]);
-        assert_eq!(map.internal_to_original.len(), 1);
+        assert_eq!(map.internal_to_originals.len(), 1);
         assert_eq!(map.original_to_internal.len(), 131_072);
         assert!(map.original_to_internal.iter().all(|&class| class == 0));
     }
@@ -7351,11 +7351,20 @@ mod compact_special_range_tests {
         let map = special_token_id_map(&[
             interval(0, 10, 20), interval(1, 15, 25), interval(2, 26, 30),
         ]);
-        assert_eq!(map.internal_to_original.len(), 4);
+        assert_eq!(map.internal_to_originals.len(), 4);
         for (range, class) in [(10..=14, 0), (15..=20, 1), (21..=25, 2), (26..=30, 3)] {
             for token in range { assert_eq!(map.original_to_internal[token], class); }
         }
         assert!(map.original_to_internal[..10].iter().all(|&id| id == u32::MAX));
+    }
+
+    #[test]
+    fn serialized_exact_intervals_reject_reversed_bounds() {
+        let invalid = bincode::serialize(&(0u32, 9u32, 3u32)).unwrap();
+        assert!(bincode::deserialize::<SpecialTokenTerminal>(&invalid).is_err());
+        let valid = interval(3, 31, 63);
+        let decoded: SpecialTokenTerminal = bincode::deserialize(&bincode::serialize(&valid).unwrap()).unwrap();
+        assert_eq!(decoded, valid);
     }
 
     #[test]

@@ -6546,16 +6546,27 @@ impl<'a> ConstraintState<'a> {
                 || self.constraint.uses_dynamic_runtime()
                 || self.constraint.uses_compact_segmented_parser_runtime())
         { return; }
-        for &id in self.constraint.empty_byte_token_ids.iter() {
-            let Some(word) = buf.get_mut(id as usize / 32) else { continue; };
-            let bit = 1u32 << (id % 32);
-            if *word & bit == 0 { continue; }
-            let live_special = self.constraint.has_special_token_id(id)
-                && super::commit::advance_special_token_paths(
-                    self.constraint, &self.state, id,
-                ).is_some_and(|stack| !stack.is_empty());
-            if !live_special { *word &= !bit; }
+        // Liveness belongs to a parser terminal, not to every token in its
+        // interval. In particular, an all-vocabulary empty-spelled binding must
+        // not perform one parser advance per model ID. This inventory is sorted
+        // and unique, whether prepared from Vocab or reconstructed during load.
+        let empty_ids = self.constraint.empty_byte_token_ids.as_ref();
+        let mut live_ranges = smallvec::SmallVec::<[(u32, u32); 8]>::new();
+        for special in &self.constraint.special_token_terminals {
+            if self.constraint.is_late_grammar_placeholder_terminal(special.terminal_id) {
+                continue;
+            }
+            let first_empty = empty_ids.partition_point(|&id| id < special.token_id);
+            if empty_ids.get(first_empty).is_none_or(|&id| id > special.token_id_end) {
+                continue;
+            }
+            if super::commit::advance_special_terminal_paths(
+                self.constraint, &self.state, special.terminal_id,
+            ).is_some_and(|stack| !stack.is_empty()) {
+                live_ranges.push((special.token_id, special.token_id_end));
+            }
         }
+        retain_live_empty_byte_ranges(buf, empty_ids, &mut live_ranges);
     }
 
     fn fill_blocked_seed_dense(
@@ -9554,5 +9565,101 @@ mod boundary_dag_exact_tests {
                 }
             }
         }
+    }
+}
+
+/// Clear a sorted, unique empty-spelling inventory outside the live exact
+/// intervals. Allowed spans are skipped by binary search, including overlaps;
+/// this never introduces a bit that the body mask did not already contain.
+fn retain_live_empty_byte_ranges(
+    mask: &mut [u32],
+    empty_ids: &[u32],
+    live_ranges: &mut [(u32, u32)],
+) {
+    fn clear_ids(mask: &mut [u32], ids: &[u32]) {
+        let Some((&start, &end)) = ids.first().zip(ids.last()) else { return; };
+        // Sorted unique IDs with this cardinality constitute a complete span.
+        // Clear dense uncovered spans wordwise rather than once per model ID.
+        if u64::from(end) - u64::from(start) + 1 == ids.len() as u64 {
+            let first = start as usize / 32;
+            if first >= mask.len() { return; }
+            let last = (end as usize / 32).min(mask.len() - 1);
+            let first_bits = u32::MAX << (start % 32);
+            let last_bits = if last == end as usize / 32 {
+                u32::MAX >> (31 - end % 32)
+            } else { u32::MAX };
+            if first == last {
+                mask[first] &= !(first_bits & last_bits);
+            } else {
+                mask[first] &= !first_bits;
+                mask[first + 1..last].fill(0);
+                mask[last] &= !last_bits;
+            }
+        } else {
+            for &id in ids {
+                if let Some(word) = mask.get_mut(id as usize / 32) {
+                    *word &= !(1u32 << (id % 32));
+                }
+            }
+        }
+    }
+    live_ranges.sort_unstable();
+    let mut remaining = empty_ids;
+    for &(start, end) in live_ranges.iter() {
+        let before = remaining.partition_point(|&id| id < start);
+        clear_ids(mask, &remaining[..before]);
+        remaining = &remaining[before..];
+        let through = remaining.partition_point(|&id| id <= end);
+        remaining = &remaining[through..];
+        if remaining.is_empty() { return; }
+    }
+    clear_ids(mask, remaining);
+}
+
+#[cfg(test)]
+mod empty_byte_range_filter_tests {
+    use super::retain_live_empty_byte_ranges;
+
+    #[test]
+    fn interval_filter_matches_independent_pointwise_policy() {
+        let domains = [
+            (0..128).collect::<Vec<u32>>(),
+            (0..128).filter(|id| id % 3 == 0).collect(),
+            (17..96).collect(),
+            vec![0, 31, 32, 63, 64, 95, 127, u32::MAX],
+        ];
+        let selections = [vec![], vec![(0, 127)], vec![(31, 63)],
+            vec![(90, 127), (0, 32), (31, 96)],
+            vec![(u32::MAX - 1, u32::MAX)], vec![(60, 95), (0, 1)]];
+        for empty in &domains {
+            for ranges in &selections {
+                for words in [0, 1, 4] {
+                    for seed in [0, u32::MAX, 0xa5a5_5a5a] {
+                        let mut actual = vec![seed; words];
+                        let mut expected = actual.clone();
+                        for &id in empty {
+                            if !ranges.iter().any(|&(start, end)| start <= id && id <= end) {
+                                if let Some(word) = expected.get_mut(id as usize / 32) {
+                                    *word &= !(1u32 << (id % 32));
+                                }
+                            }
+                        }
+                        retain_live_empty_byte_ranges(&mut actual, empty, &mut ranges.clone());
+                        assert_eq!(actual, expected, "domain={empty:?}, ranges={ranges:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn full_and_nearly_full_128k_empty_domains_skip_allowed_spans() {
+        let ids = (0..131_072).collect::<Vec<u32>>();
+        let mut mask = vec![u32::MAX; 4096];
+        retain_live_empty_byte_ranges(&mut mask, &ids, &mut [(0, 131_071)]);
+        assert!(mask.iter().all(|&word| word == u32::MAX));
+        retain_live_empty_byte_ranges(&mut mask, &ids, &mut [(65_537, 131_071), (0, 65_535)]);
+        assert_eq!(mask.iter().map(|word| word.count_ones()).sum::<u32>(), 131_071);
+        assert_eq!(mask[65_536 / 32] & 1, 0);
     }
 }

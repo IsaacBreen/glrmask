@@ -1615,12 +1615,27 @@ impl FastCommitTemplateDfas {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SpecialTokenTerminal {
     pub(crate) terminal_id: TerminalID,
     /// Inclusive lower and upper bounds of one exact-token event.
     pub(crate) token_id: u32,
     pub(crate) token_id_end: u32,
+}
+
+// The interval width is new wire data. Reject reversed endpoints while decoding
+// before they can reach RangeSet construction, mask allocation or composition.
+impl<'de> serde::Deserialize<'de> for SpecialTokenTerminal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire { terminal_id: TerminalID, token_id: u32, token_id_end: u32 }
+        let wire = <Wire as serde::Deserialize>::deserialize(deserializer)?;
+        if wire.token_id > wire.token_id_end {
+            return Err(serde::de::Error::custom("reversed exact-token interval"));
+        }
+        Ok(Self { terminal_id: wire.terminal_id, token_id: wire.token_id,
+            token_id_end: wire.token_id_end })
+    }
 }
 
 impl SpecialTokenTerminal {

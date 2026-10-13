@@ -98,3 +98,97 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
             assert not bool(mask[excluded])
         state.commit_token(n - 1)
         assert state.is_accepting()
+
+
+def pointwise_token_grammar(ids):
+    """Independent singleton alternatives; deliberately do not use Vocab.tokens."""
+    ids = list(ids)
+    names = [f"E{i}" for i in range(len(ids))]
+    source = ("glrm 1; start item; " + " ".join(f"extern {name};" for name in names)
+              + " nt item = " + " | ".join(names) + ";")
+    grammar = glrmask.Grammar.from_glrm(source)
+    for name, token in zip(names, ids):
+        grammar = grammar.bind(name, glrmask.Token(token))
+    return grammar
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("deferred", [False, True])
+def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
+    # Different model IDs may alias a spelling, including empty bytes. The
+    # oracle uses one grammar alternative per exact ID, never a compact set.
+    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"ba",
+                                      4: b"x", 5: b"", 6: b"a", 7: b"b",
+                                      8: b"x", 9: b"x", 10: b"x", 11: b"x"})
+    selections = {"A": [range(1, 4), range(6, 10)], "B": [range(3, 8)]}
+    for expression in ["A B", "(A | B) A", '\"a\" A \"b\" | \"ab\" B',
+                       "A? B+", "(A B)*"]:
+        source = "glrm 1; start start; extern A; extern B; nt start = " + expression + ";"
+        compact = glrmask.Grammar.from_glrm(source)
+        pointwise = glrmask.Grammar.from_glrm(source)
+        if deferred:
+            compact = compact.compile_unlinked(v)
+            pointwise = pointwise.compile_unlinked(v)
+        for name, ranges in selections.items():
+            compact = compact.bind(name, v.token_ranges(ranges))
+            oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
+            pointwise = pointwise.bind(name, oracle.compile(v) if deferred else oracle)
+        if deferred:
+            actual = compact.link(optimization=mode)
+            expected = pointwise.link(optimization=mode)
+        else:
+            actual = compact.compile(v, optimization=mode)
+            expected = pointwise.compile(v, optimization=mode)
+        # Exhaust every legal prefix through two model tokens, comparing the
+        # full next-token mask and acceptance at every node.
+        prefixes = [()]
+        for depth in range(3):
+            next_prefixes = []
+            for prefix in prefixes:
+                states = [actual.start(), expected.start()]
+                for state in states:
+                    for token in prefix:
+                        state.commit_token(token)
+                masks = [accepted_ids(state) for state in states]
+                assert masks[0] == masks[1], (mode, deferred, expression, prefix, masks)
+                assert states[0].is_accepting() == states[1].is_accepting(), (expression, prefix)
+                if depth < 2:
+                    next_prefixes.extend(prefix + (token,) for token in sorted(masks[0]))
+            prefixes = next_prefixes
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("compact", [False, True])
+def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
+    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa", 4: b"ba",
+                                      5: b"x", 6: b"a", 7: b"", 8: b"b", 9: b"c",
+                                      10: b"bb", 11: b"x"})
+    grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");')
+    grammar = grammar.bind("A", v.tokens(range(6)) if compact else glrmask.Token(0))
+    grammar = grammar.bind("B", v.tokens(range(3, 10)) if compact else glrmask.Token(1))
+    constraint = grammar.compile(v, optimization=mode, end_tokens=[15])
+    state = constraint.start()
+    state.commit_token(0)
+    state.commit_token(0)
+    assert state.is_accepting()
+    assert accepted_ids(state) == {15}
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("a,b", [(range(1), range(1, 2)), (range(6), range(3, 10)),
+                                  (range(12), range(11))])
+def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
+    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"aa",
+                                      4: b"ba", 5: b"x", 6: b"a", 7: b"",
+                                      8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
+    grammar = glrmask.Grammar.from_glrm(
+        'glrm 1; start start; extern A; extern B; nt start = (A | B) (A | "a");')
+    constraint = grammar.bind("A", v.tokens(a)).bind("B", v.tokens(b)).compile(
+        v, optimization=mode, end_tokens=[15])
+    state = constraint.start()
+    state.commit_token(0)
+    state.commit_token(0)
+    assert state.is_accepting()
+    assert accepted_ids(state) == {15}
+    with pytest.raises(ValueError):
+        state.commit_token(0)

@@ -58,11 +58,11 @@ fn static_template_artifacts_roundtrip_without_lr_storage() {
     for source in GRAMMARS {
         let reference=Constraint::compile(Grammar::glrm(source),&v).unwrap();
         let native_bytes=reference.save();
-        assert_eq!(u16::from_le_bytes(native_bytes[8..10].try_into().unwrap()),37);
+        assert_eq!(u16::from_le_bytes(native_bytes[8..10].try_into().unwrap()), 41);
         compare_static(&reference,&Constraint::load(native_bytes).unwrap());
         let template=reference.clone();
         let bytes=template.save();
-        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()),37);
+        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 41);
         let loaded=Constraint::load(bytes.clone()).unwrap();
         assert_eq!(parser_backend_report(&loaded)["lr_table_present"],false);
         compare_static(&reference,&loaded);
@@ -78,9 +78,9 @@ fn o2_template_artifacts_roundtrip_without_lr_storage() {
         let reference=DynamicConstraint::compile_with_vocab_partition(Grammar::glrm(source),&v).unwrap();
         let template=reference.clone();
         let bytes=template.save();
-        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()),21);
+        assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 23);
         let body=&bytes[30..]; // first native alternative after its length descriptor
-        assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()),37);
+        assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()), 41);
         assert_eq!(&body[parser_range(body)][..4],b"TPR7");
         let loaded=DynamicConstraint::load(&bytes).unwrap();
         for report in dynamic_parser_backend_report(&loaded).as_array().unwrap() {
@@ -172,11 +172,11 @@ fn external_template_artifacts_omit_vocab_require_exact_binding_and_roundtrip() 
     let template = reference.clone();
     let external = template.save_without_vocab();
     assert_eq!(&external[..8], b"GLRDXF\0\0");
-    assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 14);
+    assert_eq!(u16::from_le_bytes(external[8..10].try_into().unwrap()), 16);
     assert!(DynamicConstraint::load(&external).is_err(), "external artifact accepted without a vocabulary");
     // First dynamic alternative: outer18 + count4 + descriptor8.
     let body = &external[30..];
-    assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()),38);
+    assert_eq!(u16::from_le_bytes(body[8..10].try_into().unwrap()), 42);
     let token_section_len = u64::from_le_bytes(body[22 + 5*8..30 + 5*8].try_into().unwrap());
     assert_eq!(token_section_len,0,"model-token bytes must really be absent");
     let parser = &body[parser_range(body)];
@@ -276,7 +276,7 @@ fn compact_fixture()->Vec<u8> {
     let source=Constraint::compile(Grammar::glrm(GRAMMARS[1]),&vocab()).unwrap();
     let bytes=source.save();
     let loaded=Constraint::load(&bytes).expect("malformed cases must start from a valid current artifact");
-    assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()),37);
+    assert_eq!(u16::from_le_bytes(bytes[8..10].try_into().unwrap()), 41);
     assert_eq!(parser_backend_report(&loaded)["lr_table_present"],false);
     compare_static(&source,&loaded);
     assert_eq!(loaded.save(),bytes);

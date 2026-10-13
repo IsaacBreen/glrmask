@@ -8475,9 +8475,15 @@ impl Constraint {
         // Rebuild this tiny token-domain summary from the authoritative
         // packed/materialized inventory after all external sections load.
         // No vocabulary trie is built and it is not serialized a second time.
-        constraint.empty_byte_token_ids = constraint.token_bytes_iter()
+        let mut empty_byte_token_ids = constraint.token_bytes_iter()
             .filter_map(|(id, bytes)| bytes.is_empty().then_some(id))
-            .collect::<Vec<u32>>().into();
+            .collect::<Vec<u32>>();
+        // The mask's interval filter needs a sorted unique index even when an
+        // indexed packed artifact supplied its token-byte rows out of order.
+        // Normalize once at load, never once per generated-token mask.
+        empty_byte_token_ids.sort_unstable();
+        empty_byte_token_ids.dedup();
+        constraint.empty_byte_token_ids = empty_byte_token_ids.into();
         let rebuild_started = profile.then(std::time::Instant::now);
         let skip_runtime_rebuild_for_profile =
             std::env::var_os("GLRMASK_SKIP_RUNTIME_REBUILD_FOR_PROFILE").is_some();

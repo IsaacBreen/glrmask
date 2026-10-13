@@ -156,6 +156,14 @@ impl Default for SmallCommitQueueScratch {
 }
 
 impl SmallCommitQueueScratch {
+    // Keep the fixed-array initialization frame outside callers which may be
+    // recursively evaluating masks on a default-size worker stack. Normal
+    // commit buffers call this at state construction, not at the first commit.
+    #[inline(never)]
+    pub(crate) fn boxed() -> Box<Self> {
+        Box::new(Self::default())
+    }
+
     pub(crate) fn clear(&mut self) {
         for bucket in &mut self.processing {
             bucket.clear();
@@ -7714,7 +7722,7 @@ fn commit_bytes_impl_inner(
             state,
             bytes,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.small_queue,
+            bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.admission_cache,
             &mut bufs.prune_tokenizer_exec,
         );
@@ -7894,7 +7902,7 @@ fn commit_bytes_impl_inner(
             state,
             bytes,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.small_queue,
+            bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.template_advance_runtime,
             false,
         );
@@ -7911,7 +7919,7 @@ fn commit_bytes_impl_inner(
             state,
             bytes,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.small_queue,
+            bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.admission_cache,
             &mut bufs.prune_tokenizer_exec,
         )
@@ -11157,5 +11165,40 @@ nt start ::= item item? item?;
         assert!(profile.fast_path_total_ns > 0, "profile={profile:?}");
         assert_eq!(profile.n_queue_entries, 0, "profile={profile:?}");
         assert_eq!(profile.n_advances, 1, "profile={profile:?}");
+    }
+}
+
+#[cfg(test)]
+mod boxed_small_queue_tests {
+    use super::SmallCommitQueueScratch;
+    use crate::runtime::state::CommitBuffers;
+
+    #[test]
+    fn read_only_mask_buffers_leave_commit_queue_uninitialized() {
+        let mut buffers = CommitBuffers::for_mask_only_shadow();
+        assert!(buffers.small_queue.is_none());
+        buffers.clear_all();
+        buffers.reset_all();
+        assert!(buffers.small_queue.is_none());
+        // An internal caller that subsequently commits still gets an ordinary
+        // empty queue; this does not change the eager policy of real states.
+        let queue = buffers.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed);
+        assert!(queue.processing.iter().all(|bucket| bucket.is_empty()));
+        assert!(queue.language_processing.iter().all(|bucket| bucket.is_empty()));
+        assert!(queue.pending.is_empty() && queue.language_pending.is_empty());
+    }
+
+    #[test]
+    fn ordinary_commit_buffers_prepare_and_reuse_their_queue() {
+        for mut buffers in [CommitBuffers::default(), CommitBuffers::for_finite_recursive_mask()] {
+            let initial = buffers.small_queue.as_deref().unwrap() as *const SmallCommitQueueScratch;
+            buffers.clear_all();
+            buffers.reset_all();
+            let retained = buffers.small_queue.as_deref().unwrap() as *const SmallCommitQueueScratch;
+            assert_eq!(initial, retained);
+        }
+        // The queue's fixed arrays must not be embedded in every state copy.
+        assert_eq!(std::mem::size_of::<Option<Box<SmallCommitQueueScratch>>>(),
+            std::mem::size_of::<*mut SmallCommitQueueScratch>());
     }
 }

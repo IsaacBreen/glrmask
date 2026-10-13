@@ -4864,7 +4864,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_transfer_v13_virtual_residuals_round_trip_and_v12_v11_backward_compat() {
+    fn current_dynamic_transfer_virtual_residuals_round_trip() {
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
@@ -4884,7 +4884,7 @@ mod tests {
         // Test current V13 save and load.
         let v13_bytes = constraint.save_without_vocab();
         assert_eq!(u16::from_le_bytes([v13_bytes[8], v13_bytes[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
-        assert_eq!(TEMPLATE_DYNAMIC_TRANSFER_VERSION, 14);
+        assert_eq!(TEMPLATE_DYNAMIC_TRANSFER_VERSION, 16);
 
         let v13_loaded = DynamicConstraint::load_with_vocab(&v13_bytes, &vocab).unwrap();
         // Loaded constraint should carry the mask tokenizer projection directly from the wire
@@ -7813,7 +7813,8 @@ nt start ::= A;
         let mut bytes = constraint.save();
         bytes[8..10].copy_from_slice(&8u16.to_le_bytes());
         let error = DynamicConstraint::load(&bytes).unwrap_err().to_string();
-        assert!(error.contains("removed precompiled token programs"));
+        assert!(error.contains("unsupported dynamic constraint artifact version 8"));
+        assert!(error.contains("recompile"));
     }
 
     #[test]
