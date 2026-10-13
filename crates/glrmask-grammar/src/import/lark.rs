@@ -39,6 +39,8 @@ enum Token {
     Arrow,
     Bang,
     PercentIgnore,
+    PercentImport,
+    Minus,
 }
 
 struct Lexer<'a> {
@@ -185,17 +187,18 @@ impl<'a> Lexer<'a> {
         s
     }
 
-    fn lex_number(&mut self, first: u8) -> usize {
+    fn lex_number(&mut self, first: u8) -> Result<usize, GlrMaskError> {
         let mut n = (first - b'0') as usize;
         while let Some(b) = self.peek() {
             if b.is_ascii_digit() {
-                n = n * 10 + (b - b'0') as usize;
+                n = n.checked_mul(10).and_then(|n| n.checked_add((b - b'0') as usize))
+                    .ok_or_else(|| GlrMaskError::GrammarParse("integer in Lark source is too large".into()))?;
                 self.pos += 1;
             } else {
                 break;
             }
         }
-        n
+        Ok(n)
     }
 
     fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
@@ -245,14 +248,17 @@ impl<'a> Lexer<'a> {
                 Some(b'#') => self.skip_comment(),
                 Some(b'%') => {
                     self.pos += 1;
-                    // Check for %ignore directive
-                    let rest = &self.input[self.pos..];
-                    if rest.starts_with(b"ignore") && rest.get(6).map_or(true, |b| !b.is_ascii_alphanumeric() && *b != b'_') {
-                        self.pos += 6;
-                        tokens.push(Token::PercentIgnore);
-                    } else {
-                        // Skip other %directives (e.g. %import)
-                        self.skip_comment();
+                    let start = self.pos;
+                    while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                        self.pos += 1;
+                    }
+                    let directive = std::str::from_utf8(&self.input[start..self.pos]).unwrap();
+                    match directive {
+                        "ignore" => tokens.push(Token::PercentIgnore),
+                        "import" => tokens.push(Token::PercentImport),
+                        _ => return Err(GlrMaskError::GrammarParse(format!(
+                            "unsupported Lark directive %{directive}; directives are never silently ignored"
+                        ))),
                     }
                 }
                 Some(b'\n') => {
@@ -323,7 +329,7 @@ impl<'a> Lexer<'a> {
                         self.pos += 1;
                         tokens.push(Token::Arrow);
                     } else {
-                        return Err(GlrMaskError::GrammarParse("unexpected '-'".into()));
+                        tokens.push(Token::Minus);
                     }
                 }
                 Some(b':') => {
@@ -348,7 +354,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b) if b.is_ascii_digit() => {
                     self.pos += 1;
-                    let n = self.lex_number(b);
+                    let n = self.lex_number(b)?;
                     tokens.push(Token::Number(n));
                 }
                 Some(b) => {
@@ -363,50 +369,59 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
-    if let Some(max) = max {
-        assert!(max >= min, "tilde max must be >= min");
+fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> Result<GrammarExpr, GlrMaskError> {
+    if max.is_some_and(|max| max < min) {
+        return Err(GlrMaskError::GrammarParse(format!(
+            "repetition upper bound {} is smaller than lower bound {min}", max.unwrap()
+        )));
     }
-    GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, max))
-}
-
-fn escape_char_class_byte(b: u8) -> String {
-    match b {
-        b'\\' | b']' | b'^' | b'-' => format!("\\{}", b as char),
-        b'\n' => "\\n".into(),
-        b'\r' => "\\r".into(),
-        b'\t' => "\\t".into(),
-        byte if byte.is_ascii_graphic() || byte == b' ' => (byte as char).to_string(),
-        byte => format!("\\x{byte:02x}"),
-    }
+    Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, max)))
 }
 
 fn literal_range_expr(start: &str, end: &str) -> Result<GrammarExpr, GlrMaskError> {
-    let start_bytes = start.as_bytes();
-    let end_bytes = end.as_bytes();
-    if start_bytes.len() != 1 || end_bytes.len() != 1 {
-        return Err(GlrMaskError::GrammarParse(
-            "Lark literal ranges currently require single-byte endpoints".into(),
-        ));
+    let mut a = start.chars();
+    let mut b = end.chars();
+    let (Some(a0), Some(b0), None, None) = (a.next(), b.next(), a.next(), b.next()) else {
+        return Err(GlrMaskError::GrammarParse("Lark literal ranges require single Unicode-scalar endpoints".into()));
+    };
+    if a0 > b0 {
+        return Err(GlrMaskError::GrammarParse(format!("invalid Lark literal range {start:?}..{end:?}")));
     }
+    // Unicode escapes avoid metacharacter and UTF-8 byte ambiguities.
+    Ok(GrammarExpr::RawRegex(format!(r"[\U{:08X}-\U{:08X}]", a0 as u32, b0 as u32)))
+}
 
-    let start_byte = start_bytes[0];
-    let end_byte = end_bytes[0];
-    if start_byte > end_byte {
-        return Err(GlrMaskError::GrammarParse(format!(
-            "invalid Lark literal range {:?}..{:?}",
-            start, end
-        )));
-    }
-
-    Ok(GrammarExpr::CharClass {
-        def: format!(
-            "{}-{}",
-            escape_char_class_byte(start_byte),
-            escape_char_class_byte(end_byte)
-        ),
-        negate: false,
-        utf8: true,
+// Recognition equivalents of Lark 1.3.1 common.lark (MIT licensed).
+// Resolve imports locally: no implicit file or network access. The two pattern
+// rewrites below avoid lookbehind/reluctance while retaining delimiter boundaries.
+fn common_terminal_pattern(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "DIGIT" => r"[0-9]",
+        "HEXDIGIT" => r"[0-9a-fA-F]",
+        "INT" => r"[0-9]+",
+        "SIGNED_INT" => r"[+-]?[0-9]+",
+        "DECIMAL" => r"([0-9]+\.[0-9]*|\.[0-9]+)",
+        "_EXP" => r"[eE][+-]?[0-9]+",
+        "FLOAT" => r"([0-9]+[eE][+-]?[0-9]+|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "SIGNED_FLOAT" => r"[+-]?([0-9]+[eE][+-]?[0-9]+|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "NUMBER" => r"([0-9]+([eE][+-]?[0-9]+)?|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "SIGNED_NUMBER" => r"[+-]?([0-9]+([eE][+-]?[0-9]+)?|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "ESCAPED_STRING" => r#""([^"\\\n]|\\[^\n])*""#,
+        "LCASE_LETTER" => r"[a-z]",
+        "UCASE_LETTER" => r"[A-Z]",
+        "LETTER" => r"[a-zA-Z]",
+        "WORD" => r"[a-zA-Z]+",
+        "CNAME" => r"[_a-zA-Z][_a-zA-Z0-9]*",
+        "WS_INLINE" => r"[ \t]+",
+        "WS" => r"[ \t\x0c\r\n]+",
+        "CR" => r"\r",
+        "LF" => r"\n",
+        "NEWLINE" => r"(\r?\n)+",
+        "SH_COMMENT" => r"#[^\n]*",
+        "CPP_COMMENT" => r"//[^\n]*",
+        "C_COMMENT" => r"/\*[^*]*\*+([^/*][^*]*\*+)*/",
+        "SQL_COMMENT" => r"--[^\n]*",
+        _ => return None,
     })
 }
 
@@ -422,11 +437,11 @@ fn is_lark_terminal_name(name: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
-fn lark_start_rule_name(rules: &[NamedRule]) -> String {
+fn lark_start_rule_name(rules: &[NamedRule]) -> Result<String, GlrMaskError> {
     if rules.iter().any(|rule| rule.name == "start") {
-        "start".to_string()
+        Ok("start".to_string())
     } else {
-        rules[0].name.clone()
+        Err(GlrMaskError::GrammarParse("Lark grammar must define a rule named 'start'".into()))
     }
 }
 
@@ -915,10 +930,62 @@ impl Parser {
         }
     }
 
-    fn skip_rule_priority(&mut self) {
-        if self.peek() == Some(&Token::Dot) && matches!(self.peek_nth(1), Some(Token::Number(_))) {
-            self.pos += 2;
+    fn reject_rule_priority(&mut self) -> Result<(), GlrMaskError> {
+        if self.peek() == Some(&Token::Dot) {
+            return Err(GlrMaskError::GrammarParse(
+                "Lark rule and terminal priorities are not supported".into()
+            ));
         }
+        Ok(())
+    }
+
+    fn import_name(&mut self) -> Result<String, GlrMaskError> {
+        match self.advance() {
+            Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(name),
+            other => Err(GlrMaskError::GrammarParse(format!("expected name in Lark import, got {other:?}"))),
+        }
+    }
+
+    fn parse_import(&mut self, rules: &mut Vec<NamedRule>) -> Result<bool, GlrMaskError> {
+        if self.peek() != Some(&Token::PercentImport) { return Ok(false); }
+        self.pos += 1;
+        let module = self.import_name()?;
+        if module != "common" {
+            return Err(GlrMaskError::GrammarParse(format!("unsupported Lark import module {module:?}; only 'common' is supported")));
+        }
+        let mut imports = Vec::new();
+        if self.peek() == Some(&Token::Dot) {
+            self.pos += 1;
+            let name = self.import_name()?;
+            let alias = if self.peek() == Some(&Token::Arrow) {
+                self.pos += 1; self.import_name()?
+            } else { name.clone() };
+            imports.push((name, alias));
+        } else {
+            self.expect_token(&Token::LParen)?;
+            loop {
+                self.skip_newlines();
+                let name = self.import_name()?;
+                imports.push((name.clone(), name));
+                self.skip_newlines();
+                if self.peek() != Some(&Token::Comma) { break; }
+                self.pos += 1;
+            }
+            self.expect_token(&Token::RParen)?;
+        }
+        for (name, alias) in imports {
+            if !is_lark_terminal_name(&alias) {
+                return Err(GlrMaskError::GrammarParse(format!("imported terminal alias {alias:?} must be uppercase")));
+            }
+            let pattern = common_terminal_pattern(&name).ok_or_else(||
+                GlrMaskError::GrammarParse(format!("unknown common terminal {name:?}")))?;
+            rules.push(NamedRule { name: alias, expr: GrammarExpr::RawRegex(pattern.to_owned()), is_terminal: true, is_internal: false });
+        }
+        if !matches!(self.peek(), None | Some(Token::Newline)) {
+            return Err(GlrMaskError::GrammarParse("unexpected content after Lark import".into()));
+        }
+        self.skip_newlines();
+        Ok(true)
     }
 
     fn parse_bounded_repeat(&mut self, atom: GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
@@ -928,27 +995,14 @@ impl Parser {
         };
 
         let max = if self.peek() == Some(&Token::Dot) {
-            let saved = self.pos;
             self.pos += 1;
-            if self.peek() == Some(&Token::Dot) {
-                self.pos += 1;
-                match self.advance() {
-                    Some(Token::Number(value)) => Some(value),
-                    _ => {
-                        return Err(GlrMaskError::GrammarParse(
-                            "expected number after ..".into(),
-                        ));
-                    }
-                }
-            } else {
-                self.pos = saved;
-                None
+            self.expect_token(&Token::Dot)?;
+            match self.advance() {
+                Some(Token::Number(value)) => value,
+                _ => return Err(GlrMaskError::GrammarParse("expected upper bound after '..'".into())),
             }
-        } else {
-            None
-        };
-
-        Ok(bounded_repeat_expr(atom, min, max))
+        } else { min };
+        bounded_repeat_expr(atom, min, Some(max))
     }
 
     fn parse_literal_or_range(&mut self, literal: String) -> Result<GrammarExpr, GlrMaskError> {
@@ -982,14 +1036,14 @@ impl Parser {
         }
 
         self.pos += 1;
-        ignore_exprs.push(self.parse_atom()?);
+        ignore_exprs.push(self.parse_alternatives()?);
         self.skip_newlines();
         Ok(true)
     }
 
     fn parse_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
         let name = self.parse_rule_name()?;
-        self.skip_rule_priority();
+        self.reject_rule_priority()?;
         self.expect_token(&Token::Colon)?;
         let expr = self.parse_alternatives()?;
         Ok(NamedRule {
@@ -1006,7 +1060,7 @@ impl Parser {
 
         self.skip_newlines();
         while self.pos < self.tokens.len() {
-            if self.parse_ignore_directive(&mut ignore_exprs)? {
+            if self.parse_ignore_directive(&mut ignore_exprs)? || self.parse_import(&mut rules)? {
                 continue;
             }
 
@@ -1018,7 +1072,13 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        let start = lark_start_rule_name(&rules);
+        let mut seen = HashSet::new();
+        for rule in &rules {
+            if !seen.insert(&rule.name) {
+                return Err(GlrMaskError::GrammarParse(format!("duplicate Lark declaration {:?}", rule.name)));
+            }
+        }
+        let start = lark_start_rule_name(&rules)?;
         mark_lark_terminal_rules(&mut rules);
         let ignore = synthesize_lark_ignore_rule(&mut rules, ignore_exprs);
 
@@ -1137,7 +1197,9 @@ impl Parser {
             Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
             Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
             Some(Token::Regex(regex)) => Ok(GrammarExpr::RawRegex(regex)),
-            Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
+            Some(Token::Dot) => Err(GlrMaskError::GrammarParse(
+                "bare '.' is not a Lark atom; use /./ for a Unicode character".into()
+            )),
             Some(Token::LParen) => {
                 let expr = self.parse_alternatives()?;
                 self.expect_token(&Token::RParen)?;
@@ -1358,5 +1420,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cyclic Lark terminal definition"), "{error}");
+    }
+}
+
+
+#[cfg(test)]
+mod compatibility_regressions {
+    use super::*;
+    #[test]
+    fn exact_repetition_and_invalid_ranges() {
+        let g = parse_lark_to_named_uncompressed("start: \"a\"~3").unwrap();
+        assert!(matches!(g.rules[0].expr, GrammarExpr::Quantified(_, Quantifier::Range(3, Some(3)))));
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"~3..2").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"~99999999999999999999999999999999").is_err());
+    }
+    #[test]
+    fn never_accept_priorities_or_unknown_directives() {
+        for s in ["start.0: \"a\"", "start.-2: \"a\"", "start: A\nA.2: \"a\"",
+                  "%extend start: \"x\"\nstart: \"a\"", "%unknown thing\nstart: \"a\"", "%import unknown.A\nstart: A"] {
+            assert!(parse_lark_to_named_uncompressed(s).is_err(), "{s}");
+        }
+    }
+    #[test]
+    fn common_alias_group_and_duplicate_checks() {
+        let g = parse_lark_to_named_uncompressed("%import common (INT, WS)\n%ignore WS\nstart: INT").unwrap();
+        assert!(g.rules.iter().any(|r| r.name == "INT"));
+        assert!(parse_lark_to_named_uncompressed("%import common.INT -> N\nstart: N").is_ok());
+        assert!(parse_lark_to_named_uncompressed("%import common.INT\nINT: \"a\"\nstart: INT").is_err());
+        assert!(parse_lark_to_named_uncompressed("%import common.BOGUS\nstart: BOGUS").is_err());
+    }
+    #[test]
+    fn unicode_scalar_ranges_and_missing_start() {
+        assert!(parse_lark_to_named_uncompressed("start: \"α\"..\"ω\"").is_ok());
+        assert!(parse_lark_to_named_uncompressed("start: \"ab\"..\"z\"").is_err());
+        assert!(parse_lark_to_named_uncompressed("other: \"a\"").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: .").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"\n%ignore /[ \\t]/+").is_ok());
     }
 }
