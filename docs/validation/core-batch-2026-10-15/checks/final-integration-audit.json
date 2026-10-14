@@ -1,0 +1,80 @@
+{
+  "status": "passed",
+  "checked_at": "2026-10-15T05:51:51.857797+08:00",
+  "qualified_commit": "2a565ae99232b3eadff18d8b985b6e7ba63d1e14",
+  "source_files_checked": 396,
+  "whitespace_only_exception": {
+    "path": "src/public_api/snapshot_map.rs",
+    "qualified_sha256": "a0b459a33438ba0c3611f63f436287652ef6d58b725791ae778f46d1c2ff2928",
+    "current_sha256": "a38ec75aa558be70735eeb179ff0280ae881b22fa33fb0dd01299121d29a80be",
+    "change": "Only final redundant blank line removed; line-ending-independent text and Rust tokens unchanged."
+  },
+  "wheel_sha256": "8a0e9ccca5bf013fe4808a00c578ff8f6d79df79bbe7a2f2ba3dfdf1da9c0efd",
+  "wheel_record_entries_verified": 10,
+  "extension_sha256": "e3563719a5996790b53593a8994c1ae0cd613b4bef36d66a5122bbc85fdb9a0e",
+  "source_archive_sha256": "bc4ee9f9a0c1f1b926c6faa26e8fb9b8eef864d99155139a3de8bdce21b9e795",
+  "unchanged_runtime_binary": true,
+  "commands": [
+    {
+      "command": [
+        "C:\\gnb930283\\venv\\Scripts\\python.exe",
+        "scripts/sync-benchmarks.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-1.log"
+    },
+    {
+      "command": [
+        "C:\\gnb930283\\venv\\Scripts\\python.exe",
+        "scripts/sync-guide.py",
+        "--check"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-2.log"
+    },
+    {
+      "command": [
+        "C:\\gnb930283\\venv\\Scripts\\python.exe",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "scripts/tests",
+        "-p",
+        "test_readme_archives.py"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-3.log"
+    },
+    {
+      "command": [
+        "C:\\gnb930283\\wheel-venv\\Scripts\\python.exe",
+        "scripts/python-wheel-smoke.py"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-4.log"
+    },
+    {
+      "command": [
+        "C:\\gnb930283\\wheel-venv\\Scripts\\python.exe",
+        "-m",
+        "pytest",
+        "python/tests",
+        "-q"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-5.log"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "origin/main"
+      ],
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\resume-final-audit-6.log"
+    }
+  ]
+}

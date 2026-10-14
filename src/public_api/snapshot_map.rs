@@ -152,4 +152,3 @@ mod tests {
         let local=String::new();let b=narrow(a,&local);assert_eq!(b.get("word"),Some(&"value"));
     }
 }
-

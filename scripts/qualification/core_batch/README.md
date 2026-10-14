@@ -20,3 +20,8 @@ python scripts/qualification/core_batch/review_api_conformance_v2.py --site CAND
 ```
 
 No controller installs packages or downloads a model/vocabulary. The compact benchmark vocabulary is synthetic, so results must not be described as a full JSON-Schema corpus or serving-model sweep. Conventional CPython dispatch/object conversion is part of the Python forcing timings.
+
+`public_consumer_smoke.rs` is a compile-only public API fixture. Use it as
+`src/main.rs` in a separate Cargo package with a path dependency on this checkout
+and `default-features = false`; do not enable `internal-api`. Its Rust
+`forced_tokens()` calls propagate `Result` with `?`.

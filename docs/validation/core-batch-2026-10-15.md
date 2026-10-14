@@ -87,6 +87,13 @@ behavior/timing gates rerun on the correct artifacts. Earlier mixed-artifact
 results were rejected. Frozen baselines were preserved; no production flags
 were altered to hide the issue.
 
+A separate dependency-only Rust consumer was type-checked with the root
+`glrmask` feature set empty. It exercises the mutable source/prepared interfaces,
+`forced_tokens() -> Result<Vec<u32>>`, packed masks, and braced shortest syntax.
+This is a compile check, not an additional runtime test count. The final source
+cleanup removes only a redundant trailing blank line in `snapshot_map.rs`;
+no qualified runtime logic changed.
+
 The Maturin source distribution was built and inspected, including exact source
 content and README selection; it was not compiled a second time from an extracted
 archive. Its checker now normalizes CRLF/LF metadata descriptions on Windows
@@ -97,6 +104,7 @@ tests cover LF, CRLF, Unicode text and a real description mismatch.
 
 | Gate | Result |
 |---|---:|
+| Independent public Rust consumer (`default-features=false`, no `internal-api`) | `cargo check --locked --offline` passed |
 | Full Rust workspace libraries/integration targets | **2,935 passed**, 0 failed, 58 pre-existing ignored, 74 target summaries |
 | Focused bounded-query tests after correcting four test-only Unicode literals | **12 passed** |
 | Independently installed final-wheel Python suite | **253 passed** |
@@ -242,3 +250,14 @@ The canonical runtime, installed wheel, ordinary masks and returned token
 traces were qualified before integration. No PyPI/crates.io package or release
 tag is published by this work. CI status is verified separately for the final
 Git commit; the local checks above do not pretend to be remote CI results.
+
+## Final integration audit
+
+The final integration check reverified all 396 recorded source files, the wheel
+RECORD and runtime DLL identities, and the installed Python sources/type stubs.
+The only post-qualification Rust edit removed a redundant trailing blank line
+from snapshot_map.rs; comparison with the archived qualified source confirmed
+identical non-whitespace content. No runtime code or qualified binary changed.
+The clean-wheel smoke test and all 253 Python tests passed again, together with
+metadata regression checks, generated-document synchronization and the final
+diff check. See [the final audit receipt](core-batch-2026-10-15/checks/final-integration-audit.json).
