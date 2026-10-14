@@ -1,0 +1,6 @@
+{
+  "cases": 15,
+  "original_u32_words_equal": 40704,
+  "traces_equal": true,
+  "includes_final_mask": true
+}

@@ -1,0 +1,40 @@
+{
+  "status": "passed",
+  "profile": "DEV correctness/liveness, NOT high-core performance",
+  "physical_cores": 10,
+  "logical_processors": 16,
+  "simultaneous_compilation_elsewhere": true,
+  "rows": [
+    {
+      "workers": 16,
+      "rounds": 2,
+      "independent_links": 256,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-dev-16threads-liveness-r1.log"
+    },
+    {
+      "workers": 32,
+      "rounds": 2,
+      "independent_links": 512,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-dev-32threads-liveness-r1.log"
+    },
+    {
+      "workers": 64,
+      "rounds": 2,
+      "independent_links": 1024,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-dev-64threads-liveness-r1.log"
+    },
+    {
+      "workers": 128,
+      "rounds": 2,
+      "independent_links": 2048,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-dev-128threads-liveness-r1.log"
+    }
+  ],
+  "exe_sha256": "6171720b4d213f4a1236177e5c038e30d719ea45b9354ae358c8f85a9df2fc41",
+  "completed_at": "2026-10-15T00:41:46.575103+08:00",
+  "total_links": 3840
+}

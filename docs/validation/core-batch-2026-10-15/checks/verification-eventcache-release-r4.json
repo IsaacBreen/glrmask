@@ -1,0 +1,40 @@
+{
+  "status": "passed",
+  "rows": [
+    {
+      "workers": 16,
+      "rounds": 2,
+      "links": 256,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-release-r4-16.log"
+    },
+    {
+      "workers": 32,
+      "rounds": 2,
+      "links": 512,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-release-r4-32.log"
+    },
+    {
+      "workers": 64,
+      "rounds": 2,
+      "links": 1024,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-release-r4-64.log"
+    },
+    {
+      "workers": 128,
+      "rounds": 2,
+      "links": 2048,
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\eventcache-release-r4-128.log"
+    }
+  ],
+  "total_links": 3840,
+  "physical_cores": 10,
+  "logical_processors": 16,
+  "profile": "canonical release liveness/correctness; no 128-core performance claim",
+  "exe_sha256": "8f13d65327fb2fb56445fda89ce35eeb1b6bc653cf59fbeaa939f546d25f202b",
+  "library_sha256": "b07279e52dc1d64eb7e2987a062c61750e018d6a701b999260fd003dc5c4d865",
+  "completed_at": "2026-10-15T01:59:24.818216+08:00"
+}

@@ -1,0 +1,19 @@
+   Compiling glrmask v0.2.0 (C:\gnb930283\repo)
+    Finished `test` profile [optimized] target(s) in 1m 06s
+     Running unittests src\lib.rs (C:\gnb930283\target-dev\debug\deps\glrmask-47223c2aa8b453cc.exe)
+
+running 12 tests
+test runtime::commit::bounded::differential_tests::bounded_dynamic_owner_union_counts_distinct_original_ids ... ok
+test runtime::commit::bounded::differential_tests::bounded_composed_calls_ignore_and_independent_event_lanes ... ok
+test runtime::commit::bounded::differential_tests::bounded_exact_events_aliases_empty_spelling_and_root_controls ... ok
+test runtime::commit::bounded::differential_tests::json_schema_lark_and_regular_difference_match_full_mask_at_real_token_boundaries ... ok
+test runtime::commit::bounded::tests::ambiguous_query_stops_after_two_final_witnesses_without_filling_cache ... ok
+test runtime::commit::bounded::tests::composed_and_partial_utf8_frontiers_match_final_admission ... ok
+test runtime::commit::bounded::differential_tests::bounded_masks_and_strict_forcing_match_normal_masks_across_all_modes ... ok
+test runtime::commit::bounded::tests::exact_events_aliases_root_controls_and_empty_spellings ... ok
+test runtime::commit::bounded::tests::narrow_alphabets_prune_scoped_and_finalizing_frontiers_without_full_masks ... ok
+test runtime::commit::bounded::tests::physical_alphabet_union_keeps_parent_suffix_child_ignore_and_nullable_returns ... ok
+test runtime::commit::bounded::tests::union_counts_distinct_original_ids_not_owner_occurrences ... ok
+test runtime::commit::bounded::tests::finite_byte_languages_cold_warm_and_loaded_match_full_mask_and_forcing ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 1253 filtered out; finished in 2.31s

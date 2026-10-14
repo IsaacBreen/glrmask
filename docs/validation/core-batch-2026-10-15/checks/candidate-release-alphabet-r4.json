@@ -1,0 +1,29 @@
+{
+  "label": "candidate-release-alphabet-r4",
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "-p",
+    "glrmask",
+    "-p",
+    "_glrmask",
+    "--lib",
+    "--example",
+    "core_batch_bench",
+    "--example",
+    "core_batch_scaling",
+    "--features",
+    "internal-api"
+  ],
+  "cwd": "C:\\gnb930283\\repo",
+  "started_at": "2026-10-15T01:28:37.435043+08:00",
+  "pid": 10840,
+  "status": "completed",
+  "target": "C:\\gnb930283\\target-release",
+  "production": true,
+  "exit_code": 0,
+  "elapsed_seconds": 255.7856290999989,
+  "ended_at": "2026-10-15T01:32:53.245106+08:00"
+}

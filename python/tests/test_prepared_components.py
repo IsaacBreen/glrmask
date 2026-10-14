@@ -1,4 +1,4 @@
-"""Typed, immutable source/prepared components and Lark compatibility profiles."""
+"""Typed source/prepared snapshots and Lark compatibility profiles."""
 
 
 def _bound_snapshot(grammar, name, value):
@@ -63,8 +63,14 @@ def test_typed_bindings_and_explicit_event_adapter():
     pair = glrmask.Grammar.from_glrm(PAIR)
     with pytest.raises(ValueError):
         _bound_snapshot(leaf, "MARK", glrmask.Grammar.from_glrm('start x nt x="x"'))
-    with pytest.raises(ValueError):
-        _bound_snapshot(pair, "LEFT", v.tokens([4]))
+    widened = _bound_snapshot(pair, "LEFT", v.tokens([4]))
+    assert [r.name for r in widened.requirements] == ["RIGHT"]
+    assert [r.name for r in pair.requirements] == ["LEFT", "RIGHT"]
+    widened.bind("RIGHT", glrmask.Grammar.from_glrm('start x nt x="x"'))
+    for mode in MODES:
+        compiled = widened.compile(v, optimization=mode)
+        assert accepts(compiled, [4, 1, 0])
+        assert not accepts(compiled, [5, 1, 0])
     event = glrmask.Grammar.exact(v.tokens([2, 4]))
     g = _bound_snapshot(glrmask.Grammar.from_glrm('extern grammar EVENT start root nt root=EVENT'), "EVENT", event)
     mask = g.compile(v).start().mask()

@@ -1,0 +1,1654 @@
+{
+  "identity": {
+    "started_at": "2026-10-15T01:56:21.954563+08:00",
+    "max_workers": 16,
+    "jobs_per_worker": 32,
+    "pairs": 3,
+    "binaries": {
+      "baseline": {
+        "path": "C:\\gnb930283\\baseline-markers-artifacts\\core_batch_scaling.exe",
+        "sha256": "722b9358e415cb650c66e625fd803ccc5e3eaf732c797580657006f1be788a93"
+      },
+      "candidate": {
+        "path": "C:\\gnb930283\\candidate-artifacts-r4\\core_batch_scaling.exe",
+        "sha256": "682108ca7f4ac50beca41d034560e3c01d1ef332cb58e67b74fdc28c52a9d7b7"
+      }
+    },
+    "notes": [
+      "Same driver; persistent pools, five weak-scaling trials per row.",
+      "Record physical/logical cores and topology separately; worker count is not core count.",
+      "First workload warmup and pool creation excluded by the driver."
+    ]
+  },
+  "rows": [
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 247137.49999999997,
+        "candidate": 106012.5
+      },
+      "trials_ns": {
+        "baseline": [
+          238812.5,
+          247137.49999999997,
+          263012.5
+        ],
+        "candidate": [
+          91900.0,
+          106012.5,
+          107975.0
+        ]
+      },
+      "candidate_over_baseline": 0.4289616104395327
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 91081.25,
+        "candidate": 68700.0
+      },
+      "trials_ns": {
+        "baseline": [
+          91081.25,
+          93350.0,
+          90225.0
+        ],
+        "candidate": [
+          68700.0,
+          65981.25,
+          71268.75
+        ]
+      },
+      "candidate_over_baseline": 0.7542715981609827
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 52662.5,
+        "candidate": 48959.375
+      },
+      "trials_ns": {
+        "baseline": [
+          51381.25,
+          59559.375,
+          52662.5
+        ],
+        "candidate": [
+          48959.375,
+          47278.125,
+          55809.375
+        ]
+      },
+      "candidate_over_baseline": 0.9296819368620935
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 72492.1875,
+        "candidate": 47309.375
+      },
+      "trials_ns": {
+        "baseline": [
+          73190.625,
+          72492.1875,
+          72145.3125
+        ],
+        "candidate": [
+          51531.25,
+          42578.125,
+          47309.375
+        ]
+      },
+      "candidate_over_baseline": 0.6526134281711391
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 73549.21875,
+        "candidate": 48600.78125
+      },
+      "trials_ns": {
+        "baseline": [
+          71277.34375,
+          73549.21875,
+          77437.5
+        ],
+        "candidate": [
+          46611.71875,
+          48600.78125,
+          52557.03125
+        ]
+      },
+      "candidate_over_baseline": 0.6607926239869135
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 1340.625,
+        "candidate": 1215.625
+      },
+      "trials_ns": {
+        "baseline": [
+          1268.75,
+          1340.625,
+          1568.75
+        ],
+        "candidate": [
+          1350.0,
+          1206.25,
+          1215.625
+        ]
+      },
+      "candidate_over_baseline": 0.9067599067599068
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 770.3125,
+        "candidate": 975.0
+      },
+      "trials_ns": {
+        "baseline": [
+          584.375,
+          843.75,
+          770.3125
+        ],
+        "candidate": [
+          981.2499999999999,
+          975.0,
+          846.875
+        ]
+      },
+      "candidate_over_baseline": 1.2657200811359026
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 406.25,
+        "candidate": 729.6875
+      },
+      "trials_ns": {
+        "baseline": [
+          350.0,
+          406.25,
+          416.40625
+        ],
+        "candidate": [
+          729.6875,
+          934.375,
+          663.28125
+        ]
+      },
+      "candidate_over_baseline": 1.7961538461538462
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 485.54687500000006,
+        "candidate": 600.78125
+      },
+      "trials_ns": {
+        "baseline": [
+          425.78125,
+          485.54687500000006,
+          619.921875
+        ],
+        "candidate": [
+          617.96875,
+          596.484375,
+          600.78125
+        ]
+      },
+      "candidate_over_baseline": 1.237329042638777
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 324.8046875,
+        "candidate": 475.0
+      },
+      "trials_ns": {
+        "baseline": [
+          296.2890625,
+          356.25,
+          324.8046875
+        ],
+        "candidate": [
+          552.34375,
+          475.0,
+          441.40625
+        ]
+      },
+      "candidate_over_baseline": 1.4624173180998197
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 12159.375,
+        "candidate": 2421.875
+      },
+      "trials_ns": {
+        "baseline": [
+          12300.0,
+          12159.375,
+          10868.75
+        ],
+        "candidate": [
+          2421.875,
+          2271.875,
+          2703.125
+        ]
+      },
+      "candidate_over_baseline": 0.199177589308661
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 7390.625,
+        "candidate": 1700.0
+      },
+      "trials_ns": {
+        "baseline": [
+          7390.625,
+          8192.1875,
+          6928.125
+        ],
+        "candidate": [
+          1700.0,
+          1653.125,
+          1735.9375
+        ]
+      },
+      "candidate_over_baseline": 0.23002114164904863
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 4847.65625,
+        "candidate": 1114.84375
+      },
+      "trials_ns": {
+        "baseline": [
+          4750.78125,
+          4935.9375,
+          4847.65625
+        ],
+        "candidate": [
+          1398.4375,
+          1114.84375,
+          1056.25
+        ]
+      },
+      "candidate_over_baseline": 0.2299758259468171
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 3878.1250000000005,
+        "candidate": 1078.90625
+      },
+      "trials_ns": {
+        "baseline": [
+          3487.5,
+          3878.1250000000005,
+          4150.0
+        ],
+        "candidate": [
+          1087.5,
+          1078.90625,
+          1057.03125
+        ]
+      },
+      "candidate_over_baseline": 0.27820306204673645
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 2977.34375,
+        "candidate": 834.765625
+      },
+      "trials_ns": {
+        "baseline": [
+          2767.96875,
+          3419.921875,
+          2977.34375
+        ],
+        "candidate": [
+          899.4140625,
+          834.765625,
+          775.78125
+        ]
+      },
+      "candidate_over_baseline": 0.28037260561532407
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 47809.375,
+        "candidate": 2775.0
+      },
+      "trials_ns": {
+        "baseline": [
+          46890.625,
+          47809.375,
+          48828.125
+        ],
+        "candidate": [
+          2781.25,
+          2775.0,
+          2718.75
+        ]
+      },
+      "candidate_over_baseline": 0.058043009347016145
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 27987.5,
+        "candidate": 1832.8125
+      },
+      "trials_ns": {
+        "baseline": [
+          27284.375,
+          29675.0,
+          27987.5
+        ],
+        "candidate": [
+          1832.8125,
+          1820.3125,
+          1851.5625
+        ]
+      },
+      "candidate_over_baseline": 0.06548682447521215
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 19742.1875,
+        "candidate": 1282.8125
+      },
+      "trials_ns": {
+        "baseline": [
+          19597.65625,
+          20604.6875,
+          19742.1875
+        ],
+        "candidate": [
+          1282.8125,
+          1341.40625,
+          1230.46875
+        ]
+      },
+      "candidate_over_baseline": 0.06497823506133756
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 13840.625,
+        "candidate": 1140.625
+      },
+      "trials_ns": {
+        "baseline": [
+          13474.609375,
+          13840.625,
+          15155.078125
+        ],
+        "candidate": [
+          1140.625,
+          1219.53125,
+          1083.984375
+        ]
+      },
+      "candidate_over_baseline": 0.0824113795439151
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 10778.515625,
+        "candidate": 809.9609375
+      },
+      "trials_ns": {
+        "baseline": [
+          10778.515625,
+          11428.7109375,
+          10588.8671875
+        ],
+        "candidate": [
+          856.25,
+          809.9609375,
+          765.8203125
+        ]
+      },
+      "candidate_over_baseline": 0.07514587032943137
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 192196.875,
+        "candidate": 3412.5
+      },
+      "trials_ns": {
+        "baseline": [
+          192196.875,
+          194037.5,
+          191200.0
+        ],
+        "candidate": [
+          3268.75,
+          3412.5,
+          3950.0000000000005
+        ]
+      },
+      "candidate_over_baseline": 0.017755231452124286
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 108034.375,
+        "candidate": 2312.5
+      },
+      "trials_ns": {
+        "baseline": [
+          112632.8125,
+          108034.375,
+          104607.8125
+        ],
+        "candidate": [
+          2442.1875,
+          2248.4375,
+          2312.5
+        ]
+      },
+      "candidate_over_baseline": 0.021405224031702873
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 60909.375,
+        "candidate": 1596.875
+      },
+      "trials_ns": {
+        "baseline": [
+          60909.375,
+          58557.8125,
+          60928.90625
+        ],
+        "candidate": [
+          1561.71875,
+          1630.46875,
+          1596.875
+        ]
+      },
+      "candidate_over_baseline": 0.026217228464419477
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 44263.28125,
+        "candidate": 1457.03125
+      },
+      "trials_ns": {
+        "baseline": [
+          44263.28125,
+          44950.78125,
+          44022.65625
+        ],
+        "candidate": [
+          1315.625,
+          1457.03125,
+          1481.640625
+        ]
+      },
+      "candidate_over_baseline": 0.03291738002365109
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 35059.1796875,
+        "candidate": 1035.15625
+      },
+      "trials_ns": {
+        "baseline": [
+          34374.4140625,
+          35059.1796875,
+          35638.0859375
+        ],
+        "candidate": [
+          1035.15625,
+          1061.9140625,
+          923.046875
+        ]
+      },
+      "candidate_over_baseline": 0.02952596892531044
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 2806025.0,
+        "candidate": 197875.0
+      },
+      "trials_ns": {
+        "baseline": [
+          2806025.0,
+          2282500.0,
+          2865775.0
+        ],
+        "candidate": [
+          197875.0,
+          201675.0,
+          193625.0
+        ]
+      },
+      "candidate_over_baseline": 0.07051790343991945
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 1353943.75,
+        "candidate": 126262.50000000001
+      },
+      "trials_ns": {
+        "baseline": [
+          1321737.5,
+          1382550.0,
+          1353943.75
+        ],
+        "candidate": [
+          108731.25,
+          146725.0,
+          126262.50000000001
+        ]
+      },
+      "candidate_over_baseline": 0.09325535126551603
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 790965.625,
+        "candidate": 81162.5
+      },
+      "trials_ns": {
+        "baseline": [
+          772221.875,
+          826503.125,
+          790965.625
+        ],
+        "candidate": [
+          81162.5,
+          82628.125,
+          80634.375
+        ]
+      },
+      "candidate_over_baseline": 0.1026119181854458
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 791692.1875,
+        "candidate": 80601.5625
+      },
+      "trials_ns": {
+        "baseline": [
+          791692.1875,
+          789384.375,
+          804918.75
+        ],
+        "candidate": [
+          76275.0,
+          83593.75,
+          80601.5625
+        ]
+      },
+      "candidate_over_baseline": 0.10180921799231472
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 691816.40625,
+        "candidate": 69478.125
+      },
+      "trials_ns": {
+        "baseline": [
+          651603.125,
+          769286.71875,
+          691816.40625
+        ],
+        "candidate": [
+          69478.125,
+          77503.90625,
+          68421.875
+        ]
+      },
+      "candidate_over_baseline": 0.10042855932921148
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 1009.375,
+        "candidate": 271.875
+      },
+      "trials_ns": {
+        "baseline": [
+          834.375,
+          1009.375,
+          1040.625
+        ],
+        "candidate": [
+          268.75,
+          271.875,
+          290.625
+        ]
+      },
+      "candidate_over_baseline": 0.2693498452012384
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 737.5,
+        "candidate": 185.9375
+      },
+      "trials_ns": {
+        "baseline": [
+          737.5,
+          548.4375,
+          810.9375
+        ],
+        "candidate": [
+          209.375,
+          175.0,
+          185.9375
+        ]
+      },
+      "candidate_over_baseline": 0.2521186440677966
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 300.78125,
+        "candidate": 125.78124999999999
+      },
+      "trials_ns": {
+        "baseline": [
+          300.78125,
+          280.46875,
+          375.78125
+        ],
+        "candidate": [
+          116.40625,
+          167.96875,
+          125.78124999999999
+        ]
+      },
+      "candidate_over_baseline": 0.41818181818181815
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 354.296875,
+        "candidate": 102.34375
+      },
+      "trials_ns": {
+        "baseline": [
+          354.296875,
+          304.6875,
+          455.46875
+        ],
+        "candidate": [
+          102.34375,
+          100.390625,
+          113.28125
+        ]
+      },
+      "candidate_over_baseline": 0.288864388092613
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 238.0859375,
+        "candidate": 87.109375
+      },
+      "trials_ns": {
+        "baseline": [
+          238.0859375,
+          235.7421875,
+          249.41406249999997
+        ],
+        "candidate": [
+          87.109375,
+          83.3984375,
+          101.953125
+        ]
+      },
+      "candidate_over_baseline": 0.36587366694011486
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 8681.25,
+        "candidate": 2746.875
+      },
+      "trials_ns": {
+        "baseline": [
+          8112.500000000001,
+          8900.0,
+          8681.25
+        ],
+        "candidate": [
+          2756.25,
+          2746.875,
+          2703.125
+        ]
+      },
+      "candidate_over_baseline": 0.31641468682505397
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 5128.125,
+        "candidate": 1670.3125
+      },
+      "trials_ns": {
+        "baseline": [
+          5098.4375,
+          5400.0,
+          5128.125
+        ],
+        "candidate": [
+          2290.625,
+          1543.75,
+          1670.3125
+        ]
+      },
+      "candidate_over_baseline": 0.32571602681291895
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 3101.5625,
+        "candidate": 1206.25
+      },
+      "trials_ns": {
+        "baseline": [
+          3025.0,
+          3101.5625,
+          3595.3125
+        ],
+        "candidate": [
+          1206.25,
+          1525.78125,
+          1111.71875
+        ]
+      },
+      "candidate_over_baseline": 0.3889168765743073
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 2538.671875,
+        "candidate": 1039.0625
+      },
+      "trials_ns": {
+        "baseline": [
+          2382.03125,
+          2538.671875,
+          2565.625
+        ],
+        "candidate": [
+          1039.0625,
+          1053.515625,
+          1026.171875
+        ]
+      },
+      "candidate_over_baseline": 0.4092937374980766
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 2037.3046874999998,
+        "candidate": 821.6796875
+      },
+      "trials_ns": {
+        "baseline": [
+          1783.59375,
+          2376.7578125,
+          2037.3046874999998
+        ],
+        "candidate": [
+          821.6796875,
+          917.3828125,
+          709.5703125
+        ]
+      },
+      "candidate_over_baseline": 0.40331703575879596
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 35290.625,
+        "candidate": 9243.75
+      },
+      "trials_ns": {
+        "baseline": [
+          35503.125,
+          35290.625,
+          34384.375
+        ],
+        "candidate": [
+          9100.0,
+          9243.75,
+          9634.375
+        ]
+      },
+      "candidate_over_baseline": 0.2619321703710263
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 21048.4375,
+        "candidate": 6629.6875
+      },
+      "trials_ns": {
+        "baseline": [
+          19796.875,
+          21350.0,
+          21048.4375
+        ],
+        "candidate": [
+          6629.6875,
+          6296.875,
+          6743.75
+        ]
+      },
+      "candidate_over_baseline": 0.3149729047583698
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 12969.53125,
+        "candidate": 4264.84375
+      },
+      "trials_ns": {
+        "baseline": [
+          12644.53125,
+          12969.53125,
+          14670.3125
+        ],
+        "candidate": [
+          4337.5,
+          4264.84375,
+          3739.84375
+        ]
+      },
+      "candidate_over_baseline": 0.3288356123125113
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 9670.3125,
+        "candidate": 3192.1875
+      },
+      "trials_ns": {
+        "baseline": [
+          9670.3125,
+          9596.875,
+          10720.703125
+        ],
+        "candidate": [
+          3466.40625,
+          3137.109375,
+          3192.1875
+        ]
+      },
+      "candidate_over_baseline": 0.33010179350460495
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 7401.7578125,
+        "candidate": 2720.5078125
+      },
+      "trials_ns": {
+        "baseline": [
+          7401.7578125,
+          8555.46875,
+          7171.875
+        ],
+        "candidate": [
+          2735.546875,
+          2497.4609375,
+          2720.5078125
+        ]
+      },
+      "candidate_over_baseline": 0.3675488824972953
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 143856.25,
+        "candidate": 32303.125
+      },
+      "trials_ns": {
+        "baseline": [
+          143093.75,
+          143856.25,
+          147668.75
+        ],
+        "candidate": [
+          32303.125,
+          33171.875,
+          31762.5
+        ]
+      },
+      "candidate_over_baseline": 0.22455141851674848
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 80906.25,
+        "candidate": 19953.125
+      },
+      "trials_ns": {
+        "baseline": [
+          80846.875,
+          81326.5625,
+          80906.25
+        ],
+        "candidate": [
+          19350.0,
+          19953.125,
+          20493.75
+        ]
+      },
+      "candidate_over_baseline": 0.2466203167246041
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 47313.28125,
+        "candidate": 11985.9375
+      },
+      "trials_ns": {
+        "baseline": [
+          48137.5,
+          47313.28125,
+          45943.75
+        ],
+        "candidate": [
+          11745.3125,
+          11985.9375,
+          12665.625
+        ]
+      },
+      "candidate_over_baseline": 0.25333135186010797
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 33485.546875,
+        "candidate": 9883.59375
+      },
+      "trials_ns": {
+        "baseline": [
+          33485.546875,
+          33517.96875,
+          32708.984375000004
+        ],
+        "candidate": [
+          9912.109375,
+          9688.28125,
+          9883.59375
+        ]
+      },
+      "candidate_over_baseline": 0.2951599920674731
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 25687.890625,
+        "candidate": 8196.2890625
+      },
+      "trials_ns": {
+        "baseline": [
+          25639.453125,
+          26640.0390625,
+          25687.890625
+        ],
+        "candidate": [
+          8242.1875,
+          8196.2890625,
+          7419.921875
+        ]
+      },
+      "candidate_over_baseline": 0.3190720944024574
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 1,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 3100.0,
+        "candidate": 2625.0
+      },
+      "trials_ns": {
+        "baseline": [
+          3100.0,
+          4075.0,
+          3075.0
+        ],
+        "candidate": [
+          2625.0,
+          3025.0,
+          2375.0
+        ]
+      },
+      "candidate_over_baseline": 0.8467741935483871
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 32,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 422050.0,
+        "candidate": 59350.0
+      },
+      "trials_ns": {
+        "baseline": [
+          427625.0,
+          411000.0,
+          422050.0
+        ],
+        "candidate": [
+          58475.0,
+          62125.00000000001,
+          59350.0
+        ]
+      },
+      "candidate_over_baseline": 0.14062314891600522
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 128,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 6079025.0,
+        "candidate": 471550.0
+      },
+      "trials_ns": {
+        "baseline": [
+          6079025.0,
+          6058475.0,
+          6104325.0
+        ],
+        "candidate": [
+          443550.0,
+          471550.0,
+          478725.0
+        ]
+      },
+      "candidate_over_baseline": 0.07757000505837695
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 512,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 95168625.0,
+        "candidate": 2393700.0
+      },
+      "trials_ns": {
+        "baseline": [
+          95447200.0,
+          95168625.0,
+          95004775.0
+        ],
+        "candidate": [
+          2231575.0,
+          2527325.0,
+          2393700.0
+        ]
+      },
+      "candidate_over_baseline": 0.02515219695566685
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 1243.75,
+        "candidate": 1415.625
+      },
+      "trials_ns": {
+        "baseline": [
+          1150.0,
+          1287.5,
+          1243.75
+        ],
+        "candidate": [
+          1415.625,
+          1490.625,
+          1200.0
+        ]
+      },
+      "candidate_over_baseline": 1.1381909547738693
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 720.3125,
+        "candidate": 854.6875
+      },
+      "trials_ns": {
+        "baseline": [
+          495.31249999999994,
+          720.3125,
+          778.125
+        ],
+        "candidate": [
+          679.6875,
+          1096.875,
+          854.6875
+        ]
+      },
+      "candidate_over_baseline": 1.1865509761388287
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 375.78125,
+        "candidate": 696.09375
+      },
+      "trials_ns": {
+        "baseline": [
+          375.78125,
+          469.53125,
+          321.09375
+        ],
+        "candidate": [
+          613.28125,
+          756.25,
+          696.09375
+        ]
+      },
+      "candidate_over_baseline": 1.8523908523908523
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 421.09375,
+        "candidate": 538.28125
+      },
+      "trials_ns": {
+        "baseline": [
+          421.09375,
+          422.265625,
+          394.921875
+        ],
+        "candidate": [
+          566.40625,
+          528.515625,
+          538.28125
+        ]
+      },
+      "candidate_over_baseline": 1.2782931354359925
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 295.8984375,
+        "candidate": 402.734375
+      },
+      "trials_ns": {
+        "baseline": [
+          272.265625,
+          295.8984375,
+          361.71875
+        ],
+        "candidate": [
+          402.734375,
+          424.8046875,
+          343.5546875
+        ]
+      },
+      "candidate_over_baseline": 1.361056105610561
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 14162.5,
+        "candidate": 2415.625
+      },
+      "trials_ns": {
+        "baseline": [
+          14162.5,
+          14521.875,
+          12325.0
+        ],
+        "candidate": [
+          2415.625,
+          2296.875,
+          2700.0
+        ]
+      },
+      "candidate_over_baseline": 0.1705648720211827
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 9448.4375,
+        "candidate": 1779.6875
+      },
+      "trials_ns": {
+        "baseline": [
+          9448.4375,
+          10825.0,
+          9054.6875
+        ],
+        "candidate": [
+          1743.75,
+          1857.8125,
+          1779.6875
+        ]
+      },
+      "candidate_over_baseline": 0.1883578634033405
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 5803.90625,
+        "candidate": 1126.5625
+      },
+      "trials_ns": {
+        "baseline": [
+          5674.21875,
+          6176.5625,
+          5803.90625
+        ],
+        "candidate": [
+          1517.1875,
+          1103.90625,
+          1126.5625
+        ]
+      },
+      "candidate_over_baseline": 0.1941041862969444
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 4835.9375,
+        "candidate": 1017.578125
+      },
+      "trials_ns": {
+        "baseline": [
+          4621.09375,
+          5082.03125,
+          4835.9375
+        ],
+        "candidate": [
+          1060.546875,
+          1017.578125,
+          950.78125
+        ]
+      },
+      "candidate_over_baseline": 0.2104200323101777
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 3938.671875,
+        "candidate": 800.0
+      },
+      "trials_ns": {
+        "baseline": [
+          3633.984375,
+          4115.4296875,
+          3938.671875
+        ],
+        "candidate": [
+          822.265625,
+          800.0,
+          764.2578125
+        ]
+      },
+      "candidate_over_baseline": 0.20311415253396806
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 49631.25,
+        "candidate": 2606.25
+      },
+      "trials_ns": {
+        "baseline": [
+          49618.75,
+          51571.875,
+          49631.25
+        ],
+        "candidate": [
+          2606.25,
+          3465.625,
+          2606.25
+        ]
+      },
+      "candidate_over_baseline": 0.05251227805062335
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 30617.187499999996,
+        "candidate": 1979.6874999999998
+      },
+      "trials_ns": {
+        "baseline": [
+          29509.375,
+          32637.5,
+          30617.187499999996
+        ],
+        "candidate": [
+          1796.875,
+          2312.5,
+          1979.6874999999998
+        ]
+      },
+      "candidate_over_baseline": 0.06465935187547844
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 24739.84375,
+        "candidate": 1246.09375
+      },
+      "trials_ns": {
+        "baseline": [
+          19686.71875,
+          24739.84375,
+          27462.5
+        ],
+        "candidate": [
+          1207.8125,
+          1359.375,
+          1246.09375
+        ]
+      },
+      "candidate_over_baseline": 0.050367890864306694
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 17396.09375,
+        "candidate": 1123.4375
+      },
+      "trials_ns": {
+        "baseline": [
+          15002.734375,
+          17396.09375,
+          18137.5
+        ],
+        "candidate": [
+          1127.34375,
+          1123.4375,
+          1043.359375
+        ]
+      },
+      "candidate_over_baseline": 0.064579871558809
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 12822.65625,
+        "candidate": 783.59375
+      },
+      "trials_ns": {
+        "baseline": [
+          12184.375,
+          12822.65625,
+          13452.34375
+        ],
+        "candidate": [
+          839.6484375,
+          783.59375,
+          736.71875
+        ]
+      },
+      "candidate_over_baseline": 0.06111009565588253
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 1,
+      "ns_per_job": {
+        "baseline": 192809.375,
+        "candidate": 3100.0
+      },
+      "trials_ns": {
+        "baseline": [
+          192809.375,
+          192993.75,
+          192753.125
+        ],
+        "candidate": [
+          3100.0,
+          2925.0,
+          3296.875
+        ]
+      },
+      "candidate_over_baseline": 0.016078056370443607
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 2,
+      "ns_per_job": {
+        "baseline": 109973.4375,
+        "candidate": 2212.5
+      },
+      "trials_ns": {
+        "baseline": [
+          110512.5,
+          109973.4375,
+          106815.625
+        ],
+        "candidate": [
+          2167.1875,
+          2325.0,
+          2212.5
+        ]
+      },
+      "candidate_over_baseline": 0.020118494522825114
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 4,
+      "ns_per_job": {
+        "baseline": 69190.625,
+        "candidate": 1603.90625
+      },
+      "trials_ns": {
+        "baseline": [
+          69190.625,
+          69955.46875,
+          65235.9375
+        ],
+        "candidate": [
+          1603.90625,
+          1489.0625,
+          1669.53125
+        ]
+      },
+      "candidate_over_baseline": 0.023180976468994172
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 8,
+      "ns_per_job": {
+        "baseline": 50561.328125,
+        "candidate": 1344.53125
+      },
+      "trials_ns": {
+        "baseline": [
+          51521.875,
+          46524.21875,
+          50561.328125
+        ],
+        "candidate": [
+          1344.53125,
+          1251.171875,
+          1482.8125
+        ]
+      },
+      "candidate_over_baseline": 0.026592087270255027
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 16,
+      "ns_per_job": {
+        "baseline": 36760.9375,
+        "candidate": 979.6875000000001
+      },
+      "trials_ns": {
+        "baseline": [
+          36173.2421875,
+          36760.9375,
+          37055.46875
+        ],
+        "candidate": [
+          979.6875000000001,
+          1101.3671875,
+          957.8125
+        ]
+      },
+      "candidate_over_baseline": 0.026650231648744
+    }
+  ],
+  "completed_at": "2026-10-15T01:56:38.507736+08:00"
+}

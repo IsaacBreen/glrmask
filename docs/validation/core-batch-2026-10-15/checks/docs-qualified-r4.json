@@ -1,0 +1,32 @@
+{
+  "status": "passed",
+  "rows": [
+    {
+      "label": "bench-sync",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\docs-qualified-r4-bench-sync.log"
+    },
+    {
+      "label": "guide-sync",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\docs-qualified-r4-guide-sync.log"
+    },
+    {
+      "label": "rustdoc-GUIDE",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\docs-qualified-r4-rustdoc-GUIDE.log"
+    },
+    {
+      "label": "rustdoc-README",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\docs-qualified-r4-rustdoc-README.log"
+    },
+    {
+      "label": "rustdoc-concurrent-construction",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\docs-qualified-r4-rustdoc-concurrent-construction.log"
+    }
+  ],
+  "library": "C:\\gnb930283\\target-release\\release\\deps\\libglrmask-e404e0ab21439412.rlib",
+  "completed_at": "2026-10-15T01:55:41.651184+08:00"
+}

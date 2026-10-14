@@ -101,3 +101,8 @@ Construction metadata and validation must not become runtime mask lookups.
 Normal packed `fill_mask()` keeps its separate implementation and should be
 qualified both alone and after construction/forcing activity. Shared hardware
 contention is reported separately from additional work in the mask code path.
+
+## Measured qualification
+
+See the [15 October 2026 core-batch report](validation/core-batch-2026-10-15.md)
+for matched measurements, exact correctness gates and remaining trade-offs.

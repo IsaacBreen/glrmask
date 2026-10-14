@@ -1,0 +1,24 @@
+{
+  "status": "passed",
+  "rows": [
+    {
+      "label": "prefix-proof",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\clean-wheel-r4-prefix-proof.log"
+    },
+    {
+      "label": "smoke",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\clean-wheel-r4-smoke.log"
+    },
+    {
+      "label": "pytest",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\clean-wheel-r4-pytest.log"
+    }
+  ],
+  "venv": "C:\\gnb930283\\wheel-venv\\Scripts\\python.exe",
+  "wheel_sha256": "8a0e9ccca5bf013fe4808a00c578ff8f6d79df79bbe7a2f2ba3dfdf1da9c0efd",
+  "extension_sha256": "e3563719a5996790b53593a8994c1ae0cd613b4bef36d66a5122bbc85fdb9a0e",
+  "completed_at": "2026-10-15T01:51:57.250268+08:00"
+}

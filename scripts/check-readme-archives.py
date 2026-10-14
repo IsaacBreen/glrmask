@@ -13,7 +13,12 @@ ROOT=Path(__file__).resolve().parents[1]
 def description(text):
     metadata=Parser().parsestr(text)
     assert metadata['Description-Content-Type'].startswith('text/markdown')
-    assert metadata.get_payload().strip()==(ROOT/'python/PYTHON.md').read_text().strip(), 'Python metadata description differs'
+    # Metadata generated on Windows may preserve CRLF in the description,
+    # while Path.read_text uses universal newlines. Compare the same text
+    # without treating a platform newline convention as README drift.
+    actual = metadata.get_payload().replace('\r\n', '\n').strip()
+    expected = (ROOT/'python/PYTHON.md').read_text(encoding='utf8').strip()
+    assert actual == expected, 'Python metadata description differs'
 
 
 def main():

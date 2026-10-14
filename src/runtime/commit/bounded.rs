@@ -128,15 +128,60 @@ fn probe_existing_mask(view:View<'_>,witnesses:&mut Witnesses)->crate::Result<Op
     Ok(Some(true))
 }
 
-/// A conservative physical first-byte bound. Epsilon/finalization, projected
-/// states, or a composed provider decline to prune rather than lose paths.
+/// A bounded-cost negative certificate for small physical lexer graphs.
+///
+/// Every ordinary byte, including one reached after epsilon/finalization,
+/// ignore reset or scoped CALL/RETURN, must occur on a byte transition of some
+/// participating lexer. Taking the union over ALL states and components is
+/// therefore conservative; it does not claim that any retained byte is live.
+/// Symbolic/virtual or compressed residuals, and large graphs, decline this
+/// optimization. No metadata or cache is added to ordinary mask execution.
+fn physical_alphabet_bound(root:&Constraint)->[bool;256] {
+    const MAX_COMPONENTS:usize=64;
+    const MAX_STATES:usize=256;
+    const MAX_EDGES:usize=4096;
+    let mut pending:SmallVec<[&Constraint;4]>=smallvec::smallvec![root];
+    let mut components=0usize;let mut states=0usize;let mut edges=0usize;
+    let mut distinct=0usize;let mut result=[false;256];
+    while let Some(c)=pending.pop() {
+        components+=1;
+        if components>MAX_COMPONENTS{return [true;256];}
+        let lexer=&c.tokenizer;
+        if lexer.has_any_virtual_runtime() || lexer.has_compressed_transition_segments() {
+            return [true;256];
+        }
+        states=states.saturating_add(lexer.num_states() as usize);
+        if states>MAX_STATES{return [true;256];}
+        for state in 0..lexer.num_states() {
+            for (byte,_) in lexer.transitions_from(state) {
+                edges+=1;
+                if edges>MAX_EDGES{return [true;256];}
+                if !result[byte as usize] {
+                    result[byte as usize]=true;distinct+=1;
+                    if distinct==256{return result;}
+                }
+            }
+        }
+        if let Some(overlay)=&c.static_dynamic_overlay {
+            if components+pending.len()+overlay.segmented_parser_components.len()>MAX_COMPONENTS {
+                return [true;256];
+            }
+            pending.extend(overlay.segmented_parser_components.iter().map(|p|p.constraint.as_ref()));
+        }
+    }
+    result
+}
+
+/// Use the tighter live physical frontier when it cannot finalize/reset. At a
+/// boundary, the bounded whole-alphabet certificate still excludes impossible
+/// byte groups without incorrectly treating a component-local state as global.
 fn first_byte_bound(view:View<'_>)->[bool;256] {
     let c=view.constraint;
-    if c.uses_compact_segmented_parser_runtime(){return [true;256];}
+    if c.uses_compact_segmented_parser_runtime(){return physical_alphabet_bound(c);}
     let lexer=&c.tokenizer;let mut result=[false;256];
     for &state in view.state.keys() {
         if state>=lexer.num_states() || lexer.state_has_epsilon_transitions(state)
-            || !lexer.matched_terminal_bitset(state).is_empty(){return [true;256];}
+            || !lexer.matched_terminal_bitset(state).is_empty(){return physical_alphabet_bound(c);}
         for (byte,_) in lexer.transitions_from(state){result[byte as usize]=true;}
     }
     result
@@ -590,6 +635,52 @@ mod tests {
         let examined=BYTE_PROOFS.with(|n|n.get());assert!(examined<40,"performed {examined} byte proofs for a two-witness query");
         assert_eq!(s.mask_cache.lock().unwrap().is_some(),before,"query populated the full mask cache");
     }
+
+    #[test]
+    fn narrow_alphabets_prune_scoped_and_finalizing_frontiers_without_full_masks() {
+        let mut entries=(0..256u32).map(|id|(id,vec![id as u8])).collect::<Vec<_>>();
+        for id in 256..8192 {entries.push((id,format!("word{id:07}").into_bytes()));}
+        let v=Vocab::new(entries);
+        for (source,expected) in [
+            ("grammar CHILD { start inner nt inner=\"!?\" } start root nt root=CHILD \"!\"",vec![33,63,33]),
+            ("start root nt root=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
+        ] {
+            for mode in MODES {
+                let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                for loaded in [false,true] {
+                    let c=if loaded{Constraint::load(c.save()).unwrap()}else{c.clone()};
+                    let state=c.start();
+                    let cached_before=state.mask_cache.lock().unwrap().as_ref()
+                        .map(|m|(m.generation,m.mask.clone()));
+                    BYTE_PROOFS.with(|n|n.set(0));
+                    assert_eq!(state.forced_tokens().unwrap(),expected,"{mode:?}, loaded={loaded}");
+                    let work=BYTE_PROOFS.with(|n|n.get());
+                    assert!(work<expected.len()*12,"{mode:?}, loaded={loaded}: {work} byte proofs for {} IDs",expected.len());
+                    assert_eq!(state.mask_cache.lock().unwrap().as_ref()
+                        .map(|m|(m.generation,m.mask.clone())),cached_before,
+                        "query changed the pre-existing mask cache: {mode:?}, loaded={loaded}");
+                    assert_eq!(state.forced_token_ids_reference(),expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn physical_alphabet_union_keeps_parent_suffix_child_ignore_and_nullable_returns() {
+        let v=Vocab::new((0..256u32).map(|id|(id,vec![id as u8])).collect());
+        for source in [
+            "grammar C { start r ignore WS t WS=/ +/ nt r=\"a\"? } start r nt r=C \"Z\"",
+            "grammar C { start r ignore WS t WS=/\\t+/ nt r=\"a\" | \"ab\" } start r ignore WS t WS=/ +/ nt r=\"P\" C \"Z\"",
+            "grammar C { start r nt r=\"(\" r \")\" | eps } start r nt r=C \"Z\"",
+        ] {
+            for mode in MODES {
+                let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                explore(&c,&format!("alphabet boundary {mode:?}, {source}"));
+                let loaded=Constraint::load(c.save()).unwrap();
+                explore(&loaded,&format!("loaded alphabet boundary {mode:?}, {source}"));
+            }
+        }
+    }
 }
 
 
@@ -645,7 +736,7 @@ mod differential_tests {
             (4,b"a".to_vec()),(5,b" ".to_vec()),(6,b"c".to_vec()),(7,Vec::new()),
             (8,b"x".to_vec()),(9,b"(".to_vec()),(10,b")".to_vec()),(11,b"()".to_vec()),
             (12,b"a ".to_vec()),(13,b"ab ".to_vec()),(14,b" a".to_vec()),
-            (32,vec![0xc3]),(33,vec![0xa9]),(34,"Ã©".as_bytes().to_vec()),(67,b"a".to_vec()),
+            (32,vec![0xc3]),(33,vec![0xa9]),(34,"\u{e9}".as_bytes().to_vec()),(67,b"a".to_vec()),
         ],[99,130]);
         for source in [
             "start root nt root=\"ab\" \"c\"?",
@@ -655,7 +746,7 @@ mod differential_tests {
             "start root ignore WS t WS=/ +/ nt root=\"ab\"",
             "start root t X=shortest { /a|ab/ } nt root=X \"b\"?",
             "start root nt root=\"(\" root \" )\" | \"()\"",
-            "start root nt root=\"Ã©\" \"a\"?",
+            "start root nt root=\"\u{e9}\" \"a\"?",
             "start root nt root=eps",
         ] {
             for mode in MODES {
@@ -718,8 +809,8 @@ mod differential_tests {
     #[test]
     fn json_schema_lark_and_regular_difference_match_full_mask_at_real_token_boundaries() {
         use std::collections::BTreeSet;
-        let schema=r#"{"type":"object","properties":{"a":{"type":"array","items":{"enum":["alpha","Î²"]},"maxItems":2},"score":{"type":"integer","minimum":-3,"maximum":15},"enabled":{"type":"boolean"}},"required":["a","score","enabled"],"additionalProperties":false}"#;
-        let json=r#"{"a": ["alpha", "Î²"], "score": -2, "enabled": true}"#;
+        let schema=r#"{"type":"object","properties":{"a":{"type":"array","items":{"enum":["alpha","β"]},"maxItems":2},"score":{"type":"integer","minimum":-3,"maximum":15},"enabled":{"type":"boolean"}},"required":["a","score","enabled"],"additionalProperties":false}"#;
+        let json=r#"{"a": ["alpha", "β"], "score": -2, "enabled": true}"#;
         let lark="start: sum\n?sum: sum \"+\" atom | atom\n?atom: /[0-9]+/ | \"(\" sum \")\"\n%ignore /[ \\t]+/";
         let arithmetic="(17 + 28) + 3";
         let regular="start root t WORD=/[a-z]+/ - /bad/ nt root=\"[\" WORD (\",\" WORD)* \"]\"";

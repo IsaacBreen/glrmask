@@ -13,7 +13,8 @@ import glrmask
 assert Path(glrmask.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
 metadata = importlib.metadata.metadata("glrmask")
 assert metadata["Name"] == "glrmask"
-assert metadata.get_payload().startswith("# GLRMask for Python")
+expected_description = (Path(__file__).resolve().parents[1] / "python" / "PYTHON.md").read_text(encoding="utf-8")
+assert metadata.get_payload().strip() == expected_description.strip()
 if len(sys.argv) > 1:
     assert metadata["Version"] == sys.argv[1]
 

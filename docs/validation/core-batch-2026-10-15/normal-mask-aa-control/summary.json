@@ -1,0 +1,5144 @@
+{
+  "identity": {
+    "started_at": "2026-10-15T00:59:39.492408+08:00",
+    "baseline_ref": "b255ca31d",
+    "candidate_ref": "b255ca31d-control",
+    "binaries": {
+      "baseline": {
+        "path": "C:\\gnb930283\\baseline-markers-artifacts\\core_batch_bench.exe",
+        "sha256": "7d41367944dbe8fb6fd4bcb354cb9d87ca0ebc424d3d795edfa94ec498ae1bb0"
+      },
+      "candidate": {
+        "path": "C:\\gnb930283\\baseline-markers-artifacts\\core_batch_bench.exe",
+        "sha256": "7d41367944dbe8fb6fd4bcb354cb9d87ca0ebc424d3d795edfa94ec498ae1bb0"
+      }
+    },
+    "repetitions": 5000,
+    "vocab": 8192,
+    "pairs": 2,
+    "reverse_first": true,
+    "notes": [
+      "Separate processes, identical measured loops and inputs.",
+      "AB then BA ordering alternates per pair.",
+      "No building or source edits by this controller.",
+      "Full original-ID words are compared, not only fingerprints.",
+      "Ratios and repeatability flags are observations, not automatic performance acceptance."
+    ]
+  },
+  "full_mask_words_compared": 40704,
+  "timed_masks": {
+    "baseline": 1440000,
+    "candidate": 1440000
+  },
+  "rows": [
+    {
+      "mode": "Balanced",
+      "case": "exact_token_set",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 4200.0,
+            "candidate": 4100.0,
+            "ratio": 0.9761904761904762,
+            "paired_ratios": [
+              0.9761904761904762,
+              0.9761904761904762
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4650.0,
+            "candidate": 4550.0,
+            "ratio": 0.978494623655914,
+            "paired_ratios": [
+              1.0,
+              0.9574468085106383
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5100.0,
+            "candidate": 5000.0,
+            "ratio": 0.9803921568627451,
+            "paired_ratios": [
+              1.0,
+              0.9607843137254902
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9350.0,
+            "candidate": 9600.0,
+            "ratio": 1.0267379679144386,
+            "paired_ratios": [
+              1.1195652173913044,
+              0.9368421052631579
+            ]
+          },
+          "max_ns": {
+            "baseline": 48800.0,
+            "candidate": 48800.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.685512367491166,
+              0.7200577200577201
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 3500.0,
+            "candidate": 3450.0,
+            "ratio": 0.9857142857142858,
+            "paired_ratios": [
+              0.9714285714285714,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 3800.0,
+            "candidate": 3650.0,
+            "ratio": 0.9605263157894737,
+            "paired_ratios": [
+              0.9736842105263158,
+              0.9473684210526315
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4400.0,
+            "candidate": 4750.0,
+            "ratio": 1.0795454545454546,
+            "paired_ratios": [
+              1.1904761904761905,
+              0.9782608695652174
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9750.0,
+            "candidate": 11200.0,
+            "ratio": 1.1487179487179486,
+            "paired_ratios": [
+              1.2164948453608246,
+              1.0816326530612246
+            ]
+          },
+          "max_ns": {
+            "baseline": 67950.0,
+            "candidate": 48750.0,
+            "ratio": 0.717439293598234,
+            "paired_ratios": [
+              2.097674418604651,
+              0.458041958041958
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 114300.0,
+            "candidate": 113350.0,
+            "ratio": 0.9916885389326334,
+            "paired_ratios": [
+              0.9781849912739965,
+              1.0052631578947369
+            ]
+          },
+          "p95_ns": {
+            "baseline": 121350.0,
+            "candidate": 120150.0,
+            "ratio": 0.9901112484548825,
+            "paired_ratios": [
+              0.9884583676834295,
+              0.9917627677100495
+            ]
+          },
+          "p99_ns": {
+            "baseline": 136800.0,
+            "candidate": 139450.0,
+            "ratio": 1.0193713450292399,
+            "paired_ratios": [
+              1.0080882352941176,
+              1.0305232558139534
+            ]
+          },
+          "p999_ns": {
+            "baseline": 187500.0,
+            "candidate": 214950.0,
+            "ratio": 1.1464,
+            "paired_ratios": [
+              1.089527027027027,
+              1.1975683890577509
+            ]
+          },
+          "max_ns": {
+            "baseline": 460400.0,
+            "candidate": 421400.0,
+            "ratio": 0.9152910512597741,
+            "paired_ratios": [
+              0.380688622754491,
+              2.3279272151898733
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 129350.0,
+            "candidate": 128300.0,
+            "ratio": 0.9918824893699265,
+            "paired_ratios": [
+              0.9791827293754818,
+              1.0046511627906978
+            ]
+          },
+          "p95_ns": {
+            "baseline": 137850.0,
+            "candidate": 136800.0,
+            "ratio": 0.9923830250272034,
+            "paired_ratios": [
+              0.9963662790697675,
+              0.9884141926140478
+            ]
+          },
+          "p99_ns": {
+            "baseline": 157400.0,
+            "candidate": 161200.0,
+            "ratio": 1.0241423125794156,
+            "paired_ratios": [
+              1.0423892100192678,
+              1.0062853551225643
+            ]
+          },
+          "p999_ns": {
+            "baseline": 224500.0,
+            "candidate": 242000.0,
+            "ratio": 1.0779510022271714,
+            "paired_ratios": [
+              1.0395852968897266,
+              1.1123310810810811
+            ]
+          },
+          "max_ns": {
+            "baseline": 489750.0,
+            "candidate": 449500.0,
+            "ratio": 0.9178152118427769,
+            "paired_ratios": [
+              0.4000286656155941,
+              2.199787083037615
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 944550.0,
+            "candidate": 965750.0,
+            "ratio": 1.0224445503149648,
+            "paired_ratios": [
+              1.0572815533980582,
+              0.988878494958944
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1053350.0,
+            "candidate": 1051750.0,
+            "ratio": 0.9984810366924574,
+            "paired_ratios": [
+              1.059870866757973,
+              0.9406177962194558
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1053350.0,
+            "candidate": 1051750.0,
+            "ratio": 0.9984810366924574,
+            "paired_ratios": [
+              1.059870866757973,
+              0.9406177962194558
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1053350.0,
+            "candidate": 1051750.0,
+            "ratio": 0.9984810366924574,
+            "paired_ratios": [
+              1.059870866757973,
+              0.9406177962194558
+            ]
+          },
+          "max_ns": {
+            "baseline": 1053350.0,
+            "candidate": 1051750.0,
+            "ratio": 0.9984810366924574,
+            "paired_ratios": [
+              1.059870866757973,
+              0.9406177962194558
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 11850.0,
+            "candidate": 11750.0,
+            "ratio": 0.9915611814345991,
+            "paired_ratios": [
+              0.9747899159663865,
+              1.0084745762711864
+            ]
+          },
+          "p95_ns": {
+            "baseline": 16400.0,
+            "candidate": 16100.0,
+            "ratio": 0.9817073170731707,
+            "paired_ratios": [
+              0.9216867469879518,
+              1.0432098765432098
+            ]
+          },
+          "p99_ns": {
+            "baseline": 16400.0,
+            "candidate": 16100.0,
+            "ratio": 0.9817073170731707,
+            "paired_ratios": [
+              0.9216867469879518,
+              1.0432098765432098
+            ]
+          },
+          "p999_ns": {
+            "baseline": 16400.0,
+            "candidate": 16100.0,
+            "ratio": 0.9817073170731707,
+            "paired_ratios": [
+              0.9216867469879518,
+              1.0432098765432098
+            ]
+          },
+          "max_ns": {
+            "baseline": 16400.0,
+            "candidate": 16100.0,
+            "ratio": 0.9817073170731707,
+            "paired_ratios": [
+              0.9216867469879518,
+              1.0432098765432098
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 1994800.0,
+        "candidate": 2033000.0,
+        "ratio": 1.0191497894525767
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 778500.0,
+        "candidate": 932250.0,
+        "ratio": 1.197495183044316
+      },
+      "first_link_ns": {
+        "baseline": 34350.0,
+        "candidate": 38150.0,
+        "ratio": 1.1106259097525473
+      },
+      "save_ns": {
+        "baseline": 244800.0,
+        "candidate": 276700.0,
+        "ratio": 1.1303104575163399
+      },
+      "load_ns": {
+        "baseline": 438950.0,
+        "candidate": 439900.0,
+        "ratio": 1.0021642556099783
+      },
+      "prepared_save_ns": {
+        "baseline": 206200.0,
+        "candidate": 219250.0,
+        "ratio": 1.0632880698351115
+      },
+      "prepared_load_ns": {
+        "baseline": 1362650.0,
+        "candidate": 1319600.0,
+        "ratio": 0.9684071478369354
+      },
+      "artifact_bytes": {
+        "baseline": 120472.0,
+        "candidate": 120472.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 120540.0,
+        "candidate": 120540.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 35200.0,
+        "candidate": 29800.0,
+        "ratio": 0.8465909090909091
+      }
+    },
+    {
+      "mode": "Balanced",
+      "case": "glrm_list",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 1250.0,
+            "candidate": 1200.0,
+            "ratio": 0.96,
+            "paired_ratios": [
+              1.0,
+              0.9230769230769231
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2900.0,
+            "candidate": 2900.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 3200.0,
+            "candidate": 3100.0,
+            "ratio": 0.96875,
+            "paired_ratios": [
+              0.9393939393939394,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 7950.0,
+            "candidate": 7750.0,
+            "ratio": 0.9748427672955975,
+            "paired_ratios": [
+              0.9629629629629629,
+              0.9871794871794873
+            ]
+          },
+          "max_ns": {
+            "baseline": 184450.0,
+            "candidate": 74500.0,
+            "ratio": 0.403903496882624,
+            "paired_ratios": [
+              0.14029644950017237,
+              1.3743654822335025
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 5950.0,
+            "candidate": 5950.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9833333333333333,
+              1.0169491525423728
+            ]
+          },
+          "p95_ns": {
+            "baseline": 11450.0,
+            "candidate": 11400.0,
+            "ratio": 0.9956331877729258,
+            "paired_ratios": [
+              0.9826086956521739,
+              1.0087719298245614
+            ]
+          },
+          "p99_ns": {
+            "baseline": 11800.0,
+            "candidate": 11650.0,
+            "ratio": 0.9872881355932204,
+            "paired_ratios": [
+              0.9747899159663865,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 21450.0,
+            "candidate": 19200.0,
+            "ratio": 0.8951048951048951,
+            "paired_ratios": [
+              0.8130434782608695,
+              0.9899497487437185
+            ]
+          },
+          "max_ns": {
+            "baseline": 112050.0,
+            "candidate": 242200.0,
+            "ratio": 2.1615350290049085,
+            "paired_ratios": [
+              3.440508628519528,
+              0.9263157894736842
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 111800.0,
+            "candidate": 111000.0,
+            "ratio": 0.9928443649373881,
+            "paired_ratios": [
+              0.9848078641644326,
+              1.000895255147717
+            ]
+          },
+          "p95_ns": {
+            "baseline": 118600.0,
+            "candidate": 117050.0,
+            "ratio": 0.9869308600337268,
+            "paired_ratios": [
+              0.9731318219983207,
+              1.0008467400508043
+            ]
+          },
+          "p99_ns": {
+            "baseline": 135700.0,
+            "candidate": 133300.0,
+            "ratio": 0.9823139277818718,
+            "paired_ratios": [
+              0.9410092395167022,
+              1.026778882938026
+            ]
+          },
+          "p999_ns": {
+            "baseline": 181500.0,
+            "candidate": 182700.0,
+            "ratio": 1.006611570247934,
+            "paired_ratios": [
+              0.8979793001478561,
+              1.1442848219862587
+            ]
+          },
+          "max_ns": {
+            "baseline": 234350.0,
+            "candidate": 248050.0,
+            "ratio": 1.0584595690206955,
+            "paired_ratios": [
+              1.1153997636864907,
+              0.9911545623836127
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 192100.0,
+            "candidate": 191550.0,
+            "ratio": 0.9971369078604894,
+            "paired_ratios": [
+              0.9911550468262227,
+              1.003125
+            ]
+          },
+          "p95_ns": {
+            "baseline": 204900.0,
+            "candidate": 201650.0,
+            "ratio": 0.9841386041971694,
+            "paired_ratios": [
+              0.9642512077294686,
+              1.0044378698224852
+            ]
+          },
+          "p99_ns": {
+            "baseline": 238100.0,
+            "candidate": 229150.0,
+            "ratio": 0.9624107517849643,
+            "paired_ratios": [
+              0.9097165991902834,
+              1.019197207678883
+            ]
+          },
+          "p999_ns": {
+            "baseline": 343850.0,
+            "candidate": 337700.0,
+            "ratio": 0.9821142940235568,
+            "paired_ratios": [
+              0.9165783898305084,
+              1.0619155111254435
+            ]
+          },
+          "max_ns": {
+            "baseline": 620050.0,
+            "candidate": 517600.0,
+            "ratio": 0.8347713894040804,
+            "paired_ratios": [
+              0.6975258450458822,
+              1.1463607594936709
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 1149700.0,
+            "candidate": 1200300.0,
+            "ratio": 1.0440114812559798,
+            "paired_ratios": [
+              1.159599636032757,
+              0.9381872709096968
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1363650.0,
+            "candidate": 1375250.0,
+            "ratio": 1.0085065816008507,
+            "paired_ratios": [
+              1.1134335189564422,
+              0.9113950861338604
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1363650.0,
+            "candidate": 1375250.0,
+            "ratio": 1.0085065816008507,
+            "paired_ratios": [
+              1.1134335189564422,
+              0.9113950861338604
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1363650.0,
+            "candidate": 1375250.0,
+            "ratio": 1.0085065816008507,
+            "paired_ratios": [
+              1.1134335189564422,
+              0.9113950861338604
+            ]
+          },
+          "max_ns": {
+            "baseline": 1363650.0,
+            "candidate": 1375250.0,
+            "ratio": 1.0085065816008507,
+            "paired_ratios": [
+              1.1134335189564422,
+              0.9113950861338604
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 23450.0,
+            "candidate": 23150.0,
+            "ratio": 0.9872068230277186,
+            "paired_ratios": [
+              0.9778761061946902,
+              0.9958847736625515
+            ]
+          },
+          "p95_ns": {
+            "baseline": 35200.0,
+            "candidate": 32500.0,
+            "ratio": 0.9232954545454546,
+            "paired_ratios": [
+              0.952662721893491,
+              0.8961748633879781
+            ]
+          },
+          "p99_ns": {
+            "baseline": 35200.0,
+            "candidate": 32500.0,
+            "ratio": 0.9232954545454546,
+            "paired_ratios": [
+              0.952662721893491,
+              0.8961748633879781
+            ]
+          },
+          "p999_ns": {
+            "baseline": 35200.0,
+            "candidate": 32500.0,
+            "ratio": 0.9232954545454546,
+            "paired_ratios": [
+              0.952662721893491,
+              0.8961748633879781
+            ]
+          },
+          "max_ns": {
+            "baseline": 35200.0,
+            "candidate": 32500.0,
+            "ratio": 0.9232954545454546,
+            "paired_ratios": [
+              0.952662721893491,
+              0.8961748633879781
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 38032650.0,
+        "candidate": 38130450.0,
+        "ratio": 1.0025714747723338
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 2414400.0,
+        "candidate": 2303200.0,
+        "ratio": 0.9539430086149768
+      },
+      "first_link_ns": {
+        "baseline": 65600.0,
+        "candidate": 63400.0,
+        "ratio": 0.9664634146341463
+      },
+      "save_ns": {
+        "baseline": 327750.0,
+        "candidate": 364150.0,
+        "ratio": 1.1110602593440122
+      },
+      "load_ns": {
+        "baseline": 359300.0,
+        "candidate": 335150.0,
+        "ratio": 0.9327859727247425
+      },
+      "prepared_save_ns": {
+        "baseline": 193750.0,
+        "candidate": 188950.0,
+        "ratio": 0.9752258064516129
+      },
+      "prepared_load_ns": {
+        "baseline": 1413150.0,
+        "candidate": 1420900.0,
+        "ratio": 1.00548420196016
+      },
+      "artifact_bytes": {
+        "baseline": 259924.0,
+        "candidate": 259924.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 127243.0,
+        "candidate": 127243.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1100.0,
+        "candidate": 1150.0,
+        "ratio": 1.0454545454545454
+      }
+    },
+    {
+      "mode": "Balanced",
+      "case": "json_schema",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 2250.0,
+            "candidate": 2300.0,
+            "ratio": 1.0222222222222221,
+            "paired_ratios": [
+              1.0454545454545454,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2900.0,
+            "candidate": 2850.0,
+            "ratio": 0.9827586206896551,
+            "paired_ratios": [
+              0.9655172413793104,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 3150.0,
+            "candidate": 3100.0,
+            "ratio": 0.9841269841269841,
+            "paired_ratios": [
+              0.967741935483871,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 7950.0,
+            "candidate": 7950.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9625000000000001,
+              1.0379746835443038
+            ]
+          },
+          "max_ns": {
+            "baseline": 41400.0,
+            "candidate": 47300.0,
+            "ratio": 1.142512077294686,
+            "paired_ratios": [
+              1.0455696202531646,
+              1.2309468822170901
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 3900.0,
+            "candidate": 3750.0,
+            "ratio": 0.9615384615384616,
+            "paired_ratios": [
+              0.9743589743589743,
+              0.9487179487179487
+            ]
+          },
+          "p95_ns": {
+            "baseline": 9400.0,
+            "candidate": 9350.0,
+            "ratio": 0.9946808510638298,
+            "paired_ratios": [
+              0.9893617021276596,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 9700.0,
+            "candidate": 9700.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 16300.0,
+            "candidate": 16000.0,
+            "ratio": 0.9815950920245399,
+            "paired_ratios": [
+              0.9875000000000002,
+              0.9759036144578314
+            ]
+          },
+          "max_ns": {
+            "baseline": 123550.0,
+            "candidate": 293000.0,
+            "ratio": 2.371509510319709,
+            "paired_ratios": [
+              1.6008708272859216,
+              3.343092406221409
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 112000.0,
+            "candidate": 111050.0,
+            "ratio": 0.9915178571428571,
+            "paired_ratios": [
+              0.9802513464991023,
+              1.002664298401421
+            ]
+          },
+          "p95_ns": {
+            "baseline": 118300.0,
+            "candidate": 117500.0,
+            "ratio": 0.9932375316990701,
+            "paired_ratios": [
+              0.9821882951653944,
+              1.004212299915754
+            ]
+          },
+          "p99_ns": {
+            "baseline": 136200.0,
+            "candidate": 133800.0,
+            "ratio": 0.9823788546255506,
+            "paired_ratios": [
+              0.9796380090497738,
+              0.9849785407725322
+            ]
+          },
+          "p999_ns": {
+            "baseline": 176650.0,
+            "candidate": 176050.0,
+            "ratio": 0.9966034531559581,
+            "paired_ratios": [
+              0.9244186046511628,
+              1.0650854936569223
+            ]
+          },
+          "max_ns": {
+            "baseline": 241500.0,
+            "candidate": 234200.0,
+            "ratio": 0.9697722567287784,
+            "paired_ratios": [
+              0.9104744852282901,
+              1.0208012326656393
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 248900.0,
+            "candidate": 247100.0,
+            "ratio": 0.9927681799919646,
+            "paired_ratios": [
+              0.9846835953244658,
+              1.0008009611533841
+            ]
+          },
+          "p95_ns": {
+            "baseline": 263500.0,
+            "candidate": 261500.0,
+            "ratio": 0.9924098671726755,
+            "paired_ratios": [
+              0.9931297709923662,
+              0.9916981132075472
+            ]
+          },
+          "p99_ns": {
+            "baseline": 305200.0,
+            "candidate": 290700.0,
+            "ratio": 0.9524901703800787,
+            "paired_ratios": [
+              0.9612687813021703,
+              0.944033451270505
+            ]
+          },
+          "p999_ns": {
+            "baseline": 428700.0,
+            "candidate": 413850.0,
+            "ratio": 0.9653603918824353,
+            "paired_ratios": [
+              0.9333483958427474,
+              0.9995178399228544
+            ]
+          },
+          "max_ns": {
+            "baseline": 524000.0,
+            "candidate": 659700.0,
+            "ratio": 1.258969465648855,
+            "paired_ratios": [
+              1.2041884816753927,
+              1.31204208153297
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 2108400.0,
+            "candidate": 2260900.0,
+            "ratio": 1.0723297287042306,
+            "paired_ratios": [
+              1.0919811320754718,
+              1.052460892789012
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2371100.0,
+            "candidate": 2674400.0,
+            "ratio": 1.1279153135675426,
+            "paired_ratios": [
+              1.0418534517890619,
+              1.2201975179164481
+            ]
+          },
+          "p99_ns": {
+            "baseline": 2371100.0,
+            "candidate": 2674400.0,
+            "ratio": 1.1279153135675426,
+            "paired_ratios": [
+              1.0418534517890619,
+              1.2201975179164481
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2371100.0,
+            "candidate": 2674400.0,
+            "ratio": 1.1279153135675426,
+            "paired_ratios": [
+              1.0418534517890619,
+              1.2201975179164481
+            ]
+          },
+          "max_ns": {
+            "baseline": 2371100.0,
+            "candidate": 2674400.0,
+            "ratio": 1.1279153135675426,
+            "paired_ratios": [
+              1.0418534517890619,
+              1.2201975179164481
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 57400.0,
+            "candidate": 53500.0,
+            "ratio": 0.9320557491289199,
+            "paired_ratios": [
+              0.8984509466437177,
+              0.9664902998236331
+            ]
+          },
+          "p95_ns": {
+            "baseline": 71550.0,
+            "candidate": 67750.0,
+            "ratio": 0.9468902865129281,
+            "paired_ratios": [
+              0.8681318681318683,
+              1.0284495021337126
+            ]
+          },
+          "p99_ns": {
+            "baseline": 71550.0,
+            "candidate": 67750.0,
+            "ratio": 0.9468902865129281,
+            "paired_ratios": [
+              0.8681318681318683,
+              1.0284495021337126
+            ]
+          },
+          "p999_ns": {
+            "baseline": 71550.0,
+            "candidate": 67750.0,
+            "ratio": 0.9468902865129281,
+            "paired_ratios": [
+              0.8681318681318683,
+              1.0284495021337126
+            ]
+          },
+          "max_ns": {
+            "baseline": 71550.0,
+            "candidate": 67750.0,
+            "ratio": 0.9468902865129281,
+            "paired_ratios": [
+              0.8681318681318683,
+              1.0284495021337126
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 39507450.0,
+        "candidate": 40636650.0,
+        "ratio": 1.0285819509991154
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 5850050.0,
+        "candidate": 6063600.0,
+        "ratio": 1.0365039615046026
+      },
+      "first_link_ns": {
+        "baseline": 125700.0,
+        "candidate": 100000.0,
+        "ratio": 0.7955449482895783
+      },
+      "save_ns": {
+        "baseline": 415750.0,
+        "candidate": 369300.0,
+        "ratio": 0.8882742032471437
+      },
+      "load_ns": {
+        "baseline": 432700.0,
+        "candidate": 406850.0,
+        "ratio": 0.9402588398428472
+      },
+      "prepared_save_ns": {
+        "baseline": 212200.0,
+        "candidate": 225000.0,
+        "ratio": 1.0603204524033931
+      },
+      "prepared_load_ns": {
+        "baseline": 1480500.0,
+        "candidate": 1434450.0,
+        "ratio": 0.9688956433637285
+      },
+      "artifact_bytes": {
+        "baseline": 292304.0,
+        "candidate": 292304.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 139380.0,
+        "candidate": 139380.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1500.0,
+        "candidate": 1200.0,
+        "ratio": 0.8
+      }
+    },
+    {
+      "mode": "Balanced",
+      "case": "lark_arithmetic",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 2550.0,
+            "candidate": 2550.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9615384615384616,
+              1.04
+            ]
+          },
+          "p95_ns": {
+            "baseline": 3050.0,
+            "candidate": 2950.0,
+            "ratio": 0.9672131147540983,
+            "paired_ratios": [
+              0.9032258064516129,
+              1.0333333333333334
+            ]
+          },
+          "p99_ns": {
+            "baseline": 3700.0,
+            "candidate": 3200.0,
+            "ratio": 0.8648648648648649,
+            "paired_ratios": [
+              0.7317073170731707,
+              1.0303030303030303
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9150.0,
+            "candidate": 8600.0,
+            "ratio": 0.9398907103825137,
+            "paired_ratios": [
+              0.803921568627451,
+              1.1111111111111112
+            ]
+          },
+          "max_ns": {
+            "baseline": 836450.0,
+            "candidate": 68050.0,
+            "ratio": 0.08135572957140295,
+            "paired_ratios": [
+              0.05318242667640258,
+              1.6508474576271186
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 8500.0,
+            "candidate": 8500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9764705882352941,
+              1.0235294117647058
+            ]
+          },
+          "p95_ns": {
+            "baseline": 10800.0,
+            "candidate": 10650.0,
+            "ratio": 0.9861111111111112,
+            "paired_ratios": [
+              0.963302752293578,
+              1.0093457943925233
+            ]
+          },
+          "p99_ns": {
+            "baseline": 12300.0,
+            "candidate": 11200.0,
+            "ratio": 0.9105691056910569,
+            "paired_ratios": [
+              0.8134328358208955,
+              1.0267857142857142
+            ]
+          },
+          "p999_ns": {
+            "baseline": 27100.0,
+            "candidate": 24200.0,
+            "ratio": 0.8929889298892989,
+            "paired_ratios": [
+              0.5384615384615384,
+              1.544502617801047
+            ]
+          },
+          "max_ns": {
+            "baseline": 1601700.0,
+            "candidate": 108050.0,
+            "ratio": 0.06745957420240994,
+            "paired_ratios": [
+              0.03449162621749333,
+              1.1762162162162162
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 110500.0,
+            "candidate": 110150.0,
+            "ratio": 0.9968325791855204,
+            "paired_ratios": [
+              0.9872611464968153,
+              1.0063006300630064
+            ]
+          },
+          "p95_ns": {
+            "baseline": 120400.0,
+            "candidate": 116550.0,
+            "ratio": 0.9680232558139535,
+            "paired_ratios": [
+              0.933931484502447,
+              1.003384094754653
+            ]
+          },
+          "p99_ns": {
+            "baseline": 136950.0,
+            "candidate": 133200.0,
+            "ratio": 0.9726177437020811,
+            "paired_ratios": [
+              0.8919298245614035,
+              1.0601217656012176
+            ]
+          },
+          "p999_ns": {
+            "baseline": 649950.0,
+            "candidate": 173300.0,
+            "ratio": 0.26663589506885144,
+            "paired_ratios": [
+              0.1524045261669024,
+              1.032602252519265
+            ]
+          },
+          "max_ns": {
+            "baseline": 2907550.0,
+            "candidate": 288750.0,
+            "ratio": 0.09931041598596757,
+            "paired_ratios": [
+              0.04255205647527428,
+              1.766980146290491
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 211150.0,
+            "candidate": 209900.0,
+            "ratio": 0.9940800378877576,
+            "paired_ratios": [
+              0.9749171793658306,
+              1.0132701421800947
+            ]
+          },
+          "p95_ns": {
+            "baseline": 230300.0,
+            "candidate": 221950.0,
+            "ratio": 0.963742943986105,
+            "paired_ratios": [
+              0.9176867876741241,
+              1.012516763522575
+            ]
+          },
+          "p99_ns": {
+            "baseline": 274650.0,
+            "candidate": 253500.0,
+            "ratio": 0.922992900054615,
+            "paired_ratios": [
+              0.8084684088653654,
+              1.063157894736842
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1313250.0,
+            "candidate": 335650.0,
+            "ratio": 0.25558728345707216,
+            "paired_ratios": [
+              0.14160596600763095,
+              1.076850984067479
+            ]
+          },
+          "max_ns": {
+            "baseline": 3114250.0,
+            "candidate": 424950.0,
+            "ratio": 0.13645339969495063,
+            "paired_ratios": [
+              0.06361914600550964,
+              1.142449464922711
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 1609100.0,
+            "candidate": 1640400.0,
+            "ratio": 1.0194518675035735,
+            "paired_ratios": [
+              1.0395888147830876,
+              0.9986741587221416
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1929350.0,
+            "candidate": 1797650.0,
+            "ratio": 0.9317386684634722,
+            "paired_ratios": [
+              0.9421930571557381,
+              0.9205326460481099
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1929350.0,
+            "candidate": 1797650.0,
+            "ratio": 0.9317386684634722,
+            "paired_ratios": [
+              0.9421930571557381,
+              0.9205326460481099
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1929350.0,
+            "candidate": 1797650.0,
+            "ratio": 0.9317386684634722,
+            "paired_ratios": [
+              0.9421930571557381,
+              0.9205326460481099
+            ]
+          },
+          "max_ns": {
+            "baseline": 1929350.0,
+            "candidate": 1797650.0,
+            "ratio": 0.9317386684634722,
+            "paired_ratios": [
+              0.9421930571557381,
+              0.9205326460481099
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 67350.0,
+            "candidate": 65250.0,
+            "ratio": 0.9688195991091314,
+            "paired_ratios": [
+              0.9523099850968703,
+              0.985207100591716
+            ]
+          },
+          "p95_ns": {
+            "baseline": 79750.0,
+            "candidate": 80350.0,
+            "ratio": 1.0075235109717868,
+            "paired_ratios": [
+              0.965,
+              1.050314465408805
+            ]
+          },
+          "p99_ns": {
+            "baseline": 79750.0,
+            "candidate": 80350.0,
+            "ratio": 1.0075235109717868,
+            "paired_ratios": [
+              0.965,
+              1.050314465408805
+            ]
+          },
+          "p999_ns": {
+            "baseline": 79750.0,
+            "candidate": 80350.0,
+            "ratio": 1.0075235109717868,
+            "paired_ratios": [
+              0.965,
+              1.050314465408805
+            ]
+          },
+          "max_ns": {
+            "baseline": 79750.0,
+            "candidate": 80350.0,
+            "ratio": 1.0075235109717868,
+            "paired_ratios": [
+              0.965,
+              1.050314465408805
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 38571000.0,
+        "candidate": 38689350.0,
+        "ratio": 1.0030683674263048
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 5872750.0,
+        "candidate": 5698150.0,
+        "ratio": 0.9702694649014516
+      },
+      "first_link_ns": {
+        "baseline": 206800.0,
+        "candidate": 193750.0,
+        "ratio": 0.9368955512572534
+      },
+      "save_ns": {
+        "baseline": 379500.0,
+        "candidate": 408100.0,
+        "ratio": 1.0753623188405796
+      },
+      "load_ns": {
+        "baseline": 392900.0,
+        "candidate": 391050.0,
+        "ratio": 0.9952914227538814
+      },
+      "prepared_save_ns": {
+        "baseline": 229950.0,
+        "candidate": 216900.0,
+        "ratio": 0.9432485322896281
+      },
+      "prepared_load_ns": {
+        "baseline": 1527300.0,
+        "candidate": 1469000.0,
+        "ratio": 0.9618280625941203
+      },
+      "artifact_bytes": {
+        "baseline": 309104.0,
+        "candidate": 309104.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 137289.0,
+        "candidate": 137289.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1350.0,
+        "candidate": 1300.0,
+        "ratio": 0.9629629629629629
+      }
+    },
+    {
+      "mode": "Balanced",
+      "case": "scoped_child",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 85550.0,
+            "candidate": 83150.0,
+            "ratio": 0.9719462302746932,
+            "paired_ratios": [
+              0.9672897196261683,
+              0.9766081871345029
+            ]
+          },
+          "p95_ns": {
+            "baseline": 119500.0,
+            "candidate": 116400.0,
+            "ratio": 0.9740585774058578,
+            "paired_ratios": [
+              0.9738837405223252,
+              0.9742310889443059
+            ]
+          },
+          "p99_ns": {
+            "baseline": 129500.0,
+            "candidate": 128500.0,
+            "ratio": 0.9922779922779923,
+            "paired_ratios": [
+              0.9984520123839008,
+              0.9861325115562403
+            ]
+          },
+          "p999_ns": {
+            "baseline": 191550.0,
+            "candidate": 192600.0,
+            "ratio": 1.005481597494127,
+            "paired_ratios": [
+              1.0041109969167523,
+              1.006896551724138
+            ]
+          },
+          "max_ns": {
+            "baseline": 593600.0,
+            "candidate": 1156400.0,
+            "ratio": 1.9481132075471699,
+            "paired_ratios": [
+              0.7961577124986038,
+              5.4813292223364165
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 8150.0,
+            "candidate": 8050.0,
+            "ratio": 0.9877300613496932,
+            "paired_ratios": [
+              1.0,
+              0.975609756097561
+            ]
+          },
+          "p95_ns": {
+            "baseline": 15200.0,
+            "candidate": 14750.0,
+            "ratio": 0.9703947368421053,
+            "paired_ratios": [
+              0.9545454545454545,
+              0.9866666666666667
+            ]
+          },
+          "p99_ns": {
+            "baseline": 16100.0,
+            "candidate": 16000.0,
+            "ratio": 0.9937888198757764,
+            "paired_ratios": [
+              0.9877300613496931,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 27550.0,
+            "candidate": 28200.0,
+            "ratio": 1.0235934664246824,
+            "paired_ratios": [
+              1.027972027972028,
+              1.0188679245283019
+            ]
+          },
+          "max_ns": {
+            "baseline": 102700.0,
+            "candidate": 147350.0,
+            "ratio": 1.434761441090555,
+            "paired_ratios": [
+              1.6627697841726619,
+              1.1656050955414012
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 114250.0,
+            "candidate": 112300.0,
+            "ratio": 0.9829321663019693,
+            "paired_ratios": [
+              0.9823788546255506,
+              0.9834782608695652
+            ]
+          },
+          "p95_ns": {
+            "baseline": 123000.0,
+            "candidate": 122150.0,
+            "ratio": 0.9930894308943089,
+            "paired_ratios": [
+              0.9918300653594772,
+              0.9943365695792881
+            ]
+          },
+          "p99_ns": {
+            "baseline": 137700.0,
+            "candidate": 140850.0,
+            "ratio": 1.022875816993464,
+            "paired_ratios": [
+              0.998567335243553,
+              1.0478645066273933
+            ]
+          },
+          "p999_ns": {
+            "baseline": 175100.0,
+            "candidate": 196100.0,
+            "ratio": 1.1199314677327241,
+            "paired_ratios": [
+              1.1417233560090703,
+              1.097813578826237
+            ]
+          },
+          "max_ns": {
+            "baseline": 262650.0,
+            "candidate": 311000.0,
+            "ratio": 1.1840852845992766,
+            "paired_ratios": [
+              1.195879659908437,
+              1.1676537585421412
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 954350.0,
+            "candidate": 928300.0,
+            "ratio": 0.9727039346151831,
+            "paired_ratios": [
+              0.9710205795884083,
+              0.9743804245529646
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1011650.0,
+            "candidate": 999850.0,
+            "ratio": 0.9883358869174121,
+            "paired_ratios": [
+              0.9848918732102301,
+              0.9917870571937463
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1118700.0,
+            "candidate": 1132750.0,
+            "ratio": 1.0125592205238223,
+            "paired_ratios": [
+              1.0144429766622634,
+              1.010618023414103
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1590600.0,
+            "candidate": 1589650.0,
+            "ratio": 0.999402741103986,
+            "paired_ratios": [
+              0.9834651329978433,
+              1.0169973544973545
+            ]
+          },
+          "max_ns": {
+            "baseline": 1857300.0,
+            "candidate": 2300200.0,
+            "ratio": 1.2384644376245086,
+            "paired_ratios": [
+              1.1042392717815344,
+              1.3824563361419564
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 3888250.0,
+            "candidate": 3967600.0,
+            "ratio": 1.0204076383977367,
+            "paired_ratios": [
+              1.046821387080215,
+              0.9964173537495092
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4632600.0,
+            "candidate": 4851900.0,
+            "ratio": 1.0473384276648103,
+            "paired_ratios": [
+              1.0335065939258559,
+              1.0613094979823838
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4632600.0,
+            "candidate": 4851900.0,
+            "ratio": 1.0473384276648103,
+            "paired_ratios": [
+              1.0335065939258559,
+              1.0613094979823838
+            ]
+          },
+          "p999_ns": {
+            "baseline": 4632600.0,
+            "candidate": 4851900.0,
+            "ratio": 1.0473384276648103,
+            "paired_ratios": [
+              1.0335065939258559,
+              1.0613094979823838
+            ]
+          },
+          "max_ns": {
+            "baseline": 4632600.0,
+            "candidate": 4851900.0,
+            "ratio": 1.0473384276648103,
+            "paired_ratios": [
+              1.0335065939258559,
+              1.0613094979823838
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 144600.0,
+            "candidate": 140100.0,
+            "ratio": 0.9688796680497925,
+            "paired_ratios": [
+              0.9526098901098901,
+              0.9853760445682451
+            ]
+          },
+          "p95_ns": {
+            "baseline": 157950.0,
+            "candidate": 148100.0,
+            "ratio": 0.9376384931940488,
+            "paired_ratios": [
+              0.9221442246330568,
+              0.9528894472361809
+            ]
+          },
+          "p99_ns": {
+            "baseline": 157950.0,
+            "candidate": 148100.0,
+            "ratio": 0.9376384931940488,
+            "paired_ratios": [
+              0.9221442246330568,
+              0.9528894472361809
+            ]
+          },
+          "p999_ns": {
+            "baseline": 157950.0,
+            "candidate": 148100.0,
+            "ratio": 0.9376384931940488,
+            "paired_ratios": [
+              0.9221442246330568,
+              0.9528894472361809
+            ]
+          },
+          "max_ns": {
+            "baseline": 157950.0,
+            "candidate": 148100.0,
+            "ratio": 0.9376384931940488,
+            "paired_ratios": [
+              0.9221442246330568,
+              0.9528894472361809
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 11688800.0,
+        "candidate": 11395700.0,
+        "ratio": 0.9749247142563822
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 3175700.0,
+        "candidate": 3653450.0,
+        "ratio": 1.1504392732310986
+      },
+      "first_link_ns": {
+        "baseline": 239100.0,
+        "candidate": 229750.0,
+        "ratio": 0.9608950230029276
+      },
+      "save_ns": {
+        "baseline": 2169650.0,
+        "candidate": 2246700.0,
+        "ratio": 1.035512640287604
+      },
+      "load_ns": {
+        "baseline": 2255750.0,
+        "candidate": 2269500.0,
+        "ratio": 1.006095533636263
+      },
+      "prepared_save_ns": {
+        "baseline": 457950.0,
+        "candidate": 402800.0,
+        "ratio": 0.8795720056774757
+      },
+      "prepared_load_ns": {
+        "baseline": 2767250.0,
+        "candidate": 2755400.0,
+        "ratio": 0.995717770349625
+      },
+      "artifact_bytes": {
+        "baseline": 1735384.0,
+        "candidate": 1735392.0,
+        "ratio": 1.0000046099307127
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 253470.0,
+        "candidate": 253470.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 112600.0,
+        "candidate": 118000.0,
+        "ratio": 1.0479573712255772
+      }
+    },
+    {
+      "mode": "FastBuild",
+      "case": "exact_token_set",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 2300.0,
+            "candidate": 2450.0,
+            "ratio": 1.065217391304348,
+            "paired_ratios": [
+              1.0,
+              1.1304347826086956
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2850.0,
+            "candidate": 2850.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 3450.0,
+            "candidate": 3100.0,
+            "ratio": 0.8985507246376812,
+            "paired_ratios": [
+              0.90625,
+              0.8918918918918919
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9050.0,
+            "candidate": 7450.0,
+            "ratio": 0.8232044198895028,
+            "paired_ratios": [
+              0.813953488372093,
+              0.8315789473684212
+            ]
+          },
+          "max_ns": {
+            "baseline": 66654950.0,
+            "candidate": 35450.0,
+            "ratio": 0.0005318434714901144,
+            "paired_ratios": [
+              0.08673139158576051,
+              0.00043182627216019776
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 4050.0,
+            "candidate": 4050.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9512195121951219,
+              1.05
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4500.0,
+            "candidate": 4300.0,
+            "ratio": 0.9555555555555556,
+            "paired_ratios": [
+              0.9111111111111111,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5700.0,
+            "candidate": 4900.0,
+            "ratio": 0.8596491228070176,
+            "paired_ratios": [
+              0.8181818181818182,
+              0.8983050847457628
+            ]
+          },
+          "p999_ns": {
+            "baseline": 13850.0,
+            "candidate": 11100.0,
+            "ratio": 0.8014440433212996,
+            "paired_ratios": [
+              0.768,
+              0.8289473684210527
+            ]
+          },
+          "max_ns": {
+            "baseline": 155650.0,
+            "candidate": 37450.0,
+            "ratio": 0.24060391904914874,
+            "paired_ratios": [
+              0.43533123028391174,
+              0.190802743041549
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 32400.0,
+            "candidate": 31350.0,
+            "ratio": 0.9675925925925926,
+            "paired_ratios": [
+              0.9840764331210192,
+              0.9520958083832335
+            ]
+          },
+          "p95_ns": {
+            "baseline": 35750.0,
+            "candidate": 33200.0,
+            "ratio": 0.9286713286713286,
+            "paired_ratios": [
+              0.9193083573487033,
+              0.9375
+            ]
+          },
+          "p99_ns": {
+            "baseline": 40950.0,
+            "candidate": 37750.0,
+            "ratio": 0.9218559218559218,
+            "paired_ratios": [
+              0.926208651399491,
+              0.9178403755868545
+            ]
+          },
+          "p999_ns": {
+            "baseline": 78350.0,
+            "candidate": 69650.0,
+            "ratio": 0.8889597957881302,
+            "paired_ratios": [
+              1.123076923076923,
+              0.7494908350305499
+            ]
+          },
+          "max_ns": {
+            "baseline": 11942650.0,
+            "candidate": 198800.0,
+            "ratio": 0.01664622173470712,
+            "paired_ratios": [
+              2.023230088495575,
+              0.009022941890909396
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 48050.0,
+            "candidate": 46900.0,
+            "ratio": 0.9760665972944849,
+            "paired_ratios": [
+              0.9808917197452229,
+              0.9714285714285714
+            ]
+          },
+          "p95_ns": {
+            "baseline": 53500.0,
+            "candidate": 50400.0,
+            "ratio": 0.9420560747663551,
+            "paired_ratios": [
+              0.9144486692015209,
+              0.96875
+            ]
+          },
+          "p99_ns": {
+            "baseline": 61800.0,
+            "candidate": 56650.0,
+            "ratio": 0.9166666666666666,
+            "paired_ratios": [
+              0.9016949152542373,
+              0.9303405572755418
+            ]
+          },
+          "p999_ns": {
+            "baseline": 132300.0,
+            "candidate": 98800.0,
+            "ratio": 0.7467876039304611,
+            "paired_ratios": [
+              1.0157303370786517,
+              0.6104783599088838
+            ]
+          },
+          "max_ns": {
+            "baseline": 66704849.99999999,
+            "candidate": 230950.0,
+            "ratio": 0.0034622669865834346,
+            "paired_ratios": [
+              1.1108247422680413,
+              0.0018496318376888014
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 218300.0,
+            "candidate": 198350.0,
+            "ratio": 0.9086120018323408,
+            "paired_ratios": [
+              0.6156045751633987,
+              1.2825860271115748
+            ]
+          },
+          "p95_ns": {
+            "baseline": 280300.0,
+            "candidate": 259450.0,
+            "ratio": 0.9256154120585087,
+            "paired_ratios": [
+              0.7583308315821075,
+              1.1705494505494505
+            ]
+          },
+          "p99_ns": {
+            "baseline": 280300.0,
+            "candidate": 259450.0,
+            "ratio": 0.9256154120585087,
+            "paired_ratios": [
+              0.7583308315821075,
+              1.1705494505494505
+            ]
+          },
+          "p999_ns": {
+            "baseline": 280300.0,
+            "candidate": 259450.0,
+            "ratio": 0.9256154120585087,
+            "paired_ratios": [
+              0.7583308315821075,
+              1.1705494505494505
+            ]
+          },
+          "max_ns": {
+            "baseline": 280300.0,
+            "candidate": 259450.0,
+            "ratio": 0.9256154120585087,
+            "paired_ratios": [
+              0.7583308315821075,
+              1.1705494505494505
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 6050.0,
+            "candidate": 8750.0,
+            "ratio": 1.4462809917355373,
+            "paired_ratios": [
+              0.8955223880597015,
+              2.1296296296296298
+            ]
+          },
+          "p95_ns": {
+            "baseline": 8200.0,
+            "candidate": 14000.0,
+            "ratio": 1.7073170731707317,
+            "paired_ratios": [
+              0.9101123595505618,
+              2.6533333333333333
+            ]
+          },
+          "p99_ns": {
+            "baseline": 8200.0,
+            "candidate": 14000.0,
+            "ratio": 1.7073170731707317,
+            "paired_ratios": [
+              0.9101123595505618,
+              2.6533333333333333
+            ]
+          },
+          "p999_ns": {
+            "baseline": 8200.0,
+            "candidate": 14000.0,
+            "ratio": 1.7073170731707317,
+            "paired_ratios": [
+              0.9101123595505618,
+              2.6533333333333333
+            ]
+          },
+          "max_ns": {
+            "baseline": 8200.0,
+            "candidate": 14000.0,
+            "ratio": 1.7073170731707317,
+            "paired_ratios": [
+              0.9101123595505618,
+              2.6533333333333333
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 6292550.0,
+        "candidate": 6207850.0,
+        "ratio": 0.986539638143519
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 1206950.0,
+        "candidate": 1175850.0,
+        "ratio": 0.9742325697004847
+      },
+      "first_link_ns": {
+        "baseline": 29900.0,
+        "candidate": 47300.0,
+        "ratio": 1.5819397993311037
+      },
+      "save_ns": {
+        "baseline": 2693850.0,
+        "candidate": 3182150.0,
+        "ratio": 1.1812647326317351
+      },
+      "load_ns": {
+        "baseline": 1706200.0,
+        "candidate": 2145200.0,
+        "ratio": 1.2572969171257766
+      },
+      "prepared_save_ns": {
+        "baseline": 277100.0,
+        "candidate": 290850.0,
+        "ratio": 1.0496210754240347
+      },
+      "prepared_load_ns": {
+        "baseline": 1131850.0,
+        "candidate": 1265950.0,
+        "ratio": 1.1184785969872333
+      },
+      "artifact_bytes": {
+        "baseline": 3026060.0,
+        "candidate": 3026060.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 120540.0,
+        "candidate": 120540.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 32600.0,
+        "candidate": 36100.0,
+        "ratio": 1.107361963190184
+      }
+    },
+    {
+      "mode": "FastBuild",
+      "case": "glrm_list",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 500.0,
+            "candidate": 500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1350.0,
+            "candidate": 1350.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9285714285714286,
+              1.0769230769230769
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1550.0,
+            "candidate": 1550.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9375,
+              1.0666666666666667
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2050.0,
+            "candidate": 2200.0,
+            "ratio": 1.0731707317073171,
+            "paired_ratios": [
+              1.1428571428571428,
+              1.0
+            ]
+          },
+          "max_ns": {
+            "baseline": 16850.0,
+            "candidate": 15350.0,
+            "ratio": 0.9109792284866469,
+            "paired_ratios": [
+              1.037344398340249,
+              0.59375
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 2250.0,
+            "candidate": 2300.0,
+            "ratio": 1.0222222222222221,
+            "paired_ratios": [
+              1.0454545454545454,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4250.0,
+            "candidate": 4350.0,
+            "ratio": 1.0235294117647058,
+            "paired_ratios": [
+              1.0238095238095237,
+              1.0232558139534884
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4450.0,
+            "candidate": 4600.0,
+            "ratio": 1.0337078651685394,
+            "paired_ratios": [
+              1.0454545454545454,
+              1.0222222222222221
+            ]
+          },
+          "p999_ns": {
+            "baseline": 6200.0,
+            "candidate": 6800.0,
+            "ratio": 1.096774193548387,
+            "paired_ratios": [
+              1.0757575757575757,
+              1.1206896551724137
+            ]
+          },
+          "max_ns": {
+            "baseline": 19650.0,
+            "candidate": 32650.0,
+            "ratio": 1.6615776081424936,
+            "paired_ratios": [
+              1.7246376811594204,
+              1.5913978494623655
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 58000.0,
+            "candidate": 59650.0,
+            "ratio": 1.028448275862069,
+            "paired_ratios": [
+              1.0068493150684932,
+              1.0503472222222223
+            ]
+          },
+          "p95_ns": {
+            "baseline": 60750.0,
+            "candidate": 62500.0,
+            "ratio": 1.02880658436214,
+            "paired_ratios": [
+              1.0164473684210527,
+              1.041186161449753
+            ]
+          },
+          "p99_ns": {
+            "baseline": 71600.0,
+            "candidate": 74950.0,
+            "ratio": 1.0467877094972067,
+            "paired_ratios": [
+              1.0492753623188407,
+              1.0444743935309972
+            ]
+          },
+          "p999_ns": {
+            "baseline": 79750.0,
+            "candidate": 79850.0,
+            "ratio": 1.0012539184952978,
+            "paired_ratios": [
+              0.9756986634264885,
+              1.028497409326425
+            ]
+          },
+          "max_ns": {
+            "baseline": 86000.0,
+            "candidate": 94100.0,
+            "ratio": 1.094186046511628,
+            "paired_ratios": [
+              1.0426758938869665,
+              1.1465416178194607
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 91450.0,
+            "candidate": 93400.0,
+            "ratio": 1.0213231273920176,
+            "paired_ratios": [
+              1.0032679738562091,
+              1.039517014270033
+            ]
+          },
+          "p95_ns": {
+            "baseline": 95900.0,
+            "candidate": 97750.0,
+            "ratio": 1.0192909280500522,
+            "paired_ratios": [
+              1.010438413361169,
+              1.028125
+            ]
+          },
+          "p99_ns": {
+            "baseline": 112300.0,
+            "candidate": 116350.0,
+            "ratio": 1.0360641139804097,
+            "paired_ratios": [
+              1.0399628252788105,
+              1.0324786324786326
+            ]
+          },
+          "p999_ns": {
+            "baseline": 120500.0,
+            "candidate": 126100.0,
+            "ratio": 1.0464730290456432,
+            "paired_ratios": [
+              1.0563380281690142,
+              1.0365752285951788
+            ]
+          },
+          "max_ns": {
+            "baseline": 171650.0,
+            "candidate": 170600.0,
+            "ratio": 0.9938829012525487,
+            "paired_ratios": [
+              1.0148867313915857,
+              0.9766949152542372
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 429200.0,
+            "candidate": 453900.0,
+            "ratio": 1.0575489282385835,
+            "paired_ratios": [
+              0.7769883560292086,
+              1.4617571794142736
+            ]
+          },
+          "p95_ns": {
+            "baseline": 469300.0,
+            "candidate": 523900.0,
+            "ratio": 1.1163434903047091,
+            "paired_ratios": [
+              0.9630635524171646,
+              1.335490551384934
+            ]
+          },
+          "p99_ns": {
+            "baseline": 469300.0,
+            "candidate": 523900.0,
+            "ratio": 1.1163434903047091,
+            "paired_ratios": [
+              0.9630635524171646,
+              1.335490551384934
+            ]
+          },
+          "p999_ns": {
+            "baseline": 469300.0,
+            "candidate": 523900.0,
+            "ratio": 1.1163434903047091,
+            "paired_ratios": [
+              0.9630635524171646,
+              1.335490551384934
+            ]
+          },
+          "max_ns": {
+            "baseline": 469300.0,
+            "candidate": 523900.0,
+            "ratio": 1.1163434903047091,
+            "paired_ratios": [
+              0.9630635524171646,
+              1.335490551384934
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 11300.0,
+            "candidate": 11750.0,
+            "ratio": 1.0398230088495575,
+            "paired_ratios": [
+              1.1238938053097345,
+              0.9557522123893806
+            ]
+          },
+          "p95_ns": {
+            "baseline": 17800.0,
+            "candidate": 15900.0,
+            "ratio": 0.8932584269662921,
+            "paired_ratios": [
+              0.8848167539267016,
+              0.9030303030303031
+            ]
+          },
+          "p99_ns": {
+            "baseline": 17800.0,
+            "candidate": 15900.0,
+            "ratio": 0.8932584269662921,
+            "paired_ratios": [
+              0.8848167539267016,
+              0.9030303030303031
+            ]
+          },
+          "p999_ns": {
+            "baseline": 17800.0,
+            "candidate": 15900.0,
+            "ratio": 0.8932584269662921,
+            "paired_ratios": [
+              0.8848167539267016,
+              0.9030303030303031
+            ]
+          },
+          "max_ns": {
+            "baseline": 17800.0,
+            "candidate": 15900.0,
+            "ratio": 0.8932584269662921,
+            "paired_ratios": [
+              0.8848167539267016,
+              0.9030303030303031
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 6622750.0,
+        "candidate": 6520150.0,
+        "ratio": 0.9845079460949001
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 4853950.0,
+        "candidate": 4905700.0,
+        "ratio": 1.010661420080553
+      },
+      "first_link_ns": {
+        "baseline": 46400.0,
+        "candidate": 47600.0,
+        "ratio": 1.0258620689655173
+      },
+      "save_ns": {
+        "baseline": 2609050.0,
+        "candidate": 2742250.0,
+        "ratio": 1.0510530652919645
+      },
+      "load_ns": {
+        "baseline": 2166300.0,
+        "candidate": 1696450.0,
+        "ratio": 0.7831094492914186
+      },
+      "prepared_save_ns": {
+        "baseline": 220000.0,
+        "candidate": 280400.0,
+        "ratio": 1.2745454545454546
+      },
+      "prepared_load_ns": {
+        "baseline": 1382200.0,
+        "candidate": 1236950.0,
+        "ratio": 0.8949139053682535
+      },
+      "artifact_bytes": {
+        "baseline": 3027140.0,
+        "candidate": 3027140.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 127243.0,
+        "candidate": 127243.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 800.0,
+        "candidate": 950.0,
+        "ratio": 1.1875
+      }
+    },
+    {
+      "mode": "FastBuild",
+      "case": "json_schema",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 1000.0,
+            "candidate": 1050.0,
+            "ratio": 1.05,
+            "paired_ratios": [
+              1.0,
+              1.1
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1400.0,
+            "candidate": 1400.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1500.0,
+            "candidate": 1600.0,
+            "ratio": 1.0666666666666667,
+            "paired_ratios": [
+              1.0,
+              1.1333333333333333
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2350.0,
+            "candidate": 2750.0,
+            "ratio": 1.1702127659574468,
+            "paired_ratios": [
+              0.9130434782608695,
+              1.4166666666666667
+            ]
+          },
+          "max_ns": {
+            "baseline": 18150.0,
+            "candidate": 18350.0,
+            "ratio": 1.0110192837465564,
+            "paired_ratios": [
+              0.7208121827411168,
+              1.355421686746988
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 1900.0,
+            "candidate": 1900.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 3850.0,
+            "candidate": 3800.0,
+            "ratio": 0.987012987012987,
+            "paired_ratios": [
+              1.0,
+              0.9743589743589743
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4150.0,
+            "candidate": 4250.0,
+            "ratio": 1.0240963855421688,
+            "paired_ratios": [
+              1.0,
+              1.0476190476190477
+            ]
+          },
+          "p999_ns": {
+            "baseline": 6050.0,
+            "candidate": 6550.0,
+            "ratio": 1.0826446280991735,
+            "paired_ratios": [
+              0.9508196721311475,
+              1.2166666666666666
+            ]
+          },
+          "max_ns": {
+            "baseline": 26750.0,
+            "candidate": 22900.0,
+            "ratio": 0.8560747663551402,
+            "paired_ratios": [
+              0.6591760299625468,
+              1.0522388059701493
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 61050.0,
+            "candidate": 63050.0,
+            "ratio": 1.0327600327600328,
+            "paired_ratios": [
+              1.004950495049505,
+              1.0601626016260162
+            ]
+          },
+          "p95_ns": {
+            "baseline": 64550.0,
+            "candidate": 67850.0,
+            "ratio": 1.051123160340821,
+            "paired_ratios": [
+              1.0,
+              1.1018518518518519
+            ]
+          },
+          "p99_ns": {
+            "baseline": 78200.0,
+            "candidate": 81150.0,
+            "ratio": 1.0377237851662404,
+            "paired_ratios": [
+              1.003875968992248,
+              1.070886075949367
+            ]
+          },
+          "p999_ns": {
+            "baseline": 84150.0,
+            "candidate": 99500.0,
+            "ratio": 1.1824123588829472,
+            "paired_ratios": [
+              1.0144578313253012,
+              1.3458382180539272
+            ]
+          },
+          "max_ns": {
+            "baseline": 107000.0,
+            "candidate": 131000.0,
+            "ratio": 1.2242990654205608,
+            "paired_ratios": [
+              1.3052749719416386,
+              1.166533226581265
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 122000.0,
+            "candidate": 124400.0,
+            "ratio": 1.019672131147541,
+            "paired_ratios": [
+              1.0,
+              1.0392477514309078
+            ]
+          },
+          "p95_ns": {
+            "baseline": 131600.0,
+            "candidate": 135550.0,
+            "ratio": 1.030015197568389,
+            "paired_ratios": [
+              0.996962794229309,
+              1.0631178707224334
+            ]
+          },
+          "p99_ns": {
+            "baseline": 146250.0,
+            "candidate": 148800.0,
+            "ratio": 1.0174358974358975,
+            "paired_ratios": [
+              0.9882677708764666,
+              1.046070460704607
+            ]
+          },
+          "p999_ns": {
+            "baseline": 165750.0,
+            "candidate": 193300.0,
+            "ratio": 1.166214177978884,
+            "paired_ratios": [
+              1.0338345864661653,
+              1.2891215823152995
+            ]
+          },
+          "max_ns": {
+            "baseline": 389750.0,
+            "candidate": 441100.0,
+            "ratio": 1.1317511225144323,
+            "paired_ratios": [
+              1.0597628841035567,
+              1.2129983615510649
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 610850.0,
+            "candidate": 605450.0,
+            "ratio": 0.9911598592125727,
+            "paired_ratios": [
+              1.0204755614266843,
+              0.9623437753611427
+            ]
+          },
+          "p95_ns": {
+            "baseline": 679250.0,
+            "candidate": 669450.0,
+            "ratio": 0.9855723224144277,
+            "paired_ratios": [
+              0.9681573733371073,
+              1.0044485350513883
+            ]
+          },
+          "p99_ns": {
+            "baseline": 679250.0,
+            "candidate": 669450.0,
+            "ratio": 0.9855723224144277,
+            "paired_ratios": [
+              0.9681573733371073,
+              1.0044485350513883
+            ]
+          },
+          "p999_ns": {
+            "baseline": 679250.0,
+            "candidate": 669450.0,
+            "ratio": 0.9855723224144277,
+            "paired_ratios": [
+              0.9681573733371073,
+              1.0044485350513883
+            ]
+          },
+          "max_ns": {
+            "baseline": 679250.0,
+            "candidate": 669450.0,
+            "ratio": 0.9855723224144277,
+            "paired_ratios": [
+              0.9681573733371073,
+              1.0044485350513883
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 30900.0,
+            "candidate": 30600.0,
+            "ratio": 0.9902912621359223,
+            "paired_ratios": [
+              0.9639344262295082,
+              1.0159744408945686
+            ]
+          },
+          "p95_ns": {
+            "baseline": 36900.0,
+            "candidate": 38350.0,
+            "ratio": 1.0392953929539295,
+            "paired_ratios": [
+              1.0276243093922652,
+              1.050531914893617
+            ]
+          },
+          "p99_ns": {
+            "baseline": 36900.0,
+            "candidate": 38350.0,
+            "ratio": 1.0392953929539295,
+            "paired_ratios": [
+              1.0276243093922652,
+              1.050531914893617
+            ]
+          },
+          "p999_ns": {
+            "baseline": 36900.0,
+            "candidate": 38350.0,
+            "ratio": 1.0392953929539295,
+            "paired_ratios": [
+              1.0276243093922652,
+              1.050531914893617
+            ]
+          },
+          "max_ns": {
+            "baseline": 36900.0,
+            "candidate": 38350.0,
+            "ratio": 1.0392953929539295,
+            "paired_ratios": [
+              1.0276243093922652,
+              1.050531914893617
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 10229950.0,
+        "candidate": 8875650.0,
+        "ratio": 0.8676142112131535
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 9266200.0,
+        "candidate": 9140750.0,
+        "ratio": 0.9864615484233019
+      },
+      "first_link_ns": {
+        "baseline": 98950.0,
+        "candidate": 114700.0,
+        "ratio": 1.1591712986356746
+      },
+      "save_ns": {
+        "baseline": 3129100.0,
+        "candidate": 2824800.0,
+        "ratio": 0.9027515899140328
+      },
+      "load_ns": {
+        "baseline": 2102750.0,
+        "candidate": 2163600.0,
+        "ratio": 1.0289382950897634
+      },
+      "prepared_save_ns": {
+        "baseline": 353950.0,
+        "candidate": 362500.0,
+        "ratio": 1.0241559542308236
+      },
+      "prepared_load_ns": {
+        "baseline": 1496150.0,
+        "candidate": 1259350.0,
+        "ratio": 0.8417270995555258
+      },
+      "artifact_bytes": {
+        "baseline": 3030584.0,
+        "candidate": 3030584.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 139380.0,
+        "candidate": 139380.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 3900.0,
+        "candidate": 6200.0,
+        "ratio": 1.5897435897435896
+      }
+    },
+    {
+      "mode": "FastBuild",
+      "case": "lark_arithmetic",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 1200.0,
+            "candidate": 1200.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1450.0,
+            "candidate": 1400.0,
+            "ratio": 0.9655172413793104,
+            "paired_ratios": [
+              0.9333333333333333,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1600.0,
+            "candidate": 1650.0,
+            "ratio": 1.03125,
+            "paired_ratios": [
+              1.0,
+              1.0666666666666667
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2500.0,
+            "candidate": 3150.0,
+            "ratio": 1.26,
+            "paired_ratios": [
+              1.0384615384615385,
+              1.5
+            ]
+          },
+          "max_ns": {
+            "baseline": 19650.0,
+            "candidate": 22600.0,
+            "ratio": 1.1501272264631044,
+            "paired_ratios": [
+              0.991701244813278,
+              1.4013157894736843
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 4250.0,
+            "candidate": 4250.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 6500.0,
+            "candidate": 6600.0,
+            "ratio": 1.0153846153846153,
+            "paired_ratios": [
+              1.0149253731343284,
+              1.0158730158730158
+            ]
+          },
+          "p99_ns": {
+            "baseline": 6850.0,
+            "candidate": 7000.0,
+            "ratio": 1.0218978102189782,
+            "paired_ratios": [
+              1.0142857142857142,
+              1.0298507462686568
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9100.0,
+            "candidate": 10100.0,
+            "ratio": 1.10989010989011,
+            "paired_ratios": [
+              1.1333333333333333,
+              1.0869565217391304
+            ]
+          },
+          "max_ns": {
+            "baseline": 25650.0,
+            "candidate": 28750.0,
+            "ratio": 1.1208576998050683,
+            "paired_ratios": [
+              1.2489270386266094,
+              1.0142857142857142
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 59750.0,
+            "candidate": 61300.0,
+            "ratio": 1.0259414225941423,
+            "paired_ratios": [
+              1.0115894039735098,
+              1.0406091370558377
+            ]
+          },
+          "p95_ns": {
+            "baseline": 63000.0,
+            "candidate": 64550.0,
+            "ratio": 1.0246031746031745,
+            "paired_ratios": [
+              1.0173501577287065,
+              1.0319488817891374
+            ]
+          },
+          "p99_ns": {
+            "baseline": 75100.0,
+            "candidate": 78450.0,
+            "ratio": 1.044607190412783,
+            "paired_ratios": [
+              1.0181347150259068,
+              1.0726027397260274
+            ]
+          },
+          "p999_ns": {
+            "baseline": 83500.0,
+            "candidate": 85000.0,
+            "ratio": 1.0179640718562875,
+            "paired_ratios": [
+              1.0211267605633803,
+              1.0146699266503667
+            ]
+          },
+          "max_ns": {
+            "baseline": 97750.0,
+            "candidate": 141900.0,
+            "ratio": 1.4516624040920716,
+            "paired_ratios": [
+              1.8005698005698005,
+              1.0443458980044347
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 112050.0,
+            "candidate": 113600.0,
+            "ratio": 1.0138331102186524,
+            "paired_ratios": [
+              1.0026525198938991,
+              1.0252252252252252
+            ]
+          },
+          "p95_ns": {
+            "baseline": 119800.0,
+            "candidate": 122200.0,
+            "ratio": 1.020033388981636,
+            "paired_ratios": [
+              1.0057851239669422,
+              1.0345699831365935
+            ]
+          },
+          "p99_ns": {
+            "baseline": 132650.0,
+            "candidate": 139400.0,
+            "ratio": 1.0508857896720694,
+            "paired_ratios": [
+              1.031524926686217,
+              1.0713731574864238
+            ]
+          },
+          "p999_ns": {
+            "baseline": 149450.0,
+            "candidate": 159100.0,
+            "ratio": 1.0645700903312145,
+            "paired_ratios": [
+              1.043859649122807,
+              1.0849369608493695
+            ]
+          },
+          "max_ns": {
+            "baseline": 186650.0,
+            "candidate": 265900.0,
+            "ratio": 1.4245914813822662,
+            "paired_ratios": [
+              1.4454813359528487,
+              1.3995285798467885
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 838750.0,
+            "candidate": 754050.0,
+            "ratio": 0.899016393442623,
+            "paired_ratios": [
+              0.9794898764133578,
+              0.8322608790489694
+            ]
+          },
+          "p95_ns": {
+            "baseline": 877400.0,
+            "candidate": 817450.0,
+            "ratio": 0.9316731251424664,
+            "paired_ratios": [
+              0.9903205531112508,
+              0.8830397164599187
+            ]
+          },
+          "p99_ns": {
+            "baseline": 877400.0,
+            "candidate": 817450.0,
+            "ratio": 0.9316731251424664,
+            "paired_ratios": [
+              0.9903205531112508,
+              0.8830397164599187
+            ]
+          },
+          "p999_ns": {
+            "baseline": 877400.0,
+            "candidate": 817450.0,
+            "ratio": 0.9316731251424664,
+            "paired_ratios": [
+              0.9903205531112508,
+              0.8830397164599187
+            ]
+          },
+          "max_ns": {
+            "baseline": 877400.0,
+            "candidate": 817450.0,
+            "ratio": 0.9316731251424664,
+            "paired_ratios": [
+              0.9903205531112508,
+              0.8830397164599187
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 34600.0,
+            "candidate": 36300.0,
+            "ratio": 1.0491329479768785,
+            "paired_ratios": [
+              1.046242774566474,
+              1.0520231213872833
+            ]
+          },
+          "p95_ns": {
+            "baseline": 39700.0,
+            "candidate": 44450.0,
+            "ratio": 1.119647355163728,
+            "paired_ratios": [
+              1.1675257731958764,
+              1.0738916256157636
+            ]
+          },
+          "p99_ns": {
+            "baseline": 39700.0,
+            "candidate": 44450.0,
+            "ratio": 1.119647355163728,
+            "paired_ratios": [
+              1.1675257731958764,
+              1.0738916256157636
+            ]
+          },
+          "p999_ns": {
+            "baseline": 39700.0,
+            "candidate": 44450.0,
+            "ratio": 1.119647355163728,
+            "paired_ratios": [
+              1.1675257731958764,
+              1.0738916256157636
+            ]
+          },
+          "max_ns": {
+            "baseline": 39700.0,
+            "candidate": 44450.0,
+            "ratio": 1.119647355163728,
+            "paired_ratios": [
+              1.1675257731958764,
+              1.0738916256157636
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 6917600.0,
+        "candidate": 7062450.0,
+        "ratio": 1.020939343124783
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 7140500.0,
+        "candidate": 7135700.0,
+        "ratio": 0.9993277781667951
+      },
+      "first_link_ns": {
+        "baseline": 127150.0,
+        "candidate": 126000.0,
+        "ratio": 0.9909555642941408
+      },
+      "save_ns": {
+        "baseline": 2986950.0,
+        "candidate": 2842850.0,
+        "ratio": 0.9517568087848809
+      },
+      "load_ns": {
+        "baseline": 1807800.0,
+        "candidate": 1871450.0,
+        "ratio": 1.035208540767784
+      },
+      "prepared_save_ns": {
+        "baseline": 316450.0,
+        "candidate": 359150.0,
+        "ratio": 1.1349344288197187
+      },
+      "prepared_load_ns": {
+        "baseline": 1365600.0,
+        "candidate": 1295750.0,
+        "ratio": 0.9488503222026948
+      },
+      "artifact_bytes": {
+        "baseline": 3028824.0,
+        "candidate": 3028824.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 137289.0,
+        "candidate": 137289.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 700.0,
+        "candidate": 850.0,
+        "ratio": 1.2142857142857142
+      }
+    },
+    {
+      "mode": "FastBuild",
+      "case": "scoped_child",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 1100.0,
+            "candidate": 1100.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 1350.0,
+            "candidate": 1350.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9285714285714286,
+              1.0769230769230769
+            ]
+          },
+          "p99_ns": {
+            "baseline": 1600.0,
+            "candidate": 1550.0,
+            "ratio": 0.96875,
+            "paired_ratios": [
+              0.9375,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2650.0,
+            "candidate": 2450.0,
+            "ratio": 0.9245283018867925,
+            "paired_ratios": [
+              1.0,
+              0.8518518518518519
+            ]
+          },
+          "max_ns": {
+            "baseline": 16350.0,
+            "candidate": 17600.0,
+            "ratio": 1.0764525993883791,
+            "paired_ratios": [
+              0.9675324675324675,
+              1.1734104046242775
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 2950.0,
+            "candidate": 2900.0,
+            "ratio": 0.9830508474576272,
+            "paired_ratios": [
+              0.9666666666666667,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4500.0,
+            "candidate": 4500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4750.0,
+            "candidate": 4700.0,
+            "ratio": 0.9894736842105263,
+            "paired_ratios": [
+              1.0,
+              0.9791666666666666
+            ]
+          },
+          "p999_ns": {
+            "baseline": 7000.0,
+            "candidate": 6750.0,
+            "ratio": 0.9642857142857143,
+            "paired_ratios": [
+              1.0151515151515151,
+              0.918918918918919
+            ]
+          },
+          "max_ns": {
+            "baseline": 23350.0,
+            "candidate": 22250.0,
+            "ratio": 0.9528907922912205,
+            "paired_ratios": [
+              0.6936619718309859,
+              1.355191256830601
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 59150.0,
+            "candidate": 59450.0,
+            "ratio": 1.0050718512256973,
+            "paired_ratios": [
+              0.9915397631133672,
+              1.0185810810810811
+            ]
+          },
+          "p95_ns": {
+            "baseline": 62750.0,
+            "candidate": 62400.0,
+            "ratio": 0.9944223107569721,
+            "paired_ratios": [
+              0.9839743589743589,
+              1.004754358161648
+            ]
+          },
+          "p99_ns": {
+            "baseline": 76050.0,
+            "candidate": 75450.0,
+            "ratio": 0.9921104536489151,
+            "paired_ratios": [
+              0.9828722002635046,
+              1.0013123359580052
+            ]
+          },
+          "p999_ns": {
+            "baseline": 82850.0,
+            "candidate": 79950.0,
+            "ratio": 0.9649969824984912,
+            "paired_ratios": [
+              0.9714640198511166,
+              0.9588719153936546
+            ]
+          },
+          "max_ns": {
+            "baseline": 94800.0,
+            "candidate": 101550.0,
+            "ratio": 1.0712025316455696,
+            "paired_ratios": [
+              0.9353448275862069,
+              1.2014462809917354
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 97900.0,
+            "candidate": 98000.0,
+            "ratio": 1.0010214504596526,
+            "paired_ratios": [
+              0.9887869520897044,
+              1.0133060388945752
+            ]
+          },
+          "p95_ns": {
+            "baseline": 104500.0,
+            "candidate": 103250.0,
+            "ratio": 0.9880382775119617,
+            "paired_ratios": [
+              0.9817483189241114,
+              0.994280266920877
+            ]
+          },
+          "p99_ns": {
+            "baseline": 124850.0,
+            "candidate": 119150.0,
+            "ratio": 0.9543452142571085,
+            "paired_ratios": [
+              0.9574638844301766,
+              0.9512390087929656
+            ]
+          },
+          "p999_ns": {
+            "baseline": 133850.0,
+            "candidate": 129000.0,
+            "ratio": 0.9637654090399701,
+            "paired_ratios": [
+              0.9778456837280366,
+              0.9502923976608186
+            ]
+          },
+          "max_ns": {
+            "baseline": 168850.0,
+            "candidate": 184000.0,
+            "ratio": 1.0897246076399172,
+            "paired_ratios": [
+              0.9400791407574901,
+              1.2543532338308458
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 771550.0,
+            "candidate": 842200.0,
+            "ratio": 1.0915689197070833,
+            "paired_ratios": [
+              1.1612529002320187,
+              1.0211129936139711
+            ]
+          },
+          "p95_ns": {
+            "baseline": 837350.0,
+            "candidate": 904400.0,
+            "ratio": 1.0800740431121991,
+            "paired_ratios": [
+              1.1531060696044662,
+              1.006243996157541
+            ]
+          },
+          "p99_ns": {
+            "baseline": 837350.0,
+            "candidate": 904400.0,
+            "ratio": 1.0800740431121991,
+            "paired_ratios": [
+              1.1531060696044662,
+              1.006243996157541
+            ]
+          },
+          "p999_ns": {
+            "baseline": 837350.0,
+            "candidate": 904400.0,
+            "ratio": 1.0800740431121991,
+            "paired_ratios": [
+              1.1531060696044662,
+              1.006243996157541
+            ]
+          },
+          "max_ns": {
+            "baseline": 837350.0,
+            "candidate": 904400.0,
+            "ratio": 1.0800740431121991,
+            "paired_ratios": [
+              1.1531060696044662,
+              1.006243996157541
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 83100.0,
+            "candidate": 83100.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9225352112676056,
+              1.0814814814814815
+            ]
+          },
+          "p95_ns": {
+            "baseline": 99500.0,
+            "candidate": 116050.0,
+            "ratio": 1.1663316582914574,
+            "paired_ratios": [
+              0.9948559670781894,
+              1.3300589390962672
+            ]
+          },
+          "p99_ns": {
+            "baseline": 99500.0,
+            "candidate": 116050.0,
+            "ratio": 1.1663316582914574,
+            "paired_ratios": [
+              0.9948559670781894,
+              1.3300589390962672
+            ]
+          },
+          "p999_ns": {
+            "baseline": 99500.0,
+            "candidate": 116050.0,
+            "ratio": 1.1663316582914574,
+            "paired_ratios": [
+              0.9948559670781894,
+              1.3300589390962672
+            ]
+          },
+          "max_ns": {
+            "baseline": 99500.0,
+            "candidate": 116050.0,
+            "ratio": 1.1663316582914574,
+            "paired_ratios": [
+              0.9948559670781894,
+              1.3300589390962672
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 6735800.0,
+        "candidate": 6697750.0,
+        "ratio": 0.9943510793075804
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 5633100.0,
+        "candidate": 6480750.0,
+        "ratio": 1.1504766469617085
+      },
+      "first_link_ns": {
+        "baseline": 946250.0,
+        "candidate": 907450.0,
+        "ratio": 0.958996036988111
+      },
+      "save_ns": {
+        "baseline": 2675100.0,
+        "candidate": 2786050.0,
+        "ratio": 1.0414750850435497
+      },
+      "load_ns": {
+        "baseline": 1792800.0,
+        "candidate": 1758850.0,
+        "ratio": 0.9810631414547077
+      },
+      "prepared_save_ns": {
+        "baseline": 574950.0,
+        "candidate": 519800.0,
+        "ratio": 0.9040786155317854
+      },
+      "prepared_load_ns": {
+        "baseline": 2041300.0,
+        "candidate": 2088750.0,
+        "ratio": 1.023244990937148
+      },
+      "artifact_bytes": {
+        "baseline": 3030188.0,
+        "candidate": 3030188.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 253470.0,
+        "candidate": 253470.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 95700.0,
+        "candidate": 96850.0,
+        "ratio": 1.0120167189132707
+      }
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "exact_token_set",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 4350.0,
+            "candidate": 4150.0,
+            "ratio": 0.9540229885057471,
+            "paired_ratios": [
+              0.9761904761904762,
+              0.9333333333333333
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4650.0,
+            "candidate": 4550.0,
+            "ratio": 0.978494623655914,
+            "paired_ratios": [
+              1.0,
+              0.9583333333333334
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5100.0,
+            "candidate": 5150.0,
+            "ratio": 1.0098039215686274,
+            "paired_ratios": [
+              1.0,
+              1.0192307692307692
+            ]
+          },
+          "p999_ns": {
+            "baseline": 11500.0,
+            "candidate": 10450.0,
+            "ratio": 0.908695652173913,
+            "paired_ratios": [
+              0.9494949494949495,
+              0.8778625954198473
+            ]
+          },
+          "max_ns": {
+            "baseline": 61400.0,
+            "candidate": 36950.0,
+            "ratio": 0.6017915309446255,
+            "paired_ratios": [
+              0.32482124616956076,
+              1.6907630522088353
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 3650.0,
+            "candidate": 3450.0,
+            "ratio": 0.9452054794520548,
+            "paired_ratios": [
+              0.9714285714285714,
+              0.9210526315789473
+            ]
+          },
+          "p95_ns": {
+            "baseline": 3850.0,
+            "candidate": 3650.0,
+            "ratio": 0.948051948051948,
+            "paired_ratios": [
+              0.972972972972973,
+              0.925
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4500.0,
+            "candidate": 4600.0,
+            "ratio": 1.0222222222222221,
+            "paired_ratios": [
+              1.0,
+              1.0434782608695652
+            ]
+          },
+          "p999_ns": {
+            "baseline": 10800.0,
+            "candidate": 11400.0,
+            "ratio": 1.0555555555555556,
+            "paired_ratios": [
+              0.9363636363636364,
+              1.179245283018868
+            ]
+          },
+          "max_ns": {
+            "baseline": 48450.0,
+            "candidate": 36950.0,
+            "ratio": 0.762641898864809,
+            "paired_ratios": [
+              1.021798365122616,
+              0.6046511627906976
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 114650.0,
+            "candidate": 113250.0,
+            "ratio": 0.9877889228085478,
+            "paired_ratios": [
+              0.9841966637401229,
+              0.9913344887348353
+            ]
+          },
+          "p95_ns": {
+            "baseline": 120450.0,
+            "candidate": 120450.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9908256880733946,
+              1.0090909090909093
+            ]
+          },
+          "p99_ns": {
+            "baseline": 137800.0,
+            "candidate": 140200.0,
+            "ratio": 1.0174165457184325,
+            "paired_ratios": [
+              0.9769949676491733,
+              1.0586080586080586
+            ]
+          },
+          "p999_ns": {
+            "baseline": 174950.0,
+            "candidate": 186400.0,
+            "ratio": 1.0654472706487568,
+            "paired_ratios": [
+              1.0306345733041575,
+              1.1035308198683422
+            ]
+          },
+          "max_ns": {
+            "baseline": 240400.0,
+            "candidate": 281400.0,
+            "ratio": 1.1705490848585691,
+            "paired_ratios": [
+              1.2134831460674158,
+              1.1243523316062176
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 129950.0,
+            "candidate": 128150.0,
+            "ratio": 0.9861485186610235,
+            "paired_ratios": [
+              0.9852484472049691,
+              0.9870327993897788
+            ]
+          },
+          "p95_ns": {
+            "baseline": 136700.0,
+            "candidate": 137050.0,
+            "ratio": 1.0025603511338699,
+            "paired_ratios": [
+              0.9911764705882353,
+              1.0138282387190685
+            ]
+          },
+          "p99_ns": {
+            "baseline": 159600.0,
+            "candidate": 161300.0,
+            "ratio": 1.0106516290726817,
+            "paired_ratios": [
+              0.9724828017510945,
+              1.048964218455744
+            ]
+          },
+          "p999_ns": {
+            "baseline": 211500.0,
+            "candidate": 228350.0,
+            "ratio": 1.0796690307328605,
+            "paired_ratios": [
+              1.0642329020332717,
+              1.095837366892546
+            ]
+          },
+          "max_ns": {
+            "baseline": 271250.0,
+            "candidate": 312800.0,
+            "ratio": 1.1531797235023042,
+            "paired_ratios": [
+              1.1819794253281306,
+              1.1220260936300843
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 918400.0,
+            "candidate": 1002600.0,
+            "ratio": 1.0916811846689896,
+            "paired_ratios": [
+              0.9993981945837511,
+              1.2012383900928794
+            ]
+          },
+          "p95_ns": {
+            "baseline": 989350.0,
+            "candidate": 1020150.0,
+            "ratio": 1.0311315510183454,
+            "paired_ratios": [
+              0.9841025146931304,
+              1.0830144557823131
+            ]
+          },
+          "p99_ns": {
+            "baseline": 989350.0,
+            "candidate": 1020150.0,
+            "ratio": 1.0311315510183454,
+            "paired_ratios": [
+              0.9841025146931304,
+              1.0830144557823131
+            ]
+          },
+          "p999_ns": {
+            "baseline": 989350.0,
+            "candidate": 1020150.0,
+            "ratio": 1.0311315510183454,
+            "paired_ratios": [
+              0.9841025146931304,
+              1.0830144557823131
+            ]
+          },
+          "max_ns": {
+            "baseline": 989350.0,
+            "candidate": 1020150.0,
+            "ratio": 1.0311315510183454,
+            "paired_ratios": [
+              0.9841025146931304,
+              1.0830144557823131
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 12400.0,
+            "candidate": 11100.0,
+            "ratio": 0.8951612903225806,
+            "paired_ratios": [
+              1.0,
+              0.796875
+            ]
+          },
+          "p95_ns": {
+            "baseline": 16550.0,
+            "candidate": 23500.0,
+            "ratio": 1.4199395770392749,
+            "paired_ratios": [
+              1.309090909090909,
+              1.5301204819277108
+            ]
+          },
+          "p99_ns": {
+            "baseline": 16550.0,
+            "candidate": 23500.0,
+            "ratio": 1.4199395770392749,
+            "paired_ratios": [
+              1.309090909090909,
+              1.5301204819277108
+            ]
+          },
+          "p999_ns": {
+            "baseline": 16550.0,
+            "candidate": 23500.0,
+            "ratio": 1.4199395770392749,
+            "paired_ratios": [
+              1.309090909090909,
+              1.5301204819277108
+            ]
+          },
+          "max_ns": {
+            "baseline": 16550.0,
+            "candidate": 23500.0,
+            "ratio": 1.4199395770392749,
+            "paired_ratios": [
+              1.309090909090909,
+              1.5301204819277108
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 2247450.0,
+        "candidate": 2119050.0,
+        "ratio": 0.9428685843956484
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 864200.0,
+        "candidate": 880200.0,
+        "ratio": 1.0185142328164776
+      },
+      "first_link_ns": {
+        "baseline": 34300.0,
+        "candidate": 35700.0,
+        "ratio": 1.0408163265306123
+      },
+      "save_ns": {
+        "baseline": 234850.0,
+        "candidate": 246150.0,
+        "ratio": 1.0481158186076218
+      },
+      "load_ns": {
+        "baseline": 452450.0,
+        "candidate": 436150.0,
+        "ratio": 0.9639739197701404
+      },
+      "prepared_save_ns": {
+        "baseline": 202750.0,
+        "candidate": 225350.0,
+        "ratio": 1.1114673242909987
+      },
+      "prepared_load_ns": {
+        "baseline": 1384800.0,
+        "candidate": 1294000.0,
+        "ratio": 0.9344309647602542
+      },
+      "artifact_bytes": {
+        "baseline": 120472.0,
+        "candidate": 120472.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 120540.0,
+        "candidate": 116506.0,
+        "ratio": 0.9665339306454289
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 31600.0,
+        "candidate": 30400.0,
+        "ratio": 0.9620253164556962
+      }
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "glrm_list",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 1500.0,
+            "candidate": 1500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 3900.0,
+            "candidate": 3900.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4000.0,
+            "candidate": 4000.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p999_ns": {
+            "baseline": 8950.0,
+            "candidate": 8550.0,
+            "ratio": 0.9553072625698324,
+            "paired_ratios": [
+              0.898876404494382,
+              1.011111111111111
+            ]
+          },
+          "max_ns": {
+            "baseline": 36700.0,
+            "candidate": 45300.0,
+            "ratio": 1.2343324250681198,
+            "paired_ratios": [
+              1.2054380664652569,
+              1.2580645161290323
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 4700.0,
+            "candidate": 4700.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 8000.0,
+            "candidate": 7950.0,
+            "ratio": 0.99375,
+            "paired_ratios": [
+              0.9875000000000002,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 8250.0,
+            "candidate": 8150.0,
+            "ratio": 0.9878787878787879,
+            "paired_ratios": [
+              0.9879518072289156,
+              0.9878048780487805
+            ]
+          },
+          "p999_ns": {
+            "baseline": 16500.0,
+            "candidate": 15550.0,
+            "ratio": 0.9424242424242424,
+            "paired_ratios": [
+              0.95,
+              0.9352941176470588
+            ]
+          },
+          "max_ns": {
+            "baseline": 101550.0,
+            "candidate": 95650.0,
+            "ratio": 0.9419005416051206,
+            "paired_ratios": [
+              0.9434697855750487,
+              0.9402985074626866
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 113200.0,
+            "candidate": 112300.0,
+            "ratio": 0.9920494699646644,
+            "paired_ratios": [
+              0.9814651368049426,
+              1.0026525198938991
+            ]
+          },
+          "p95_ns": {
+            "baseline": 119800.0,
+            "candidate": 118650.0,
+            "ratio": 0.9904006677796328,
+            "paired_ratios": [
+              0.9824561403508771,
+              0.9983319432860718
+            ]
+          },
+          "p99_ns": {
+            "baseline": 137650.0,
+            "candidate": 136100.0,
+            "ratio": 0.9887395568470759,
+            "paired_ratios": [
+              0.9781659388646288,
+              0.9992748368382887
+            ]
+          },
+          "p999_ns": {
+            "baseline": 197650.0,
+            "candidate": 195650.0,
+            "ratio": 0.9898811029597774,
+            "paired_ratios": [
+              1.0225442834138487,
+              0.9607655502392345
+            ]
+          },
+          "max_ns": {
+            "baseline": 275550.0,
+            "candidate": 245650.0,
+            "ratio": 0.8914897477771729,
+            "paired_ratios": [
+              1.0527391659852823,
+              0.7628058727569331
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 180500.0,
+            "candidate": 179400.0,
+            "ratio": 0.9939058171745152,
+            "paired_ratios": [
+              0.9861649142224682,
+              1.0016638935108153
+            ]
+          },
+          "p95_ns": {
+            "baseline": 191250.0,
+            "candidate": 189200.0,
+            "ratio": 0.989281045751634,
+            "paired_ratios": [
+              0.9847928683796539,
+              0.9937434827945777
+            ]
+          },
+          "p99_ns": {
+            "baseline": 223550.0,
+            "candidate": 218350.0,
+            "ratio": 0.9767389845672109,
+            "paired_ratios": [
+              0.9619856887298748,
+              0.9914988814317673
+            ]
+          },
+          "p999_ns": {
+            "baseline": 316950.0,
+            "candidate": 318150.0,
+            "ratio": 1.0037860861334595,
+            "paired_ratios": [
+              1.0178282009724473,
+              0.9904732636754764
+            ]
+          },
+          "max_ns": {
+            "baseline": 388200.0,
+            "candidate": 373100.0,
+            "ratio": 0.9611025244719217,
+            "paired_ratios": [
+              1.0119649029513427,
+              0.9133150137396953
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 2100550.0,
+            "candidate": 2064900.0,
+            "ratio": 0.9830282545047726,
+            "paired_ratios": [
+              1.0268502581755592,
+              0.9419173279202805
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2358100.0,
+            "candidate": 2449500.0,
+            "ratio": 1.03876001865909,
+            "paired_ratios": [
+              1.0584237409768247,
+              1.0189153495505474
+            ]
+          },
+          "p99_ns": {
+            "baseline": 2358100.0,
+            "candidate": 2449500.0,
+            "ratio": 1.03876001865909,
+            "paired_ratios": [
+              1.0584237409768247,
+              1.0189153495505474
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2358100.0,
+            "candidate": 2449500.0,
+            "ratio": 1.03876001865909,
+            "paired_ratios": [
+              1.0584237409768247,
+              1.0189153495505474
+            ]
+          },
+          "max_ns": {
+            "baseline": 2358100.0,
+            "candidate": 2449500.0,
+            "ratio": 1.03876001865909,
+            "paired_ratios": [
+              1.0584237409768247,
+              1.0189153495505474
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 27200.0,
+            "candidate": 23550.0,
+            "ratio": 0.8658088235294118,
+            "paired_ratios": [
+              0.9385245901639344,
+              0.8066666666666666
+            ]
+          },
+          "p95_ns": {
+            "baseline": 38750.0,
+            "candidate": 33850.0,
+            "ratio": 0.8735483870967742,
+            "paired_ratios": [
+              0.9116022099447514,
+              0.8401937046004843
+            ]
+          },
+          "p99_ns": {
+            "baseline": 38750.0,
+            "candidate": 33850.0,
+            "ratio": 0.8735483870967742,
+            "paired_ratios": [
+              0.9116022099447514,
+              0.8401937046004843
+            ]
+          },
+          "p999_ns": {
+            "baseline": 38750.0,
+            "candidate": 33850.0,
+            "ratio": 0.8735483870967742,
+            "paired_ratios": [
+              0.9116022099447514,
+              0.8401937046004843
+            ]
+          },
+          "max_ns": {
+            "baseline": 38750.0,
+            "candidate": 33850.0,
+            "ratio": 0.8735483870967742,
+            "paired_ratios": [
+              0.9116022099447514,
+              0.8401937046004843
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 8660250.0,
+        "candidate": 8875650.0,
+        "ratio": 1.0248722611933836
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 1963100.0,
+        "candidate": 2037050.0,
+        "ratio": 1.0376700117161632
+      },
+      "first_link_ns": {
+        "baseline": 73950.0,
+        "candidate": 68800.0,
+        "ratio": 0.9303583502366464
+      },
+      "save_ns": {
+        "baseline": 211300.0,
+        "candidate": 212700.0,
+        "ratio": 1.0066256507335543
+      },
+      "load_ns": {
+        "baseline": 539150.0,
+        "candidate": 535950.0,
+        "ratio": 0.9940647315218399
+      },
+      "prepared_save_ns": {
+        "baseline": 208750.0,
+        "candidate": 222700.0,
+        "ratio": 1.0668263473053892
+      },
+      "prepared_load_ns": {
+        "baseline": 1493200.0,
+        "candidate": 1436750.0,
+        "ratio": 0.9621952852933298
+      },
+      "artifact_bytes": {
+        "baseline": 127479.0,
+        "candidate": 127479.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 127243.0,
+        "candidate": 127243.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1000.0,
+        "candidate": 1000.0,
+        "ratio": 1.0
+      }
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "json_schema",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 2600.0,
+            "candidate": 2500.0,
+            "ratio": 0.9615384615384616,
+            "paired_ratios": [
+              0.9615384615384616,
+              0.9615384615384616
+            ]
+          },
+          "p95_ns": {
+            "baseline": 4500.0,
+            "candidate": 4500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 4750.0,
+            "candidate": 4650.0,
+            "ratio": 0.9789473684210527,
+            "paired_ratios": [
+              0.9791666666666666,
+              0.9787234042553191
+            ]
+          },
+          "p999_ns": {
+            "baseline": 9200.0,
+            "candidate": 8600.0,
+            "ratio": 0.9347826086956522,
+            "paired_ratios": [
+              0.9887640449438202,
+              0.8842105263157894
+            ]
+          },
+          "max_ns": {
+            "baseline": 200000.0,
+            "candidate": 326650.0,
+            "ratio": 1.63325,
+            "paired_ratios": [
+              1.7602632403635223,
+              1.1322620519159456
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 1400.0,
+            "candidate": 1400.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 6400.0,
+            "candidate": 6050.0,
+            "ratio": 0.9453125,
+            "paired_ratios": [
+              0.9104477611940298,
+              0.9836065573770492
+            ]
+          },
+          "p99_ns": {
+            "baseline": 6650.0,
+            "candidate": 6250.0,
+            "ratio": 0.9398496240601504,
+            "paired_ratios": [
+              0.9,
+              0.9841269841269841
+            ]
+          },
+          "p999_ns": {
+            "baseline": 11800.0,
+            "candidate": 11450.0,
+            "ratio": 0.9703389830508474,
+            "paired_ratios": [
+              1.0,
+              0.9396551724137931
+            ]
+          },
+          "max_ns": {
+            "baseline": 216900.0,
+            "candidate": 96000.0,
+            "ratio": 0.4426002766251729,
+            "paired_ratios": [
+              0.5522138680033417,
+              0.30761316872427985
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 112400.0,
+            "candidate": 111150.0,
+            "ratio": 0.9888790035587188,
+            "paired_ratios": [
+              0.9787045252883763,
+              0.9991079393398751
+            ]
+          },
+          "p95_ns": {
+            "baseline": 119450.0,
+            "candidate": 118150.0,
+            "ratio": 0.9891167852658016,
+            "paired_ratios": [
+              0.9833194328607172,
+              0.9949579831932773
+            ]
+          },
+          "p99_ns": {
+            "baseline": 136050.0,
+            "candidate": 135650.0,
+            "ratio": 0.9970599044468945,
+            "paired_ratios": [
+              0.9897585954645208,
+              1.0044313146233383
+            ]
+          },
+          "p999_ns": {
+            "baseline": 176450.0,
+            "candidate": 210250.0,
+            "ratio": 1.1915556814961745,
+            "paired_ratios": [
+              1.2782909930715936,
+              1.1079577072899276
+            ]
+          },
+          "max_ns": {
+            "baseline": 306950.0,
+            "candidate": 1137700.0,
+            "ratio": 3.70646685127871,
+            "paired_ratios": [
+              6.448660714285714,
+              2.1310592459605027
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 217250.0,
+            "candidate": 214000.0,
+            "ratio": 0.9850402761795167,
+            "paired_ratios": [
+              0.9726027397260274,
+              0.9976798143851509
+            ]
+          },
+          "p95_ns": {
+            "baseline": 231600.0,
+            "candidate": 227750.0,
+            "ratio": 0.9833765112262521,
+            "paired_ratios": [
+              0.9794959419051688,
+              0.9873417721518988
+            ]
+          },
+          "p99_ns": {
+            "baseline": 266500.0,
+            "candidate": 262350.0,
+            "ratio": 0.9844277673545966,
+            "paired_ratios": [
+              0.9708271787296898,
+              0.9984744469870329
+            ]
+          },
+          "p999_ns": {
+            "baseline": 398350.0,
+            "candidate": 416250.0,
+            "ratio": 1.044935358353207,
+            "paired_ratios": [
+              1.1163120567375886,
+              0.9641423601819642
+            ]
+          },
+          "max_ns": {
+            "baseline": 687300.0,
+            "candidate": 1355350.0,
+            "ratio": 1.9719918521751783,
+            "paired_ratios": [
+              1.972435821601798,
+              1.971282826374457
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 5569600.0,
+            "candidate": 5462850.0,
+            "ratio": 0.9808334530307383,
+            "paired_ratios": [
+              0.9685672780098057,
+              0.9928269592699123
+            ]
+          },
+          "p95_ns": {
+            "baseline": 5762350.0,
+            "candidate": 5636050.0,
+            "ratio": 0.9780818589637909,
+            "paired_ratios": [
+              0.9712784526685121,
+              0.9846745258841619
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5762350.0,
+            "candidate": 5636050.0,
+            "ratio": 0.9780818589637909,
+            "paired_ratios": [
+              0.9712784526685121,
+              0.9846745258841619
+            ]
+          },
+          "p999_ns": {
+            "baseline": 5762350.0,
+            "candidate": 5636050.0,
+            "ratio": 0.9780818589637909,
+            "paired_ratios": [
+              0.9712784526685121,
+              0.9846745258841619
+            ]
+          },
+          "max_ns": {
+            "baseline": 5762350.0,
+            "candidate": 5636050.0,
+            "ratio": 0.9780818589637909,
+            "paired_ratios": [
+              0.9712784526685121,
+              0.9846745258841619
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 55200.0,
+            "candidate": 55100.0,
+            "ratio": 0.9981884057971014,
+            "paired_ratios": [
+              0.9927140255009107,
+              1.0036036036036036
+            ]
+          },
+          "p95_ns": {
+            "baseline": 67100.0,
+            "candidate": 64650.0,
+            "ratio": 0.9634873323397913,
+            "paired_ratios": [
+              0.9159292035398231,
+              1.0120481927710843
+            ]
+          },
+          "p99_ns": {
+            "baseline": 67100.0,
+            "candidate": 64650.0,
+            "ratio": 0.9634873323397913,
+            "paired_ratios": [
+              0.9159292035398231,
+              1.0120481927710843
+            ]
+          },
+          "p999_ns": {
+            "baseline": 67100.0,
+            "candidate": 64650.0,
+            "ratio": 0.9634873323397913,
+            "paired_ratios": [
+              0.9159292035398231,
+              1.0120481927710843
+            ]
+          },
+          "max_ns": {
+            "baseline": 67100.0,
+            "candidate": 64650.0,
+            "ratio": 0.9634873323397913,
+            "paired_ratios": [
+              0.9159292035398231,
+              1.0120481927710843
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 10602100.0,
+        "candidate": 9992950.0,
+        "ratio": 0.9425444015808189
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 5524650.0,
+        "candidate": 5444850.0,
+        "ratio": 0.9855556460590263
+      },
+      "first_link_ns": {
+        "baseline": 101600.0,
+        "candidate": 116550.0,
+        "ratio": 1.1471456692913387
+      },
+      "save_ns": {
+        "baseline": 228700.0,
+        "candidate": 245800.0,
+        "ratio": 1.074770441626585
+      },
+      "load_ns": {
+        "baseline": 599500.0,
+        "candidate": 577150.0,
+        "ratio": 0.9627189324437031
+      },
+      "prepared_save_ns": {
+        "baseline": 198100.0,
+        "candidate": 217550.0,
+        "ratio": 1.0981827359919232
+      },
+      "prepared_load_ns": {
+        "baseline": 1529700.0,
+        "candidate": 1519850.0,
+        "ratio": 0.9935608289207034
+      },
+      "artifact_bytes": {
+        "baseline": 139404.0,
+        "candidate": 139404.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 139380.0,
+        "candidate": 139380.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1100.0,
+        "candidate": 1050.0,
+        "ratio": 0.9545454545454546
+      }
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "lark_arithmetic",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 3700.0,
+            "candidate": 3750.0,
+            "ratio": 1.0135135135135136,
+            "paired_ratios": [
+              1.0,
+              1.027027027027027
+            ]
+          },
+          "p95_ns": {
+            "baseline": 5200.0,
+            "candidate": 5300.0,
+            "ratio": 1.0192307692307692,
+            "paired_ratios": [
+              1.0192307692307692,
+              1.0192307692307692
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5550.0,
+            "candidate": 5800.0,
+            "ratio": 1.045045045045045,
+            "paired_ratios": [
+              0.9821428571428571,
+              1.1090909090909091
+            ]
+          },
+          "p999_ns": {
+            "baseline": 11400.0,
+            "candidate": 11550.0,
+            "ratio": 1.013157894736842,
+            "paired_ratios": [
+              0.972972972972973,
+              1.0512820512820513
+            ]
+          },
+          "max_ns": {
+            "baseline": 94900.0,
+            "candidate": 1241150.0,
+            "ratio": 13.078503688092729,
+            "paired_ratios": [
+              0.7866786678667866,
+              30.430749682337993
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 4400.0,
+            "candidate": 4400.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              1.0,
+              1.0
+            ]
+          },
+          "p95_ns": {
+            "baseline": 6100.0,
+            "candidate": 6100.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.9836065573770492,
+              1.0163934426229508
+            ]
+          },
+          "p99_ns": {
+            "baseline": 6550.0,
+            "candidate": 6850.0,
+            "ratio": 1.0458015267175573,
+            "paired_ratios": [
+              0.9545454545454546,
+              1.1384615384615384
+            ]
+          },
+          "p999_ns": {
+            "baseline": 14500.0,
+            "candidate": 14500.0,
+            "ratio": 1.0,
+            "paired_ratios": [
+              0.92,
+              1.0857142857142856
+            ]
+          },
+          "max_ns": {
+            "baseline": 96950.0,
+            "candidate": 248500.0,
+            "ratio": 2.563176895306859,
+            "paired_ratios": [
+              2.462944162436548,
+              2.6666666666666665
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 112450.0,
+            "candidate": 112550.0,
+            "ratio": 1.0008892841262784,
+            "paired_ratios": [
+              0.9946332737030411,
+              1.0070733863837311
+            ]
+          },
+          "p95_ns": {
+            "baseline": 119400.0,
+            "candidate": 122350.0,
+            "ratio": 1.0247068676716917,
+            "paired_ratios": [
+              0.9857621440536013,
+              1.0636515912897822
+            ]
+          },
+          "p99_ns": {
+            "baseline": 136150.0,
+            "candidate": 139750.0,
+            "ratio": 1.0264414248990084,
+            "paired_ratios": [
+              0.9724238026124818,
+              1.0817843866171004
+            ]
+          },
+          "p999_ns": {
+            "baseline": 202800.0,
+            "candidate": 467950.0,
+            "ratio": 2.3074457593688362,
+            "paired_ratios": [
+              0.7312305641936917,
+              4.273130193905817
+            ]
+          },
+          "max_ns": {
+            "baseline": 350950.0,
+            "candidate": 825600.0,
+            "ratio": 2.3524718620886165,
+            "paired_ratios": [
+              0.5662482566248257,
+              6.835
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 189600.0,
+            "candidate": 190800.0,
+            "ratio": 1.0063291139240507,
+            "paired_ratios": [
+              1.0026483050847457,
+              1.0099789915966386
+            ]
+          },
+          "p95_ns": {
+            "baseline": 201800.0,
+            "candidate": 207550.0,
+            "ratio": 1.0284935579781962,
+            "paired_ratios": [
+              0.9812345679012345,
+              1.076081551466932
+            ]
+          },
+          "p99_ns": {
+            "baseline": 235500.0,
+            "candidate": 238750.0,
+            "ratio": 1.0138004246284502,
+            "paired_ratios": [
+              0.9430590191188695,
+              1.0876736111111112
+            ]
+          },
+          "p999_ns": {
+            "baseline": 346750.0,
+            "candidate": 693200.0,
+            "ratio": 1.9991348233597692,
+            "paired_ratios": [
+              0.9647688838782412,
+              3.082669028638914
+            ]
+          },
+          "max_ns": {
+            "baseline": 573100.0,
+            "candidate": 1615250.0,
+            "ratio": 2.81844355260862,
+            "paired_ratios": [
+              0.8679910285165011,
+              5.150766283524904
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 5257250.0,
+            "candidate": 5411750.0,
+            "ratio": 1.0293879880165486,
+            "paired_ratios": [
+              1.0098222549630722,
+              1.0492299440655888
+            ]
+          },
+          "p95_ns": {
+            "baseline": 5830100.0,
+            "candidate": 5786150.0,
+            "ratio": 0.9924615358227131,
+            "paired_ratios": [
+              0.9725624038011109,
+              1.0133908147105402
+            ]
+          },
+          "p99_ns": {
+            "baseline": 5830100.0,
+            "candidate": 5786150.0,
+            "ratio": 0.9924615358227131,
+            "paired_ratios": [
+              0.9725624038011109,
+              1.0133908147105402
+            ]
+          },
+          "p999_ns": {
+            "baseline": 5830100.0,
+            "candidate": 5786150.0,
+            "ratio": 0.9924615358227131,
+            "paired_ratios": [
+              0.9725624038011109,
+              1.0133908147105402
+            ]
+          },
+          "max_ns": {
+            "baseline": 5830100.0,
+            "candidate": 5786150.0,
+            "ratio": 0.9924615358227131,
+            "paired_ratios": [
+              0.9725624038011109,
+              1.0133908147105402
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 66400.0,
+            "candidate": 68750.0,
+            "ratio": 1.0353915662650603,
+            "paired_ratios": [
+              0.9699248120300751,
+              1.10105580693816
+            ]
+          },
+          "p95_ns": {
+            "baseline": 81700.0,
+            "candidate": 83300.0,
+            "ratio": 1.0195838433292534,
+            "paired_ratios": [
+              0.9987760097919217,
+              1.040391676866585
+            ]
+          },
+          "p99_ns": {
+            "baseline": 81700.0,
+            "candidate": 83300.0,
+            "ratio": 1.0195838433292534,
+            "paired_ratios": [
+              0.9987760097919217,
+              1.040391676866585
+            ]
+          },
+          "p999_ns": {
+            "baseline": 81700.0,
+            "candidate": 83300.0,
+            "ratio": 1.0195838433292534,
+            "paired_ratios": [
+              0.9987760097919217,
+              1.040391676866585
+            ]
+          },
+          "max_ns": {
+            "baseline": 81700.0,
+            "candidate": 83300.0,
+            "ratio": 1.0195838433292534,
+            "paired_ratios": [
+              0.9987760097919217,
+              1.040391676866585
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 9718700.0,
+        "candidate": 9921700.0,
+        "ratio": 1.020887567267227
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 5085200.0,
+        "candidate": 4941550.0,
+        "ratio": 0.9717513568787854
+      },
+      "first_link_ns": {
+        "baseline": 231950.0,
+        "candidate": 208150.0,
+        "ratio": 0.8973916792412158
+      },
+      "save_ns": {
+        "baseline": 236350.0,
+        "candidate": 244350.0,
+        "ratio": 1.033848106621536
+      },
+      "load_ns": {
+        "baseline": 591250.0,
+        "candidate": 644000.0,
+        "ratio": 1.0892177589852008
+      },
+      "prepared_save_ns": {
+        "baseline": 213800.0,
+        "candidate": 222700.0,
+        "ratio": 1.0416276894293732
+      },
+      "prepared_load_ns": {
+        "baseline": 1424250.0,
+        "candidate": 1671150.0,
+        "ratio": 1.1733543970510796
+      },
+      "artifact_bytes": {
+        "baseline": 167317.0,
+        "candidate": 167317.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 137289.0,
+        "candidate": 137289.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 1050.0,
+        "candidate": 1150.0,
+        "ratio": 1.0952380952380953
+      }
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "scoped_child",
+      "measurements": {
+        "mask": {
+          "p50_ns": {
+            "baseline": 19900.0,
+            "candidate": 20050.0,
+            "ratio": 1.0075376884422111,
+            "paired_ratios": [
+              1.005,
+              1.0101010101010102
+            ]
+          },
+          "p95_ns": {
+            "baseline": 26200.0,
+            "candidate": 25800.0,
+            "ratio": 0.9847328244274809,
+            "paired_ratios": [
+              0.9694656488549618,
+              1.0
+            ]
+          },
+          "p99_ns": {
+            "baseline": 28350.0,
+            "candidate": 28200.0,
+            "ratio": 0.9947089947089947,
+            "paired_ratios": [
+              0.9823321554770318,
+              1.0070422535211268
+            ]
+          },
+          "p999_ns": {
+            "baseline": 48350.0,
+            "candidate": 49000.0,
+            "ratio": 1.0134436401240952,
+            "paired_ratios": [
+              0.979757085020243,
+              1.0486257928118394
+            ]
+          },
+          "max_ns": {
+            "baseline": 157800.0,
+            "candidate": 341550.0,
+            "ratio": 2.164448669201521,
+            "paired_ratios": [
+              0.7983914209115281,
+              4.137877614252518
+            ]
+          }
+        },
+        "commit": {
+          "p50_ns": {
+            "baseline": 7150.0,
+            "candidate": 7100.0,
+            "ratio": 0.993006993006993,
+            "paired_ratios": [
+              1.0,
+              0.9861111111111112
+            ]
+          },
+          "p95_ns": {
+            "baseline": 14600.0,
+            "candidate": 14150.0,
+            "ratio": 0.9691780821917808,
+            "paired_ratios": [
+              0.986013986013986,
+              0.9530201342281879
+            ]
+          },
+          "p99_ns": {
+            "baseline": 15500.0,
+            "candidate": 15000.0,
+            "ratio": 0.967741935483871,
+            "paired_ratios": [
+              0.9867549668874173,
+              0.949685534591195
+            ]
+          },
+          "p999_ns": {
+            "baseline": 26200.0,
+            "candidate": 25150.0,
+            "ratio": 0.9599236641221374,
+            "paired_ratios": [
+              1.0,
+              0.9230769230769231
+            ]
+          },
+          "max_ns": {
+            "baseline": 83100.0,
+            "candidate": 93900.0,
+            "ratio": 1.1299638989169676,
+            "paired_ratios": [
+              0.8624577226606539,
+              1.4361290322580644
+            ]
+          }
+        },
+        "start": {
+          "p50_ns": {
+            "baseline": 442450.0,
+            "candidate": 438550.0,
+            "ratio": 0.9911854446830151,
+            "paired_ratios": [
+              0.9879682179341657,
+              0.9943744374437443
+            ]
+          },
+          "p95_ns": {
+            "baseline": 469400.0,
+            "candidate": 465850.0,
+            "ratio": 0.9924371538133788,
+            "paired_ratios": [
+              0.9861081427655481,
+              0.998725844128265
+            ]
+          },
+          "p99_ns": {
+            "baseline": 506900.0,
+            "candidate": 506550.0,
+            "ratio": 0.9993095285066088,
+            "paired_ratios": [
+              0.9924797150207797,
+              1.0060963618485743
+            ]
+          },
+          "p999_ns": {
+            "baseline": 649100.0,
+            "candidate": 657000.0,
+            "ratio": 1.0121706978893854,
+            "paired_ratios": [
+              0.9851244687310261,
+              1.04003753518924
+            ]
+          },
+          "max_ns": {
+            "baseline": 884450.0,
+            "candidate": 1642000.0,
+            "ratio": 1.8565210017525016,
+            "paired_ratios": [
+              2.4367311072056235,
+              1.0585470659325904
+            ]
+          }
+        },
+        "trace_total": {
+          "p50_ns": {
+            "baseline": 699600.0,
+            "candidate": 692450.0,
+            "ratio": 0.9897798742138365,
+            "paired_ratios": [
+              0.9852329749103943,
+              0.9942995582157618
+            ]
+          },
+          "p95_ns": {
+            "baseline": 743000.0,
+            "candidate": 735800.0,
+            "ratio": 0.9903095558546433,
+            "paired_ratios": [
+              0.986627043090639,
+              0.9939654016360466
+            ]
+          },
+          "p99_ns": {
+            "baseline": 817500.0,
+            "candidate": 807550.0,
+            "ratio": 0.98782874617737,
+            "paired_ratios": [
+              0.9712195121951219,
+              1.0045398773006136
+            ]
+          },
+          "p999_ns": {
+            "baseline": 1086250.0,
+            "candidate": 1082000.0,
+            "ratio": 0.9960874568469505,
+            "paired_ratios": [
+              0.9851266984943078,
+              1.0071079110126466
+            ]
+          },
+          "max_ns": {
+            "baseline": 1318000.0,
+            "candidate": 2062550.0,
+            "ratio": 1.5649089529590288,
+            "paired_ratios": [
+              2.1430159318266027,
+              0.9584920326467159
+            ]
+          }
+        },
+        "warm_compile": {
+          "p50_ns": {
+            "baseline": 7023250.0,
+            "candidate": 6515750.0,
+            "ratio": 0.92774000640729,
+            "paired_ratios": [
+              0.8406742794997281,
+              1.018576166647271
+            ]
+          },
+          "p95_ns": {
+            "baseline": 7716450.0,
+            "candidate": 6665300.0,
+            "ratio": 0.8637780326445451,
+            "paired_ratios": [
+              0.793722725746895,
+              0.9343609756097561
+            ]
+          },
+          "p99_ns": {
+            "baseline": 7716450.0,
+            "candidate": 6665300.0,
+            "ratio": 0.8637780326445451,
+            "paired_ratios": [
+              0.793722725746895,
+              0.9343609756097561
+            ]
+          },
+          "p999_ns": {
+            "baseline": 7716450.0,
+            "candidate": 6665300.0,
+            "ratio": 0.8637780326445451,
+            "paired_ratios": [
+              0.793722725746895,
+              0.9343609756097561
+            ]
+          },
+          "max_ns": {
+            "baseline": 7716450.0,
+            "candidate": 6665300.0,
+            "ratio": 0.8637780326445451,
+            "paired_ratios": [
+              0.793722725746895,
+              0.9343609756097561
+            ]
+          }
+        },
+        "warm_link": {
+          "p50_ns": {
+            "baseline": 2875550.0,
+            "candidate": 2890550.0,
+            "ratio": 1.005216393385613,
+            "paired_ratios": [
+              0.9964487152705244,
+              1.0139636666782452
+            ]
+          },
+          "p95_ns": {
+            "baseline": 2962850.0,
+            "candidate": 2968800.0,
+            "ratio": 1.0020082015626846,
+            "paired_ratios": [
+              0.9734944585391908,
+              1.031159346097403
+            ]
+          },
+          "p99_ns": {
+            "baseline": 2962850.0,
+            "candidate": 2968800.0,
+            "ratio": 1.0020082015626846,
+            "paired_ratios": [
+              0.9734944585391908,
+              1.031159346097403
+            ]
+          },
+          "p999_ns": {
+            "baseline": 2962850.0,
+            "candidate": 2968800.0,
+            "ratio": 1.0020082015626846,
+            "paired_ratios": [
+              0.9734944585391908,
+              1.031159346097403
+            ]
+          },
+          "max_ns": {
+            "baseline": 2962850.0,
+            "candidate": 2968800.0,
+            "ratio": 1.0020082015626846,
+            "paired_ratios": [
+              0.9734944585391908,
+              1.031159346097403
+            ]
+          }
+        }
+      },
+      "first_compile_ns": {
+        "baseline": 13423300.0,
+        "candidate": 14058600.0,
+        "ratio": 1.0473281532857046
+      },
+      "prepare_with_warm_vocab_ns": {
+        "baseline": 3021150.0,
+        "candidate": 3279650.0,
+        "ratio": 1.0855634443837612
+      },
+      "first_link_ns": {
+        "baseline": 2966450.0,
+        "candidate": 2944300.0,
+        "ratio": 0.9925331625343424
+      },
+      "save_ns": {
+        "baseline": 947750.0,
+        "candidate": 827600.0,
+        "ratio": 0.8732260617251385
+      },
+      "load_ns": {
+        "baseline": 1426050.0,
+        "candidate": 1466800.0,
+        "ratio": 1.0285754356439114
+      },
+      "prepared_save_ns": {
+        "baseline": 307100.0,
+        "candidate": 303800.0,
+        "ratio": 0.9892543145555194
+      },
+      "prepared_load_ns": {
+        "baseline": 2660450.0,
+        "candidate": 2638550.0,
+        "ratio": 0.9917683098723901
+      },
+      "artifact_bytes": {
+        "baseline": 384468.0,
+        "candidate": 384468.0,
+        "ratio": 1.0
+      },
+      "prepared_artifact_bytes": {
+        "baseline": 253470.0,
+        "candidate": 253470.0,
+        "ratio": 1.0
+      },
+      "source_create_and_bind_ns": {
+        "baseline": 117900.0,
+        "candidate": 114150.0,
+        "ratio": 0.9681933842239185
+      }
+    }
+  ],
+  "repeatability_review_flags": [
+    {
+      "mode": "Balanced",
+      "case": "json_schema",
+      "quantile": "max_ns",
+      "paired_ratios": [
+        1.0455696202531646,
+        1.2309468822170901
+      ]
+    },
+    {
+      "mode": "FastBuild",
+      "case": "lark_arithmetic",
+      "quantile": "p999_ns",
+      "paired_ratios": [
+        1.0384615384615385,
+        1.5
+      ]
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "glrm_list",
+      "quantile": "max_ns",
+      "paired_ratios": [
+        1.2054380664652569,
+        1.2580645161290323
+      ]
+    },
+    {
+      "mode": "FastRuntime",
+      "case": "json_schema",
+      "quantile": "max_ns",
+      "paired_ratios": [
+        1.7602632403635223,
+        1.1322620519159456
+      ]
+    }
+  ],
+  "completed_at": "2026-10-15T01:01:11.373821+08:00"
+}

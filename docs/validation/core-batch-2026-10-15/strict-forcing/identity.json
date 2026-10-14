@@ -1,0 +1,19 @@
+{
+  "profile": "canonical release Python, equal 8192-ID vocab, strict ID forcing only",
+  "created_at": "2026-10-15T01:40:18.458232+08:00",
+  "pairs": 3,
+  "repetitions_per_row": 2000,
+  "driver_sha256": "fa140ccd914ddc7945d7a765243fe3b777f7e448b55aa39a4e9633fbf607c21c",
+  "sites": {
+    "baseline": {
+      "path": "C:\\gnb930283\\baseline-markers-site",
+      "library": "C:\\gnb930283\\baseline-markers-site\\glrmask\\_glrmask.cp312-win_amd64.pyd",
+      "sha256": "d4bf430872444910260686f46bfa5fd5b62627c667556a54748cb0c09fe6588f"
+    },
+    "candidate": {
+      "path": "C:\\gnb930283\\verification-r4-binary-site",
+      "library": "C:\\gnb930283\\verification-r4-binary-site\\glrmask\\_glrmask.cp312-win_amd64.pyd",
+      "sha256": "e3563719a5996790b53593a8994c1ae0cd613b4bef36d66a5122bbc85fdb9a0e"
+    }
+  }
+}

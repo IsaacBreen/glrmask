@@ -65,6 +65,12 @@
   caches from distributable wheels. Updated guides describe the canonical API
   and the deliberate native/Lark dialect differences.
 
+- Normalize platform line endings in distribution README metadata checks,
+  without accepting actual description drift.
+- Add matched core-batch qualification results, portable comparison drivers,
+  and explicit remaining performance/scaling limitations in
+  `docs/validation/core-batch-2026-10-15.md`.
+
 ### Construction efficiency and concurrency
 
 - Share immutable binding snapshots and declaration metadata. Incremental

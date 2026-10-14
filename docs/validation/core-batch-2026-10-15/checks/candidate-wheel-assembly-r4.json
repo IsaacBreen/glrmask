@@ -1,0 +1,24 @@
+{
+  "assembly": "Canonical Cargo release DLL + current sources; Maturin metadata template; fresh RECORD",
+  "metadata_template": "C:\\gnb930283\\baseline-artifacts\\glrmask-0.2.0-cp312-cp312-win_amd64.whl",
+  "wheel": "C:\\gnb930283\\candidate-artifacts-r4\\glrmask-0.2.0-cp312-cp312-win_amd64.whl",
+  "site": "C:\\gnb930283\\candidate-site-r4",
+  "extension": "C:\\gnb930283\\target-release\\release\\_glrmask.dll",
+  "extension_sha256": "e3563719a5996790b53593a8994c1ae0cd613b4bef36d66a5122bbc85fdb9a0e",
+  "wheel_sha256": "8a0e9ccca5bf013fe4808a00c578ff8f6d79df79bbe7a2f2ba3dfdf1da9c0efd",
+  "repo_head": "ff125cfa7f7368ddf201064f30cad39aed2aff64",
+  "files": [
+    "glrmask-0.2.0.dist-info/METADATA",
+    "glrmask-0.2.0.dist-info/RECORD",
+    "glrmask-0.2.0.dist-info/WHEEL",
+    "glrmask-0.2.0.dist-info/licenses/licenses/LICENSE-APACHE",
+    "glrmask-0.2.0.dist-info/licenses/licenses/LICENSE-MIT",
+    "glrmask-0.2.0.dist-info/licenses/licenses/NOTICE-LARK",
+    "glrmask/__init__.py",
+    "glrmask/__init__.pyi",
+    "glrmask/_glrmask.cp312-win_amd64.pyd",
+    "glrmask/auto.py",
+    "glrmask/py.typed"
+  ],
+  "artifact_smoke": "passed"
+}

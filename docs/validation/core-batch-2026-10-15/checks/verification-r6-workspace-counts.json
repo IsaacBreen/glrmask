@@ -1,0 +1,8 @@
+{
+  "targets": 74,
+  "passed": 2935,
+  "failed": 0,
+  "ignored": 58,
+  "source": "workspace-alphabet-final-r6.log",
+  "subsequent_change": "4 test-only Unicode fixture literals corrected; focused gate to follow"
+}

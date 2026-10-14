@@ -102,3 +102,8 @@ commits. Coverage includes duplicate spellings, event-only IDs, empty event
 sets, root controls, partial UTF-8 sequences, child scopes, dynamic unions and
 saved/loaded artifacts. The earlier canonical algorithm is retained only as an
 internal test/reference facility, not a public serving policy.
+
+## Measured qualification
+
+See the [15 October 2026 core-batch report](validation/core-batch-2026-10-15.md)
+for matched measurements, exact correctness gates and remaining trade-offs.
