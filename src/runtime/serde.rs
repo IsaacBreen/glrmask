@@ -5932,6 +5932,13 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+// Optional annotation envelope. Plain constraints retain exactly their existing
+// artifact formats; the enclosed body is the normal LR/native implementation.
+// Keeping this at the embeddable-body boundary also covers prepared grammars
+// and recursively retained compiled children, not just top-level save().
+const MARKER_BODY_MAGIC: &[u8; 8] = b"GLRMARK1";
+const MARKER_BODY_HEADER_LEN: usize = 20;
+
 impl Constraint {
     /// Materialize and retain the canonical current-format artifact once a
     /// compiler-owned constraint has reached its final serialized semantics.
@@ -5941,7 +5948,7 @@ impl Constraint {
         if self.serialized_artifact_cache.is_some() {
             return;
         }
-        let bytes = self.save_body();
+        let bytes = self.save_body_core_with_vocab_policy(false);
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
@@ -6121,6 +6128,21 @@ impl Constraint {
     }
 
     fn save_body_with_vocab_policy(&self, external_vocab: bool) -> Vec<u8> {
+        let body = self.save_body_core_with_vocab_policy(external_vocab);
+        let Some(markers) = self.marker_queries.as_deref() else { return body; };
+        let mut bytes = Vec::with_capacity(MARKER_BODY_HEADER_LEN + markers.terminals.len() * 8 + body.len());
+        bytes.extend_from_slice(MARKER_BODY_MAGIC);
+        bytes.extend_from_slice(&(markers.terminals.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        for marker in &markers.terminals {
+            bytes.extend_from_slice(&marker.terminal_id.to_le_bytes());
+            bytes.extend_from_slice(&marker.marker_id.to_le_bytes());
+        }
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    fn save_body_core_with_vocab_policy(&self, external_vocab: bool) -> Vec<u8> {
         let _remainder_trace =
             crate::dynamic_constraint::remainder_trace::Session::new("constraint.snapshot_body");
         let artifact_version = if external_vocab {
@@ -7146,13 +7168,67 @@ impl Constraint {
     }
 
     fn load_body_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
-        match bytes {
+        if !bytes.starts_with(MARKER_BODY_MAGIC) {
+            return Self::load_body_core_with_vocab_policy(bytes, supplied_vocab);
+        }
+        let fail = |message: &str| crate::Error::Serialization(message.to_owned());
+        if bytes.len() < MARKER_BODY_HEADER_LEN { return Err(fail("truncated marker artifact header")); }
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        if count == 0 { return Err(fail("empty marker artifact envelope is not canonical")); }
+        let body_len = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().expect("header checked")))
+            .map_err(|_| fail("marker artifact length exceeds address space"))?;
+        let body_start = count.checked_mul(8).and_then(|len| MARKER_BODY_HEADER_LEN.checked_add(len))
+            .ok_or_else(|| fail("marker artifact inventory length overflow"))?;
+        if body_len == 0 || body_start.checked_add(body_len) != Some(bytes.len()) {
+            return Err(fail("marker artifact section lengths do not match input"));
+        }
+        // Inspect canonical ordering before allocating from untrusted counts.
+        let records = &bytes[MARKER_BODY_HEADER_LEN..body_start];
+        let mut previous = None;
+        for record in records.chunks_exact(8) {
+            let terminal = u32::from_le_bytes(record[..4].try_into().expect("fixed record"));
+            if previous.is_some_and(|prior| terminal <= prior) {
+                return Err(fail("marker artifact terminal IDs must be strictly increasing"));
+            }
+            previous = Some(terminal);
+        }
+        if bytes[body_start..].starts_with(MARKER_BODY_MAGIC) {
+            return Err(fail("nested marker annotation envelopes are not canonical"));
+        }
+        let terminals = records.chunks_exact(8).map(|record| super::markers::MarkerTerminal {
+            terminal_id: u32::from_le_bytes(record[..4].try_into().expect("fixed record")),
+            marker_id: u32::from_le_bytes(record[4..].try_into().expect("fixed record")),
+        }).collect::<Vec<_>>();
+        let mut constraint = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body_core_with_vocab_policy(Cow::Owned(bytes.split_off(body_start)), supplied_vocab)?,
+            Cow::Borrowed(bytes) => Self::load_body_core_with_vocab_policy(Cow::Borrowed(&bytes[body_start..]), supplied_vocab)?,
+        };
+        for marker in &terminals {
+            if marker.terminal_id >= constraint.parser_terminal_count()
+                || constraint.ignore_terminal == Some(marker.terminal_id)
+                || constraint.parser_skip_terminals().contains(&marker.terminal_id)
+                || constraint.parser_is_control_terminal(marker.terminal_id)
+                || constraint.special_token_terminals.iter().any(|special| special.terminal_id == marker.terminal_id)
+                || constraint.tokenizer.possible_future_terminals(constraint.tokenizer.initial_state())
+                    .contains(marker.terminal_id as usize)
+            {
+                return Err(fail("marker artifact identifies an invalid or input-bound terminal"));
+            }
+        }
+        constraint.install_marker_terminals(terminals).map_err(crate::Error::Serialization)?;
+        Ok(constraint)
+    }
+
+    fn load_body_core_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
+        let constraint = match bytes {
             Cow::Owned(bytes) => {
                 let backing = std::sync::Arc::new(bytes);
                 Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)), supplied_vocab)
             }
             Cow::Borrowed(bytes) => Self::load_impl(bytes, None, supplied_vocab),
-        }
+        }?;
+        constraint.prepare_commit_reset_frontier();
+        Ok(constraint)
     }
 
     /// Load an embeddable compiled body without enforcing the public

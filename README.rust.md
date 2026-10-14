@@ -119,6 +119,11 @@ while generating:
         break
 ```
 
+Optional `@mark(id)` annotations report numeric marker IDs and byte positions
+during generation. Read `state.marker_events()` immediately after `start()` and
+each commit. These are possible boundary observations, not captures or a selected
+parse. See the [marker reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/markers.md).
+
 ## Quickstart
 
 ```rust

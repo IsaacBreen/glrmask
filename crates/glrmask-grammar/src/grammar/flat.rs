@@ -102,6 +102,11 @@ pub enum Terminal {
         start: u32,
         end: u32,
     },
+    /// Non-lexical compiler probe for passive marker admission. Never committed.
+    MarkerProbe {
+        id: TerminalID,
+        marker_id: u32,
+    },
 }
 
 impl Rule {
@@ -119,7 +124,7 @@ impl Terminal {
                 crate::automata::lexer::regex::parse_regex(pattern, *utf8).is_nullable()
             }
             Self::Expr { expr, .. } => expr.is_nullable(),
-            Self::SpecialToken { .. } | Self::SpecialTokenRange { .. } => false,
+            Self::SpecialToken { .. } | Self::SpecialTokenRange { .. } | Self::MarkerProbe { .. } => false,
         }
     }
 
@@ -128,7 +133,7 @@ impl Terminal {
             Terminal::Literal { id, .. } => *id,
             Terminal::Pattern { id, .. } => *id,
             Terminal::Expr { id, .. } => *id,
-            Terminal::SpecialToken { id, .. } | Terminal::SpecialTokenRange { id, .. } => *id,
+            Terminal::SpecialToken { id, .. } | Terminal::SpecialTokenRange { id, .. } | Terminal::MarkerProbe { id, .. } => *id,
         }
     }
 
@@ -137,6 +142,7 @@ impl Terminal {
             Terminal::Literal { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
             Terminal::Pattern { pattern, .. } => pattern.clone(),
             Terminal::Expr { expr, .. } => format!("{:?}", expr),
+            Terminal::MarkerProbe { marker_id, .. } => format!("@mark({marker_id})"),
             Terminal::SpecialToken { token_id, .. } => format!("@token({token_id})"),
             Terminal::SpecialTokenRange { start, end, .. } => format!("@tokens({start}..={end})"),
         }

@@ -225,8 +225,15 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
         }
     }
     let mut specials = Vec::new();
+    let mut markers = Vec::new();
     let mut wrappers = Vec::new(); let mut shards = Vec::new();
     for (index, component) in components.into_iter().enumerate() {
+        if let Some(queries) = &component.marker_queries {
+            markers.extend(queries.terminals.iter().map(|marker| crate::runtime::markers::MarkerTerminal {
+                terminal_id: terminal_offsets[index] + marker.terminal_id,
+                marker_id: marker.marker_id,
+            }));
+        }
         for special in &component.special_token_terminals {
             if index == 0 && bound_slots.contains(&special.terminal_id) { continue; }
             specials.push(SpecialTokenTerminal { terminal_id: terminal_offsets[index] + special.terminal_id,
@@ -251,6 +258,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     constraint.sanitize_late_grammar_placeholder_token_domain();
     constraint.validate_template_composition_layout().map_err(fail)?;
     constraint.rebuild_dynamic_runtime_caches();
+    constraint.install_marker_terminals(markers).map_err(fail)?;
     // Sparse/data-only components can have an interface-tail proof without
     // source grammar rules. Its reusable fingerprint is then unavailable;
     // retain the ordinary conservative candidate query for that component.

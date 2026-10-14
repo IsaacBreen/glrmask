@@ -14306,32 +14306,43 @@ impl Tokenizer {
     /// Exact epsilon-closed tokenizer frontiers after one byte from reset.
     /// Entry `b` is epsilon_closure(move(epsilon_closure(reset), b)).
     pub fn initial_byte_frontiers(&self) -> Arc<[TokenizerStateSet]> {
-        Arc::clone(self.initial_byte_frontiers.get_or_init(|| {
-            let closures = self.all_singleton_epsilon_closures();
-            let reset = self.initial_state();
-            let reset_closure = closures
-                .get(reset as usize)
-                .expect("tokenizer reset state must have an epsilon closure");
+        let _ = self.initial_byte_frontiers_ref();
+        Arc::clone(self.initial_byte_frontiers.get().expect("frontiers initialized"))
+    }
+
+    /// Borrow the exact reset-to-first-byte cache without an Arc refcount pair.
+    /// Only reset and reached target closures are needed; constructing this
+    /// cache must not materialize closures for every state in a large lexer.
+    pub fn initial_byte_frontiers_ref(&self) -> &[TokenizerStateSet] {
+        self.initial_byte_frontiers.get_or_init(|| {
+            let closures = self.cached_singleton_epsilon_closures();
+            let reset_closure = self.singleton_epsilon_closure(self.initial_state());
+            let mut reached_closures = FxHashMap::<u32, Box<[u32]>>::default();
             let mut rows = Vec::with_capacity(256);
             for byte in 0u16..=255 {
-                let byte = byte as u8;
                 let mut targets = TokenizerStateSet::new();
-                for &state in reset_closure {
-                    let Some(target) = self.step(state, byte) else {
-                        continue;
-                    };
-                    if let Some(closure) = closures.get(target as usize) {
+                for &state in reset_closure.iter() {
+                    let Some(target) = self.step(state, byte as u8) else { continue; };
+                    if let Some(closure) = closures.and_then(|all| all.get(target as usize)) {
                         targets.extend(closure.iter().copied());
+                    } else if !self.state_has_epsilon_transitions(target) {
+                        targets.push(target);
                     } else {
-                        targets.extend(self.epsilon_closure_states(&[target]));
+                        let closure = reached_closures.entry(target)
+                            .or_insert_with(|| self.singleton_epsilon_closure(target));
+                        targets.extend(closure.iter().copied());
                     }
                 }
-                targets.sort_unstable();
-                targets.dedup();
-                rows.push(targets);
+                targets.sort_unstable(); targets.dedup(); rows.push(targets);
             }
             Arc::from(rows.into_boxed_slice())
-        }))
+        }).as_ref()
+    }
+
+    /// Borrow a prepared reset projection; never constructs it in a hot path.
+    #[inline]
+    pub fn cached_initial_byte_frontiers(&self) -> Option<&[TokenizerStateSet]> {
+        self.initial_byte_frontiers.get().map(AsRef::as_ref)
     }
 
     pub fn cached_singleton_epsilon_closures(
@@ -17804,6 +17815,35 @@ mod tests {
 
         let result = tokenizer.execute_from_state_end_only(b"ab", tokenizer.initial_state_id());
         assert_eq!(result.as_slice(), &[3]);
+    }
+
+    #[test]
+    fn reset_byte_projection_does_not_materialize_all_state_closures() {
+        let mut dfa = DFA::new(7);
+        dfa.ensure_group_capacity(1);
+        dfa.add_epsilon_transition(0, 1);
+        dfa.add_epsilon_transition(0, 4);
+        dfa.add_transition(1, b'a', 2);
+        dfa.add_epsilon_transition(2, 3);
+        dfa.add_transition(3, b'b', 3);
+        dfa.add_transition(4, b'a', 5);
+        dfa.add_epsilon_transition(5, 6);
+        let mut accepting = BitSet::new(1); accepting.set(0);
+        dfa.overwrite_state_metadata(3, accepting.clone(), BitSet::new(1));
+        dfa.overwrite_state_metadata(6, accepting, BitSet::new(1));
+        dfa.recompute_possible_futures();
+        let tokenizer = Tokenizer::from_parts(dfa, 1, None);
+        assert!(tokenizer.cached_singleton_epsilon_closures().is_none());
+        assert!(tokenizer.cached_initial_byte_frontiers().is_none());
+        let frontiers = tokenizer.initial_byte_frontiers();
+        assert!(tokenizer.cached_singleton_epsilon_closures().is_none(),
+            "preparing reset must not decode unrelated state closures");
+        assert_eq!(frontiers[b'a' as usize].as_slice(), &[2, 3, 5, 6]);
+        for byte in 0u16..=255 {
+            let expected = tokenizer.execute_from_state_end_only(&[byte as u8], tokenizer.initial_state_id());
+            assert_eq!(frontiers[byte as usize].as_slice(), expected.as_slice(), "byte {byte}");
+        }
+        assert!(tokenizer.cached_initial_byte_frontiers().is_some());
     }
 
     #[test]

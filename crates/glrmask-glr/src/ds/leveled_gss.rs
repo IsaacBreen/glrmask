@@ -1891,6 +1891,13 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
         self.union_ids(left, right)
     }
 
+    /// Whether this interned language contains the empty concrete stack.
+    /// Key zero denotes the empty language and therefore returns false.
+    #[inline]
+    pub fn contains_empty_key(&self, root: u32) -> bool {
+        self.nodes[root as usize].empty
+    }
+
     pub fn top_branches(&self, root: u32) -> &[(T, u32)] {
         &self.nodes[root as usize].children
     }
@@ -4973,6 +4980,16 @@ impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> LeveledGSS<T, A> {
         segment.max_depth = segment.next.max_depth() + new_len as u32;
         segment.segments_len = segment.next.segments_len() + new_len;
         true
+    }
+
+    /// Whether the represented language contains the empty concrete stack.
+    /// This differs from `is_empty()`, which asks whether no stack exists.
+    #[inline]
+    pub fn contains_empty_stack(&self) -> bool {
+        match &*self.inner {
+            Upper::Branch(branch) => branch.empty.is_some(),
+            Upper::Interface(interface) => interface.inner.empty(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {

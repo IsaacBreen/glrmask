@@ -101,6 +101,7 @@ mod dynamic_constraint;
 pub(crate) use glrmask_vocab::__private as vocab;
 
 pub use runtime::{Constraint, ConstraintState};
+pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
 pub use public_api::{BuildOptions, Grammar, Optimization, PreparedGrammar, Requirement, LarkOptions};
