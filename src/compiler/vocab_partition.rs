@@ -82,7 +82,7 @@ fn singleton_literal_language_bytes(grammar: &GrammarDef) -> Option<Vec<u8>> {
                     }
                     Terminal::Pattern { .. }
                     | Terminal::Expr { .. }
-                    | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => return None,
+                    | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => return None,
                 },
                 Symbol::Nonterminal(child) => {
                     let child = expand(child as usize, grammar, rules_by_lhs, state, memo)?;

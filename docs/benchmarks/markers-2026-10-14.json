@@ -1,0 +1,1632 @@
+{
+  "date": "2026-10-14",
+  "baseline_revision": "de1a09b54700448db8ebc6691ab77a33b9ec9d5c",
+  "baseline_binary_sha256": "2d4dd0df403ada37eb8ac496a698e435f6fa09bae029dfcf2fb854bb544cdc1e",
+  "candidate_binary_sha256": "98d3275c2001a04ef5f0570348a09a00b0b7098c6c9ddbcfa6d1fce75996060c",
+  "correctness_gates": [
+    {
+      "name": "Root library + integration",
+      "targets": 47,
+      "passed": 1617,
+      "failed": 0,
+      "ignored": 51,
+      "log": "canonical-root-accepted.log"
+    },
+    {
+      "name": "Lexer",
+      "targets": 1,
+      "passed": 269,
+      "failed": 0,
+      "ignored": 3,
+      "log": "canonical-lexer-accepted.log"
+    },
+    {
+      "name": "Grammar standalone",
+      "targets": 1,
+      "passed": 120,
+      "failed": 0,
+      "ignored": 0,
+      "log": "canonical-grammar-final.log"
+    },
+    {
+      "name": "GLR",
+      "targets": 1,
+      "passed": 268,
+      "failed": 0,
+      "ignored": 2,
+      "log": "canonical-glr-accepted.log"
+    },
+    {
+      "name": "Terminal automata",
+      "targets": 1,
+      "passed": 275,
+      "failed": 0,
+      "ignored": 0,
+      "log": "canonical-terminal-dwa-final.log"
+    }
+  ],
+  "rust_passed": 2549,
+  "rust_ignored": 56,
+  "python_passed": 232,
+  "differential_frontier_comparisons": 10672,
+  "performance": {
+    "completed_at": 1791969843.6412852,
+    "host": "macOS-27.0-arm64-arm-64bit",
+    "binaries": {
+      "baseline": "2d4dd0df403ada37eb8ac496a698e435f6fa09bae029dfcf2fb854bb544cdc1e",
+      "unmarked": "98d3275c2001a04ef5f0570348a09a00b0b7098c6c9ddbcfa6d1fce75996060c",
+      "marked": "98d3275c2001a04ef5f0570348a09a00b0b7098c6c9ddbcfa6d1fce75996060c"
+    },
+    "samples_per_run": 51,
+    "rounds_per_sample": 16,
+    "independent_runs": 3,
+    "counterbalanced_order": [
+      [
+        "baseline",
+        "unmarked",
+        "marked"
+      ],
+      [
+        "marked",
+        "baseline",
+        "unmarked"
+      ],
+      [
+        "unmarked",
+        "marked",
+        "baseline"
+      ]
+    ],
+    "statistic": "Median across 3 run medians of whole-sequence average nanoseconds per committed model token. These are not individual-token p99 tail measurements.",
+    "compile_and_start_excluded": true,
+    "mask_after_actual_commit": true,
+    "case_count": 24,
+    "rows": [
+      {
+        "mode": "Balanced",
+        "case": "alternating_single_tokens",
+        "baseline_commit_median_ns": 1066.619873046875,
+        "baseline_commit_run_p50_ns": [
+          1058.533203125,
+          1066.619873046875,
+          1073.069580078125
+        ],
+        "baseline_mask_after_commit_median_ns": 472.4580078125,
+        "baseline_mask_after_commit_run_p50_ns": [
+          469.09228515625,
+          473.843017578125,
+          472.4580078125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1729.919189453125,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1716.54248046875,
+          1736.25634765625,
+          1729.919189453125
+        ],
+        "unmarked_commit_median_ns": 1061.787841796875,
+        "unmarked_commit_run_p50_ns": [
+          1057.25146484375,
+          1061.787841796875,
+          1062.642333984375
+        ],
+        "unmarked_mask_after_commit_median_ns": 472.172607421875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          472.172607421875,
+          472.6015625,
+          461.3271484375
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1707.692626953125,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1700.886962890625,
+          1718.210693359375,
+          1707.692626953125
+        ],
+        "marked_commit_median_ns": 1143.554931640625,
+        "marked_commit_run_p50_ns": [
+          1148.6611328125,
+          1135.009765625,
+          1143.554931640625
+        ],
+        "marked_mask_after_commit_median_ns": 467.456787109375,
+        "marked_mask_after_commit_run_p50_ns": [
+          478.32373046875,
+          467.456787109375,
+          461.0341796875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1792.073974609375,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1820.302490234375,
+          1792.073974609375,
+          1785.60400390625
+        ],
+        "unmarked_commit_ratio": 0.9954697719664674,
+        "marked_commit_overhead_ns": 81.76708984375,
+        "unmarked_mask_ratio": 0.9993959243236316,
+        "marked_mask_ratio": 0.9900125076330688
+      },
+      {
+        "mode": "Balanced",
+        "case": "dense_16_markers",
+        "baseline_commit_median_ns": 857.594970703125,
+        "baseline_commit_run_p50_ns": [
+          881.255615234375,
+          851.511474609375,
+          857.594970703125
+        ],
+        "baseline_mask_after_commit_median_ns": 186.781494140625,
+        "baseline_mask_after_commit_run_p50_ns": [
+          195.309814453125,
+          183.76708984375,
+          186.781494140625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1125.0107421875,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1155.63916015625,
+          1115.21337890625,
+          1125.0107421875
+        ],
+        "unmarked_commit_median_ns": 866.73974609375,
+        "unmarked_commit_run_p50_ns": [
+          864.614013671875,
+          872.40576171875,
+          866.73974609375
+        ],
+        "unmarked_mask_after_commit_median_ns": 187.90283203125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          184.810546875,
+          187.90283203125,
+          193.972412109375
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1133.900634765625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1129.008056640625,
+          1133.900634765625,
+          1146.8701171875
+        ],
+        "marked_commit_median_ns": 1100.57568359375,
+        "marked_commit_run_p50_ns": [
+          1100.57568359375,
+          1098.613037109375,
+          1114.40966796875
+        ],
+        "marked_mask_after_commit_median_ns": 185.438232421875,
+        "marked_mask_after_commit_run_p50_ns": [
+          185.438232421875,
+          184.443115234375,
+          188.59716796875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1369.0908203125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1369.0908203125,
+          1353.657958984375,
+          1377.726806640625
+        ],
+        "unmarked_commit_ratio": 1.010663280106607,
+        "marked_commit_overhead_ns": 233.8359375,
+        "unmarked_mask_ratio": 1.006003474250938,
+        "marked_mask_ratio": 0.9868836484116157
+      },
+      {
+        "mode": "Balanced",
+        "case": "fused_eight_lexemes",
+        "baseline_commit_median_ns": 6181.3173828125,
+        "baseline_commit_run_p50_ns": [
+          6074.9501953125,
+          6181.3173828125,
+          6188.720703125
+        ],
+        "baseline_mask_after_commit_median_ns": 194.505859375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          190.5009765625,
+          194.505859375,
+          197.5673828125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 6480.71484375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          6378.1728515625,
+          6480.71484375,
+          6520.1435546875
+        ],
+        "unmarked_commit_median_ns": 6331.0126953125,
+        "unmarked_commit_run_p50_ns": [
+          6331.0126953125,
+          6166.994140625,
+          6332.2724609375
+        ],
+        "unmarked_mask_after_commit_median_ns": 202.9814453125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          202.9814453125,
+          202.18359375,
+          209.638671875
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 6603.150390625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          6603.150390625,
+          6450.3173828125,
+          6639.728515625
+        ],
+        "marked_commit_median_ns": 6636.59765625,
+        "marked_commit_run_p50_ns": [
+          6699.0947265625,
+          6630.453125,
+          6636.59765625
+        ],
+        "marked_mask_after_commit_median_ns": 196.4833984375,
+        "marked_mask_after_commit_run_p50_ns": [
+          192.8134765625,
+          196.4833984375,
+          202.6943359375
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 6958.2119140625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          7055.828125,
+          6943.9677734375,
+          6958.2119140625
+        ],
+        "unmarked_commit_ratio": 1.0242173800873315,
+        "marked_commit_overhead_ns": 305.5849609375,
+        "unmarked_mask_ratio": 1.0435749646038137,
+        "marked_mask_ratio": 0.9679869908060024
+      },
+      {
+        "mode": "Balanced",
+        "case": "inactive_128_markers",
+        "baseline_commit_median_ns": 879.86279296875,
+        "baseline_commit_run_p50_ns": [
+          878.1630859375,
+          884.593017578125,
+          879.86279296875
+        ],
+        "baseline_mask_after_commit_median_ns": 188.81005859375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          187.53173828125,
+          189.906982421875,
+          188.81005859375
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1145.34521484375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1141.947509765625,
+          1147.41015625,
+          1145.34521484375
+        ],
+        "unmarked_commit_median_ns": 861.907958984375,
+        "unmarked_commit_run_p50_ns": [
+          862.091552734375,
+          861.907958984375,
+          855.82470703125
+        ],
+        "unmarked_mask_after_commit_median_ns": 186.815673828125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          186.815673828125,
+          183.844970703125,
+          187.25439453125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1118.794677734375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1125.905517578125,
+          1118.794677734375,
+          1117.044677734375
+        ],
+        "marked_commit_median_ns": 865.203857421875,
+        "marked_commit_run_p50_ns": [
+          874.8876953125,
+          843.658935546875,
+          865.203857421875
+        ],
+        "marked_mask_after_commit_median_ns": 185.521240234375,
+        "marked_mask_after_commit_run_p50_ns": [
+          185.521240234375,
+          181.848388671875,
+          186.650146484375
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1124.857666015625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1136.66748046875,
+          1096.36376953125,
+          1124.857666015625
+        ],
+        "unmarked_commit_ratio": 0.979593597856555,
+        "marked_commit_overhead_ns": 3.2958984375,
+        "unmarked_mask_ratio": 0.9894370841231707,
+        "marked_mask_ratio": 0.9930710653596394
+      },
+      {
+        "mode": "Balanced",
+        "case": "inactive_16_markers",
+        "baseline_commit_median_ns": 1606.45556640625,
+        "baseline_commit_run_p50_ns": [
+          1577.422607421875,
+          1632.313720703125,
+          1606.45556640625
+        ],
+        "baseline_mask_after_commit_median_ns": 186.12646484375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          182.026123046875,
+          186.12646484375,
+          187.0634765625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1893.53369140625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1842.987060546875,
+          1928.2529296875,
+          1893.53369140625
+        ],
+        "unmarked_commit_median_ns": 841.919921875,
+        "unmarked_commit_run_p50_ns": [
+          858.591796875,
+          841.919921875,
+          825.14404296875
+        ],
+        "unmarked_mask_after_commit_median_ns": 189.553955078125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          195.304443359375,
+          189.553955078125,
+          187.644287109375
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1106.52685546875,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1121.9384765625,
+          1106.52685546875,
+          1089.477294921875
+        ],
+        "marked_commit_median_ns": 848.460205078125,
+        "marked_commit_run_p50_ns": [
+          848.460205078125,
+          845.651611328125,
+          866.648681640625
+        ],
+        "marked_mask_after_commit_median_ns": 181.824951171875,
+        "marked_mask_after_commit_run_p50_ns": [
+          180.09619140625,
+          181.824951171875,
+          185.2021484375
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1108.265869140625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1108.265869140625,
+          1101.02392578125,
+          1128.65185546875
+        ],
+        "unmarked_commit_ratio": 0.5240854085733799,
+        "marked_commit_overhead_ns": 6.540283203125,
+        "unmarked_mask_ratio": 1.0184148462565616,
+        "marked_mask_ratio": 0.9592253092104331
+      },
+      {
+        "mode": "Balanced",
+        "case": "inactive_512_markers",
+        "baseline_commit_median_ns": 882.975341796875,
+        "baseline_commit_run_p50_ns": [
+          896.8818359375,
+          882.975341796875,
+          877.197998046875
+        ],
+        "baseline_mask_after_commit_median_ns": 189.598876953125,
+        "baseline_mask_after_commit_run_p50_ns": [
+          189.598876953125,
+          186.4482421875,
+          190.7578125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1150.206787109375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1178.527587890625,
+          1140.573974609375,
+          1150.206787109375
+        ],
+        "unmarked_commit_median_ns": 874.27783203125,
+        "unmarked_commit_run_p50_ns": [
+          869.628662109375,
+          874.27783203125,
+          875.417236328125
+        ],
+        "unmarked_mask_after_commit_median_ns": 184.582763671875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          184.582763671875,
+          183.54150390625,
+          186.331298828125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1139.53662109375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1139.53662109375,
+          1133.117919921875,
+          1144.0625
+        ],
+        "marked_commit_median_ns": 879.923828125,
+        "marked_commit_run_p50_ns": [
+          879.923828125,
+          876.789794921875,
+          888.2548828125
+        ],
+        "marked_mask_after_commit_median_ns": 184.740234375,
+        "marked_mask_after_commit_run_p50_ns": [
+          191.731689453125,
+          184.740234375,
+          184.07958984375
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1149.394287109375,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1155.375,
+          1143.3310546875,
+          1149.394287109375
+        ],
+        "unmarked_commit_ratio": 0.9901497704931087,
+        "marked_commit_overhead_ns": 5.64599609375,
+        "unmarked_mask_ratio": 0.9735435496145363,
+        "marked_mask_ratio": 1.0008531170516275
+      },
+      {
+        "mode": "Balanced",
+        "case": "long_fixed_lexeme_in_chunks",
+        "baseline_commit_median_ns": 384.470703125,
+        "baseline_commit_run_p50_ns": [
+          384.470703125,
+          385.02001953125,
+          382.395263671875
+        ],
+        "baseline_mask_after_commit_median_ns": 182.9072265625,
+        "baseline_mask_after_commit_run_p50_ns": [
+          184.982421875,
+          180.999755859375,
+          182.9072265625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1252.919677734375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1260.935546875,
+          1247.568603515625,
+          1252.919677734375
+        ],
+        "unmarked_commit_median_ns": 372.172607421875,
+        "unmarked_commit_run_p50_ns": [
+          361.88818359375,
+          372.172607421875,
+          374.176025390625
+        ],
+        "unmarked_mask_after_commit_median_ns": 187.05712890625,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          181.38330078125,
+          187.05712890625,
+          188.67236328125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1262.552978515625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1230.133056640625,
+          1262.552978515625,
+          1268.757568359375
+        ],
+        "marked_commit_median_ns": 376.037841796875,
+        "marked_commit_run_p50_ns": [
+          376.689208984375,
+          376.037841796875,
+          375.31494140625
+        ],
+        "marked_mask_after_commit_median_ns": 183.758056640625,
+        "marked_mask_after_commit_run_p50_ns": [
+          183.86328125,
+          183.758056640625,
+          182.3544921875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1270.884033203125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1280.233154296875,
+          1270.884033203125,
+          1260.751953125
+        ],
+        "unmarked_commit_ratio": 0.9680129185314632,
+        "marked_commit_overhead_ns": 3.865234375,
+        "unmarked_mask_ratio": 1.022688564152122,
+        "marked_mask_ratio": 0.9823632903759661
+      },
+      {
+        "mode": "Balanced",
+        "case": "nested_parentheses",
+        "baseline_commit_median_ns": 945.0701923076923,
+        "baseline_commit_run_p50_ns": [
+          952.1644230769231,
+          931.7721153846154,
+          945.0701923076923
+        ],
+        "baseline_mask_after_commit_median_ns": 522.8423076923077,
+        "baseline_mask_after_commit_run_p50_ns": [
+          529.498076923077,
+          519.9971153846154,
+          522.8423076923077
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1649.2384615384615,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1672.316346153846,
+          1623.0788461538461,
+          1649.2384615384615
+        ],
+        "unmarked_commit_median_ns": 932.9326923076923,
+        "unmarked_commit_run_p50_ns": [
+          932.9326923076923,
+          928.2471153846154,
+          958.5317307692308
+        ],
+        "unmarked_mask_after_commit_median_ns": 517.8894230769231,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          508.19807692307694,
+          517.8894230769231,
+          524.6846153846154
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1617.9903846153845,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1604.6076923076923,
+          1617.9903846153845,
+          1656.5307692307692
+        ],
+        "marked_commit_median_ns": 1139.5048076923076,
+        "marked_commit_run_p50_ns": [
+          1154.9259615384615,
+          1122.8778846153846,
+          1139.5048076923076
+        ],
+        "marked_mask_after_commit_median_ns": 512.7105769230769,
+        "marked_mask_after_commit_run_p50_ns": [
+          527.5990384615385,
+          502.9221153846154,
+          512.7105769230769
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1825.8846153846155,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1878.6057692307693,
+          1787.4586538461538,
+          1825.8846153846155
+        ],
+        "unmarked_commit_ratio": 0.987157038600104,
+        "marked_commit_overhead_ns": 206.57211538461536,
+        "unmarked_mask_ratio": 0.9905270010813674,
+        "marked_mask_ratio": 0.9900000928324096
+      },
+      {
+        "mode": "FastBuild",
+        "case": "alternating_single_tokens",
+        "baseline_commit_median_ns": 656.32177734375,
+        "baseline_commit_run_p50_ns": [
+          650.1572265625,
+          656.32177734375,
+          671.91552734375
+        ],
+        "baseline_mask_after_commit_median_ns": 464.15478515625,
+        "baseline_mask_after_commit_run_p50_ns": [
+          461.110595703125,
+          464.15478515625,
+          472.320068359375
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1353.3525390625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1335.205322265625,
+          1353.3525390625,
+          1371.49072265625
+        ],
+        "unmarked_commit_median_ns": 653.900146484375,
+        "unmarked_commit_run_p50_ns": [
+          652.25146484375,
+          661.671630859375,
+          653.900146484375
+        ],
+        "unmarked_mask_after_commit_median_ns": 450.26806640625,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          450.26806640625,
+          462.25830078125,
+          447.733154296875
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1337.291015625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1337.291015625,
+          1362.101806640625,
+          1336.0693359375
+        ],
+        "marked_commit_median_ns": 724.568603515625,
+        "marked_commit_run_p50_ns": [
+          737.427001953125,
+          721.669921875,
+          724.568603515625
+        ],
+        "marked_mask_after_commit_median_ns": 458.14208984375,
+        "marked_mask_after_commit_run_p50_ns": [
+          472.498291015625,
+          458.14208984375,
+          453.464599609375
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1429.504638671875,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1458.494873046875,
+          1418.314453125,
+          1429.504638671875
+        ],
+        "unmarked_commit_ratio": 0.9963102993943371,
+        "marked_commit_overhead_ns": 70.66845703125,
+        "unmarked_mask_ratio": 0.9700817072362503,
+        "marked_mask_ratio": 1.0174874125548041
+      },
+      {
+        "mode": "FastBuild",
+        "case": "dense_16_markers",
+        "baseline_commit_median_ns": 497.273681640625,
+        "baseline_commit_run_p50_ns": [
+          497.273681640625,
+          506.846435546875,
+          496.175537109375
+        ],
+        "baseline_mask_after_commit_median_ns": 186.716552734375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          186.716552734375,
+          189.38232421875,
+          185.8681640625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 819.68212890625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          817.535400390625,
+          831.61376953125,
+          819.68212890625
+        ],
+        "unmarked_commit_median_ns": 480.570556640625,
+        "unmarked_commit_run_p50_ns": [
+          489.35986328125,
+          480.570556640625,
+          474.212646484375
+        ],
+        "unmarked_mask_after_commit_median_ns": 182.787353515625,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          187.132568359375,
+          182.787353515625,
+          181.13330078125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 804.078125,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          823.109375,
+          804.078125,
+          794.19970703125
+        ],
+        "marked_commit_median_ns": 768.107177734375,
+        "marked_commit_run_p50_ns": [
+          765.035400390625,
+          768.60546875,
+          768.107177734375
+        ],
+        "marked_mask_after_commit_median_ns": 185.259033203125,
+        "marked_mask_after_commit_run_p50_ns": [
+          184.965087890625,
+          185.492431640625,
+          185.259033203125
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1100.555419921875,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1100.810546875,
+          1100.555419921875,
+          1094.340087890625
+        ],
+        "unmarked_commit_ratio": 0.9664105991998362,
+        "marked_commit_overhead_ns": 287.53662109375,
+        "unmarked_mask_ratio": 0.978956342320974,
+        "marked_mask_ratio": 1.0135221591645218
+      },
+      {
+        "mode": "FastBuild",
+        "case": "fused_eight_lexemes",
+        "baseline_commit_median_ns": 2709.1474609375,
+        "baseline_commit_run_p50_ns": [
+          2719.5634765625,
+          2666.583984375,
+          2709.1474609375
+        ],
+        "baseline_mask_after_commit_median_ns": 192.3017578125,
+        "baseline_mask_after_commit_run_p50_ns": [
+          193.4189453125,
+          191.294921875,
+          192.3017578125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 3043.458984375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          3057.2119140625,
+          2984.783203125,
+          3043.458984375
+        ],
+        "unmarked_commit_median_ns": 2698.2841796875,
+        "unmarked_commit_run_p50_ns": [
+          2698.2841796875,
+          2715.4912109375,
+          2673.9501953125
+        ],
+        "unmarked_mask_after_commit_median_ns": 191.7421875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          191.7421875,
+          197.1328125,
+          188.591796875
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 3024.78125,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          3024.78125,
+          3058.9189453125,
+          2988.2822265625
+        ],
+        "marked_commit_median_ns": 3116.943359375,
+        "marked_commit_run_p50_ns": [
+          3180.869140625,
+          3116.943359375,
+          3108.96875
+        ],
+        "marked_mask_after_commit_median_ns": 188.490234375,
+        "marked_mask_after_commit_run_p50_ns": [
+          197.7314453125,
+          188.490234375,
+          187.2685546875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 3467.7333984375,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          3555.1337890625,
+          3449.5859375,
+          3467.7333984375
+        ],
+        "unmarked_commit_ratio": 0.9959901476731574,
+        "marked_commit_overhead_ns": 418.6591796875,
+        "unmarked_mask_ratio": 0.9970901445786804,
+        "marked_mask_ratio": 0.983039970663733
+      },
+      {
+        "mode": "FastBuild",
+        "case": "inactive_128_markers",
+        "baseline_commit_median_ns": 501.790283203125,
+        "baseline_commit_run_p50_ns": [
+          501.790283203125,
+          507.863525390625,
+          499.51123046875
+        ],
+        "baseline_mask_after_commit_median_ns": 187.31494140625,
+        "baseline_mask_after_commit_run_p50_ns": [
+          187.31494140625,
+          187.569580078125,
+          184.63330078125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 823.486328125,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          823.486328125,
+          827.505615234375,
+          814.17822265625
+        ],
+        "unmarked_commit_median_ns": 491.8515625,
+        "unmarked_commit_run_p50_ns": [
+          481.08935546875,
+          492.054931640625,
+          491.8515625
+        ],
+        "unmarked_mask_after_commit_median_ns": 183.89306640625,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          183.89306640625,
+          186.373046875,
+          183.80078125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 818.22705078125,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          811.655517578125,
+          827.769287109375,
+          818.22705078125
+        ],
+        "marked_commit_median_ns": 490.234130859375,
+        "marked_commit_run_p50_ns": [
+          495.574462890625,
+          490.234130859375,
+          488.1484375
+        ],
+        "marked_mask_after_commit_median_ns": 183.904052734375,
+        "marked_mask_after_commit_run_p50_ns": [
+          185.651611328125,
+          183.904052734375,
+          182.320556640625
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 820.048095703125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          827.880859375,
+          820.048095703125,
+          808.4208984375
+        ],
+        "unmarked_commit_ratio": 0.980193477164041,
+        "marked_commit_overhead_ns": -1.617431640625,
+        "unmarked_mask_ratio": 0.9817319698348109,
+        "marked_mask_ratio": 1.0000597430253337
+      },
+      {
+        "mode": "FastBuild",
+        "case": "inactive_16_markers",
+        "baseline_commit_median_ns": 1253.824462890625,
+        "baseline_commit_run_p50_ns": [
+          1221.862060546875,
+          1256.54150390625,
+          1253.824462890625
+        ],
+        "baseline_mask_after_commit_median_ns": 190.18310546875,
+        "baseline_mask_after_commit_run_p50_ns": [
+          190.18310546875,
+          187.474365234375,
+          190.186279296875
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1588.856689453125,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1552.388671875,
+          1599.84326171875,
+          1588.856689453125
+        ],
+        "unmarked_commit_median_ns": 473.3271484375,
+        "unmarked_commit_run_p50_ns": [
+          473.3271484375,
+          479.248046875,
+          473.10400390625
+        ],
+        "unmarked_mask_after_commit_median_ns": 183.5146484375,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          182.474365234375,
+          186.317138671875,
+          183.5146484375
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 798.563720703125,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          798.563720703125,
+          808.06396484375,
+          798.1875
+        ],
+        "marked_commit_median_ns": 486.77587890625,
+        "marked_commit_run_p50_ns": [
+          484.446044921875,
+          491.93359375,
+          486.77587890625
+        ],
+        "marked_mask_after_commit_median_ns": 184.33056640625,
+        "marked_mask_after_commit_run_p50_ns": [
+          182.323486328125,
+          185.08154296875,
+          184.33056640625
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 808.309326171875,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          807.58642578125,
+          818.400390625,
+          808.309326171875
+        ],
+        "unmarked_commit_ratio": 0.377506710426011,
+        "marked_commit_overhead_ns": 13.44873046875,
+        "unmarked_mask_ratio": 0.9649366487374678,
+        "marked_mask_ratio": 1.004446064527802
+      },
+      {
+        "mode": "FastBuild",
+        "case": "inactive_512_markers",
+        "baseline_commit_median_ns": 508.666748046875,
+        "baseline_commit_run_p50_ns": [
+          509.86767578125,
+          508.666748046875,
+          507.161865234375
+        ],
+        "baseline_mask_after_commit_median_ns": 187.23046875,
+        "baseline_mask_after_commit_run_p50_ns": [
+          189.01513671875,
+          185.63134765625,
+          187.23046875
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 831.349609375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          831.349609375,
+          829.010986328125,
+          831.90869140625
+        ],
+        "unmarked_commit_median_ns": 492.442626953125,
+        "unmarked_commit_run_p50_ns": [
+          490.387451171875,
+          499.8271484375,
+          492.442626953125
+        ],
+        "unmarked_mask_after_commit_median_ns": 184.798583984375,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          184.6845703125,
+          187.76708984375,
+          184.798583984375
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 820.413818359375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          817.596435546875,
+          833.964599609375,
+          820.413818359375
+        ],
+        "marked_commit_median_ns": 504.058837890625,
+        "marked_commit_run_p50_ns": [
+          504.058837890625,
+          504.45556640625,
+          492.492919921875
+        ],
+        "marked_mask_after_commit_median_ns": 186.704345703125,
+        "marked_mask_after_commit_run_p50_ns": [
+          187.107177734375,
+          186.704345703125,
+          180.9775390625
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 835.754638671875,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          840.3720703125,
+          835.754638671875,
+          809.998046875
+        ],
+        "unmarked_commit_ratio": 0.9681046163209102,
+        "marked_commit_overhead_ns": 11.6162109375,
+        "unmarked_mask_ratio": 0.9870112766268178,
+        "marked_mask_ratio": 1.0103126424329698
+      },
+      {
+        "mode": "FastBuild",
+        "case": "long_fixed_lexeme_in_chunks",
+        "baseline_commit_median_ns": 445.5771484375,
+        "baseline_commit_run_p50_ns": [
+          447.886474609375,
+          445.129150390625,
+          445.5771484375
+        ],
+        "baseline_mask_after_commit_median_ns": 185.862060546875,
+        "baseline_mask_after_commit_run_p50_ns": [
+          185.862060546875,
+          186.372314453125,
+          185.16015625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1742.0654296875,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1741.45458984375,
+          1751.576904296875,
+          1742.0654296875
+        ],
+        "unmarked_commit_median_ns": 427.98876953125,
+        "unmarked_commit_run_p50_ns": [
+          436.146728515625,
+          427.510009765625,
+          427.98876953125
+        ],
+        "unmarked_mask_after_commit_median_ns": 182.538818359375,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          186.1513671875,
+          182.538818359375,
+          182.022216796875
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1717.630859375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1744.2529296875,
+          1717.630859375,
+          1711.24267578125
+        ],
+        "marked_commit_median_ns": 441.05029296875,
+        "marked_commit_run_p50_ns": [
+          442.7080078125,
+          440.327392578125,
+          441.05029296875
+        ],
+        "marked_mask_after_commit_median_ns": 184.645263671875,
+        "marked_mask_after_commit_run_p50_ns": [
+          185.41650390625,
+          184.645263671875,
+          183.5673828125
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1742.2587890625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1747.16162109375,
+          1742.2587890625,
+          1732.523193359375
+        ],
+        "unmarked_commit_ratio": 0.9605267483578838,
+        "marked_commit_overhead_ns": 13.0615234375,
+        "unmarked_mask_ratio": 0.9821198464187807,
+        "marked_mask_ratio": 1.0115397115607099
+      },
+      {
+        "mode": "FastBuild",
+        "case": "nested_parentheses",
+        "baseline_commit_median_ns": 689.4201923076923,
+        "baseline_commit_run_p50_ns": [
+          691.7884615384615,
+          682.8923076923077,
+          689.4201923076923
+        ],
+        "baseline_mask_after_commit_median_ns": 511.5557692307692,
+        "baseline_mask_after_commit_run_p50_ns": [
+          511.5557692307692,
+          505.4509615384615,
+          513.2451923076923
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1429.685576923077,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1429.685576923077,
+          1395.7509615384615,
+          1433.3317307692307
+        ],
+        "unmarked_commit_median_ns": 690.7865384615385,
+        "unmarked_commit_run_p50_ns": [
+          692.7067307692307,
+          690.7865384615385,
+          677.7259615384615
+        ],
+        "unmarked_mask_after_commit_median_ns": 505.80961538461537,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          505.80961538461537,
+          507.43461538461537,
+          495.72403846153844
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1434.2557692307691,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1434.2557692307691,
+          1435.7778846153847,
+          1391.4278846153845
+        ],
+        "marked_commit_median_ns": 864.9423076923077,
+        "marked_commit_run_p50_ns": [
+          864.9423076923077,
+          868.2682692307692,
+          860.4163461538461
+        ],
+        "marked_mask_after_commit_median_ns": 519.0673076923077,
+        "marked_mask_after_commit_run_p50_ns": [
+          532.8182692307693,
+          519.0673076923077,
+          506.1576923076923
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1636.1778846153845,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1642.0240384615386,
+          1636.1778846153845,
+          1606.889423076923
+        ],
+        "unmarked_commit_ratio": 1.0019818771905602,
+        "marked_commit_overhead_ns": 174.15576923076924,
+        "unmarked_mask_ratio": 0.9887672973470822,
+        "marked_mask_ratio": 1.0262108348763028
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "alternating_single_tokens",
+        "baseline_commit_median_ns": 864.39013671875,
+        "baseline_commit_run_p50_ns": [
+          864.39013671875,
+          867.5126953125,
+          862.172607421875
+        ],
+        "baseline_mask_after_commit_median_ns": 523.399658203125,
+        "baseline_mask_after_commit_run_p50_ns": [
+          523.399658203125,
+          516.38427734375,
+          532.3056640625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1495.982421875,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1495.982421875,
+          1490.9765625,
+          1502.054443359375
+        ],
+        "unmarked_commit_median_ns": 868.265869140625,
+        "unmarked_commit_run_p50_ns": [
+          868.265869140625,
+          871.6533203125,
+          855.83544921875
+        ],
+        "unmarked_mask_after_commit_median_ns": 513.76171875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          508.673095703125,
+          513.76171875,
+          517.88525390625
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1486.00244140625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1486.00244140625,
+          1496.399169921875,
+          1477.468017578125
+        ],
+        "marked_commit_median_ns": 883.199462890625,
+        "marked_commit_run_p50_ns": [
+          881.560546875,
+          883.199462890625,
+          891.40869140625
+        ],
+        "marked_mask_after_commit_median_ns": 516.75634765625,
+        "marked_mask_after_commit_run_p50_ns": [
+          519.170654296875,
+          502.85205078125,
+          516.75634765625
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1516.661376953125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1518.961669921875,
+          1497.934814453125,
+          1516.661376953125
+        ],
+        "unmarked_commit_ratio": 1.0044837767776797,
+        "marked_commit_overhead_ns": 14.93359375,
+        "unmarked_mask_ratio": 0.9815858889052147,
+        "marked_mask_ratio": 1.0058288284178432
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "dense_16_markers",
+        "baseline_commit_median_ns": 856.099609375,
+        "baseline_commit_run_p50_ns": [
+          853.3740234375,
+          856.099609375,
+          859.5078125
+        ],
+        "baseline_mask_after_commit_median_ns": 251.265380859375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          252.343994140625,
+          247.953857421875,
+          251.265380859375
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1199.371337890625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1182.118408203125,
+          1199.371337890625,
+          1202.37255859375
+        ],
+        "unmarked_commit_median_ns": 852.650390625,
+        "unmarked_commit_run_p50_ns": [
+          852.650390625,
+          852.32568359375,
+          865.518798828125
+        ],
+        "unmarked_mask_after_commit_median_ns": 248.21435546875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          248.21435546875,
+          246.587646484375,
+          251.396728515625
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1190.918212890625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1190.918212890625,
+          1183.716064453125,
+          1203.3388671875
+        ],
+        "marked_commit_median_ns": 1116.20166015625,
+        "marked_commit_run_p50_ns": [
+          1106.353515625,
+          1116.20166015625,
+          1117.27880859375
+        ],
+        "marked_mask_after_commit_median_ns": 249.168701171875,
+        "marked_mask_after_commit_run_p50_ns": [
+          249.168701171875,
+          252.24755859375,
+          246.203125
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1448.62841796875,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1444.539306640625,
+          1454.80322265625,
+          1448.62841796875
+        ],
+        "unmarked_commit_ratio": 0.9959710076815499,
+        "marked_commit_overhead_ns": 263.55126953125,
+        "unmarked_mask_ratio": 0.9878573587010279,
+        "marked_mask_ratio": 1.003844844917703
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "fused_eight_lexemes",
+        "baseline_commit_median_ns": 4830.484375,
+        "baseline_commit_run_p50_ns": [
+          4783.322265625,
+          4847.736328125,
+          4830.484375
+        ],
+        "baseline_mask_after_commit_median_ns": 252.525390625,
+        "baseline_mask_after_commit_run_p50_ns": [
+          251.947265625,
+          252.525390625,
+          255.0126953125
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 5191.771484375,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          5151.7744140625,
+          5231.732421875,
+          5191.771484375
+        ],
+        "unmarked_commit_median_ns": 4831.419921875,
+        "unmarked_commit_run_p50_ns": [
+          4831.419921875,
+          4802.8984375,
+          4832.2744140625
+        ],
+        "unmarked_mask_after_commit_median_ns": 250.6416015625,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          247.3935546875,
+          250.642578125,
+          250.6416015625
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 5191.9755859375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          5164.1015625,
+          5192.994140625,
+          5191.9755859375
+        ],
+        "marked_commit_median_ns": 4920.1669921875,
+        "marked_commit_run_p50_ns": [
+          4879.517578125,
+          4954.669921875,
+          4920.1669921875
+        ],
+        "marked_mask_after_commit_median_ns": 254.4375,
+        "marked_mask_after_commit_run_p50_ns": [
+          260.205078125,
+          254.4375,
+          251.453125
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 5277.994140625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          5226.7265625,
+          5309.814453125,
+          5277.994140625
+        ],
+        "unmarked_commit_ratio": 1.0001936755824823,
+        "marked_commit_overhead_ns": 88.7470703125,
+        "unmarked_mask_ratio": 0.9925401993920785,
+        "marked_mask_ratio": 1.015144726229949
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "inactive_128_markers",
+        "baseline_commit_median_ns": 870.971435546875,
+        "baseline_commit_run_p50_ns": [
+          844.3798828125,
+          870.971435546875,
+          874.939208984375
+        ],
+        "baseline_mask_after_commit_median_ns": 249.11474609375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          246.540283203125,
+          249.11474609375,
+          255.82275390625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1205.199462890625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1174.560302734375,
+          1205.199462890625,
+          1222.20849609375
+        ],
+        "unmarked_commit_median_ns": 865.0205078125,
+        "unmarked_commit_run_p50_ns": [
+          865.0205078125,
+          862.0908203125,
+          871.5517578125
+        ],
+        "unmarked_mask_after_commit_median_ns": 245.735595703125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          245.735595703125,
+          245.453125,
+          250.819091796875
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1194.021240234375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1194.021240234375,
+          1185.69970703125,
+          1200.642822265625
+        ],
+        "marked_commit_median_ns": 878.285888671875,
+        "marked_commit_run_p50_ns": [
+          880.0859375,
+          878.285888671875,
+          861.0634765625
+        ],
+        "marked_mask_after_commit_median_ns": 247.925537109375,
+        "marked_mask_after_commit_run_p50_ns": [
+          248.951416015625,
+          247.925537109375,
+          242.57421875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1218.861572265625,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1222.98193359375,
+          1218.861572265625,
+          1187.275634765625
+        ],
+        "unmarked_commit_ratio": 0.9931674823174442,
+        "marked_commit_overhead_ns": 13.265380859375,
+        "unmarked_mask_ratio": 0.9864353658560489,
+        "marked_mask_ratio": 1.0089117793455356
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "inactive_16_markers",
+        "baseline_commit_median_ns": 859.252685546875,
+        "baseline_commit_run_p50_ns": [
+          855.72265625,
+          859.252685546875,
+          860.43212890625
+        ],
+        "baseline_mask_after_commit_median_ns": 251.23193359375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          250.920166015625,
+          253.05126953125,
+          251.23193359375
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1194.427001953125,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1192.829833984375,
+          1194.427001953125,
+          1200.540283203125
+        ],
+        "unmarked_commit_median_ns": 850.524658203125,
+        "unmarked_commit_run_p50_ns": [
+          847.107177734375,
+          850.524658203125,
+          870.116455078125
+        ],
+        "unmarked_mask_after_commit_median_ns": 245.58203125,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          245.58203125,
+          244.787841796875,
+          256.4501953125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1181.51806640625,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1181.51806640625,
+          1180.47021484375,
+          1206.105224609375
+        ],
+        "marked_commit_median_ns": 869.822265625,
+        "marked_commit_run_p50_ns": [
+          869.822265625,
+          860.28076171875,
+          871.74462890625
+        ],
+        "marked_mask_after_commit_median_ns": 248.68408203125,
+        "marked_mask_after_commit_run_p50_ns": [
+          251.31396484375,
+          248.68408203125,
+          247.772216796875
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1205.606689453125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1219.431396484375,
+          1201.233154296875,
+          1205.606689453125
+        ],
+        "unmarked_commit_ratio": 0.9898423042597825,
+        "marked_commit_overhead_ns": 19.297607421875,
+        "unmarked_mask_ratio": 0.9775112094114354,
+        "marked_mask_ratio": 1.0126314240722774
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "inactive_512_markers",
+        "baseline_commit_median_ns": 870.12744140625,
+        "baseline_commit_run_p50_ns": [
+          877.869140625,
+          870.12744140625,
+          865.08154296875
+        ],
+        "baseline_mask_after_commit_median_ns": 247.552490234375,
+        "baseline_mask_after_commit_run_p50_ns": [
+          247.932861328125,
+          247.552490234375,
+          245.98779296875
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1210.947265625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1213.3896484375,
+          1210.947265625,
+          1201.538330078125
+        ],
+        "unmarked_commit_median_ns": 878.3876953125,
+        "unmarked_commit_run_p50_ns": [
+          849.822509765625,
+          878.3876953125,
+          883.138427734375
+        ],
+        "unmarked_mask_after_commit_median_ns": 244.718505859375,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          243.389892578125,
+          244.718505859375,
+          251.19580078125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1203.83740234375,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1187.835693359375,
+          1203.83740234375,
+          1224.72119140625
+        ],
+        "marked_commit_median_ns": 900.553466796875,
+        "marked_commit_run_p50_ns": [
+          894.87646484375,
+          900.553466796875,
+          901.814697265625
+        ],
+        "marked_mask_after_commit_median_ns": 245.280517578125,
+        "marked_mask_after_commit_run_p50_ns": [
+          244.77490234375,
+          248.16259765625,
+          245.280517578125
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1240.23486328125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1222.382080078125,
+          1240.23486328125,
+          1248.158935546875
+        ],
+        "unmarked_commit_ratio": 1.0094931541210794,
+        "marked_commit_overhead_ns": 22.165771484375,
+        "unmarked_mask_ratio": 0.9885519859957099,
+        "marked_mask_ratio": 1.002296564032934
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "long_fixed_lexeme_in_chunks",
+        "baseline_commit_median_ns": 380.136962890625,
+        "baseline_commit_run_p50_ns": [
+          382.557373046875,
+          380.136962890625,
+          378.05126953125
+        ],
+        "baseline_mask_after_commit_median_ns": 466.780517578125,
+        "baseline_mask_after_commit_run_p50_ns": [
+          466.780517578125,
+          466.989501953125,
+          465.414306640625
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 922.759765625,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          925.842041015625,
+          922.759765625,
+          914.997314453125
+        ],
+        "unmarked_commit_median_ns": 376.47509765625,
+        "unmarked_commit_run_p50_ns": [
+          372.945068359375,
+          376.47509765625,
+          382.03955078125
+        ],
+        "unmarked_mask_after_commit_median_ns": 456.938232421875,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          451.406494140625,
+          456.938232421875,
+          463.218017578125
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 904.88671875,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          893.188232421875,
+          904.88671875,
+          915.069580078125
+        ],
+        "marked_commit_median_ns": 382.54833984375,
+        "marked_commit_run_p50_ns": [
+          384.1455078125,
+          382.54833984375,
+          382.130859375
+        ],
+        "marked_mask_after_commit_median_ns": 456.306640625,
+        "marked_mask_after_commit_run_p50_ns": [
+          454.45263671875,
+          459.767822265625,
+          456.306640625
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 913.594970703125,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          913.757568359375,
+          913.594970703125,
+          904.968505859375
+        ],
+        "unmarked_commit_ratio": 0.9903669845559623,
+        "marked_commit_overhead_ns": 6.0732421875,
+        "unmarked_mask_ratio": 0.9789145330929483,
+        "marked_mask_ratio": 0.9986177742371711
+      },
+      {
+        "mode": "FastRuntime",
+        "case": "nested_parentheses",
+        "baseline_commit_median_ns": 768.7894230769231,
+        "baseline_commit_run_p50_ns": [
+          765.7875,
+          768.7894230769231,
+          776.0038461538461
+        ],
+        "baseline_mask_after_commit_median_ns": 541.7528846153846,
+        "baseline_mask_after_commit_run_p50_ns": [
+          541.7528846153846,
+          539.4759615384615,
+          547.839423076923
+        ],
+        "baseline_commit_plus_mask_with_timer_overhead_median_ns": 1421.2740384615386,
+        "baseline_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1407.7701923076922,
+          1421.2740384615386,
+          1429.9682692307692
+        ],
+        "unmarked_commit_median_ns": 763.9403846153846,
+        "unmarked_commit_run_p50_ns": [
+          763.9403846153846,
+          759.0932692307692,
+          788.625
+        ],
+        "unmarked_mask_after_commit_median_ns": 528.8182692307693,
+        "unmarked_mask_after_commit_run_p50_ns": [
+          526.9615384615385,
+          528.8182692307693,
+          541.5913461538462
+        ],
+        "unmarked_commit_plus_mask_with_timer_overhead_median_ns": 1386.698076923077,
+        "unmarked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1386.698076923077,
+          1381.4509615384616,
+          1423.2384615384615
+        ],
+        "marked_commit_median_ns": 842.8307692307692,
+        "marked_commit_run_p50_ns": [
+          842.7884615384615,
+          842.8307692307692,
+          864.0230769230769
+        ],
+        "marked_mask_after_commit_median_ns": 544.0548076923077,
+        "marked_mask_after_commit_run_p50_ns": [
+          547.4769230769231,
+          538.1461538461539,
+          544.0548076923077
+        ],
+        "marked_commit_plus_mask_with_timer_overhead_median_ns": 1503.2067307692307,
+        "marked_commit_plus_mask_with_timer_overhead_run_p50_ns": [
+          1503.2067307692307,
+          1490.3471153846153,
+          1508.173076923077
+        ],
+        "unmarked_commit_ratio": 0.9936926311471206,
+        "marked_commit_overhead_ns": 78.89038461538462,
+        "unmarked_mask_ratio": 0.9761245103590022,
+        "marked_mask_ratio": 1.0288124282916735
+      }
+    ],
+    "runs": [
+      {
+        "block": 1,
+        "name": "baseline",
+        "elapsed_s": 11.902420043945312
+      },
+      {
+        "block": 1,
+        "name": "unmarked",
+        "elapsed_s": 11.795707941055298
+      },
+      {
+        "block": 1,
+        "name": "marked",
+        "elapsed_s": 12.157685041427612
+      },
+      {
+        "block": 2,
+        "name": "marked",
+        "elapsed_s": 12.120350122451782
+      },
+      {
+        "block": 2,
+        "name": "baseline",
+        "elapsed_s": 12.118636131286621
+      },
+      {
+        "block": 2,
+        "name": "unmarked",
+        "elapsed_s": 11.200865745544434
+      },
+      {
+        "block": 3,
+        "name": "unmarked",
+        "elapsed_s": 11.139584064483643
+      },
+      {
+        "block": 3,
+        "name": "marked",
+        "elapsed_s": 12.333315134048462
+      },
+      {
+        "block": 3,
+        "name": "baseline",
+        "elapsed_s": 11.844618082046509
+      }
+    ]
+  },
+  "interpretation": {
+    "sampling_unit": "whole-sequence average time per committed model token",
+    "not_measured": "individual-token p99/p100 tails or real model-serving throughput",
+    "unmarked_commit_ratio_min": 0.377506710426011,
+    "unmarked_commit_ratio_max": 1.0242173800873315,
+    "unmarked_mask_ratio_min": 0.9649366487374678,
+    "unmarked_mask_ratio_max": 1.0435749646038137,
+    "marked_vs_unmarked_mask_ratio_min": 0.9592253092104331,
+    "marked_vs_unmarked_mask_ratio_max": 1.0288124282916735
+  }
+}

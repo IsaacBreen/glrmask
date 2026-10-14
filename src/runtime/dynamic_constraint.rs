@@ -990,6 +990,7 @@ impl DynamicConstraint {
         };
         let inner = Constraint {
             end_tokens: std::sync::Arc::from([]),
+            marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -1288,12 +1289,18 @@ impl DynamicConstraint {
             .iter()
             .map(|special| (special.terminal_id, (special.token_id, special.token_id_end)))
             .collect::<BTreeMap<_, _>>();
+        let markers_by_terminal = constraint.marker_queries.as_deref().map(|queries|
+            queries.terminals.iter().map(|marker| (marker.terminal_id, marker.marker_id)).collect::<BTreeMap<_, _>>()
+        ).unwrap_or_default();
         let terminals = exprs
             .iter()
             .cloned()
             .enumerate()
             .map(|(id, expr)| {
                 let id = id as u32;
+                if let Some(&marker_id) = markers_by_terminal.get(&id) {
+                    return Terminal::MarkerProbe { id, marker_id };
+                }
                 special_by_terminal.get(&id).copied().map_or(
                     Terminal::Expr { id, expr },
                     |(start, end)| if start == end {

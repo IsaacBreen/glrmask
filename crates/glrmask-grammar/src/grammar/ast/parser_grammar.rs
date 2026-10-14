@@ -153,6 +153,7 @@ impl Resolver<'_> {
             }
             GrammarExpr::Literal(bytes) if bytes.is_empty() => ParserExpr::Epsilon,
             GrammarExpr::Literal(bytes) => ParserExpr::Terminal(self.lexical.literal_terminal_id(bytes)),
+            GrammarExpr::MarkerProbe(id) => ParserExpr::Terminal(self.lexical.marker_terminal_id(*id)),
             GrammarExpr::SpecialToken(token) => ParserExpr::Terminal(
                 self.lexical.special_terminal_id("<exact token>", *token)),
             GrammarExpr::SpecialTokenRange(start, end) => ParserExpr::Terminal(
@@ -220,7 +221,7 @@ pub fn resolve_parser_grammar(grammar: &NamedGrammar) -> Result<(ParserGrammar, 
     let mut resolver = Resolver { lexical, rule_ids, named_terminals: FxHashMap::default(), remaining_nodes: 4_000_000 };
     for rule in grammar.rules.iter().filter(|rule| rule.is_terminal) {
         if rule.is_internal {
-            if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
+            if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)) {
                 return Err(error("an internal lexical helper cannot be an exact token"));
             }
             continue;

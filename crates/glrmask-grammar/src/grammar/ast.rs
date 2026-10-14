@@ -87,6 +87,9 @@ pub enum GrammarExpr {
     SpecialToken(u32),
     /// Match one exact model token from an inclusive interval, without expansion.
     SpecialTokenRange(u32, u32),
+    /// Compiler-only probe symbol. Source markers use `marker(id)`, which adds
+    /// the epsilon alternative. No input or vocabulary token can consume it.
+    MarkerProbe(u32),
     CharClass { def: String, negate: bool, utf8: bool },
     RawRegex(String),
     LexerDfa(Arc<LexerDFA>),
@@ -112,6 +115,11 @@ pub enum GrammarExpr {
 }
 
 impl GrammarExpr {
+    /// A passive position marker: an optional compiler probe, never an input token.
+    pub fn marker(id: u32) -> Self {
+        Self::Quantified(Box::new(Self::MarkerProbe(id)), Quantifier::Optional)
+    }
+
     pub fn exact_token_range(&self) -> Option<(u32, u32)> {
         match self {
             Self::SpecialToken(id) => Some((*id, *id)),
@@ -233,7 +241,7 @@ impl NamedGrammar {
                 | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte
-                | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => {}
+                | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_) => {}
             }
         }
 
@@ -366,7 +374,7 @@ impl NamedGrammar {
                         collect_refs(symbol, out);
                     }
                 }
-                GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+                GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
                 | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
                 | GrammarExpr::LexerDfa(_)
                 | GrammarExpr::AnyByte => {}
@@ -542,6 +550,9 @@ fn grammar_expr_to_lark_with_indent(
                 write!(out, "/*hex:{}*/", hex_str).unwrap();
             }
         }
+        GrammarExpr::MarkerProbe(id) => {
+            write!(out, "@mark({id})").unwrap();
+        }
         GrammarExpr::SpecialToken(token_id) => {
             write!(out, "@token({token_id})").unwrap();
         }
@@ -550,7 +561,7 @@ fn grammar_expr_to_lark_with_indent(
         }
         GrammarExpr::Quantified(inner, Quantifier::Optional) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
-            out.push('?');
+            if !matches!(inner.as_ref(), GrammarExpr::MarkerProbe(_)) { out.push('?'); }
         }
         GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
             grammar_expr_to_lark_with_indent(inner, out, true, indent);
@@ -636,6 +647,7 @@ struct Lowerer<'a> {
     terminals: Vec<Terminal>,
     terminal_expr_hash_index: FxHashMap<u64, Vec<TerminalID>>,
     special_terminal_ids: FxHashMap<(u32, u32), TerminalID>,
+    marker_terminal_ids: FxHashMap<u32, TerminalID>,
     nonterminal_ids: FxHashMap<String, NonterminalID>,
     next_nonterminal_id: NonterminalID,
     generated_nonterminal_counter: u32,
@@ -764,6 +776,7 @@ impl<'a> Lowerer<'a> {
             terminals: Vec::new(),
             terminal_expr_hash_index: FxHashMap::default(),
             special_terminal_ids: FxHashMap::default(),
+            marker_terminal_ids: FxHashMap::default(),
             nonterminal_ids: FxHashMap::default(),
             next_nonterminal_id: 0,
             generated_nonterminal_counter: 0,
@@ -971,7 +984,7 @@ impl<'a> Lowerer<'a> {
             })),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -1050,6 +1063,7 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(Some(Symbol::Terminal(self.literal_terminal_id(bytes))))
             }
+            GrammarExpr::MarkerProbe(id) => Ok(Some(Symbol::Terminal(self.marker_terminal_id(*id)))),
             GrammarExpr::SpecialToken(token_id) => Ok(Some(Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
             ))),
@@ -1147,7 +1161,7 @@ impl<'a> Lowerer<'a> {
                 self.nonnullable_terminal_symbol(expr)
             }
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::AnyByte
@@ -1213,7 +1227,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -1328,6 +1342,15 @@ impl<'a> Lowerer<'a> {
                 utf8,
             });
         }
+        id
+    }
+
+    fn marker_terminal_id(&mut self, marker_id: u32) -> TerminalID {
+        if let Some(&id) = self.marker_terminal_ids.get(&marker_id) { return id; }
+        let id = self.terminals.len() as TerminalID;
+        self.marker_terminal_ids.insert(marker_id, id);
+        self.terminal_names.insert(id, format!("@mark({marker_id})"));
+        self.terminals.push(Terminal::MarkerProbe { id, marker_id });
         id
     }
 
@@ -2143,7 +2166,7 @@ impl<'a> Lowerer<'a> {
             }
             GrammarExpr::Ref(_)
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::Shortest(_) | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -2559,6 +2582,7 @@ impl<'a> Lowerer<'a> {
                 Symbol::Nonterminal(self.nonterminal_id(name))
             }
             GrammarExpr::Literal(bytes) => Symbol::Terminal(self.literal_terminal_id(bytes)),
+            GrammarExpr::MarkerProbe(id) => Symbol::Terminal(self.marker_terminal_id(*id)),
             GrammarExpr::SpecialToken(token_id) => Symbol::Terminal(
                 self.special_terminal_id(&format!("@token({token_id})"), *token_id),
             ),
@@ -2902,7 +2926,7 @@ pub fn resolved_named_terminal_exprs(
         .iter()
         .filter(|rule| rule.is_terminal && !rule.is_internal)
     {
-        if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
+        if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)) {
             continue;
         }
         let expr = if let Some(cached) = terminal_expr_cache.get(&rule.name) {
@@ -2943,6 +2967,11 @@ fn grammar_expr_to_expr(
             return Err(GlrMaskError::GrammarParse(format!(
                 "@token({token_id}) cannot be composed inside a byte terminal expression"
             )));
+        }
+        GrammarExpr::MarkerProbe(_) => {
+            return Err(GlrMaskError::GrammarParse(
+                "markers are grammar-boundary observations, not byte-terminal expressions".into()
+            ));
         }
         GrammarExpr::SpecialTokenRange(_, _) => {
             return Err(GlrMaskError::GrammarParse(
@@ -3085,7 +3114,7 @@ fn collect_terminal_rule_refs<'a>(expr: &'a GrammarExpr, refs: &mut FxHashSet<&'
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3117,7 +3146,7 @@ fn grammar_expr_is_nullable(
             *min == 0 || grammar_expr_is_nullable(expr, rule_nullable)
         }
         GrammarExpr::Literal(bytes) => bytes.is_empty(),
-        GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => false,
+        GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_) => false,
         GrammarExpr::CharClass { def, negate, utf8 } => {
             parse_regex(&char_class_pattern(def, *negate), *utf8).is_nullable()
         }
@@ -3256,7 +3285,7 @@ fn validate_expr_nfa_placement(grammar: &NamedGrammar) -> Result<(), GlrMaskErro
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

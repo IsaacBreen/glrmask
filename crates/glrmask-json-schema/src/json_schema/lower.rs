@@ -1597,7 +1597,7 @@ impl<'a> Lowerer<'a> {
                 .any(Self::expr_contains_raw_regex),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::Ref(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::LexerDfa(_)
@@ -1775,7 +1775,7 @@ fn collect_repeated_terminal_sites(
         GrammarExpr::Epsilon
         | GrammarExpr::Ref(_)
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -2438,7 +2438,7 @@ fn prune_generated_rules_in_place(rules: &mut Vec<NamedRule>, start: &str) {
             GrammarExpr::ExprNFA(nfa) => {
                 for symbol in &nfa.symbols { references(symbol, pending); }
             }
-            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_) | GrammarExpr::AnyByte => {}
         }

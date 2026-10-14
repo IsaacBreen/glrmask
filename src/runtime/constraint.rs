@@ -3782,6 +3782,7 @@ impl Constraint {
     pub(crate) fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state: self.initial_state_map(),
             buffers: Default::default(),
@@ -7779,6 +7780,23 @@ impl Constraint {
             ));
     }
 
+    /// Prepare shared immutable reset metadata at compile/load publication.
+    /// The narrow builder visits reset and one-byte targets, not every state.
+    pub(crate) fn prepare_commit_reset_frontier(&self) {
+        if self.tokenizer.cached_initial_byte_frontiers().is_some() { return; }
+        let reset = self.tokenizer.initial_state();
+        if !self.tokenizer.state_has_epsilon_transitions(reset) { return; }
+        let owned;
+        let closure = if let Some(cached) = self.tokenizer.cached_singleton_epsilon_closures()
+            .and_then(|all| all.get(reset as usize)) {
+            cached
+        } else {
+            owned = self.tokenizer.singleton_epsilon_closure(reset);
+            &owned
+        };
+        if closure.len() > 16 { let _ = self.tokenizer.initial_byte_frontiers_ref(); }
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if !self.has_template_parser() && (self.table.unconditional_advance.len() != self.parser_symbol_count() as usize
@@ -7994,6 +8012,7 @@ impl Constraint {
         let hot_frontier_count = self.direct_regular_dynamic_hot_frontiers.len();
         self.dynamic_mask_vocab = dynamic_mask_vocab;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
+        self.prepare_commit_reset_frontier();
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} slice_leftovers_ms={:.3} terminal_observation_ms={:.3} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
@@ -10315,14 +10334,9 @@ impl Constraint {
         // first decoding commit.
         let tokenizer_closures_started_at = profile.then(std::time::Instant::now);
         if !self.tokenizer.has_packed_runtime_metadata() {
-            let tokenizer_closures = self.tokenizer.all_singleton_epsilon_closures();
-            if tokenizer_closures
-                .get(self.tokenizer.initial_state() as usize)
-                .is_some_and(|closure| closure.len() > 64)
-            {
-                let _ = self.tokenizer.initial_byte_frontiers();
-            }
+            let _ = self.tokenizer.all_singleton_epsilon_closures();
         }
+        self.prepare_commit_reset_frontier();
         let tokenizer_closures_ms = tokenizer_closures_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let initial_commit_prime_started_at = profile.then(std::time::Instant::now);
@@ -12462,6 +12476,7 @@ impl Constraint {
         let state = self.initial_state_map();
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state,
             buffers: Default::default(),
@@ -12471,6 +12486,7 @@ impl Constraint {
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
+        state.initialize_markers();
         state
     }
 
@@ -12478,6 +12494,7 @@ impl Constraint {
         crate::runtime::initialize_hot_path_config();
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state: self.initial_state_map(),
             buffers: crate::runtime::state::CommitBuffers::for_constraint(self),
@@ -12486,6 +12503,7 @@ impl Constraint {
             mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
+        state.initialize_markers();
         state
     }
 

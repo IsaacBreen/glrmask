@@ -325,3 +325,11 @@ required-features = ["internal-api"]
 [[test]]
 name = "public_optimization_modes"
 path = "tests/public_optimization_modes.rs"
+
+[[test]]
+name = "marker_events"
+path = "tests/marker_events.rs"
+
+[[test]]
+name = "marker_commit"
+path = "tests/marker_commit.rs"

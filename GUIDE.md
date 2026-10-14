@@ -141,6 +141,11 @@ while generating:
         break
 ```
 
+Optional `@mark(id)` annotations report numeric marker IDs and byte positions
+during generation. Read `state.marker_events()` immediately after `start()` and
+each commit. These are possible boundary observations, not captures or a selected
+parse. See the [marker reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/markers.md).
+
 ### Python quickstart
 
 ```bash
@@ -345,6 +350,19 @@ choosing between encodings. Both are read-only and conservative. Canonical encod
 can change subsequent model logits and is not a probability-preserving optimization.
 See [forcing contracts](docs/forcing.md) for acceptance barriers, exact events,
 aliases, proof limits, and replay requirements.
+
+### Streaming markers
+
+Place `@mark(id)` in a parser expression to observe possible input boundaries.
+`constraint.marker_ids()` lists the numeric IDs. `state.marker_events()` returns
+the events from `start()` or the most recent commit, including markers inside a
+model token. Copy a batch before the next commit when retaining history.
+
+Markers only read the parsing frontier; they never consume a model token or
+select a derivation. An event can come from an alternative that later fails.
+There is no automatic pairing, capture nesting, or ambiguity resolution. The
+[marker reference](docs/markers.md) defines ignored-input behavior, byte offsets,
+composition, persistence, and the Rust/Python APIs.
 
 ### Build/runtime trade-off
 

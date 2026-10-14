@@ -18,6 +18,7 @@ enum Token {
     Ident(String),
     Literal(String),
     SpecialToken(u32),
+    Marker(u32),
     CharClass { def: String, negate: bool },
     LParen,
     RParen,
@@ -204,7 +205,8 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
-        let prefix = b"token(";
+        let marker = self.input[self.pos..].starts_with(b"mark(");
+        let prefix: &[u8] = if marker { b"mark(" } else { b"token(" };
         if !self.input[self.pos..].starts_with(prefix) {
             return Err(GlrMaskError::GrammarParse(
                 "expected @token(<token-id>)".into(),
@@ -229,7 +231,7 @@ impl<'a> Lexer<'a> {
             ));
         }
         self.pos += 1;
-        Ok(Token::SpecialToken(token_id))
+        Ok(if marker { Token::Marker(token_id) } else { Token::SpecialToken(token_id) })
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
@@ -403,6 +405,7 @@ impl Parser {
             Some(Token::Ident(_))
                 | Some(Token::Literal(_))
                 | Some(Token::SpecialToken(_))
+                | Some(Token::Marker(_))
                 | Some(Token::CharClass { .. })
                 | Some(Token::LParen)
                 | Some(Token::Dot)
@@ -431,6 +434,7 @@ impl Parser {
         match self.advance() {
             Some(Token::Ident(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => Ok(GrammarExpr::Literal(literal.into_bytes())),
+            Some(Token::Marker(id)) => Ok(GrammarExpr::marker(id)),
             Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
             Some(Token::CharClass { def, negate }) => Ok(GrammarExpr::CharClass { def, negate, utf8: true }),
             Some(Token::Dot) => Ok(GrammarExpr::AnyByte),

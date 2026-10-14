@@ -4678,6 +4678,7 @@ impl<'a> ConstraintState<'a> {
             component_buf.fill(0);
             let shadow = ConstraintState {
             terminated: false,
+            markers: None,
                 constraint: component.constraint.as_ref(),
                 state,
                 buffers: CommitBuffers::for_mask_only_shadow(),
@@ -4896,6 +4897,7 @@ impl<'a> ConstraintState<'a> {
             component_buf.fill(0);
             let shadow = ConstraintState {
             terminated: false,
+            markers: None,
                 constraint: component.constraint.as_ref(),
                 state,
                 buffers: CommitBuffers::for_mask_only_shadow(),
@@ -5117,6 +5119,7 @@ impl<'a> ConstraintState<'a> {
                                 }
                                 let view = ConstraintState {
                                     terminated: self.terminated,
+            markers: None,
                                     constraint: self.constraint,
                                     state: frontier,
                                     buffers: CommitBuffers::for_mask_only_shadow(),
@@ -8808,6 +8811,7 @@ impl<'a> ConstraintState<'a> {
         // scratch sequentially.
         let mut shadow = Box::new(ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self.constraint,
             state: self.state.clone(),
             buffers: CommitBuffers::for_constraint(self.constraint),

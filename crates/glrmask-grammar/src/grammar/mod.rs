@@ -8,3 +8,6 @@ pub(crate) mod named_simplify;
 pub(crate) mod terminal_choice_promotion;
 
 pub(crate) mod right_linear;
+
+#[cfg(test)]
+mod marker_tests;

@@ -517,6 +517,7 @@ impl CommitBuffers {
 /// Create separate states for concurrently generated sequences.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
+    pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
     pub(crate) constraint: &'a Constraint,
     pub(crate) state: ParserStateMap,
     pub(crate) buffers: CommitBuffers,
@@ -534,6 +535,7 @@ impl<'a> Clone for ConstraintState<'a> {
     fn clone(&self) -> Self {
         ConstraintState {
             terminated: self.terminated,
+            markers: self.markers.clone(),
             constraint: self.constraint,
             state: self.state.clone(),
             buffers: CommitBuffers::for_constraint(self.constraint),
@@ -558,6 +560,7 @@ impl<'a> ConstraintState<'a> {
     pub(crate) fn copy_snapshot_from(&mut self, source: &ConstraintState<'_>) {
         assert!(std::ptr::eq(self.constraint, source.constraint));
         self.terminated = source.terminated;
+        self.markers = source.markers.clone();
         self.state = source.state.clone();
         self.buffers = CommitBuffers::for_constraint(self.constraint);
         self.generation = source.generation;
