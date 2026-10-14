@@ -627,31 +627,28 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Return a safe prefix of library-canonical forced output.
+    /// Return up to 10,000 locally inevitable original model-token IDs.
     ///
-    /// Ordinary deterministic text uses longest admitted token spelling, with
-    /// original-ID order breaking byte-alias ties. This is not token-sequence
-    /// probability preservation or the model tokenizer's BPE algorithm. Stops
-    /// at acceptance, text/event ambiguity, unstable tokenization or proof limits.
-    /// Exact-token events retain their IDs and complete semantic successors.
-    /// The original state is unchanged.
-    pub fn forced(&self) -> Vec<u32> {
-        super::commit::forced::force(std::slice::from_ref(self), None)
+    /// Read-only: the source state is unchanged. A step is returned only when
+    /// exactly one original ID is admissible and the root cannot already stop.
+    /// Different encodings/aliases remain choices. No full mask is constructed;
+    /// resource/proof failures are errors rather than false ambiguity.
+    pub fn forced_tokens(&self) -> crate::Result<Vec<u32>> {
+        super::commit::bounded::forced_tokens(std::slice::from_ref(self))
     }
 
-    /// Return an inevitable prefix of original token IDs, without choosing an
-    /// encoding for deterministic text. A step requires a singleton allowed-ID
-    /// mask; byte aliases and alternate token segmentations remain choices.
-    /// Stops at acceptance, ID ambiguity, an error, or the library ID limit.
-    /// Unlike [`Self::forced`], this never canonicalizes several valid IDs.
-    pub fn forced_token_ids(&self) -> Vec<u32> {
-        super::commit::forced::force_token_ids(std::slice::from_ref(self), None)
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_canonical_reference(&self)->Vec<u32> {
+        super::commit::forcing_reference::force(std::slice::from_ref(self),None)
+    }
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_token_ids_reference(&self)->Vec<u32> {
+        super::commit::forcing_reference::force_token_ids(std::slice::from_ref(self),None)
     }
 
-    pub(crate) fn forced_dynamic(&self) -> Vec<u32> {
-        super::commit::forced::force(std::slice::from_ref(self), Some(true))
-    }
-
+    #[cfg(any(test,feature="internal-api"))]
     pub(super) fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
         if !self.constraint.end_tokens.is_empty() { return self.mask(); }
         if dynamic {

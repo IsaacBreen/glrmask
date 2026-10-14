@@ -12,26 +12,30 @@ use glrmask::{Grammar, Result, Vocab};
 let child = Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
 ).prepare(vocab)?;
-let parent = Grammar::from_glrm(
+let mut parent = Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
 ).prepare(vocab)?;
-let complete = parent.bind("ITEM", &child)?
-    .bind("ITEM::MARK", glrmask::Token::new(marker))?;
-let constraint = complete.link()?;
+parent.bind("ITEM", &child)?;
+parent.bind("ITEM::MARK", glrmask::Token::new(marker))?;
+let constraint = parent.link()?;
 # let _ = constraint;
 # Ok(())
 # }
 ```
 
-Bindings are immutable. Repeated references to one inline grammar share bindings;
-separate attachments of one prepared definition can be specialized independently.
+Binding mutates the receiving handle atomically. `clone()` makes an independently
+editable handle sharing immutable internals. Children are captured as snapshots;
+editing the original child later does not change existing parents. Repeated
+references to one inline grammar share bindings, while separately attached
+occurrences can be specialized independently.
 `requirements()` (Python: `.requirements`) exposes outstanding typed paths such as
 `ITEM::MARK`. Final compile/link requires every declared parameter to be resolved.
 Open prepared graphs support save/load with the same vocabulary identity.
 
 Exact token sets and compact ranges consume one original ID, never its decoded
-spelling. A JSON Schema is an ordinary grammar-valued child. Use `Grammar::exact`
-for an explicit event-set-to-grammar adapter. See the [full guide](GUIDE.md),
+spelling. A JSON Schema is an ordinary grammar-valued child. Exact event values
+can also bind directly to grammar slots; `Grammar::exact` constructs a standalone
+event-set grammar when needed. See the [full guide](GUIDE.md),
 [native syntax](docs/glrm-format.md), and [exact-token ranges](docs/exact-token-ranges.md).
 
 ### Choosing an optimization mode
@@ -60,17 +64,18 @@ current output is a complete match, possibly with valid continuations. Commit th
 sampled end token before stopping. An initially accepting grammar can instead stop
 immediately if that is the application's policy.
 
-Optional `forced()` queries choose a canonical admitted encoding of determined
-bytes. `forced_token_ids()` does not choose among alternative tokenizations. They
-are read-only and stop at acceptance or an unproved alternative; canonical forcing
-is not a claim that the model would have sampled the selected IDs. See
-[the forcing contract](docs/forcing.md).
+The read-only `forced_tokens()` query returns only individually inevitable
+original IDs; it never chooses between alternative tokenizations or constructs a
+full token mask merely to prove uniqueness. It stops at root acceptance or a
+non-singleton allowed set, and reports proof/resource failures as errors. Raw-byte
+`commit_bytes()` remains a separate recognition operation, not a substitute for
+committing exact model IDs. See [the forcing contract](docs/forcing.md).
 
 ### Source formats
 
 Native GLRM has optional semicolons, `grammar NAME { ... }`, explicit `t`/`nt`
 declarations, typed externs, scoped ignore, Unicode/byte expressions and regular
-`shortest(...)`. Native source contains no numeric-token, special-token-name or
+`shortest { ... }`. Native source contains no numeric-token, special-token-name or
 inline JSON literals. Lark accepts those selected compatibility forms only in its
 explicit `llm` profile. Unsupported priorities, capture/sampling annotations,
 substring generation and regex-internal lazy quantifiers are errors.

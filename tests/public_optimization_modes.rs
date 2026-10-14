@@ -25,7 +25,7 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
                 a.commit_bytes(prefix).unwrap(); r.commit_bytes(prefix).unwrap();
                 assert_eq!(a.mask(), r.mask(), "{mode:?} after {prefix:?}");
                 assert_eq!(a.is_accepting(), r.is_accepting());
-                assert_eq!(a.forced(), r.forced());
+                assert_eq!(a.forced_canonical_reference(), r.forced_canonical_reference());
                 assert_eq!(allowed(&a.mask(),100), a.is_accepting());
                 assert!(!allowed(&a.mask(),25));
                 let snapshot = a.clone();
@@ -53,14 +53,14 @@ fn force_and_exact_token_aliases_agree_across_modes() {
     for mode in MODES {
         let c = g.compile_with(&v, BuildOptions::default().optimization(mode)).unwrap();
         let mut a = c.start(); let mut r = reference.start();
-        assert_eq!(a.forced(),r.forced());
+        assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference());
         assert_eq!(a.mask(),r.mask());
         a.commit_token(15).unwrap(); r.commit_token(15).unwrap();
-        assert_eq!(a.forced(),r.forced()); assert_eq!(a.mask(),r.mask());
+        assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference()); assert_eq!(a.mask(),r.mask());
         a.commit_token(2).unwrap(); assert!(a.is_accepting());
     }
     let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
-        .bind("MARK", glrmask::Token::new(15)).unwrap();
+        .bind_snapshot("MARK", glrmask::Token::new(15)).unwrap();
     for mode in MODES {
         let c = g.compile_with(&v, BuildOptions::default().optimization(mode)).unwrap();
         let mut a = c.start(); assert!(allowed(&a.mask(),15)); assert!(!allowed(&a.mask(),0));
@@ -73,7 +73,7 @@ fn source_dynamic_composition_and_precompiled_link_have_distinct_scopes() {
     let v = vocab();
     let child = Grammar::from_ebnf(r#"start ::= ")""#);
     let grammar = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"(\" child;")
-        .bind("child", &child).unwrap();
+        .bind_snapshot("child", &child).unwrap();
     let reference = grammar.compile(&v).unwrap();
     for mode in MODES {
         let c=grammar.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
@@ -112,7 +112,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         Grammar::from_glrm("glrm 1; start root; pragma glrmask { lexer group letters = A, B; } t A = \"a\"; t B = \"b\"; nt root = A B?;"),
         Grammar::from_json_schema(r#"{"const":"a"}"#)];
     for child in children {
-        let description=parent.clone().bind("child",child).unwrap();
+        let description=parent.clone().bind_snapshot("child",child).unwrap();
         let reference=description.compile(&v).unwrap();
         let actual=description.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
         for c in [actual.clone(),Constraint::load(actual.save()).unwrap(),
@@ -121,10 +121,10 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         }
     }
     let exact=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK;")
-        .bind("MARK",v.tokens([33,99]).unwrap()).unwrap();
+        .bind_snapshot("MARK",v.tokens([33,99]).unwrap()).unwrap();
     let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;")
-        .bind("leaf",exact).unwrap();
-    let description=parent.bind("child",middle).unwrap();
+        .bind_snapshot("leaf",exact).unwrap();
+    let description=parent.bind_snapshot("child",middle).unwrap();
     let reference=description.compile(&v).unwrap();
     let actual=description.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
     compare_prefixes(&actual,&reference,&[0,1,3,4,8,33,99],4);
@@ -148,7 +148,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
             let prefix=vec![b'a';n]; let mut a=c.start();let mut o=oracle.start();
             a.commit_bytes(&prefix).unwrap();o.commit_bytes(&prefix).unwrap();
             assert_eq!(a.mask(),o.mask(),"after {n} a bytes");
-            assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced(),o.forced());
+            assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced_canonical_reference(),o.forced_canonical_reference());
             let snapshot=a.clone();
             if n==30 { a.commit_token(1).unwrap();assert!(a.is_accepting());
                 assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !a.is_rejected()); assert!(a.mask().iter().all(|&w|w==0)); }
@@ -181,7 +181,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                     a.commit_bytes(&prefix).unwrap();expected.commit_bytes(&prefix).unwrap();
                     assert_eq!(a.mask(),expected.mask(),"{mode:?}, length {n}, prefix {prefix:?}");
                     assert_eq!(a.is_accepting(),expected.is_accepting());
-                    assert_eq!(a.forced(),expected.forced());
+                    assert_eq!(a.forced_canonical_reference(),expected.forced_canonical_reference());
                     let snapshot=a.clone();assert_eq!(snapshot.mask(),expected.mask());
                 }
                 let mut a=c.start();

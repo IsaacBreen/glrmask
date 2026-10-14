@@ -4028,15 +4028,23 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
 
-    /// Return a forced token sequence when one can be determined.
-    pub fn forced(&self) -> Vec<u32> {
-        crate::runtime::force_for_states(&self.alternatives, Some(true))
+    /// Strictly inevitable original IDs across all live alternatives.
+    /// Read-only; exact-event and byte successors remain correlated.
+    pub fn forced_tokens(&self)->crate::Result<Vec<u32>> {
+        crate::runtime::bounded_forced_tokens(&self.alternatives)
     }
-
-    /// Return only inevitable original token IDs across all live alternatives.
-    /// Unlike canonical-byte [`Self::forced`], alternate encodings are choices.
-    pub fn forced_token_ids(&self) -> Vec<u32> {
-        crate::runtime::force_ids_for_states(&self.alternatives, Some(true))
+    pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
+        crate::runtime::mask_for_states_at_most(&self.alternatives,max_allowed)
+    }
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_canonical_reference(&self)->Vec<u32> {
+        crate::runtime::force_for_states(&self.alternatives,Some(true))
+    }
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_token_ids_reference(&self)->Vec<u32> {
+        crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
     /// Return whether the committed prefix is currently accepted by the grammar.
@@ -7923,7 +7931,7 @@ nt start ::= A;
         let mut static_state = constraint.start();
         let mut dynamic_state = dynamic.start();
         assert_eq!(static_state.mask(), dynamic_state.mask());
-        assert_eq!(static_state.forced(), dynamic_state.forced());
+        assert_eq!(static_state.forced_canonical_reference(), dynamic_state.forced_canonical_reference());
 
         for token in [3, 3] {
             static_state.commit_token(token).unwrap();
@@ -7971,6 +7979,6 @@ nt start ::= A;
     fn dynamic_forced_uses_dynamic_masks() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'", &vocab).unwrap();
-        assert_eq!(constraint.start().forced(), vec![0]);
+        assert_eq!(constraint.start().forced_canonical_reference(), vec![0]);
     }
 }

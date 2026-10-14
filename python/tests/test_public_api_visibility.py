@@ -1,4 +1,12 @@
 """The released namespace exposes intent and persistence, not parser machinery."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import inspect
 
 import numpy as np
@@ -96,13 +104,13 @@ def test_boundary_request_survives_module_save_bind_and_explicit_override():
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
     child = glrmask.Grammar.from_ebnf('start ::= "a"').prepare(vocab)
-    plain = glrmask.PreparedGrammar.load(grammar.prepare(vocab).save()).bind("child", child).link()
+    plain = _bound_snapshot(glrmask.PreparedGrammar.load(grammar.prepare(vocab).save()), "child", child).link()
     for detail in [glrmask.BoundaryTriggerDetail.TOKENS, glrmask.BoundaryTriggerDetail.EXACT]:
         module = grammar.prepare(vocab, boundary_trigger=detail)
         with pytest.raises(ValueError, match="unbound"):
             module.link()
         restored = glrmask.PreparedGrammar.load(module.save())
-        bound = restored.bind("child", child)
+        bound = _bound_snapshot(restored, "child", child)
         requested = bound.link()
         assert requested.save() != plain.save()
         assert bound.link(boundary_trigger=glrmask.BoundaryTriggerDetail.NONE).save() == plain.save()
@@ -142,7 +150,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
             for ended in [branch, branch.clone()]:
                 assert ended.is_accepting() and not ended.is_rejected()
                 assert not ended.mask().any()
-                assert ended.forced() == []
+                assert ended.forced_tokens() == []
                 with pytest.raises(ValueError, match="already terminated"):
                     ended.commit_token(0)
                 with pytest.raises(ValueError, match="already terminated"):

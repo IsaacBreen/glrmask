@@ -1,4 +1,12 @@
 """Internal Python table-free tooling: masks are checked against literal languages."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import copy
 import gc
 import json
@@ -211,7 +219,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
                    glrmask.PreparedGrammar.load(prepared.save(), vocab=vocab)]:
         child_bytes = source.save()
         for selection in [{}, {"parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA}]:
-            linked = link_module(parent.bind("C", source), optimization=mode, **selection)
+            linked = link_module(_bound_snapshot(parent, "C", source), optimization=mode, **selection)
             assert source.save() == child_bytes
             for compiled in representations(linked, vocab):
                 assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
@@ -236,7 +244,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
     child = grammar_from_ebnf('start ::= "a"?').prepare(vocab)
     parent = grammar_from_glrm(
         'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
-    linked = link_module(parent.bind("C", child), optimization=mode,
+    linked = link_module(_bound_snapshot(parent, "C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[6])
     for compiled in representations(linked, vocab):
         state = compiled.start()
@@ -282,7 +290,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     child = glrmask.PreparedGrammar.load(child.save(), vocab=vocab)
     parent = grammar_from_glrm(
         'glrm 1; start root; extern grammar C; nt root = "p" C "q";').prepare(vocab)
-    compiled = link_module(parent.bind("C", child), optimization=mode,
+    compiled = link_module(_bound_snapshot(parent, "C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[8])
     for compiled in representations(compiled, vocab):
         assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
@@ -323,7 +331,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
     for child in [prepared, glrmask.PreparedGrammar.load(prepared.save()),
                   glrmask.PreparedGrammar.load(prepared.save(), vocab=vocab)]:
         child_bytes = child.save()
-        linked = link_module(parent.bind("C", child),
+        linked = link_module(_bound_snapshot(parent, "C", child),
             optimization=mode, end_tokens=[8], **selection)
         assert child.save() == child_bytes
         for compiled in representations(linked, vocab):

@@ -72,7 +72,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: Optimizati
         explicit_samples.push(elapsed);
     }
     let options = BuildOptions::default().optimization(mode);
-    let (bound, bind_ns) = timed(|| Grammar::from_glrm(SOURCE).bind("T", tokens.clone()));
+    let (bound, bind_ns) = timed(|| Grammar::from_glrm(SOURCE).bind_snapshot("T", tokens.clone()));
     let bound = bound?;
     let (constraint, cold_compile_ns) = timed(|| bound.compile_with(&vocab, options.clone()));
     let constraint = constraint?;
@@ -86,7 +86,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: Optimizati
     // after source compilation, so shared vocabulary caches are already warm.
     let (open, precompile_ns) = timed(|| Grammar::from_glrm(SOURCE).prepare(&vocab));
     let open = open?;
-    let (attached, compiled_bind_ns) = timed(|| open.bind("T", tokens.clone()));
+    let (attached, compiled_bind_ns) = timed(|| open.bind_snapshot("T", tokens.clone()));
     let attached = attached?;
     let (linked, first_link_ns) = timed(|| attached.link_with(options.clone()));
     let linked = linked?;
@@ -147,8 +147,8 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: Optimization, mixed: b
         if mixed {
             Ok(Grammar::from_glrm(
                 "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
-            ).bind("A", vocab.token_ranges([0..=n - 1])?)?
-                .bind("B", vocab.token_ranges([0..=n - 2])?)?)
+            ).bind_snapshot("A", vocab.token_ranges([0..=n - 1])?)?
+                .bind_snapshot("B", vocab.token_ranges([0..=n - 2])?)?)
         } else {
             Ok(Grammar::from_glrm("glrm 1; start start; nt start = \"x\" \"x\";"))
         }

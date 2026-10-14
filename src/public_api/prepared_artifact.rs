@@ -5,7 +5,7 @@
 use super::*;
 use std::collections::HashMap;
 
-const MAGIC: &[u8; 8] = b"GLRMOD13";
+const MAGIC: &[u8; 8] = b"GLRMOD14";
 const HEADER: usize = 16;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -114,7 +114,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
         let body = definition(&module.inner, false);
         let bindings = module.bindings.iter().map(|(name, value)| {
             let value = match value {
-                ModuleBinding::Module(child) => Binding::Prepared(instance_ids[&(child.as_ref() as *const _ as usize)]),
+                ModuleBinding::Module(child) => Binding::Prepared(instance_ids[&(graph::prepared_identity(child))]),
                 ModuleBinding::Constraint(child) => Binding::Runnable(definition(child, true)),
                 ModuleBinding::ExactTokens(ids) => Binding::Events(ids.to_vec()),
             };
@@ -123,7 +123,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
         instance_ids.insert(*id, instances.len() as u32);
         instances.push(Instance {
             definition: body,
-            slot_kinds: module.slot_kinds.clone(), slot_spans: module.slot_spans.clone(),
+            slot_kinds: module.slot_kinds.as_ref().clone(), slot_spans: module.slot_spans.as_ref().clone(),
             boundary_trigger: match module.boundary_trigger {
                 BoundaryTriggerDetail::None => 0, BoundaryTriggerDetail::Tokens => 1, BoundaryTriggerDetail::Exact => 2,
             },
@@ -188,6 +188,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
         }
         definitions.push(Arc::new(inner));
     }
+    let event_caches=(0..definitions.len()).map(|_|Arc::new(event_cache::ExactAdapterCache::default())).collect::<Vec<_>>();
     let mut instances=Vec::<Arc<PreparedGrammar>>::with_capacity(manifest.instances.len());
     let mut heights=Vec::<usize>::with_capacity(manifest.instances.len());
     let mut edges=Vec::<Vec<usize>>::with_capacity(manifest.instances.len());
@@ -197,7 +198,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
         if ports>1_048_576 { return Err(error("too many prepared ports")); }
         let def=instance.definition as usize;
         if def>=definitions.len() || manifest.definitions[def].runnable { return Err(error("invalid prepared definition reference")); }
-        let mut bindings=BTreeMap::new();let mut children=Vec::new();let mut height=0;
+        let mut bindings=OrdMap::new();let mut children=Vec::new();let mut height=0;
         for (name,binding) in instance.bindings {
             if !instance.slot_kinds.contains_key(&name) || bindings.contains_key(&name) { return Err(error("unknown or duplicate prepared binding")); }
             let value=match binding {
@@ -212,7 +213,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
                     if definition>=definitions.len() || !manifest.definitions[definition].runnable { return Err(error("invalid runnable definition reference")); }
                     ModuleBinding::Constraint(definitions[definition].clone())
                 }
-                Binding::Events(ranges) => ModuleBinding::ExactTokens(Arc::from(ranges)),
+                Binding::Events(ranges) => ModuleBinding::ExactTokens(event_caches[def].leaf(&ranges)?),
             };
             bindings.insert(name,value);
         }
@@ -220,7 +221,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
         let boundary_trigger=match instance.boundary_trigger {0=>BoundaryTriggerDetail::None,1=>BoundaryTriggerDetail::Tokens,
             2=>BoundaryTriggerDetail::Exact,_=>return Err(error("invalid prepared boundary-trigger policy"))};
         instances.push(Arc::new(PreparedGrammar {inner:definitions[def].clone(),bindings,boundary_trigger,
-            slot_kinds:instance.slot_kinds,slot_spans:instance.slot_spans}));
+            slot_kinds:Arc::new(instance.slot_kinds),slot_spans:Arc::new(instance.slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone()}));
         heights.push(height);edges.push(children);
     }
     let mut reached=vec![false;instances.len()];let mut pending=vec![instances.len()-1];
@@ -250,7 +251,7 @@ mod tests {
         let v = Vocab::new(vec![(0,b"x".to_vec())]);
         let child = Grammar::from_glrm("start root nt root=\"x\"").prepare(&v).unwrap();
         let parent = Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD")
-            .prepare(&v).unwrap().bind("CHILD",child).unwrap();
+            .prepare(&v).unwrap().bind_snapshot("CHILD",child).unwrap();
         let bytes = parent.save();
         let mutations: Vec<fn(&mut Manifest)> = vec![
             |m|m.instances.last_mut().unwrap().bindings[0].1=Binding::Prepared(u32::MAX),

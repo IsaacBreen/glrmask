@@ -153,10 +153,25 @@ nt start = CONTROL payload;
         .unwrap().build().unwrap().compile().unwrap();
     assert!(!empty.start().is_accepting());
     assert!(empty.start().mask().iter().all(|word| *word == 0));
-    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+    // Exact events widen losslessly to a grammar port: both slots still
+    // consume one original-ID event, even though that ID has no byte spelling.
+    let widened = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
-        .bind_token("payload", [7])
-        .is_err());
+        .bind_token("CONTROL", [7]).unwrap()
+        .bind_token("payload", [7]).unwrap()
+        .build().unwrap();
+    let widened_static = widened.clone().compile().unwrap();
+    let widened_dynamic = widened.compile_dynamic().unwrap();
+    let mut a = widened_static.start();
+    let mut b = widened_dynamic.start();
+    for _ in 0..2 {
+        assert!(!a.is_accepting() && !b.is_accepting());
+        assert_eq!(a.mask(), b.mask());
+        assert!(allowed(&a.mask(), 7));
+        a.commit_token(7).unwrap();
+        b.commit_token(7).unwrap();
+    }
+    assert!(a.is_accepting() && b.is_accepting());
     // External references may remain unresolved until final compilation or link.
     let open_spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -314,7 +329,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     )
     .unwrap();
     let loaded_static_bound = loaded_static_parent
-        .bind("child", &prepared_child)
+        .bind_snapshot("child", &prepared_child)
         .unwrap()
         .link()
         .unwrap();
@@ -333,7 +348,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     )
     .unwrap();
     let loaded_dynamic_bound = loaded_dynamic_parent
-        .bind("child", &prepared_child)
+        .bind_snapshot("child", &prepared_child)
         .unwrap()
         .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
@@ -367,7 +382,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
         .unwrap();
     let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
     let bound = loaded
-        .bind("child", &child)
+        .bind_snapshot("child", &child)
         .unwrap()
         .link()
         .unwrap();
@@ -656,7 +671,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .build()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
-    let constraint = parent.bind("MARK", glrmask::Token::new(7)).unwrap()
+    let constraint = parent.bind_snapshot("MARK", glrmask::Token::new(7)).unwrap()
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
@@ -720,7 +735,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         "glrm 1; start start; extern grammar nested; nt start = nested;",
     );
     let open = Grammar::from_glrm(parent)
-        .bind("child", unresolved_grammar_child)
+        .bind_snapshot("child", unresolved_grammar_child)
         .unwrap()
         .prepare(&vocab)
         .unwrap()
@@ -733,7 +748,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .prepare(&vocab)
         .unwrap();
     let fully_bound = open
-        .bind("child::nested", &leaf)
+        .bind_snapshot("child::nested", &leaf)
         .unwrap()
         .link()
         .unwrap();
@@ -742,7 +757,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     assert!(state.is_accepting());
 
     let dynamic_fully_bound = open
-        .bind("child::nested", &leaf)
+        .bind_snapshot("child::nested", &leaf)
         .unwrap()
         .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();

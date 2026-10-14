@@ -320,7 +320,7 @@ mod candidate_tests {
         .prepare(&vocab)
         .unwrap();
         let linked = parent
-            .bind("child", &child)
+            .bind_snapshot("child", &child)
             .unwrap()
             .link_with(
                 BuildOptions::default()
@@ -368,7 +368,7 @@ mod candidate_tests {
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).compile_with(&vocab, options.clone()).unwrap();
                 let linked = Grammar::from_glrm(parent).prepare(&vocab).unwrap()
-                    .bind("child", &child).unwrap().link_with(options).unwrap();
+                    .bind_snapshot("child", &child).unwrap().link_with(options).unwrap();
                 assert!(linked.boundary_candidate_summary.get().is_none());
                 let mut eager = linked.clone();
                 let overlay = eager.static_dynamic_overlay.as_ref().unwrap();
@@ -407,7 +407,7 @@ mod candidate_tests {
             .compile(&vocab).unwrap();
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#)
-            .prepare(&vocab).unwrap().bind("child", &child).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {

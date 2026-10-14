@@ -2289,7 +2289,7 @@ mod tests {
         let mask = state.mask();
         assert!(token_allowed(&mask, 100));
         assert!(token_allowed(&mask, 101));
-        assert_eq!(state.forced(), Vec::<u32>::new());
+        assert_eq!(state.forced_canonical_reference(), Vec::<u32>::new());
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }
@@ -2306,7 +2306,7 @@ mod tests {
 
         let mut state = constraint.start();
         state.commit_token(2).unwrap();
-        assert_eq!(state.forced(), vec![100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100]);
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }
@@ -2322,10 +2322,10 @@ mod tests {
         .unwrap();
 
         let mut state = constraint.start();
-        assert_eq!(state.forced(), vec![100, 100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100, 100]);
         state.commit_token(100).unwrap();
         assert!(!state.is_accepting());
-        assert_eq!(state.forced(), vec![100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100]);
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }

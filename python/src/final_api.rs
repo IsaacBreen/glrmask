@@ -182,7 +182,7 @@ impl Binding {
         ))
     }
 
-    fn apply(&self,grammar:glrmask::Grammar<'static>,name:&str)->glrmask::Result<glrmask::Grammar<'static>> {
+    fn apply(&self,grammar:&mut glrmask::Grammar<'static>,name:&str)->glrmask::Result<()> {
         match self {
             Self::Source(child)=>grammar.bind(name,child),
             Self::Token(token)=>grammar.bind(name,token.clone()),
@@ -193,11 +193,9 @@ impl Binding {
 
 }
 
-/// Immutable grammar description with source-grammar or exact-token bindings.
-///
-/// bind returns another description. compile produces a complete runnable
-/// Constraint; prepare intentionally preserves unresolved slots.
-#[pyclass(name = "Grammar", module = "glrmask", frozen)]
+/// Mutable grammar assembly handle. Copies share immutable instance snapshots.
+/// bind changes this handle; compile/prepare capture a stable input snapshot.
+#[pyclass(name = "Grammar", module = "glrmask")]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
     inner:glrmask::Grammar<'static>,
@@ -268,8 +266,10 @@ impl PyGrammar {
     fn exact(tokens:&PyExactTokens)->Self {Self {inner:glrmask::Grammar::exact(tokens.inner.clone())}}
 
     #[getter]
-    fn requirements(&self)->PyResult<Vec<PyRequirement>> {
-        self.inner.requirements().map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
+    fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
+        let snapshot=slf.try_borrow()?.inner.clone();
+        slf.py().allow_threads(move ||snapshot.requirements())
+            .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
 
     /// Create a grammar from native GLRM source text.
@@ -286,10 +286,31 @@ impl PyGrammar {
         Ok(Self::new(source, SourceKind::JsonSchema))
     }
 
-    /// Return a new description with one declared slot bound. No compilation occurs.
-    fn bind(&self,name:String,value:&Bound<'_,PyAny>)->PyResult<Self> {
+    /// Atomically fill one slot on this handle. Attached children are snapshots.
+    fn bind(slf:&Bound<'_,Self>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
+        let py=slf.py();
+        // Capture value first: self-attachment captures the old snapshot too.
         let binding=Binding::extract_for_grammar(value)?;
-        binding.apply(self.inner.clone(),&name).map(|inner|Self {inner}).map_err(api_error)
+        let mut target=slf.try_borrow_mut()?;
+        let mut next=target.inner.clone();
+        let next=py.allow_threads(move || {
+            binding.apply(&mut next,&name)?;
+            Ok::<_,glrmask::Error>(next)
+        }).map_err(api_error)?;
+        let previous=std::mem::replace(&mut target.inner,next);
+        // A last snapshot drop may release cached diagnostic paths. Never hold
+        // the GIL through that potentially large native destruction.
+        py.allow_threads(move ||drop(previous));
+        Ok(())
+    }
+
+    #[pyo3(name="clone")]
+    fn clone_handle(&self)->Self {Self {inner:self.inner.clone()}}
+    fn __copy__(&self)->Self {self.clone_handle()}
+    fn __deepcopy__(slf:&Bound<'_,Self>,memo:&Bound<'_,PyDict>)->PyResult<Py<Self>> {
+        let copy=Py::new(slf.py(),slf.try_borrow()?.clone_handle())?;
+        memo.set_item(slf.as_ptr() as usize,&copy)?;
+        Ok(copy)
     }
 
 
@@ -299,12 +320,12 @@ impl PyGrammar {
     /// Their policy is not inherited when the result is later embedded as a child.
     #[pyo3(signature = (vocab, *, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn compile(
-        &self, py: Python<'_>, vocab: &PyVocab,
+        slf:&Bound<'_,Self>, py: Python<'_>, vocab: &PyVocab,
         end_tokens: Option<Vec<u32>>, optimization: Option<PyRef<'_, PyOptimization>>,
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>,
     ) -> PyResult<PyConstraint> {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
-        let grammar = self.as_rust().map_err(api_error)?;
+        let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
         py.allow_threads(move || grammar.compile_with(&vocab, options))
             .map(constraint).map_err(api_error)
@@ -312,18 +333,18 @@ impl PyGrammar {
 
     /// Compile reusable machinery while preserving unresolved grammar/token slots.
     #[pyo3(signature = (vocab, *, boundary_trigger=None))]
-    fn prepare(&self, py: Python<'_>, vocab: &PyVocab,
+    fn prepare(slf:&Bound<'_,Self>, py: Python<'_>, vocab: &PyVocab,
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyPreparedGrammar> {
         let options = with_boundary(glrmask::BuildOptions::default(), boundary_trigger);
-        let grammar = self.as_rust().map_err(api_error)?;
+        let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
         py.allow_threads(move || grammar.prepare_with(&vocab, options))
             .map(|inner| PyPreparedGrammar { inner }).map_err(api_error)
     }
 }
 
-/// Immutable vocabulary-specific compiled constraint in pre-link form.
-#[pyclass(name = "PreparedGrammar", module = "glrmask", frozen)]
+/// Mutable prepared assembly handle with independently reusable snapshots.
+#[pyclass(name = "PreparedGrammar", module = "glrmask")]
 #[derive(Clone)]
 pub(super) struct PyPreparedGrammar {
     inner: glrmask::PreparedGrammar,
@@ -332,37 +353,56 @@ pub(super) struct PyPreparedGrammar {
 #[pymethods]
 impl PyPreparedGrammar {
     #[getter]
-    fn requirements(&self)->PyResult<Vec<PyRequirement>> {
-        self.inner.requirements().map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
+    fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
+        let snapshot=slf.try_borrow()?.inner.clone();
+        slf.py().allow_threads(move ||snapshot.requirements())
+            .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
-    /// Bind a prepared child or exact-token value, returning a new value.
-    fn bind(&self, py: Python<'_>, name: String, value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let binding = Binding::extract_for_unlinked(value)?;
-        let module = self.inner.clone();
-        let result = py.allow_threads(move || match binding {
-            Binding::Prepared(child)=>module.bind(&name,child),
-            Binding::Token(token) => module.bind(&name, token),
-            Binding::Tokens(tokens) => module.bind(&name, tokens),
-            Binding::Source(_) => unreachable!("source binding rejected above"),
-        });
-        result.map(|inner| Self { inner }).map_err(api_error)
+    /// Atomically fill a prepared or exact-event slot. No child is compiled here.
+    fn bind(slf:&Bound<'_,Self>,py:Python<'_>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
+        let binding=Binding::extract_for_unlinked(value)?;
+        let mut target=slf.try_borrow_mut()?;
+        let mut next=target.inner.clone();
+        let next=py.allow_threads(move || {
+            match binding {
+                Binding::Prepared(child)=>next.bind(&name,child)?,
+                Binding::Token(token)=>next.bind(&name,token)?,
+                Binding::Tokens(tokens)=>next.bind(&name,tokens)?,
+                Binding::Source(_)=>unreachable!("source bindings rejected above"),
+            }
+            Ok::<_,glrmask::Error>(next)
+        }).map_err(api_error)?;
+        let previous=std::mem::replace(&mut target.inner,next);
+        py.allow_threads(move ||drop(previous));
+        Ok(())
+    }
+
+    #[pyo3(name="clone")]
+    fn clone_handle(&self)->Self {Self {inner:self.inner.clone()}}
+    fn __copy__(&self)->Self {self.clone_handle()}
+    fn __deepcopy__(slf:&Bound<'_,Self>,memo:&Bound<'_,PyDict>)->PyResult<Py<Self>> {
+        let copy=Py::new(slf.py(),slf.try_borrow()?.clone_handle())?;
+        memo.set_item(slf.as_ptr() as usize,&copy)?;
+        Ok(copy)
     }
 
     /// Produce a runnable root. Every required slot must already be bound.
     #[pyo3(signature = (*, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn link(
-        &self, py: Python<'_>, end_tokens: Option<Vec<u32>>,
+        slf:&Bound<'_,Self>, py: Python<'_>, end_tokens: Option<Vec<u32>>,
         optimization: Option<PyRef<'_, PyOptimization>>,
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>,
     ) -> PyResult<PyConstraint> {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
-        py.allow_threads(|| self.inner.link_with(options)).map(constraint).map_err(api_error)
+        let snapshot=slf.try_borrow()?.inner.clone();
+        py.allow_threads(move || snapshot.link_with(options)).map(constraint).map_err(api_error)
     }
 
     /// Serialize compiled machinery and its open-slot manifest as bytes.
-    fn save<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
-        let bytes = py.allow_threads(|| self.inner.save());
-        PyBytes::new(py, &bytes)
+    fn save<'py>(slf:&Bound<'py,Self>, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let snapshot=slf.try_borrow()?.inner.clone();
+        let bytes = py.allow_threads(move || snapshot.save());
+        Ok(PyBytes::new(py, &bytes))
     }
 
     /// Load an unlinked constraint, retaining open slots and exact vocabulary identity.

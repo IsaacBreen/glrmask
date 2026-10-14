@@ -1105,14 +1105,11 @@ impl PyDynamicConstraintState {
     }
 
 
-    /// Safe library-canonical encoding of determined text; not BPE or token-ID inevitability.
-    fn forced(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced())
-    }
-
-    /// Inevitable original token IDs only; never chooses between byte aliases or segmentations.
-    fn forced_token_ids(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced_token_ids())
+    /// Locally inevitable original token IDs, without choosing an encoding.
+    /// Pure query; proof/resource errors propagate and no full mask is built.
+    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
     fn is_accepting(&self) -> bool {
@@ -1208,14 +1205,11 @@ impl PyConstraintState {
         self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
-    /// Safe library-canonical encoding of determined text; not BPE or token-ID inevitability.
-    fn forced(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced())
-    }
-
-    /// Inevitable original token IDs only; never chooses between byte aliases or segmentations.
-    fn forced_token_ids(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced_token_ids())
+    /// Locally inevitable original token IDs, without choosing an encoding.
+    /// Pure query; proof/resource errors propagate and no full mask is built.
+    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
     fn is_accepting(&self) -> bool {

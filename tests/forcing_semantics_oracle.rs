@@ -98,7 +98,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         let original_mask = state.mask();
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
-            let got = if canonical { state.forced() } else { state.forced_token_ids() };
+            let got = if canonical { state.forced_canonical_reference() } else { state.forced_token_ids_reference() };
             // Both query contracts permit a shorter answer when a conservative
             // byte/proof boundary intervenes, but never a different encoding.
             assert!(expected.starts_with(&got),
@@ -153,7 +153,7 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
     for (case,words) in cases.iter().enumerate() {
         let (source,events)=grammar_source(words);
         let mut grammar=Grammar::from_glrm(&source);
-        for id in events { grammar=grammar.bind(format!("EVENT_{id}"),vocab.tokens([id]).unwrap()).unwrap(); }
+        for id in events { grammar=grammar.bind_snapshot(format!("EVENT_{id}"),vocab.tokens([id]).unwrap()).unwrap(); }
         for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
             let compiled=grammar.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             let label=format!("case={case},mode={mode:?}");
@@ -194,13 +194,13 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
         let (source,events)=grammar_source(&leaf_language);
         let leaf=Grammar::from_glrm(&source);
         let leaf_prepared=leaf.prepare(&vocab).unwrap();
-        let assembly=parent_prepared.bind("CHILD",&leaf_prepared).unwrap();
+        let assembly=parent_prepared.bind_snapshot("CHILD",&leaf_prepared).unwrap();
         let mut assembly=glrmask::PreparedGrammar::load_with_vocab(assembly.save(),&vocab).unwrap();
-        let mut source_assembly=parent.bind("CHILD",&leaf).unwrap();
+        let mut source_assembly=parent.bind_snapshot("CHILD",&leaf).unwrap();
         for id in events {
             let path=format!("CHILD::EVENT_{id}");
-            assembly=assembly.bind(&path,vocab.tokens([id]).unwrap()).unwrap();
-            source_assembly=source_assembly.bind(&path,vocab.tokens([id]).unwrap()).unwrap();
+            assembly=assembly.bind_snapshot(&path,vocab.tokens([id]).unwrap()).unwrap();
+            source_assembly=source_assembly.bind_snapshot(&path,vocab.tokens([id]).unwrap()).unwrap();
         }
         let expected=leaf_language.iter().map(|word| {
             let mut wrapped=vec![B(b'(')];wrapped.extend_from_slice(word);wrapped.push(B(b')'));wrapped
@@ -225,17 +225,17 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"a".to_vec()),
             (highest,b"unused".to_vec())], [highest-1]);
         let g=Grammar::from_glrm("extern token MARK start root nt root=\"a\" \"b\" | MARK \"b\"")
-            .bind("MARK",vocab.tokens([3]).unwrap()).unwrap();
+            .bind_snapshot("MARK",vocab.tokens([3]).unwrap()).unwrap();
         for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
             let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             for c in [c.clone(),Constraint::load(&c.save()).unwrap()] {
                 let mut s=c.start();
                 assert!(s.mask().len() >= (highest as usize + 1).div_ceil(32));
                 assert!(!bit(&s.mask(),highest)); assert!(!bit(&s.mask(),highest-1));
-                assert!(s.forced().is_empty());
+                assert!(s.forced_canonical_reference().is_empty());
                 for id in [0,2,3] {assert!(bit(&s.mask(),id));}
                 s.commit_token(3).unwrap();
-                assert_eq!(s.forced_token_ids(),[1]);s.commit_token(1).unwrap();assert!(s.is_accepting());
+                assert_eq!(s.forced_token_ids_reference(),[1]);s.commit_token(1).unwrap();assert!(s.is_accepting());
             }
         }
     }

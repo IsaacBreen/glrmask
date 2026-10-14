@@ -76,7 +76,7 @@ text[lazy]: /.*END/s
 
 The body must be representable as a regular terminal expression. `[lazy]` means
 prefix-minimal acceptance of the whole expression, the same operation as native
-GLRM `shortest(...)`. It does not apply to arbitrary CFG rules, grammar calls,
+GLRM `shortest { ... }`. It does not apply to arbitrary CFG rules, grammar calls,
 exact events, or a regularization that erases implicit ignore boundaries.
 
 Internal reluctant quantifiers such as `/a+?b.*/` are rejected, not silently treated
@@ -123,7 +123,8 @@ grammar = glrmask.Grammar.from_lark(
 )
 child = glrmask.Grammar.from_json_schema({"type": "null"})
 # Source binding; use prepare(vocab) on both sides for reusable prepared children.
-composed = grammar.bind("payload", child)
+composed = grammar.clone()
+composed.bind("payload", child)
 ```
 
 `@payload` declares a grammar-valued host requirement. A local rule named

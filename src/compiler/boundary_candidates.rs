@@ -1271,7 +1271,7 @@ mod tests {
             .compile_with(&vocabulary, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc = "a" child "b";"#)
             .prepare(&vocabulary).unwrap();
-        let linked = parent.bind("child", &child).unwrap().link_with(options()).unwrap();
+        let linked = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
         let components = &linked.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components;
         let expected = fingerprint_for_constraint(&linked, &vocabulary).unwrap();
         let queries = components.iter().map(|component|
@@ -1742,7 +1742,7 @@ mod preparation_tests {
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options.clone()).unwrap();
         let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
-            .prepare(&vocab).unwrap().bind("leaf", &leaf).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
             .link_with(options.clone()).unwrap();
         materialize_deferred_composition_boundary_summary(&middle);
         let BoundaryCandidateSummary::Known { mut fingerprint, precision, .. } =
@@ -1758,7 +1758,7 @@ mod preparation_tests {
         assert!(persisted_boundary_candidate_ids(&loaded, &vocab).unwrap().is_none(),
             "pre-fix nullable candidate proof must widen before it can exclude []!");
         let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
-            .prepare(&vocab).unwrap().bind("middle", &loaded).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("middle", &loaded).unwrap()
             .link_with(options).unwrap();
         let mut state = root.start(); state.commit_bytes(b"X").unwrap();
         assert_ne!(state.mask()[0] & (1 << 2), 0);

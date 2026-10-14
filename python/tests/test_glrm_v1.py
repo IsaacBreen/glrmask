@@ -1,3 +1,11 @@
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import pytest
 import glrmask
 from glrmask._glrmask import DynamicConstraint as LegacyDynamicConstraint
@@ -24,8 +32,7 @@ def _grammar():
 def _final_constraint():
     vocab = _vocab()
     return (
-        glrmask.Grammar.from_glrm(_grammar())
-        .bind("END", vocab.tokens([77, 78]))
+        _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([77, 78]))
         .compile(vocab)
     )
 
@@ -54,7 +61,7 @@ def test_named_external_terminal_binding_errors(bad_bindings):
     with pytest.raises((ValueError, RuntimeError, OverflowError)):
         for name, value in bad_bindings.items():
             ids = value if isinstance(value, list) else [value]
-            grammar = grammar.bind(name, vocab.tokens(ids))
+            grammar = _bound_snapshot(grammar, name, vocab.tokens(ids))
         grammar.compile(vocab)
 
 
@@ -62,7 +69,7 @@ def test_empty_event_binding_recognizes_no_output():
     vocab = _vocab()
     for mode in (glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
                  glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME):
-        grammar = glrmask.Grammar.from_glrm(_grammar()).bind("END", vocab.tokens([]))
+        grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([]))
         constraint = grammar.compile(vocab, optimization=mode)
         state = constraint.start()
         assert not state.is_accepting()
@@ -75,4 +82,4 @@ def test_empty_event_binding_recognizes_no_output():
             state.commit_token(0)
         assert not state.is_accepting()
         assert not state.mask(79).any()
-        assert not state.forced_token_ids()
+        assert not state.forced_tokens()

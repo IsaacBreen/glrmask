@@ -1,10 +1,18 @@
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import glrmask
 
 
 def _prepare_glrm(source, vocab, *, subgrammars=None):
     parent = glrmask.Grammar.from_glrm(source).prepare(vocab)
     for name, child in (subgrammars or {}).items():
-        parent = parent.bind(name, child)
+        parent = _bound_snapshot(parent, name, child)
     return parent
 
 
@@ -347,7 +355,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
         assert not mask[end_token]
         mask[end_token] = True
         assert mask[end_token]
-        assert state.forced() == []
+        assert state.forced_tokens() == []
 
     loaded = glrmask.Constraint.load(composed.save(), vocab)
     loaded_state = loaded.start()
@@ -383,8 +391,8 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         vocab,
     )
 
-    with_a = parent.bind("payload", child_a).link()
-    with_b = parent.bind("payload", child_b).link()
+    with_a = _bound_snapshot(parent, "payload", child_a).link()
+    with_b = _bound_snapshot(parent, "payload", child_b).link()
 
     state = with_a.start()
     state.commit_token(0)
@@ -399,7 +407,7 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     assert state.is_accepting()
 
     loaded_parent = glrmask.PreparedGrammar.load(parent.save(), vocab=vocab)
-    loaded_with_a = loaded_parent.bind("payload", child_a).link()
+    loaded_with_a = _bound_snapshot(loaded_parent, "payload", child_a).link()
     state = loaded_with_a.start()
     state.commit_token(0)
     state.commit_token(2)

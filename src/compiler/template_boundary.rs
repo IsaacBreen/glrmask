@@ -474,7 +474,7 @@ mod tests {
             let child=Grammar::from_ebnf(if nullable {r#"start ::= "a" | """#} else {r#"start ::= "a""#})
                 .compile(&vocab).unwrap();
             let dynamic=Grammar::from_glrm(r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#)
-                .prepare(&vocab).unwrap().bind("child",&child).unwrap()
+                .prepare(&vocab).unwrap().bind_snapshot("child",&child).unwrap()
                 .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
             let prepared=prepared_root_call_candidates(&dynamic);
             assert_eq!(prepared.is_none(),nullable);
@@ -573,7 +573,7 @@ mod tests {
         ] {
             let options = BuildOptions::default().optimization(Optimization::FastRuntime);
             let unlinked = Grammar::from_glrm(source).prepare(&vocab).unwrap();
-            let mut candidate = unlinked.bind("child", &child).unwrap().link().unwrap();
+            let mut candidate = unlinked.bind_snapshot("child", &child).unwrap().link().unwrap();
             assert_eq!(retain_same_owner_paths(&candidate, 1, true).unwrap(), retain);
             install(&mut candidate, &vocab).unwrap();
             let reference = Grammar::from_ebnf(inline).compile_with(&vocab, options).unwrap();
@@ -599,7 +599,7 @@ mod tests {
         let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()), (3, b"xay".to_vec())]);
         let child = Grammar::from_ebnf(r#"start ::= "a""#).compile(&vocab).unwrap();
         let mut c = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#)
-            .prepare(&vocab).unwrap().bind("child", &child).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(Optimization::FastRuntime)).unwrap();
         c.install_template_parser().unwrap();
         let bodies = c.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components.iter()

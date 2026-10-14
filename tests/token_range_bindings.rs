@@ -33,10 +33,10 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
     let accepts = |id| (5..=18).contains(&id) || (31..=33).contains(&id) || (48..=63).contains(&id);
     for mode in MODES {
         let options = BuildOptions::default().optimization(mode).end_tokens([95]);
-        let constraint = Grammar::from_glrm(ONE).bind("T", tokens.clone()).unwrap()
+        let constraint = Grammar::from_glrm(ONE).bind_snapshot("T", tokens.clone()).unwrap()
             .compile_with(&vocab, options).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
         assert_mask(&constraint, &[], 96, accepts);
-        assert!(constraint.start().forced().is_empty(), "a multi-token set is not forced");
+        assert!(constraint.start().forced_canonical_reference().is_empty(), "a multi-token set is not forced");
         for id in [5, 6, 18, 31, 33, 48, 63] {
             let mut state = constraint.start();
             state.commit_token(id).unwrap();
@@ -61,8 +61,8 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
     let source = "glrm 1; start start; extern token A; extern token B; nt start = A B;";
     for mode in MODES {
         let constraint = Grammar::from_glrm(source)
-            .bind("A", vocab.token_ranges([10..=30]).unwrap()).unwrap()
-            .bind("B", vocab.token_ranges([20..=40]).unwrap()).unwrap()
+            .bind_snapshot("A", vocab.token_ranges([10..=30]).unwrap()).unwrap()
+            .bind_snapshot("B", vocab.token_ranges([20..=40]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
         assert_mask(&constraint, &[], 100, |id| (10..=30).contains(&id));
         for first in [10, 20, 25, 30] {
@@ -80,7 +80,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
     let vocab = Vocab::new_with_exact_token_ids(vec![(0, b"[".to_vec()), (1, b"]".to_vec())], 2..128);
     let child_source = "glrm 1; start start; extern token T; nt start = T T;";
     let open = Grammar::from_glrm(child_source).prepare(&vocab).unwrap();
-    let bound = open.bind("T", vocab.token_ranges([5..=15, 100..=120]).unwrap()).unwrap();
+    let bound = open.bind_snapshot("T", vocab.token_ranges([5..=15, 100..=120]).unwrap()).unwrap();
     let serialized = bound.save();
     let loaded = PreparedGrammar::load(&serialized).unwrap();
     for mode in MODES {
@@ -92,7 +92,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         // Each root link chooses its requested optimization independently.
         let prepared_child = loaded.clone();
         let outer = Grammar::from_glrm("glrm 1; start start; extern grammar C; nt start = \"[\" C \"]\";")
-            .prepare(&vocab).unwrap().bind("C", &prepared_child).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("C", &prepared_child).unwrap()
             .link_with(options).unwrap();
         assert_mask(&outer, &[0], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
         let mut state = outer.start();
@@ -119,7 +119,7 @@ fn range_construction_normalizes_and_rejects_missing_ids() {
     assert!(vocab.token_ranges([79..=80]).is_err());
     assert!(vocab.tokens([5, 5]).is_err(), "existing duplicate-list validation is preserved");
     let different = Vocab::new_with_exact_token_ids(vec![(0, b"different".to_vec())], 1..80);
-    assert!(Grammar::from_glrm(ONE).bind("T", ranges).unwrap().compile(&different).is_err());
+    assert!(Grammar::from_glrm(ONE).bind_snapshot("T", ranges).unwrap().compile(&different).is_err());
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
         assert_eq!(tokens.ranges().len(), if excluded.is_some() { 2 } else { 1 });
         assert_eq!(tokens.len(), (N - u32::from(excluded.is_some())) as usize);
         for mode in MODES {
-            let constraint = Grammar::from_glrm(ONE).bind("T", tokens.clone()).unwrap()
+            let constraint = Grammar::from_glrm(ONE).bind_snapshot("T", tokens.clone()).unwrap()
                 .compile_with(&vocab, BuildOptions::default().optimization(mode))
                 .unwrap_or_else(|e| panic!("{mode:?}, excluded={excluded:?}: {e}"));
             let mask = constraint.start().mask();
@@ -183,8 +183,8 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
         nt start = ("a" A "b") | ("a" B "bb");"#;
     for mode in MODES {
         let constraint = Grammar::from_glrm(source)
-            .bind("A", vocab.token_ranges([8..=12]).unwrap()).unwrap()
-            .bind("B", vocab.token_ranges([10..=14]).unwrap()).unwrap()
+            .bind_snapshot("A", vocab.token_ranges([8..=12]).unwrap()).unwrap()
+            .bind_snapshot("B", vocab.token_ranges([10..=14]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
         assert_mask(&constraint, &[], 20, |id| id == 0);
         assert_mask(&constraint, &[0], 20, |id| (8..=14).contains(&id));
@@ -213,11 +213,11 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
     let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..16);
     for mode in MODES {
         let singleton = Grammar::from_glrm(ONE)
-            .bind("T", vocab.token_ranges([5..=5]).unwrap()).unwrap()
+            .bind_snapshot("T", vocab.token_ranges([5..=5]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
-        assert_eq!(singleton.start().forced(), vec![5]);
+        assert_eq!(singleton.start().forced_canonical_reference(), vec![5]);
         let repeated = Grammar::from_glrm("glrm 1; start start; extern token T; nt start = T T;")
-            .bind("T", vocab.token_ranges([0..=15]).unwrap()).unwrap()
+            .bind_snapshot("T", vocab.token_ranges([0..=15]).unwrap()).unwrap()
             .compile_with(&vocab, BuildOptions::default().optimization(mode).end_tokens([8])).unwrap();
         assert_mask(&repeated, &[], 16, |id| id != 8);
         assert_mask(&repeated, &[7], 16, |id| id != 8);
@@ -238,7 +238,7 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
 fn neutral_scalar_module_formats_are_not_misread_as_range_artifacts() {
     let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..128);
     let module = Grammar::from_glrm(ONE).prepare(&vocab).unwrap()
-        .bind("T", vocab.token_ranges([0..=127]).unwrap()).unwrap();
+        .bind_snapshot("T", vocab.token_ranges([0..=127]).unwrap()).unwrap();
     let bytes = module.save();
     for version in [b"GLRMOD03", b"GLRMOD04", b"GLRMOD05", b"GLRMOD06"] {
         let mut old = bytes.clone();
@@ -259,8 +259,8 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
     for mode in MODES {
         for (a, b) in [(0..=0, 1..=1), (0..=5, 3..=9), (0..=11, 0..=10)] {
             let grammar = Grammar::from_glrm(source)
-                .bind("A", vocab.token_ranges([a]).unwrap()).unwrap()
-                .bind("B", vocab.token_ranges([b]).unwrap()).unwrap();
+                .bind_snapshot("A", vocab.token_ranges([a]).unwrap()).unwrap()
+                .bind_snapshot("B", vocab.token_ranges([b]).unwrap()).unwrap();
             let options = BuildOptions::default().optimization(mode).end_tokens([15]);
             let constraint = grammar.compile_with(&vocab, options).unwrap();
             for constraint in [constraint.clone(), Constraint::load(&constraint.save()).unwrap()] {
@@ -281,8 +281,8 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
     let vocab = Vocab::new((0..n).map(|id| (id, Vec::new())).collect());
     for mode in MODES {
         let grammar = Grammar::from_glrm("glrm 1; start start; extern token A; extern token B; nt start = A B;")
-            .bind("A", vocab.token_ranges([0..=n - 1]).unwrap()).unwrap()
-            .bind("B", vocab.token_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1]).unwrap()).unwrap();
+            .bind_snapshot("A", vocab.token_ranges([0..=n - 1]).unwrap()).unwrap()
+            .bind_snapshot("B", vocab.token_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1]).unwrap()).unwrap();
         let original = grammar.compile_with(&vocab,
             BuildOptions::default().optimization(mode).end_tokens([n])).unwrap();
         for constraint in [original.clone(), Constraint::load(&original.save()).unwrap()] {

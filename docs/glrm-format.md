@@ -72,13 +72,13 @@ recognition has no implicit Python-style ordered-regex match-selection policy.
 ## Shortest terminal language
 
 ```glrm
-t THROUGH_END = shortest(/.*END/s)
+t THROUGH_END = shortest { /.*END/s }
 nt response = THROUGH_END "!"
 start response
 ```
 
 `shortest(L)` retains exactly the words in the regular language `L` that have no
-strictly shorter accepted prefix. For example, `shortest(/a|ab/)` accepts `a`, not
+strictly shorter accepted prefix. For example, `shortest { /a|ab/ }` accepts `a`, not
 `ab`. The operation acts on one regular terminal expression before unrelated
 terminals are combined. It does not globally change lexer policy or commit a
 context-free rule to its first completion.

@@ -254,13 +254,13 @@ fn source_and_precompiled_composition_use_native_defaults() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"xa".to_vec()),(2,b"x".to_vec())]);
     let child=Grammar::from_glrm(r#"start root; nt root = "a";"#);
     let parent=Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#);
-    let bound=parent.clone().bind("child",&child).unwrap();
+    let bound=parent.clone().bind_snapshot("child",&child).unwrap();
     let template=bound.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
     let mut state=template.start();state.commit_bytes(b"xa").unwrap();assert!(state.is_accepting());
     let ordinary=bound.compile(&v).unwrap();
     let child=child.compile(&v).unwrap();let child_bytes=child.save();
-    let module=parent.prepare(&v).unwrap().bind("child",&child).unwrap();
+    let module=parent.prepare(&v).unwrap().bind_snapshot("child",&child).unwrap();
     let explicit=module.link_with(BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let default=module.link().unwrap();
     for compiled in [&template,&ordinary,&explicit,&default] {
@@ -282,7 +282,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
         let child_bytes=child.save();
         for optimization in [glrmask::Optimization::Auto, glrmask::Optimization::FastRuntime, glrmask::Optimization::Balanced] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                module.bind("child", &child).and_then(|bound| bound.link_with(
+                module.bind_snapshot("child", &child).and_then(|bound| bound.link_with(
                     BuildOptions::default().optimization(optimization)))
             }));
             assert!(outcome.is_ok(), "native composition must not touch an absent LR table");

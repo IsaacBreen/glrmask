@@ -1,4 +1,12 @@
 """Additional lifecycle, validation and ownership regressions for the final API."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import gc
 import numpy as np
 import pytest
@@ -56,21 +64,21 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     g = glrmask.Grammar.from_glrm('glrm 1; start start; extern token T; extern grammar C; nt start = T C;')
     child = glrmask.Grammar.from_ebnf('start ::= "a"')
     with pytest.raises(TypeError):
-        g.bind('T', 7)
+        _bound_snapshot(g, 'T', 7)
     with pytest.raises(ValueError):
-        g.bind('T', child)
+        _bound_snapshot(g, 'T', child)
+    widened = _bound_snapshot(g, 'C', glrmask.Token(7))
+    assert [r.name for r in widened.requirements] == ['T']
+    bound = _bound_snapshot(g, 'T', glrmask.Token(7))
     with pytest.raises(ValueError):
-        g.bind('C', glrmask.Token(7))
-    bound = g.bind('T', glrmask.Token(7))
+        _bound_snapshot(bound, 'T', glrmask.Token(8))
     with pytest.raises(ValueError):
-        bound.bind('T', glrmask.Token(8))
-    with pytest.raises(ValueError):
-        bound.bind('missing', child)
+        _bound_snapshot(bound, 'missing', child)
     m = g.prepare(v)
     with pytest.raises(TypeError):
-        m.bind('C', child)
+        _bound_snapshot(m, 'C', child)
     with pytest.raises(TypeError):
-        g.bind('C', child.compile(v))
+        _bound_snapshot(g, 'C', child.compile(v))
 
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
@@ -99,7 +107,7 @@ def test_description_owns_source_bindings_after_collection():
     v = vocab()
     parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
     child_source = glrmask.Grammar.from_ebnf('start ::= "a"')
-    a = parent.bind('C', child_source)
+    a = _bound_snapshot(parent, 'C', child_source)
     del parent, child_source, v
     gc.collect()
     assert a.compile(vocab()).start().mask()[0]
@@ -141,16 +149,16 @@ def test_token_constructor_and_sparse_membership_validation():
     m = glrmask.PreparedGrammar.load(g.prepare(v).save())
     for id in [0, 3, 62, 64, 2**32-1]:
         value = glrmask.Token(id)
-        bound = g.bind("item", value)
+        bound = _bound_snapshot(g, "item", value)
         with pytest.raises(ValueError, match="not present"):
             bound.compile(v)
         with pytest.raises(ValueError, match="not present"):
-            m.bind("item", value)
+            _bound_snapshot(m, "item", value)
     for id in [7, 63]:
-        c = m.bind("item", glrmask.Token(id)).link()
+        c = _bound_snapshot(m, "item", glrmask.Token(id)).link()
         assert np.flatnonzero(c.start().mask()).tolist() == [id]
     text = glrmask.Grammar.from_ebnf('s ::= "a"')
     with pytest.raises(ValueError):
-        g.bind("item", text)
+        _bound_snapshot(g, "item", text)
     general = glrmask.Grammar.from_glrm("extern grammar item start s nt s = item")
-    assert np.flatnonzero(general.bind("item", text).compile(v).start().mask()).tolist() == [2, 7]
+    assert np.flatnonzero(_bound_snapshot(general, "item", text).compile(v).start().mask()).tolist() == [2, 7]

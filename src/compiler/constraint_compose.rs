@@ -19339,6 +19339,13 @@ fn finalize_owned_composed_constraint_runtime_single_thread(
     structural_terminal_aliases: usize,
     components_have_no_runtime_product: bool,
 ) -> f64 {
+    // Caller-owned Rayon pools already define the application's CPU budget.
+    // Independent links must not queue behind our process-wide serial helper.
+    if super::pipeline::caller_pool_is_active() {
+        return finalize_owned_composed_constraint_runtime(
+            constraint, structural_terminal_aliases, components_have_no_runtime_product,
+        );
+    }
     static FINALIZE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     let pool = FINALIZE_POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -27356,7 +27363,7 @@ table: &child_table,
             assert_eq!(actual.mask(), expected.mask());
             assert!(token_allowed(&actual.mask(), END_TOKEN));
             assert!(!token_allowed(&actual.mask(), PLACEHOLDER_TOKEN));
-            assert_eq!(actual.forced(), vec![END_TOKEN]);
+            assert_eq!(actual.forced_canonical_reference(), vec![END_TOKEN]);
             actual.commit_token(END_TOKEN).unwrap();
             expected.commit_token(END_TOKEN).unwrap();
             assert!(actual.is_accepting());
@@ -27367,7 +27374,7 @@ table: &child_table,
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(0).unwrap();
-        assert_eq!(loaded_state.forced(), vec![END_TOKEN]);
+        assert_eq!(loaded_state.forced_canonical_reference(), vec![END_TOKEN]);
         loaded_state.commit_token(END_TOKEN).unwrap();
         assert!(loaded_state.is_accepting());
     }
@@ -27422,7 +27429,7 @@ table: &child_table,
                 expected.commit_token(token).unwrap();
             }
             assert_eq!(actual.mask(), expected.mask());
-            assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
+            assert_eq!(actual.forced_canonical_reference(), vec![SPECIAL_TOKEN]);
             actual.commit_token(SPECIAL_TOKEN).unwrap();
             expected.commit_token(SPECIAL_TOKEN).unwrap();
             assert!(actual.is_accepting());

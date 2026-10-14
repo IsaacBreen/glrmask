@@ -407,7 +407,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let source = "glrm 1; start start; extern token MARK; nt start = MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
-    let native = Grammar::from_glrm(source).bind("MARK", crate::Token::new(9)).unwrap()
+    let native = Grammar::from_glrm(source).bind_snapshot("MARK", crate::Token::new(9)).unwrap()
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
@@ -518,7 +518,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
         source,&vocab,&[("MARK",&[(25, 25)])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
     for mode in [Optimization::Auto,Optimization::Balanced,Optimization::FastRuntime] {
-        constraints.push(Grammar::from_glrm(source).bind("MARK",crate::Token::new(25)).unwrap()
+        constraints.push(Grammar::from_glrm(source).bind_snapshot("MARK",crate::Token::new(25)).unwrap()
             .compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
     for compiled in constraints {

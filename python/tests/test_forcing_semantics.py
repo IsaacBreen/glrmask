@@ -1,4 +1,12 @@
-"""Canonical text vs inevitable original-ID forcing, including exact events."""
+"""Strict original-ID forcing, aliases, exact events and acceptance barriers."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import numpy as np
 import pytest
 import glrmask
@@ -23,32 +31,33 @@ def assert_read_only_and_replay(state, method):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_canonical_and_original_id_contracts_are_distinct(mode):
+def test_forcing_does_not_choose_between_equivalent_tokenizations(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 3:b"ab"})
     compiled = glrmask.Grammar.from_ebnf('start ::= "ab"').compile(vocab, optimization=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
-        assert assert_read_only_and_replay(state,"forced") == [2]
-        assert assert_read_only_and_replay(state,"forced_token_ids") == []
+        assert not hasattr(state, "forced")
+        assert not hasattr(state, "forced_token_ids")
+        assert assert_read_only_and_replay(state,"forced_tokens") == []
         state.commit_token(0)
-        assert assert_read_only_and_replay(state,"forced_token_ids") == [1]
+        assert assert_read_only_and_replay(state,"forced_tokens") == [1]
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_spellingless_event_is_not_erased_from_byte_proof(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 9:b""})
-    grammar = glrmask.Grammar.from_glrm(
+    grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | MARK;'
-    ).bind("MARK", vocab.tokens([9]))
+    ), "MARK", vocab.tokens([9]))
     state = grammar.compile(vocab, optimization=mode).start()
     assert state.mask()[9]
-    assert assert_read_only_and_replay(state,"forced") == []
-    assert assert_read_only_and_replay(state,"forced_token_ids") == []
+    assert not hasattr(state, "forced")
+    assert assert_read_only_and_replay(state,"forced_tokens") == []
 
 
 @pytest.mark.parametrize("mode", MODES)
 def test_force_stops_at_acceptance_not_optional_continuation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"c"})
     state = glrmask.Grammar.from_ebnf('start ::= "ab" "c"?').compile(vocab,optimization=mode).start()
-    assert assert_read_only_and_replay(state,"forced") == [0,1]
-    assert assert_read_only_and_replay(state,"forced_token_ids") == [0,1]
+    assert not hasattr(state, "forced")
+    assert assert_read_only_and_replay(state,"forced_tokens") == [0,1]

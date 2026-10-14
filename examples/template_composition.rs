@@ -17,7 +17,7 @@ fn main() -> glrmask::Result<()> {
     ).prepare(&vocab)?;
     
     for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
-        let linked = parent.bind("child", &child)?.link_with(
+        let linked = parent.bind_snapshot("child", &child)?.link_with(
             BuildOptions::default()
                 .optimization(optimization)
                 .parser_backend(ParserBackend::TemplateDfa),

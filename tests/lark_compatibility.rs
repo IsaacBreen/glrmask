@@ -43,12 +43,17 @@ fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
     let v=words(&["x","y","xy"]);
     let g=llm("start: payload @payload\npayload: \"x\"");
     assert_eq!(g.requirements().unwrap()[0].name(),"payload");
-    assert!(g.bind("payload",Token::new(0)).is_err());
+    let widened=g.bind_snapshot("payload",Token::new(0)).unwrap();
+    for mode in MODES {
+        let c=widened.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+        assert!(accepts(&c,&[0,0]));assert!(!accepts(&c,&[2]));
+    }
+    assert_eq!(g.requirements().unwrap().len(),1);
     let child=Grammar::from_glrm("start root nt root=\"y\"");
-    let p=g.prepare(&v).unwrap().bind("payload",child.prepare(&v).unwrap()).unwrap();
+    let p=g.prepare(&v).unwrap().bind_snapshot("payload",child.prepare(&v).unwrap()).unwrap();
     let loaded=PreparedGrammar::load(p.save()).unwrap();
     for mode in MODES {
-        let c=g.bind("payload",&child).unwrap().compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=g.bind_snapshot("payload",&child).unwrap().compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(accepts(&c,&[2]));assert!(accepts(&loaded.link_with(BuildOptions::default().optimization(mode)).unwrap(),&[2]));
     }
 }
@@ -58,7 +63,7 @@ fn inline_json_is_equivalent_to_host_bound_isolated_schema() {
 start: "<" %json {"type":"string","const":"a b"} ">""#;
     let schema=r#"{"type":"string","const":"a b"}"#;
     let v=words(&["<",">","\"a b\"","<\"a b\">","< \"a b\" >","\"ab\"","<\"ab\">"]);
-    let host=llm("%ignore /[ ]+/\nstart: \"<\" @payload \">\"").bind("payload",Grammar::from_json_schema(schema)).unwrap();
+    let host=llm("%ignore /[ ]+/\nstart: \"<\" @payload \">\"").bind_snapshot("payload",Grammar::from_json_schema(schema)).unwrap();
     for mode in MODES{
         let options=BuildOptions::default().optimization(mode);
         let a=llm(source).compile_with(&v,options.clone()).unwrap();let b=host.compile_with(&v,options).unwrap();

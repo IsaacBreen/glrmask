@@ -21,7 +21,8 @@ grammar = glrmask.Grammar.from_glrm(
 all_tokens = vocab.tokens(range(131_072))
 # All IDs except 65,535, represented by two intervals rather than 131,071 IDs.
 selection = vocab.token_ranges([range(0, 65_535), range(65_536, 131_072)])
-constraint = grammar.bind("T", selection).compile(vocab)
+grammar.bind("T", selection)
+constraint = grammar.compile(vocab)
 state = constraint.start()
 state.commit_token(100_000)
 assert state.is_accepting()
@@ -33,10 +34,13 @@ assert len(selection) == 131_071
 A token set can also be attached to an already compiled open component:
 
 ```python
-module = grammar.prepare(vocab)
-bound = module.bind("T", selection)
+module = glrmask.Grammar.from_glrm(
+    "extern token T start root nt root = T"
+).prepare(vocab)
+bound = module.clone()
+bound.bind("T", selection)
 constraint = bound.link()
-# module is still open: binding returns a new immutable description.
+# module is still open: its independent clone was specialized.
 ```
 
 `tokens([id, ...])` and other iterables remain supported. Contiguous ranges with
@@ -65,9 +69,10 @@ let selection = vocab.token_ranges([0..=65_534, 65_536..=131_071])?;
 assert_eq!(selection.len(), 131_071);
 assert_eq!(selection.ranges().count(), 2);
 
-let grammar = Grammar::from_glrm(
+let mut grammar = Grammar::from_glrm(
     "extern token T start root nt root = T"
-).bind("T", selection)?;
+);
+grammar.bind("T", selection)?;
 let constraint = grammar.compile(&vocab)?;
 ```
 

@@ -1,4 +1,12 @@
 """Normal public state operations share semantics across all optimization modes."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import numpy as np
 import pytest
 import glrmask
@@ -22,7 +30,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             expected.commit_bytes(prefix)
             mask = state.mask()
             assert np.array_equal(mask, expected.mask())
-            assert state.forced() == expected.forced()
+            assert state.forced_tokens() == expected.forced_tokens()
             assert state.is_accepting() == expected.is_accepting()
             assert bool(mask[100]) == state.is_accepting()
             assert not mask[25]
@@ -42,10 +50,10 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
     parent = glrmask.Grammar.from_glrm(
         'glrm 1; start root; extern grammar child; nt root = "x" child "y";')
     child = glrmask.Grammar.from_lark('start: "a" "b"?\n%ignore /\\t+/')
-    description = parent.bind("child", child)
+    description = _bound_snapshot(parent, "child", child)
     reference = description.compile(vocab)
     compiled = description.compile(vocab, optimization=mode)
-    module = parent.prepare(vocab).bind("child", child.prepare(vocab))
+    module = _bound_snapshot(parent.prepare(vocab), "child", child.prepare(vocab))
     linked = module.link(optimization=mode)
     for constraint in [compiled, linked, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
@@ -61,8 +69,8 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_token_identity_survives_source_compilation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 15: b"a"})
-    grammar = glrmask.Grammar.from_glrm(
-        "glrm 1; start root; extern token MARK; nt root = MARK;").bind("MARK", glrmask.Token(15))
+    grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
+        "glrm 1; start root; extern token MARK; nt root = MARK;"), "MARK", glrmask.Token(15))
     compiled = grammar.compile(vocab, optimization=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
@@ -86,7 +94,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
             state.commit_bytes(b"a" * n)
             expected.commit_bytes(b"a" * n)
             assert np.array_equal(state.mask(), expected.mask())
-            assert state.forced() == expected.forced()
+            assert state.forced_tokens() == expected.forced_tokens()
             snapshot = state.clone()
             if n == 30:
                 state.commit_token(1)
@@ -116,7 +124,7 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
             expected.commit_bytes(prefix)
             assert np.array_equal(state.mask(), expected.mask())
             assert state.is_accepting() == expected.is_accepting()
-            assert state.forced() == expected.forced()
+            assert state.forced_tokens() == expected.forced_tokens()
             assert np.array_equal(state.clone().mask(), expected.mask())
         state = constraint.start()
         assert state.mask()[3] and state.mask()[7]

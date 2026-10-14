@@ -1,88 +1,104 @@
-# Forcing and deterministic text
+# Strict token forcing
 
-GLRMask has two read-only continuation queries. Both return original model-token
-IDs, leave the source state unchanged, and stop at an accepting prefix. An
-accepting grammar may still allow a continuation: stopping is a competing choice.
+`ConstraintState.forced_tokens()` is a read-only query for a prefix of
+**individually inevitable original model-token IDs**. Rust returns
+`Result<Vec<u32>>`; Python returns `list[int]` and raises an exception if a
+recognition proof fails for reasons other than grammatical rejection.
 
-## Canonical byte fast-forwarding: `forced()`
+The query never selects a canonical tokenization. There is no public
+`forced()`, `forced_token_ids()`, or `forced_bytes()` method.
 
-`state.forced()` proves a common ordinary-byte prefix and selects a stable,
-grammar-admitted encoding of that prefix. It chooses the longest admissible token
-spelling, breaking identical-spelling ties by the lowest original token ID.
-An admissible longer token that extends beyond the proved prefix blocks an
-unstable shorter choice. A longer spelling that the grammar rejects does not.
+## What is forced?
 
-For a grammar accepting only `ab` and vocabulary entries `a`, `b`, and `ab`,
-this query can return the ID for `ab`, even though `[a, b]` is another legal
-encoding. This is a **library canonicalization policy**, not the model tokenizer's
-BPE algorithm and not a proof that the chosen token IDs are inevitable. Selecting
-one encoding rather than another can change the model's later logits and its
-distribution over token sequences. The serving integration must opt into that
-trade-off when it consumes the result.
+At each prospective token boundary the query checks two things:
 
-## Inevitable original IDs: `forced_token_ids()`
+1. Can the root already finish? If so, stop rather than remove that choice.
+2. Is exactly one original token ID admissible? If so, advance a private
+   recognition cursor with that complete ID and continue. Otherwise, stop.
 
-`state.forced_token_ids()` emits a token only when the authoritative next-token
-mask contains exactly one original ID. It commits that ID to a private successor
-and repeats. It does not choose between byte aliases or alternative segmentations.
-For the `ab` example above it returns an empty list. With only `a` and `b` in the
-vocabulary, it can return their two IDs.
+For a grammar requiring `ab`, a vocabulary containing tokens for `a`, `b`, and
+`ab` gives an empty initial forcing result: both `a` and `ab` can start the
+output. Choosing the longest token would be a tokenization policy, not forcing.
+After committing `a`, the query can return the ID for `b` if it is the only
+admissible next ID. Two different IDs with identical byte spellings remain
+two choices.
 
-This is a local admission guarantee, not a global completion search. The query
-does not eliminate a locally admitted branch merely because a sparse vocabulary
-might make eventual completion impossible. The result is a safe prefix and need
-not be maximal when the library's finite query limits are reached.
+The source state does not advance. The caller commits the returned IDs when
+using the result:
 
-## Exact-token events and grammar boundaries
+```python
+ids = state.forced_tokens()
+for token_id in ids:
+    state.commit_token(token_id)
+```
 
-An exact-token match is an atomic ID event, not a decoded byte string. A spelling-
-less event is not epsilon. Equal decoded bytes do not make different exact IDs
-interchangeable. Both queries retain an ID's ordinary byte interpretation and its
-exact-event interpretation whenever both are valid.
+An inference integration must also feed those IDs through its model to update
+the model's decoding state. Skipping token sampling does not remove that work.
+An empty list does not mean that the grammar is complete or rejected; inspect
+acceptance and use ordinary masking as appropriate.
 
-The canonical byte proof stops when an exact event competes with text or another
-event. A unique admitted ID may cross that boundary, but only its **full ID
-commit** determines what can follow. No byte-only cursor is used to discard an
-exact-event branch. Reserved root end IDs are not ordinary spelling candidates.
-Every returned token is revalidated and committed through the ordinary public
-recognition semantics before any later returned token is proved.
+## Exact events and ambiguous successors
 
-Dynamic union alternatives are analyzed together, with each grammar owner's
-lexer/parser state kept correlated. Independently computed forced vectors need
-not be equal for the union to have a common prefix. Incompatible ordinary spelling
-maps or root policies cause canonical forcing to decline rather than invent an
-alias policy.
+An exact-token event is one original ID, not its printed spelling. A
+spelling-less event can be forced. Empty bytes are not such an event, and
+byte-identical IDs are not interchangeable.
 
-## Limits and failures
+One allowed ID can have several valid parser/lexer successors, including
+both its byte interpretation and an exact-event interpretation. All remain
+live after the private token commit. Dynamic grammar alternatives are queried
+together: a repeated ID is counted once across their union, not once per owner.
+Child acceptance is a call/return possibility, not necessarily root completion.
+Root end-token controls retain the same policy as ordinary masking.
 
-Forcing is optional and conservative. Acceptance, ambiguity, an unstable encoding,
-an unavailable proof, or a library resource limit can produce an empty or shorter
-result. There is no implicit retry or background continuation. Calling the query
-again on the unchanged state does not advance it.
+The query proves **local next-ID admission**, not the existence of a complete
+future tokenization. A sparse model vocabulary can have a locally admissible
+prefix without a vocabulary-realizable finish. Forcing does not introduce a
+global completion search or choose another tokenization to work around that.
 
-The implementation limits output IDs, output bytes for canonical forcing, and
-checked byte/event probes. These counters are **not** a total CPU, wall-clock, or
-memory budget; a parser closure or ordinary mask operation can itself be expensive.
-A proven grammatical rejection can remove a branch. A metadata/proof/resource
-failure cannot be used as evidence that a competing branch is impossible.
+## Bounded proof without a full token mask
 
-Normal mask and commit behavior does not depend on whether either forcing query
-is used. Runtime state still belongs to the caller: commit the returned IDs only
-when the serving policy has chosen to use that kind of forcing.
+The implementation uses a private cardinality query rather than constructing
+every vocabulary bit and counting afterward. It can stop as soon as two
+distinct, finally admissible original IDs are proved. It may read an existing
+exact mask or already-prepared vocabulary data; it does not generate a full
+mask merely to establish uniqueness.
 
+Candidate lexer matches alone are insufficient. Maximal munch, parser
+continuations, nullable boundaries, exact events and root policy must all be
+accounted for before an ID is a positive witness. When two alternatives admit
+the same ID, that is still one witness. A class of grammar-equivalent tokens
+can contain multiple original IDs and must not be counted as one token.
 
-## Regression contract
+Proving that only one ID exists can require more work than finding two. The
+query is not guaranteed to be faster than ordinary masking for every state.
+Normal `mask()` and `fill_mask()` do not run the bounded-cardinality logic.
 
-The test suite checks both queries against an independent finite-language model
-whose symbols are bytes or exact model-token events. An ID may consume its full
-byte spelling or a matching atomic event; both successors survive when valid.
-Empty and missing spellings are not epsilon byte transitions. Reference masks
-and acceptance are computed by this model, not by another GLRMask backend.
+## Limits and errors
 
-The same cases run across the four optimization choices, source-bound and
-prepared-bound components, and saved/loaded constraints. Additional cases cover
-UTF-8 scalars split across model tokens, distinct aliases, root end controls,
-child ignore competing with parent continuations, and unused high token IDs.
-A conservative query result may be shorter than the reference result, but may
-not contain a different unproved token. Every returned token is replayed through
-the ordinary mask and commit interface, and the original state remains unchanged.
+One call returns at most 10,000 IDs. Reaching that output limit returns the
+proved prefix, which the caller can commit before asking again. This is not a
+grammar length budget or a total wall-clock limit.
+
+Proof/resource errors are errors, not fabricated empty masks, ambiguity, or
+grammar completion. The original state remains unchanged. A real rejection can
+remove an alternative; a resource failure cannot be used to prove that a
+competing alternative is impossible.
+
+## Raw-byte recognition is a separate operation
+
+`commit_bytes(data)` remains available for incrementally recognizing raw text
+or testing grammar-covered input. It does not deliver exact-ID events and may
+reach a state that cannot be reached using the model vocabulary. When the
+application knows the actual model token IDs, it should use `commit_token` to
+preserve their semantics. No corresponding public byte-forcing operation is
+required for raw-byte input to be useful.
+
+## Validation contract
+
+Bounded-query tests compare cold and warm results against complete ordinary
+masks at multiple thresholds and across optimization modes. Forcing is checked
+against the full-mask singleton reference and replayed with ordinary token
+commits. Coverage includes duplicate spellings, event-only IDs, empty event
+sets, root controls, partial UTF-8 sequences, child scopes, dynamic unions and
+saved/loaded artifacts. The earlier canonical algorithm is retained only as an
+internal test/reference facility, not a public serving policy.

@@ -310,6 +310,31 @@ fn configure_compile_worker_thread() {
 #[cfg(not(target_os = "windows"))]
 fn configure_compile_worker_thread() {}
 
+thread_local! {
+    // Construction-only state. Ordinary token masking never reads this flag.
+    static OWNED_COMPILE_WORKER: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+}
+
+fn initialize_compile_worker() {
+    OWNED_COMPILE_WORKER.with(|owned| owned.set(true));
+    configure_compile_worker_thread();
+}
+
+/// A caller already executing in a Rayon pool owns that pool's CPU budget.
+/// Do not redirect its independent jobs to our small default pool or serial
+/// finalizer. This is queried only by compilation/composition entry points.
+pub(crate) fn caller_pool_is_active() -> bool {
+    rayon::current_thread_index().is_some()
+        && !OWNED_COMPILE_WORKER.with(std::cell::Cell::get)
+}
+
+fn explicit_parallel_compile_budget() -> bool {
+    ["GLRMASK_COMPILE_THREADS", "RAYON_NUM_THREADS"].iter().any(|name| {
+        std::env::var(name).ok().and_then(|value| value.trim().parse::<usize>().ok())
+            .is_some_and(|threads| threads > 1)
+    })
+}
+
 fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
@@ -348,7 +373,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     let thread_count = compile_thread_count()?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
-        .start_handler(|_| configure_compile_worker_thread())
+        .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()
 });
@@ -356,7 +381,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
 static SINGLE_THREAD_COMPILE_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     rayon::ThreadPoolBuilder::new()
         .num_threads(1)
-        .start_handler(|_| configure_compile_worker_thread())
+        .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()
 });
@@ -366,6 +391,11 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    // Respect a caller-supplied pool and avoid nested cross-pool installs.
+    // Re-entering an unrelated small pool serializes high-core caller work.
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
     if let Some(pool) = &*COMPILE_THREAD_POOL {
         pool.install(f)
     } else {
@@ -378,7 +408,13 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    if single_thread && let Some(pool) = &*SINGLE_THREAD_COMPILE_POOL {
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+    // A deliberate service-wide CPU budget must apply to tiny requests too.
+    // The default small-request latency policy remains unchanged otherwise.
+    if single_thread && !explicit_parallel_compile_budget()
+        && let Some(pool) = &*SINGLE_THREAD_COMPILE_POOL {
         pool.install(f)
     } else {
         run_with_compile_thread_pool(f)
@@ -7385,5 +7421,46 @@ mod compact_special_range_tests {
         let mut mask = [1u32; 4];
         interval(0, 31, 96).or_mask(&mut mask);
         for id in [0, 32, 64, 96] { assert_ne!(mask[id / 32] & (1 << (id % 32)), 0); }
+    }
+}
+
+
+#[cfg(test)]
+mod caller_execution_tests {
+    use super::*;
+
+    #[test]
+    fn caller_owned_pool_is_not_replaced_by_the_default_or_tiny_pool() {
+        for size in [1,2,4] {
+            let pool=rayon::ThreadPoolBuilder::new().num_threads(size).build().unwrap();
+            pool.install(|| {
+                (0..size*2).into_par_iter().for_each(|_| {
+                    assert!(caller_pool_is_active());
+                    let caller=std::thread::current().id();
+                    run_with_compile_thread_pool(|| {
+                        assert_eq!(std::thread::current().id(),caller);
+                        assert_eq!(rayon::current_num_threads(),size);
+                        run_with_dynamic_compile_thread_pool(true,|| {
+                            assert_eq!(std::thread::current().id(),caller);
+                            assert_eq!(rayon::current_num_threads(),size);
+                        });
+                    });
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn caller_parallel_compilation_preserves_masks_and_snapshot_isolation() {
+        let v=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
+        let g=crate::Grammar::from_glrm("start root nt root=\"ab\"");
+        let opts=crate::BuildOptions::default().optimization(crate::Optimization::FastBuild);
+        let reference=g.compile_with(&v,opts.clone()).unwrap();let expected=reference.start().mask();
+        let pool=rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        pool.install(|| (0..12).into_par_iter().for_each(|_| {
+            let c=g.compile_with(&v,opts.clone()).unwrap();
+            assert_eq!(c.start().mask(),expected);
+            let mut s=c.start();s.commit_token(2).unwrap();assert!(s.is_accepting());
+        }));
     }
 }

@@ -612,7 +612,7 @@ fn dump_nt_postfix(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
 
 fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Shortest(inner) => format!("shortest({})", dump_nt_expr_with_flavor(inner, false, flavor)),
+        GrammarExpr::Shortest(inner) => format!("shortest {{ {} }}", dump_nt_expr_with_flavor(inner, false, flavor)),
         GrammarExpr::Ref(name) => if flavor==DumpFlavor::V1 {source_identifier(name)} else {name.clone()},
         GrammarExpr::Grouped(inner) => {
             format!("({})", dump_nt_expr_with_flavor(inner, false, flavor))
@@ -2810,9 +2810,9 @@ impl GlrmParser {
             Tok::EscapedIdent(name) => {self.advance();Ok(GrammarExpr::Ref(name))}
             Tok::Ident(ref kw) => {
                 match kw.as_str() {
-                    "shortest" if matches!(self.token_at(1),Tok::LParen) => {
-                        self.advance();self.consume(&Tok::LParen)?;
-                        let inner=self.parse_nt_expr(true)?;self.consume(&Tok::RParen)?;
+                    "shortest" if matches!(self.token_at(1),Tok::LBrace) => {
+                        self.advance();self.consume(&Tok::LBrace)?;
+                        let inner=self.parse_nt_expr(true)?;self.consume(&Tok::RBrace)?;
                         Ok(GrammarExpr::Shortest(Box::new(inner)))
                     }
                     "eps" => {
@@ -5263,15 +5263,15 @@ mod redesigned_surface_tests {
 
     #[test]
     fn shortest_is_regular_and_handles_nfa_competition_and_epsilon() {
-        let source=r#"start root t VALUE=shortest(/a|ab/) nt root=VALUE"#;
+        let source=r#"start root t VALUE=shortest { /a|ab/ } nt root=VALUE"#;
         assert!(terminal_matches(source,"VALUE",b"a"));
         assert!(!terminal_matches(source,"VALUE",b"ab"));
-        let source=r#"start root t VALUE=shortest(/ab|abc|ac/) nt root=VALUE"#;
+        let source=r#"start root t VALUE=shortest { /ab|abc|ac/ } nt root=VALUE"#;
         for bytes in [b"ab".as_slice(),b"ac"] {assert!(terminal_matches(source,"VALUE",bytes));}
         assert!(!terminal_matches(source,"VALUE",b"abc"));
-        assert!(from_glrm(r#"start root t EMPTY=shortest(/a*/) nt root=EMPTY"#).is_ok());
-        assert!(from_glrm(r#"start root ignore EMPTY t EMPTY=shortest(/a*/) nt root="b""#).is_err());
-        assert!(from_glrm(r#"start root nt X="a" nt root=shortest(X)"#).is_err());
+        assert!(from_glrm(r#"start root t EMPTY=shortest { /a*/ } nt root=EMPTY"#).is_ok());
+        assert!(from_glrm(r#"start root ignore EMPTY t EMPTY=shortest { /a*/ } nt root="b""#).is_err());
+        assert!(from_glrm(r#"start root nt X="a" nt root=shortest { X }"#).is_err());
         assert!(from_glrm(r#"start root t VALUE=/a+?/ nt root=VALUE"#).is_err());
     }
 
@@ -5288,7 +5288,7 @@ mod redesigned_surface_tests {
     #[test]
     fn canonical_formatter_is_idempotent_and_retains_literal_alphabets() {
         for source in [
-            r#"start root t VALUE=shortest(/.*END/s) nt root=VALUE"#,
+            r#"start root t VALUE=shortest { /.*END/s } nt root=VALUE"#,
             r#"start root t VALUE=b/[\x00-\xFF]+/ nt root=VALUE"#,
             r#"start root t VALUE="é\u{1F600}\n" nt root=VALUE"#,
             r#"start `start` nt `start`=b"\xFF\x00""#,

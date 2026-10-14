@@ -1,4 +1,12 @@
 """Typed, immutable source/prepared components and Lark compatibility profiles."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import gc
 
 import numpy as np
@@ -32,13 +40,13 @@ def test_owned_source_and_independent_open_prepared_children(mode):
     child = glrmask.Grammar.from_glrm("".join([LEAF]))
     open_child = child.prepare(v)
     parent = glrmask.Grammar.from_glrm(PAIR).prepare(v)
-    package = parent.bind("LEFT", open_child).bind("RIGHT", open_child)
+    package = _bound_snapshot(_bound_snapshot(parent, "LEFT", open_child), "RIGHT", open_child)
     assert isinstance(package, glrmask.PreparedGrammar)
     assert [(r.path, r.kind) for r in package.requirements] == [
         (["LEFT", "MARK"], "token"), (["RIGHT", "MARK"], "token")]
     assert [r.name for r in open_child.requirements] == ["MARK"]
     loaded = glrmask.PreparedGrammar.load(package.save(), vocab=v)
-    complete = loaded.bind("LEFT::MARK", v.tokens([4])).bind("RIGHT::MARK", v.tokens([5]))
+    complete = _bound_snapshot(_bound_snapshot(loaded, "LEFT::MARK", v.tokens([4])), "RIGHT::MARK", v.tokens([5]))
     del child, parent, open_child
     gc.collect()
     compiled = complete.link(optimization=mode)
@@ -46,7 +54,7 @@ def test_owned_source_and_independent_open_prepared_children(mode):
     assert not accepts(compiled, [0, 5, 1, 2, 4])
     assert len(package.requirements) == 2
     with pytest.raises(ValueError):
-        complete.bind("LEFT::MARK", v.tokens([5]))
+        _bound_snapshot(complete, "LEFT::MARK", v.tokens([5]))
 
 
 def test_typed_bindings_and_explicit_event_adapter():
@@ -54,15 +62,15 @@ def test_typed_bindings_and_explicit_event_adapter():
     leaf = glrmask.Grammar.from_glrm(LEAF)
     pair = glrmask.Grammar.from_glrm(PAIR)
     with pytest.raises(ValueError):
-        leaf.bind("MARK", glrmask.Grammar.from_glrm('start x nt x="x"'))
+        _bound_snapshot(leaf, "MARK", glrmask.Grammar.from_glrm('start x nt x="x"'))
     with pytest.raises(ValueError):
-        pair.bind("LEFT", v.tokens([4]))
+        _bound_snapshot(pair, "LEFT", v.tokens([4]))
     event = glrmask.Grammar.exact(v.tokens([2, 4]))
-    g = glrmask.Grammar.from_glrm('extern grammar EVENT start root nt root=EVENT').bind("EVENT", event)
+    g = _bound_snapshot(glrmask.Grammar.from_glrm('extern grammar EVENT start root nt root=EVENT'), "EVENT", event)
     mask = g.compile(v).start().mask()
     assert not mask[0] and mask[2] and mask[4]
-    source = pair.bind("LEFT", leaf).bind("RIGHT", leaf)
-    complete = source.bind("LEFT::MARK", v.tokens([4])).bind("RIGHT::MARK", v.tokens([5]))
+    source = _bound_snapshot(_bound_snapshot(pair, "LEFT", leaf), "RIGHT", leaf)
+    complete = _bound_snapshot(_bound_snapshot(source, "LEFT::MARK", v.tokens([4])), "RIGHT::MARK", v.tokens([5]))
     assert len(source.requirements) == 2 and complete.requirements == []
 
 
@@ -74,7 +82,7 @@ def test_lark_llm_numeric_names_and_prepared_bindings(mode):
     g = glrmask.Grammar.from_lark('start: <|begin|> @payload <[^0-2]>', profile="llm", token_names={"begin": 2})
     assert [r.name for r in g.requirements] == ["payload"]
     child = glrmask.Grammar.from_glrm('start root nt root="|"')
-    compiled = g.prepare(v).bind("payload", child.prepare(v)).link(optimization=mode)
+    compiled = _bound_snapshot(g.prepare(v), "payload", child.prepare(v)).link(optimization=mode)
     assert accepts(compiled, [2, 1, 4]) and accepts(compiled, [2, 1, 5])
     assert not accepts(compiled, [0, 1, 4])
     with pytest.raises(ValueError):
@@ -86,7 +94,7 @@ def test_inline_json_and_host_bound_json_are_mask_equivalent(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b'<"a b">', 1: b'<"ab">', 2: b"<", 3: b'"a b"', 4: b">"})
     schema = {"type": "string", "const": "a b"}
     inline = glrmask.Grammar.from_lark('start: "<" %json {"type":"string","const":"a b"} ">"', profile="llm")
-    bound = glrmask.Grammar.from_lark('start: "<" @json ">"', profile="llm").bind("json", glrmask.Grammar.from_json_schema(schema))
+    bound = _bound_snapshot(glrmask.Grammar.from_lark('start: "<" @json ">"', profile="llm"), "json", glrmask.Grammar.from_json_schema(schema))
     left = inline.compile(v, optimization=mode)
     right = bound.compile(v, optimization=mode)
     assert np.array_equal(left.start().mask(), right.start().mask())

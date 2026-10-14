@@ -829,7 +829,7 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
             .compile_with(&vocab, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
             .prepare(&vocab).unwrap();
-        let middle = parent.bind("leaf", &leaf).unwrap().link_with(options()).unwrap();
+        let middle = parent.bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
         let overlay = middle.static_dynamic_overlay.as_ref().unwrap();
         let local = &overlay.segmented_parser_components[0].constraint;
         let slot = overlay.segmented_parser_links[0].slot_terminal;

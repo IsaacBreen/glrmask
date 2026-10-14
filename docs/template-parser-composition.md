@@ -24,11 +24,13 @@ let child = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with(
         .parser_backend(ParserBackend::TemplateDfa),
 )?;
 let parent = Grammar::from_glrm(
-    r#"glrm 1; start root; extern child; nt root = "x" child "y";"#,
+    r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
 ).compile_unlinked(&vocab)?;
 
 for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
-    let linked = parent.bind("child", &child)?.link_with(
+    let mut request = parent.clone();
+    request.bind("child", &child)?;
+    let linked = request.link_with(
         BuildOptions::default()
             .optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa),
@@ -46,8 +48,8 @@ for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
 # Ok::<(), glrmask::Error>(())
 ```
 
-Binding is immutable. Selecting a backend for the result does not mutate a
-shared child or change the process-wide default. End-token policy belongs to the
+Binding mutates the receiver while capturing a snapshot of each child. Selecting
+a backend for the result does not mutate a shared child or change the process-wide default. End-token policy belongs to the
 final root, not an embedded child's standalone termination policy. Exact grammar
 tokens remain grammar tokens, and parent and child ignore rules retain their
 own scopes.

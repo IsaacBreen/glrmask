@@ -232,17 +232,16 @@ of the wrong kind is an error; an exact ID is never replaced by its decoded text
 use glrmask::{Grammar, Result, Vocab};
 
 # fn demo(vocab: &Vocab, end_id: u32) -> Result<()> {
-let parent = Grammar::from_glrm(r#"
+let mut parent = Grammar::from_glrm(r#"
     extern grammar PAYLOAD
     extern token END
     start response
     nt response = PAYLOAD END
 "#);
 let child = Grammar::from_json_schema(r#"{"type":"null"}"#);
-let complete = parent
-    .bind("PAYLOAD", &child)?
-    .bind("END", glrmask::Token::new(end_id))?;
-let constraint = complete.compile(vocab)?;
+parent.bind("PAYLOAD", &child)?;
+parent.bind("END", glrmask::Token::new(end_id))?;
+let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
 # }
@@ -254,17 +253,21 @@ not a sequence. Sparse vocabulary holes and incompatible vocabulary identities
 are errors. IDs with the same spelling remain distinct, and spelling-less IDs
 are not epsilon. See [exact-token ranges](docs/exact-token-ranges.md).
 
-For a deliberately general grammar parameter, adapt exact events explicitly:
-`Grammar::exact(vocab.tokens([id])?)` in Rust or
-`glrmask.Grammar.exact(vocab.tokens([id]))` in Python. This is an event-aware grammar
-fragment, not a regex over token spellings.
+A grammar-valued parameter also accepts `Token` or `ExactTokens` directly: this
+widens an exact event into a general fragment without changing its meaning.
+`Grammar::exact(vocab.tokens([id])?)` (Rust) and
+`glrmask.Grammar.exact(vocab.tokens([id]))` (Python) remain available for creating
+a standalone event-aware grammar. Neither conversion uses decoded token spelling.
+An arbitrary grammar cannot bind a token-valued parameter.
 
 ### Prepare, attach, specialize, link
 
 `Grammar.prepare(vocab)` creates a non-runnable `PreparedGrammar`. The parent and
-its children may both have unresolved parameters. Binding is immutable and does
-not link a child prematurely. Reuse one prepared definition with separate binding
-environments:
+its children may both have unresolved parameters. `bind(name, value)` mutates the
+receiving assembly handle and returns `Result<()>` in Rust or `None` in Python.
+Each successful bind publishes a new shared snapshot; an error leaves the previous
+configuration intact. Attaching a child captures its current configuration, not
+a live reference to later edits. Use `clone()` to specialize independently:
 
 ```python
 import glrmask
@@ -284,11 +287,13 @@ parent = glrmask.Grammar.from_glrm('''
     nt pair = LEFT "|" RIGHT
 ''').prepare(vocab)
 
-package = parent.bind("LEFT", leaf).bind("RIGHT", leaf)
+package = parent.clone()
+package.bind("LEFT", leaf)
+package.bind("RIGHT", leaf)
 assert [r.name for r in package.requirements] == ["LEFT::MARK", "RIGHT::MARK"]
-complete = package.bind("LEFT::MARK", vocab.tokens([4])).bind(
-    "RIGHT::MARK", vocab.tokens([5]),
-)
+complete = package.clone()
+complete.bind("LEFT::MARK", vocab.tokens([4]))
+complete.bind("RIGHT::MARK", vocab.tokens([5]))
 constraint = complete.link()
 state = constraint.start()
 for token_id in [0, 4, 1, 2, 5]:
@@ -339,12 +344,12 @@ supply the enclosing generation's root termination policy.
 
 ### Determined output
 
-`state.forced()` selects a declared canonical, admitted encoding of proved common
-bytes; `state.forced_token_ids()` returns locally inevitable original IDs without
-choosing between encodings. Both are read-only and conservative. Canonical encoding
-can change subsequent model logits and is not a probability-preserving optimization.
-See [forcing contracts](docs/forcing.md) for acceptance barriers, exact events,
-aliases, proof limits, and replay requirements.
+`state.forced_tokens()` returns locally inevitable original token IDs without
+choosing between encodings. It is read-only and stops before the root can finish
+or more than one next ID is admissible. The private proof does not construct a
+full vocabulary mask. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
+and raises errors for proof/resource failures. There is no public byte-forcing or
+canonical-tokenization query. See [forcing contracts](docs/forcing.md).
 
 ### Build/runtime trade-off
 
@@ -417,7 +422,7 @@ nt value = INTEGER | "null"
 It retains `internal t`, unordered context-free alternatives, scoped grammars,
 regular intersection/subtraction, structural nonterminal-alternative subtraction,
 separated sequences, explicit finite automata, Unicode/byte expressions and
-terminal-only `shortest(...)`. See [the native format](docs/glrm-format.md).
+terminal-only `shortest { ... }`. See [the native format](docs/glrm-format.md).
 
 Lark is a recognition-focused frontend with an explicit optional LLM compatibility
 profile. That profile adds selected exact-token syntax, named token resolution,

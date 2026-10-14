@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_table_free(&parser_backend_report(&reference));
     eprintln!("INLINE_REFERENCE source_prepare_compile_ns={reference_compile_ns}");
     let start = Instant::now();
-    let candidate = parent.bind("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
+    let candidate = parent.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
     let link_ns = start.elapsed().as_nanos(); eprintln!("DIRECT_LINK ns={link_ns}");
     assert_eq!(candidate.parser_backend(), ParserBackend::TemplateDfa);
     let report = parser_backend_report(&candidate); assert_table_free(&report); if args[3] == "static" { assert_static(&report); }
@@ -295,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_measurement = if args.len() == 6 {
         for repeat in 0..2 {
             let started = Instant::now();
-            let linked = parent.bind("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
+            let linked = parent.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
             link_samples.push(started.elapsed().as_nanos());
             assert_eq!(linked.save(), saved, "repeated prepared-component link must preserve exact artifact bytes");
             eprintln!("ISOLATED_LINK repeat={repeat} ns={}", link_samples.last().unwrap());

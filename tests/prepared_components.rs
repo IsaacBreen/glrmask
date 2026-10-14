@@ -15,30 +15,32 @@ fn check_pair(c:&Constraint) {
 #[test]
 fn typed_source_ports_reject_wrong_kind_at_binding() {
     let v=vocab();let token=Grammar::from_glrm(LEAF);let grammar=Grammar::from_glrm(PAIR);
-    assert!(token.bind("MARK",Grammar::from_glrm("start root nt root=\"x\"")).is_err());
-    assert!(grammar.bind("LEFT",Token::new(4)).is_err());
+    assert!(token.bind_snapshot("MARK",Grammar::from_glrm("start root nt root=\"x\"")).is_err());
+    let widened=grammar.bind_snapshot("LEFT",Token::new(4)).unwrap();
+    assert_eq!(widened.requirements().unwrap().iter().map(|r|r.name()).collect::<Vec<_>>(),["RIGHT"]);
+    assert_eq!(grammar.requirements().unwrap().len(),2);
     let requirements=token.requirements().unwrap();assert_eq!(requirements[0].kind,ExternalKind::Token);
     assert_eq!(requirements[0].name(),"MARK");
-    assert!(token.bind("MARK",v.tokens([4]).unwrap()).is_ok());
+    assert!(token.bind_snapshot("MARK",v.tokens([4]).unwrap()).is_ok());
 }
 #[test]
 fn source_open_attachments_have_independent_qualified_environments() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF);
-    let pair=Grammar::from_glrm(PAIR).bind("LEFT",&leaf).unwrap().bind("RIGHT",&leaf).unwrap();
+    let pair=Grammar::from_glrm(PAIR).bind_snapshot("LEFT",&leaf).unwrap().bind_snapshot("RIGHT",&leaf).unwrap();
     assert_eq!(pair.requirements().unwrap().iter().map(|r|r.name()).collect::<Vec<_>>(),["LEFT::MARK","RIGHT::MARK"]);
-    let complete=pair.bind("LEFT::MARK",Token::new(4)).unwrap().bind("RIGHT::MARK",Token::new(5)).unwrap();
-    assert!(complete.bind("LEFT::MARK",Token::new(5)).is_err());
+    let complete=pair.bind_snapshot("LEFT::MARK",Token::new(4)).unwrap().bind_snapshot("RIGHT::MARK",Token::new(5)).unwrap();
+    assert!(complete.bind_snapshot("LEFT::MARK",Token::new(5)).is_err());
     assert_eq!(leaf.requirements().unwrap().len(),1);
     for mode in MODES {check_pair(&complete.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap());}
 }
 #[test]
 fn prepared_open_children_survive_serialization_and_independent_binding() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF).prepare(&v).unwrap();
-    let pair=Grammar::from_glrm(PAIR).prepare(&v).unwrap().bind("LEFT",&leaf).unwrap().bind("RIGHT",&leaf).unwrap();
+    let pair=Grammar::from_glrm(PAIR).prepare(&v).unwrap().bind_snapshot("LEFT",&leaf).unwrap().bind_snapshot("RIGHT",&leaf).unwrap();
     assert!(pair.link().is_err());assert_eq!(pair.requirements().unwrap().len(),2);
     let loaded=PreparedGrammar::load_with_vocab(pair.save(),&v).unwrap();
-    assert!(loaded.bind("LEFT::MARK",Grammar::from_glrm("start x nt x=\"x\"").prepare(&v).unwrap()).is_err());
-    let complete=loaded.bind("LEFT::MARK",Token::new(4)).unwrap().bind("RIGHT::MARK",Token::new(5)).unwrap();
+    assert!(loaded.bind_snapshot("LEFT::MARK",Grammar::from_glrm("start x nt x=\"x\"").prepare(&v).unwrap()).is_err());
+    let complete=loaded.bind_snapshot("LEFT::MARK",Token::new(4)).unwrap().bind_snapshot("RIGHT::MARK",Token::new(5)).unwrap();
     for mode in MODES {check_pair(&complete.link_with(BuildOptions::default().optimization(mode)).unwrap());}
     assert_eq!(pair.requirements().unwrap().len(),2);assert_eq!(leaf.requirements().unwrap().len(),1);
 }
@@ -47,7 +49,7 @@ fn explicit_exact_adapter_has_event_not_spelling_semantics() {
     let v=vocab();let event=Grammar::exact(v.tokens([2,4]).unwrap());
     let host=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE");
     for mode in MODES {
-        let c=host.bind("VALUE",&event).unwrap().compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=host.bind_snapshot("VALUE",&event).unwrap().compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
         let mask=c.start().mask();assert!(!allowed(&mask,0));assert!(allowed(&mask,2));assert!(allowed(&mask,4));assert!(!allowed(&mask,5));
         for id in [2,4] {let mut s=c.start();s.commit_token(id).unwrap();assert!(s.is_accepting());}
     }
@@ -59,14 +61,14 @@ fn unused_parameters_still_belong_to_the_interface() {
     let v=vocab();let g=Grammar::from_glrm("extern token UNUSED start root nt root=\"x\"");
     assert!(g.compile(&v).is_err());
     let prepared=g.prepare(&v).unwrap();assert!(prepared.link().is_err());
-    let c=prepared.bind("UNUSED",Token::new(4)).unwrap().link().unwrap();
+    let c=prepared.bind_snapshot("UNUSED",Token::new(4)).unwrap().link().unwrap();
     let mut s=c.start();s.commit_token(0).unwrap();assert!(s.is_accepting());
 }
 #[test]
 fn inline_and_attached_paths_have_the_same_scope_rules() {
     let v=vocab();let source="grammar inner {extern token MARK start x nt x=MARK} start root nt root=inner";
     let source=Grammar::from_glrm(source);assert_eq!(source.requirements().unwrap()[0].name(),"inner::MARK");
-    let prepared=source.prepare(&v).unwrap();let c=prepared.bind("inner::MARK",Token::new(5)).unwrap().link().unwrap();
+    let prepared=source.prepare(&v).unwrap();let c=prepared.bind_snapshot("inner::MARK",Token::new(5)).unwrap().link().unwrap();
     assert_eq!((0..6).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),[5]);
 }
 
@@ -84,8 +86,8 @@ fn requirement_coordinates_survive_preparation_and_save_load() {
     let loaded=PreparedGrammar::load_with_vocab(p.save(),&v).unwrap();
     assert_eq!(loaded.requirements().unwrap(),[r]);
     let child=Grammar::from_glrm("start root nt root=\"x\"");
-    assert_eq!(g.bind("MARK",&child).unwrap_err().source_span(),Some(span));
-    assert_eq!(loaded.bind("MARK",child.prepare(&v).unwrap()).unwrap_err().source_span(),Some(span));
+    assert_eq!(g.bind_snapshot("MARK",&child).unwrap_err().source_span(),Some(span));
+    assert_eq!(loaded.bind_snapshot("MARK",child.prepare(&v).unwrap()).unwrap_err().source_span(),Some(span));
 }
 
 #[test]
@@ -117,7 +119,7 @@ fn compact_closed_dag_does_not_expand_during_inspection_or_persistence() {
     let mut graph=leaf;
     // This compact object describes more than two billion invocation paths.
     // Introspection and persistence must operate on the shared instance DAG.
-    for _ in 0..31 {graph=wrapper.bind("LEFT",&graph).unwrap().bind("RIGHT",&graph).unwrap();}
+    for _ in 0..31 {graph=wrapper.bind_snapshot("LEFT",&graph).unwrap().bind_snapshot("RIGHT",&graph).unwrap();}
     assert!(graph.requirements().unwrap().is_empty());
     let bytes=graph.save();
     assert!(bytes.len()<unit_bytes*3+128_000,"artifact unexpectedly expanded: {} vs unit {unit_bytes}",bytes.len());
@@ -134,7 +136,7 @@ fn compact_closed_dag_does_not_expand_during_inspection_or_persistence() {
 fn compact_open_dag_has_bounded_requirements_but_remains_serializable() {
     let v=vocab();let leaf=Grammar::from_glrm(LEAF).prepare(&v).unwrap();
     let wrapper=Grammar::from_glrm(PAIR).prepare(&v).unwrap();let mut graph=leaf;
-    for _ in 0..18 {graph=wrapper.bind("LEFT",&graph).unwrap().bind("RIGHT",&graph).unwrap();}
+    for _ in 0..18 {graph=wrapper.bind_snapshot("LEFT",&graph).unwrap().bind_snapshot("RIGHT",&graph).unwrap();}
     assert!(graph.requirements().unwrap_err().to_string().contains("resource limit"));
     let bytes=graph.save();assert!(bytes.len()<2_000_000);
     let loaded=PreparedGrammar::load_with_vocab(bytes,&v).unwrap();
@@ -146,14 +148,14 @@ fn source_preparation_memoizes_shared_attachments_and_checks_depth() {
     let v=vocab();
     let wrapper=Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT");
     let mut source=Grammar::from_glrm("start root nt root=\"x\"");
-    for _ in 0..18 {source=wrapper.bind("LEFT",&source).unwrap().bind("RIGHT",&source).unwrap();}
+    for _ in 0..18 {source=wrapper.bind_snapshot("LEFT",&source).unwrap().bind_snapshot("RIGHT",&source).unwrap();}
     assert!(source.requirements().unwrap().is_empty());
     let prepared=source.prepare(&v).unwrap();assert!(prepared.requirements().unwrap().is_empty());
     assert!(prepared.save().len()<8_000_000);
     let one=Grammar::from_glrm("extern grammar CHILD start root nt root=CHILD").prepare(&v).unwrap();
     let mut graph=Grammar::from_glrm("start root nt root=eps").prepare(&v).unwrap();
-    for _ in 0..64 {graph=one.bind("CHILD",&graph).unwrap();}
-    assert!(one.bind("CHILD",&graph).unwrap_err().to_string().contains("depth"));
+    for _ in 0..64 {graph=one.bind_snapshot("CHILD",&graph).unwrap();}
+    assert!(one.bind_snapshot("CHILD",&graph).unwrap_err().to_string().contains("depth"));
     assert!(PreparedGrammar::load(graph.save()).is_ok());
 }
 
@@ -164,8 +166,8 @@ fn empty_exact_bindings_are_empty_languages_not_epsilon() {
     assert!(empty.is_empty());assert_eq!(empty.len(),0);assert!(empty.ids().is_empty());
     assert!(v.token_ranges([]).unwrap().is_empty());
     let parent=Grammar::from_glrm("extern token EVENT start root nt root=EVENT | \"x\"");
-    let source=parent.bind("EVENT",empty.clone()).unwrap();
-    let prepared=parent.prepare(&v).unwrap().bind("EVENT",empty.clone()).unwrap();
+    let source=parent.bind_snapshot("EVENT",empty.clone()).unwrap();
+    let prepared=parent.prepare(&v).unwrap().bind_snapshot("EVENT",empty.clone()).unwrap();
     let loaded=PreparedGrammar::load_with_vocab(prepared.save(),&v).unwrap();
     let event=Grammar::exact(empty);
     for mode in MODES {
