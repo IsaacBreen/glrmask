@@ -19,6 +19,8 @@ import zlib
 ROOT = Path(__file__).resolve().parents[1]
 CONTENT = ROOT/'docs/content'
 MODES = [('static', 'GLRMask'), ('dynamic', 'GLRMask dynamic'), ('llguidance', 'llguidance')]
+AWS_JSON_SHA256 = '770bcc50c47774b86f8b95ccb131c3bb5943d089bab3629e6075d6250ee58486'
+AWS_JS_SHA256 = '8814aaa858ac642428d98b32fc874a39fb7ebfb6c79a15d222a8ef3e006aa87a'
 PROVENANCE_SHA256 = '11f5b4704ecf9279d3d6b83c6a183e8ec7666a4eef8e7c58bf12256789e2cfbc'
 JS_PROVENANCE_SHA256 = '3653f392561164fd306df5715ce9eafffef1dedeaa7034e1ef2e504560a92dbd'
 
@@ -27,7 +29,7 @@ def digest(data):
     return hashlib.sha256(json.dumps(data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def load():
+def load_historical():
     data = json.loads((ROOT/'docs/benchmarks/json-schema-2026-10-08.json').read_text(encoding="utf-8"))
     prov = {k:v for k,v in data.items() if k not in ['tail','modes']}
     prov['modes'] = {mode:{k:v for k,v in row.items() if k!='statistics_ns'} for mode,row in data['modes'].items()}
@@ -46,71 +48,39 @@ def load():
     return data, js
 
 
+def load():
+    # Historical pins stay checked; current snapshots have separate identities.
+    load_historical()
+    data=json.loads((ROOT/'docs/benchmarks/json-schema-2026-10-14.json').read_text(encoding='utf-8'))
+    js=json.loads((ROOT/'docs/benchmarks/javascript-2026-10-14.json').read_text(encoding='utf-8'))
+    assert digest(data)==AWS_JSON_SHA256, 'Native JSON snapshot changed; verify native export and outcomes'
+    assert digest(js)==AWS_JS_SHA256, 'Native JavaScript snapshot changed; verify native export and outcomes'
+    for record in [data,js]:
+        assert record['schema']=='glrmask-native-publication-v2'
+        xs=record['tail']['exceedance_pct']
+        assert all(0<x<=100 for x in xs) and all(a<b for a,b in zip(xs,xs[1:]))
+        for mode in ['static','dynamic','balanced','llguidance']:
+            ys=record['tail'][mode+'_us']
+            assert len(xs)==len(ys) and all(math.isfinite(y) and y>0 for y in ys)
+            assert all(a>=b for a,b in zip(ys,ys[1:]))
+    return data,js
+
+
 def table(rows, column='Metric', names=('GLRMask','llguidance')):
     return '\n'.join(['| '+column+' | '+' | '.join(names)+' |','|---|'+'---:|'*len(names)] +
                      ['| '+label.replace(' ', '&nbsp;')+' | '+' | '.join(f'{v:,.1f}' for v in values)+' |' for label,values in rows])
 
 
 def markdown(data, js):
-    def json_rows(metric, scale, quantiles, modes=('static','llguidance')):
-        return [(label,[data['modes'][m]['statistics_ns'][metric][key]/scale for m in modes])
-                for label,key in quantiles]
-    rows=json_rows('tbm',1e3,[('Mean','mean'),('p50','median'),('p99','p99'),('p99.9','p99_9'),('Max','max')])
-    ttfm=json_rows('ttfm',1e6,[('Mean','mean'),('p50','median'),('p99','p99'),('Max','max')])
-    def js_rows(metric, labels):
-        return [(row['label'].capitalize() if row['label'] in ['mean','max'] else row['label'],
-                 [row['values'][0],row['values'][2]]) for row in js['tables'][metric] if row['label'] in labels]
-    js_tbm=js_rows('tbm',['mean','p50','p99','max'])
-    js_ttfm=js_rows('ttfm',['mean'])+[('Selected',[js['ttfm_single']['values_ms'][0],js['ttfm_single']['values_ms'][2]])]+js_rows('ttfm',['max'])
-    dynamic_ttfm=json_rows('ttfm',1e6,[('Mean','mean'),('p50','median'),('p99','p99'),('Max','max')],('static','dynamic','llguidance'))
-    return '''### JSON Schema
-
-Time between masks. Lower is better.
-
-{{json-plot}}
-
-**TBM (µs)**
-
-'''+table(rows, 'Statistic')+'''
-
-**Time to first mask (ms)**
-
-'''+table(ttfm, 'Statistic')+'''
-
-8 October 2026 · 2,925,983 aligned token positions · macOS 27 ARM64, 10 logical CPUs. [Benchmark details](docs/benchmark-cfa-2026-10-08.md).
-
-#### Dynamic mode
-
-Care about compile times? Try dynamic mode.
-
-{{dynamic}}
-
-{{json-dynamic-plot}}
-
-**Time to first mask (ms)**
-
-'''+table(dynamic_ttfm,'Stat',('GLRMask','GLRMask<br>dynamic','llguidance'))+'''
-
-[Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).
-
-### JavaScript
-
-Time between masks. Lower is better.
-
-{{javascript-plot}}
-
-**TBM (µs)**
-
-'''+table(js_tbm, 'Statistic')+'''
-
-**Time to first mask (ms)**
-
-'''+table(js_ttfm, 'Statistic')+'''
-
-9 October 2026 · 31 examples, 4,099 token positions · macOS ARM64. [Benchmark details](docs/benchmark-javascript-2026-10-09.md).
-
-Both datasets measure source builds, not the published 0.2 packages.
-'''
+    names=('Static / FastRuntime','Dynamic / FastBuild','Balanced / O2','llguidance')
+    modes=('static','dynamic','balanced','llguidance')
+    def rows(record,metric,scale):
+        return [(label,[record['modes'][m]['statistics_ns'][metric][key]/scale for m in modes])
+                for key,label in [('mean','Mean'),('median','p50'),('p90','p90'),('p99','p99'),('p99_9','p99.9'),('max','Max')]]
+    sections=[]
+    for record,label,placeholder in [(data,'JSON Schema','json'),(js,'JavaScript','javascript')]:
+        sections.append('### '+label+'\n\nTime between masks. Lower is better.\n\n{{'+placeholder+'-plot}}\n\n**TBM (µs)**\n\n'+table(rows(record,'tbm',1e3),'Statistic',names)+'\n\n**Time to first mask (ms)**\n\n'+table(rows(record,'ttfm',1e6),'Statistic',names)+f"\n\n14 October 2026 · {record['complete_valid_trajectories']:,} complete valid trajectories accepted by all four engines · {record['tbm_positions']:,} TBM positions per engine · {record['common_schemas']:,} common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.\n")
+    return '\n'.join(sections)+"\n#### Dynamic mode\n\n{{dynamic}}\n\n{{json-dynamic-plot}}\n\n[Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).\n\nThere was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Balanced 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.\n\n[Native AWS benchmark details](docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.\n"
 
 
 def svg(tail, spec, dark=False, label='JSON Schema', dataset='json', include_dynamic=False):
@@ -196,17 +166,13 @@ def render_png(source, path, spec):
     path.write_bytes(png[:-12]+chunk+png[-12:])
 
 
-def check_website(data, js, root):
-    website=json.loads((root/'src/data/glrmask-canonical-20261008.json').read_text(encoding="utf-8")); tail=json.loads((root/'src/data/glrmask-canonical-tail-20261008.json').read_text(encoding="utf-8"))
-    assert data['source_commits']==website['metadata']['current']['revisions']
-    assert data['tail']==tail
-    for mode,_ in MODES:
-        actual,expected=data['modes'][mode],website['modes'][mode]
-        for key in ['schemas','aligned_tbm_positions','membership_sha256','prefix_identity_sha256']:assert actual[key]==expected[key]
-        assert actual['outcomes']==expected['outcomes']['current']
-        for metric in ['tbm','ttfm','build']:assert actual['statistics_ns'][metric]==expected['statistics']['current'][metric]['nearest_rank']
-    website_js=json.loads((root/'src/data/glrmask-javascript-measured-5f2609-20261009.json').read_text(encoding="utf-8"))
-    for key in ['source_revision','cfa_revision','llguidance_version','examples','tokens','tail','tables','ttfm_single']:assert js[key]==website_js[key], 'JS '+key+' differs'
+def check_website(data,js,root):
+    assert data['tail']==json.loads((root/'src/data/glrmask-canonical-tail-20261014.json').read_text())
+    actual=json.loads((root/'src/data/glrmask-canonical-20261014.json').read_text())
+    for mode,row in data['modes'].items():
+        assert row['statistics_ns']=={metric:value['interpolated'] for metric,value in actual['modes'][mode]['statistics']['current'].items()}
+        assert row['outcomes']==actual['modes'][mode]['outcomes']['current']
+    assert js['tail']==json.loads((root/'src/data/glrmask-javascript-native-20261014.json').read_text())['tail']
 
 
 def main():
@@ -216,7 +182,7 @@ def main():
     if args.website_root:check_website(data,js,args.website_root)
     spec=json.loads((CONTENT/'tail-chart.json').read_text(encoding="utf-8"))
     files={CONTENT/'benchmarks.md':markdown(data,js)}
-    for dataset,measured,tail,label in [('json','2026-10-08',data['tail'],'JSON Schema'),('json-dynamic','2026-10-08',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-09',js['tail'],'JavaScript')]:
+    for dataset,measured,tail,label in [('json','2026-10-14',data['tail'],'JSON Schema'),('json-dynamic','2026-10-14',data['tail'],'JSON Schema · Dynamic'),('javascript','2026-10-14',js['tail'],'JavaScript')]:
         stem=ROOT/f'docs/assets/benchmark-tbm-{dataset}-{measured}'
         for dark in [False,True]:files=files|{Path(str(stem)+('-dark' if dark else '')+'.svg'):svg(tail,spec,dark,label,'json' if dataset=='json-dynamic' else dataset,dataset=='json-dynamic')}
     stale=[str(p.relative_to(ROOT)) for p,body in files.items() if not p.exists() or p.read_text(encoding="utf-8")!=body]
