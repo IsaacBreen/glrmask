@@ -153,25 +153,29 @@ nt start = CONTROL payload;
         .unwrap().build().unwrap().compile().unwrap();
     assert!(!empty.start().is_accepting());
     assert!(empty.start().mask().iter().all(|word| *word == 0));
-    // Exact events widen losslessly to a grammar port: both slots still
-    // consume one original-ID event, even though that ID has no byte spelling.
-    let widened = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+    // The legacy/internal explicit bind_token helper remains narrowly typed.
+    // Public Grammar::bind performs the intentional event-to-grammar widening.
+    let narrow = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7]).unwrap()
         .bind_token("payload", [7]).unwrap()
         .build().unwrap();
-    let widened_static = widened.clone().compile().unwrap();
-    let widened_dynamic = widened.compile_dynamic().unwrap();
-    let mut a = widened_static.start();
-    let mut b = widened_dynamic.start();
-    for _ in 0..2 {
-        assert!(!a.is_accepting() && !b.is_accepting());
-        assert_eq!(a.mask(), b.mask());
-        assert!(allowed(&a.mask(), 7));
-        a.commit_token(7).unwrap();
-        b.commit_token(7).unwrap();
+    assert!(narrow.compile().unwrap_err().to_string().contains("requires a grammar"));
+    let mut widened = Grammar::from_glrm(source);
+    widened.bind("CONTROL", glrmask::Token::new(7)).unwrap();
+    widened.bind("payload", glrmask::Token::new(7)).unwrap();
+    for mode in [glrmask::Optimization::Auto, glrmask::Optimization::FastBuild,
+                 glrmask::Optimization::Balanced, glrmask::Optimization::FastRuntime] {
+        let constraint = widened.compile_with(
+            &vocab, glrmask::BuildOptions::default().optimization(mode)).unwrap();
+        let mut state = constraint.start();
+        for _ in 0..2 {
+            assert!(!state.is_accepting());
+            assert!(allowed(&state.mask(), 7));
+            state.commit_token(7).unwrap();
+        }
+        assert!(state.is_accepting());
     }
-    assert!(a.is_accepting() && b.is_accepting());
     // External references may remain unresolved until final compilation or link.
     let open_spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()

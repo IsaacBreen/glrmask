@@ -9,15 +9,18 @@
   reusable vocabulary-specific machinery and `link()` creates a closed runnable
   root. The old public `UnlinkedConstraint` / `compile_unlinked` spellings and
   implicit runnable-constraint child bindings are no longer exposed.
-- Support immutable open-to-open attachment at both source and prepared stages,
-  with isolated inline components and qualified `child::NAME` requirements.
-  Separate attachments share compiled definitions without sharing bindings.
-  Requirements retain expected kinds and original source spans; final linking
-  checks every declared dependency.
+- Make `Grammar.bind(name, value)` and `PreparedGrammar.bind(name, value)`
+  single-item mutations in both Rust and Python. They return `Result<()>` and
+  `None`, respectively, and leave the previous configuration intact on error.
+  Cheap `clone()` creates an independent handle; Python also supports `copy.copy`
+  and `copy.deepcopy`. Attaching an open child captures its current snapshot.
+  Later edits do not change parents, siblings, or already compiled constraints.
+  Qualified `child::NAME` requirements retain their types and source spans.
 - Keep explicit `extern token NAME` and `extern grammar NAME` contracts.
   `Token(id)` / `Token::new(id)` consumes one original ID and is checked against
   the target vocabulary. Vocabulary-qualified `ExactTokens` provides compact
-  sets/ranges; `Grammar.exact` explicitly adapts an event set to a grammar slot.
+  sets/ranges. Exact event values can bind a grammar port directly, with the
+  semantics of `Grammar.exact`; arbitrary grammars still cannot bind token ports.
   Empty sets denote the empty language, never epsilon.
 - Store prepared assemblies as a bounded DAG with shared compiled definitions
   and distinct instance environments. Reject malformed, excessively deep,
@@ -32,7 +35,8 @@
   `internal t`, maximal munch, ambiguous CFG recognition, regular algebra,
   structural alternative subtraction, and separated-sequence presence semantics.
 - Add explicit Unicode/byte strings and regexes, checked useful flags and
-  escapes, original-source diagnostics, and regular-terminal `shortest(...)`.
+  escapes, original-source diagnostics, and regular-terminal `shortest { R }`.
+  The braced operator is compositional and replaces the function-call spelling.
   Keep independent ignored-terminal identities and component-local skip policy.
   Regex-internal reluctant quantifiers and nonregular assertions fail explicitly.
 - Add a documented Lark recognition profile and an explicit LLM compatibility
@@ -46,17 +50,36 @@
 
 ### Correctness and packaging
 
-- Repair forcing around exact events, spelling-less IDs, duplicate spellings,
-  accepting alternatives and correlated dynamic states. `forced()` chooses a
-  canonical admitted encoding of determined bytes; `forced_token_ids()` requires
-  unavoidable original IDs. Canonical encoding is not a claim of unchanged model
-  sampling probabilities. Every returned ID is replayable through normal commit.
+- Expose only `forced_tokens()` for strict, locally inevitable original token
+  IDs. Remove `forced()` and `forced_token_ids()`; do not choose a canonical
+  encoding among alternative model tokenizations. Keep `commit_bytes()` as a
+  separate raw-byte recognition operation, not an exact-token commit substitute.
+  The private bounded-cardinality query finds final distinct ID witnesses without
+  constructing a complete vocabulary mask. Existing exact-mask caches may be
+  read; no public bounded-mask or byte-forcing API is added. Internal proof errors
+  are reported rather than silently treated as ambiguity or completion.
 - Correct trailing-unmapped vocabulary-coordinate refinement, productionless
   start coordinates and zero-terminal component ownership, with independent
   byte/event and empty-language regressions.
 - Include Python type stubs and `py.typed`, and exclude development interpreter
   caches from distributable wheels. Updated guides describe the canonical API
   and the deliberate native/Lark dialect differences.
+
+### Construction efficiency and concurrency
+
+- Share immutable binding snapshots and declaration metadata. Incremental
+  instance summaries replace repeated whole-graph discovery during binding and
+  closure checks; requirement paths are materialized when requested. Full
+  validation remains at artifact trust boundaries.
+- Reuse exact-event adapters across prepared links instead of recompiling the
+  same event set each time. Cache ownership is limited to the prepared definition;
+  no new registry or lookup is added to ordinary runtime masking.
+- Release Python's GIL during substantial native binding and requirement work.
+  Independent concurrent edits use cloned handles; overlapping access to the
+  same mutating handle reports a borrow error rather than losing updates.
+- Respect caller-owned Rayon pools during compilation and composition, avoiding
+  redirection of independent jobs into a capped or serial helper pool. Keep the
+  documented single-build defaults outside a caller-owned execution context.
 
 ## 0.2.0 — 2026-10-10
 

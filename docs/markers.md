@@ -58,7 +58,7 @@ instead of retaining the whole sequence's event history.
 `commit_token()` and `commit_bytes()` keep their usual return types. A failed
 commit leaves no events from that attempt. Clone-based speculation copies the
 marker state as well as the parser state, so branches remain independent.
-Calling `mask()`, `fill_mask()`, `forced()`, or `forced_token_ids()` does not
+Calling `mask()`, `fill_mask()`, or `forced_tokens()` does not
 change the last reported batch or publish events from internal probes.
 
 ## Python

@@ -7,6 +7,32 @@ MODES = [glrmask.Optimization.FAST_BUILD, glrmask.Optimization.BALANCED,
 SOURCE = 'glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);'
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_cold_strict_forcing_is_silent_across_exact_events_and_markers(mode):
+    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 10: b""})
+    grammar = glrmask.Grammar.from_glrm(
+        'extern token EVENT start root '
+        'nt root=@mark(1) EVENT @mark(2) "a" @mark(3);'
+    )
+    grammar.bind("EVENT", v.tokens([10]))
+    compiled = grammar.compile(v, optimization=mode)
+    for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
+        state = constraint.start()
+        before = state.marker_events()
+        assert before == [(1, 0)]
+        # No mask() call precedes this query: exercise the mask-free cold proof.
+        assert state.forced_tokens() == [10, 0]
+        assert state.marker_events() == before
+        state.commit_token(10)
+        assert state.marker_events() == [(2, 0)]
+        assert state.forced_tokens() == [0]
+        assert state.marker_events() == [(2, 0)]
+        state.commit_token(0)
+        assert state.marker_events() == [(3, 1)]
+        assert state.is_accepting()
+        assert state.forced_tokens() == []
+
+
 def vocab():
     return glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 3: b"x", 4: b"y",
         5: b"xaby", 6: b"pxabyq", 7: b"p", 8: b"q", 10: b"", 11: b"<event>"})
