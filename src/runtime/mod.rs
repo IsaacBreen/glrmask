@@ -53,3 +53,5 @@ pub(crate) fn initialize_hot_path_config() {
     mask::initialize_runtime_config();
     commit::initialize_runtime_config();
 }
+
+pub(crate) mod markers;

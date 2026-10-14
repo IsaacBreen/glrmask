@@ -834,6 +834,11 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
+    /// Caller-selected marker IDs retained by this compiled grammar, sorted.
+    fn marker_ids(&self) -> Vec<u32> {
+        self.inner.marker_ids().to_vec()
+    }
+
     /// Serialize the compiled body and final termination policy as bytes.
     ///
     /// external_vocab=False embeds the vocabulary. With external_vocab=True,
@@ -1149,6 +1154,14 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
+    /// Copy the initial or most recent commit's marker batch as (ID, byte offset).
+    /// Observations are not captures or promises about a final parse.
+    fn marker_events(&self) -> Vec<(u32, u64)> {
+        self.inner.with_dependent(|_, state| {
+            state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
+        })
+    }
+
     /// Copy this sequence's exact parser state without sharing mutable state.
     fn clone(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());

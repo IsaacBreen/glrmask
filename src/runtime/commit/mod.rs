@@ -1,3 +1,4 @@
+use crate::runtime::markers::{CommitObserver, NoMarkers, LiveMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 pub(crate) mod bounded;
@@ -1526,11 +1527,22 @@ fn coalesce_uniform_runtime_source_states(
     }
 }
 
+#[inline]
 fn commit_token_impl(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     buffers: &mut CommitBuffers,
     token_id: u32,
+) -> Result<(), String> {
+    commit_token_impl_observed(constraint, state, buffers, token_id, &mut NoMarkers)
+}
+
+fn commit_token_impl_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    buffers: &mut CommitBuffers,
+    token_id: u32,
+    observer: &mut O,
 ) -> Result<(), String> {
     let bytes = token_bytes_for_id(constraint, token_id);
     let has_special = constraint.has_special_token_id(token_id);
@@ -1551,7 +1563,7 @@ fn commit_token_impl(
         || !(constraint.has_template_parser() || constraint.uses_dynamic_runtime()
             || constraint.uses_compact_segmented_parser_runtime()));
     if let Some(bytes) = bytes {
-        if commit_bytes_impl(constraint, state, bytes, buffers).is_err() {
+        if commit_bytes_impl_observed(constraint, state, bytes, buffers, observer).is_err() {
             state.clear();
             buffers.reset_all();
         }
@@ -1559,6 +1571,7 @@ fn commit_token_impl(
         state.clear();
     }
     merge_special_token_paths(constraint, state, special_paths)?;
+    if has_special { observer.frontier(constraint, state, bytes.map_or(0, |b| b.len())); }
     maybe_normalize_lookahead_invariant_reductions(constraint, state);
     coalesce_uniform_runtime_source_states(constraint, state);
     finish_token_commit(state)
@@ -1788,7 +1801,7 @@ fn assert_commit_fast_path_equivalence(
 }
 
 #[inline]
-fn runtime_tokenizer_is_reset_state(constraint: &Constraint, state: u32) -> bool {
+pub(crate) fn runtime_tokenizer_is_reset_state(constraint: &Constraint, state: u32) -> bool {
     if constraint.uses_compact_segmented_parser_runtime() {
         constraint.recursive_tokenizer_is_reset_state(state)
     } else {
@@ -3264,6 +3277,7 @@ fn advance_terminal_match(
 /// or `None` to fall through to the general path.
 ///
 /// `exec_result` is the pre-computed tokenizer output for the single state.
+#[inline]
 fn commit_bytes_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -3271,6 +3285,19 @@ fn commit_bytes_fast_path(
     tokenizer_state: u32,
     exec_result: &TokenizerExecResult,
 ) -> Option<Result<(), String>> {
+    commit_bytes_fast_path_observed(constraint, state, bytes, tokenizer_state, exec_result, &mut NoMarkers)
+}
+
+fn commit_bytes_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_state: u32,
+    exec_result: &TokenizerExecResult,
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     let gss = state.values().next().unwrap();
     let ignore_terminal = constraint.ignore_terminal;
     let has_linker_controls = constraint.parser_has_controls()
@@ -3408,13 +3435,29 @@ fn commit_bytes_fast_path(
         ));
     }
     Some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
+#[inline]
 fn commit_bytes_full_width_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
 ) -> Option<Result<(), String>> {
+    commit_bytes_full_width_fast_path_observed(constraint, state, bytes, &mut NoMarkers)
+}
+
+fn commit_bytes_full_width_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     let has_linker_controls = constraint.parser_has_controls()
         || constraint.uses_compact_segmented_parser_runtime();
     if constraint.tokenizer_has_epsilon_transitions
@@ -3529,6 +3572,10 @@ fn commit_bytes_full_width_fast_path(
     }
     *state = new_state;
     Some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
 fn merge_small_parser_state(
@@ -3793,6 +3840,7 @@ struct LanguageCommitSimulationProfile {
     continuation_check_ns: u64,
 }
 
+#[inline]
 fn simulate_language_commit(
     constraint: &Constraint,
     state: &ParserStateMap,
@@ -3800,8 +3848,23 @@ fn simulate_language_commit(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     queue_scratch: &mut SmallCommitQueueScratch,
     template_runtime: &mut TemplateAdvanceRuntime,
-    mut profile: Option<&mut LanguageCommitSimulationProfile>,
+    profile: Option<&mut LanguageCommitSimulationProfile>,
 ) -> Option<Result<SmallLanguageParserStates, String>> {
+    simulate_language_commit_observed(constraint, state, bytes, tokenizer_scratch, queue_scratch, template_runtime, profile, &mut NoMarkers)
+}
+
+fn simulate_language_commit_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    template_runtime: &mut TemplateAdvanceRuntime,
+    mut profile: Option<&mut LanguageCommitSimulationProfile>,
+    observer: &mut O,
+) -> Option<Result<SmallLanguageParserStates, String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     if bytes.is_empty() || bytes.len() > 8 || state.is_empty() || state.len() > 8 {
         return None;
     }
@@ -3910,6 +3973,7 @@ fn simulate_language_commit(
                 }) {
                     continue;
                 }
+                observer.language(constraint, template_runtime, advanced_language, &advanced_accumulator, new_offset);
                 emitted.push((
                     new_offset,
                     advanced_language,
@@ -3999,8 +4063,13 @@ fn simulate_language_commit(
     Some(Ok(std::mem::take(
         &mut queue_scratch.language_pending,
     )))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
+#[inline]
 fn commit_bytes_language_small_queue_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -4010,6 +4079,21 @@ fn commit_bytes_language_small_queue_fast_path(
     template_runtime: &mut TemplateAdvanceRuntime,
     profitability_prechecked: bool,
 ) -> Option<Result<(), String>> {
+    commit_bytes_language_small_queue_fast_path_observed(constraint, state, bytes, tokenizer_scratch, queue_scratch, template_runtime, profitability_prechecked, &mut NoMarkers)
+}
+
+fn commit_bytes_language_small_queue_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    template_runtime: &mut TemplateAdvanceRuntime,
+    profitability_prechecked: bool,
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     if !language_small_queue_enabled() || !(2..=8).contains(&bytes.len()) || state.len() > 2 {
         return None;
     }
@@ -4087,7 +4171,7 @@ fn commit_bytes_language_small_queue_fast_path(
     let total_started = profile_enabled.then(std::time::Instant::now);
     let mut profile = LanguageCommitSimulationProfile::default();
     template_runtime.begin_commit();
-    let simulation = simulate_language_commit(
+    let simulation = simulate_language_commit_observed(
         constraint,
         state,
         bytes,
@@ -4095,7 +4179,7 @@ fn commit_bytes_language_small_queue_fast_path(
         queue_scratch,
         template_runtime,
         profile_enabled.then_some(&mut profile),
-    );
+     observer);
     let Some(simulation) = simulation else {
         if profile_enabled {
             let reason = if template_runtime.is_exhausted() {
@@ -4178,6 +4262,10 @@ fn commit_bytes_language_small_queue_fast_path(
     }
     *state = new_state;
     Some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
 fn try_advance_unique_actionable_top_fast(
@@ -4370,6 +4458,7 @@ fn try_batch_same_width_pure_matches(
     (!advanced.is_empty()).then_some(advanced)
 }
 
+#[inline]
 fn commit_bytes_small_queue_fast_path(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -4379,6 +4468,21 @@ fn commit_bytes_small_queue_fast_path(
     admission_cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
     prune_tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
 ) -> Option<Result<(), String>> {
+    commit_bytes_small_queue_fast_path_observed(constraint, state, bytes, tokenizer_scratch, queue_scratch, admission_cache, prune_tokenizer_scratch, &mut NoMarkers)
+}
+
+fn commit_bytes_small_queue_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    queue_scratch: &mut SmallCommitQueueScratch,
+    admission_cache: &mut SmallVec<[ParserAdmissionCacheEntry; 8]>,
+    prune_tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     let has_linker_controls = constraint.parser_has_controls()
         || constraint.uses_compact_segmented_parser_runtime();
     if bytes.len() > 16 || state.len() > 8 {
@@ -4525,7 +4629,8 @@ fn commit_bytes_small_queue_fast_path(
                         batched_widths.push(matched.width);
                         continue;
                     }
-                    emitted_terminal_outputs.push((new_offset, advanced.clone()));
+                    observer.stack(constraint, &advanced, new_offset);
+                emitted_terminal_outputs.push((new_offset, advanced.clone()));
                     if new_offset == bytes.len() {
                         merge_small_parser_state(
                             &mut queue_scratch.pending,
@@ -4553,6 +4658,7 @@ fn commit_bytes_small_queue_fast_path(
                 }
 
                 if matched.ignored {
+                    observer.stack(constraint, &gss_at_offset, new_offset);
                     if new_offset == bytes.len() {
                         merge_small_parser_state(
                             &mut queue_scratch.pending,
@@ -4602,6 +4708,7 @@ fn commit_bytes_small_queue_fast_path(
                 }) {
                     continue;
                 }
+                observer.stack(constraint, &advanced, new_offset);
                 emitted_terminal_outputs.push((new_offset, advanced.clone()));
                 if new_offset == bytes.len() {
                     merge_small_parser_state(
@@ -4717,6 +4824,10 @@ fn commit_bytes_small_queue_fast_path(
     }
     *state = new_state;
     Some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
 enum LinearFastPathResult {
@@ -4827,13 +4938,27 @@ fn choose_direct_linear_step(
     })
 }
 
+#[inline]
 fn commit_bytes_direct_linear_fast_path(
     constraint: &Constraint,
     start_gss: ParserGSS,
     bytes: &[u8],
     start_tokenizer_state: u32,
-    mut profile: Option<&mut CommitProfile>,
+    profile: Option<&mut CommitProfile>,
 ) -> Option<LinearFastPathResult> {
+    commit_bytes_direct_linear_fast_path_observed(constraint, start_gss, bytes, start_tokenizer_state, profile, &mut NoMarkers)
+}
+
+fn commit_bytes_direct_linear_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    start_gss: ParserGSS,
+    bytes: &[u8],
+    start_tokenizer_state: u32,
+    mut profile: Option<&mut CommitProfile>,
+    observer: &mut O,
+) -> Option<LinearFastPathResult> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     if constraint.has_template_parser() { return None; }
 
     let mut gss = start_gss;
@@ -4995,6 +5120,8 @@ fn commit_bytes_direct_linear_fast_path(
                 }
 
                 offset += step.width;
+                if let Some(stack) = carried_stack.as_ref() { observer.carried(constraint, stack, offset); }
+                else { observer.stack(constraint, &gss, offset); }
                 tokenizer_state = constraint.runtime_commit_initial_state();
                 continue;
             }
@@ -5078,6 +5205,8 @@ fn commit_bytes_direct_linear_fast_path(
         }
 
         offset += step.width;
+                if let Some(stack) = carried_stack.as_ref() { observer.carried(constraint, stack, offset); }
+                else { observer.stack(constraint, &gss, offset); }
         tokenizer_state = constraint.runtime_commit_initial_state();
     }
 
@@ -5105,6 +5234,10 @@ fn commit_bytes_direct_linear_fast_path(
         )));
     }
     Some(LinearFastPathResult::Complete(Ok(fused)))
+
+    })();
+    if result.is_none() || matches!(&result, Some(LinearFastPathResult::Restart)) { observer.rewind(marker_checkpoint); }
+    result
 }
 
 fn record_per_advance_entry(
@@ -6004,12 +6137,25 @@ fn clear_state_on_commit_error<T>(
     result
 }
 
+#[inline]
 fn commit_bytes_linear_fast_path(
     constraint: &Constraint,
     start_gss: ParserGSS,
     bytes: &[u8],
     first_exec_result: TokenizerExecResult,
 ) -> LinearFastPathResult {
+    commit_bytes_linear_fast_path_observed(constraint, start_gss, bytes, first_exec_result, &mut NoMarkers)
+}
+
+fn commit_bytes_linear_fast_path_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    start_gss: ParserGSS,
+    bytes: &[u8],
+    first_exec_result: TokenizerExecResult,
+    observer: &mut O,
+) -> LinearFastPathResult {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     let ignore_terminal = constraint.ignore_terminal;
     let mut gss = start_gss;
     let mut carried_stack = gss.try_virtual_stack();
@@ -6124,6 +6270,8 @@ fn commit_bytes_linear_fast_path(
 
             if shifted_carried_stack {
                 offset += width;
+                if let Some(stack) = carried_stack.as_ref() { observer.carried(constraint, stack, offset); }
+                else { observer.stack(constraint, &gss, offset); }
                 if offset == bytes.len() {
                     gss = carried_stack.take().unwrap().into_gss();
                     let fused = if constraint.direct_regular_wide_frontier_for_gss(&gss).is_some() {
@@ -6193,6 +6341,8 @@ fn commit_bytes_linear_fast_path(
         }
 
         offset += width;
+                if let Some(stack) = carried_stack.as_ref() { observer.carried(constraint, stack, offset); }
+                else { observer.stack(constraint, &gss, offset); }
         if offset == bytes.len() {
             if let Some(stack) = carried_stack.take() {
                 gss = stack.into_gss();
@@ -6216,6 +6366,10 @@ fn commit_bytes_linear_fast_path(
             constraint.runtime_commit_initial_state(),
         );
     }
+
+    })();
+    if matches!(&result, LinearFastPathResult::Restart) { observer.rewind(marker_checkpoint); }
+    result
 }
 
 fn commit_bytes_linear_fast_path_profiled(
@@ -6923,6 +7077,7 @@ fn try_commit_multi_state_lexer_only(
     Some(Ok(()))
 }
 
+#[inline]
 fn try_commit_flat_frontier_in_place(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -6932,6 +7087,21 @@ fn try_commit_flat_frontier_in_place(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     frontier: &mut FlatFrontierScratch,
 ) -> Option<Result<(), String>> {
+    try_commit_flat_frontier_in_place_observed(constraint, state, bytes, original, work, tokenizer_scratch, frontier, &mut NoMarkers)
+}
+
+fn try_commit_flat_frontier_in_place_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    original: &mut Vec<u32>,
+    work: &mut Vec<u32>,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     frontier.reclaim_retired_gss();
     macro_rules! flat_decline {
         ($reason:literal) => {{
@@ -7050,6 +7220,7 @@ fn try_commit_flat_frontier_in_place(
                     flat_decline!("invalid-match-width");
                 }
                 if matched.ignored {
+                    observer.flat(constraint, original, new_offset);
                     if !frontier.enqueue(
                         new_offset,
                         initial_tokenizer_state,
@@ -7083,6 +7254,7 @@ fn try_commit_flat_frontier_in_place(
                 for action_index in 0..frontier.action.complete.len() {
                     work.clear();
                     work.extend_from_slice(&frontier.action.complete[action_index]);
+                    observer.flat(constraint, work, new_offset);
                     if !frontier.enqueue(
                         new_offset,
                         initial_tokenizer_state,
@@ -7287,8 +7459,13 @@ fn try_commit_flat_frontier_in_place(
     debug_assert!(frontier.gss_pool.len() <= FLAT_FRONTIER_GSS_POOL_CAPACITY);
     state.entries = new_entries;
     Some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
+#[inline]
 fn try_commit_direct_linear_in_place(
     constraint: &Constraint,
     state: &mut ParserStateMap,
@@ -7298,6 +7475,21 @@ fn try_commit_direct_linear_in_place(
     tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
     frontier: &mut FlatFrontierScratch,
 ) -> Option<Result<(), String>> {
+    try_commit_direct_linear_in_place_observed(constraint, state, bytes, original, work, tokenizer_scratch, frontier, &mut NoMarkers)
+}
+
+fn try_commit_direct_linear_in_place_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    original: &mut Vec<u32>,
+    work: &mut Vec<u32>,
+    tokenizer_scratch: &mut tokenizer_scan::ReusableTokenizerExecScratch,
+    frontier: &mut FlatFrontierScratch,
+    observer: &mut O,
+) -> Option<Result<(), String>> {
+    let marker_checkpoint = observer.checkpoint();
+    let result = (|| {
     if constraint.has_template_parser() { return None; }
 
     let debug_path = std::env::var_os("GLRMASK_DEBUG_COMMIT_PATH").is_some();
@@ -7452,6 +7644,7 @@ fn try_commit_direct_linear_in_place(
                 None => return None,
             }
         }
+        observer.flat(constraint, work, new_offset);
         offset = new_offset;
         tokenizer_state = initial_tokenizer_state;
     };
@@ -7459,6 +7652,10 @@ fn try_commit_direct_linear_in_place(
     frontier
         .replace_state_with_shared_uniform_stack_keys(state, &final_keys, work, &acc)
         .then_some(Ok(()))
+
+    })();
+    if result.is_none() { observer.rewind(marker_checkpoint); }
+    result
 }
 
 
@@ -7480,14 +7677,25 @@ fn maybe_normalize_lookahead_invariant_reductions(
     }
 }
 
+#[inline]
 fn commit_bytes_impl(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
     bufs: &mut CommitBuffers,
 ) -> Result<(), String> {
+    commit_bytes_impl_observed(constraint, state, bytes, bufs, &mut NoMarkers)
+}
+
+fn commit_bytes_impl_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    bufs: &mut CommitBuffers,
+    observer: &mut O,
+) -> Result<(), String> {
     expand_runtime_product_states(constraint, state);
-    commit_bytes_impl_inner(constraint, state, bytes, bufs)?;
+    commit_bytes_impl_inner_observed(constraint, state, bytes, bufs, observer)?;
 
     // General symbolic residuals expose a conservative infallible future bit
     // during the inner commit so ordinary parser/lexer machinery can remain
@@ -7512,6 +7720,7 @@ fn commit_bytes_impl(
         }
     }
 
+    observer.frontier(constraint, state, bytes.len());
     coalesce_uniform_runtime_source_states(constraint, state);
     Ok(())
 }
@@ -7600,11 +7809,22 @@ fn try_commit_single_state_lexer_only(
     false
 }
 
+#[inline]
 fn commit_bytes_impl_inner(
     constraint: &Constraint,
     state: &mut ParserStateMap,
     bytes: &[u8],
     bufs: &mut CommitBuffers,
+) -> Result<(), String> {
+    commit_bytes_impl_inner_observed(constraint, state, bytes, bufs, &mut NoMarkers)
+}
+
+fn commit_bytes_impl_inner_observed<O: CommitObserver>(
+    constraint: &Constraint,
+    state: &mut ParserStateMap,
+    bytes: &[u8],
+    bufs: &mut CommitBuffers,
+    observer: &mut O,
 ) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
@@ -7677,7 +7897,7 @@ fn commit_bytes_impl_inner(
     if !has_linker_controls
         && !direct_dynamic
         && state.len() == 1
-        && let Some(result) = try_commit_direct_linear_in_place(
+        && let Some(result) = try_commit_direct_linear_in_place_observed(
             constraint,
             state,
             bytes,
@@ -7685,7 +7905,7 @@ fn commit_bytes_impl_inner(
             &mut bufs.linear_stack_work,
             &mut bufs.reusable_tokenizer_exec,
             &mut bufs.flat_frontier,
-        )
+         observer)
     {
         if debug_path {
             eprintln!("[glrmask/debug][commit_path] direct_linear states={}", state.len());
@@ -7720,7 +7940,7 @@ fn commit_bytes_impl_inner(
         && bytes.len() <= 16
         && state.len() <= 8
     {
-        let early_small_queue = commit_bytes_small_queue_fast_path(
+        let early_small_queue = commit_bytes_small_queue_fast_path_observed(
             constraint,
             state,
             bytes,
@@ -7728,7 +7948,7 @@ fn commit_bytes_impl_inner(
             bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.admission_cache,
             &mut bufs.prune_tokenizer_exec,
-        );
+         observer);
         if let Some(result) = early_small_queue {
             if debug_path {
                 eprintln!("[glrmask/debug][commit_path] early_small_queue states={}", state.len());
@@ -7740,7 +7960,7 @@ fn commit_bytes_impl_inner(
     if !has_linker_controls
         && !direct_dynamic
         && state.len() <= FLAT_FRONTIER_MAX_BRANCHES
-        && let Some(result) = try_commit_flat_frontier_in_place(
+        && let Some(result) = try_commit_flat_frontier_in_place_observed(
             constraint,
             state,
             bytes,
@@ -7748,7 +7968,7 @@ fn commit_bytes_impl_inner(
             &mut bufs.linear_stack_work,
             &mut bufs.reusable_tokenizer_exec,
             &mut bufs.flat_frontier,
-        )
+         observer)
     {
         if debug_path {
             eprintln!("[glrmask/debug][commit_path] flat_frontier states={}", state.len());
@@ -7857,13 +8077,13 @@ fn commit_bytes_impl_inner(
     if !has_linker_controls && state.len() == 1 {
         let (&tokenizer_state, _) = state.iter().next().unwrap();
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
-        if let Some(result) = commit_bytes_fast_path(
+        if let Some(result) = commit_bytes_fast_path_observed(
             constraint,
             state,
             bytes,
             tokenizer_state,
             &exec_result,
-        ) {
+         observer) {
             return result;
         }
     }
@@ -7872,13 +8092,13 @@ fn commit_bytes_impl_inner(
     if !has_linker_controls && state.len() == 1 {
         let (&tokenizer_state, parser_gss) = state.iter().next().unwrap();
         if parser_gss.single_exclusive_top_value().is_some() {
-            if let Some(result) = commit_bytes_direct_linear_fast_path(
+            if let Some(result) = commit_bytes_direct_linear_fast_path_observed(
                 constraint,
                 parser_gss.clone(),
                 bytes,
                 tokenizer_state,
                 None,
-            ) {
+             observer) {
                 match result {
                     LinearFastPathResult::Complete(result) => match result {
                         Ok(final_gss) => {
@@ -7891,7 +8111,7 @@ fn commit_bytes_impl_inner(
                     LinearFastPathResult::Continue { gss, offset } => {
                         state.clear();
                         state.insert(constraint.runtime_commit_initial_state(), gss);
-                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
+                        return observer.shifted(offset, |observer| commit_bytes_impl_observed(constraint, state, &bytes[offset..], bufs, observer));
                     }
                     LinearFastPathResult::Restart => {}
                 }
@@ -7900,7 +8120,7 @@ fn commit_bytes_impl_inner(
     }
 
     if !has_linker_controls {
-        let language_small_queue_result = commit_bytes_language_small_queue_fast_path(
+        let language_small_queue_result = commit_bytes_language_small_queue_fast_path_observed(
             constraint,
             state,
             bytes,
@@ -7908,7 +8128,7 @@ fn commit_bytes_impl_inner(
             bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.template_advance_runtime,
             false,
-        );
+         observer);
         if let Some(result) = language_small_queue_result {
             return result;
         }
@@ -7917,7 +8137,7 @@ fn commit_bytes_impl_inner(
     let small_queue_result = if constraint.uses_compact_segmented_parser_runtime() {
         None
     } else {
-        commit_bytes_small_queue_fast_path(
+        commit_bytes_small_queue_fast_path_observed(
             constraint,
             state,
             bytes,
@@ -7925,7 +8145,7 @@ fn commit_bytes_impl_inner(
             bufs.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed).as_mut(),
             &mut bufs.admission_cache,
             &mut bufs.prune_tokenizer_exec,
-        )
+         observer)
     };
     if let Some(result) = small_queue_result {
         if debug_path {
@@ -7935,7 +8155,7 @@ fn commit_bytes_impl_inner(
     }
 
     if !constraint.uses_compact_segmented_parser_runtime()
-        && let Some(result) = commit_bytes_full_width_fast_path(constraint, state, bytes)
+        && let Some(result) = commit_bytes_full_width_fast_path_observed(constraint, state, bytes, observer)
     {
         if debug_path {
             eprintln!("[glrmask/debug][commit_path] full_width states={}", state.len());
@@ -7951,9 +8171,9 @@ fn commit_bytes_impl_inner(
         let exec_result = execute_tokenizer_from_state_small(constraint, bytes, tokenizer_state);
 
         // Try fast path with pre-computed exec_result
-        if let Some(result) = commit_bytes_fast_path(
+        if let Some(result) = commit_bytes_fast_path_observed(
             constraint, state, bytes, tokenizer_state, &exec_result,
-        ) {
+         observer) {
             return result;
         }
 
@@ -7983,12 +8203,12 @@ fn commit_bytes_impl_inner(
             if start_gss.is_empty() {
                 return Err("commit rejected: no valid parser states remain".to_string());
             }
-            match commit_bytes_linear_fast_path(
+            match commit_bytes_linear_fast_path_observed(
                 constraint,
                 start_gss,
                 bytes,
                 exec_result.clone(),
-            ) {
+             observer) {
                 LinearFastPathResult::Complete(result) => {
                     match result {
                         Ok(final_gss) => {
@@ -8005,7 +8225,7 @@ fn commit_bytes_impl_inner(
                     state.insert(constraint.runtime_commit_initial_state(), gss);
 
                     if bytes.len() - offset == 1 {
-                        return commit_bytes_impl(constraint, state, &bytes[offset..], bufs);
+                        return observer.shifted(offset, |observer| commit_bytes_impl_observed(constraint, state, &bytes[offset..], bufs, observer));
                     }
 
                     let needed_queue_len = bytes.len() + 1;
@@ -8048,6 +8268,7 @@ fn commit_bytes_impl_inner(
                                 let new_offset = offset + matched.width;
 
                                 if matched.ignored {
+                                    observer.stack(constraint, &gss_at_offset, new_offset);
                                     queue_parser_state(
                                         &mut processing_queue,
                                         &mut bufs.pending_state,
@@ -8070,6 +8291,7 @@ fn commit_bytes_impl_inner(
                                     continue;
                                 };
 
+                                observer.stack(constraint, &gss, new_offset);
                                 queue_parser_state(
                                     &mut processing_queue,
                                     &mut bufs.pending_state,
@@ -8201,6 +8423,7 @@ fn commit_bytes_impl_inner(
                 let new_offset = offset + matched.width;
 
                 if matched.ignored {
+                    observer.stack(constraint, &gss_at_offset, new_offset);
                     if !queue_parser_ignored_reset_state(
                         constraint,
                         &mut processing_queue,
@@ -8225,6 +8448,7 @@ fn commit_bytes_impl_inner(
                     continue;
                 };
 
+                observer.stack(constraint, &gss, new_offset);
                 if !queue_parser_reset_state(
                     constraint,
                     &mut processing_queue,
@@ -8288,6 +8512,39 @@ fn commit_bytes_impl_inner(
 }
 
 impl<'a> ConstraintState<'a> {
+    #[inline]
+    fn commit_token_actual(&mut self, token_id: u32) -> Result<(), String> {
+        let constraint = self.constraint;
+        let Some(markers) = self.markers.as_deref_mut() else {
+            return commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
+        };
+        markers.begin();
+        let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
+        let base = markers.byte_offset;
+        let width = token_bytes_for_id(constraint, token_id).map_or(0, |bytes| bytes.len());
+        let next = base.checked_add(width as u64).ok_or("marker byte position overflow")?;
+        let result = commit_token_impl_observed(constraint, &mut self.state, &mut self.buffers, token_id,
+            &mut LiveMarkers { queries, state: markers, base });
+        markers.finish(queries, next, result.is_ok());
+        result
+    }
+
+    #[inline]
+    fn commit_bytes_actual(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let constraint = self.constraint;
+        let Some(markers) = self.markers.as_deref_mut() else {
+            return commit_bytes_impl(constraint, &mut self.state, bytes, &mut self.buffers);
+        };
+        markers.begin();
+        let queries = constraint.marker_queries.as_deref().expect("marker-enabled state has immutable queries");
+        let base = markers.byte_offset;
+        let next = base.checked_add(bytes.len() as u64).ok_or("marker byte position overflow")?;
+        let result = commit_bytes_impl_observed(constraint, &mut self.state, bytes, &mut self.buffers,
+            &mut LiveMarkers { queries, state: markers, base });
+        markers.finish(queries, next, result.is_ok());
+        result
+    }
+
     pub(crate) fn knows_token_id(&self, token_id: u32) -> bool {
         token_bytes_for_id(self.constraint, token_id).is_some()
             || self.constraint.has_special_token_id(token_id)
@@ -8828,6 +9085,7 @@ impl<'a> ConstraintState<'a> {
 
     /// Return Some when root termination policy handles this commitment.
     fn commit_end_token(&mut self, token_id: u32) -> Option<Result<(), String>> {
+        if let Some(markers) = self.markers.as_deref_mut() { markers.begin(); }
         if self.terminated {
             return Some(Err("sequence has already terminated".to_owned()));
         }
@@ -8855,6 +9113,7 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn reject_control_resource_limit(&mut self, message: String) -> Result<(), String> {
+        if let Some(markers) = self.markers.as_deref_mut() { markers.begin(); }
         self.state.clear();
         self.buffers = Default::default();
         self.generation = self.generation.wrapping_add(1);
@@ -8880,7 +9139,7 @@ impl<'a> ConstraintState<'a> {
         let equivalence_reference = (assertion_flags & COMMIT_ASSERT_FAST_PATH_EQUIVALENCE != 0)
             .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
-        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
+        let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
@@ -8912,7 +9171,7 @@ impl<'a> ConstraintState<'a> {
             None
         };
         let mask_state_before_commit = self.snapshot_current_mask_state();
-        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
+        let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         assert_commit_oracles(
             constraint,
@@ -8943,7 +9202,7 @@ impl<'a> ConstraintState<'a> {
             .then(|| self.state.clone());
         let mask_state_before_commit = self.snapshot_current_mask_state();
         let start = Instant::now();
-        let result = commit_token_impl(constraint, &mut self.state, &mut self.buffers, token_id);
+        let result = self.commit_token_actual(token_id);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         // Cache-preservation proofs are part of commit's runtime cost. Keep
         // them inside the timed interval so TBM/commit reporting cannot make a
@@ -9115,11 +9374,12 @@ impl<'a> ConstraintState<'a> {
     }
 
     fn commit_bytes_raw_inner(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if let Some(markers) = self.markers.as_deref_mut() { markers.begin(); }
         if self.terminated {
             return Err("sequence has already terminated".to_owned());
         }
         let mask_state_before_commit = self.snapshot_current_mask_state();
-        let result = commit_bytes_impl(self.constraint, &mut self.state, bytes, &mut self.buffers);
+        let result = self.commit_bytes_actual(bytes);
         let result = clear_state_on_commit_error(&mut self.state, result);
         self.finish_commit_generation(mask_state_before_commit, result.is_ok());
         result

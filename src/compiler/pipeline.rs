@@ -735,7 +735,7 @@ fn terminal_domain_too_large_for_early_overlap(grammar: &GrammarDef) -> bool {
         let local_cost = match terminal {
             Terminal::Literal { bytes, .. } => 1usize.saturating_add(bytes.len()),
             Terminal::Pattern { pattern, .. } => 1usize.saturating_add(pattern.len()),
-            Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => 1,
+            Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => 1,
             Terminal::Expr { expr, .. } => return consume_early_overlap_cost(expr, &mut remaining),
         };
         if local_cost >= remaining {
@@ -758,7 +758,7 @@ fn should_parallelize_terminal_factoring(grammar: &GrammarDef) -> bool {
     let mut remaining = MIN_PREPARSED_EXPR_NODES;
     grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_tree_reaches_budget(expr, &mut remaining),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => {
             false
         }
     })
@@ -1391,7 +1391,7 @@ fn build_vocab_partition_direct_mask_tokenizer(
     let preflight_started = Instant::now();
     let has_intersection = grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_contains_intersection(expr),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => {
             false
         }
     });
@@ -2631,7 +2631,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
         Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
         Terminal::Expr { expr, .. } => expr.clone(),
-        Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => Expr::Choice(Vec::new()),
+        Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => Expr::Choice(Vec::new()),
     }
 }
 
@@ -2752,7 +2752,7 @@ fn grammar_has_potential_bounded_terminal_synthesis(
         }
         Terminal::Literal { .. }
         | Terminal::Pattern { .. }
-        | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } => false,
+        | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => false,
     })
 }
 
@@ -6138,6 +6138,7 @@ fn compile_prepared_with_profile_and_table_construction(
         drop(table);
         let mut constraint = Constraint {
             end_tokens: std::sync::Arc::from([]),
+            marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -6286,6 +6287,9 @@ fn compile_prepared_with_profile_and_table_construction(
             caches.install(&mut constraint);
         }
         let mut constraint = finalize_constraint(constraint);
+        if let Err(message) = constraint.install_grammar_markers(&prepared_grammar) {
+            glrmask_invariant::__private::fail_compilation_resource_limit(message);
+        }
         crate::runtime::compact_large_non_dwa_weight_runtime(&mut constraint);
         // Keep compiler-produced packed runtime storage in its owned form.
         // Converting it to a backed artifact representation here would perform
@@ -6832,6 +6836,7 @@ fn compile_dynamic_owned_early_overlap(
             vocab,
             dynamic_mask_vocab,
         );
+        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
                 .inner
@@ -7193,6 +7198,7 @@ fn compile_dynamic_owned_impl(
             vocab,
             dynamic_mask_vocab,
         );
+        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
                 .inner

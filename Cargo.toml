@@ -329,3 +329,11 @@ path = "tests/public_optimization_modes.rs"
 [[test]]
 name = "core_batch"
 path = "tests/core_batch.rs"
+
+[[test]]
+name = "marker_events"
+path = "tests/marker_events.rs"
+
+[[test]]
+name = "marker_commit"
+path = "tests/marker_commit.rs"

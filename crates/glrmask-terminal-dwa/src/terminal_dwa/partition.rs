@@ -726,13 +726,21 @@ fn partition_parts_vocab_map(
     .flatten()
     .map(|part| part.id_map.vocab_tokens.clone())
     .collect::<Vec<_>>();
-    match maps.as_slice() {
+    complete_partition_vocab_maps(vocab, &maps)
+}
+
+fn complete_partition_vocab_maps(vocab: &Vocab, maps: &[ManyToOneIdMap]) -> Option<ManyToOneIdMap> {
+    match maps {
         [] => None,
-        [only] => Some(only.clone()),
+        // Even a sole active family can cover only part of this character
+        // partition. Bypassing refinement in that case silently dropped its
+        // unobserved tokens and violated the outer exhaustive-map invariant.
+        [only] if only.internal_to_originals.iter().map(Vec::len).sum::<usize>() == vocab.len()
+            => Some(only.clone()),
         // In the vocab-map-only path a token absent from every branch is likewise
         // unobservable by every active terminal family represented by those maps.
         // Preserve all proved branch distinctions, but merge that common dead set.
-        _ => Some(common_refine_partition_maps_impl(vocab, &maps, true)),
+        _ => Some(common_refine_partition_maps_impl(vocab, maps, true)),
     }
 }
 
@@ -2102,6 +2110,22 @@ mod tests {
     };
     use crate::compiler::stages::equiv_types::ManyToOneIdMap;
     use crate::Vocab;
+
+    #[test]
+    fn sole_partial_vocab_family_still_covers_its_dead_tokens() {
+        let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),
+            (2,b"x".to_vec()),(3,b"y".to_vec())]);
+        let partial = ManyToOneIdMap {
+            original_to_internal: vec![0,1,u32::MAX,u32::MAX],
+            internal_to_originals: vec![vec![0],vec![1]],
+            representative_original_ids: vec![0,1],
+        };
+        let result = super::complete_partition_vocab_maps(&vocab, &[partial]).unwrap();
+        assert_eq!(result.internal_to_originals, [vec![0],vec![1],vec![2,3]]);
+        assert_eq!(result.representative_original_ids, [0,1,2]);
+        let complete = super::complete_partition_vocab_maps(&vocab, &[result.clone()]).unwrap();
+        assert_eq!(complete.internal_to_originals,result.internal_to_originals);
+    }
 
     #[test]
     fn vocab_map_only_refinement_merges_tokens_unobserved_by_every_branch() {

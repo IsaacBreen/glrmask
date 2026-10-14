@@ -139,7 +139,7 @@ fn expand_with_known_macros(
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -192,7 +192,7 @@ fn nonterminal_dependencies(
             }
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -470,7 +470,7 @@ pub fn retain_reachable_rules(grammar: &mut NamedGrammar) {
             GrammarExpr::ExprNFA(expr_nfa) => {
                 for symbol in &expr_nfa.symbols { referenced_names(symbol, output); }
             }
-            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_) | GrammarExpr::AnyByte => {}
         }

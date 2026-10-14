@@ -83,7 +83,9 @@ impl GrammarParserProgram {
             _ => None,
         }).collect::<Vec<_>>();
         specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
-        self.program.compile_tokenizer(tokenizer, self.grammar.terminal_names().to_vec(),
-            self.grammar.ignore_terminal(), specials, vocab, options)
+        let mut constraint = self.program.compile_tokenizer(tokenizer, self.grammar.terminal_names().to_vec(),
+            self.grammar.ignore_terminal(), specials, vocab, options)?;
+        constraint.install_grammar_markers(&self.lexical).map_err(crate::Error::Compilation)?;
+        Ok(constraint)
     }
 }

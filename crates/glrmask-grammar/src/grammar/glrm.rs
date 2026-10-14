@@ -593,7 +593,8 @@ fn dump_quantifier(quantifier: &Quantifier) -> String {
 fn dump_nt_postfix(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Quantified(inner, Quantifier::Optional) => {
-            format!("{}?", dump_nt_atom(inner, flavor))
+            if matches!(inner.as_ref(), GrammarExpr::MarkerProbe(_)) { dump_nt_atom(inner, flavor) }
+            else { format!("{}?", dump_nt_atom(inner, flavor)) }
         }
         GrammarExpr::Quantified(inner, Quantifier::ZeroPlus) => {
             format!("{}*", dump_nt_atom(inner, flavor))
@@ -618,6 +619,7 @@ fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
             format!("({})", dump_nt_expr_with_flavor(inner, false, flavor))
         }
         GrammarExpr::Literal(bytes) => format_literal(bytes, flavor),
+        GrammarExpr::MarkerProbe(id) => format!("@mark({id})"),
         GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
         GrammarExpr::SpecialTokenRange(start, end) => format!("@tokens({start}, {end})"),
         GrammarExpr::RawRegex(pat) => source_regex_literal(pat).unwrap_or_else(||format!("/{}/", escape_regex_for_slash(pat))),
@@ -1050,7 +1052,6 @@ fn parse_glrm_scope(source: &str) -> Result<ParsedGlrmScope, GlrMaskError> {
 /// the fully qualified occurrence path of `scope`; child paths extend it with
 /// `::`. `consumed` records which supplied bindings were actually used so
 /// unused bindings can be rejected after the walk.
-#[cfg(feature = "internal-api")]
 fn bind_inline_subgrammars<F>(
     scope: &mut ParsedGlrmScope,
     prefix: &str,
@@ -1821,7 +1822,8 @@ fn collect_expr_special_token_ids(expr: &GrammarExpr, token_ids: &mut RangeSetBl
                 collect_expr_special_token_ids(symbol, token_ids);
             }
         }
-        GrammarExpr::Ref(_)
+        GrammarExpr::MarkerProbe(_)
+        | GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
         | GrammarExpr::CharClass { .. }
@@ -2778,6 +2780,13 @@ impl GlrmParser {
                 Ok(GrammarExpr::AnyByte)
             }
             Tok::At => {
+                if matches!(self.token_at(1), Tok::Ident(name) if name == "mark") {
+                    self.advance(); self.advance(); self.consume(&Tok::LParen)?;
+                    let id = u32::try_from(self.expect_int()?)
+                        .map_err(|_| err("marker ID does not fit in u32"))?;
+                    self.consume(&Tok::RParen)?;
+                    return Ok(GrammarExpr::marker(id));
+                }
                 if self.version == GlrmVersion::V1 {
                     return Err(err("GLRM v1 does not expose numeric @token(id) syntax; declare 'extern NAME;' and bind it by name"));
                 }
@@ -2959,7 +2968,7 @@ fn validate_ignore_terminal(grammar: &NamedGrammar, scope_label: &str) -> Result
             "ignore '{ignore_name}' in {scope_label} must name a local emitting terminal",
         )));
     }
-    if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)) {
+    if matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)) {
         return Err(err(
             "a special LLM token terminal cannot be the ignore terminal",
         ));
@@ -3013,7 +3022,7 @@ fn grammar_expr_contains_ref(expr: &GrammarExpr, name: &str) -> bool {
             .any(|symbol| grammar_expr_contains_ref(symbol, name)),
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3336,7 +3345,7 @@ fn flatten_scope(
         .filter(|rule| {
             rule.is_terminal
                 && !rule.is_internal
-                && !matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _))
+                && !matches!(rule.expr, GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_))
         })
         .map(|rule| rule.name.clone())
         .collect::<HashSet<_>>();
@@ -3650,7 +3659,7 @@ fn rewrite_scope_refs(
         },
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -3677,7 +3686,7 @@ impl DefaultPartitionAtomPromoter<'_> {
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
             | GrammarExpr::AnyByte | GrammarExpr::Shortest(_) => self.promote_atom(expr.clone()),
-            GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) => expr.clone(),
+            GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_) => expr.clone(),
             GrammarExpr::Grouped(inner) => {
                 GrammarExpr::Grouped(Box::new(self.rewrite_expr(inner)?))
             }
@@ -3762,7 +3771,7 @@ impl DefaultPartitionAtomPromoter<'_> {
                 .any(|symbol| self.contains_nonterminal_ref(symbol)),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -3815,7 +3824,7 @@ impl IgnoreScopeRewriter<'_> {
             }
             GrammarExpr::Ref(_) | GrammarExpr::Epsilon => expr.clone(),
             GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -3906,7 +3915,7 @@ impl IgnoreScopeRewriter<'_> {
                 .any(|symbol| self.contains_nonterminalish_ref(symbol)),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

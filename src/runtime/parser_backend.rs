@@ -195,7 +195,7 @@ fn compile_domain(template: &CommitTemplateDfas) -> crate::Result<TemplateDomain
     TemplateDomain::compile(template).map_err(crate::Error::Compilation)
 }
 
-fn matches_gss(domain: &TemplateDomain, stack: &ParserGSS) -> bool {
+pub(super) fn matches_gss(domain: &TemplateDomain, stack: &ParserGSS) -> bool {
     if stack.is_empty() { return false; }
     let cursor = match domain.start() {
         DomainProbe::Accept => return true,
@@ -430,6 +430,30 @@ impl TemplateParser {
             }
         }
         result
+    }
+
+    pub(crate) fn marker_top_partition(&self, terminal: u32)
+        -> Option<(TopAdmission, impl Iterator<Item = (u32, TopAdmission)> + '_)> {
+        if self.composition.is_some() { return None; }
+        self.domains.get(terminal as usize).map(|domain| domain.top_admission_partition())
+    }
+
+    pub(crate) fn marker_top_admission(&self, top: u32, terminal: u32) -> TopAdmission {
+        if let Some(composition) = &self.composition {
+            return composition.outer_views.get(terminal as usize)
+                .map_or(TopAdmission::Never, |view| view.classify_top(top));
+        }
+        self.domains.get(terminal as usize).map_or(TopAdmission::Never, |domain| domain.classify_top(top))
+    }
+
+    pub(crate) fn marker_admits_flat(&self, stack: &[u32], terminal: u32) -> bool {
+        if self.composition.is_some() {
+            let gss = ParserGSS::from_single_stack(stack.to_vec(),
+                crate::compiler::glr::accumulator::TerminalsDisallowed::new());
+            return self.admits(&gss, terminal);
+        }
+        self.domains.get(terminal as usize)
+            .is_some_and(|domain| domain.matches_top_first(stack.iter().rev().copied()))
     }
 
     pub(crate) fn admits_flat_any(&self, stack: &[u32], candidates: &BitSet) -> bool {
@@ -813,6 +837,10 @@ impl Constraint {
         self.deferred_table_rules = Default::default();
         self.template_parser = Some(Arc::new(prepared.parser));
         self.table = ParserTableStorage::absent();
+        if let Some(queries) = &self.marker_queries {
+            let terminals = queries.terminals.to_vec();
+            self.install_marker_terminals(terminals).map_err(crate::Error::Compilation)?;
+        }
         if !self.uses_dynamic_runtime() {
             self.prime_initial_commit_hot_path();
         }

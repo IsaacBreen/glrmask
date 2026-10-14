@@ -10391,6 +10391,7 @@ pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.
     /// The outer root artifact stores these separately from compiler data.
     pub(crate) end_tokens: Arc<[u32]>,
+    pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Reusable component-local trigger metadata for dynamic composition.
@@ -10774,6 +10775,8 @@ pub struct Constraint {
 pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) end_tokens: Arc<[u32]>,
+    #[serde(skip, default)]
+    pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(skip, default)]

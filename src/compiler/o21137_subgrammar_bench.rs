@@ -200,6 +200,7 @@ fn clone_terminal_with_id(terminal: &Terminal, id: u32) -> Terminal {
             id,
             expr: expr.clone(),
         },
+        Terminal::MarkerProbe { marker_id, .. } => Terminal::MarkerProbe { id, marker_id: *marker_id },
         Terminal::SpecialToken { token_id, .. } => Terminal::SpecialToken {
             id,
             token_id: *token_id,
