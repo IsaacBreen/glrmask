@@ -151,6 +151,15 @@ impl ResidualArena {
         arena.epsilon = arena.intern_raw(ResidualNode::Epsilon, true)?;
         arena.sigma_star = arena.intern_raw(ResidualNode::SigmaStar, true)?;
         let root = arena.compile_expr(expr)?;
+        // Leave bounded headroom for lazy derivatives, based on actual nodes
+        // rather than regex repeat bounds. Keep every parallel vector ready
+        // so a commit does not merely move capacity growth to the next array.
+        let spare = arena.nodes.len().min(128);
+        arena.nodes.reserve_exact(spare);
+        arena.nullable.reserve_exact(spare);
+        arena.transitions.reserve_exact(spare);
+        arena.first_bytes_cache.reserve_exact(spare);
+        arena.nonempty_cache.reserve_exact(spare);
         Some((arena, root))
     }
 
