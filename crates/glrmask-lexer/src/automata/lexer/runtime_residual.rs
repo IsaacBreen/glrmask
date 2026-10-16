@@ -1522,7 +1522,8 @@ impl BoundedCodeIntersectionOracle {
     /// Close all completions of the current partial body under whole body-code
     /// copies. Every later body boundary belongs to this closed relation graph.
     /// Compute shortest distances to suffix-admitting boundaries in this closed
-    /// graph, and retain the maximum finite distance plus two. A shortest path
+    /// graph. Retain zero for suffix-admitting productive closures with a nonempty
+    /// suffix; otherwise retain the maximum finite distance plus two. A shortest path
     /// has at most R-1 copies among R boundary states, so this never exceeds the
     /// global P+1 bound. The extra copies cover partial-body/strict-future cases.
     /// Keep the global P+1 stencil for compiler/recognition/transition caches.
@@ -1573,7 +1574,21 @@ impl BoundedCodeIntersectionOracle {
                 }
             }
         }
-        let headroom = distances.into_iter().flatten().max().unwrap_or(0).checked_add(2)?;
+        let maximum_distance = distances.into_iter().flatten().max().unwrap_or(0);
+        // If every productive boundary already admits the nonempty suffix,
+        // no additional whole body copies are needed as a future witness.
+        // The caller's ceil(K / minimum_body_width) + 1 crossing bound already
+        // covers a partial first/last code word. After a <=K-byte candidate,
+        // complete that last word if necessary and take the suffix immediately;
+        // its nonempty bytes also supply a strict positive continuation.
+        // Dead boundary states remain dead independently of the upper bound.
+        // This is only a completed-mask key: byte-transition/projection keys
+        // retain their conservative future-witness stencil.
+        let headroom = if maximum_distance == 0 && !self.suffix.is_empty() {
+            0
+        } else {
+            maximum_distance.checked_add(2)?
+        };
         self.mask_result_future_headroom.insert(key, headroom);
         Some(headroom)
     }
@@ -7832,6 +7847,151 @@ mod tests {
         }
         check(100,0,160);
         check(3,9,25);
+    }
+
+    #[test]
+    fn mask_result_zero_witness_keys_preserve_complete_finite_languages() {
+        // Independent finite-language oracle for prefix-free variable-width
+        // code words, including partial-code coordinates and both bounds.
+        for (codes, min, max, ordered) in [
+            (vec![b"a".to_vec()], 0, 8, false),
+            (vec![b"a".to_vec(), b"bc".to_vec()], 0, 8, false),
+            (vec![b"a".to_vec(), b"bc".to_vec()], 0, 8, true),
+            (vec![b"ab".to_vec(), b"bc".to_vec()], 2, 7, false),
+        ] {
+            let body = Expr::Choice(codes.iter().map(|code| bytes(code)).collect());
+            let middle = if ordered {
+                // Multiple productive pattern states and dead transitions:
+                // every a must precede every bc code word.
+                Expr::Seq(vec![
+                    Expr::Repeat { expr: Box::new(bytes(b"a")), min: 0, max: None },
+                    Expr::Repeat { expr: Box::new(bytes(b"bc")), min: 0, max: None },
+                ])
+            } else {
+                Expr::Repeat { expr: Box::new(body.clone()), min: 0, max: None }
+            };
+            let unbounded = Expr::Seq(vec![bytes(b"<"), middle, bytes(b">")]);
+            let expr = Expr::Intersect {
+                expr: Box::new(unbounded),
+                intersect: Box::new(bounded_code_envelope_with_body(body, min, max)),
+            };
+            let runtime = VirtualResidualRuntime::new_dynamic(
+                &expr, 0, 0, 1, 2, 1,
+                Arc::new(VirtualStateAllocator::new(2).unwrap()),
+                Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap()),
+            ).unwrap();
+            let mut words = Vec::new();
+            let mut layer = vec![b"<".to_vec()];
+            for count in 0..=max {
+                if count >= min {
+                    words.extend(layer.iter().map(|prefix| {
+                        let mut word = prefix.clone(); word.push(b'>'); word
+                    }));
+                }
+                let mut next = Vec::new();
+                for prefix in &layer {
+                    for code in &codes {
+                        let mut word = prefix.clone(); word.extend(code); next.push(word);
+                    }
+                }
+                layer = next;
+            }
+            if ordered {
+                words.retain(|word| {
+                    let core = &word[1..word.len() - 1];
+                    let first_bc = core.iter().position(|&byte| byte == b'b').unwrap_or(core.len());
+                    !core[first_bc..].contains(&b'a')
+                });
+            }
+            let mut prefixes = words.iter().flat_map(|word|
+                (0..=word.len()).map(|n| word[..n].to_vec())
+            ).collect::<Vec<_>>();
+            prefixes.sort(); prefixes.dedup();
+            let mut candidates = vec![Vec::new()];
+            let mut layer = vec![Vec::new()];
+            for _ in 0..3 {
+                let mut next = Vec::new();
+                for prefix in &layer {
+                    for &byte in b"abc>z" {
+                        let mut token = prefix.clone(); token.push(byte); next.push(token);
+                    }
+                }
+                candidates.extend(next.iter().cloned()); layer = next;
+            }
+            for horizon in 1..=3 {
+                let mut by_key = FxHashMap::<(u32, u32), Vec<(bool, bool)>>::default();
+                let mut aliases = 0;
+                for prefix in &prefixes {
+                    let root = runtime.direct_coordinate_for_state(1).unwrap();
+                    let coordinate = prefix.iter().try_fold(root, |state, &byte|
+                        runtime.direct_coordinate_step(state, byte)).unwrap();
+                    let Some(key) = runtime.direct_coordinate_mask_result_dense_key(coordinate, horizon) else { continue; };
+                    let observations = candidates.iter().filter(|token| token.len() <= horizon).map(|token| {
+                        let mut full = prefix.clone(); full.extend(token);
+                        let expected = (
+                            words.iter().any(|word| word == &full),
+                            words.iter().any(|word| word.len() > full.len() && word.starts_with(&full)),
+                        );
+                        let observed = token.iter().try_fold(coordinate, |state, &byte|
+                            runtime.direct_coordinate_step(state, byte)).map(|target| (
+                                runtime.direct_coordinate_accepting(target).unwrap(),
+                                runtime.direct_coordinate_has_future(target).unwrap(),
+                            )).unwrap_or((false, false));
+                        assert_eq!(observed, expected, "prefix={prefix:?} token={token:?}");
+                        expected
+                    }).collect::<Vec<_>>();
+                    if let Some(previous) = by_key.insert(key, observations.clone()) {
+                        aliases += 1;
+                        assert_eq!(previous, observations, "merged prefix={prefix:?} horizon={horizon}");
+                    }
+                }
+                assert!(aliases > 0);
+            }
+            let mut store = runtime.store.lock().unwrap();
+            let oracle = store.liveness_oracle.as_mut().unwrap();
+            assert_eq!(oracle.mask_result_future_repeat_headroom(0, 0), Some(0));
+        }
+    }
+
+    #[test]
+    fn mask_result_zero_witness_collapses_128_byte_horizon_boundary() {
+        // Same bound/horizon/count transition as sp409/ex0/raw452, but an
+        // independent finite literal language checks every a-run endpoint.
+        let body = bytes(b"a");
+        let unbounded = Expr::Seq(vec![bytes(b"<"), Expr::Repeat {
+            expr: Box::new(body.clone()), min: 0, max: None,
+        }, bytes(b">")]);
+        let expr = Expr::Intersect {
+            expr: Box::new(unbounded),
+            intersect: Box::new(bounded_code_envelope_with_body(body, 0, 150)),
+        };
+        let runtime = VirtualResidualRuntime::new_dynamic(
+            &expr, 0, 0, 1, 2, 1,
+            Arc::new(VirtualStateAllocator::new(2).unwrap()),
+            Arc::new(VirtualRuntimeStateOwners::new(2, &[1]).unwrap()),
+        ).unwrap();
+        let root = runtime.direct_coordinate_for_state(1).unwrap();
+        let at = |count: usize| {
+            let mut prefix = std::iter::once(b'<').chain(std::iter::repeat_n(b'a', count));
+            prefix.try_fold(root, |state, byte| runtime.direct_coordinate_step(state, byte)).unwrap()
+        };
+        let left = at(17); let right = at(20);
+        assert_eq!(runtime.direct_coordinate_mask_result_dense_key(left, 128),
+                   runtime.direct_coordinate_mask_result_dense_key(right, 128));
+        assert_ne!(runtime.direct_coordinate_finite_mask_dense_key(left, 128),
+                   runtime.direct_coordinate_finite_mask_dense_key(right, 128));
+        for count in 0..=128 {
+            for suffix in [b"".as_slice(), b">", b"b"] {
+                let mut token = vec![b'a'; count]; token.extend_from_slice(suffix);
+                if token.len() > 128 { continue; }
+                let observe = |coordinate| token.iter().try_fold(coordinate, |state, &byte|
+                    runtime.direct_coordinate_step(state, byte)).map(|target| (
+                        runtime.direct_coordinate_accepting(target).unwrap(),
+                        runtime.direct_coordinate_has_future(target).unwrap(),
+                    )).unwrap_or((false, false));
+                assert_eq!(observe(left), observe(right), "token={token:?}");
+            }
+        }
     }
 
     #[test]
