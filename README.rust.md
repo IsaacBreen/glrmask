@@ -14,6 +14,15 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 cargo add glrmask
 ```
 
+## Usage
+
+GLRMask has four core types:
+
+- `Grammar`: the language you want to generate.
+- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
+- `Constraint`: a grammar compiled against a specific vocabulary.
+- `ConstraintState`: the mutable state for a single generated sequence.
+
 ## Quickstart
 
 ```rust
@@ -36,19 +45,6 @@ fn main() -> glrmask::Result<()> {
 ```
 
 Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.
-
-## Core concepts
-
-GLRMask has four core types:
-
-- `Grammar`: source grammar semantics and bindings.
-- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.
-- `Constraint`: a closed, runnable grammar compiled against a vocabulary.
-- `ConstraintState`: the mutable state for one generated sequence.
-
-Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.
-
-`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
 
 ## Learn more
 

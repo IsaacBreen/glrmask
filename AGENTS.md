@@ -69,3 +69,13 @@ Final correctness qualification and matched build/link/TBM performance acceptanc
 are separate gates. Targeted tests alone do not qualify the full replacement.
 Publishing packages, pushing, merging main or changing defaults requires current
 user authorization.
+
+
+## Shared documentation prose
+
+Keep relevant website, Rust and Python wording in `docs/content` and generate
+copies with `scripts/sync-guide.py`. A website wording request applies to the
+corresponding language prose too; do not introduce homepage-only overrides.
+Preserve language-specific examples and API contracts. See
+`docs/documentation-sync.md` for publication and drift checks. Documentation
+changes alone do not authorize or require a package version bump.

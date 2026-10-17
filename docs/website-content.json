@@ -9,7 +9,7 @@
   "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts GLRM (its native grammar format), JSON Schema, and Lark.",
   "links": "[GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)",
   "dynamic": "GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: source grammar semantics and bindings.\n- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.\n- `Constraint`: a closed, runnable grammar compiled against a vocabulary.\n- `ConstraintState`: the mutable state for one generated sequence.\n\nCompile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.\n\n`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: the language you want to generate.\n- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.\n- `Constraint`: a grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -83,5 +83,5 @@
     "json": "docs/benchmarks/json-schema-2026-10-14.json",
     "javascript": "docs/benchmarks/javascript-2026-10-14.json"
   },
-  "content_sha256": "c2a62e31e364f6e860d7abd17651801c37e730ab66ef513120b089628eb697b6"
+  "content_sha256": "73f19ef30edd6ce0a7b3aa88321588096ce6abb0dff788c27f403afbd7de36fb"
 }
