@@ -4940,9 +4940,11 @@ pub fn string_value_satisfies_schema(
         return Ok(true);
     };
     if let Some(pattern) = &schema.pattern {
-        return Regex::new(pattern)
+        let normalized = preprocess_ascii_shorthand(pattern);
+        let matches = Regex::new(&normalized)
             .map(|regex| regex.is_match(text))
-            .map_err(|error| SchemaImportError::new(format!("invalid string pattern {pattern:?}: {error}")));
+            .map_err(|error| SchemaImportError::new(format!("unsupported or malformed string pattern {pattern:?}: {error}")))?;
+        if !matches { return Ok(false); }
     }
     let length = text.chars().count();
     if length < schema.min_length || schema.max_length.is_some_and(|max| length > max) {

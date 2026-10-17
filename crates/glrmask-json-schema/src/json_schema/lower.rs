@@ -15,7 +15,7 @@ use crate::grammar::named_simplify::simplify_named_grammar_expressions;
 use crate::import::ast::{GrammarExpr, NamedGrammar, NamedRule, Quantifier};
 
 use super::ast::{
-    AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, Schema, SchemaAssertions,
+    json_values_equal, json_number_is_integer, AdditionalProperties, ArraySchema, NumberSchema, ObjectSchema, Schema, SchemaAssertions,
     SchemaDocument, SchemaKind, SchemaType, StringSchema,
 };
 
@@ -973,7 +973,10 @@ impl<'a> Lowerer<'a> {
             SchemaKind::Any => Ok(r(JSON_VALUE_RULE)),
             SchemaKind::Never => Ok(never()),
             SchemaKind::Ref(pointer) => self.lower_ref(pointer),
-            SchemaKind::Assertions(assertions) => self.lower_assertions(schema, assertions),
+            SchemaKind::Assertions(assertions) => self.lower_assertions(schema, assertions).map_err(|error| {
+                if error.message().starts_with('#') { error }
+                else { SchemaImportError::at(&schema.location, error.message()) }
+            }),
         }
     }
 
@@ -1085,7 +1088,7 @@ impl<'a> Lowerer<'a> {
 
         let selected_types = self.selected_types(schema, assertions)?;
         if selected_types.is_empty() {
-            return Ok(r(JSON_VALUE_RULE));
+            return Ok(if assertions.types.is_some() { never() } else { r(JSON_VALUE_RULE) });
         }
 
         let alternatives = selected_types
@@ -1259,11 +1262,8 @@ impl<'a> Lowerer<'a> {
             SchemaKind::Ref(pointer) => {
                 let normalized = normalize_local_ref(pointer)?;
                 if !ref_stack.insert(normalized.clone()) {
-                    // Recursive schemas can be satisfied by finite literals, but
-                    // proving that here is not needed for enum/const pruning.
-                    // Avoid looping and let the surrounding non-recursive
-                    // assertions do the remaining filtering.
-                    return Ok(true);
+                    return Err(SchemaImportError::at(&schema.location,
+                        "unsupported assertion: recursive literal validation cannot prove this reference cycle"));
                 }
                 let target = self.resolve_ref_target(pointer)?;
                 let result = self.json_literal_satisfies_schema_inner(value, target, ref_stack);
@@ -1339,13 +1339,13 @@ impl<'a> Lowerer<'a> {
         }
 
         if let Some(const_value) = &assertions.const_value
-            && value != const_value
+            && !json_values_equal(value, const_value)
         {
             return Ok(false);
         }
         if check_enum_membership
             && let Some(enum_values) = &assertions.enum_values
-            && !enum_values.iter().any(|enum_value| enum_value == value)
+            && !enum_values.iter().any(|enum_value| json_values_equal(enum_value, value))
         {
             return Ok(false);
         }
@@ -2257,14 +2257,6 @@ fn number_value_satisfies_schema(value: &Value, schema: &NumberSchema) -> bool {
         }
     }
     true
-}
-
-fn json_number_is_integer(number: &serde_json::Number) -> bool {
-    number.as_i64().is_some()
-        || number.as_u64().is_some()
-        || number
-            .as_f64()
-            .is_some_and(|value| value.is_finite() && value.fract() == 0.0)
 }
 
 fn large_string_enum_literals(

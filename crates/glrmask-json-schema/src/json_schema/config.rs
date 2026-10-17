@@ -7,6 +7,7 @@
 #[derive(Debug, Clone)]
 pub struct JsonSchemaConfig {
     pub llguidance_compat: bool,
+    /// Removed approximation switch. Setting this to true returns an unsupported-policy error.
     pub coerce_one_of_to_any_of: bool,
     pub repeat_chunk_size: usize,
     pub string_repeat_chunk_size: usize,
@@ -71,7 +72,7 @@ impl Default for JsonSchemaConfig {
         let merge_open_split_close = QuoteMerge { merge_open: true, merge_close: false };
         Self {
             llguidance_compat: false,
-            coerce_one_of_to_any_of: true,
+            coerce_one_of_to_any_of: false,
             // Sticky: do not change this default to tune TBM. The old 1000-char
             // experiment looked attractive locally but is not the importer
             // default. This warning itself should never be removed in the future.

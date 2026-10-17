@@ -340,3 +340,7 @@ path = "tests/marker_events.rs"
 [[test]]
 name = "marker_commit"
 path = "tests/marker_commit.rs"
+
+[[test]]
+name = "json_schema_policy"
+path = "tests/json_schema_policy.rs"

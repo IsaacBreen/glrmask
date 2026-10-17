@@ -1,3 +1,5 @@
+pub(crate) mod acceptance;
+pub(crate) mod dialect;
 pub(crate) mod array;
 pub(crate) mod ast;
 pub(crate) mod combinators;
@@ -12,11 +14,10 @@ pub(crate) mod preflight;
 pub(crate) mod string;
 
 
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::automata::lexer::ast::Expr;
 use crate::GlrMaskError;
@@ -805,25 +806,23 @@ fn schema_to_named_grammar_with_config_runtime_impl(
     let profile_enabled = std::env::var_os("GLRMASK_PROFILE_COMPILE").is_some()
         || std::env::var_os("GLRMASK_PROFILE_DYNAMIC_TOP").is_some();
     let total_started_at = profile_enabled.then(std::time::Instant::now);
-    // This scan is also reused by typed loading, avoiding separate walks for
-    // oneOf coercion, definitions, local aliases, and references.
-    let document_features = scan_document_features(schema);
-    // Coercion is default-on, but the large majority of schemas do not contain
-    // oneOf. Preserve the source Value unless there is an actual rewrite.
-    let imported_schema: Cow<'_, Value> = if config.coerce_one_of_to_any_of
-        && document_features.has_one_of
-    {
-        Cow::Owned(coerce_one_of_to_any_of_schema(schema))
-    } else {
-        Cow::Borrowed(schema)
-    };
+    // Enforce policy before typed loading and optimizer shortcuts. Never rewrite
+    // assertions inside annotation/instance payloads.
+    if config.coerce_one_of_to_any_of {
+        return Err(error::SchemaImportError::at("#/oneOf",
+            "unsupported policy: oneOf approximation has been removed; use exact disjoint branches").into());
+    }
+    preflight::check_schema_size(schema).map_err(GlrMaskError::from)?;
+    let dialect_schema = dialect::prepare_document(schema).map_err(GlrMaskError::from)?;
+    let imported_schema = acceptance::prepare_document(&dialect_schema).map_err(GlrMaskError::from)?;
+    let document_features = scan_document_features(&imported_schema);
     let preflight_started_at = profile_enabled.then(std::time::Instant::now);
-    preflight::check_schema_preflight(imported_schema.as_ref()).map_err(GlrMaskError::from)?;
+    preflight::check_schema_preflight(&imported_schema).map_err(GlrMaskError::from)?;
     let preflight_ms = preflight_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
     let load_started_at = profile_enabled.then(std::time::Instant::now);
-    let document = load_document_with_features(imported_schema.as_ref(), &document_features)
+    let document = load_document_with_features(&imported_schema, &document_features)
         .map_err(GlrMaskError::from)?;
     let load_ms = load_started_at
         .map(|started_at| started_at.elapsed().as_secs_f64() * 1000.0)
@@ -846,111 +845,6 @@ fn schema_to_named_grammar_with_config_runtime_impl(
     Ok(lowered)
 }
 
-
-fn coerce_one_of_to_any_of_schema(schema: &Value) -> Value {
-    coerce_one_of_to_any_of_schema_node(schema)
-}
-
-fn coerce_one_of_to_any_of_schema_node(node: &Value) -> Value {
-    let Value::Object(object) = node else {
-        return node.clone();
-    };
-
-    let mut out = Map::new();
-    for (key, value) in object {
-        if key == "oneOf" {
-            continue;
-        }
-        out.insert(key.clone(), coerce_one_of_child(key, value));
-    }
-
-    let Some(Value::Array(one_of)) = object.get("oneOf") else {
-        if let Some(value) = object.get("oneOf") {
-            out.insert("oneOf".to_string(), value.clone());
-        }
-        return Value::Object(out);
-    };
-
-    let coerced = Value::Array(
-        one_of
-            .iter()
-            .map(coerce_one_of_to_any_of_schema_node)
-            .collect(),
-    );
-    if out.contains_key("anyOf") {
-        match out.get_mut("allOf") {
-            Some(Value::Array(all_of)) => all_of.push(Value::Object(Map::from_iter([(
-                "anyOf".to_string(),
-                coerced,
-            )]))),
-            _ => {
-                out.insert(
-                    "allOf".to_string(),
-                    Value::Array(vec![Value::Object(Map::from_iter([(
-                        "anyOf".to_string(),
-                        coerced,
-                    )]))]),
-                );
-            }
-        }
-    } else {
-        out.insert("anyOf".to_string(), coerced);
-    }
-    Value::Object(out)
-}
-
-fn coerce_one_of_child(key: &str, value: &Value) -> Value {
-    match key {
-        "const" | "default" | "enum" | "examples" => value.clone(),
-        "$defs" | "definitions" | "dependentSchemas" | "dependencies"
-        | "patternProperties" | "properties" => coerce_one_of_schema_map(value),
-        "additionalItems" | "additionalProperties" | "contains" | "contentSchema"
-        | "else" | "if" | "items" | "not" | "propertyNames" | "then"
-        | "unevaluatedItems" | "unevaluatedProperties" => coerce_one_of_schema_or_tuple(value),
-        "allOf" | "anyOf" | "prefixItems" => coerce_one_of_schema_array(value),
-        _ => coerce_one_of_extension_value(value),
-    }
-}
-
-fn coerce_one_of_schema_map(value: &Value) -> Value {
-    let Value::Object(object) = value else {
-        return value.clone();
-    };
-    Value::Object(Map::from_iter(object.iter().map(|(key, child)| {
-        (key.clone(), coerce_one_of_to_any_of_schema_node(child))
-    })))
-}
-
-fn coerce_one_of_schema_array(value: &Value) -> Value {
-    let Value::Array(items) = value else {
-        return value.clone();
-    };
-    Value::Array(items.iter().map(coerce_one_of_to_any_of_schema_node).collect())
-}
-
-fn coerce_one_of_schema_or_tuple(value: &Value) -> Value {
-    match value {
-        Value::Object(_) => coerce_one_of_to_any_of_schema_node(value),
-        Value::Array(_) => coerce_one_of_schema_array(value),
-        _ => value.clone(),
-    }
-}
-
-fn coerce_one_of_extension_value(value: &Value) -> Value {
-    match value {
-        Value::Object(_) => coerce_one_of_to_any_of_schema_node(value),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|child| match child {
-                    Value::Object(_) => coerce_one_of_to_any_of_schema_node(child),
-                    _ => child.clone(),
-                })
-                .collect(),
-        ),
-        _ => value.clone(),
-    }
-}
 
 /// The new importer deliberately does not depend on the old post-import grammar
 /// simplification pass.

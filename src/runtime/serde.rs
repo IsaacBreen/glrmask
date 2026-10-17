@@ -9275,7 +9275,7 @@ mod tests {
             (2, b"a".to_vec()),
             (3, b"aa".to_vec()),
         ]);
-        let schema = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+        let schema = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
         let constraint = Constraint::from_json_schema(schema, &vocab)
             .expect("large bounded URI should compile through the exact Static residual lane");
         assert!(constraint.tokenizer.has_virtual_residual_runtime());

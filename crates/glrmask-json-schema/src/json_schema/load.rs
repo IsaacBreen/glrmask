@@ -41,7 +41,7 @@ fn scan_document_features_inner(value: &Value, is_root: bool, features: &mut Doc
                 .and_then(Value::as_str)
                 .is_some_and(|alias| alias.starts_with('#') || (is_root && alias.ends_with('#')));
             features.has_local_id_alias |= has_local_alias;
-            for child in object.values() {
+            for (_, child) in schema_children(object) {
                 scan_document_features_inner(child, false, features);
             }
         }
@@ -189,34 +189,33 @@ fn normalize_mixed_ref_one_of_branches(branches: &mut [Schema]) {
     }
 }
 
-fn collect_all_ref_pointers(value: &Value, refs: &mut std::collections::BTreeSet<String>) {
-    if let Some(obj) = value.as_object() {
-        if let Some(r) = obj.get("$ref").and_then(Value::as_str) {
-            refs.insert(r.to_string());
-        }
-        for val in obj.values() {
-            collect_all_ref_pointers(val, refs);
-        }
-    } else if let Some(arr) = value.as_array() {
-        for val in arr {
-            collect_all_ref_pointers(val, refs);
+/// Enumerate only schema-valued keyword positions. Literal data (const/enum)
+/// and annotations must never be interpreted as schemas by indexing scans.
+pub(super) fn schema_children(object: &Map<String, Value>) -> Vec<(String, &Value)> {
+    let mut children = Vec::new();
+    for (key, value) in object {
+        match key.as_str() {
+            "$defs" | "definitions" | "properties" | "patternProperties" | "dependentSchemas" | "dependencies" => {
+                if let Some(map) = value.as_object() {
+                    for (name, child) in map {
+                        if key == "dependencies" && child.is_array() { continue; }
+                        children.push((format!("{}/{}", escape_pointer_segment(key), escape_pointer_segment(name)), child));
+                    }
+                }
+            },
+            "allOf" | "anyOf" | "oneOf" | "prefixItems" => {
+                if let Some(items) = value.as_array() {
+                    children.extend(items.iter().enumerate().map(|(i, child)| (format!("{key}/{i}"), child)));
+                }
+            },
+            "items" if value.is_array() => {
+                children.extend(value.as_array().unwrap().iter().enumerate().map(|(i, child)| (format!("items/{i}"), child)));
+            },
+            "items" | "additionalItems" | "additionalProperties" | "not" | "if" | "then" | "else" | "contains" | "propertyNames" | "unevaluatedProperties" | "unevaluatedItems" => children.push((key.clone(), value)),
+            _ => {},
         }
     }
-}
-
-fn contains_local_id_alias(value: &Value, is_root: bool) -> bool {
-    match value {
-        Value::Object(object) => {
-            let has_local_alias = object
-                .get("$id")
-                .or_else(|| object.get("id"))
-                .and_then(Value::as_str)
-                .is_some_and(|alias| alias.starts_with('#') || (is_root && alias.ends_with('#')));
-            has_local_alias || object.values().any(|child| contains_local_id_alias(child, false))
-        }
-        Value::Array(items) => items.iter().any(|child| contains_local_id_alias(child, false)),
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => false,
-    }
+    children
 }
 
 fn local_id_alias(object: &Map<String, Value>, location: &str) -> Option<String> {
@@ -364,24 +363,9 @@ fn collect_definitions(
         }
     }
 
-    for (key, child) in object {
-        if matches!(key.as_str(), "$defs" | "definitions") {
-            continue;
-        }
-        let child_location = format!("{location}/{}", escape_pointer_segment(key));
-        if matches!(key.as_str(), "properties" | "patternProperties") {
-            if let Some(children) = child.as_object() {
-                for (name, schema_value) in children {
-                    let schema_location = format!(
-                        "{child_location}/{}",
-                        escape_pointer_segment(name)
-                    );
-                    collect_definitions(schema_value, &schema_location, out)?;
-                }
-                continue;
-            }
-        }
-        collect_definitions(child, &child_location, out)?;
+    for (relative, child) in schema_children(object) {
+        if relative.starts_with("$defs/") || relative.starts_with("definitions/") { continue; }
+        collect_definitions(child, &format!("{location}/{relative}"), out)?;
     }
     Ok(())
 }
@@ -403,69 +387,8 @@ fn collect_local_id_aliases(
         });
     }
 
-    for map_key in ["properties", "patternProperties"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(map_key));
-        if let Some(children) = object.get(map_key).and_then(Value::as_object) {
-            for (name, schema_value) in children {
-                let schema_location = format!(
-                    "{child_location}/{}",
-                    escape_pointer_segment(name)
-                );
-                collect_local_id_aliases(schema_value, &schema_location, out)?;
-            }
-        }
-    }
-
-    for defs_key in ["$defs", "definitions"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(defs_key));
-        if let Some(children) = object.get(defs_key).and_then(Value::as_object) {
-            for (name, schema_value) in children {
-                let schema_location = format!(
-                    "{child_location}/{}",
-                    escape_pointer_segment(name)
-                );
-                collect_local_id_aliases(schema_value, &schema_location, out)?;
-            }
-        }
-    }
-
-    for schema_key in [
-        "additionalProperties",
-        "not",
-        "if",
-        "then",
-        "else",
-        "contains",
-        "propertyNames",
-    ] {
-        if let Some(child) = object.get(schema_key) {
-            let child_location = format!("{location}/{}", escape_pointer_segment(schema_key));
-            collect_local_id_aliases(child, &child_location, out)?;
-        }
-    }
-
-    if let Some(items) = object.get("items") {
-        let child_location = format!("{location}/items");
-        match items {
-            Value::Array(children) => {
-                for (index, schema_value) in children.iter().enumerate() {
-                    let schema_location = format!("{child_location}/{index}");
-                    collect_local_id_aliases(schema_value, &schema_location, out)?;
-                }
-            }
-            Value::Bool(_) | Value::Object(_) => collect_local_id_aliases(items, &child_location, out)?,
-            _ => {}
-        }
-    }
-
-    for array_key in ["prefixItems", "anyOf", "oneOf", "allOf"] {
-        let child_location = format!("{location}/{}", escape_pointer_segment(array_key));
-        if let Some(children) = object.get(array_key).and_then(Value::as_array) {
-            for (index, schema_value) in children.iter().enumerate() {
-                let schema_location = format!("{child_location}/{index}");
-                collect_local_id_aliases(schema_value, &schema_location, out)?;
-            }
-        }
+    for (relative, child) in schema_children(object) {
+        collect_local_id_aliases(child, &format!("{location}/{relative}"), out)?;
     }
 
     Ok(())
@@ -748,6 +671,9 @@ fn should_load_object_assertion(object: &Map<String, Value>, types: Option<&[Sch
             "propertyNames",
             "additionalProperties",
             "minProperties",
+            "maxProperties",
+            "dependencies",
+            "dependentRequired",
         ]
             .iter()
             .any(|key| object.contains_key(*key))
@@ -784,40 +710,15 @@ fn load_object_keywords(
     location: &str,
 ) -> ImportResult<ObjectSchema> {
     let mut schema = ObjectSchema::default();
-    let mut required_order = Vec::new();
-
-    let object_items_fallback = object.get("items").and_then(Value::as_object).filter(|items| {
-        object.get("properties").is_none()
-            && items.get("properties").is_some()
-            && object
-                .get("required")
-                .and_then(Value::as_array)
-                .is_some_and(|required| required.iter().any(Value::is_string))
-    });
-    let using_object_items_properties = object_items_fallback.is_some();
-
-    if let Some(properties_value) = object
-        .get("properties")
-        .or_else(|| object_items_fallback.and_then(|items| items.get("properties")))
-    {
+    if let Some(properties_value) = object.get("properties") {
         let Some(properties) = properties_value.as_object() else {
             return Err(SchemaImportError::at(location, "properties must be an object"));
         };
-        let properties_location = if object.get("properties").is_some() {
-            format!("{location}/properties")
-        } else {
-            format!("{location}/items/properties")
-        };
         for (name, property_value) in properties {
-            let child_location = format!("{properties_location}/{}", escape_pointer_segment(name));
-            let property_schema = if using_object_items_properties {
-                Schema::any(child_location.clone())
-            } else {
-                load_schema_at(property_value, &child_location)?
-            };
+            let child_location = format!("{location}/properties/{}", escape_pointer_segment(name));
             schema.properties.push(PropertySchema {
                 name: name.clone(),
-                schema: property_schema,
+                schema: load_schema_at(property_value, &child_location)?,
             });
         }
     }
@@ -830,46 +731,19 @@ fn load_object_keywords(
             let Some(name) = value.as_str() else {
                 return Err(SchemaImportError::at(location, format!("required[{index}] must be a string")));
             };
-            required_order.push(name.to_string());
             schema.required_order.push(name.to_string());
             schema.required.insert(name.to_string());
         }
     }
 
-    if using_object_items_properties && !required_order.is_empty() {
-        let original_order = schema
-            .properties
-            .iter()
-            .map(|property| property.name.clone())
-            .collect::<Vec<_>>();
-        schema.properties.sort_by_key(|property| {
-            let required_index = required_order
-                .iter()
-                .position(|name| name == &property.name)
-                .unwrap_or(usize::MAX);
-            let original_index = original_order
-                .iter()
-                .position(|name| name == &property.name)
-                .unwrap_or(usize::MAX);
-            (required_index, original_index)
-        });
-    }
-
     load_legacy_dependencies(object, location, &mut schema)?;
     load_dependent_required(object, location, &mut schema)?;
 
-    if let Some(pattern_properties_value) = object
-        .get("patternProperties")
-        .or_else(|| object_items_fallback.and_then(|items| items.get("patternProperties")))
-    {
+    if let Some(pattern_properties_value) = object.get("patternProperties") {
         let Some(pattern_properties) = pattern_properties_value.as_object() else {
             return Err(SchemaImportError::at(location, "patternProperties must be an object"));
         };
-        let pattern_properties_location = if object.get("patternProperties").is_some() {
-            format!("{location}/patternProperties")
-        } else {
-            format!("{location}/items/patternProperties")
-        };
+        let pattern_properties_location = format!("{location}/patternProperties");
         for (pattern, property_value) in pattern_properties {
             let child_location = format!(
                 "{pattern_properties_location}/{}",
@@ -884,15 +758,8 @@ fn load_object_keywords(
 
     schema.property_names = load_schema_member(object, "propertyNames", location)?;
 
-    if let Some(additional) = object
-        .get("additionalProperties")
-        .or_else(|| object_items_fallback.and_then(|items| items.get("additionalProperties")))
-    {
-        let additional_location = if object.get("additionalProperties").is_some() {
-            format!("{location}/additionalProperties")
-        } else {
-            format!("{location}/items/additionalProperties")
-        };
+    if let Some(additional) = object.get("additionalProperties") {
+        let additional_location = format!("{location}/additionalProperties");
         schema.additional_properties = match additional {
             Value::Bool(true) => AdditionalProperties::AllowAny,
             Value::Bool(false) => AdditionalProperties::Deny,
@@ -1072,8 +939,11 @@ fn load_number_keywords(
         match value {
             Value::Bool(flag) => number.exclusive_minimum = *flag,
             Value::Number(_) => {
-                number.minimum = read_f64_keyword(object, "exclusiveMinimum", location)?;
-                number.exclusive_minimum = true;
+                let bound = read_f64_keyword(object, "exclusiveMinimum", location)?.unwrap();
+                if number.minimum.is_none_or(|minimum| bound >= minimum) {
+                    number.minimum = Some(bound);
+                    number.exclusive_minimum = true;
+                }
             }
             _ => return Err(SchemaImportError::at(location, "exclusiveMinimum must be a bool or number")),
         }
@@ -1083,8 +953,11 @@ fn load_number_keywords(
         match value {
             Value::Bool(flag) => number.exclusive_maximum = *flag,
             Value::Number(_) => {
-                number.maximum = read_f64_keyword(object, "exclusiveMaximum", location)?;
-                number.exclusive_maximum = true;
+                let bound = read_f64_keyword(object, "exclusiveMaximum", location)?.unwrap();
+                if number.maximum.is_none_or(|maximum| bound <= maximum) {
+                    number.maximum = Some(bound);
+                    number.exclusive_maximum = true;
+                }
             }
             _ => return Err(SchemaImportError::at(location, "exclusiveMaximum must be a bool or number")),
         }
@@ -1140,6 +1013,47 @@ mod tests {
     use serde_json::json;
 
     use super::scan_document_features;
+
+    #[test]
+    fn untyped_object_counts_and_dependencies_are_loaded() {
+        use super::super::ast::SchemaKind;
+        for (schema, count, dependency) in [
+            (json!({"maxProperties":1}), Some(1), None),
+            (json!({"dependencies":{"a":["b"]}}), None, Some(("a", "b"))),
+            (json!({"dependentRequired":{"a":["b"]}}), None, Some(("a", "b"))),
+        ] {
+            let document = super::load_document(&schema).unwrap();
+            let SchemaKind::Assertions(assertions) = document.root.kind else {
+                panic!("expected assertions for {schema}");
+            };
+            assert!(assertions.types.is_none());
+            let object = assertions.object.expect("untyped object keywords must load");
+            assert_eq!(object.max_properties, count);
+            if let Some((trigger, required)) = dependency {
+                assert!(object.property_dependencies[trigger].contains(required));
+            }
+        }
+    }
+
+    #[test]
+    fn literal_payloads_do_not_create_schema_features_or_definitions() {
+        let schema = json!({"const":{"oneOf": false,"$ref":42,"$defs":{"bad":42},"$id":"#fake"}});
+        let features = scan_document_features(&schema);
+        assert!(!features.has_one_of);
+        assert!(!features.has_definitions);
+        assert!(!features.has_local_id_alias);
+        assert!(features.ref_pointers.is_empty());
+        super::load_document(&schema).unwrap();
+    }
+
+    #[test]
+    fn stronger_inclusive_numeric_bounds_survive_weaker_exclusive_bounds() {
+        let number = super::load_number_keywords(json!({"minimum":10,"exclusiveMinimum":0,"maximum":20,"exclusiveMaximum":30}).as_object().unwrap(), "#").unwrap();
+        assert_eq!(number.minimum, Some(10.0));
+        assert_eq!(number.maximum, Some(20.0));
+        assert!(!number.exclusive_minimum);
+        assert!(!number.exclusive_maximum);
+    }
 
     #[test]
     fn document_feature_scan_detects_nested_loading_shortcuts() {
