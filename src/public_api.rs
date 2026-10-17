@@ -25,7 +25,7 @@ mod prepared_artifact;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Optimization {
-    /// Choose a strategy automatically.
+    /// The default.
     #[default]
     Auto,
     /// Favor shorter compilation.
@@ -2339,7 +2339,7 @@ impl PreparedGrammar {
         Ok(next)
     }
 
-    /// Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged.
+    /// Fill a declared slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Attach a parent before binding descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<'a, T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where T: IntoUnlinkedValue<'a> {

@@ -15,7 +15,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
     PyConstraint { inner: Arc::new(inner), max_token }
 }
 
-/// Build-time versus per-token cost. The modes preserve the supported grammar language; `AUTO` chooses a strategy.
+/// Build-time versus per-token cost. The modes preserve the supported grammar language.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "Optimization", module = "glrmask", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,7 +362,7 @@ impl PyPreparedGrammar {
         slf.py().allow_threads(move ||snapshot.requirements())
             .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
-    /// Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged.
+    /// Fill a declared slot once. Attach a parent before binding its descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.
     fn bind(slf:&Bound<'_,Self>,py:Python<'_>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
         let binding=Binding::extract_for_unlinked(value)?;
         let mut target=slf.try_borrow_mut()?;

@@ -1,6 +1,6 @@
 {
-  "Optimization": "Build-time versus per-token cost. The modes preserve the supported grammar language; `AUTO` chooses a strategy.",
-  "Optimization.AUTO": "Choose a strategy automatically.",
+  "Optimization": "Build-time versus per-token cost. The modes preserve the supported grammar language.",
+  "Optimization.AUTO": "Default.",
   "Optimization.FAST_BUILD": "Favor shorter compilation.",
   "Optimization.BALANCED": "Balance compilation and masking cost.",
   "Optimization.FAST_RUNTIME": "Favor lower masking latency, accepting more compilation work.",
@@ -44,7 +44,7 @@
   "Grammar.compile": "Requires every slot to be bound. `end_tokens` are root generation controls, allowed only at acceptance; commit the selected end token before stopping. Their policy is not inherited by an embedded child. `optimization` defaults to `AUTO`.",
   "PreparedGrammar": "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots.",
   "PreparedGrammar.requirements": "Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.",
-  "PreparedGrammar.bind": "Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged.",
+  "PreparedGrammar.bind": "Fill a declared slot once. Attach a parent before binding its descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.",
   "PreparedGrammar.clone": "Independent binding snapshot sharing immutable compiled machinery.",
   "PreparedGrammar.__copy__": "Equivalent to `clone`.",
   "PreparedGrammar.__deepcopy__": "Equivalent to `clone`; immutable compiled storage may remain shared.",

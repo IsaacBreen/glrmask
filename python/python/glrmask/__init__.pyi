@@ -54,9 +54,9 @@ _internal: ModuleType
 
 @final
 class Optimization:
-    "Build-time versus per-token cost. The modes preserve the supported grammar language; `AUTO` chooses a strategy."
+    "Build-time versus per-token cost. The modes preserve the supported grammar language."
     AUTO: ClassVar[Optimization]
-    "Choose a strategy automatically."
+    "Default."
     FAST_BUILD: ClassVar[Optimization]
     "Favor shorter compilation."
     BALANCED: ClassVar[Optimization]
@@ -217,7 +217,7 @@ class PreparedGrammar:
     def bind(
         self, name: str, value: Union[PreparedGrammar, Token, ExactTokens],
     ) -> None:
-        "Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged."
+        "Fill a declared slot once. Attach a parent before binding its descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged."
         ...
     def clone(self) -> PreparedGrammar:
         "Independent binding snapshot sharing immutable compiled machinery."
