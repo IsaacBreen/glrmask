@@ -107,3 +107,28 @@ registry versions retain their uploaded descriptions. Before a future package
 release, publish the referenced documentation assets, then verify descriptions
 in the newly built artifacts and their actual registry rendering. This docs
 workflow does not authorize a new version or replace an existing release.
+
+
+## Language reference prose
+
+`docs/content/introduction.md`, `usage.md` and the two quickstarts generate the
+package READMEs and Rust/Python module introductions. Each opening page has one
+complete decode example, the four core types and links to the detailed guide.
+`docs/content/python-api.json` holds the reviewed Python symbol contracts;
+`sync-guide.py --check` checks the stubs and public auto helpers against it.
+Native PyO3 docstrings carry the same contracts for future wheels.
+
+`docs/language-docs.json` is a narrow, benchmark-free website import. Its digest
+covers the canonical prose and Python symbols. The website pins one exact public
+library revision and uses these texts to document the installed public wheel,
+without altering that wheel. This allows current reference corrections while
+immutable registry artifacts retain their original documentation. Unknown new
+public symbols fail generation until their contracts are reviewed. Benchmark
+snapshot imports and measurement identities remain independent.
+
+The website’s `python-reference.yml` checks stable PyPI releases hourly, validates
+examples and links, and commits generated documentation to its permitted `dev`
+branch. The existing Cloudflare Git integration deploys `dist-glrmask`. Source
+pushes do not rebuild an immutable docs.rs version: Rust documentation changes
+appear on docs.rs at the next normal crate publication. No package bump is
+required or authorized solely for these documentation changes.
