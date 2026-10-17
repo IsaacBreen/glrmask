@@ -52,10 +52,9 @@ pub struct Token {
 }
 
 impl Token {
-    /// Describe consumption of one exact ID. Membership is checked at compile/link binding.
+    /// Membership is checked at compile/link binding.
     pub const fn new(id: u32) -> Self { Self { id } }
 
-    /// The exact model token ID.
     pub const fn id(&self) -> u32 { self.id }
 }
 
@@ -87,7 +86,6 @@ impl ExactTokens {
         self.ranges.iter().map(|&(start, end)| (u64::from(end) - u64::from(start) + 1) as usize).sum()
     }
 
-    /// An empty event set recognizes no token event; it is not epsilon.
     pub fn is_empty(&self) -> bool { self.ranges.is_empty() }
 
     #[doc(hidden)]
