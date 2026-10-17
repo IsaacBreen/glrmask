@@ -1,0 +1,25 @@
+@PACKAGE_INIT@
+if(TARGET glrmask::glrmask)
+  return()
+endif()
+include(CMakeFindDependencyMacro)
+if(NOT @GLRMASK_SHARED@ AND NOT WIN32)
+  find_dependency(Threads)
+endif()
+add_library(glrmask::c @GLRMASK_KIND@ IMPORTED)
+set_target_properties(glrmask::c PROPERTIES
+  IMPORTED_LOCATION "${PACKAGE_PREFIX_DIR}/@GLRMASK_INSTALL_LOCATION@"
+  INTERFACE_INCLUDE_DIRECTORIES "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@")
+if(@GLRMASK_SHARED@)
+  set_property(TARGET glrmask::c PROPERTY INTERFACE_COMPILE_DEFINITIONS GLRMASK_SHARED)
+  if(WIN32)
+    set_property(TARGET glrmask::c PROPERTY IMPORTED_IMPLIB "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/@GLRMASK_IMPLIB_FILENAME@")
+  endif()
+else()
+  set_property(TARGET glrmask::c PROPERTY INTERFACE_LINK_LIBRARIES "@GLRMASK_SYSTEM_LIBS@")
+endif()
+add_library(glrmask::glrmask INTERFACE IMPORTED)
+set_target_properties(glrmask::glrmask PROPERTIES
+  INTERFACE_LINK_LIBRARIES glrmask::c
+  INTERFACE_COMPILE_FEATURES cxx_std_17)
+check_required_components(glrmask)

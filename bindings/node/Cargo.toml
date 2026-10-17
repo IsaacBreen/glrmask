@@ -1,0 +1,18 @@
+[package]
+name = "glrmask-node"
+version = "0.3.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "glrmask_node"
+crate-type = ["cdylib"]
+
+[dependencies]
+glrmask-binding-core = { path = "../core" }
+napi = { version = "3", default-features = false, features = ["napi8"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

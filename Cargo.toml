@@ -18,6 +18,7 @@ exclude = [
     ".benchmarks/**",
     ".cache/**",
     "python/**",
+    "bindings/**",
     "scripts/**",
     "target/**",
 ]
@@ -223,6 +224,9 @@ path = "tests/regressions/replay/snowplow_hostname.rs"
 members = [
     ".",
     "python",
+    "bindings/core",
+    "bindings/cpp",
+    "bindings/node",
     "crates/glrmask-finite-automata",
     "crates/glrmask-weight",
     "crates/glrmask-weighted-automata",
@@ -238,6 +242,15 @@ members = [
     "crates/glrmask-dwa-merge",
 ]
 resolver = "2"
+
+# An owned incremental development loop for the native language bindings.
+# This does not change normal library or production-release optimization.
+[profile.bindings-dev]
+inherits = "dev"
+opt-level = 1
+debug = 0
+incremental = true
+codegen-units = 256
 
 [[test]]
 name = "integer_multiple_exact"

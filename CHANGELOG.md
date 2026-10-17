@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased native language bindings
+
+- Add native C ABI and C++17 RAII bindings, static/shared libraries, CMake installation and external-consumer support.
+- Add a Node-API JavaScript/TypeScript package with asynchronous compilation and persistence, synchronous packed masks and commits, owning snapshots, explicit disposal and CommonJS/ESM support.
+- Cover the current public source/prepared/constraint lifecycle, exact token sets and ranges, marker observations, forcing, and cross-language artifact interchange with matching builds.
+- Add language guides, native build artifacts, platform validation and links to the hosted C++ and JavaScript documentation. No package publication or version change is performed by these build workflows.
+
 ## 0.3.0 — 2026-10-17
 
 ### Components and public APIs

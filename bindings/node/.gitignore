@@ -1,0 +1,6 @@
+node_modules/
+*.node
+*.tgz
+native.d.ts
+typecheck-output/
+native-manifest.json
