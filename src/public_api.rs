@@ -435,12 +435,12 @@ impl<'a> Grammar<'a> {
         grammar
     }
 
-    /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may raise an error for very large shared graphs.
+    /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may return an error for very large shared graphs.
     pub fn requirements(&self) -> Result<Vec<Requirement>> {
         graph::source_requirements(self)
     }
 
-    /// Fill a declared local or `::`-qualified slot once. Accepts `Grammar`, `Token` or `ExactTokens`; a general grammar cannot fill a token slot. Captures the child’s current snapshot. Unknown, already filled, incompatible or cyclic bindings fail without changing this handle.
+    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, `Token` or `ExactTokens`; token slots require exact events. Attached children are snapshots. Failed binds leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where

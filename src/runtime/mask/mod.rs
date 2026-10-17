@@ -8831,7 +8831,7 @@ impl<'a> ConstraintState<'a> {
     ///
     /// # Panics
     ///
-    /// The buffer must contain at least [`Constraint::mask_len`] words.
+    /// Panics if `buf` has fewer than [`Constraint::mask_len`] words.
     pub fn fill_mask(&self, buf: &mut [u32]) {
         assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is smaller than constraint mask");
         if self.terminated {

@@ -45,7 +45,7 @@ pub struct Vocab {
     max_token_byte_len: OnceLock<usize>,
 }
 
-/// One original token ID, independent of its byte spelling. This value stores no vocabulary identity: the target checks ID membership, so the same ID can be accepted with different bytes. Use `vocab.tokens([id])` when a singleton must retain vocabulary identity.
+/// An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token {
     id: u32,
@@ -59,7 +59,7 @@ impl Token {
     pub const fn id(&self) -> u32 { self.id }
 }
 
-/// One token event chosen from a vocabulary-bound set, not a sequence. Even a singleton retains the full token-ID/byte mapping; a different mapping is rejected. An empty set matches nothing, not the empty string.
+/// One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
 #[derive(Debug, Clone)]
 pub struct ExactTokens {
     vocab: Vocab,

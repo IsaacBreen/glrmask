@@ -9064,7 +9064,7 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// An unknown ID returns an error. A grammatically forbidden ID rejects the state and may also return an error; subsequent masks are zero. Sample from the mask before committing. Commit a selected root end token before stopping.
+    /// Unknown IDs return an error. Forbidden IDs reject the state and may also return an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits return an error.
     pub fn commit_token(
         &mut self,
         token_id: u32,
