@@ -1,5 +1,7 @@
 # JSON Schema acceptance policy and semantic deviations
 
+**Unreleased:** this policy is implemented in draft PR #13 and is not a claim about currently published packages.
+
 GLRMask compiles a documented JSON Schema subset into generation grammars. It
 is not a full JSON Schema validator. Within that subset, compilation preserves
 supported assertions; assertions that cannot be enforced produce an error.

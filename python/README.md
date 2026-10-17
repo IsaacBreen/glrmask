@@ -265,14 +265,6 @@ as a matching mapping.
 
 ## Grammar formats
 
-JSON Schema compilation enforces its supported assertions and reports unsupported
-features instead of silently weakening them. An absent `$schema` selects Draft
-2020-12; explicit Draft 4, 6, 7, 2019-09, and 2020-12 declarations select their
-dialect semantics. `format` is annotation-only; required format-assertion or
-unknown vocabularies are unsupported. `oneOf` remains exclusive, with no
-approximation mode. See [JSON Schema acceptance and limitations](https://github.com/IsaacBreen/glrmask/blob/main/docs/json-schema-semantic-deviations.md), including
-the current object property-order restriction.
-
 GLRMask accepts JSON Schema, GLRM, Lark, and EBNF. GLRM is the native composition format:
 
 ```glrm

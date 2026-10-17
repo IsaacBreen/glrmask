@@ -1,5 +1,7 @@
 # JSON Schema acceptance policy validation (2026-10-17)
 
+**Unreleased:** this policy is implemented in draft PR #13 and is not a claim about currently published packages.
+
 Source baseline: `385888ea316dd219d7cb7c73acf21d137a392a8b`. This change is
 limited to the importer, its tests, probe tooling, and documentation. It does not
 change llguidance, frozen benchmark inputs/binaries, parser backends, bindings,
