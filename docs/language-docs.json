@@ -1,7 +1,7 @@
 {
   "schema": "glrmask-language-docs-v1",
   "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON schemas and Lark grammars. GLRM is its internal grammar format.",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: source grammar semantics and bindings.\n- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.\n- `Constraint`: a closed, runnable grammar compiled against a vocabulary.\n- `ConstraintState`: the mutable state for one generated sequence.\n\nCompile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.\n\n`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.\n\nSee the [full guide](https://glrmask.com/guide/) for composition, persistence, optimization and special-token details.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: source grammar semantics and bindings.\n- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.\n- `Constraint`: a closed, runnable grammar compiled against a vocabulary.\n- `ConstraintState`: the mutable state for one generated sequence.\n\nCompile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.\n\n`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -10,5 +10,10 @@
     "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
     "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
   },
-  "content_sha256": "17d3497f06868f39813ddd203458139321f146a03d909b63a8678d22560c1b0a"
+  "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
+  "api_reference": {
+    "python": "https://glrmask.com/api/python/",
+    "rust": "https://docs.rs/glrmask/latest/glrmask/"
+  },
+  "content_sha256": "0fbaa58ed516af0f1951a0617190c5cb41426118cd037d665ae064cdb34db04b"
 }

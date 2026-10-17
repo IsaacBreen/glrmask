@@ -122,8 +122,6 @@ Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable compo
 
 `Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
 
-See the [full guide](https://glrmask.com/guide/) for composition, persistence, optimization and special-token details.
-
 ### Python quickstart
 
 ```python

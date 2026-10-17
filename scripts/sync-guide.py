@@ -88,7 +88,7 @@ def getting_started(flavor):
 def document(flavor):
     if flavor in ['python', 'rust']:
         api = 'https://glrmask.com/api/python/' if flavor == 'python' else 'https://docs.rs/glrmask/latest/glrmask/'
-        more = f'## Learn more\n\n[Full guide]({WEBSITE}/guide/) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
+        more = f'## Learn more\n\n[Full guide]({REPO}/blob/main/GUIDE.md) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
         return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                               install(flavor, '## Installation'), quickstart(flavor, '## Quickstart'),
                               '## Core concepts\n\n' + read('usage'), more, LICENSE]) + '\n'
@@ -131,7 +131,9 @@ def language_payload():
     payload = {'schema': 'glrmask-language-docs-v1',
                'introduction': read('introduction'), 'usage': read('usage'),
                'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
-               'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']}}
+               'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
+               'guide_url': REPO + '/blob/main/GUIDE.md',
+               'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
     payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
 
@@ -141,7 +143,8 @@ def rust_module_intro():
     start = source.index('//!')
     end = source.index('//! # Typed bindings')
     prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation'),
-                           quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage')])
+                           quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage'),
+                           '# Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/)'])
     block = '\n'.join('//! ' + line if line else '//!' for line in prose.splitlines()) + '\n//!\n'
     return source[:start] + block + source[end:]
 
