@@ -69,7 +69,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
         assert_eq!(embedding.return_pop, 1); assert_eq!(embedding.nullable, nullable);
         let child = Constraint::load(child.save()).unwrap();
         let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "x" C "y";"#)
-            .compile_unlinked(&vocab).unwrap().bind("C", &child).unwrap();
+            .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
         let mut words = vec![b"xay".to_vec(), b"xby".to_vec(), b"xaby".to_vec()];
         if nullable { words.push(b"xy".to_vec()); }
         for mode in [Optimization::Balanced, Optimization::FastRuntime] {
@@ -78,7 +78,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             let external = Constraint::load_with_vocab(linked.save_without_vocab().unwrap(), &vocab).unwrap();
             for c in [&linked, &loaded, &external] { check(c, &tokens, &words); }
             let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
-                .compile_unlinked(&vocab).unwrap().bind("C", &loaded).unwrap().link_with(options(mode)).unwrap();
+                .prepare(&vocab).unwrap().bind_snapshot("C", &loaded).unwrap().link_with(options(mode)).unwrap();
             let outer_words = words.iter().map(|word| {
                 let mut out = vec![b'p']; out.extend(word); out.push(b'q'); out
             }).collect::<Vec<_>>();

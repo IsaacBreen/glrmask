@@ -108,7 +108,7 @@ fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
                 .map(|special| special.terminal_id),
         )
@@ -828,8 +828,8 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
         let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
-            .compile_unlinked(&vocab).unwrap();
-        let middle = parent.bind("leaf", &leaf).unwrap().link_with(options()).unwrap();
+            .prepare(&vocab).unwrap();
+        let middle = parent.bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
         let overlay = middle.static_dynamic_overlay.as_ref().unwrap();
         let local = &overlay.segmented_parser_components[0].constraint;
         let slot = overlay.segmented_parser_links[0].slot_terminal;

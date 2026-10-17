@@ -41,9 +41,9 @@ pub(crate) fn parse_glrm_to_named(source: &str) -> crate::Result<ast::NamedGramm
 
 fn parse_glrm_with_external_terminal_bindings(
     source: &str,
-    bindings: &[(&str, &[u32])],
+    bindings: &[(&str, &[(u32, u32)])],
 ) -> crate::Result<ast::NamedGrammar> {
-    Ok(crate::grammar::glrm::from_glrm_with_external_terminals(
+    Ok(crate::grammar::glrm::from_glrm_with_external_terminal_ranges(
         source,
         bindings,
     )?)
@@ -318,28 +318,11 @@ pub(crate) fn compile_glrm_with_protected_shift_terminals(
 }
 
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
-    if vocab.is_empty() {
-        return Ok(0);
-    }
-    if let Some(next) = vocab.max_token_id().checked_add(1) {
+    if let Some(next) = vocab.max_exact_token_id().and_then(|id| id.checked_add(1)) {
         return Ok(next);
     }
-
-    // Only the pathological `u32::MAX` case needs a vocabulary scan. Normal
-    // dense model vocabularies stay on the constant-time max+1 path.
-    let mut expected = 0u32;
-    for (token_id, _) in vocab.iter() {
-        if token_id != expected {
-            return Ok(expected);
-        }
-        expected = expected.checked_add(1).ok_or_else(|| {
-            crate::GlrMaskError::Compilation(
-                "every u32 token ID is occupied; no external-subgrammar placeholder is available"
-                    .to_string(),
-            )
-        })?;
-    }
-    Ok(expected)
+    vocab.next_available_exact_token_id(0).ok_or_else(|| crate::GlrMaskError::Compilation(
+        "every u32 token ID is occupied; no external-subgrammar placeholder is available".into()))
 }
 
 pub(crate) fn external_placeholder_token_id_avoiding(
@@ -349,11 +332,9 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let reserved = reserved.into_iter().collect::<BTreeSet<_>>();
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
-        if !reserved.contains(&candidate)
-            && !vocab.contains_exact_token_id(candidate)
-        {
-            return Ok(candidate);
-        }
+        candidate = vocab.next_available_exact_token_id(candidate).ok_or_else(||
+            crate::GlrMaskError::Compilation("no external-subgrammar placeholder is available".into()))?;
+        if !reserved.contains(&candidate) { return Ok(candidate); }
         candidate = candidate.checked_add(1).ok_or_else(|| {
             crate::GlrMaskError::Compilation(
                 "every u32 token ID is occupied; no external-subgrammar placeholder is available"
@@ -468,12 +449,17 @@ fn dynamic_named_alternatives_from_named(
 }
 
 fn compile_bounded_template_from_source(
-    source: &str, vocab: &crate::Vocab, table_construction: GlrTableConstruction,
-    parse: fn(&str) -> crate::Result<ast::NamedGrammar>,
-    transform: Option<NamedGrammarTransform>,
-) -> crate::Result<DynamicConstraint> {
-    with_large_import_stack(source.len(), || {
-        let alternatives = dynamic_named_alternatives(source, parse, transform, &[])?;
+    source:&str,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    parse:fn(&str)->crate::Result<ast::NamedGrammar>,transform:Option<NamedGrammarTransform>,
+)->crate::Result<DynamicConstraint> {
+    with_large_import_stack(source.len(),||compile_bounded_template_from_named(parse(source)?,vocab,table_construction,transform))
+}
+
+pub(crate) fn compile_bounded_template_from_named(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    transform:Option<NamedGrammarTransform>,
+)->crate::Result<DynamicConstraint> {
+    let alternatives=dynamic_named_alternatives_from_named(named,transform,&[])?;
         let mut compiled = Vec::with_capacity(alternatives.len());
         for alternative in alternatives {
             let grammar = ast::lower(&alternative)?;
@@ -513,7 +499,36 @@ fn compile_bounded_template_from_source(
             emit_import_phase_end("bounded_install_template_parser", install_started);
         }
         Ok(constraint)
-    })
+
+}
+
+/// Compile a source-independent component shell. Both GLRM and Lark use the
+/// same slot lowering and boundary metadata; exact events never become bytes.
+pub(crate) fn compile_component_shell(
+    component:&crate::grammar::glrm::ParsedComponent,
+    vocab:&crate::Vocab,token_bindings:&[(&str,&[(u32,u32)])],dynamic:bool,
+)->crate::Result<Constraint> {
+    let has_open=component.declarations().names.iter().any(|name|!token_bindings.iter().any(|(bound,_)|*bound==name));
+    let first=if has_open {first_external_placeholder_token_id(vocab)?}else{0};
+    let parsed=component.lower_shell(first,std::iter::empty(),token_bindings)?;
+    let mut parent=if dynamic {
+        compile_dynamic_named_single(parsed.grammar,vocab,GlrTableConstruction::ExperimentalCoreMerged,false)?
+    } else {
+        compile_from_named_grammar(parsed.grammar,vocab,"component",GlrTableConstruction::ExperimentalCoreMerged,&[])?
+    };
+    for placeholder in parsed.placeholders {
+        let terminals=parent.special_token_terminals.iter().filter(|t|t.token_id==placeholder.token_id)
+            .map(|t|t.terminal_id).collect::<BTreeSet<_>>();
+        if terminals.len()>1 {return Err(crate::Error::Compilation(format!("component slot {:?} has multiple internal terminals",placeholder.binding_name)));}
+        // Optimizers may remove an unreachable occurrence, but the prepared
+        // artifact's independent authored interface still requires a binding.
+        if let Some(&terminal_id)=terminals.first() {
+            parent.late_grammar_slots.push(crate::runtime::LateGrammarSlot {name:placeholder.binding_name,terminal_id});
+        }
+    }
+    if parent.sanitize_late_grammar_placeholder_token_domain(){parent.rebuild_runtime_caches();}
+    let _=parent.late_bind_vocab.set(vocab.clone());
+    Ok(parent)
 }
 
 
@@ -525,7 +540,7 @@ pub(crate) fn compile_dynamic_glrm_fixture(
     source: &str, vocab: &crate::Vocab,
     backend: crate::runtime::parser_backend::DynamicParserBackend,
 ) -> crate::Result<DynamicConstraint> {
-    let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+    let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
         source, first_external_placeholder_token_id(vocab)?, std::iter::empty(), &[],
     )?;
     let placeholders = parsed.placeholders.iter()
@@ -1270,7 +1285,7 @@ impl Constraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[(&str, &[u32])],
+        bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -1292,12 +1307,12 @@ impl Constraint {
     pub(crate) fn from_glrm_grammar_with_unbound_subgrammars_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 end_token_ids.iter().copied(),
@@ -1341,7 +1356,7 @@ impl Constraint {
         })
     }
 
-    /// Compile GLRM containing typed `extern grammar name;` declarations and bind
+    /// Compile GLRM containing typed `extern name;` declarations and bind
     /// each declaration to an already-compiled child constraint.
     ///
     /// Binding names are the source names of top-level externals. Externals
@@ -1378,12 +1393,12 @@ impl Constraint {
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 end_token_ids.iter().copied().chain(
@@ -1860,7 +1875,7 @@ impl DynamicConstraint {
     pub(crate) fn from_glrm_grammar_with_bindings_and_end_tokens(
         glrm: &str,
         vocab: &crate::Vocab,
-        bindings: &[(&str, &[u32])],
+        bindings: &[(&str, &[(u32, u32)])],
         end_token_ids: &[u32],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
@@ -1878,11 +1893,11 @@ impl DynamicConstraint {
         glrm: &str,
         children: &[(&str, &Constraint)],
         vocab: &crate::Vocab,
-        terminal_bindings: &[(&str, &[u32])],
+        terminal_bindings: &[(&str, &[(u32, u32)])],
     ) -> crate::Result<Self> {
         with_large_import_stack(glrm.len(), || {
             let first_placeholder_token_id = first_external_placeholder_token_id(vocab)?;
-            let parsed = crate::grammar::glrm::from_glrm_with_bindings_and_external_subgrammars(
+            let parsed = crate::grammar::glrm::from_glrm_with_ranges_and_external_subgrammars(
                 glrm,
                 first_placeholder_token_id,
                 children.iter().flat_map(|(_, child)| {
@@ -2274,7 +2289,7 @@ mod tests {
         let mask = state.mask();
         assert!(token_allowed(&mask, 100));
         assert!(token_allowed(&mask, 101));
-        assert_eq!(state.forced(), Vec::<u32>::new());
+        assert_eq!(state.forced_canonical_reference(), Vec::<u32>::new());
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }
@@ -2291,7 +2306,7 @@ mod tests {
 
         let mut state = constraint.start();
         state.commit_token(2).unwrap();
-        assert_eq!(state.forced(), vec![100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100]);
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }
@@ -2307,10 +2322,10 @@ mod tests {
         .unwrap();
 
         let mut state = constraint.start();
-        assert_eq!(state.forced(), vec![100, 100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100, 100]);
         state.commit_token(100).unwrap();
         assert!(!state.is_accepting());
-        assert_eq!(state.forced(), vec![100]);
+        assert_eq!(state.forced_canonical_reference(), vec![100]);
         state.commit_token(100).unwrap();
         assert!(state.is_accepting());
     }
@@ -2527,7 +2542,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar payload;
+                extern payload;
                 nt document ::= "X" payload "!";
             "#,
             &[("payload", &child)],
@@ -2571,8 +2586,8 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar left;
-                extern grammar right;
+                extern left;
+                extern right;
                 nt document ::= "X" left right "!";
             "#,
             &[("left", &child), ("right", &child)],
@@ -2613,7 +2628,7 @@ mod tests {
                 start document;
                 g wrapper ::= {
                     start value;
-                    extern grammar leaf;
+                    extern leaf;
                     nt value ::= "[" leaf "]";
                 };
                 nt document ::= "<" wrapper ">";
@@ -2646,7 +2661,7 @@ mod tests {
                 start document;
                 ignore PARENT_WS;
                 t PARENT_WS ::= " "+;
-                extern grammar child;
+                extern child;
                 nt document ::= "<" child ">";
             "#,
             &[("child", &child)],
@@ -2687,10 +2702,10 @@ mod tests {
             &vocab,
         )
         .unwrap();
-        let source = "start document; extern grammar child; nt document ::= child;";
+        let source = "start document; extern child; nt document ::= child;";
 
         let unresolved = Constraint::from_glrm_grammar_with_subgrammars(source, &[], &vocab)
-            .expect("an unresolved extern grammar is a valid late-binding slot");
+            .expect("an unresolved extern is a valid late-binding slot");
         assert_eq!(unresolved.late_grammar_slots.len(), 1);
         assert_eq!(unresolved.late_grammar_slots[0].name, "child");
         let late_bound = unresolved
@@ -2734,7 +2749,7 @@ mod tests {
         let composed = Constraint::from_glrm_grammar_with_subgrammars(
             r#"
                 start document;
-                extern grammar child;
+                extern child;
                 nt document ::= child "!";
             "#,
             &[("child", &child)],
@@ -2773,7 +2788,7 @@ mod tests {
         )
         .unwrap();
         let composed = Constraint::from_glrm_grammar_with_subgrammars_and_end_tokens(
-            "start document; extern grammar child; nt document ::= child;",
+            "start document; extern child; nt document ::= child;",
             &[("child", &child)],
             &vocab,
             &[1],

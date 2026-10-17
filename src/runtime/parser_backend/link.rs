@@ -225,12 +225,19 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
         }
     }
     let mut specials = Vec::new();
+    let mut markers = Vec::new();
     let mut wrappers = Vec::new(); let mut shards = Vec::new();
     for (index, component) in components.into_iter().enumerate() {
+        if let Some(queries) = &component.marker_queries {
+            markers.extend(queries.terminals.iter().map(|marker| crate::runtime::markers::MarkerTerminal {
+                terminal_id: terminal_offsets[index] + marker.terminal_id,
+                marker_id: marker.marker_id,
+            }));
+        }
         for special in &component.special_token_terminals {
             if index == 0 && bound_slots.contains(&special.terminal_id) { continue; }
             specials.push(SpecialTokenTerminal { terminal_id: terminal_offsets[index] + special.terminal_id,
-                token_id: special.token_id });
+                token_id: special.token_id, token_id_end: special.token_id_end });
         }
         let shard = SegmentedBoundaryShard { start_component: index as u32,
             start_parser_states: crate::ds::bitset::BitSet::new(0), accepts_empty_stack: index == 0,
@@ -241,7 +248,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
             global_terminal_aliases: vec![], local_tsid_to_global_tsids: vec![],
             root_disallowed_terminal: None, global_to_local_parser_state: vec![] });
     }
-    specials.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     specials.dedup(); constraint.special_token_terminals = specials;
     constraint.static_dynamic_overlay = Some(StaticDynamicOverlayMetadata {
         terminal_offsets, tokenizer_state_offsets: tokenizer_offsets, segmented_parser_components: wrappers,
@@ -251,6 +258,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
     constraint.sanitize_late_grammar_placeholder_token_domain();
     constraint.validate_template_composition_layout().map_err(fail)?;
     constraint.rebuild_dynamic_runtime_caches();
+    constraint.install_marker_terminals(markers).map_err(fail)?;
     // Sparse/data-only components can have an interface-tail proof without
     // source grammar rules. Its reusable fingerprint is then unavailable;
     // retain the ordinary conservative candidate query for that component.
@@ -317,10 +325,10 @@ mod candidate_tests {
         let parent = Grammar::from_glrm(
             r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#,
         )
-        .compile_unlinked(&vocab)
+        .prepare(&vocab)
         .unwrap();
         let linked = parent
-            .bind("child", &child)
+            .bind_snapshot("child", &child)
             .unwrap()
             .link_with(
                 BuildOptions::default()
@@ -360,15 +368,15 @@ mod candidate_tests {
         for parent in [
             r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
             r#"glrm 1; start root; extern grammar child; nt root = "x" child "y" "x" child "y";"#,
-            r#"start root; extern grammar child; ignore WS; t WS ::= " "+; nt root ::= "x" child "y";"#,
+            r#"start root; extern grammar child; ignore WS; t WS = " "+; nt root = "x" child "y";"#,
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
                 let options = BuildOptions::default().optimization(Optimization::Balanced)
                     .parser_backend(ParserBackend::TemplateDfa);
                 let child = Grammar::from_glrm(child).compile_with(&vocab, options.clone()).unwrap();
-                let linked = Grammar::from_glrm(parent).compile_unlinked(&vocab).unwrap()
-                    .bind("child", &child).unwrap().link_with(options).unwrap();
+                let linked = Grammar::from_glrm(parent).prepare(&vocab).unwrap()
+                    .bind_snapshot("child", &child).unwrap().link_with(options).unwrap();
                 assert!(linked.boundary_candidate_summary.get().is_none());
                 let mut eager = linked.clone();
                 let overlay = eager.static_dynamic_overlay.as_ref().unwrap();
@@ -407,7 +415,7 @@ mod candidate_tests {
             .compile(&vocab).unwrap();
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#)
-            .compile_unlinked(&vocab).unwrap().bind("child", &child).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {

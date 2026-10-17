@@ -95,6 +95,20 @@ pub fn opt(expr: impl Into<Expr>) -> Expr {
     repeat(expr, 0, Some(1))
 }
 
+/// Prefix-minimal sublanguage: discard every word having a strictly shorter
+/// accepted prefix. This is a regular-language operation, not a runtime matching
+/// preference. Nullable input yields epsilon; other terminals are unaffected.
+pub fn shortest(expr: impl Into<Expr>) -> Expr {
+    let shared = Arc::new(expr.into());
+    Expr::Exclude {
+        expr: Box::new(Expr::Shared(shared.clone())),
+        exclude: Box::new(Expr::Seq(vec![
+            Expr::Shared(shared),
+            Expr::Repeat { expr: Box::new(Expr::U8Class(U8Set::all())), min: 1, max: None },
+        ])),
+    }
+}
+
 pub fn eps() -> Expr {
     Expr::Epsilon
 }

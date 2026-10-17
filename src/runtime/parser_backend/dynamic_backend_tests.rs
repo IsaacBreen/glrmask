@@ -406,8 +406,8 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (9, Vec::new()), (11, Vec::new())]);
     let source = "glrm 1; start start; extern token MARK; nt start = MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
-        source, &vocab, &[("MARK", &[9])], &[]).unwrap().into_constraint();
-    let native = Grammar::from_glrm(source).bind("MARK", vocab.token(9).unwrap()).unwrap()
+        source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
+    let native = Grammar::from_glrm(source).bind_snapshot("MARK", crate::Token::new(9)).unwrap()
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
@@ -432,7 +432,7 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
         let backend = dynamic.clone().into_constraint().parser_backend();
         let transfer = dynamic.save_without_vocab();
         let version = u16::from_le_bytes(transfer[8..10].try_into().unwrap());
-        assert_eq!(version, if backend == ParserBackend::LrTable { 15 } else { 14 });
+        assert_eq!(version, if backend == ParserBackend::LrTable { 17 } else { 16 });
         let self_loaded = crate::DynamicConstraint::load(&dynamic.save()).unwrap();
         let external_loaded = crate::DynamicConstraint::load_with_vocab(&transfer, &vocab).unwrap();
         assert_eq!(external_loaded.save_without_vocab(), transfer);
@@ -463,11 +463,12 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
             let mut corrupt = transfer.clone();
             corrupt[26] ^= 1; // First byte of the mandatory envelope digest.
             assert!(crate::DynamicConstraint::load_with_vocab(&corrupt, &vocab).is_err());
-            for version in 1u16..=13 {
+            for version in 1u16..=15 {
                 let mut old = transfer.clone();
                 old[8..10].copy_from_slice(&version.to_le_bytes());
                 let error = crate::DynamicConstraint::load_with_vocab(&old, &vocab).unwrap_err();
-                assert!(error.to_string().contains("lacks mandatory exact vocabulary identity"));
+                assert!(error.to_string().contains("unsupported dynamic transfer artifact version"));
+                assert!(error.to_string().contains("recompile"));
             }
         }
     }
@@ -514,10 +515,10 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(25,Vec::new()),(26,Vec::new())]);
     let source = "glrm 1; start root; extern token MARK; nt root = \"a\" MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
-        source,&vocab,&[("MARK",&[25])],&[]).unwrap().into_constraint();
+        source,&vocab,&[("MARK",&[(25, 25)])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
     for mode in [Optimization::Auto,Optimization::Balanced,Optimization::FastRuntime] {
-        constraints.push(Grammar::from_glrm(source).bind("MARK",vocab.token(25).unwrap()).unwrap()
+        constraints.push(Grammar::from_glrm(source).bind_snapshot("MARK",crate::Token::new(25)).unwrap()
             .compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
     for compiled in constraints {

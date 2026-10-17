@@ -1,0 +1,25 @@
+{
+  "label": "bounded-unicode-final-r7",
+  "command": [
+    "cargo",
+    "test",
+    "--locked",
+    "-p",
+    "glrmask",
+    "--lib",
+    "--features",
+    "internal-api",
+    "runtime::commit::bounded",
+    "--",
+    "--test-threads=2"
+  ],
+  "cwd": "C:\\gnb930283\\repo",
+  "started_at": "2026-10-15T01:52:45.056062+08:00",
+  "pid": 23824,
+  "status": "completed",
+  "target": "C:\\gnb930283\\target-dev",
+  "production": false,
+  "exit_code": 0,
+  "elapsed_seconds": 69.01655419999588,
+  "ended_at": "2026-10-15T01:53:54.086800+08:00"
+}

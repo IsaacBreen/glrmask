@@ -1,0 +1,1195 @@
+{
+  "kind": "glrm-core-batch-matched-public-api-v2",
+  "redesign": true,
+  "profile": "cargo-release-defaults",
+  "vocabulary": "deterministic synthetic bytes + corpus ngrams + ASCII identifiers",
+  "repetitions": 5000,
+  "notes": [
+    "Identical measured loops, vocabularies and token traces; only return-new versus mutable binding setup differs.",
+    "Parse/binding, vocabulary, compile, prepare, final link, save/load and runtime operations timed separately.",
+    "Warm compile/link samples share vocabulary caches; small sample counts describe these cases, not global tails.",
+    "Runtime measured in release with reusable mask buffer, new state per trace and explicit warmup.",
+    "Not a full schema-corpus or real model benchmark. Mask fingerprints and trace acceptance compared exactly."
+  ],
+  "rows": [
+    {
+      "case": "json_schema",
+      "mode": "FastBuild",
+      "vocab_target": 8192,
+      "trace": [
+        1021,
+        713,
+        353,
+        376,
+        862,
+        346,
+        383,
+        820,
+        973,
+        334,
+        458,
+        464,
+        660,
+        370,
+        988,
+        792,
+        341,
+        1006
+      ],
+      "mask_fingerprint": "0ba982dc73fe34f6",
+      "captured_masks": null,
+      "vocab_input_ns": 713000.0,
+      "vocab_ns": 195600.0,
+      "source_create_and_bind_ns": 6400.0,
+      "first_compile_ns": 9059100.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 592900.0,
+        "p95_ns": 654800.0,
+        "p99_ns": 654800.0,
+        "p999_ns": 654800.0,
+        "max_ns": 654800.0
+      },
+      "prepare_with_warm_vocab_ns": 9771000.0,
+      "first_link_ns": 113200.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 31800.0,
+        "p95_ns": 39500.0,
+        "p99_ns": 39500.0,
+        "p999_ns": 39500.0,
+        "max_ns": 39500.0
+      },
+      "save_ns": 2852100.0,
+      "load_ns": 2209400.0,
+      "artifact_bytes": 3030584,
+      "prepared_save_ns": 479200.0,
+      "prepared_load_ns": 1293400.0,
+      "prepared_artifact_bytes": 139380,
+      "start": {
+        "n": 5000,
+        "p50_ns": 65200.0,
+        "p95_ns": 71400.0,
+        "p99_ns": 84600.0,
+        "p999_ns": 114800.0,
+        "max_ns": 145700.0
+      },
+      "mask": {
+        "n": 90000,
+        "p50_ns": 1100.0,
+        "p95_ns": 1400.0,
+        "p99_ns": 1700.0,
+        "p999_ns": 3400.0,
+        "max_ns": 22500.0
+      },
+      "commit": {
+        "n": 90000,
+        "p50_ns": 1900.0,
+        "p95_ns": 3800.0,
+        "p99_ns": 4400.0,
+        "p999_ns": 7300.0,
+        "max_ns": 28200.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 127100.0,
+        "p95_ns": 139800.0,
+        "p99_ns": 154400.0,
+        "p999_ns": 221600.0,
+        "max_ns": 444200.0
+      }
+    },
+    {
+      "case": "lark_arithmetic",
+      "mode": "FastBuild",
+      "vocab_target": 8192,
+      "trace": [
+        397,
+        561,
+        312,
+        418,
+        275,
+        296,
+        555,
+        303,
+        57
+      ],
+      "mask_fingerprint": "fb0720a035040f1d",
+      "captured_masks": null,
+      "vocab_input_ns": 725800.0,
+      "vocab_ns": 150700.0,
+      "source_create_and_bind_ns": 900.0,
+      "first_compile_ns": 7198600.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 763100.0,
+        "p95_ns": 847100.0,
+        "p99_ns": 847100.0,
+        "p999_ns": 847100.0,
+        "max_ns": 847100.0
+      },
+      "prepare_with_warm_vocab_ns": 6995600.0,
+      "first_link_ns": 132900.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 36400.0,
+        "p95_ns": 43600.0,
+        "p99_ns": 43600.0,
+        "p999_ns": 43600.0,
+        "max_ns": 43600.0
+      },
+      "save_ns": 2854900.0,
+      "load_ns": 1877500.0,
+      "artifact_bytes": 3028824,
+      "prepared_save_ns": 358800.0,
+      "prepared_load_ns": 1450400.0,
+      "prepared_artifact_bytes": 137289,
+      "start": {
+        "n": 5000,
+        "p50_ns": 61500.00000000001,
+        "p95_ns": 64600.0,
+        "p99_ns": 78300.0,
+        "p999_ns": 83000.0,
+        "max_ns": 94200.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 1200.0,
+        "p95_ns": 1400.0,
+        "p99_ns": 1600.0,
+        "p999_ns": 3600.0,
+        "max_ns": 21300.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 4200.0,
+        "p95_ns": 6400.0,
+        "p99_ns": 6900.0,
+        "p999_ns": 10000.0,
+        "max_ns": 28400.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 113800.0,
+        "p95_ns": 122700.0,
+        "p99_ns": 138100.0,
+        "p999_ns": 163500.0,
+        "max_ns": 237500.0
+      }
+    },
+    {
+      "case": "glrm_list",
+      "mode": "FastBuild",
+      "vocab_target": 8192,
+      "trace": [
+        648,
+        862,
+        477,
+        733,
+        855,
+        898,
+        491,
+        912,
+        93
+      ],
+      "mask_fingerprint": "e095fc934577b7d5",
+      "captured_masks": null,
+      "vocab_input_ns": 715000.0,
+      "vocab_ns": 127100.0,
+      "source_create_and_bind_ns": 1000.0,
+      "first_compile_ns": 6565200.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 514100.0,
+        "p95_ns": 515900.0,
+        "p99_ns": 515900.0,
+        "p999_ns": 515900.0,
+        "max_ns": 515900.0
+      },
+      "prepare_with_warm_vocab_ns": 4918600.0,
+      "first_link_ns": 44400.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 10800.0,
+        "p95_ns": 14900.0,
+        "p99_ns": 14900.0,
+        "p999_ns": 14900.0,
+        "max_ns": 14900.0
+      },
+      "save_ns": 2588700.0,
+      "load_ns": 1669100.0,
+      "artifact_bytes": 3027140,
+      "prepared_save_ns": 282700.0,
+      "prepared_load_ns": 1326900.0,
+      "prepared_artifact_bytes": 127243,
+      "start": {
+        "n": 5000,
+        "p50_ns": 60500.0,
+        "p95_ns": 63200.00000000001,
+        "p99_ns": 77500.0,
+        "p999_ns": 79400.0,
+        "max_ns": 97800.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 500.0,
+        "p95_ns": 1400.0,
+        "p99_ns": 1600.0,
+        "p999_ns": 2000.0,
+        "max_ns": 5700.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 2300.0,
+        "p95_ns": 4400.0,
+        "p99_ns": 4600.0,
+        "p999_ns": 6500.0,
+        "max_ns": 29600.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 94700.0,
+        "p95_ns": 98700.0,
+        "p99_ns": 120800.0,
+        "p999_ns": 124700.0,
+        "max_ns": 184400.0
+      }
+    },
+    {
+      "case": "scoped_child",
+      "mode": "FastBuild",
+      "vocab_target": 8192,
+      "trace": [
+        603,
+        626,
+        648,
+        956,
+        471,
+        980,
+        842,
+        915,
+        593,
+        68
+      ],
+      "mask_fingerprint": "2e54cce1c684b3c9",
+      "captured_masks": null,
+      "vocab_input_ns": 703000.0,
+      "vocab_ns": 137500.0,
+      "source_create_and_bind_ns": 102100.0,
+      "first_compile_ns": 6727600.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 783500.0,
+        "p95_ns": 838000.0,
+        "p99_ns": 838000.0,
+        "p999_ns": 838000.0,
+        "max_ns": 838000.0
+      },
+      "prepare_with_warm_vocab_ns": 7085600.0,
+      "first_link_ns": 1019699.9999999999,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 87600.0,
+        "p95_ns": 135400.0,
+        "p99_ns": 135400.0,
+        "p999_ns": 135400.0,
+        "max_ns": 135400.0
+      },
+      "save_ns": 2771600.0,
+      "load_ns": 1685500.0,
+      "artifact_bytes": 3030188,
+      "prepared_save_ns": 536800.0,
+      "prepared_load_ns": 2021700.0,
+      "prepared_artifact_bytes": 253470,
+      "start": {
+        "n": 5000,
+        "p50_ns": 60300.0,
+        "p95_ns": 63399.99999999999,
+        "p99_ns": 76300.0,
+        "p999_ns": 81600.0,
+        "max_ns": 116300.0
+      },
+      "mask": {
+        "n": 50000,
+        "p50_ns": 1100.0,
+        "p95_ns": 1400.0,
+        "p99_ns": 1600.0,
+        "p999_ns": 2300.0,
+        "max_ns": 20300.0
+      },
+      "commit": {
+        "n": 50000,
+        "p50_ns": 2900.0,
+        "p95_ns": 4500.0,
+        "p99_ns": 4700.0,
+        "p999_ns": 6800.0,
+        "max_ns": 24800.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 99000.0,
+        "p95_ns": 104300.0,
+        "p99_ns": 119000.0,
+        "p999_ns": 129999.99999999999,
+        "max_ns": 201700.0
+      }
+    },
+    {
+      "case": "exact_token_set",
+      "mode": "FastBuild",
+      "vocab_target": 8192,
+      "trace": [
+        97,
+        98
+      ],
+      "mask_fingerprint": "833acb773d054b25",
+      "captured_masks": null,
+      "vocab_input_ns": 701200.0,
+      "vocab_ns": 121000.0,
+      "source_create_and_bind_ns": 35600.0,
+      "first_compile_ns": 6150600.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 246000.00000000003,
+        "p95_ns": 266300.0,
+        "p99_ns": 266300.0,
+        "p999_ns": 266300.0,
+        "max_ns": 266300.0
+      },
+      "prepare_with_warm_vocab_ns": 1296000.0,
+      "first_link_ns": 63700.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 11500.0,
+        "p95_ns": 19900.0,
+        "p99_ns": 19900.0,
+        "p999_ns": 19900.0,
+        "max_ns": 19900.0
+      },
+      "save_ns": 3643700.0,
+      "load_ns": 2610000.0,
+      "artifact_bytes": 3026060,
+      "prepared_save_ns": 257100.00000000003,
+      "prepared_load_ns": 1445100.0,
+      "prepared_artifact_bytes": 120540,
+      "start": {
+        "n": 5000,
+        "p50_ns": 31800.0,
+        "p95_ns": 34500.0,
+        "p99_ns": 39100.0,
+        "p999_ns": 73600.0,
+        "max_ns": 214700.0
+      },
+      "mask": {
+        "n": 10000,
+        "p50_ns": 2600.0,
+        "p95_ns": 2900.0,
+        "p99_ns": 3300.0,
+        "p999_ns": 7900.000000000001,
+        "max_ns": 57500.0
+      },
+      "commit": {
+        "n": 10000,
+        "p50_ns": 4200.0,
+        "p95_ns": 4500.0,
+        "p99_ns": 5300.0,
+        "p999_ns": 12600.0,
+        "max_ns": 47300.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 47600.0,
+        "p95_ns": 52700.0,
+        "p99_ns": 60100.0,
+        "p999_ns": 107200.0,
+        "max_ns": 246400.00000000003
+      }
+    },
+    {
+      "case": "json_schema",
+      "mode": "Balanced",
+      "vocab_target": 8192,
+      "trace": [
+        1021,
+        713,
+        353,
+        376,
+        862,
+        346,
+        383,
+        820,
+        973,
+        334,
+        458,
+        464,
+        660,
+        370,
+        988,
+        792,
+        341,
+        1006
+      ],
+      "mask_fingerprint": "0ba982dc73fe34f6",
+      "captured_masks": null,
+      "vocab_input_ns": 1361800.0,
+      "vocab_ns": 199000.0,
+      "source_create_and_bind_ns": 1400.0,
+      "first_compile_ns": 41933500.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 2206800.0,
+        "p95_ns": 2792300.0,
+        "p99_ns": 2792300.0,
+        "p999_ns": 2792300.0,
+        "max_ns": 2792300.0
+      },
+      "prepare_with_warm_vocab_ns": 6382100.0,
+      "first_link_ns": 100300.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 54800.0,
+        "p95_ns": 72300.0,
+        "p99_ns": 72300.0,
+        "p999_ns": 72300.0,
+        "max_ns": 72300.0
+      },
+      "save_ns": 374200.0,
+      "load_ns": 409700.0,
+      "artifact_bytes": 292304,
+      "prepared_save_ns": 233900.0,
+      "prepared_load_ns": 1449100.0,
+      "prepared_artifact_bytes": 139380,
+      "start": {
+        "n": 5000,
+        "p50_ns": 112900.0,
+        "p95_ns": 119200.0,
+        "p99_ns": 137700.0,
+        "p999_ns": 193100.0,
+        "max_ns": 265000.0
+      },
+      "mask": {
+        "n": 90000,
+        "p50_ns": 2300.0,
+        "p95_ns": 2900.0,
+        "p99_ns": 3200.0,
+        "p999_ns": 8200.0,
+        "max_ns": 53300.0
+      },
+      "commit": {
+        "n": 90000,
+        "p50_ns": 3700.0,
+        "p95_ns": 9400.0,
+        "p99_ns": 9700.0,
+        "p999_ns": 16200.0,
+        "max_ns": 365400.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 249900.0,
+        "p95_ns": 262800.0,
+        "p99_ns": 293500.0,
+        "p999_ns": 414600.0,
+        "max_ns": 698400.0
+      }
+    },
+    {
+      "case": "lark_arithmetic",
+      "mode": "Balanced",
+      "vocab_target": 8192,
+      "trace": [
+        397,
+        561,
+        312,
+        418,
+        275,
+        296,
+        555,
+        303,
+        57
+      ],
+      "mask_fingerprint": "fb0720a035040f1d",
+      "captured_masks": null,
+      "vocab_input_ns": 1322300.0,
+      "vocab_ns": 164800.0,
+      "source_create_and_bind_ns": 1200.0,
+      "first_compile_ns": 38741800.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 1581800.0,
+        "p95_ns": 1714400.0,
+        "p99_ns": 1714400.0,
+        "p999_ns": 1714400.0,
+        "max_ns": 1714400.0
+      },
+      "prepare_with_warm_vocab_ns": 5816800.0,
+      "first_link_ns": 203600.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 66600.0,
+        "p95_ns": 83500.0,
+        "p99_ns": 83500.0,
+        "p999_ns": 83500.0,
+        "max_ns": 83500.0
+      },
+      "save_ns": 448700.0,
+      "load_ns": 399500.0,
+      "artifact_bytes": 309104,
+      "prepared_save_ns": 226500.0,
+      "prepared_load_ns": 1519300.0,
+      "prepared_artifact_bytes": 137289,
+      "start": {
+        "n": 5000,
+        "p50_ns": 111800.0,
+        "p95_ns": 118600.0,
+        "p99_ns": 139300.0,
+        "p999_ns": 174200.0,
+        "max_ns": 338200.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 2600.0,
+        "p95_ns": 3100.0,
+        "p99_ns": 3400.0,
+        "p999_ns": 9000.0,
+        "max_ns": 48700.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 8700.0,
+        "p95_ns": 10800.0,
+        "p99_ns": 11500.0,
+        "p999_ns": 29500.0,
+        "max_ns": 108800.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 213800.0,
+        "p95_ns": 226500.0,
+        "p99_ns": 262600.0,
+        "p999_ns": 344700.0,
+        "max_ns": 480400.0
+      }
+    },
+    {
+      "case": "glrm_list",
+      "mode": "Balanced",
+      "vocab_target": 8192,
+      "trace": [
+        648,
+        862,
+        477,
+        733,
+        855,
+        898,
+        491,
+        912,
+        93
+      ],
+      "mask_fingerprint": "e095fc934577b7d5",
+      "captured_masks": null,
+      "vocab_input_ns": 1355700.0,
+      "vocab_ns": 144500.0,
+      "source_create_and_bind_ns": 1100.0,
+      "first_compile_ns": 38403000.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 1126200.0,
+        "p95_ns": 1290900.0,
+        "p99_ns": 1290900.0,
+        "p999_ns": 1290900.0,
+        "max_ns": 1290900.0
+      },
+      "prepare_with_warm_vocab_ns": 2298700.0,
+      "first_link_ns": 64800.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 24200.0,
+        "p95_ns": 32800.0,
+        "p99_ns": 32800.0,
+        "p999_ns": 32800.0,
+        "max_ns": 32800.0
+      },
+      "save_ns": 385200.0,
+      "load_ns": 335700.0,
+      "artifact_bytes": 259924,
+      "prepared_save_ns": 187800.0,
+      "prepared_load_ns": 1410500.0,
+      "prepared_artifact_bytes": 127243,
+      "start": {
+        "n": 5000,
+        "p50_ns": 111800.0,
+        "p95_ns": 118200.0,
+        "p99_ns": 134200.0,
+        "p999_ns": 183200.0,
+        "max_ns": 212900.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 1200.0,
+        "p95_ns": 2900.0,
+        "p99_ns": 3100.0,
+        "p999_ns": 7700.000000000001,
+        "max_ns": 108300.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 6000.0,
+        "p95_ns": 11500.0,
+        "p99_ns": 11700.0,
+        "p999_ns": 19700.0,
+        "max_ns": 105600.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 192600.0,
+        "p95_ns": 203700.0,
+        "p99_ns": 233600.0,
+        "p999_ns": 329300.0,
+        "max_ns": 434700.0
+      }
+    },
+    {
+      "case": "scoped_child",
+      "mode": "Balanced",
+      "vocab_target": 8192,
+      "trace": [
+        603,
+        626,
+        648,
+        956,
+        471,
+        980,
+        842,
+        915,
+        593,
+        68
+      ],
+      "mask_fingerprint": "2e54cce1c684b3c9",
+      "captured_masks": null,
+      "vocab_input_ns": 1327100.0,
+      "vocab_ns": 147100.0,
+      "source_create_and_bind_ns": 112200.0,
+      "first_compile_ns": 10448000.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 4060600.0,
+        "p95_ns": 4892000.0,
+        "p99_ns": 4892000.0,
+        "p999_ns": 4892000.0,
+        "max_ns": 4892000.0
+      },
+      "prepare_with_warm_vocab_ns": 3503300.0,
+      "first_link_ns": 238900.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 141500.0,
+        "p95_ns": 151700.0,
+        "p99_ns": 151700.0,
+        "p999_ns": 151700.0,
+        "max_ns": 151700.0
+      },
+      "save_ns": 2259500.0,
+      "load_ns": 2238000.0,
+      "artifact_bytes": 1735392,
+      "prepared_save_ns": 389200.0,
+      "prepared_load_ns": 2710800.0,
+      "prepared_artifact_bytes": 253470,
+      "start": {
+        "n": 5000,
+        "p50_ns": 113100.0,
+        "p95_ns": 122900.0,
+        "p99_ns": 142300.0,
+        "p999_ns": 190800.0,
+        "max_ns": 256300.0
+      },
+      "mask": {
+        "n": 50000,
+        "p50_ns": 83500.0,
+        "p95_ns": 117200.0,
+        "p99_ns": 128000.0,
+        "p999_ns": 189800.0,
+        "max_ns": 1600000.0
+      },
+      "commit": {
+        "n": 50000,
+        "p50_ns": 8000.0,
+        "p95_ns": 14800.0,
+        "p99_ns": 15900.0,
+        "p999_ns": 27000.0,
+        "max_ns": 109800.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 931800.0,
+        "p95_ns": 1002300.0,
+        "p99_ns": 1113600.0,
+        "p999_ns": 1537700.0,
+        "max_ns": 2477500.0
+      }
+    },
+    {
+      "case": "exact_token_set",
+      "mode": "Balanced",
+      "vocab_target": 8192,
+      "trace": [
+        97,
+        98
+      ],
+      "mask_fingerprint": "833acb773d054b25",
+      "captured_masks": null,
+      "vocab_input_ns": 1364700.0,
+      "vocab_ns": 146200.0,
+      "source_create_and_bind_ns": 30700.0,
+      "first_compile_ns": 1964000.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 951400.0,
+        "p95_ns": 1020099.9999999999,
+        "p99_ns": 1020099.9999999999,
+        "p999_ns": 1020099.9999999999,
+        "max_ns": 1020099.9999999999
+      },
+      "prepare_with_warm_vocab_ns": 897900.0,
+      "first_link_ns": 39900.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 11900.0,
+        "p95_ns": 16900.0,
+        "p99_ns": 16900.0,
+        "p999_ns": 16900.0,
+        "max_ns": 16900.0
+      },
+      "save_ns": 254700.0,
+      "load_ns": 443200.0,
+      "artifact_bytes": 120472,
+      "prepared_save_ns": 214700.0,
+      "prepared_load_ns": 1343200.0,
+      "prepared_artifact_bytes": 120540,
+      "start": {
+        "n": 5000,
+        "p50_ns": 114600.0,
+        "p95_ns": 120400.0,
+        "p99_ns": 141800.0,
+        "p999_ns": 236400.0,
+        "max_ns": 588500.0
+      },
+      "mask": {
+        "n": 10000,
+        "p50_ns": 4100.0,
+        "p95_ns": 4500.0,
+        "p99_ns": 4900.0,
+        "p999_ns": 8900.0,
+        "max_ns": 49900.0
+      },
+      "commit": {
+        "n": 10000,
+        "p50_ns": 3500.0,
+        "p95_ns": 3600.0,
+        "p99_ns": 4500.0,
+        "p999_ns": 10600.0,
+        "max_ns": 52400.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 129600.0,
+        "p95_ns": 136500.0,
+        "p99_ns": 160100.0,
+        "p999_ns": 263400.0,
+        "max_ns": 619900.0
+      }
+    },
+    {
+      "case": "json_schema",
+      "mode": "FastRuntime",
+      "vocab_target": 8192,
+      "trace": [
+        1021,
+        713,
+        353,
+        376,
+        862,
+        346,
+        383,
+        820,
+        973,
+        334,
+        458,
+        464,
+        660,
+        370,
+        988,
+        792,
+        341,
+        1006
+      ],
+      "mask_fingerprint": "0ba982dc73fe34f6",
+      "captured_masks": null,
+      "vocab_input_ns": 1379000.0,
+      "vocab_ns": 142000.0,
+      "source_create_and_bind_ns": 1000.0,
+      "first_compile_ns": 9949100.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 5591800.0,
+        "p95_ns": 5763300.0,
+        "p99_ns": 5763300.0,
+        "p999_ns": 5763300.0,
+        "max_ns": 5763300.0
+      },
+      "prepare_with_warm_vocab_ns": 5516700.0,
+      "first_link_ns": 112100.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 55700.0,
+        "p95_ns": 67200.0,
+        "p99_ns": 67200.0,
+        "p999_ns": 67200.0,
+        "max_ns": 67200.0
+      },
+      "save_ns": 243100.0,
+      "load_ns": 591700.0,
+      "artifact_bytes": 139404,
+      "prepared_save_ns": 216600.0,
+      "prepared_load_ns": 1515200.0,
+      "prepared_artifact_bytes": 139380,
+      "start": {
+        "n": 5000,
+        "p50_ns": 112000.0,
+        "p95_ns": 118400.0,
+        "p99_ns": 136000.0,
+        "p999_ns": 199100.0,
+        "max_ns": 830900.0
+      },
+      "mask": {
+        "n": 90000,
+        "p50_ns": 2500.0,
+        "p95_ns": 4500.0,
+        "p99_ns": 4600.0,
+        "p999_ns": 8400.0,
+        "max_ns": 91600.0
+      },
+      "commit": {
+        "n": 90000,
+        "p50_ns": 1400.0,
+        "p95_ns": 6000.0,
+        "p99_ns": 6200.0,
+        "p999_ns": 10900.0,
+        "max_ns": 59800.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 215000.0,
+        "p95_ns": 226200.0,
+        "p99_ns": 261800.00000000003,
+        "p999_ns": 360300.0,
+        "max_ns": 1043400.0000000001
+      }
+    },
+    {
+      "case": "lark_arithmetic",
+      "mode": "FastRuntime",
+      "vocab_target": 8192,
+      "trace": [
+        397,
+        561,
+        312,
+        418,
+        275,
+        296,
+        555,
+        303,
+        57
+      ],
+      "mask_fingerprint": "fb0720a035040f1d",
+      "captured_masks": null,
+      "vocab_input_ns": 1257200.0,
+      "vocab_ns": 147900.0,
+      "source_create_and_bind_ns": 1200.0,
+      "first_compile_ns": 10154900.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 5477400.0,
+        "p95_ns": 5759100.0,
+        "p99_ns": 5759100.0,
+        "p999_ns": 5759100.0,
+        "max_ns": 5759100.0
+      },
+      "prepare_with_warm_vocab_ns": 4903100.0,
+      "first_link_ns": 209200.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 73000.0,
+        "p95_ns": 85000.0,
+        "p99_ns": 85000.0,
+        "p999_ns": 85000.0,
+        "max_ns": 85000.0
+      },
+      "save_ns": 244000.0,
+      "load_ns": 637400.0,
+      "artifact_bytes": 167317,
+      "prepared_save_ns": 225900.0,
+      "prepared_load_ns": 1927600.0,
+      "prepared_artifact_bytes": 137289,
+      "start": {
+        "n": 5000,
+        "p50_ns": 113900.0,
+        "p95_ns": 127000.0,
+        "p99_ns": 145500.0,
+        "p999_ns": 771300.0,
+        "max_ns": 1367000.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 3800.0,
+        "p95_ns": 5300.0,
+        "p99_ns": 6100.0,
+        "p999_ns": 12300.0,
+        "max_ns": 2394900.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 4400.0,
+        "p95_ns": 6200.0,
+        "p99_ns": 7400.0,
+        "p999_ns": 15200.0,
+        "max_ns": 254400.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 192300.0,
+        "p95_ns": 216400.0,
+        "p99_ns": 250600.00000000003,
+        "p999_ns": 1044100.0000000001,
+        "max_ns": 2688700.0
+      }
+    },
+    {
+      "case": "glrm_list",
+      "mode": "FastRuntime",
+      "vocab_target": 8192,
+      "trace": [
+        648,
+        862,
+        477,
+        733,
+        855,
+        898,
+        491,
+        912,
+        93
+      ],
+      "mask_fingerprint": "e095fc934577b7d5",
+      "captured_masks": null,
+      "vocab_input_ns": 1350900.0,
+      "vocab_ns": 144400.0,
+      "source_create_and_bind_ns": 1100.0,
+      "first_compile_ns": 8832800.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 2041700.0,
+        "p95_ns": 2391700.0,
+        "p99_ns": 2391700.0,
+        "p999_ns": 2391700.0,
+        "max_ns": 2391700.0
+      },
+      "prepare_with_warm_vocab_ns": 2130700.0,
+      "first_link_ns": 67500.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 24200.0,
+        "p95_ns": 34700.0,
+        "p99_ns": 34700.0,
+        "p999_ns": 34700.0,
+        "max_ns": 34700.0
+      },
+      "save_ns": 227100.0,
+      "load_ns": 523500.0,
+      "artifact_bytes": 127479,
+      "prepared_save_ns": 212100.0,
+      "prepared_load_ns": 1463100.0,
+      "prepared_artifact_bytes": 127243,
+      "start": {
+        "n": 5000,
+        "p50_ns": 113400.0,
+        "p95_ns": 119700.0,
+        "p99_ns": 137800.0,
+        "p999_ns": 200800.0,
+        "max_ns": 233800.0
+      },
+      "mask": {
+        "n": 45000,
+        "p50_ns": 1500.0,
+        "p95_ns": 3900.0,
+        "p99_ns": 4000.0,
+        "p999_ns": 9100.0,
+        "max_ns": 50700.0
+      },
+      "commit": {
+        "n": 45000,
+        "p50_ns": 4700.0,
+        "p95_ns": 8000.0,
+        "p99_ns": 8100.0,
+        "p999_ns": 15900.0,
+        "max_ns": 94500.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 180600.0,
+        "p95_ns": 190600.0,
+        "p99_ns": 221600.0,
+        "p999_ns": 322300.0,
+        "max_ns": 365600.0
+      }
+    },
+    {
+      "case": "scoped_child",
+      "mode": "FastRuntime",
+      "vocab_target": 8192,
+      "trace": [
+        603,
+        626,
+        648,
+        956,
+        471,
+        980,
+        842,
+        915,
+        593,
+        68
+      ],
+      "mask_fingerprint": "2e54cce1c684b3c9",
+      "captured_masks": null,
+      "vocab_input_ns": 1330300.0,
+      "vocab_ns": 145600.0,
+      "source_create_and_bind_ns": 116000.0,
+      "first_compile_ns": 13280500.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 7002100.0,
+        "p95_ns": 7182900.0,
+        "p99_ns": 7182900.0,
+        "p999_ns": 7182900.0,
+        "max_ns": 7182900.0
+      },
+      "prepare_with_warm_vocab_ns": 3430100.0,
+      "first_link_ns": 2942200.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 2919100.0,
+        "p95_ns": 3021400.0,
+        "p99_ns": 3021400.0,
+        "p999_ns": 3021400.0,
+        "max_ns": 3021400.0
+      },
+      "save_ns": 844100.0,
+      "load_ns": 1459000.0,
+      "artifact_bytes": 384468,
+      "prepared_save_ns": 307200.0,
+      "prepared_load_ns": 2613000.0,
+      "prepared_artifact_bytes": 253470,
+      "start": {
+        "n": 5000,
+        "p50_ns": 441900.0,
+        "p95_ns": 470300.0,
+        "p99_ns": 511599.99999999994,
+        "p999_ns": 665000.0,
+        "max_ns": 788300.0
+      },
+      "mask": {
+        "n": 50000,
+        "p50_ns": 20000.0,
+        "p95_ns": 26200.0,
+        "p99_ns": 28600.0,
+        "p999_ns": 49600.0,
+        "max_ns": 534200.0
+      },
+      "commit": {
+        "n": 50000,
+        "p50_ns": 7100.0,
+        "p95_ns": 14200.0,
+        "p99_ns": 15100.0,
+        "p999_ns": 25200.0,
+        "max_ns": 111300.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 697700.0,
+        "p95_ns": 741200.0,
+        "p99_ns": 818700.0,
+        "p999_ns": 1091000.0,
+        "max_ns": 1233100.0
+      }
+    },
+    {
+      "case": "exact_token_set",
+      "mode": "FastRuntime",
+      "vocab_target": 8192,
+      "trace": [
+        97,
+        98
+      ],
+      "mask_fingerprint": "833acb773d054b25",
+      "captured_masks": null,
+      "vocab_input_ns": 1317100.0,
+      "vocab_ns": 146800.0,
+      "source_create_and_bind_ns": 31500.0,
+      "first_compile_ns": 2124100.0,
+      "warm_compile": {
+        "n": 5,
+        "p50_ns": 1008800.0,
+        "p95_ns": 1018900.0000000001,
+        "p99_ns": 1018900.0000000001,
+        "p999_ns": 1018900.0000000001,
+        "max_ns": 1018900.0000000001
+      },
+      "prepare_with_warm_vocab_ns": 826700.0,
+      "first_link_ns": 34000.0,
+      "warm_link": {
+        "n": 7,
+        "p50_ns": 10200.0,
+        "p95_ns": 25400.0,
+        "p99_ns": 25400.0,
+        "p999_ns": 25400.0,
+        "max_ns": 25400.0
+      },
+      "save_ns": 261500.0,
+      "load_ns": 436600.0,
+      "artifact_bytes": 120472,
+      "prepared_save_ns": 220100.0,
+      "prepared_load_ns": 1314000.0,
+      "prepared_artifact_bytes": 112472,
+      "start": {
+        "n": 5000,
+        "p50_ns": 114400.0,
+        "p95_ns": 122100.00000000001,
+        "p99_ns": 144500.0,
+        "p999_ns": 184400.0,
+        "max_ns": 260400.0
+      },
+      "mask": {
+        "n": 10000,
+        "p50_ns": 4200.0,
+        "p95_ns": 4600.0,
+        "p99_ns": 5300.0,
+        "p999_ns": 11500.0,
+        "max_ns": 42100.0
+      },
+      "commit": {
+        "n": 10000,
+        "p50_ns": 3500.0,
+        "p95_ns": 3700.0,
+        "p99_ns": 4800.0,
+        "p999_ns": 12500.0,
+        "max_ns": 36400.0
+      },
+      "trace_total": {
+        "n": 5000,
+        "p50_ns": 129400.0,
+        "p95_ns": 139300.0,
+        "p99_ns": 167100.0,
+        "p999_ns": 226400.0,
+        "max_ns": 292400.0
+      }
+    }
+  ]
+}

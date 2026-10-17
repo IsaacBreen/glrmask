@@ -1,0 +1,26 @@
+{
+  "started_at": "2026-10-15T01:45:23.923565+08:00",
+  "baseline_ref": "b255ca31d",
+  "candidate_ref": "ff125cfa7-plus-private-alphabet-r4",
+  "binaries": {
+    "baseline": {
+      "path": "C:\\gnb930283\\baseline-markers-artifacts\\core_batch_bench.exe",
+      "sha256": "7d41367944dbe8fb6fd4bcb354cb9d87ca0ebc424d3d795edfa94ec498ae1bb0"
+    },
+    "candidate": {
+      "path": "C:\\gnb930283\\target-release\\release\\examples\\core_batch_bench.exe",
+      "sha256": "43807735a41742f6ba596228500109ac347841a136e7bb5ef2f71904261ce752"
+    }
+  },
+  "repetitions": 5000,
+  "vocab": 8192,
+  "pairs": 4,
+  "reverse_first": true,
+  "notes": [
+    "Separate processes, identical measured loops and inputs.",
+    "AB then BA ordering alternates per pair.",
+    "No building or source edits by this controller.",
+    "Full original-ID words are compared, not only fingerprints.",
+    "Ratios and repeatability flags are observations, not automatic performance acceptance."
+  ]
+}

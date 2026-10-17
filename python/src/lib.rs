@@ -572,10 +572,38 @@ fn advance_trace_step_to_dict<'py>(
     Ok(dict)
 }
 
+/// Resolve a contiguous builtin Python range without iterating its members.
+/// A non-range or strided range returns None for the explicit-ID fallback.
+fn contiguous_exact_token_range(value: &Bound<'_, PyAny>, allow_empty:bool) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
+    let range_type = value.py().import("builtins")?.getattr("range")?;
+    if !value.is_instance(&range_type)? { return Ok(None); }
+    if !value.is_truthy()? {
+        // tokens(iterable) admits an empty iterable, even when its optimized
+        // representation is a range. token_ranges still rejects an individually
+        // empty range rather than silently erasing a malformed range member.
+        return if allow_empty {Ok(None)} else {Err(PyValueError::new_err("exact-token range must not be empty"))};
+    }
+    let step: i128 = value.getattr("step")?.extract()?;
+    if step != 1 && step != -1 { return Ok(None); }
+    let start: i128 = value.getattr("start")?.extract()?;
+    let stop: i128 = value.getattr("stop")?.extract()?;
+    let (first, last) = if step == 1 && start < stop {
+        (start, stop - 1)
+    } else if step == -1 && start > stop {
+        (stop + 1, start)
+    } else {
+        return Err(PyValueError::new_err("exact-token range must not be empty"));
+    };
+    let convert = |id| u32::try_from(id).map_err(|_| PyValueError::new_err(
+        "exact-token range contains an ID outside the u32 token-ID domain"));
+    Ok(Some(convert(first)?..=convert(last)?))
+}
+
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
 
+/// Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.
 #[pyclass(name = "Vocab")]
 #[derive(Clone)]
 pub struct PyVocab {
@@ -585,20 +613,33 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Resolve one exact token, preserving this complete vocabulary identity.
-    fn token(&self, id: u32) -> PyResult<final_api::PyExactToken> {
-        self.inner.token(id).map(|inner| final_api::PyExactToken { inner })
+    /// Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.
+    fn tokens(&self, ids: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
+        let result = if let Some(range) = contiguous_exact_token_range(ids,true)? {
+            self.inner.token_ranges([range])
+        } else {
+            let ids = ids.try_iter()?.map(|item| item?.extract::<u32>())
+                .collect::<PyResult<Vec<_>>>()?;
+            self.inner.tokens(ids)
+        };
+        result.map(|inner| final_api::PyExactTokens { inner })
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
-    /// Resolve a nonempty set of distinct exact token IDs.
-    fn tokens(&self, ids: Vec<u32>) -> PyResult<final_api::PyExactTokens> {
-        self.inner.tokens(ids).map(|inner| final_api::PyExactTokens { inner })
+    /// Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides.
+    fn token_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
+        let ranges = ranges.try_iter()?.map(|item| {
+            contiguous_exact_token_range(&item?,false)?.ok_or_else(|| PyValueError::new_err(
+                "token_ranges expects nonempty Python ranges with step 1 or -1; use tokens for individual or strided IDs"))
+        }).collect::<PyResult<Vec<_>>>()?;
+        self.inner.token_ranges(ranges).map(|inner| final_api::PyExactTokens { inner })
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
+    /// Counts byte-backed entries; exact-only control IDs are excluded.
     fn __len__(&self) -> usize { self.inner.len() }
 
+    /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
@@ -608,6 +649,7 @@ impl PyVocab {
         })
     }
 
+    /// Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.
     #[staticmethod]
     fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
@@ -617,11 +659,7 @@ impl PyVocab {
         })
     }
 
-    /// Build the byte vocabulary used by a llama-cpp-python `Llama` model.
-    ///
-    /// EOG, control, unused, and empty-piece tokens are omitted from the byte
-    /// vocabulary. EOG IDs remain available through `llama_cpp_end_token_ids`
-    /// for the decoder's stopping policy.
+    /// Extract the byte vocabulary from a llama-cpp-python `Llama`. EOG, control, unused and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.
     #[staticmethod]
     fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
@@ -631,6 +669,7 @@ impl PyVocab {
         })
     }
 
+    /// EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.
     #[getter]
     fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
         self.llama_cpp_end_token_ids.clone()
@@ -750,7 +789,7 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// Compiled grammar constraint. Immutable, thread-safe.
+/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -792,10 +831,12 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Serialize the compiled body and final termination policy as bytes.
-    ///
-    /// external_vocab=False embeds the vocabulary. With external_vocab=True,
-    /// loading requires the exact same vocabulary mapping, not just its size.
+    /// Sorted, distinct application marker IDs, independent of model token IDs.
+    fn marker_ids(&self) -> Vec<u32> {
+        self.inner.marker_ids().to_vec()
+    }
+
+    /// Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.
     #[pyo3(signature = (*, external_vocab=false))]
     fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.allow_threads(|| {
@@ -805,6 +846,7 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping.
     #[staticmethod]
     #[pyo3(signature = (data, vocab=None))]
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
@@ -826,6 +868,7 @@ impl PyConstraint {
         }
     }
 
+    /// Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`.
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
@@ -1063,8 +1106,11 @@ impl PyDynamicConstraintState {
     }
 
 
-    fn forced(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced())
+    /// Locally inevitable original token IDs, without choosing an encoding.
+    /// Pure query; proof/resource errors propagate and no full mask is built.
+    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
     fn is_accepting(&self) -> bool {
@@ -1095,7 +1141,7 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// Mutable per-sequence parse state.
+/// Mutable state for one generated sequence.
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
     inner: OwnedState,
@@ -1104,7 +1150,14 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    /// Copy this sequence's exact parser state without sharing mutable state.
+    /// Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.
+    fn marker_events(&self) -> Vec<(u32, u64)> {
+        self.inner.with_dependent(|_, state| {
+            state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
+        })
+    }
+
+    /// Independent snapshot at the current prefix.
     fn clone(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
         self.inner.with_dependent(|_, source| {
@@ -1116,6 +1169,7 @@ impl PyConstraintState {
     }
 
 
+    /// New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1129,6 +1183,7 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
+    /// Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -1146,24 +1201,30 @@ impl PyConstraintState {
         Ok(())
     }
 
+    /// Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error.
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
+    /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
+    /// The prefix cannot be extended to a valid match.
     fn is_rejected(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
-    fn forced(&self) -> Vec<u32> {
-        self.inner.with_dependent(|_owner, state| state.forced())
+    /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
+    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
+    /// The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.
     fn is_accepting(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
     }
@@ -1797,7 +1858,7 @@ fn compile_glrm_serialized(
 }
 
 // ---------------------------------------------------------------------------
-// UnlinkedConstraint
+// PreparedGrammar
 // ---------------------------------------------------------------------------
 
 
@@ -1967,8 +2028,9 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Grammar",
-            "UnlinkedConstraint",
-            "ExactToken",
+            "PreparedGrammar",
+            "Requirement",
+            "Token",
             "ExactTokens",
             "Optimization",
             "BoundaryTriggerDetail",

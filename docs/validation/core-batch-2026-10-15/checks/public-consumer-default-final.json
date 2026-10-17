@@ -1,0 +1,26 @@
+{
+  "label": "public-consumer-default-final-r2",
+  "command": [
+    "cargo",
+    "check",
+    "--locked",
+    "--offline",
+    "--manifest-path",
+    "C:\\gnb930283\\public-consumer-final\\Cargo.toml"
+  ],
+  "cwd": "C:\\gnb930283\\public-consumer-final",
+  "started_at": "2026-10-15T05:51:10.116457+08:00",
+  "pid": 4952,
+  "status": "completed",
+  "target": "C:\\gnb930283\\target-dev",
+  "production": false,
+  "exit_code": 0,
+  "elapsed_seconds": 0.3751209999900311,
+  "ended_at": "2026-10-15T05:51:10.496484+08:00",
+  "package_id": "path+file:///C:/gnb930283/repo#glrmask@0.2.0",
+  "glrmask_features": [],
+  "kind": "cargo check only; runtime behavior covered separately by canonical release and installed-wheel gates",
+  "consumer_source_sha256": "01cbe2a3945ab7fd8e6784d676330849cf0e76703d8c3ad69c2a77e94c55f683",
+  "lock_sha256": "25a4342a89889bf0ef0ce7fffec42079ae96afdcebecda79e77efb9570a9b42a",
+  "source_commit_before_cosmetic_cleanup": "2a565ae99232b3eadff18d8b985b6e7ba63d1e14"
+}

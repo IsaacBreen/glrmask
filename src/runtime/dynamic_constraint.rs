@@ -86,10 +86,10 @@ const LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18: u16 = 18;
 // v20 additionally persists exact terminal-projected lexer quotients used by
 // dynamic-mask subtree certificates. As documented above, the pre-release
 // wire is intentionally allowed to replace the previous current layout.
-const DYNAMIC_CONSTRAINT_VERSION: u16 = 20;
+const DYNAMIC_CONSTRAINT_VERSION: u16 = 22;
 // Template backends use the same table-free Constraint body as static mode.
 // This avoids a second parser codec and cannot restore an LR fallback.
-const TEMPLATE_DYNAMIC_CONSTRAINT_VERSION: u16 = 21;
+const TEMPLATE_DYNAMIC_CONSTRAINT_VERSION: u16 = 23;
 const DYNAMIC_CONSTRAINT_HEADER_LEN: usize = DYNAMIC_CONSTRAINT_MAGIC.len() + 2 + 8;
 const DYNAMIC_TRANSFER_MAGIC: [u8; 8] = *b"GLRDXF\0\0";
 const DYNAMIC_TRANSFER_VERSION_V1: u16 = 1;
@@ -126,8 +126,8 @@ const LEGACY_DYNAMIC_TRANSFER_VERSION_V12: u16 = 12;
 // v15 retains the six raw sections and v13 metadata, but binds the envelope to
 // the exact canonical model vocabulary. v1-v13 lacked a mandatory identity
 // field and cannot safely validate an external vocabulary; recompile them.
-const DYNAMIC_TRANSFER_VERSION: u16 = 15;
-const TEMPLATE_DYNAMIC_TRANSFER_VERSION: u16 = 14;
+const DYNAMIC_TRANSFER_VERSION: u16 = 17;
+const TEMPLATE_DYNAMIC_TRANSFER_VERSION: u16 = 16;
 const DYNAMIC_TRANSFER_V12_PAYLOAD_HEADER_LEN: usize = 8;
 const DYNAMIC_TRANSFER_V15_PAYLOAD_HEADER_LEN: usize = 8 + 32;
 const DYNAMIC_TRANSFER_V12_ALT_DESCRIPTOR_LEN: usize = 6 * 8;
@@ -973,7 +973,7 @@ impl DynamicConstraint {
             .next_back()
             .copied()
             .into_iter()
-            .chain(special_token_terminals.iter().map(|special| special.token_id))
+            .chain(special_token_terminals.iter().map(|special| special.token_id_end))
             .max()
             .unwrap_or(0);
         // Compile callers own precisely this Vocab's immutable byte inventory.
@@ -990,6 +990,7 @@ impl DynamicConstraint {
         };
         let inner = Constraint {
             end_tokens: std::sync::Arc::from([]),
+            marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Dynamic,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -1286,17 +1287,25 @@ impl DynamicConstraint {
         let special_by_terminal = constraint
             .special_token_terminals
             .iter()
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, (special.token_id, special.token_id_end)))
             .collect::<BTreeMap<_, _>>();
+        let markers_by_terminal = constraint.marker_queries.as_deref().map(|queries|
+            queries.terminals.iter().map(|marker| (marker.terminal_id, marker.marker_id)).collect::<BTreeMap<_, _>>()
+        ).unwrap_or_default();
         let terminals = exprs
             .iter()
             .cloned()
             .enumerate()
             .map(|(id, expr)| {
                 let id = id as u32;
+                if let Some(&marker_id) = markers_by_terminal.get(&id) {
+                    return Terminal::MarkerProbe { id, marker_id };
+                }
                 special_by_terminal.get(&id).copied().map_or(
                     Terminal::Expr { id, expr },
-                    |token_id| Terminal::SpecialToken { id, token_id },
+                    |(start, end)| if start == end {
+                        Terminal::SpecialToken { id, token_id: start }
+                    } else { Terminal::SpecialTokenRange { id, start, end } },
                 )
             })
             .collect::<Vec<_>>();
@@ -3256,29 +3265,9 @@ impl DynamicConstraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if version <= 13 {
+        if !matches!(version, DYNAMIC_TRANSFER_VERSION | TEMPLATE_DYNAMIC_TRANSFER_VERSION) {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic transfer artifact version {version}: lacks mandatory exact vocabulary identity; recompile the pre-release artifact")));
-        }
-        if !matches!(
-            version,
-            DYNAMIC_TRANSFER_VERSION_V1
-                | DYNAMIC_TRANSFER_VERSION_V2
-                | DYNAMIC_TRANSFER_VERSION_V3
-                | DYNAMIC_TRANSFER_VERSION_V4
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V5
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V6
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V7
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V9
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V10
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V11
-                | LEGACY_DYNAMIC_TRANSFER_VERSION_V12
-                | DYNAMIC_TRANSFER_VERSION
-                | TEMPLATE_DYNAMIC_TRANSFER_VERSION
-        ) {
-            return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic transfer artifact version {version}",
-            )));
+                "unsupported dynamic transfer artifact version {version}: recompile the pre-release artifact")));
         }
         let payload_len = usize::try_from(u64::from_le_bytes(
             bytes[10..18]
@@ -3693,27 +3682,9 @@ impl DynamicConstraint {
             ));
         }
         let version = u16::from_le_bytes([bytes[8], bytes[9]]);
-        if !matches!(
-            version,
-            1 | 2
-                | 7
-                | 8
-                | 9
-                | 10
-                | 11
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V12
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V13
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V14_MAIN
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V15_RESIDUAL
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V16
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V17
-                | LEGACY_DYNAMIC_CONSTRAINT_VERSION_V18
-                | DYNAMIC_CONSTRAINT_VERSION
-                | TEMPLATE_DYNAMIC_CONSTRAINT_VERSION
-        ) {
+        if !matches!(version, DYNAMIC_CONSTRAINT_VERSION | TEMPLATE_DYNAMIC_CONSTRAINT_VERSION) {
             return Err(crate::GlrMaskError::Serialization(format!(
-                "unsupported dynamic constraint artifact version {version}",
-            )));
+                "unsupported dynamic constraint artifact version {version}: recompile the pre-release artifact")));
         }
         let payload_len = usize::try_from(u64::from_le_bytes(
             bytes[10..18]
@@ -4064,16 +4035,23 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
 
-    /// Return a forced token sequence when one can be determined.
-    pub fn forced(&self) -> Vec<u32> {
-        let Some((first, rest)) = self.alternatives.split_first() else {
-            return Vec::new();
-        };
-        let forced = first.forced();
-        (!forced.is_empty()
-            && rest.iter().all(|state| state.forced() == forced))
-            .then_some(forced)
-            .unwrap_or_default()
+    /// Strictly inevitable original IDs across all live alternatives.
+    /// Read-only; exact-event and byte successors remain correlated.
+    pub fn forced_tokens(&self)->crate::Result<Vec<u32>> {
+        crate::runtime::bounded_forced_tokens(&self.alternatives)
+    }
+    pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
+        crate::runtime::mask_for_states_at_most(&self.alternatives,max_allowed)
+    }
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_canonical_reference(&self)->Vec<u32> {
+        crate::runtime::force_for_states(&self.alternatives,Some(true))
+    }
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
+    pub fn forced_token_ids_reference(&self)->Vec<u32> {
+        crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
     /// Return whether the committed prefix is currently accepted by the grammar.
@@ -4475,7 +4453,7 @@ mod tests {
                 .tokenizer
                 .virtual_residual_bounded_code_liveness_oracle_count()
                 > 0,
-            "format/length intersections must carry the same certified JSON decoded-length liveness oracle as pattern/length intersections",
+            "annotation-only formats must retain the certified JSON decoded-length liveness oracle",
         );
 
         let accepts = |bytes: &[u8]| {
@@ -4485,7 +4463,7 @@ mod tests {
         assert!(!accepts(br#""aa""#));
         assert!(accepts(br#""aaa""#));
         assert!(accepts(br#""a.b""#));
-        assert!(!accepts(br#""a..b""#));
+        assert!(accepts(br#""a..b""#), "format is an annotation; length remains asserted");
 
         let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
         assert!(
@@ -4494,7 +4472,7 @@ mod tests {
                 .tokenizer
                 .virtual_residual_bounded_code_liveness_oracle_count()
                 > 0,
-            "save/load must reconstruct the bounded format liveness oracle",
+            "save/load must reconstruct the bounded length liveness oracle",
         );
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }
@@ -4900,7 +4878,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_transfer_v13_virtual_residuals_round_trip_and_v12_v11_backward_compat() {
+    fn current_dynamic_transfer_virtual_residuals_round_trip() {
         let vocab = Vocab::new(vec![
             (0, b"\"".to_vec()),
             (1, b"a".to_vec()),
@@ -4920,7 +4898,7 @@ mod tests {
         // Test current V13 save and load.
         let v13_bytes = constraint.save_without_vocab();
         assert_eq!(u16::from_le_bytes([v13_bytes[8], v13_bytes[9]]), TEMPLATE_DYNAMIC_TRANSFER_VERSION);
-        assert_eq!(TEMPLATE_DYNAMIC_TRANSFER_VERSION, 14);
+        assert_eq!(TEMPLATE_DYNAMIC_TRANSFER_VERSION, 16);
 
         let v13_loaded = DynamicConstraint::load_with_vocab(&v13_bytes, &vocab).unwrap();
         // Loaded constraint should carry the mask tokenizer projection directly from the wire
@@ -7849,7 +7827,8 @@ nt start ::= A;
         let mut bytes = constraint.save();
         bytes[8..10].copy_from_slice(&8u16.to_le_bytes());
         let error = DynamicConstraint::load(&bytes).unwrap_err().to_string();
-        assert!(error.contains("removed precompiled token programs"));
+        assert!(error.contains("unsupported dynamic constraint artifact version 8"));
+        assert!(error.contains("recompile"));
     }
 
     #[test]
@@ -7959,7 +7938,7 @@ nt start ::= A;
         let mut static_state = constraint.start();
         let mut dynamic_state = dynamic.start();
         assert_eq!(static_state.mask(), dynamic_state.mask());
-        assert_eq!(static_state.forced(), dynamic_state.forced());
+        assert_eq!(static_state.forced_canonical_reference(), dynamic_state.forced_canonical_reference());
 
         for token in [3, 3] {
             static_state.commit_token(token).unwrap();
@@ -8007,6 +7986,6 @@ nt start ::= A;
     fn dynamic_forced_uses_dynamic_masks() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
         let constraint = DynamicConstraint::from_ebnf("start ::= 'a'", &vocab).unwrap();
-        assert_eq!(constraint.start().forced(), vec![0]);
+        assert_eq!(constraint.start().forced_canonical_reference(), vec![0]);
     }
 }

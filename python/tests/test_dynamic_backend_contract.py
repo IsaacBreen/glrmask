@@ -19,7 +19,7 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     compiled = DynamicConstraint.from_ebnf(SOURCE, vocab, vocab_partition=partition)
     raw = bytes(compiled.save())
-    expected = 14 if partition or flag == "1" else 15
+    expected = 16 if partition or flag == "1" else 17
     assert version(raw) == expected
     # Changing the compile switch must not change existing or loaded objects.
     monkeypatch.setenv("GLRMASK_DYNAMIC_TEMPLATE_DFA", "1" if flag == "0" else "0")
@@ -42,15 +42,15 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
                     {**TOKENS, 15: b")"}]:
         with pytest.raises(ValueError, match="vocab"):
             DynamicConstraint.load(raw, glrmask.Vocab.from_id_to_bytes(changed))
-    if expected == 15:
+    if expected == 17:
         corrupt = bytearray(raw)
         corrupt[26] ^= 1
         with pytest.raises(ValueError, match="vocab"):
             DynamicConstraint.load(bytes(corrupt), vocab)
-        for old_version in range(1, 14):
+        for old_version in range(1, 16):
             old = bytearray(raw)
             old[8:10] = old_version.to_bytes(2, "little")
-            with pytest.raises(ValueError, match="lacks mandatory exact vocabulary identity"):
+            with pytest.raises(ValueError, match="unsupported dynamic transfer artifact version"):
                 DynamicConstraint.load(bytes(old), vocab)
 
 

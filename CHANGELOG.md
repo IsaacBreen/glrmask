@@ -1,153 +1,157 @@
 # Changelog
 
-## Unreleased optimization choices
+## 0.3.0 — 2026-10-17
 
-- Reject terminal-run stabilization proofs based on admission-only compact
-  parser tables. Static masks retain valid whole-word tokens after Lark
-  right-linear compression, including models containing only that token.
+### Components and public APIs
+
+- Use the `Grammar` → `PreparedGrammar` → `Constraint` → `ConstraintState`
+  lifecycle. Source descriptions are parsed and cached once; `prepare()` retains
+  reusable vocabulary-specific machinery and `link()` creates a closed runnable
+  root. The old public `UnlinkedConstraint` / `compile_unlinked` spellings and
+  implicit runnable-constraint child bindings are no longer exposed.
+- Make `Grammar.bind(name, value)` and `PreparedGrammar.bind(name, value)`
+  single-item mutations in both Rust and Python. They return `Result<()>` and
+  `None`, respectively, and leave the previous configuration intact on error.
+  Cheap `clone()` creates an independent handle; Python also supports `copy.copy`
+  and `copy.deepcopy`. Attaching an open child captures its current snapshot.
+  Later edits do not change parents, siblings, or already compiled constraints.
+  Qualified `child::NAME` requirements retain their types and source spans.
+- Keep explicit `extern token NAME` and `extern grammar NAME` contracts.
+  `Token(id)` / `Token::new(id)` consumes one original ID and is checked against
+  the target vocabulary. Vocabulary-qualified `ExactTokens` provides compact
+  sets/ranges. Exact event values can bind a grammar port directly, with the
+  semantics of `Grammar.exact`; arbitrary grammars still cannot bind token ports.
+  Empty sets denote the empty language, never epsilon.
+- Store prepared assemblies as a bounded DAG with shared compiled definitions
+  and distinct instance environments. Reject malformed, excessively deep,
+  unreachable or wrong-kind manifests before decoding compiled bodies. Older
+  private artifact versions are rejected rather than guessed or upgraded.
+
+### Grammar frontends
+
+- Make native GLRM declarations layout-independent with optional semicolons,
+  no required version header, `grammar NAME { ... }` scopes, backtick-escaped
+  identifiers, explicit `edge` FA statements, and canonical formatting. Preserve
+  `internal t`, maximal munch, ambiguous CFG recognition, regular algebra,
+  structural alternative subtraction, and separated-sequence presence semantics.
+- Add explicit Unicode/byte strings and regexes, checked useful flags and
+  escapes, original-source diagnostics, and regular-terminal `shortest { R }`.
+  The braced operator is compositional and replaces the function-call spelling.
+  Keep independent ignored-terminal identities and component-local skip policy.
+  Regex-internal reluctant quantifiers and nonregular assertions fail explicitly.
+- Add a documented Lark recognition profile and an explicit LLM compatibility
+  profile. Fix exact/bounded repetition, common imports, Unicode ranges, flags,
+  start-rule handling and directive errors. The LLM profile supports exact-ID
+  sets/ranges/complements, explicit named-token maps, `@name` grammar requirements,
+  isolated `%json` fragments, and regular-body `[lazy]`.
+- Do not add numeric-token, named-special or inline-JSON literals to native
+  GLRM. Both frontends share the component/compiler machinery; neither accepts
+  priorities, captures, substring generation, sampling annotations or rule budgets.
+
+### Correctness and packaging
+
+- Expose only `forced_tokens()` for strict, locally inevitable original token
+  IDs. Remove `forced()` and `forced_token_ids()`; do not choose a canonical
+  encoding among alternative model tokenizations. Keep `commit_bytes()` as a
+  separate raw-byte recognition operation, not an exact-token commit substitute.
+  The private bounded-cardinality query finds final distinct ID witnesses without
+  constructing a complete vocabulary mask. Existing exact-mask caches may be
+  read; no public bounded-mask or byte-forcing API is added. Internal proof errors
+  are reported rather than silently treated as ambiguity or completion.
+- Correct trailing-unmapped vocabulary-coordinate refinement, productionless
+  start coordinates and zero-terminal component ownership, with independent
+  byte/event and empty-language regressions.
+- Include Python type stubs and `py.typed`, and exclude development interpreter
+  caches from distributable wheels. Updated guides describe the canonical API
+  and the deliberate native/Lark dialect differences.
+
+- Normalize platform line endings in distribution README metadata checks,
+  without accepting actual description drift.
+- Add matched core-batch qualification results, portable comparison drivers,
+  and explicit remaining performance/scaling limitations in
+  `docs/validation/core-batch-2026-10-15.md`.
+
+### Construction efficiency and concurrency
+
+- Share immutable binding snapshots and declaration metadata. Incremental
+  instance summaries replace repeated whole-graph discovery during binding and
+  closure checks; requirement paths are materialized when requested. Full
+  validation remains at artifact trust boundaries.
+- Reuse exact-event adapters across prepared links instead of recompiling the
+  same event set each time. Cache ownership is limited to the prepared definition;
+  no new registry or lookup is added to ordinary runtime masking.
+- Release Python's GIL during substantial native binding and requirement work.
+  Independent concurrent edits use cloned handles; overlapping access to the
+  same mutating handle reports a borrow error rather than losing updates.
+- Respect caller-owned Rayon pools during compilation and composition, avoiding
+  redirection of independent jobs into a capped or serial helper pool. Keep the
+  documented single-build defaults outside a caller-owned execution context.
+
+## 0.2.0 — 2026-10-10
+
+### Public API
+
+- Rust and Python share the `Grammar`, `UnlinkedConstraint`, `Constraint`, and
+  `ConstraintState` lifecycle. Immutable bindings support source grammars,
+  reusable compiled children, and vocabulary-qualified exact tokens.
+- `FastBuild` / `FAST_BUILD` selects ordinary Dynamic/O1; `Balanced` / `BALANCED`
+  selects native O2; `FastRuntime` / `FAST_RUNTIME` selects Static; `Auto` / `AUTO`
+  retains the existing default. Every mode returns the same public constraint
+  and state types. Parser backend selectors and data-only parser providers remain
+  unstable tooling under Rust's `internal-api` feature and Python's `_internal`.
+- Public persistence supports compiled constraints and open pre-link artifacts.
+  Python uses `Constraint.save(*, external_vocab=False)`; Rust uses
+  `save_without_vocab()` for external-vocabulary saves. Loading an external
+  artifact validates the exact vocabulary identity.
+- Boundary queries are selected through Rust `BuildOptions.boundary_trigger` or
+  Python's `boundary_trigger` keyword. Exact boundary triggers are unsupported
+  by retained-LR Dynamic and return an error. Pre-link artifacts retain requests
+  until final link, whose explicit options can override the root request.
+- Python exposes exact state snapshots with `ConstraintState.clone()`.
+- Remove the public `is_terminated()` accessor. Stop at the first complete match
+  with `is_accepting()`, or continue until a configured end-token ID is sampled
+  and committed. An allowed end-token commit empties the next mask, preserves
+  acceptance, and rejects further commits.
+
+### Correctness and implementation
+
 - Retained-LR Dynamic builds executable actions for compressed direct-regular
-  languages. Admission-only compact tables remain on the native/Static path.
-  This fixes empty masks and rejected valid Lark inputs after right-linear
-  compression, including the FastBuild public compilation path.
-- `FastBuild` / `FAST_BUILD` now selects the actual ordinary Dynamic compiler.
-  `Balanced` / `BALANCED` preserves the previous native O2 path; `FastRuntime`
-  selects Static and `Auto` keeps the existing default. All return the same
-  public Constraint and ConstraintState types.
-- FastBuild resolves bound source grammars into one ordinary Dynamic body;
-  precompiled links retain their constituents and select Dynamic boundaries.
-  Exact boundary triggers on retained-LR Dynamic return a clear error.
+  languages. Static declines terminal-run stabilization proofs based on
+  admission-only compact tables. Valid whole-word Lark tokens remain maskable
+  in both paths, including vocabularies containing only that token.
+- Native O2 and Static parser representations execute without retained LR
+  action/goto tables. Retained-LR artifacts stay LR and native artifacts stay
+  native when loaded, independently of the compilation environment.
+- Dynamic masking shares correlated lexer/parser recognizer states during a
+  vocabulary-trie walk. Compiler, boundary linking, exact bounded-terminal
+  synthesis, automaton minimization, and runtime storage have been improved.
+  Exact recognition, token masks, commit behavior, and completion remain the
+  correctness contract.
+- Serialization retains exact tokenizer transitions and liveness metadata,
+  bounds decompression, and preserves packed runtime data. Constraints prepare
+  runtime caches during compilation/loading rather than hiding that work in
+  the first state operation.
+- Python uses mimalloc with delayed automatic purging and reset-based purges.
+  Pages remain OS-reclaimable; set `MIMALLOC_PURGE_DECOMMITS=1` before import
+  when immediate RSS reduction is preferred.
 
-## Unreleased API cleanup
+### Compatibility and evidence
 
-- Keep parser backend selectors, inspectors, and data-only parser-provider
-  construction in Rust's `internal-api` feature and Python's `_internal`.
-  Public mode selection remains `Optimization`.
-- Python `Constraint.save(*, external_vocab=False)` replaces the separate
-  external-vocabulary save method; Rust names that form `save_without_vocab()`.
-  Constraint serialization bytes and load behavior are unchanged.
-- Select optional boundary queries through `BuildOptions.boundary_trigger` and
-  Python's `boundary_trigger` keyword. Direct trigger builders are internal.
-  Pre-link artifacts retain requests until final link; explicit link options
-  override the retained root request. Default pre-link artifact bytes remain
-  unchanged; non-default requests use the tagged GLRMOD04 manifest.
-- Remove the public `ConstraintState::is_terminated()` accessor from Rust and
-  Python. Callers choose between stopping at the first complete match with
-  `is_accepting()` or permitting continuation until a configured end-token ID
-  is sampled and committed. Committing an allowed end token empties the next-token
-  mask, keeps the state accepting and non-rejected, and rejects further commits.
-
-
-## Unreleased
-
-### Added
-
-- Explicit table-free parser selection through Rust `ParserBackend::TemplateDfa`
-  and Python `ParserBackend.TEMPLATE_DFA`. The runtime and saved artifacts omit
-  the LR table; parser advancement and exact admissibility use acyclic
-  POP/READ/PUSH programs beneath the existing mask and commit engines.
-- Data-only `ParserProgram` providers can supply their own finite stack-action
-  graphs without an LR grammar or runtime callbacks. They support static and
-  dynamic masking, completion relations, validated serialization, and artifacts
-  bound to an external vocabulary. Cycles, invalid coordinates and oversized
-  expansion requests are rejected rather than truncated or sent to an LR
-  fallback. Compiled-component composition is deferred for this backend.
-
-### Improved
-
-- Table-free loads reuse the exact validated parser indices already prepared
-  during decoding instead of rebuilding them. Dynamic result-cache payloads
-  classify sparse representations in one pass while preserving the original
-  storage choice, tie-breaking, allocation path, and cache-admission policy.
-  LR remains the default: template-mode latency, construction and loading
-  tradeoffs depend on the grammar and execution mode.
-- Static masks bound speculative concrete-stack expansion per parser graph,
-  retaining shared-graph evaluation for wide ambiguities. Deterministic
-  reductions reuse common output prefixes, single-top commits avoid a duplicate
-  fast-path attempt, and fully accepted stack paths stop without redundant work.
-- Static compilation reuses support keys, final-weight signatures, and token
-  remaps; large two-parser unions use the exact direct construction. Token-set
-  intersections use a memoized interval sweep while preserving the previous
-  operand representative, including on reversed cache hits.
-- Dynamic compilation overlaps lexer factoring with parser-table construction.
-  Shared regex discovery traverses unique DAG nodes, and choice rewrites retain
-  already-factored children instead of recursively factoring them again.
-- Dynamic master-trie admission compares its cost with the original vocabulary
-  trie before replacing the traversal, avoiding an expanded-trie comparison that
-  could select a slower path.
-
-- Static constraint serialization now primes canonical artifact bytes during public compilation, making the first subsequent `save()` a bulk copy rather than a full re-encode. Current artifacts also persist the packed-DWA dense-mask cache needed by the runtime, substantially reducing load-time cache reconstruction. Rust now exposes one `Constraint::load(...)` entry point that automatically takes the zero-copy backing path for owned `Vec<u8>` input while continuing to accept borrowed bytes.
-
-- Direct dynamic masking now walks the vocabulary trie once with interned
-  correlated lexer/parser recognizer states instead of repeating the trie walk
-  for each live branch. Runtime vocabulary data uses a flat preorder walk,
-  flattened token aliases, and compact per-node mask operations; reusable trie
-  construction moves into vocabulary preparation. Small lexer NFAs may be
-  determinized for faster masks, while large source automata skip that optional
-  product construction before it becomes a build-time cliff.
-- Dynamic tokenizer construction now keeps very large exact binary
-  intersections in compressed runtime form, uses a compact fail-closed engine
-  for long zero-minimum bounded string residuals, and isolates nullable roots
-  before assembling the global lexer union. One-word automaton bitsets stay
-  inline and large single-group metadata is built in parallel. Representative
-  former 0.5–1.0 second dynamic builds now complete below 200 ms without
-  weakening lexer semantics or precomputing vocabulary-specific token programs.
-- Static constraint saving now serializes directly into the compressed
-  artifact and borrows tokenizer DFA storage instead of materializing a full
-  raw bincode payload and cloned wire automaton. Large compile-once artifacts
-  therefore avoid the previous hundreds-of-megabytes serialization spike;
-  loading also bounds decompression by the declared raw length before parsing.
-- Runtime mask and commit paths now reuse bounded parser, tokenizer, accumulator, and bitmap storage for common deterministic and small-frontier states, avoiding allocator activity during ordinary decoding. Tokenizer epsilon-closure data is finalized during compile/load rather than on the first commit. The Python extension keeps delayed automatic mimalloc purging enabled but defaults purges to reset (`MADV_FREE`/`MEM_RESET`) rather than synchronous decommit. Pages remain OS-reclaimable without requiring caller-managed trimming; `MIMALLOC_PURGE_DECOMMITS=1` restores immediate RSS-oriented decommit behaviour.
-- Constraints with at most 16 initially admissible tokens exercise those initial commit transitions during runtime-cache finalization. LR-backed constraints with larger initial masks retain their existing skip policy; table-free static constraints sample at most 16 admissible tokens. This preparation uses the shared commit implementation and is included in compilation or loading cost, rather than deferred to `Constraint::start()` or hidden from startup measurements.
-- Large bounded JSON Schema string patterns now retain exact `maxLength`
-  semantics by compiling terminal/parser automata against a certified smaller
-  residual representative while keeping the full exact lexer for runtime
-  state. Pathological bounded-repeat intersections no longer force the former
-  multi-second terminal-DWA construction path.
-- Exact runtime tokenizer finalization now overlaps terminal/parser automaton
-  construction. Large protected residual products publish their synthesized
-  compile tokenizer before full future analysis and byte-transition
-  materialization, and runtime component assembly moves transition storage
-  instead of copying it a second time.
-- Bounded-terminal synthesis candidate discovery now runs before terminal
-  materialization, uses cached vocabulary length/alphabet statistics, reuses
-  language-canonical repeat-horizon proofs, and parallelizes only the small set
-  of qualified candidates. Grammars with no viable candidate avoid synthesis
-  allocations entirely, and the diagnostic opt-out shares the same eligibility
-  scan so no-candidate ON/OFF builds follow the same planning path.
-- Expensive constrained array items are no longer duplicated into separate
-  first/next contextual terminals when one item already exceeds the importer
-  product budget. The item is compiled once and its count remains enforced at
-  grammar level.
-
-### Changed
-
-- `DynamicConstraint` once again performs vocabulary/lexer/parser analysis in
-  the decoding path instead of compiling whole-vocabulary token programs or
-  continuation partitions. Dynamic artifact format version 9 no longer stores
-  those precomputed structures; version-7 and version-8 dynamic artifacts must
-  be rebuilt rather than silently restoring the removed backend.
-- Static `Constraint` artifacts now use compressed format version 8. Current
-  code continues to load uncompressed version-7 artifacts; newly saved
-  artifacts require a version-8-capable loader.
-- Finite `maxLength` constraints on patterned JSON Schema strings are preserved
-  by default even when their estimated pattern/length product is large. The
-  complexity budget now selects lowering strategy only; it no longer permits a
-  semantically weaker grammar.
-- Exact bounded-terminal synthesis is enabled by default. Runtime keeps the
-  full exact tokenizer while terminal/parser DWA construction may use a
-  certified smaller representative. Set
-  `GLRMASK_SYNTHETIC_BOUNDED_TERMINALS=0` only for diagnostics.
-
-### Fixed
-
-- Fallback tokenizer serialization preserves packed compressed segments when
-  they cannot use the contiguous-suffix encoding. Previously affected large
-  mixed tokenizers could lose transitions after saving and loading; affected
-  artifacts written by older code must be rebuilt from their grammar.
-- Direct slice and byte-family proofs on compact loaded bounded-repeat
-  tokenizers use the retained liveness metadata rather than indexing construction
-  tables omitted from the artifact. Missing proof data declines the shortcut
-  instead of inventing liveness or panicking.
+- This release changes the Rust and Python APIs from 0.1.1. Use the examples and
+  guides at the `v0.2.0` tag; integrations written for the older API must adapt.
+  Serialized artifacts are pre-release formats: rebuild old artifacts when the
+  current loader rejects them. No cross-release artifact compatibility is promised.
+- Python wheels target CPython 3.9–3.13 on manylinux x86_64/aarch64, macOS
+  x86_64/arm64, and Windows x86_64. Source installation requires Rust and native
+  build tools. Python 3.14 and other platforms are outside this wheel matrix.
+- The root Rust crate and Python distribution are 0.2.0. The extracted helper
+  crates make their first registry publications at their existing 0.1.1 versions;
+  root dependencies pin those exact versions.
+- The README's corrected 20 August 2026, official-9,558-schema engineering run
+  remains an interim historical benchmark, not a measurement of this release.
+  Later reports under `docs/performance/` retain their own source, workload,
+  machine, and evidence provenance. Do not combine their timings into an
+  unqualified full-corpus or cross-platform performance claim.
 
 ## 0.1.1 — 2026-07-19 — runtime, integration, and tail-latency update
 

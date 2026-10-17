@@ -1,0 +1,13 @@
+{
+  "status": "passed",
+  "package": "C:\\gnb930283\\candidate-site-r4\\glrmask\\__init__.py",
+  "elapsed_seconds": 0.9884868000008282,
+  "checks": {
+    "constraints": 200,
+    "states": 1676,
+    "forced_ids_replayed": 380,
+    "bindings": 6144
+  },
+  "trace_sha256": "66ec5906e620848055190aaa3021fe55a32552a85add56edc5d2d3f9c41adc85",
+  "note": "Independent public installed-wheel oracle, all four optimization modes. Not a performance benchmark."
+}

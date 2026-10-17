@@ -1,0 +1,893 @@
+{
+  "kind": "strict-forcing-paired-public-wheel-v1",
+  "variant": "candidate",
+  "package": "C:\\gnb930283\\verification-r4-binary-site\\glrmask\\__init__.py",
+  "vocab_size": 8192,
+  "repetitions": 2000,
+  "rows": [
+    {
+      "case": "broad_identifier",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 163500,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 9700,
+        "p95_ns": 10000,
+        "p99_ns": 11500,
+        "p999_ns": 14400,
+        "max_ns": 19400,
+        "mean_ns": 9797.3
+      }
+    },
+    {
+      "case": "broad_identifier",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 5600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 400,
+        "p95_ns": 500,
+        "p99_ns": 700,
+        "p999_ns": 1600,
+        "max_ns": 7700,
+        "mean_ns": 449.25
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 34100,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 6000,
+        "p95_ns": 6300,
+        "p99_ns": 6700,
+        "p999_ns": 9300,
+        "max_ns": 12400,
+        "mean_ns": 6028.8
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 1700,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 400,
+        "p95_ns": 500,
+        "p99_ns": 600,
+        "p999_ns": 900,
+        "max_ns": 10700,
+        "mean_ns": 447.95
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 62100,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 16500,
+        "p95_ns": 17400,
+        "p99_ns": 19700,
+        "p999_ns": 25300,
+        "max_ns": 29500,
+        "mean_ns": 16681.1
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 18600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 11000,
+        "p95_ns": 11900,
+        "p99_ns": 16700,
+        "p999_ns": 22500,
+        "max_ns": 32000,
+        "mean_ns": 11182.65
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 129600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 102500,
+        "p95_ns": 105800,
+        "p99_ns": 114100,
+        "p999_ns": 131500,
+        "max_ns": 132400,
+        "mean_ns": 103101.4
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 104900,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 97100,
+        "p95_ns": 100900,
+        "p99_ns": 111100,
+        "p999_ns": 125700,
+        "max_ns": 129100,
+        "mean_ns": 97890.1
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 9000,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 800,
+        "p95_ns": 900,
+        "p99_ns": 900,
+        "p999_ns": 2700,
+        "max_ns": 7500,
+        "mean_ns": 784.8
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 1900,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 800,
+        "p95_ns": 900,
+        "p99_ns": 900,
+        "p999_ns": 900,
+        "max_ns": 5700,
+        "mean_ns": 776.2
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 68700,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 25800,
+        "p95_ns": 26500,
+        "p99_ns": 29700,
+        "p999_ns": 34400,
+        "max_ns": 48700,
+        "mean_ns": 25963.05
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 23000,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 18200,
+        "p95_ns": 19100,
+        "p99_ns": 22000,
+        "p999_ns": 28700,
+        "max_ns": 39100,
+        "mean_ns": 18312.4
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "FAST_BUILD",
+      "cache": "cold-state",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 31600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 8100,
+        "p95_ns": 8300,
+        "p99_ns": 11300,
+        "p999_ns": 12900,
+        "max_ns": 17700,
+        "mean_ns": 8209.1
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "FAST_BUILD",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 9800,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 5500,
+        "p95_ns": 5800,
+        "p99_ns": 6000,
+        "p999_ns": 8500,
+        "max_ns": 9700,
+        "mean_ns": 5587.5
+      }
+    },
+    {
+      "case": "broad_identifier",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 42300,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 4500,
+        "p95_ns": 4700,
+        "p99_ns": 4800,
+        "p999_ns": 7800,
+        "max_ns": 11500,
+        "mean_ns": 4497.85
+      }
+    },
+    {
+      "case": "broad_identifier",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 800,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 300,
+        "max_ns": 400,
+        "mean_ns": 219.0
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 17100,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 4100,
+        "p95_ns": 4500,
+        "p99_ns": 5500,
+        "p999_ns": 9000,
+        "max_ns": 11100,
+        "mean_ns": 4210.95
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 1200,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 300,
+        "max_ns": 300,
+        "mean_ns": 228.3
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 47200,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 11400,
+        "p95_ns": 11700,
+        "p99_ns": 14500,
+        "p999_ns": 19000,
+        "max_ns": 39200,
+        "mean_ns": 11467.65
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 10900,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 7500,
+        "p95_ns": 7700,
+        "p99_ns": 8100,
+        "p999_ns": 11700,
+        "max_ns": 15700,
+        "mean_ns": 7518.8
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 77700,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 52500,
+        "p95_ns": 54900,
+        "p99_ns": 61000,
+        "p999_ns": 68400,
+        "max_ns": 76700,
+        "mean_ns": 52914.6
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 58300,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 48800,
+        "p95_ns": 50500,
+        "p99_ns": 54500,
+        "p999_ns": 64300,
+        "max_ns": 72600,
+        "mean_ns": 49080.9
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 2100,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 400,
+        "p999_ns": 400,
+        "max_ns": 500,
+        "mean_ns": 208.0
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 800,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 200,
+        "p99_ns": 300,
+        "p999_ns": 4600,
+        "max_ns": 13900,
+        "mean_ns": 201.4
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 70300,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 15800,
+        "p95_ns": 16700,
+        "p99_ns": 19100,
+        "p999_ns": 27200,
+        "max_ns": 33900,
+        "mean_ns": 15984.35
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 22200,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 11200,
+        "p95_ns": 11500,
+        "p99_ns": 12600,
+        "p999_ns": 18700,
+        "max_ns": 28900,
+        "mean_ns": 11274.7
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "BALANCED",
+      "cache": "cold-state",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 15600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 6600,
+        "p95_ns": 7300,
+        "p99_ns": 8500,
+        "p999_ns": 11000,
+        "max_ns": 100200,
+        "mean_ns": 6692.15
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "BALANCED",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 6800,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 4400,
+        "p95_ns": 4600,
+        "p99_ns": 4800,
+        "p999_ns": 9000,
+        "max_ns": 9000,
+        "mean_ns": 4477.25
+      }
+    },
+    {
+      "case": "broad_identifier",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 2500,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 600,
+        "max_ns": 4700,
+        "mean_ns": 234.65
+      }
+    },
+    {
+      "case": "broad_identifier",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 300,
+        "max_ns": 400,
+        "mean_ns": 229.95
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 2500,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 300,
+        "max_ns": 4700,
+        "mean_ns": 233.05
+      }
+    },
+    {
+      "case": "deterministic_bytes_aliases",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 1200,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 300,
+        "p99_ns": 300,
+        "p999_ns": 300,
+        "max_ns": 500,
+        "mean_ns": 230.3
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 24900,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 7600,
+        "p95_ns": 7800,
+        "p99_ns": 8000,
+        "p999_ns": 12500,
+        "max_ns": 16900,
+        "mean_ns": 7641.25
+      }
+    },
+    {
+      "case": "two_singleton_chars",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63
+      ],
+      "first_query_ns": 10600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 7600,
+        "p95_ns": 8100,
+        "p99_ns": 9700,
+        "p999_ns": 10800,
+        "max_ns": 15600,
+        "mean_ns": 7652.95
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 66600,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 49600,
+        "p95_ns": 51500,
+        "p99_ns": 54300,
+        "p999_ns": 70200,
+        "max_ns": 84100,
+        "mean_ns": 49872.3
+      }
+    },
+    {
+      "case": "long_singleton_chain",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33,
+        33
+      ],
+      "first_query_ns": 53000,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 49400,
+        "p95_ns": 51200,
+        "p99_ns": 56200,
+        "p999_ns": 63600,
+        "max_ns": 63800,
+        "mean_ns": 49724.7
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [],
+      "first_query_ns": 2800,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 200,
+        "p99_ns": 200,
+        "p999_ns": 300,
+        "max_ns": 500,
+        "mean_ns": 192.8
+      }
+    },
+    {
+      "case": "accepting_prefix",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [],
+      "first_query_ns": 500,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 200,
+        "p95_ns": 200,
+        "p99_ns": 200,
+        "p999_ns": 300,
+        "max_ns": 300,
+        "mean_ns": 192.15
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 36700,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 11200,
+        "p95_ns": 11600,
+        "p99_ns": 12500,
+        "p999_ns": 17500,
+        "max_ns": 31700,
+        "mean_ns": 11259.05
+      }
+    },
+    {
+      "case": "nested_inline",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        33,
+        63,
+        33
+      ],
+      "first_query_ns": 15500,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 11200,
+        "p95_ns": 11800,
+        "p99_ns": 14400,
+        "p999_ns": 15600,
+        "max_ns": 26800,
+        "mean_ns": 11287.25
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "FAST_RUNTIME",
+      "cache": "cold-state",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 10100,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 4600,
+        "p95_ns": 4800,
+        "p99_ns": 4800,
+        "p999_ns": 7700,
+        "max_ns": 10900,
+        "mean_ns": 4651.15
+      }
+    },
+    {
+      "case": "exact_event",
+      "mode": "FAST_RUNTIME",
+      "cache": "mask-already-computed",
+      "forced_ids": [
+        8195
+      ],
+      "first_query_ns": 6300,
+      "forcing": {
+        "n": 2000,
+        "p50_ns": 4600,
+        "p95_ns": 4800,
+        "p99_ns": 5300,
+        "p999_ns": 9100,
+        "max_ns": 13900,
+        "mean_ns": 4673.1
+      }
+    }
+  ],
+  "notes": [
+    "Timer measures public call only; construction/prefix commits/oracle validation excluded.",
+    "cold-state denotes no normal mask cache on the queried state; immutable compiled caches are warm.",
+    "Tests read-only query on unchanged state; no complete output masks are generated by this script inside timing.",
+    "Per-call Python timer overhead present in both variants; compare independent alternating fresh processes.",
+    "All returned ID sequences validated against public full-mask strict oracle.",
+    "first_query_ns is measured before the independent full-mask oracle can warm shared memoization."
+  ]
+}

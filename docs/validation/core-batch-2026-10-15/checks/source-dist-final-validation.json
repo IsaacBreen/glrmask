@@ -1,0 +1,12 @@
+{
+  "status": "passed",
+  "archive": "C:\\gnb930283\\candidate-source-final\\glrmask-0.2.0.tar.gz",
+  "sha256": "bc4ee9f9a0c1f1b926c6faa26e8fb9b8eef864d99155139a3de8bdce21b9e795",
+  "members": 797,
+  "bounded_source_exact": true,
+  "stub_present": true,
+  "readme_checker_passed": true,
+  "rebuilt_from_sdist": false,
+  "metadata_newline_regression_tests_passed": 3,
+  "completed_at": "2026-10-15T02:06:25.252167+08:00"
+}

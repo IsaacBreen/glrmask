@@ -310,6 +310,31 @@ fn configure_compile_worker_thread() {
 #[cfg(not(target_os = "windows"))]
 fn configure_compile_worker_thread() {}
 
+thread_local! {
+    // Construction-only state. Ordinary token masking never reads this flag.
+    static OWNED_COMPILE_WORKER: std::cell::Cell<bool> = const {std::cell::Cell::new(false)};
+}
+
+fn initialize_compile_worker() {
+    OWNED_COMPILE_WORKER.with(|owned| owned.set(true));
+    configure_compile_worker_thread();
+}
+
+/// A caller already executing in a Rayon pool owns that pool's CPU budget.
+/// Do not redirect its independent jobs to our small default pool or serial
+/// finalizer. This is queried only by compilation/composition entry points.
+pub(crate) fn caller_pool_is_active() -> bool {
+    rayon::current_thread_index().is_some()
+        && !OWNED_COMPILE_WORKER.with(std::cell::Cell::get)
+}
+
+fn explicit_parallel_compile_budget() -> bool {
+    ["GLRMASK_COMPILE_THREADS", "RAYON_NUM_THREADS"].iter().any(|name| {
+        std::env::var(name).ok().and_then(|value| value.trim().parse::<usize>().ok())
+            .is_some_and(|threads| threads > 1)
+    })
+}
+
 fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
@@ -348,7 +373,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     let thread_count = compile_thread_count()?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
-        .start_handler(|_| configure_compile_worker_thread())
+        .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()
 });
@@ -356,7 +381,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
 static SINGLE_THREAD_COMPILE_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     rayon::ThreadPoolBuilder::new()
         .num_threads(1)
-        .start_handler(|_| configure_compile_worker_thread())
+        .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()
 });
@@ -366,6 +391,11 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
+    // Respect a caller-supplied pool and avoid nested cross-pool installs.
+    // Re-entering an unrelated small pool serializes high-core caller work.
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
     if let Some(pool) = &*COMPILE_THREAD_POOL {
         pool.install(f)
     } else {
@@ -378,7 +408,13 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    if single_thread && let Some(pool) = &*SINGLE_THREAD_COMPILE_POOL {
+    if rayon::current_thread_index().is_some() {
+        return f();
+    }
+    // A deliberate service-wide CPU budget must apply to tiny requests too.
+    // The default small-request latency policy remains unchanged otherwise.
+    if single_thread && !explicit_parallel_compile_budget()
+        && let Some(pool) = &*SINGLE_THREAD_COMPILE_POOL {
         pool.install(f)
     } else {
         run_with_compile_thread_pool(f)
@@ -699,7 +735,7 @@ fn terminal_domain_too_large_for_early_overlap(grammar: &GrammarDef) -> bool {
         let local_cost = match terminal {
             Terminal::Literal { bytes, .. } => 1usize.saturating_add(bytes.len()),
             Terminal::Pattern { pattern, .. } => 1usize.saturating_add(pattern.len()),
-            Terminal::SpecialToken { .. } => 1,
+            Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => 1,
             Terminal::Expr { expr, .. } => return consume_early_overlap_cost(expr, &mut remaining),
         };
         if local_cost >= remaining {
@@ -722,7 +758,7 @@ fn should_parallelize_terminal_factoring(grammar: &GrammarDef) -> bool {
     let mut remaining = MIN_PREPARSED_EXPR_NODES;
     grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_tree_reaches_budget(expr, &mut remaining),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => {
             false
         }
     })
@@ -1355,7 +1391,7 @@ fn build_vocab_partition_direct_mask_tokenizer(
     let preflight_started = Instant::now();
     let has_intersection = grammar.terminals.iter().any(|terminal| match terminal {
         Terminal::Expr { expr, .. } => expression_contains_intersection(expr),
-        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } => {
+        Terminal::Literal { .. } | Terminal::Pattern { .. } | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => {
             false
         }
     });
@@ -2595,7 +2631,7 @@ fn terminal_expr(terminal: &Terminal) -> Expr {
         Terminal::Literal { bytes, .. } => Expr::U8Seq(bytes.clone()),
         Terminal::Pattern { pattern, utf8, .. } => parse_regex(pattern, *utf8),
         Terminal::Expr { expr, .. } => expr.clone(),
-        Terminal::SpecialToken { .. } => Expr::Choice(Vec::new()),
+        Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => Expr::Choice(Vec::new()),
     }
 }
 
@@ -2716,7 +2752,7 @@ fn grammar_has_potential_bounded_terminal_synthesis(
         }
         Terminal::Literal { .. }
         | Terminal::Pattern { .. }
-        | Terminal::SpecialToken { .. } => false,
+        | Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. } | Terminal::MarkerProbe { .. } => false,
     })
 }
 
@@ -3310,12 +3346,42 @@ fn collect_special_token_terminals(grammar: &GrammarDef) -> Vec<SpecialTokenTerm
             Terminal::SpecialToken { id, token_id } => Some(SpecialTokenTerminal {
                 terminal_id: *id,
                 token_id: *token_id,
+                token_id_end: *token_id,
+            }),
+            Terminal::SpecialTokenRange { id, start, end } => Some(SpecialTokenTerminal {
+                terminal_id: *id, token_id: *start, token_id_end: *end,
             }),
             _ => None,
         })
         .collect::<Vec<_>>();
-    specials.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+    specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     specials
+}
+
+/// Exact-token membership changes only at interval boundaries. Keep a single
+/// internal vocabulary class per elementary interval rather than per model ID.
+/// The existing dense model-ID lookup is populated once; automata and weights
+/// remain proportional to the number of ranges, including overlapping ranges.
+pub(crate) fn special_token_id_map(specials: &[SpecialTokenTerminal]) -> ManyToOneIdMap {
+    if specials.is_empty() { return ManyToOneIdMap::empty(); }
+    let mut events = std::collections::BTreeMap::<u64, i64>::new();
+    for special in specials {
+        assert!(special.token_id <= special.token_id_end, "invalid exact-token interval");
+        *events.entry(u64::from(special.token_id)).or_default() += 1;
+        *events.entry(u64::from(special.token_id_end) + 1).or_default() -= 1;
+    }
+    let points = events.into_iter().collect::<Vec<_>>();
+    let maximum = points.last().unwrap().0 as usize;
+    let mut dense = vec![u32::MAX; maximum];
+    let mut active = 0i64;
+    let mut classes = 0u32;
+    for window in points.windows(2) {
+        active += window[0].1;
+        if active == 0 { continue; }
+        dense[window[0].0 as usize..window[1].0 as usize].fill(classes);
+        classes += 1;
+    }
+    ManyToOneIdMap::from_original_to_internal_allowing_unmapped(dense, classes)
 }
 
 fn build_special_token_terminal_family(
@@ -3326,22 +3392,7 @@ fn build_special_token_terminal_family(
         return None;
     }
 
-    let mut token_ids = specials
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<Vec<_>>();
-    token_ids.sort_unstable();
-    token_ids.dedup();
-
-    let max_token_id = *token_ids.last()? as usize;
-    let mut original_token_to_internal = vec![u32::MAX; max_token_id + 1];
-    for (internal, &token_id) in token_ids.iter().enumerate() {
-        original_token_to_internal[token_id as usize] = internal as u32;
-    }
-    let vocab_tokens = ManyToOneIdMap::from_singleton_original_to_internal_with_representatives(
-        original_token_to_internal,
-        token_ids,
-    );
+    let vocab_tokens = special_token_id_map(specials);
 
     let initial_state = tokenizer.initial_state();
     let mut original_state_to_internal = vec![u32::MAX; tokenizer.num_states() as usize];
@@ -3361,8 +3412,9 @@ fn build_special_token_terminal_family(
     let final_state = dwa.add_state();
     dwa.set_final_weight(final_state, Weight::all());
     for special in specials {
-        let internal_token = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
-        let tokens = RangeSetBlaze::from_iter([internal_token..=internal_token]);
+        let first = id_map.vocab_tokens.original_to_internal[special.token_id as usize];
+        let last = id_map.vocab_tokens.original_to_internal[special.token_id_end as usize];
+        let tokens = RangeSetBlaze::from_iter([first..=last]);
         let weight = Weight::from_uniform(0..=0, tokens);
         dwa.add_transition(
             dwa.start_state(),
@@ -6086,6 +6138,7 @@ fn compile_prepared_with_profile_and_table_construction(
         drop(table);
         let mut constraint = Constraint {
             end_tokens: std::sync::Arc::from([]),
+            marker_queries: None,
             runtime_backend: crate::runtime::ConstraintRuntimeBackend::Static,
             static_dynamic_overlay: None,
             boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -6234,6 +6287,9 @@ fn compile_prepared_with_profile_and_table_construction(
             caches.install(&mut constraint);
         }
         let mut constraint = finalize_constraint(constraint);
+        if let Err(message) = constraint.install_grammar_markers(&prepared_grammar) {
+            glrmask_invariant::__private::fail_compilation_resource_limit(message);
+        }
         crate::runtime::compact_large_non_dwa_weight_runtime(&mut constraint);
         // Keep compiler-produced packed runtime storage in its owned form.
         // Converting it to a backed artifact representation here would perform
@@ -6780,6 +6836,7 @@ fn compile_dynamic_owned_early_overlap(
             vocab,
             dynamic_mask_vocab,
         );
+        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
                 .inner
@@ -7141,6 +7198,7 @@ fn compile_dynamic_owned_impl(
             vocab,
             dynamic_mask_vocab,
         );
+        constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
                 .inner
@@ -7313,4 +7371,102 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
     (constraint, profile)
+}
+#[cfg(test)]
+mod compact_special_range_tests {
+    use super::*;
+
+    fn interval(terminal_id: u32, start: u32, end: u32) -> SpecialTokenTerminal {
+        SpecialTokenTerminal { terminal_id, token_id: start, token_id_end: end }
+    }
+
+    #[test]
+    fn full_128k_exact_interval_has_one_internal_token_class() {
+        let map = special_token_id_map(&[interval(0, 0, 131_071)]);
+        assert_eq!(map.internal_to_originals.len(), 1);
+        assert_eq!(map.original_to_internal.len(), 131_072);
+        assert!(map.original_to_internal.iter().all(|&class| class == 0));
+    }
+
+    #[test]
+    fn overlapping_and_adjacent_intervals_split_only_at_membership_boundaries() {
+        let map = special_token_id_map(&[
+            interval(0, 10, 20), interval(1, 15, 25), interval(2, 26, 30),
+        ]);
+        assert_eq!(map.internal_to_originals.len(), 4);
+        for (range, class) in [(10..=14, 0), (15..=20, 1), (21..=25, 2), (26..=30, 3)] {
+            for token in range { assert_eq!(map.original_to_internal[token], class); }
+        }
+        assert!(map.original_to_internal[..10].iter().all(|&id| id == u32::MAX));
+    }
+
+    #[test]
+    fn serialized_exact_intervals_reject_reversed_bounds() {
+        let invalid = bincode::serialize(&(0u32, 9u32, 3u32)).unwrap();
+        assert!(bincode::deserialize::<SpecialTokenTerminal>(&invalid).is_err());
+        let valid = interval(3, 31, 63);
+        let decoded: SpecialTokenTerminal = bincode::deserialize(&bincode::serialize(&valid).unwrap()).unwrap();
+        assert_eq!(decoded, valid);
+    }
+
+    #[test]
+    fn word_mask_union_preserves_neighbors_and_short_buffers() {
+        for (start, end) in [(0, 0), (31, 31), (31, 32), (32, 63), (17, 95), (0, 127)] {
+            let terminal = interval(0, start, end);
+            let mut mask = [0u32; 4];
+            terminal.or_mask(&mut mask);
+            for id in 0..128 {
+                assert_eq!((mask[id / 32] >> (id % 32)) & 1 != 0,
+                    (start..=end).contains(&(id as u32)));
+            }
+            let mut short = [0u32; 1];
+            terminal.or_mask(&mut short);
+            assert_eq!(short[0], mask[0]);
+            terminal.or_mask(&mut []);
+        }
+        let mut mask = [1u32; 4];
+        interval(0, 31, 96).or_mask(&mut mask);
+        for id in [0, 32, 64, 96] { assert_ne!(mask[id / 32] & (1 << (id % 32)), 0); }
+    }
+}
+
+
+#[cfg(test)]
+mod caller_execution_tests {
+    use super::*;
+
+    #[test]
+    fn caller_owned_pool_is_not_replaced_by_the_default_or_tiny_pool() {
+        for size in [1,2,4] {
+            let pool=rayon::ThreadPoolBuilder::new().num_threads(size).build().unwrap();
+            pool.install(|| {
+                (0..size*2).into_par_iter().for_each(|_| {
+                    assert!(caller_pool_is_active());
+                    let caller=std::thread::current().id();
+                    run_with_compile_thread_pool(|| {
+                        assert_eq!(std::thread::current().id(),caller);
+                        assert_eq!(rayon::current_num_threads(),size);
+                        run_with_dynamic_compile_thread_pool(true,|| {
+                            assert_eq!(std::thread::current().id(),caller);
+                            assert_eq!(rayon::current_num_threads(),size);
+                        });
+                    });
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn caller_parallel_compilation_preserves_masks_and_snapshot_isolation() {
+        let v=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
+        let g=crate::Grammar::from_glrm("start root nt root=\"ab\"");
+        let opts=crate::BuildOptions::default().optimization(crate::Optimization::FastBuild);
+        let reference=g.compile_with(&v,opts.clone()).unwrap();let expected=reference.start().mask();
+        let pool=rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();
+        pool.install(|| (0..12).into_par_iter().for_each(|_| {
+            let c=g.compile_with(&v,opts.clone()).unwrap();
+            assert_eq!(c.start().mask(),expected);
+            let mut s=c.start();s.commit_token(2).unwrap();assert!(s.is_accepting());
+        }));
+    }
 }

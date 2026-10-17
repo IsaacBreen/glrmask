@@ -739,48 +739,48 @@ fn json_schema_uri_format_structured_mode_accepts_basic_uri() {
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_rejects_bracketed_host() {
+fn json_schema_uri_format_approx_mode_annotation_accepts_bracketed_host() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
     let approx_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
+    assert_accepts_bytes(&approx_constraint, br#""http://[not::strict::]/path""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_bracketed_host() {
+fn json_schema_uri_format_default_annotation_accepts_bracketed_host() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let strict_constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&strict_constraint, br#""http://[not::strict::]/path""#);
+    assert_accepts_bytes(&strict_constraint, br#""http://[not::strict::]/path""#);
 }
 
 #[test]
-fn json_schema_uri_format_approx_mode_rejects_non_uri_string() {
+fn json_schema_uri_format_approx_mode_annotation_accepts_non_uri_string() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _approx = EnvVarGuard::set("GLRMASK_JSON_SCHEMA_URI_MODE", "approx");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""not a uri""#);
+    assert_accepts_bytes(&constraint, br#""not a uri""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_missing_scheme() {
+fn json_schema_uri_format_default_annotation_accepts_missing_scheme() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""not a uri""#);
+    assert_accepts_bytes(&constraint, br#""not a uri""#);
 }
 
 #[test]
-fn json_schema_uri_format_default_rejects_relative_path() {
+fn json_schema_uri_format_default_annotation_accepts_relative_path() {
     let _lock = URI_ENV_LOCK.lock().unwrap();
     let _uri_mode = EnvVarGuard::unset("GLRMASK_JSON_SCHEMA_URI_MODE");
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
-    assert_rejects_bytes(&constraint, br#""/not-absolute""#);
+    assert_accepts_bytes(&constraint, br#""/not-absolute""#);
 }
 
 #[test]
@@ -796,39 +796,39 @@ fn json_schema_date_format_accepts_valid_date() {
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_month() {
+fn json_schema_date_format_annotation_accepts_zero_month() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-00-15""#);
+    assert_accepts_bytes(&constraint, br#""2021-00-15""#);
 }
 
 #[test]
-fn json_schema_date_format_rejects_thirteenth_month() {
+fn json_schema_date_format_annotation_accepts_thirteenth_month() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-13-15""#);
+    assert_accepts_bytes(&constraint, br#""2021-13-15""#);
 }
 
 #[test]
-fn json_schema_date_format_rejects_zero_day() {
+fn json_schema_date_format_annotation_accepts_zero_day() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-12-00""#);
+    assert_accepts_bytes(&constraint, br#""2021-12-00""#);
 }
 
 #[test]
-fn json_schema_date_format_rejects_day_thirty_two() {
+fn json_schema_date_format_annotation_accepts_day_thirty_two() {
     let constraint = byte_schema(r#"{"type":"string","format":"date"}"#);
-    assert_rejects_bytes(&constraint, br#""2021-12-32""#);
+    assert_accepts_bytes(&constraint, br#""2021-12-32""#);
 }
 
 #[test]
-fn json_schema_email_format_rejects_empty_string() {
+fn json_schema_email_format_annotation_accepts_empty_string() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    assert_rejects_bytes(&constraint, br#""""#);
+    assert_accepts_bytes(&constraint, br#""""#);
 }
 
 #[test]
-fn json_schema_email_format_rejects_missing_at_sign() {
+fn json_schema_email_format_annotation_accepts_missing_at_sign() {
     let constraint = byte_schema(r#"{"type":"string","format":"email"}"#);
-    assert_rejects_bytes(&constraint, br#""not an email""#);
+    assert_accepts_bytes(&constraint, br#""not an email""#);
 }
 
 #[test]
@@ -1379,7 +1379,7 @@ fn json_schema_const_quote_reencodes_literal() {
 }
 
 #[test]
-fn json_schema_pattern_and_date_format_rejects_invalid_month_token() {
+fn json_schema_pattern_and_date_format_annotation_accepts_invalid_month_token() {
     let constraint = byte_schema(
         r#"{
             "type": "string",
@@ -1389,11 +1389,13 @@ fn json_schema_pattern_and_date_format_rejects_invalid_month_token() {
     );
 
     assert_accepts_bytes(&constraint, br#""2023-09-01""#);
-    assert_rejects_bytes(&constraint, br#""2023-93""#);
+    assert_accepts_bytes(&constraint, br#""2023-93""#);
 
     let mut state = constraint.start();
     state.commit_bytes(br#""2023-"#).unwrap();
-    assert!(state.commit_bytes(b"93").is_err());
+    state.commit_bytes(b"93\"").unwrap();
+    assert!(state.is_accepting());
+    assert_rejects_bytes(&constraint, br#""2023-aa""#);
 }
 
 #[test]
@@ -1436,7 +1438,7 @@ fn commit_bytes_and_repeated_commit_token_agree() {
 fn forced_reports_deterministic_prefix() {
     let constraint = ebnf(&["a", "b", "c"], r#"start ::= "a" "b" ("c")?"#);
     let mut state = constraint.start();
-    assert_eq!(state.forced(), vec![0, 1, 2]);
+    assert_eq!(state.forced_canonical_reference(), vec![0, 1]); // acceptance competes with the optional c
 
     state.commit_token(0).unwrap();
     state.commit_token(1).unwrap();
@@ -2410,3 +2412,9 @@ fn independent_terminal_interchangeability_classes_equal_baseline_artifact() {
     "#;
     let _ = lark_unlocked(&entries, grammar);
 }
+
+#[path = "forcing_semantics.rs"]
+mod forcing_semantics;
+
+#[path = "forcing_semantics_oracle.rs"]
+mod forcing_semantics_oracle;

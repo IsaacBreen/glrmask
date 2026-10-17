@@ -4,8 +4,20 @@
 import ctypes
 import sys
 import types
+import importlib.metadata
+from pathlib import Path
 
 import glrmask
+
+# A release smoke must execute the fresh installed distribution.
+assert Path(glrmask.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+metadata = importlib.metadata.metadata("glrmask")
+assert metadata["Name"] == "glrmask"
+expected_description = (Path(__file__).resolve().parents[1] / "python" / "PYTHON.md").read_text(encoding="utf-8")
+assert metadata.get_payload().strip() == expected_description.strip()
+if len(sys.argv) > 1:
+    assert metadata["Version"] == sys.argv[1]
+
 
 vocab = glrmask.Vocab.from_dict(
     {
@@ -90,14 +102,12 @@ sys.modules["llama_cpp"] = fake_llama_cpp
 
 llama_vocab = glrmask.Vocab.from_llama_cpp(fake_llm)
 assert llama_vocab.llama_cpp_end_token_ids == [3, 5]
-assert llama_vocab.token(2).id == 2  # control token: exact-only, no byte route
-control_constraint = (
-    glrmask.Grammar.from_glrm(
-        'glrm 1; start start; extern token CONTROL; nt start = CONTROL;'
-    )
-    .bind("CONTROL", llama_vocab.token(2))
-    .compile(llama_vocab)
+assert glrmask.Token(2).id == 2  # control token: exact-only, no byte route
+control_grammar = glrmask.Grammar.from_glrm(
+    'glrm 1; start start; extern token CONTROL; nt start = CONTROL;'
 )
+assert control_grammar.bind("CONTROL", glrmask.Token(2)) is None
+control_constraint = control_grammar.compile(llama_vocab)
 assert control_constraint.start().mask(6).tolist() == [False, False, True, False, False, False]
 
 llama_constraint = glrmask.Grammar.from_ebnf(

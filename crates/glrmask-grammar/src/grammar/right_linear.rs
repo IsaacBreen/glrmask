@@ -68,6 +68,7 @@ fn expand_with_known_macros(
                 macros.get(name)?.clone()
             }
         }
+        GrammarExpr::Shortest(_) => return None,
         GrammarExpr::Grouped(inner) => {
             let inner = expand_with_known_macros(inner, terminals, macros)?;
             ExpandedMacro {
@@ -138,7 +139,7 @@ fn expand_with_known_macros(
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -164,7 +165,7 @@ fn nonterminal_dependencies(
                     dependencies.insert(name.clone());
                 }
             }
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                 stack.push(inner);
             }
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -191,7 +192,7 @@ fn nonterminal_dependencies(
             }
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -338,7 +339,7 @@ impl<'a> RightLinearBuilder<'a> {
     fn has_parser_ref(&self, expr: &GrammarExpr) -> bool {
         match expr {
             GrammarExpr::Ref(name) => self.parser_names.contains(name),
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                 self.has_parser_ref(inner)
             }
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -452,7 +453,7 @@ pub fn retain_reachable_rules(grammar: &mut NamedGrammar) {
     fn referenced_names(expr: &GrammarExpr, output: &mut HashSet<String>) {
         match expr {
             GrammarExpr::Ref(name) => { output.insert(name.clone()); }
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => referenced_names(inner, output),
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => referenced_names(inner, output),
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
                 for part in parts { referenced_names(part, output); }
             }
@@ -469,7 +470,7 @@ pub fn retain_reachable_rules(grammar: &mut NamedGrammar) {
             GrammarExpr::ExprNFA(expr_nfa) => {
                 for symbol in &expr_nfa.symbols { referenced_names(symbol, output); }
             }
-            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_)
+            GrammarExpr::Epsilon | GrammarExpr::Literal(_) | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. } | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_) | GrammarExpr::AnyByte => {}
         }

@@ -8483,102 +8483,47 @@ fn add_boundary_special_token_paths(
     fallback_state_map: Option<&ManyToOneIdMap>,
     control_terminals: &BTreeSet<u32>,
 ) -> Result<MappedArtifact<TerminalAutomaton>, String> {
-    if special_token_terminals.is_empty() {
-        return Ok(artifact);
-    }
-
-    let (automaton, mut id_map) = artifact.into_parts();
-    let source_tsid = id_map
-        .tokenizer_states
-        .original_to_internal
-        .get(raw_source_state as usize)
-        .copied()
-        .filter(|&tsid| tsid != u32::MAX)
-        .or_else(|| {
-            fallback_state_map
-                .and_then(|map| map.original_to_internal.get(raw_source_state as usize))
-                .copied()
-                .filter(|&tsid| tsid != u32::MAX)
-        })
-        .ok_or_else(|| {
-            format!(
-                "boundary special-token source state {raw_source_state} has no tokenizer-state coordinate",
-            )
-        })?;
-
-    let mut unique = special_token_terminals.to_vec();
-    unique.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
-    unique.dedup_by_key(|special| (special.token_id, special.terminal_id));
-
-    let max_special_id = unique
-        .iter()
-        .map(|special| special.token_id)
-        .max()
-        .unwrap_or(0);
-    if id_map.vocab_tokens.original_to_internal.len() <= max_special_id as usize {
-        id_map
-            .vocab_tokens
-            .original_to_internal
-            .resize(max_special_id as usize + 1, u32::MAX);
-    }
-    for special in &unique {
-        let slot = &mut id_map.vocab_tokens.original_to_internal[special.token_id as usize];
-        if *slot == u32::MAX {
-            *slot = id_map.vocab_tokens.internal_to_originals.len() as u32;
-            id_map
-                .vocab_tokens
-                .internal_to_originals
-                .push(vec![special.token_id]);
-            id_map
-                .vocab_tokens
-                .representative_original_ids
-                .push(special.token_id);
-        }
-    }
-
-    let mut nwa = match automaton {
-        TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
-        TerminalAutomaton::TokenDeterministicNwa(nwa)
-        | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
+    if special_token_terminals.is_empty() { return Ok(artifact); }
+    let source_map = &artifact.id_map().tokenizer_states;
+    let state_map = if source_map.original_to_internal.get(raw_source_state as usize)
+        .is_some_and(|&id| id != u32::MAX)
+    { source_map } else { fallback_state_map.unwrap_or(source_map) };
+    let source_tsid = state_map.original_to_internal.get(raw_source_state as usize)
+        .copied().filter(|&id| id != u32::MAX)
+        .ok_or_else(|| format!("boundary special-token source state {raw_source_state} has no tokenizer-state coordinate"))?;
+    let exact_map = InternalIdMap {
+        tokenizer_states: state_map.clone(),
+        vocab_tokens: crate::compiler::pipeline::special_token_id_map(special_token_terminals),
+        deferred_vocab_singleton_original_ids: None,
     };
-    let starts = nwa.start_states().to_vec();
-    if starts.is_empty() {
-        return Err("boundary terminal automaton has no start state".into());
-    }
-    let special_final = nwa.add_state();
-    nwa.set_final_weight(special_final, Weight::all());
+    let mut exact = crate::automata::weighted_u32::nwa::NWA::new(
+        exact_map.num_tsids(), exact_map.max_internal_token_id(),
+    );
+    let exact_start = exact.add_state();
+    exact.set_start_states(vec![exact_start]);
+    let exact_final = exact.add_state();
+    exact.set_final_weight(exact_final, Weight::all());
     for &control in control_terminals {
-        nwa.add_transition(
-            special_final,
-            control as i32,
-            special_final,
-            Weight::all(),
-        );
+        exact.add_transition(exact_final, control as i32, exact_final, Weight::all());
     }
-    for special in unique {
-        let internal_token = id_map
-            .internal_token_for_original(special.token_id)
-            .expect("special token was inserted into the boundary token coordinate");
-        let weight = Weight::from_per_tsid_token_sets(std::iter::once((
-            source_tsid,
-            RangeSetBlaze::from_iter([internal_token]),
-        )));
-        for &start in &starts {
-            nwa.add_transition(
-                start,
-                special.terminal_id as i32,
-                special_final,
-                weight.clone(),
-            );
-        }
+    for special in special_token_terminals {
+        let first = exact_map.vocab_tokens.original_to_internal[special.token_id as usize];
+        let last = exact_map.vocab_tokens.original_to_internal[special.token_id_end as usize];
+        exact.add_transition(exact_start, special.terminal_id as i32, exact_final,
+            Weight::from_per_tsid_token_sets([(source_tsid, RangeSetBlaze::from_iter([first..=last]))]));
     }
-
-    // This may overlap a byte-token branch for an ID that intentionally has
-    // both exact-special and byte semantics, so retain the general NWA form.
-    Ok(MappedArtifact::new(
-        TerminalAutomaton::EpsilonNwa(nwa),
-        id_map,
-    ))
+    let paired = MappedArtifact::from((artifact,
+        MappedArtifact::new(TerminalAutomaton::EpsilonNwa(exact), exact_map)));
+    let ((ordinary, exact), id_map) = paired.into_parts();
+    let into_nwa = |automaton| match automaton {
+        TerminalAutomaton::Dwa(dwa) => dwa.to_nwa(),
+        TerminalAutomaton::TokenDeterministicNwa(nwa) | TerminalAutomaton::EpsilonNwa(nwa) => nwa,
+    };
+    let mut union = into_nwa(ordinary);
+    if union.start_states().is_empty() { return Err("boundary terminal automaton has no start state".into()); }
+    let exact_body = union.append_with_body(&into_nwa(exact));
+    union.start_states_mut().extend(exact_body.start_states);
+    Ok(MappedArtifact::new(TerminalAutomaton::EpsilonNwa(union), id_map))
 }
 
 fn boundary_discovery_good_signature(
@@ -17511,9 +17456,9 @@ fn build_boundary_repair(
         })
         .collect::<Vec<_>>();
     boundary_special_token_terminals
-        .sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
+        .sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     boundary_special_token_terminals
-        .dedup_by_key(|special| (special.token_id, special.terminal_id));
+        .dedup_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     if !active_terminals.iter().any(|&active| active) {
         if let Some(selected_boundary_tokens) = selected_boundary_tokens {
             let _ = selected_boundary_tokens.set(Ok(None));
@@ -18547,23 +18492,11 @@ fn merged_original_token_ids(
     vocab: &Vocab,
     special_token_terminals: &[SpecialTokenTerminal],
 ) -> Vec<u32> {
-    let extras = special_token_terminals
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<BTreeSet<_>>();
-    let mut extras = extras.into_iter().peekable();
-    let mut merged = Vec::with_capacity(vocab.entries_map().len() + extras.size_hint().0);
-    for &token in vocab.entries_map().keys() {
-        while extras.peek().is_some_and(|extra| *extra < token) {
-            merged.push(extras.next().unwrap());
-        }
-        if extras.peek().is_some_and(|extra| *extra == token) {
-            extras.next();
-        }
-        merged.push(token);
-    }
-    merged.extend(extras);
-    merged
+    // The output is the existing dense original-token coordinate. Normalize
+    // interval inputs first, rather than inserting their IDs into a tree.
+    let ordinary = RangeSetBlaze::from_iter(vocab.entries_map().keys().copied());
+    let exact = RangeSetBlaze::from_iter(special_token_terminals.iter().map(|special| special.token_ids()));
+    (ordinary | exact).into_iter().collect()
 }
 
 fn merged_special_token_terminals(
@@ -18611,13 +18544,13 @@ fn merged_special_token_terminals(
                         .any(|row| row.get(&terminal_id).is_some_and(consumes_terminal))
                         .then_some(SpecialTokenTerminal {
                             terminal_id,
-                            token_id: special.token_id,
+                            token_id: special.token_id, token_id_end: special.token_id_end,
                         })
                 }),
         );
     }
-    merged.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
-    merged.dedup_by_key(|special| (special.token_id, special.terminal_id));
+    merged.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
+    merged.dedup_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     merged
 }
 
@@ -19175,6 +19108,7 @@ fn build_composed_constraint_unfinalized(
     let token_bytes_ms = phase_started_at.elapsed().as_secs_f64() * 1000.0;
     let constraint = Constraint {
             end_tokens: std::sync::Arc::from([]),
+            marker_queries: None,
         runtime_backend: ConstraintRuntimeBackend::Static,
         static_dynamic_overlay: None,
         boundary_trigger: crate::runtime::BoundaryTrigger::None,
@@ -19406,6 +19340,13 @@ fn finalize_owned_composed_constraint_runtime_single_thread(
     structural_terminal_aliases: usize,
     components_have_no_runtime_product: bool,
 ) -> f64 {
+    // Caller-owned Rayon pools already define the application's CPU budget.
+    // Independent links must not queue behind our process-wide serial helper.
+    if super::pipeline::caller_pool_is_active() {
+        return finalize_owned_composed_constraint_runtime(
+            constraint, structural_terminal_aliases, components_have_no_runtime_product,
+        );
+    }
     static FINALIZE_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
     let pool = FINALIZE_POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
@@ -19512,12 +19453,12 @@ fn merged_special_token_terminals_recursive_fast(
                 })
                 .map(|special| SpecialTokenTerminal {
                     terminal_id: offset + special.terminal_id,
-                    token_id: special.token_id,
+                    token_id: special.token_id, token_id_end: special.token_id_end,
                 }),
         );
     }
-    merged.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
-    merged.dedup_by_key(|special| (special.token_id, special.terminal_id));
+    merged.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
+    merged.dedup_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
     merged
 }
 
@@ -19652,14 +19593,10 @@ fn compose_dynamic_recursive_shared_fast(
         children,
         &terminal_offsets,
     );
-    let live_special_token_ids = special_token_terminals
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<BTreeSet<_>>();
-    let embedded_end_token_ids = component_end_token_ids
-        .intersection(&live_special_token_ids)
-        .copied()
-        .collect::<Vec<_>>();
+    let live_special_token_ids = special_token_terminals.iter()
+        .map(|special| special.token_ids()).collect::<RangeSetBlaze<u32>>();
+    let embedded_end_token_ids = component_end_token_ids.iter().copied()
+        .filter(|&id| live_special_token_ids.contains(id)).collect::<Vec<_>>();
     let metadata_ms = metadata_started_at.elapsed().as_secs_f64() * 1000.0;
 
     let shell_started_at = Instant::now();
@@ -19862,7 +19799,7 @@ fn validate_compiled_subgrammar_placeholders(
                 .is_some_and(|weight| !weight.is_empty());
             let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
                 special.terminal_id == placeholder_terminal
-                    && vocab.entries_map().contains_key(&special.token_id)
+                    && vocab.intersects_exact_token_range(special.token_id, special.token_id_end)
             });
             if has_byte_token_matches || has_exact_token_match {
                 return Err(format!(
@@ -19874,7 +19811,7 @@ fn validate_compiled_subgrammar_placeholders(
                 .iter()
                 .filter(|special| special.terminal_id == placeholder_terminal)
             {
-                if component_end_token_ids.contains(&special.token_id) {
+                if component_end_token_ids.range(special.token_ids()).next().is_some() {
                     return Err(format!(
                         "subgrammar placeholder terminal {placeholder_terminal} for child {child_index} uses token ID {}, which is also configured as a grammar-level end token; every replaced placeholder must use a unique sentinel token ID",
                         special.token_id,
@@ -20197,26 +20134,11 @@ pub(crate) fn compose_constraints(
         );
     }
 
-    let live_special_token_ids = special_token_terminals
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<BTreeSet<_>>();
-    let embedded_end_token_ids = component_end_token_ids
-        .intersection(&live_special_token_ids)
-        .copied()
-        .collect::<Vec<_>>();
-    let original_token_ids = vocab
-        .entries_map()
-        .keys()
-        .copied()
-        .chain(
-            special_token_terminals
-                .iter()
-                .map(|special| special.token_id),
-        )
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let live_special_token_ids = special_token_terminals.iter()
+        .map(|special| special.token_ids()).collect::<RangeSetBlaze<u32>>();
+    let embedded_end_token_ids = component_end_token_ids.iter().copied()
+        .filter(|&id| live_special_token_ids.contains(id)).collect::<Vec<_>>();
+    let original_token_ids = merged_original_token_ids(vocab, &special_token_terminals);
     let terminal_display_names = merged_terminal_display_names(parent, children);
     let merged_ignores = merged_ignore_terminals(
         parent,
@@ -21475,14 +21397,10 @@ fn compose_constraints_owned_parent_legacy_impl(
             per_component,
         );
     }
-    let live_special_token_ids = special_token_terminals
-        .iter()
-        .map(|special| special.token_id)
-        .collect::<BTreeSet<_>>();
-    let embedded_end_token_ids = component_end_token_ids
-        .intersection(&live_special_token_ids)
-        .copied()
-        .collect::<Vec<_>>();
+    let live_special_token_ids = special_token_terminals.iter()
+        .map(|special| special.token_ids()).collect::<RangeSetBlaze<u32>>();
+    let embedded_end_token_ids = component_end_token_ids.iter().copied()
+        .filter(|&id| live_special_token_ids.contains(id)).collect::<Vec<_>>();
     let specials_ms = specials_started_at.elapsed().as_secs_f64() * 1000.0;
     let token_ids_started_at = Instant::now();
     let original_token_ids = merged_original_token_ids(vocab, &special_token_terminals);
@@ -23669,7 +23587,7 @@ mod tests {
 
         let inline_parent = r#"
             start document;
-            extern grammar SUB;
+            extern SUB;
             nt document ::= "X" SUB "!";
         "#;
         let inline_children = [("SUB", "start child; nt child ::= \"a\" \"b\";")];
@@ -23943,13 +23861,13 @@ mod tests {
         let named = crate::grammar::glrm::from_glrm_with_inline_subgrammars(
             r#"
                 start document;
-                extern grammar OUTER;
+                extern OUTER;
                 nt document ::= "<" OUTER ">";
             "#,
             &[
                 (
                     "OUTER",
-                    "start outer; extern grammar INNER; nt outer ::= \"a\" INNER;",
+                    "start outer; extern INNER; nt outer ::= \"a\" INNER;",
                 ),
                 ("OUTER::INNER", "start inner; nt inner ::= \"b\";"),
             ],
@@ -25563,7 +25481,7 @@ table: &child_table,
                 start document;
                 ignore WS;
                 t WS ::= " "+;
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[("SUB", "start child; nt child ::= \"a\";")],
@@ -25753,7 +25671,7 @@ table: &child_table,
                 t PARENT_WS ::= "ab";
                 t X ::= "X";
                 t BANG ::= "!";
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= X SUB BANG;
             "#,
             &[(
@@ -25911,7 +25829,7 @@ table: &child_table,
         let source_oracle = compile_inline_source_oracle(
             r#"
                 start document;
-                extern grammar SUB;
+                extern SUB;
                 nt document ::= "X" SUB "!";
             "#,
             &[(
@@ -27446,7 +27364,7 @@ table: &child_table,
             assert_eq!(actual.mask(), expected.mask());
             assert!(token_allowed(&actual.mask(), END_TOKEN));
             assert!(!token_allowed(&actual.mask(), PLACEHOLDER_TOKEN));
-            assert_eq!(actual.forced(), vec![END_TOKEN]);
+            assert_eq!(actual.forced_canonical_reference(), vec![END_TOKEN]);
             actual.commit_token(END_TOKEN).unwrap();
             expected.commit_token(END_TOKEN).unwrap();
             assert!(actual.is_accepting());
@@ -27457,7 +27375,7 @@ table: &child_table,
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
         let mut loaded_state = loaded.start();
         loaded_state.commit_token(0).unwrap();
-        assert_eq!(loaded_state.forced(), vec![END_TOKEN]);
+        assert_eq!(loaded_state.forced_canonical_reference(), vec![END_TOKEN]);
         loaded_state.commit_token(END_TOKEN).unwrap();
         assert!(loaded_state.is_accepting());
     }
@@ -27512,7 +27430,7 @@ table: &child_table,
                 expected.commit_token(token).unwrap();
             }
             assert_eq!(actual.mask(), expected.mask());
-            assert_eq!(actual.forced(), vec![SPECIAL_TOKEN]);
+            assert_eq!(actual.forced_canonical_reference(), vec![SPECIAL_TOKEN]);
             actual.commit_token(SPECIAL_TOKEN).unwrap();
             expected.commit_token(SPECIAL_TOKEN).unwrap();
             assert!(actual.is_accepting());

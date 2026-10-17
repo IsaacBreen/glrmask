@@ -249,3 +249,20 @@ Keep dependency caches, unrelated owners, frozen production binaries and
 canonical source untouched. No broad `cargo clean`, target deletion, or blind
 repeated full rebuild. Recovery, setup, warm-edit timing and production
 qualification must be reported separately.
+
+### Validate artifact identity across baseline and candidate worktrees
+
+Prefer distinct target directories for baseline and candidate sources, and
+freeze the completed baseline executables before changing a shared build graph.
+An October 2026 qualification exposed a stale local grammar dependency after
+alternating two worktrees through the same target directory. Cargo rebuilt the
+root but retained the baseline parser dependency; an explicit new-syntax smoke
+test failed even though the candidate source and development build were correct.
+
+A successful Cargo exit is not a substitute for checking the resulting artifact.
+Run a small behavior test that distinguishes the candidate, verify its installed
+module location, and record the hashes of the actual libraries and executables
+used by each measurement. If stale local inputs are demonstrated, invalidate
+the affected dependency closure together rather than replacing just one library
+beneath an otherwise old root. Preserve incremental caches and frozen baselines;
+do not apply a broad clean or change production profiles as a workaround.

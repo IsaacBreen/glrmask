@@ -96,6 +96,17 @@ pub enum Terminal {
         id: TerminalID,
         token_id: u32,
     },
+    /// One exact model-token event selected from an inclusive interval.
+    SpecialTokenRange {
+        id: TerminalID,
+        start: u32,
+        end: u32,
+    },
+    /// Non-lexical compiler probe for passive marker admission. Never committed.
+    MarkerProbe {
+        id: TerminalID,
+        marker_id: u32,
+    },
 }
 
 impl Rule {
@@ -113,7 +124,7 @@ impl Terminal {
                 crate::automata::lexer::regex::parse_regex(pattern, *utf8).is_nullable()
             }
             Self::Expr { expr, .. } => expr.is_nullable(),
-            Self::SpecialToken { .. } => false,
+            Self::SpecialToken { .. } | Self::SpecialTokenRange { .. } | Self::MarkerProbe { .. } => false,
         }
     }
 
@@ -122,7 +133,7 @@ impl Terminal {
             Terminal::Literal { id, .. } => *id,
             Terminal::Pattern { id, .. } => *id,
             Terminal::Expr { id, .. } => *id,
-            Terminal::SpecialToken { id, .. } => *id,
+            Terminal::SpecialToken { id, .. } | Terminal::SpecialTokenRange { id, .. } | Terminal::MarkerProbe { id, .. } => *id,
         }
     }
 
@@ -131,7 +142,9 @@ impl Terminal {
             Terminal::Literal { bytes, .. } => String::from_utf8_lossy(bytes).into_owned(),
             Terminal::Pattern { pattern, .. } => pattern.clone(),
             Terminal::Expr { expr, .. } => format!("{:?}", expr),
+            Terminal::MarkerProbe { marker_id, .. } => format!("@mark({marker_id})"),
             Terminal::SpecialToken { token_id, .. } => format!("@token({token_id})"),
+            Terminal::SpecialTokenRange { start, end, .. } => format!("@tokens({start}..={end})"),
         }
     }
 }
@@ -238,6 +251,10 @@ impl GrammarDef {
         self.rules
             .iter()
             .flat_map(|rule| rule.nonterminal_ids())
+            // An entry with no productions still owns its coordinate. Without
+            // this, augmenting an empty grammar reuses the start ID and creates
+            // the spurious cycle START -> START instead of an empty language.
+            .chain(std::iter::once(self.start))
             .max()
             .map(|id| id + 1)
             .unwrap_or(0)
@@ -377,5 +394,18 @@ mod worklist_nullability_tests {
             });
             assert_eq!(grammar.start_is_nullable(), reference(&grammar));
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_entry_tests {
+    use super::*;
+    #[test]
+    fn productionless_entry_keeps_its_nonterminal_coordinate() {
+        let mut grammar=GrammarDef::default();
+        assert_eq!(grammar.num_nonterminals(),1);
+        grammar.start=7;assert_eq!(grammar.num_nonterminals(),8);
+        grammar.rules.push(Rule{lhs:1,rhs:vec![Symbol::Terminal(0)]});
+        assert_eq!(grammar.num_nonterminals(),8);
     }
 }

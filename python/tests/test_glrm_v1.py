@@ -1,3 +1,11 @@
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import pytest
 import glrmask
 from glrmask._glrmask import DynamicConstraint as LegacyDynamicConstraint
@@ -24,8 +32,7 @@ def _grammar():
 def _final_constraint():
     vocab = _vocab()
     return (
-        glrmask.Grammar.from_glrm(_grammar())
-        .bind("END", vocab.tokens([77, 78]))
+        _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([77, 78]))
         .compile(vocab)
     )
 
@@ -47,12 +54,32 @@ def test_named_external_terminal_binding(factory):
     assert state.is_accepting()
 
 
-@pytest.mark.parametrize("bad_bindings", [{}, {"END": []}, {"OTHER": 77}, {"END": [-1]}])
+@pytest.mark.parametrize("bad_bindings", [{}, {"OTHER": 77}, {"END": [-1]}])
 def test_named_external_terminal_binding_errors(bad_bindings):
     vocab = _vocab()
     grammar = glrmask.Grammar.from_glrm(_grammar())
     with pytest.raises((ValueError, RuntimeError, OverflowError)):
         for name, value in bad_bindings.items():
             ids = value if isinstance(value, list) else [value]
-            grammar = grammar.bind(name, vocab.tokens(ids))
+            grammar = _bound_snapshot(grammar, name, vocab.tokens(ids))
         grammar.compile(vocab)
+
+
+def test_empty_event_binding_recognizes_no_output():
+    vocab = _vocab()
+    for mode in (glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
+                 glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME):
+        grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([]))
+        constraint = grammar.compile(vocab, optimization=mode)
+        state = constraint.start()
+        assert not state.is_accepting()
+        # The preceding literal can be a locally viable parser prefix. Empty
+        # event sets promise no successful event/complete match, not a new global
+        # dead-production elimination policy. Check the actual event boundary.
+        prefix_mask = state.mask(79)
+        assert not prefix_mask[1:].any()
+        if prefix_mask[0]:
+            state.commit_token(0)
+        assert not state.is_accepting()
+        assert not state.mask(79).any()
+        assert not state.forced_tokens()

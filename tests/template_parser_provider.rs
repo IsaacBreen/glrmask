@@ -174,7 +174,7 @@ fn invalid_lexer_or_nonidentity_ignore_never_changes_the_requested_language() {
 #[test]
 fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
-    let grammar=Grammar::from_glrm(r#"start root; nt root ::= "a" "b"?;"#);
+    let grammar=Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#);
     let ordinary=grammar.compile(&v).unwrap();
     let ordinary_bytes=ordinary.save();
     let explicit=grammar.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -225,7 +225,7 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
         (3,b"\"".to_vec()),(4,b"\"ab\"".to_vec()),(5,b"x".to_vec())]);
     let schema=r#"{"enum":["a","ab"]}"#;
     let sources=[
-        (Grammar::from_glrm(r#"start root; nt root ::= "a" "b"?;"#),"ab"),
+        (Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#),"ab"),
         (Grammar::from_ebnf(r#"start ::= "a" "b"?"#),"ab"),
         (Grammar::from_lark(r#"start: "a" "b"?"#),"ab"),
         (Grammar::from_json_schema(schema),"\"ab\""),
@@ -252,15 +252,15 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
 #[test]
 fn source_and_precompiled_composition_use_native_defaults() {
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"xa".to_vec()),(2,b"x".to_vec())]);
-    let child=Grammar::from_glrm(r#"start root; nt root ::= "a";"#);
+    let child=Grammar::from_glrm(r#"start root; nt root = "a";"#);
     let parent=Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#);
-    let bound=parent.clone().bind("child",&child).unwrap();
+    let bound=parent.clone().bind_snapshot("child",&child).unwrap();
     let template=bound.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
     let mut state=template.start();state.commit_bytes(b"xa").unwrap();assert!(state.is_accepting());
     let ordinary=bound.compile(&v).unwrap();
     let child=child.compile(&v).unwrap();let child_bytes=child.save();
-    let module=parent.compile_unlinked(&v).unwrap().bind("child",&child).unwrap();
+    let module=parent.prepare(&v).unwrap().bind_snapshot("child",&child).unwrap();
     let explicit=module.link_with(BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let default=module.link().unwrap();
     for compiled in [&template,&ordinary,&explicit,&default] {
@@ -272,17 +272,17 @@ fn source_and_precompiled_composition_use_native_defaults() {
 #[test]
 fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
     let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"xa".to_vec()), (2, b"x".to_vec())]);
-    let child = Grammar::from_glrm(r#"start root; nt root ::= "a";"#)
+    let child = Grammar::from_glrm(r#"start root; nt root = "a";"#)
         .compile_with(&v, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa))
         .unwrap();
     let module = Grammar::from_glrm(
         r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#,
-    ).compile_unlinked(&v).unwrap();
+    ).prepare(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();
         for optimization in [glrmask::Optimization::Auto, glrmask::Optimization::FastRuntime, glrmask::Optimization::Balanced] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                module.bind("child", &child).and_then(|bound| bound.link_with(
+                module.bind_snapshot("child", &child).and_then(|bound| bound.link_with(
                     BuildOptions::default().optimization(optimization)))
             }));
             assert!(outcome.is_ok(), "native composition must not touch an absent LR table");
@@ -298,7 +298,7 @@ fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
 fn explicit_lr_compile_and_link_requests_panic_loudly() {
     let vocab=Vocab::new(vec![(0,b"a".to_vec())]);
     let grammar=Grammar::from_ebnf(r#"start ::= "a""#);
-    let module=grammar.compile_unlinked(&vocab).unwrap();
+    let module=grammar.prepare(&vocab).unwrap();
     for link in [false,true] {
         let rejected=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let options=BuildOptions::default().parser_backend(ParserBackend::LrTable);

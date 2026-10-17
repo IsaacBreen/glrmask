@@ -17,7 +17,7 @@ use crate::runtime::{
 
 // Version 4's r=2 child algebra could lose a validated nullable empty word.
 // Its persisted exclusion certificates must widen rather than be reused.
-const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 5;
+const BOUNDARY_CANDIDATE_ALGORITHM_VERSION: u16 = 6;
 const DEFAULT_MAX_FRONTIER_PAIRS: usize = 250_000;
 // Frontier steps manipulate grammar-position sets rather than raw bytes, so
 // one "step" is materially more expensive than a tokenizer transition. Keep
@@ -606,12 +606,13 @@ fn fingerprint_with_component_queries(
         let mut semantic_specials = constraint
             .special_token_terminals
             .iter()
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
             .collect::<Vec<_>>();
         semantic_specials.sort_unstable();
-        for (terminal, token) in semantic_specials {
+        for (terminal, token, end) in semantic_specials {
             semantics.update(&terminal.to_le_bytes());
             semantics.update(&token.to_le_bytes());
+            semantics.update(&end.to_le_bytes());
         }
 
         let mut interface = blake3::Hasher::new();
@@ -637,14 +638,15 @@ fn fingerprint_with_component_queries(
             .iter()
             .filter(|special| {
                 constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                    || constraint.token_bytes_for_id(special.token_id).is_none()
+                    || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
             })
-            .map(|special| (special.terminal_id, special.token_id))
+            .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
             .collect::<Vec<_>>();
         specials.sort_unstable();
-        for (terminal, token) in specials {
+        for (terminal, token, end) in specials {
             interface.update(&terminal.to_le_bytes());
             interface.update(&token.to_le_bytes());
+            interface.update(&end.to_le_bytes());
         }
 
         return Ok(BoundaryCandidateFingerprint {
@@ -670,7 +672,7 @@ fn outward_terminals(constraint: &Constraint) -> BTreeSet<TerminalID> {
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
                 .map(|special| special.terminal_id),
         )
@@ -1206,14 +1208,15 @@ pub(crate) fn persisted_boundary_candidate_ids(
                 .iter()
                 .filter(|special| {
                     constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
-                        || constraint.token_bytes_for_id(special.token_id).is_none()
+                        || (special.token_id != special.token_id_end || constraint.token_bytes_for_id(special.token_id).is_none())
                 })
-                .map(|special| (special.terminal_id, special.token_id))
+                .map(|special| (special.terminal_id, special.token_id, special.token_id_end))
                 .collect::<Vec<_>>();
             specials.sort_unstable();
-            for (terminal, token) in specials {
+            for (terminal, token, end) in specials {
                 interface.update(&terminal.to_le_bytes());
                 interface.update(&token.to_le_bytes());
+            interface.update(&end.to_le_bytes());
             }
         }
         *interface.finalize().as_bytes() == fingerprint.public_interface
@@ -1267,8 +1270,8 @@ mod tests {
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#)
             .compile_with(&vocabulary, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc = "a" child "b";"#)
-            .compile_unlinked(&vocabulary).unwrap();
-        let linked = parent.bind("child", &child).unwrap().link_with(options()).unwrap();
+            .prepare(&vocabulary).unwrap();
+        let linked = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
         let components = &linked.static_dynamic_overlay.as_ref().unwrap().segmented_parser_components;
         let expected = fingerprint_for_constraint(&linked, &vocabulary).unwrap();
         let queries = components.iter().map(|component|
@@ -1739,7 +1742,7 @@ mod preparation_tests {
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
             .compile_with(&vocab, options.clone()).unwrap();
         let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
-            .compile_unlinked(&vocab).unwrap().bind("leaf", &leaf).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
             .link_with(options.clone()).unwrap();
         materialize_deferred_composition_boundary_summary(&middle);
         let BoundaryCandidateSummary::Known { mut fingerprint, precision, .. } =
@@ -1755,7 +1758,7 @@ mod preparation_tests {
         assert!(persisted_boundary_candidate_ids(&loaded, &vocab).unwrap().is_none(),
             "pre-fix nullable candidate proof must widen before it can exclude []!");
         let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
-            .compile_unlinked(&vocab).unwrap().bind("middle", &loaded).unwrap()
+            .prepare(&vocab).unwrap().bind_snapshot("middle", &loaded).unwrap()
             .link_with(options).unwrap();
         let mut state = root.start(); state.commit_bytes(b"X").unwrap();
         assert_ne!(state.mask()[0] & (1 << 2), 0);

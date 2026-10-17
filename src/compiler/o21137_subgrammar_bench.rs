@@ -200,9 +200,13 @@ fn clone_terminal_with_id(terminal: &Terminal, id: u32) -> Terminal {
             id,
             expr: expr.clone(),
         },
+        Terminal::MarkerProbe { marker_id, .. } => Terminal::MarkerProbe { id, marker_id: *marker_id },
         Terminal::SpecialToken { token_id, .. } => Terminal::SpecialToken {
             id,
             token_id: *token_id,
+        },
+        Terminal::SpecialTokenRange { start, end, .. } => Terminal::SpecialTokenRange {
+            id, start: *start, end: *end,
         },
     }
 }
@@ -497,7 +501,7 @@ fn selected_terminals(grammar: &GrammarDef) -> Vec<u32> {
         .iter()
         .enumerate()
         .filter_map(|(terminal, definition)| {
-            if matches!(definition, Terminal::SpecialToken { .. }) {
+            if matches!(definition, Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. }) {
                 return None;
             }
             let name = grammar

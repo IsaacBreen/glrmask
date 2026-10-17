@@ -122,3 +122,43 @@ coverage loss from a blanket recursive guard was corrected after the facade
 suite disproved it; the explicit-type proof repairs that regression. The first
 implementation freeze `4ee093ad0` is superseded and must not be benchmarked as
 the qualified final source. Raw differential failures remain retained.
+
+## Broader integration follow-up (same date)
+
+The frozen benchmark source remains `3d65c7a7acb2864d2aac011c55b7ce0f307a8d5f`.
+Full Python qualification on that source passes all 126 tests. All 14 Rust
+library suites complete: 2,429 pass, four old format expectations fail, and
+58 are ignored. All 42 integration targets complete: 35 targets pass and
+seven initially fail; the workspace doctests pass. The initial unbounded
+`cargo test --workspace` attempt exhausted local disk while building examples;
+subsequent explicit library/test batches completed without changing the source.
+
+The initial integration failures separate into stale format/unsupported-language
+expectations, an artifact byte-equality failure that passes an isolated retry,
+two executables damaged during disk exhaustion that pass after regeneration,
+and a GLRM-only default-Rayon-stack loader overflow. The loader overflow also
+occurs in a frozen-source isolated run; the original source baseline passes
+one isolated run. This does not establish the overflow as preexisting. It
+remains a separate unresolved integration concern; no runtime fix or stack-size
+workaround is hidden in this policy change.
+
+A separate integration candidate applies the policy to current upstream
+`00969ffb958ad42dbff5eb7be3bc37e6e7fe5848`, preserving its APIs, versions,
+introductions and existing compiler compatibility fix. Test fixtures use
+explicit patterns where they require regex-driven virtual lexer coverage;
+format-only tests expect annotations while still checking explicit patterns.
+The unsupported object-intersection performance test is retained as ignored,
+with a separate diagnostic regression; a refusal is not a performance pass.
+On this candidate, the full root suite passes 1,213 tests (51 ignored), general
+integration passes 124, policy regressions pass ten, virtual composition passes
+seven, and ordered-choice diagnostics pass three (one performance test ignored).
+The isolated default-stack loader stress also passes on this candidate; its
+contrasting frozen-source failures remain recorded without a claimed cause.
+The canonical guide generator and whitespace checks pass. These candidate
+results do not retroactively make the frozen source's raw workspace run green.
+
+PR #13's frozen-head wheel CI fails because its old source baseline uses the
+now-deprecated `AtomicU32::fetch_update` under `deny(warnings)`. Current upstream
+already has a narrow compatibility allowance, preserved by the candidate.
+No runtime merge, release, website publication or benchmark revision change
+was performed for this integration follow-up.

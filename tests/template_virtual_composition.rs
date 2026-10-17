@@ -1,6 +1,6 @@
 use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vocab};
 
-const URI: &str = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+const URI: &str = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
 
 fn isolated(name: &str) -> bool {
     const MARKER: &str = "GLRMASK_VIRTUAL_COMPOSITION_ISOLATED";
@@ -74,12 +74,12 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
         (307, b"\"q".to_vec()), (315, b"x:".to_vec()), (317, b"aaa".to_vec()),
         (400, b"p\"x:a\"q".to_vec()), (500, b"q\"".to_vec())]);
     let vocab = Vocab::new(tokens.clone());
-    let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#)
+    let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#)
         .compile_with(&vocab, options(Optimization::FastRuntime)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true, "test must exercise a virtual lexer");
     let child = Constraint::load(child.save()).unwrap();
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "p" child "q";"#)
-        .compile_unlinked(&vocab).unwrap().bind("child", &child).unwrap();
+        .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     let reference = parent.link_with(options(Optimization::Balanced)).unwrap();
     let candidate = parent.link_with(options(Optimization::FastRuntime)).unwrap();
     let mut prefixes = vec![vec![], b"p".to_vec(), b"p\"".to_vec(), b"p\"x:".to_vec(), b"p\"x:a".to_vec(), b"p\"x:a\"q".to_vec()];
@@ -106,11 +106,11 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     let leaf = Grammar::from_json_schema(URI).compile_with(&vocab, options(Optimization::FastRuntime)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&leaf)["virtual_lexer"], true);
     let middle = Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#)
-        .compile_unlinked(&vocab).unwrap().bind("leaf", &leaf).unwrap()
+        .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
         .link_with(options(Optimization::FastRuntime)).unwrap();
     let middle = Constraint::load(middle.save()).unwrap();
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle "." middle "!";"#)
-        .compile_unlinked(&vocab).unwrap().bind("middle", &middle).unwrap();
+        .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap();
     let reference = parent.link_with(options(Optimization::Balanced).end_tokens([1000])).unwrap();
     let candidate = parent.link_with(options(Optimization::FastRuntime).end_tokens([1000])).unwrap();
     let word = b"xp\"x:a\"q.p\"x:b\"q!";
@@ -137,7 +137,7 @@ fn virtual_parent_observation_is_not_its_component_mask_quotient() {
     tokens.extend([(300, b"\"x:a\"!".to_vec()), (301, b"a\"!".to_vec()), (302, b"aaa".to_vec())]);
     let vocab = Vocab::new(tokens.clone());
     let leaf = Grammar::from_ebnf(r#"start ::= "!""#).compile_with(&vocab, options(Optimization::FastRuntime)).unwrap();
-    let parent = Grammar::from_glrm(&source).compile_unlinked(&vocab).unwrap().bind("SUFFIX", &leaf).unwrap();
+    let parent = Grammar::glrm(&source).prepare(&vocab).unwrap().bind_snapshot("SUFFIX", &leaf).unwrap();
     let reference = parent.link_with(options(Optimization::Balanced)).unwrap();
     let candidate = parent.link_with(options(Optimization::FastRuntime)).unwrap();
     let report = glrmask::__private::parser_backend_report(&candidate);
@@ -153,7 +153,7 @@ fn virtual_parent_observation_is_not_its_component_mask_quotient() {
     let saved = candidate.save();
     let middle = Constraint::load(&saved).unwrap();
     let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "p" middle "q";"#)
-        .compile_unlinked(&vocab).unwrap().bind("middle", &middle).unwrap();
+        .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap();
     let outer_reference = outer.link_with(options(Optimization::Balanced)).unwrap();
     let outer_candidate = outer.link_with(options(Optimization::FastRuntime)).unwrap();
     let mut outer_prefixes = vec![vec![], b"p".to_vec()];
@@ -172,7 +172,7 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
     let vocab = Vocab::new(tokens.clone());
     let leaf = Grammar::from_json_schema(URI).compile_with(&vocab, options(Optimization::FastRuntime)).unwrap();
     let candidate = Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#)
-        .compile_unlinked(&vocab).unwrap().bind("leaf", &leaf).unwrap()
+        .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
         .link_with(options(Optimization::FastRuntime)).unwrap();
     let report = glrmask::__private::parser_backend_report(&candidate);
     let offsets = report["finite_observation_offsets"].as_array().unwrap().iter()
@@ -183,7 +183,7 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
     let prefixes = vec![vec![], b"p".to_vec(), b"p\"".to_vec(), b"p\"x:".to_vec(),
         b"p\"x:a".to_vec(), b"p\"x:a\"".to_vec(), b"p\"x:a\"q".to_vec()];
     compare(&candidate, &loaded, &tokens, &prefixes);
-    assert_eq!(u16::from_le_bytes(saved[8..10].try_into().unwrap()), 37);
+    assert_eq!(u16::from_le_bytes(saved[8..10].try_into().unwrap()), 41);
     assert_eq!(&saved[18..22], b"S30\0");
     let sizes = (0..11).map(|index| u64::from_le_bytes(saved[22 + index * 8..30 + index * 8].try_into().unwrap()) as usize).collect::<Vec<_>>();
     let start = 18 + 4 + 11 * 8 + sizes[..4].iter().sum::<usize>();
@@ -247,15 +247,15 @@ fn virtual_repeat_observations_preserve_literal_lower_and_upper_bounds() {
     let vocab = Vocab::new(tokens.clone());
     for (regex, minimum, maximum) in [("a{2,5000}", 2usize, 5000usize),
         ("a{4096,8192}", 4096, 8192)] {
-        let source = format!("start root; t A ::= /{regex}/; nt root ::= A;");
+        let source = format!("start root; t A = /{regex}/; nt root = A;");
         // FastRuntime may materialize this simple finite repeat. Preserve a
         // genuinely virtual child, then request static boundary compilation;
         // its explicitly dynamic local mask engine remains independent.
-        let child = Grammar::from_glrm(&source).compile_with(&vocab, options(Optimization::Balanced)).unwrap();
+        let child = Grammar::glrm(&source).compile_with(&vocab, options(Optimization::Balanced)).unwrap();
         assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true,
             "the fixture must exercise a virtual repeat: {regex}");
         let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
-            .compile_unlinked(&vocab).unwrap().bind("C", &child).unwrap();
+            .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
         let reference = parent.link_with(options(Optimization::Balanced)).unwrap();
         let candidate = parent.link_with(options(Optimization::FastRuntime)).unwrap();
         let mut prefixes = vec![vec![]];
@@ -292,11 +292,11 @@ fn unsupported_general_virtual_projection_fails_without_changing_dynamic_languag
     // dynamic B path or reuse an unrelated component-mask projection.
     let vocab = Vocab::new(vec![(0, b"p".to_vec()), (1, b"a".to_vec()),
         (2, b"aaa".to_vec()), (3, b"q".to_vec()), (4, b"aq".to_vec())]);
-    let child = Grammar::from_glrm("start root; t A ::= /(a|aa){1,5000}/; nt root ::= A;")
+    let child = Grammar::from_glrm("start root; t A = /(a|aa){1,5000}/; nt root = A;")
         .compile_with(&vocab, options(Optimization::Balanced)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true);
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
-        .compile_unlinked(&vocab).unwrap().bind("C", &child).unwrap();
+        .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
     let error = parent.link_with(options(Optimization::FastRuntime)).unwrap_err().to_string();
     assert!(error.contains("no supported finite boundary observation"), "{error}");
     let dynamic = parent.link_with(options(Optimization::Balanced)).unwrap();
@@ -344,14 +344,14 @@ mod product_review {
         // Lexical epsilon is lifted to a parser alternative before execution.
         // Preserve that source nullability in the reusable child's embedding;
         // requiring A? here would conceal a lost source-language alternative.
-        let source = "start root; t A ::= /(ab|c){0,5000}/ & /(a|bc){0,4000}/; nt root ::= A;";
+        let source = "start root; t A = /(ab|c){0,5000}/ & /(a|bc){0,4000}/; nt root = A;";
         let child = Grammar::from_glrm(source).compile_with(&vocab, options(Optimization::Balanced))?;
         let report = glrmask::__private::parser_backend_report(&child);
         println!("CHILD {report}");
         assert_eq!(report["virtual_lexer"], true, "review must use an actual virtual lexer");
         let original = child.save();
         let parent = Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"p\" child \"q\";")
-            .compile_unlinked(&vocab)?.bind("child", &child)?;
+            .prepare(&vocab)?.bind_snapshot("child", &child)?;
         let dynamic = parent.link_with(options(Optimization::Balanced))?;
         println!("DYNAMIC LINKED");
         let candidate = parent.link_with(options(Optimization::FastRuntime))?;

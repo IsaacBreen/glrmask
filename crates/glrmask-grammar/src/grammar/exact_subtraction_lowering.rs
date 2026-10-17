@@ -191,6 +191,7 @@ impl<'a> ExactSubtractionResolver<'a> {
                 canonical
             }
             GrammarExpr::Grouped(inner) => self.canonical_exact_expr_inner(inner, visiting, memo),
+            GrammarExpr::Shortest(_) => expr.clone(),
             GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
                 Box::new(self.canonical_exact_expr_inner(inner, visiting, memo)),
                 quantifier.clone(),
@@ -250,7 +251,7 @@ impl<'a> ExactSubtractionResolver<'a> {
             )),
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -277,6 +278,7 @@ impl SiteCollector {
         }
 
         match expr {
+            GrammarExpr::Shortest(_) => Ok(()),
             GrammarExpr::Grouped(inner)
             | GrammarExpr::Quantified(inner, Quantifier::Optional)
             | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
@@ -311,7 +313,7 @@ impl SiteCollector {
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -544,6 +546,7 @@ fn rewrite_expr(
     }
 
     match expr {
+        GrammarExpr::Shortest(_) => Ok(()),
         GrammarExpr::Grouped(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
@@ -582,7 +585,7 @@ fn rewrite_expr(
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -714,7 +717,7 @@ mod tests {
     fn contains_exclude(expr: &GrammarExpr) -> bool {
         match expr {
             GrammarExpr::Exclude { .. } => true,
-            GrammarExpr::Grouped(inner)
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner)
             | GrammarExpr::Quantified(inner, Quantifier::Optional)
             | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
             | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => contains_exclude(inner),
@@ -732,7 +735,7 @@ mod tests {
             GrammarExpr::Ref(_)
             | GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)

@@ -133,9 +133,13 @@ fn remap_terminal_id(terminal: &Terminal, new_id: TerminalID) -> Terminal {
             id: new_id,
             expr: expr.clone(),
         },
+        Terminal::MarkerProbe { marker_id, .. } => Terminal::MarkerProbe { id: new_id, marker_id: *marker_id },
         Terminal::SpecialToken { token_id, .. } => Terminal::SpecialToken {
             id: new_id,
             token_id: *token_id,
+        },
+        Terminal::SpecialTokenRange { start, end, .. } => Terminal::SpecialTokenRange {
+            id: new_id, start: *start, end: *end,
         },
     }
 }
@@ -167,6 +171,8 @@ enum TerminalIdentityRef<'a> {
         token_id: u32,
         is_ignore: bool,
     },
+    SpecialTokenRange { start: u32, end: u32, is_ignore: bool },
+    MarkerProbe(u32),
 }
 
 fn terminal_identity_ref(terminal: &Terminal, is_ignore: bool) -> TerminalIdentityRef<'_> {
@@ -181,9 +187,13 @@ fn terminal_identity_ref(terminal: &Terminal, is_ignore: bool) -> TerminalIdenti
             is_ignore,
         },
         Terminal::Expr { expr, .. } => TerminalIdentityRef::Expr { expr, is_ignore },
+        Terminal::MarkerProbe { marker_id, .. } => TerminalIdentityRef::MarkerProbe(*marker_id),
         Terminal::SpecialToken { token_id, .. } => TerminalIdentityRef::SpecialToken {
             token_id: *token_id,
             is_ignore,
+        },
+        Terminal::SpecialTokenRange { start, end, .. } => TerminalIdentityRef::SpecialTokenRange {
+            start: *start, end: *end, is_ignore,
         },
     }
 }

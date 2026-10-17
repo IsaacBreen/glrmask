@@ -1,4 +1,12 @@
 """The released namespace exposes intent and persistence, not parser machinery."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import inspect
 
 import numpy as np
@@ -13,13 +21,13 @@ def test_parser_machinery_is_only_available_in_internal_namespace():
         assert not hasattr(glrmask._glrmask, name)
         assert hasattr(glrmask._internal, name)
     assert "parser_backend" not in inspect.signature(glrmask.Grammar.compile).parameters
-    assert "parser_backend" not in inspect.signature(glrmask.UnlinkedConstraint.link).parameters
+    assert "parser_backend" not in inspect.signature(glrmask.PreparedGrammar.link).parameters
     assert not hasattr(glrmask.Constraint, "parser_backend")
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b"})
     grammar = glrmask.Grammar.from_ebnf('start ::= "a" "b"?')
     with pytest.raises(TypeError, match="parser_backend"):
         grammar.compile(vocab, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    module = grammar.compile_unlinked(vocab)
+    module = grammar.prepare(vocab)
     with pytest.raises(TypeError, match="parser_backend"):
         module.link(parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
     public = grammar.compile(vocab, optimization=glrmask.Optimization.FAST_BUILD)
@@ -95,18 +103,18 @@ def test_boundary_request_survives_module_save_bind_and_explicit_override():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay"})
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern grammar child; nt start = "x" child "y";')
-    child = glrmask.Grammar.from_ebnf('start ::= "a"').compile(vocab)
-    plain = glrmask.UnlinkedConstraint.load(grammar.compile_unlinked(vocab).save()).bind("child", child).link()
+    child = glrmask.Grammar.from_ebnf('start ::= "a"').prepare(vocab)
+    plain = _bound_snapshot(glrmask.PreparedGrammar.load(grammar.prepare(vocab).save()), "child", child).link()
     for detail in [glrmask.BoundaryTriggerDetail.TOKENS, glrmask.BoundaryTriggerDetail.EXACT]:
-        module = grammar.compile_unlinked(vocab, boundary_trigger=detail)
+        module = grammar.prepare(vocab, boundary_trigger=detail)
         with pytest.raises(ValueError, match="unbound"):
             module.link()
-        restored = glrmask.UnlinkedConstraint.load(module.save())
-        bound = restored.bind("child", child)
+        restored = glrmask.PreparedGrammar.load(module.save())
+        bound = _bound_snapshot(restored, "child", child)
         requested = bound.link()
         assert requested.save() != plain.save()
         assert bound.link(boundary_trigger=glrmask.BoundaryTriggerDetail.NONE).save() == plain.save()
-        reloaded = glrmask.UnlinkedConstraint.load(bound.save()).link()
+        reloaded = glrmask.PreparedGrammar.load(bound.save()).link()
         assert reloaded.save() != bound.link(boundary_trigger=glrmask.BoundaryTriggerDetail.NONE).save()
         assert np.array_equal(reloaded.start().mask(), requested.start().mask())
         assert np.array_equal(requested.start().mask(), plain.start().mask())
@@ -142,7 +150,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
             for ended in [branch, branch.clone()]:
                 assert ended.is_accepting() and not ended.is_rejected()
                 assert not ended.mask().any()
-                assert ended.forced() == []
+                assert ended.forced_tokens() == []
                 with pytest.raises(ValueError, match="already terminated"):
                     ended.commit_token(0)
                 with pytest.raises(ValueError, match="already terminated"):

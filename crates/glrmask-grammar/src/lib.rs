@@ -3,11 +3,24 @@
 #![allow(unused_variables)]
 
 use thiserror::Error as ThisError;
+mod source;
+pub use source::SourceSpan;
 
 #[derive(ThisError, Debug)]
 pub enum Error {
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
+    #[error("Grammar parse error at {span}: {message}")]
+    GrammarParseAt {message:String,span:SourceSpan},
+}
+
+impl Error {
+    pub fn source_span(&self) -> Option<SourceSpan> {
+        match self {Self::GrammarParseAt{span,..}=>Some(*span), _=>None}
+    }
+    pub(crate) fn at(self, span:SourceSpan) -> Self {
+        match self {Self::GrammarParse(message)=>Self::GrammarParseAt{message,span}, located=>located}
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -52,7 +65,7 @@ pub use grammar::ast::parser_grammar::{ParserAutomaton, ParserAutomatonState,
     ParserExpr, ParserGrammar, ParserRule, CfgRecursion, FlatParserGrammar,
     ParserAnalysis, ParserProduction, ParserSymbol};
 pub use import::ebnf::parse_ebnf_to_named;
-pub use import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed};
+pub use import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed, parse_lark_document, LarkDocument, LarkProfile, LarkTokenSet};
 
 /// Implementation details shared by the GLRMask workspace.
 ///

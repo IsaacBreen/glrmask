@@ -5086,6 +5086,14 @@ fn optimize_fast_boundary_defaults(
     loop {
         let mut changed = false;
         for (state_id, possible) in possible_by_state.iter().enumerate() {
+            // As in the generic normalizer, accepted-row support is not an
+            // exhaustive runtime input domain. Only the complete alphabet can
+            // justify a newly synthesized unconditional DEFAULT edge.
+            // Cached singleton supports may encode the complete set as
+            // Small/Shared rather than All. Their IDs are unique and in range.
+            if possible.count(num_parser_states) != num_parser_states as usize {
+                continue;
+            }
             let possible_count = possible.count(num_parser_states);
             if possible_count < 2 {
                 continue;
@@ -7711,6 +7719,15 @@ fn optimize_parser_dwa_defaults_mode(
         let mut changed = false;
 
         for (state_id, possible_ids) in possible_by_state.iter().enumerate() {
+            // NWA support lists the labels on which this predicate can succeed,
+            // not every stack symbol that the runtime may supply. Turning a
+            // proper subset into DEFAULT (and then lifting its final weight)
+            // accepts unrelated parser states. Only a complete finite alphabet
+            // certifies that a newly synthesized DEFAULT is unconditional.
+            // Keep partial rows explicit; this is compile-time work only.
+            if !matches!(possible_ids, PossibleOutgoingIds::All) {
+                continue;
+            }
             let possible_count = match possible_ids {
                 PossibleOutgoingIds::Empty => 0,
                 PossibleOutgoingIds::All => num_parser_states as usize,
@@ -11926,6 +11943,84 @@ fn consecutive_pop_derivative_reuse_matches_predecessor_rows_and_budgets() {
                 }
                 _ => panic!("result mismatch seed={seed} budget={budget}"),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod partial_default_domain_regressions {
+    use super::*;
+    use range_set_blaze::RangeSetBlaze;
+
+    #[test]
+    fn compact_boundary_full_explicit_support_remains_optimizable() {
+        let mut bits = BitSet::new(4);
+        for id in 0..4 { bits.set(id); }
+        for support in [
+            FastPossibleOutgoingIds::All,
+            FastPossibleOutgoingIds::Small(SmallVec::from_slice(&[0, 1, 2, 3])),
+            FastPossibleOutgoingIds::Bits(bits),
+            FastPossibleOutgoingIds::Shared(std::sync::Arc::from([0, 1, 2, 3])),
+        ] {
+            let mut interner = FastBoundaryWeightInterner::new(2, 64).unwrap();
+            let all = interner.all_id();
+            let mut states = vec![
+                FastBoundaryDwaState { transitions: (0..4).map(|id| (id, 1, all)).collect(), final_weight: 0 },
+                FastBoundaryDwaState { transitions: Vec::new(), final_weight: all },
+            ];
+            optimize_fast_boundary_defaults(&mut states,
+                &[support, FastPossibleOutgoingIds::Empty], 4, &mut interner);
+            assert_eq!(states[0].final_weight, all);
+            assert!(states[0].transitions.is_empty());
+        }
+    }
+
+    #[test]
+    fn compact_boundary_partial_support_preserves_explicit_guards() {
+        let mut bits = BitSet::new(8);
+        bits.set(1); bits.set(2);
+        for support in [
+            FastPossibleOutgoingIds::Small(SmallVec::from_slice(&[1, 2])),
+            FastPossibleOutgoingIds::Bits(bits),
+            FastPossibleOutgoingIds::Shared(std::sync::Arc::from([1, 2])),
+        ] {
+            let mut interner = FastBoundaryWeightInterner::new(2, 64).unwrap();
+            let all = interner.all_id();
+            let mut states = vec![
+                FastBoundaryDwaState { transitions: vec![(1, 1, all), (2, 1, all)], final_weight: 0 },
+                FastBoundaryDwaState { transitions: Vec::new(), final_weight: all },
+            ];
+            optimize_fast_boundary_defaults(&mut states,
+                &[support, FastPossibleOutgoingIds::Empty], 8, &mut interner);
+            assert_eq!(states[0].final_weight, 0, "partial row must not accept unconditionally");
+            assert_eq!(states[0].transitions, vec![(1, 1, all), (2, 1, all)]);
+        }
+    }
+
+    #[test]
+    fn partial_read_support_is_not_an_unconditional_default() {
+        for alphabet in [4, 8, 65] {
+            let mut nwa = NWA::new(0, 0);
+            let start = nwa.add_state();
+            let end = nwa.add_state();
+            nwa.set_start_states(vec![start]);
+            nwa.set_final_weight(end, Weight::all());
+            let accepted = Weight::from_uniform(0..=1, RangeSetBlaze::from_iter([3..=127]));
+            nwa.add_transition(start, 1, end, accepted.clone());
+            nwa.add_transition(start, 2, end, accepted);
+            let built = determinize_with_supports(&nwa, Some(alphabet));
+            let reference = built.dwa.clone();
+            let possible = build_possible_outgoing_ids_by_state(&nwa, &built.supports, alphabet);
+            let mut candidate = built.dwa;
+            optimize_parser_dwa_defaults(&mut candidate, &possible, alphabet);
+            subtract_final_weights_from_outgoing_dwa_impl(&mut candidate, false);
+            let candidate = determinize_parser_dwa_with_fallbacks(&candidate, &possible, alphabet);
+            let comparison = crate::parser_equivalence::compare_parser_mask_prefix_languages(
+                &candidate, &reference, alphabet, 1000,
+            ).unwrap();
+            assert!(comparison.difference.is_none(),
+                "partial input support was widened: {:?}", comparison.difference);
+            assert!(candidate.states()[candidate.start_state() as usize].final_weight.is_none());
         }
     }
 }

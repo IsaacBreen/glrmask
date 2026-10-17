@@ -1,5 +1,5 @@
 use glrmask::{
-    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Optimization, UnlinkedConstraint,
+    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Optimization, PreparedGrammar,
     Vocab,
 };
 
@@ -112,7 +112,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
 #[test]
 fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
-    let vocab = Vocab::new(Vec::new());
+    let vocab = Vocab::new_with_exact_token_ids(Vec::new(), [100,101]);
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -147,16 +147,36 @@ extern grammar payload;
 nt start = CONTROL payload;
 "#;
 
-    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+    let empty = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [])
-        .is_err());
-    assert!(ConstraintSpec::builder(Grammar::glrm(source), &vocab)
+        .unwrap().build().unwrap().compile().unwrap();
+    assert!(!empty.start().is_accepting());
+    assert!(empty.start().mask().iter().all(|word| *word == 0));
+    // The legacy/internal explicit bind_token helper remains narrowly typed.
+    // Public Grammar::bind performs the intentional event-to-grammar widening.
+    let narrow = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
-        .bind_token("payload", [7])
-        .is_err());
-    // `extern grammar` slots are deliberately allowed to remain unresolved;
-    // only exact-token externs must be complete at `build()`.
+        .bind_token("CONTROL", [7]).unwrap()
+        .bind_token("payload", [7]).unwrap()
+        .build().unwrap();
+    assert!(narrow.compile().unwrap_err().to_string().contains("requires a grammar"));
+    let mut widened = Grammar::from_glrm(source);
+    widened.bind("CONTROL", glrmask::Token::new(7)).unwrap();
+    widened.bind("payload", glrmask::Token::new(7)).unwrap();
+    for mode in [glrmask::Optimization::Auto, glrmask::Optimization::FastBuild,
+                 glrmask::Optimization::Balanced, glrmask::Optimization::FastRuntime] {
+        let constraint = widened.compile_with(
+            &vocab, glrmask::BuildOptions::default().optimization(mode)).unwrap();
+        let mut state = constraint.start();
+        for _ in 0..2 {
+            assert!(!state.is_accepting());
+            assert!(allowed(&state.mask(), 7));
+            state.commit_token(7).unwrap();
+        }
+        assert!(state.is_accepting());
+    }
+    // External references may remain unresolved until final compilation or link.
     let open_spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
         .bind_token("CONTROL", [7])
@@ -244,6 +264,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab)
         .unwrap();
     let static_child = Constraint::compile(child_grammar.clone(), &vocab).unwrap();
+    let prepared_child = child_grammar.prepare(&vocab).unwrap();
     let dynamic_child = compile_native_dynamic_fixture(child_grammar, &vocab).unwrap();
     let static_parent = Constraint::compile(Grammar::glrm(parent_source), &vocab).unwrap();
     let dynamic_parent =
@@ -304,15 +325,15 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         DynamicConstraint::load(&dynamic_bound_dynamic_boundary.save()).unwrap();
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
 
-    let loaded_static_parent = UnlinkedConstraint::load(
+    let loaded_static_parent = PreparedGrammar::load(
         Grammar::from_glrm(parent_source)
-            .compile_unlinked(&vocab)
+            .prepare(&vocab)
             .unwrap()
             .save(),
     )
     .unwrap();
     let loaded_static_bound = loaded_static_parent
-        .bind("child", &static_child)
+        .bind_snapshot("child", &prepared_child)
         .unwrap()
         .link()
         .unwrap();
@@ -320,19 +341,18 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
 
     let error = DynamicConstraint::load(&dynamic_parent.save()).unwrap_err();
     assert!(
-        error.to_string().contains("unresolved slots")
-            && error.to_string().contains("UnlinkedConstraint"),
+        error.to_string().contains("unresolved slots"),
         "an unresolved parent must not load as a runnable constraint: {error}",
     );
-    let loaded_dynamic_parent = UnlinkedConstraint::load(
+    let loaded_dynamic_parent = PreparedGrammar::load(
         Grammar::from_glrm(parent_source)
-            .compile_unlinked(&vocab)
+            .prepare(&vocab)
             .unwrap()
             .save(),
     )
     .unwrap();
     let loaded_dynamic_bound = loaded_dynamic_parent
-        .bind("child", &static_child)
+        .bind_snapshot("child", &prepared_child)
         .unwrap()
         .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
@@ -354,19 +374,19 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
     let parent = Grammar::from_glrm(
         "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
     )
-    .compile_unlinked(&vocab)
+    .prepare(&vocab)
     .unwrap();
 
-    // An unresolved grammar slot belongs to UnlinkedConstraint, never Constraint. Its
-    // private linker coordinate survives UnlinkedConstraint persistence without becoming
+    // An unresolved grammar slot belongs to PreparedGrammar, never Constraint. Its
+    // private linker coordinate survives PreparedGrammar persistence without becoming
     // part of the public model-token mask.
-    let loaded = UnlinkedConstraint::load(parent.save()).unwrap();
+    let loaded = PreparedGrammar::load(parent.save()).unwrap();
     let child = Grammar::from_ebnf(r#"start ::= "y""#)
-        .compile(&vocab)
+        .prepare(&vocab)
         .unwrap();
     let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
     let bound = loaded
-        .bind("child", &child)
+        .bind_snapshot("child", &child)
         .unwrap()
         .link()
         .unwrap();
@@ -655,7 +675,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .build()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
-    let constraint = parent.bind("MARK", vocab.token(7).unwrap()).unwrap()
+    let constraint = parent.bind_snapshot("MARK", glrmask::Token::new(7)).unwrap()
         .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
@@ -675,19 +695,16 @@ fn grammar_source_binding_accepts_shorter_lived_child_source() {
 
 #[test]
 fn grammar_source_bindings_validate_parent_declarations() {
-    let wrong_kind = Grammar::glrm(
-        "glrm 1; start start; extern token X; nt start = X;",
-    )
-    .bind_grammar("X", Grammar::ebnf(r#"start ::= "x""#))
-    .unwrap_err()
-    .to_string();
-    assert!(wrong_kind.contains("kind token, not grammar"), "{wrong_kind}");
+    let bound = Grammar::glrm(
+        "glrm 1; start start; extern grammar X; nt start = X;",
+    ).bind_grammar("X", Grammar::ebnf(r#"start ::= "x""#));
+    assert!(bound.is_ok());
 
     let unknown = Grammar::glrm("glrm 1; start start; nt start = \"x\";")
         .bind_grammar("missing", Grammar::ebnf(r#"start ::= "x""#))
         .unwrap_err()
         .to_string();
-    assert!(unknown.contains("no external grammar"), "{unknown}");
+    assert!(unknown.contains("no external"), "{unknown}");
 }
 
 #[test]
@@ -722,20 +739,20 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         "glrm 1; start start; extern grammar nested; nt start = nested;",
     );
     let open = Grammar::from_glrm(parent)
-        .bind("child", unresolved_grammar_child)
+        .bind_snapshot("child", unresolved_grammar_child)
         .unwrap()
-        .compile_unlinked(&vocab)
+        .prepare(&vocab)
         .unwrap()
         ;
     // Independent open components may reuse the same private sentinel token
     // number. Terminal IDs, not those hidden token IDs, are the linker
     // coordinate; qualified nested slots must survive serialization and bind.
-    let open = UnlinkedConstraint::load(open.save()).unwrap();
+    let open = PreparedGrammar::load(open.save()).unwrap();
     let leaf = Grammar::from_ebnf(r#"start ::= "x""#)
-        .compile(&vocab)
+        .prepare(&vocab)
         .unwrap();
     let fully_bound = open
-        .bind("child.nested", &leaf)
+        .bind_snapshot("child::nested", &leaf)
         .unwrap()
         .link()
         .unwrap();
@@ -744,7 +761,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     assert!(state.is_accepting());
 
     let dynamic_fully_bound = open
-        .bind("child.nested", &leaf)
+        .bind_snapshot("child::nested", &leaf)
         .unwrap()
         .link_with(BuildOptions::default().optimization(Optimization::Balanced))
         .unwrap();
@@ -789,8 +806,8 @@ start start;
 t WORD = fa {
     start begin;
     accept done;
-    begin -> middle: "a";
-    middle -> done: "b";
+    edge begin -> middle: "a";
+    edge middle -> done: "b";
 };
 nt start = WORD;
 "#;
@@ -812,7 +829,7 @@ fn nested_external_tokens_use_qualified_names() {
     let source = r#"
 glrm 1;
 start document;
-g inner = {
+grammar inner {
     start value;
     extern token END;
     nt value = END;
@@ -842,7 +859,7 @@ extern token END;
 nt start = fa {
     start begin;
     accept done;
-    begin -> done: END;
+    edge begin -> done: END;
 };
 "#;
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)

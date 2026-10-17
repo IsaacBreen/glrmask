@@ -6,6 +6,9 @@
 
 use regex_syntax::utf8::Utf8Sequences;
 
+mod checked;
+pub use checked::{checked_pattern, parse_checked_regex, source_regex_literal};
+
 use crate::automata::regex::Expr;
 use crate::ds::u8set::U8Set;
 
@@ -183,6 +186,17 @@ pub fn validate_regular_regex(pattern: &str) -> Result<(), String> {
 }
 
 pub fn parse_regex(pattern: &str, utf8: bool) -> Expr {
+    // Mode-qualified source patterns use the checked parser. The internal legacy
+    // parser remains separate, including historical raw-byte escape semantics.
+    if let Some(rest) = pattern.strip_prefix("(?") {
+        if let Some((flags, _)) = rest.split_once(':') {
+            if !flags.is_empty() && flags.chars().all(|c| "uisx-".contains(c))
+                && ['u','i','s','x'].into_iter().all(|flag|flags.contains(flag)) {
+                return parse_checked_regex(pattern).expect("source regex was validated before lowering");
+            }
+        }
+    }
+
     let bytes = pattern.as_bytes();
     let (expr, pos) = parse_alternation(bytes, 0, utf8);
     if pos == bytes.len() {

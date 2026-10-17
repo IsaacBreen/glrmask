@@ -56,17 +56,17 @@ const PREVIOUS_RECURSIVE_PARSER_CONSTRAINT_VERSION: u16 = 24;
 const PREVIOUS_STATIC_RESIDUAL_CONSTRAINT_VERSION: u16 = 27;
 const PREVIOUS_STATIC_PROJECTION_CONSTRAINT_VERSION: u16 = 28;
 const PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION: u16 = 29;
-const CONSTRAINT_VERSION: u16 = 30;
+const CONSTRAINT_VERSION: u16 = 40;
 // V37 retains S30 framing with TPR7 views, compiler stack-effect analysis and
 // dynamic proof metadata in R35. V35/V36 could contain boundary programs built
 // from the pre-fix nullable proof; those pre-release artifacts are unsupported.
-const TEMPLATE_CONSTRAINT_VERSION: u16 = 37;
+const TEMPLATE_CONSTRAINT_VERSION: u16 = 41;
 // V38 is the same native body bound to an external vocabulary (TPX1).
-const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 38;
+const EXTERNAL_TEMPLATE_CONSTRAINT_VERSION: u16 = 42;
 /// Self-contained external-vocabulary envelope that retains an executable LR
 /// table for ordinary Dynamic's retained LR backend. Load with
 /// `Constraint::load_with_vocab` and the exact original vocabulary.
-const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 39;
+const EXTERNAL_LR_CONSTRAINT_VERSION: u16 = 43;
 const CONSTRAINT_HEADER_LEN: usize = CONSTRAINT_MAGIC.len() + 2 + 8;
 const COMPRESSED_PAYLOAD_HEADER_LEN: usize = 8;
 const CONSTRAINT_COMPRESSION_LEVEL: i32 = 1;
@@ -5932,6 +5932,13 @@ fn envelope(version: u16, payload: &[u8]) -> Vec<u8> {
     bytes
 }
 
+// Optional annotation envelope. Plain constraints retain exactly their existing
+// artifact formats; the enclosed body is the normal LR/native implementation.
+// Keeping this at the embeddable-body boundary also covers prepared grammars
+// and recursively retained compiled children, not just top-level save().
+const MARKER_BODY_MAGIC: &[u8; 8] = b"GLRMARK1";
+const MARKER_BODY_HEADER_LEN: usize = 20;
+
 impl Constraint {
     /// Materialize and retain the canonical current-format artifact once a
     /// compiler-owned constraint has reached its final serialized semantics.
@@ -5941,7 +5948,7 @@ impl Constraint {
         if self.serialized_artifact_cache.is_some() {
             return;
         }
-        let bytes = self.save_body();
+        let bytes = self.save_body_core_with_vocab_policy(false);
         self.serialized_artifact_cache = Some(std::sync::Arc::new(bytes));
     }
 
@@ -6053,10 +6060,7 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Serialize this compiled constraint to a versioned binary artifact.
-    ///
-    /// Current artifacts use a compact sectioned representation and retain
-    /// runtime-native sections where doing so materially reduces load latency.
+    /// Versioned artifact including the vocabulary and root stopping policy. Compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
         self.save_with_vocab_policy(false)
     }
@@ -6076,11 +6080,7 @@ impl Constraint {
         *digest.finalize().as_bytes()
     }
 
-    /// Save a parser constraint without duplicating its model vocabulary.
-    /// Load with `Constraint::load_with_vocab` and the exact original
-    /// vocabulary; an absent or incompatible binding is rejected. Supported for
-    /// both the table-free template backend and a retained LR
-    /// backend with a retained table.
+    /// Omits the vocabulary. Loading requires [`Self::load_with_vocab`] with the exact original token-ID/byte mapping, not merely the same size.
     pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
         if !self.has_template_parser() && !self.table.is_present() {
             return Err(crate::Error::Serialization(
@@ -6121,6 +6121,21 @@ impl Constraint {
     }
 
     fn save_body_with_vocab_policy(&self, external_vocab: bool) -> Vec<u8> {
+        let body = self.save_body_core_with_vocab_policy(external_vocab);
+        let Some(markers) = self.marker_queries.as_deref() else { return body; };
+        let mut bytes = Vec::with_capacity(MARKER_BODY_HEADER_LEN + markers.terminals.len() * 8 + body.len());
+        bytes.extend_from_slice(MARKER_BODY_MAGIC);
+        bytes.extend_from_slice(&(markers.terminals.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        for marker in &markers.terminals {
+            bytes.extend_from_slice(&marker.terminal_id.to_le_bytes());
+            bytes.extend_from_slice(&marker.marker_id.to_le_bytes());
+        }
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    fn save_body_core_with_vocab_policy(&self, external_vocab: bool) -> Vec<u8> {
         let _remainder_trace =
             crate::dynamic_constraint::remainder_trace::Session::new("constraint.snapshot_body");
         let artifact_version = if external_vocab {
@@ -7045,12 +7060,7 @@ impl Constraint {
         bytes
     }
 
-    /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
-    ///
-    /// Passing an owned `Vec<u8>` transfers its allocation into the loaded
-    /// constraint without copying the artifact. Borrowed byte slices are also
-    /// accepted; current-format artifacts copy borrowed input once because
-    /// runtime structures retain zero-copy views into persistent backing bytes.
+    /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>` transfers its allocation; borrowed input is copied once because runtime views retain the backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
         Self::load_with_vocab_policy(bytes.into(), None)
     }
@@ -7146,13 +7156,67 @@ impl Constraint {
     }
 
     fn load_body_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
-        match bytes {
+        if !bytes.starts_with(MARKER_BODY_MAGIC) {
+            return Self::load_body_core_with_vocab_policy(bytes, supplied_vocab);
+        }
+        let fail = |message: &str| crate::Error::Serialization(message.to_owned());
+        if bytes.len() < MARKER_BODY_HEADER_LEN { return Err(fail("truncated marker artifact header")); }
+        let count = u32::from_le_bytes(bytes[8..12].try_into().expect("header checked")) as usize;
+        if count == 0 { return Err(fail("empty marker artifact envelope is not canonical")); }
+        let body_len = usize::try_from(u64::from_le_bytes(bytes[12..20].try_into().expect("header checked")))
+            .map_err(|_| fail("marker artifact length exceeds address space"))?;
+        let body_start = count.checked_mul(8).and_then(|len| MARKER_BODY_HEADER_LEN.checked_add(len))
+            .ok_or_else(|| fail("marker artifact inventory length overflow"))?;
+        if body_len == 0 || body_start.checked_add(body_len) != Some(bytes.len()) {
+            return Err(fail("marker artifact section lengths do not match input"));
+        }
+        // Inspect canonical ordering before allocating from untrusted counts.
+        let records = &bytes[MARKER_BODY_HEADER_LEN..body_start];
+        let mut previous = None;
+        for record in records.chunks_exact(8) {
+            let terminal = u32::from_le_bytes(record[..4].try_into().expect("fixed record"));
+            if previous.is_some_and(|prior| terminal <= prior) {
+                return Err(fail("marker artifact terminal IDs must be strictly increasing"));
+            }
+            previous = Some(terminal);
+        }
+        if bytes[body_start..].starts_with(MARKER_BODY_MAGIC) {
+            return Err(fail("nested marker annotation envelopes are not canonical"));
+        }
+        let terminals = records.chunks_exact(8).map(|record| super::markers::MarkerTerminal {
+            terminal_id: u32::from_le_bytes(record[..4].try_into().expect("fixed record")),
+            marker_id: u32::from_le_bytes(record[4..].try_into().expect("fixed record")),
+        }).collect::<Vec<_>>();
+        let mut constraint = match bytes {
+            Cow::Owned(mut bytes) => Self::load_body_core_with_vocab_policy(Cow::Owned(bytes.split_off(body_start)), supplied_vocab)?,
+            Cow::Borrowed(bytes) => Self::load_body_core_with_vocab_policy(Cow::Borrowed(&bytes[body_start..]), supplied_vocab)?,
+        };
+        for marker in &terminals {
+            if marker.terminal_id >= constraint.parser_terminal_count()
+                || constraint.ignore_terminal == Some(marker.terminal_id)
+                || constraint.parser_skip_terminals().contains(&marker.terminal_id)
+                || constraint.parser_is_control_terminal(marker.terminal_id)
+                || constraint.special_token_terminals.iter().any(|special| special.terminal_id == marker.terminal_id)
+                || constraint.tokenizer.possible_future_terminals(constraint.tokenizer.initial_state())
+                    .contains(marker.terminal_id as usize)
+            {
+                return Err(fail("marker artifact identifies an invalid or input-bound terminal"));
+            }
+        }
+        constraint.install_marker_terminals(terminals).map_err(crate::Error::Serialization)?;
+        Ok(constraint)
+    }
+
+    fn load_body_core_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
+        let constraint = match bytes {
             Cow::Owned(bytes) => {
                 let backing = std::sync::Arc::new(bytes);
                 Self::load_impl(backing.as_slice(), Some(std::sync::Arc::clone(&backing)), supplied_vocab)
             }
             Cow::Borrowed(bytes) => Self::load_impl(bytes, None, supplied_vocab),
-        }
+        }?;
+        constraint.prepare_commit_reset_frontier();
+        Ok(constraint)
     }
 
     /// Load an embeddable compiled body without enforcing the public
@@ -7176,14 +7240,7 @@ impl Constraint {
         Ok(constraint)
     }
 
-    /// Load a compiled constraint and bind it to an already-existing exact
-    /// model vocabulary.
-    ///
-    /// This preserves the zero-copy packed artifact representation while
-    /// sharing the caller's `Vocab` identity and derived-artifact cache. Later
-    /// subgrammar composition can therefore prove vocabulary compatibility by
-    /// `Arc` identity instead of reconstructing and repeatedly comparing the
-    /// same token byte map.
+    /// The supplied vocabulary must match the original mapping. Shares its caches and retains the packed artifact backing storage; required for artifacts from [`Self::save_without_vocab`].
     pub fn load_with_vocab<'a>(
         bytes: impl Into<Cow<'a, [u8]>>,
         vocab: &crate::Vocab,
@@ -8475,9 +8532,15 @@ impl Constraint {
         // Rebuild this tiny token-domain summary from the authoritative
         // packed/materialized inventory after all external sections load.
         // No vocabulary trie is built and it is not serialized a second time.
-        constraint.empty_byte_token_ids = constraint.token_bytes_iter()
+        let mut empty_byte_token_ids = constraint.token_bytes_iter()
             .filter_map(|(id, bytes)| bytes.is_empty().then_some(id))
-            .collect::<Vec<u32>>().into();
+            .collect::<Vec<u32>>();
+        // The mask's interval filter needs a sorted unique index even when an
+        // indexed packed artifact supplied its token-byte rows out of order.
+        // Normalize once at load, never once per generated-token mask.
+        empty_byte_token_ids.sort_unstable();
+        empty_byte_token_ids.dedup();
+        constraint.empty_byte_token_ids = empty_byte_token_ids.into();
         let rebuild_started = profile.then(std::time::Instant::now);
         let skip_runtime_rebuild_for_profile =
             std::env::var_os("GLRMASK_SKIP_RUNTIME_REBUILD_FOR_PROFILE").is_some();
@@ -9212,7 +9275,7 @@ mod tests {
             (2, b"a".to_vec()),
             (3, b"aa".to_vec()),
         ]);
-        let schema = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+        let schema = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
         let constraint = Constraint::from_json_schema(schema, &vocab)
             .expect("large bounded URI should compile through the exact Static residual lane");
         assert!(constraint.tokenizer.has_virtual_residual_runtime());
@@ -9616,7 +9679,7 @@ mod tests {
     fn current_constraint_artifact_preserves_static_dynamic_overlay() {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
         let parent = Constraint::compile(crate::Grammar::glrm(
-            "glrm 1; start root; extern grammar child; nt root = \"a\" child;"), &vocab).unwrap();
+            "glrm 1; start root; extern child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
         let loaded = Constraint::load(&constraint.save()).unwrap();

@@ -1,0 +1,21 @@
+{
+  "started_at": "2026-10-15T01:56:21.954563+08:00",
+  "max_workers": 16,
+  "jobs_per_worker": 32,
+  "pairs": 3,
+  "binaries": {
+    "baseline": {
+      "path": "C:\\gnb930283\\baseline-markers-artifacts\\core_batch_scaling.exe",
+      "sha256": "722b9358e415cb650c66e625fd803ccc5e3eaf732c797580657006f1be788a93"
+    },
+    "candidate": {
+      "path": "C:\\gnb930283\\candidate-artifacts-r4\\core_batch_scaling.exe",
+      "sha256": "682108ca7f4ac50beca41d034560e3c01d1ef332cb58e67b74fdc28c52a9d7b7"
+    }
+  },
+  "notes": [
+    "Same driver; persistent pools, five weak-scaling trials per row.",
+    "Record physical/logical cores and topology separately; worker count is not core count.",
+    "First workload warmup and pool creation excluded by the driver."
+  ]
+}

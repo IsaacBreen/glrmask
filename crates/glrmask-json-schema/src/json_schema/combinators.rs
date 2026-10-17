@@ -1694,7 +1694,7 @@ fn all_of_intersection_terminal_safe_inner(
         // Special LLM tokens are parser-controlled terminals, not byte-language
         // expressions. The common terminal resolver rejects them inside
         // Intersect/Exclude, so they must not pass this byte-terminal gate.
-        GrammarExpr::SpecialToken(_) => false,
+        GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_) => false,
         GrammarExpr::Ref(name) => {
             if matches!(
                 name.as_str(),
@@ -1726,6 +1726,7 @@ fn all_of_intersection_terminal_safe_inner(
             safe
         }
         GrammarExpr::Grouped(inner)
+        | GrammarExpr::Shortest(inner)
         | GrammarExpr::Quantified(inner, Quantifier::Optional)
         | GrammarExpr::Quantified(inner, Quantifier::ZeroPlus)
         | GrammarExpr::Quantified(inner, Quantifier::OnePlus) => {

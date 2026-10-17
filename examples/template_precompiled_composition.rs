@@ -167,7 +167,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut dispatch = String::from("start suffix;\n");
     let mut schemas = Vec::new();
     for index in 0..10 {
-        dispatch.push_str(&format!("extern grammar ARGS_{index};\n"));
+        dispatch.push_str(&format!("extern ARGS_{index};\n"));
         let schema = serde_json::from_slice(&fs::read(fixture.join(format!("schema-{index:02}.json")))?)?;
         let named = glrmask_json_schema::schema_to_named_grammar(&schema)?;
         let mut factored = glrmask_grammar::__private::grammar::factoring::factor_named_grammar(named);
@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let named = glrmask_grammar::__private::grammar::glrm::from_glrm_with_inline_subgrammars(&dispatch, &bindings)?;
     let child_source = source_for_reparse(named);
     fs::write(output.join("child-source.glrm"), &child_source)?;
-    let child = Grammar::from_glrm(&child_source).compile_with(&vocab, options.clone())?;
+    let child = Grammar::glrm(&child_source).compile_with(&vocab, options.clone())?;
     let child_compile_ns = started.elapsed().as_nanos();
     let child_report = parser_backend_report(&child); assert_table_free(&child_report);
     fs::write(output.join("child-backend.json"),serde_json::to_vec_pretty(&child_report)?)?;
@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     source = source.replacen(needle, "nt member_expression_with_suffixes ::=\n    'tools' PROGRAMMATIC_TOOL_SUFFIX\n  | primary_expression", 1);
     source.push_str("\nextern grammar PROGRAMMATIC_TOOL_SUFFIX;\n");
     fs::write(output.join("parent-source.glrm"), &source)?;
-    let started = Instant::now(); let parent = Grammar::from_glrm(&source).compile_unlinked(&vocab)?;
+    let started = Instant::now(); let parent = Grammar::glrm(&source).prepare(&vocab)?;
     let parent_compile_ns = started.elapsed().as_nanos();
     eprintln!("PARENT source_compile_ns={parent_compile_ns}");
     fs::write(output.join("prepared-child-backend.json"),serde_json::to_vec_pretty(&child_report)?)?;
@@ -221,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_table_free(&parser_backend_report(&reference));
     eprintln!("INLINE_REFERENCE source_prepare_compile_ns={reference_compile_ns}");
     let start = Instant::now();
-    let candidate = parent.bind("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
+    let candidate = parent.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
     let link_ns = start.elapsed().as_nanos(); eprintln!("DIRECT_LINK ns={link_ns}");
     assert_eq!(candidate.parser_backend(), ParserBackend::TemplateDfa);
     let report = parser_backend_report(&candidate); assert_table_free(&report); if args[3] == "static" { assert_static(&report); }
@@ -295,7 +295,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime_measurement = if args.len() == 6 {
         for repeat in 0..2 {
             let started = Instant::now();
-            let linked = parent.bind("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
+            let linked = parent.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &child)?.link_with(options.clone())?;
             link_samples.push(started.elapsed().as_nanos());
             assert_eq!(linked.save(), saved, "repeated prepared-component link must preserve exact artifact bytes");
             eprintln!("ISOLATED_LINK repeat={repeat} ns={}", link_samples.last().unwrap());

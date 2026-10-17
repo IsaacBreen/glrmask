@@ -13,6 +13,8 @@ fail() {
 }
 
 [[ -z $(git status --porcelain) ]] || fail "worktree is not clean"
+"$PYTHON_BIN" scripts/sync-benchmarks.py --check
+"$PYTHON_BIN" scripts/sync-guide.py --check
 
 
 metadata=$(
@@ -115,8 +117,12 @@ with zipfile.ZipFile(wheels[0]) as zf:
 print(f"artifact license inspection passed: {sdists[0].name}, {wheels[0].name}")
 PY
 
+sdist=$(find "$dist" -maxdepth 1 -name '*.tar.gz' -print -quit)
+"$PYTHON_BIN" scripts/check-readme-archives.py --sdist "$sdist"
+
 wheel=$(find "$dist" -maxdepth 1 -name '*.whl' -print -quit)
 [[ -n "$wheel" ]] || fail "no wheel produced"
+"$PYTHON_BIN" scripts/check-readme-archives.py --wheel "$wheel"
 "$PYTHON_BIN" -m venv "$install_venv"
 "$install_venv/bin/python" -m pip install "$wheel"
 "$install_venv/bin/python" -I "$ROOT/scripts/python-wheel-smoke.py"

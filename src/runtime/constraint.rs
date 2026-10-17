@@ -3782,6 +3782,7 @@ impl Constraint {
     pub(crate) fn prime_initial_commit_hot_path(&self) {
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state: self.initial_state_map(),
             buffers: Default::default(),
@@ -6100,11 +6101,11 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
             let mut ordinary_token_by_bytes = FxHashMap::<&[u8], u32>::default();
             for (&token, bytes) in self.token_bytes.iter() {
-                if !special_tokens.contains(&token) {
+                if !special_tokens.contains(token) {
                     ordinary_token_by_bytes
                         .entry(bytes.as_slice())
                         .or_insert(token);
@@ -6298,8 +6299,8 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
 
             for full_source_state in first_match_step_states {
                 if full_source_state >= self.tokenizer.num_states() {
@@ -6337,7 +6338,7 @@ impl Constraint {
                 let mut known_reject = 0usize;
 
                 for (&token_id, bytes) in self.token_bytes.iter() {
-                    if special_tokens.contains(&token_id) || bytes.is_empty() {
+                    if special_tokens.contains(token_id) || bytes.is_empty() {
                         continue;
                     }
                     let execution = self
@@ -6993,8 +6994,8 @@ impl Constraint {
             let special_tokens = self
                 .special_token_terminals
                 .iter()
-                .map(|special| special.token_id)
-                .collect::<BTreeSet<_>>();
+                .map(|special| special.token_ids())
+                .collect::<range_set_blaze::RangeSetBlaze<_>>();
 
             for full_source_state in root_effect_states {
                 if full_source_state >= self.tokenizer.num_states() {
@@ -7058,7 +7059,7 @@ impl Constraint {
                 struct RootEffectBuild<'a> {
                     tokenizer: &'a Tokenizer,
                     vocab: &'a DynamicMaskVocab,
-                    special_tokens: &'a BTreeSet<u32>,
+                    special_tokens: &'a range_set_blaze::RangeSetBlaze<u32>,
                     residual_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
                     exact_by_terminal: &'a mut BTreeMap<TerminalID, Vec<u32>>,
                     children_by_terminal:
@@ -7099,7 +7100,7 @@ impl Constraint {
                         let classified = !futures.is_empty() || !branches.is_empty();
 
                         for &token_id in token_ids {
-                            if build.special_tokens.contains(&token_id) || prefix.is_empty() {
+                            if build.special_tokens.contains(token_id) || prefix.is_empty() {
                                 continue;
                             }
                             if classified {
@@ -7779,6 +7780,23 @@ impl Constraint {
             ));
     }
 
+    /// Prepare shared immutable reset metadata at compile/load publication.
+    /// The narrow builder visits reset and one-byte targets, not every state.
+    pub(crate) fn prepare_commit_reset_frontier(&self) {
+        if self.tokenizer.cached_initial_byte_frontiers().is_some() { return; }
+        let reset = self.tokenizer.initial_state();
+        if !self.tokenizer.state_has_epsilon_transitions(reset) { return; }
+        let owned;
+        let closure = if let Some(cached) = self.tokenizer.cached_singleton_epsilon_closures()
+            .and_then(|all| all.get(reset as usize)) {
+            cached
+        } else {
+            owned = self.tokenizer.singleton_epsilon_closure(reset);
+            &owned
+        };
+        if closure.len() > 16 { let _ = self.tokenizer.initial_byte_frontiers_ref(); }
+    }
+
     pub(crate) fn rebuild_dynamic_runtime_caches(&mut self) {
         self.tokenizer_has_epsilon_transitions = self.tokenizer.has_epsilon_transitions();
         if !self.has_template_parser() && (self.table.unconditional_advance.len() != self.parser_symbol_count() as usize
@@ -7994,6 +8012,7 @@ impl Constraint {
         let hot_frontier_count = self.direct_regular_dynamic_hot_frontiers.len();
         self.dynamic_mask_vocab = dynamic_mask_vocab;
         self.tokenizer_fast_transitions = tokenizer_fast_transitions;
+        self.prepare_commit_reset_frontier();
         if let Some(total_started_at) = total_started_at {
             eprintln!(
                 "[glrmask/profile][dynamic_runtime_finalize] guarded_shift_ms={:.3} dynamic_vocab_ms={:.3} tokenizer_fast_ms={:.3} direct_regular_support_ms={:.3} slice_leftovers_ms={:.3} terminal_observation_ms={:.3} hot_frontier_ms={:.3} hot_frontiers={} total_ms={:.3}",
@@ -9507,14 +9526,14 @@ impl Constraint {
         let special_tokens = self
             .special_token_terminals
             .iter()
-            .map(|special| special.token_id)
-            .collect::<std::collections::BTreeSet<_>>();
+            .map(|special| special.token_ids())
+            .collect::<range_set_blaze::RangeSetBlaze<_>>();
         let mut tokens_by_bytes = FxHashMap::<&[u8], SmallVec<[u32; 2]>>::default();
         for (&token, bytes) in self.token_bytes.iter() {
             // A suffix is replayed as ordinary bytes inside a larger model
             // token. Do not use an exact-special-token-only identity as the
             // witness for that byte suffix.
-            if !special_tokens.contains(&token) {
+            if !special_tokens.contains(token) {
                 tokens_by_bytes.entry(bytes.as_slice()).or_default().push(token);
             }
         }
@@ -10315,14 +10334,9 @@ impl Constraint {
         // first decoding commit.
         let tokenizer_closures_started_at = profile.then(std::time::Instant::now);
         if !self.tokenizer.has_packed_runtime_metadata() {
-            let tokenizer_closures = self.tokenizer.all_singleton_epsilon_closures();
-            if tokenizer_closures
-                .get(self.tokenizer.initial_state() as usize)
-                .is_some_and(|closure| closure.len() > 64)
-            {
-                let _ = self.tokenizer.initial_byte_frontiers();
-            }
+            let _ = self.tokenizer.all_singleton_epsilon_closures();
         }
+        self.prepare_commit_reset_frontier();
         let tokenizer_closures_ms = tokenizer_closures_started_at
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let initial_commit_prime_started_at = profile.then(std::time::Instant::now);
@@ -12452,7 +12466,7 @@ impl Constraint {
             .and_then(|id| self.packed_dwa_token_dense_masks.get(id))
     }
 
-    /// Create a fresh state for one generated sequence.
+    /// Independent state for one generated sequence.
     pub fn start(&self) -> ConstraintState<'_> {
         if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();
@@ -12462,6 +12476,7 @@ impl Constraint {
         let state = self.initial_state_map();
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state,
             buffers: Default::default(),
@@ -12471,6 +12486,7 @@ impl Constraint {
         };
         state.prefill_mask_cache();
         state.reserve_linear_stack_hot_path();
+        state.initialize_markers();
         state
     }
 
@@ -12478,6 +12494,7 @@ impl Constraint {
         crate::runtime::initialize_hot_path_config();
         let mut state = ConstraintState {
             terminated: false,
+            markers: None,
             constraint: self,
             state: self.initial_state_map(),
             buffers: crate::runtime::state::CommitBuffers::for_constraint(self),
@@ -12486,10 +12503,11 @@ impl Constraint {
             mask_scratch: Arc::new(Mutex::new(crate::runtime::state::MaskScratch::for_constraint(self))),
         };
         state.reserve_linear_stack_hot_path();
+        state.initialize_markers();
         state
     }
 
-    /// Return the number of `u32` words required for a packed token mask.
+    /// Packed 32-bit word count, including sparse original-ID positions and root end tokens.
     pub fn mask_len(&self) -> usize {
         self.max_original_token_id()
             .map(|token_id| (token_id as usize / 32) + 1)
@@ -13210,7 +13228,7 @@ impl Constraint {
                     .filter(|special| {
                         !self.is_late_grammar_placeholder_terminal(special.terminal_id)
                     })
-                    .map(|special| special.token_id),
+                    .map(|special| special.token_id_end),
             )
             .max()
     }
@@ -13255,7 +13273,7 @@ impl Constraint {
             .filter(|special| self.token_bytes_for_id(special.token_id).is_none())
             .filter(|special| {
                 !self.special_token_terminals.iter().any(|other| {
-                    other.token_id == special.token_id
+                    other.contains(special.token_id)
                         && !placeholder_terminals.contains(&other.terminal_id)
                 })
             })
@@ -13343,7 +13361,7 @@ impl Constraint {
         self.special_token_terminals
             .iter()
             .any(|special| {
-                special.token_id == token_id
+                special.contains(token_id)
                     && !self.is_late_grammar_placeholder_terminal(special.terminal_id)
             })
     }

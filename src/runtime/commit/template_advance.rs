@@ -385,6 +385,11 @@ impl TemplateAdvanceRuntime {
         self.interner.gss_from_key(language, accumulator)
     }
 
+    #[inline]
+    pub(crate) fn language_contains_empty_stack(&self, language: u32) -> bool {
+        self.interner.contains_empty_key(language)
+    }
+
     pub(crate) fn language_top_states(&self, language: u32) -> SmallVec<[u32; 8]> {
         self.interner
             .top_branches(language)

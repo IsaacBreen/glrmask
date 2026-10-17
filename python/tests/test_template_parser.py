@@ -1,4 +1,12 @@
 """Internal Python table-free tooling: masks are checked against literal languages."""
+
+
+def _bound_snapshot(grammar, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    result = grammar.clone()
+    assert result.bind(name, value) is None
+    return result
+
 import copy
 import gc
 import json
@@ -12,7 +20,7 @@ class GrammarCalls:
     """Keep public default paths and explicit internal controls separate."""
     def __init__(self, grammar): self.grammar = grammar
     def compile(self, vocab, **options): return compile_grammar(self.grammar, vocab, **options)
-    def compile_unlinked(self, vocab): return self.grammar.compile_unlinked(vocab)
+    def prepare(self, vocab): return self.grammar.prepare(vocab)
 
 def compile_grammar(grammar, vocab, **options):
     if isinstance(grammar, GrammarCalls): grammar = grammar.grammar
@@ -193,47 +201,50 @@ def test_python_template_validation_is_early_and_does_not_retain_python_callback
 
 @pytest.mark.parametrize("mode", [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_RUNTIME,
                                   glrmask.Optimization.BALANCED])
-def test_python_compiled_composition_uses_native_defaults(mode):
+def test_python_prepared_composition_uses_native_defaults(mode):
     tokens = {0: b"a", 1: b"aa", 2: b"b"}
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
-    child = grammar_from_ebnf('start ::= "a"').compile(
-        vocab, optimization=mode, parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    parent = grammar_from_glrm('glrm 1; start root; extern grammar C; nt root = C;').compile_unlinked(vocab)
-    assert glrmask._internal.parser_backend(child) == glrmask._internal.ParserBackend.TEMPLATE_DFA
-    ordinary = grammar_from_ebnf('start ::= "a"').compile(vocab, optimization=mode)
-    assert glrmask._internal.parser_backend(ordinary) == glrmask._internal.ParserBackend.TEMPLATE_DFA
-    for child in [ordinary, child]:
-        for source in representations(child, vocab):
-            child_bytes = source.save()
-            for selection in [{}, {"parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA}]:
-                linked = link_module(parent.bind("C", source), optimization=mode, **selection)
-                assert source.save() == child_bytes
-                for compiled in representations(linked, vocab):
-                    assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
-                    for prefix in [b"", b"a"]:
-                        state = compiled.start()
-                        state.commit_bytes(prefix)
-                        assert state.is_accepting() == (prefix == b"a")
-                        for token_id, word in tokens.items():
-                            expected = b"a".startswith(prefix + word)
-                            assert bool(state.mask()[token_id]) == expected, (prefix, word)
-                            if expected:
-                                branch = compiled.start()
-                                branch.commit_bytes(prefix)
-                                branch.commit_token(token_id)
-                                assert branch.is_accepting() == (prefix + word == b"a")
+    body = grammar_from_ebnf('start ::= "a"')
+    # Standalone representations and composed representations are both native;
+    # executable roots are not implicitly converted into reusable components.
+    for root in [body.compile(vocab, optimization=mode),
+                 body.compile(vocab, optimization=mode,
+                              parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)]:
+        for restored in representations(root, vocab):
+            assert glrmask._internal.parser_backend(restored) == glrmask._internal.ParserBackend.TEMPLATE_DFA
+            assert restored.start().mask().tolist() == [True, False, False]
+    prepared = body.prepare(vocab)
+    parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
+    for source in [prepared, glrmask.PreparedGrammar.load(prepared.save()),
+                   glrmask.PreparedGrammar.load(prepared.save(), vocab=vocab)]:
+        child_bytes = source.save()
+        for selection in [{}, {"parser_backend": glrmask._internal.ParserBackend.TEMPLATE_DFA}]:
+            linked = link_module(_bound_snapshot(parent, "C", source), optimization=mode, **selection)
+            assert source.save() == child_bytes
+            for compiled in representations(linked, vocab):
+                assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
+                for prefix in [b"", b"a"]:
+                    state = compiled.start()
+                    state.commit_bytes(prefix)
+                    assert state.is_accepting() == (prefix == b"a")
+                    for token_id, word in tokens.items():
+                        expected = b"a".startswith(prefix + word)
+                        assert bool(state.mask()[token_id]) == expected, (prefix, word)
+                        if expected:
+                            branch = compiled.start()
+                            branch.commit_bytes(prefix)
+                            branch.commit_token(token_id)
+                            assert branch.is_accepting() == (prefix + word == b"a")
 
 
 @pytest.mark.parametrize("mode", [glrmask.Optimization.FAST_RUNTIME, glrmask.Optimization.BALANCED])
 def test_python_precompiled_nullable_composition_preserves_crossings_and_root_end(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"y", 3: b"xay",
                                           4: b"xy", 5: b"xx", 6: b""})
-    child = grammar_from_ebnf('start ::= "a"?').compile(
-        vocab, optimization=glrmask.Optimization.FAST_RUNTIME,
-        parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
+    child = grammar_from_ebnf('start ::= "a"?').prepare(vocab)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').compile_unlinked(vocab)
-    linked = link_module(parent.bind("C", child), optimization=mode,
+        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
+    linked = link_module(_bound_snapshot(parent, "C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[6])
     for compiled in representations(linked, vocab):
         state = compiled.start()
@@ -259,7 +270,7 @@ def test_python_backend_selection_does_not_accept_untyped_flags():
 def test_python_explicit_lr_compile_and_link_requests_panic_loudly():
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a"})
     grammar = grammar_from_ebnf('start ::= "a"')
-    module = grammar.compile_unlinked(vocab)
+    module = grammar.prepare(vocab)
     for operation in [lambda: compile_grammar(grammar, vocab, parser_backend=glrmask._internal.ParserBackend.LR_TABLE),
                       lambda: link_module(module, parser_backend=glrmask._internal.ParserBackend.LR_TABLE)]:
         with pytest.raises(BaseException, match="LR-BACKED CONSTRAINT REQUEST IS FORBIDDEN") as rejected:
@@ -275,12 +286,11 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
     child = grammar_from_json_schema(json.dumps({
         "type": "string", "format": "uri", "minLength": 1, "maxLength": 5000,
-    })).compile(vocab, optimization=glrmask.Optimization.FAST_RUNTIME,
-                parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA)
-    child = glrmask.Constraint.load(child.save())
+    })).prepare(vocab)
+    child = glrmask.PreparedGrammar.load(child.save(), vocab=vocab)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "p" C "q";').compile_unlinked(vocab)
-    compiled = link_module(parent.bind("C", child), optimization=mode,
+        'glrm 1; start root; extern grammar C; nt root = "p" C "q";').prepare(vocab)
+    compiled = link_module(_bound_snapshot(parent, "C", child), optimization=mode,
         parser_backend=glrmask._internal.ParserBackend.TEMPLATE_DFA, end_tokens=[8])
     for compiled in representations(compiled, vocab):
         assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
@@ -313,15 +323,15 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
               5: b"ay", 6: b"aa", 7: b"yx", 8: b""}
     vocab = glrmask.Vocab.from_id_to_bytes(tokens)
     selection = {} if backend is None else {"parser_backend": backend}
-    child = grammar_from_glrm(
-        'start root; t A ::= /a?/; nt root ::= A;').compile(
-            vocab, optimization=mode, **selection)
+    prepared = grammar_from_glrm(
+        'start root t A = /a?/ nt root = A').prepare(vocab)
     parent = grammar_from_glrm(
-        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').compile_unlinked(vocab)
+        'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
     language = [b"xy", b"xay"]
-    for child in representations(child, vocab):
+    for child in [prepared, glrmask.PreparedGrammar.load(prepared.save()),
+                  glrmask.PreparedGrammar.load(prepared.save(), vocab=vocab)]:
         child_bytes = child.save()
-        linked = link_module(parent.bind("C", child),
+        linked = link_module(_bound_snapshot(parent, "C", child),
             optimization=mode, end_tokens=[8], **selection)
         assert child.save() == child_bytes
         for compiled in representations(linked, vocab):

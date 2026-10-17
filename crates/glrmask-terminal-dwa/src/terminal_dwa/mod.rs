@@ -282,7 +282,7 @@ fn use_global_single_terminal_l1(
 pub fn grammar_def_uses_global_single_terminal_l1(grammar: &GrammarDef) -> bool {
     if grammar.num_terminals() != 1
         || grammar.ignore_terminal.is_some()
-        || matches!(grammar.terminals.first(), Some(Terminal::SpecialToken { .. }))
+        || matches!(grammar.terminals.first(), Some(Terminal::SpecialToken { .. } | Terminal::SpecialTokenRange { .. }))
     {
         return false;
     }

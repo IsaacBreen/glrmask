@@ -1,18 +1,54 @@
-name: Guide sync
+name: Documentation sync
 
 on:
   pull_request:
     paths:
       - 'GUIDE.md'
       - 'README.md'
+      - 'README.rust.md'
+      - 'python/README.md'
+      - 'python/PYTHON.md'
+      - 'src/**'
+      - 'crates/glrmask-vocab/src/**'
+      - 'crates/glrmask-grammar/src/**'
+      - 'python/python/glrmask/**'
+      - 'python/src/**'
+      - 'Cargo.toml'
+      - 'python/pyproject.toml'
+      - 'docs/content/**'
+      - 'docs/website-content.json'
+      - 'docs/language-docs.json'
       - 'scripts/sync-guide.py'
+      - 'scripts/check-readme-archives.py'
+      - 'docs/documentation-sync.md'
+      - 'scripts/sync-benchmarks.py'
+      - 'docs/benchmarks/**'
+      - 'docs/assets/benchmark-tbm-*'
       - '.github/workflows/guide-sync.yml'
   push:
     branches: [main, glrmask-main]
     paths:
       - 'GUIDE.md'
       - 'README.md'
+      - 'README.rust.md'
+      - 'python/README.md'
+      - 'python/PYTHON.md'
+      - 'src/**'
+      - 'crates/glrmask-vocab/src/**'
+      - 'crates/glrmask-grammar/src/**'
+      - 'python/python/glrmask/**'
+      - 'python/src/**'
+      - 'Cargo.toml'
+      - 'python/pyproject.toml'
+      - 'docs/content/**'
+      - 'docs/website-content.json'
+      - 'docs/language-docs.json'
       - 'scripts/sync-guide.py'
+      - 'scripts/check-readme-archives.py'
+      - 'docs/documentation-sync.md'
+      - 'scripts/sync-benchmarks.py'
+      - 'docs/benchmarks/**'
+      - 'docs/assets/benchmark-tbm-*'
       - '.github/workflows/guide-sync.yml'
 
 jobs:
@@ -23,4 +59,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+      - run: python scripts/sync-benchmarks.py --check
       - run: python scripts/sync-guide.py --check
+      - name: Rust documentation examples
+        run: cargo test --doc --locked -p glrmask
+      - name: Render Rust API reference
+        run: cargo doc --locked --no-deps -p glrmask
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-api-reference
+          path: target/doc
+          retention-days: 3

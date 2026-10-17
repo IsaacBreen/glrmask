@@ -77,11 +77,15 @@ impl GrammarParserProgram {
         })?;
         let mut specials = self.lexical.terminals.iter().filter_map(|terminal| match terminal {
             crate::grammar::flat::Terminal::SpecialToken { id, token_id } => Some(
-                crate::runtime::SpecialTokenTerminal { terminal_id: *id, token_id: *token_id }),
+                crate::runtime::SpecialTokenTerminal { terminal_id: *id, token_id: *token_id, token_id_end: *token_id }),
+            crate::grammar::flat::Terminal::SpecialTokenRange { id, start, end } => Some(
+                crate::runtime::SpecialTokenTerminal { terminal_id: *id, token_id: *start, token_id_end: *end }),
             _ => None,
         }).collect::<Vec<_>>();
-        specials.sort_unstable_by_key(|special| (special.token_id, special.terminal_id));
-        self.program.compile_tokenizer(tokenizer, self.grammar.terminal_names().to_vec(),
-            self.grammar.ignore_terminal(), specials, vocab, options)
+        specials.sort_unstable_by_key(|special| (special.token_id, special.token_id_end, special.terminal_id));
+        let mut constraint = self.program.compile_tokenizer(tokenizer, self.grammar.terminal_names().to_vec(),
+            self.grammar.ignore_terminal(), specials, vocab, options)?;
+        constraint.install_grammar_markers(&self.lexical).map_err(crate::Error::Compilation)?;
+        Ok(constraint)
     }
 }

@@ -1,10 +1,13 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
 
 use super::{choice_or_single, sequence_or_single};
-use crate::GlrMaskError;
+mod document;
+pub use document::{LarkDocument,LarkProfile,LarkTokenSet,parse_lark_document};
+use crate::{GlrMaskError,SourceSpan};
+use crate::automata::lexer::regex::checked_pattern;
 use crate::automata::lexer::{
     DFA as LexerDfa,
     compile::compile_expression_labeled_nfa,
@@ -21,6 +24,10 @@ enum Token {
     Terminal(String),
     Literal(String),
     SpecialToken(u32),
+    Marker(u32),
+    EventSet(LarkTokenSet),
+    External(String),
+    JsonSchema(std::ops::Range<usize>),
     Regex(String),
     LParen,
     RParen,
@@ -39,19 +46,36 @@ enum Token {
     Arrow,
     Bang,
     PercentIgnore,
+    PercentImport,
+    Minus,
 }
 
 struct Lexer<'a> {
     input: &'a [u8],
     pos: usize,
+    offsets:Vec<(usize,usize)>,
+    current_start:usize,
+    profile: LarkProfile,
 }
 
 impl<'a> Lexer<'a> {
     fn new(input: &'a str) -> Self {
         Lexer {
             input: input.as_bytes(),
-            pos: 0,
+            pos: 0, offsets:Vec::new(), current_start:0,
+            profile: LarkProfile::Llm,
         }
+    }
+
+    fn with_profile(input:&'a str,profile:LarkProfile)->Self {
+        Self {input:input.as_bytes(),pos:0,profile,offsets:Vec::new(),current_start:0}
+    }
+
+    fn require_llm(&self, feature:&str)->Result<(),GlrMaskError> {
+        if self.profile!=LarkProfile::Llm {
+            return Err(GlrMaskError::GrammarParse(format!("{feature} requires the explicit Lark LLM compatibility profile")));
+        }
+        Ok(())
     }
 
     fn peek(&self) -> Option<u8> {
@@ -185,21 +209,23 @@ impl<'a> Lexer<'a> {
         s
     }
 
-    fn lex_number(&mut self, first: u8) -> usize {
+    fn lex_number(&mut self, first: u8) -> Result<usize, GlrMaskError> {
         let mut n = (first - b'0') as usize;
         while let Some(b) = self.peek() {
             if b.is_ascii_digit() {
-                n = n * 10 + (b - b'0') as usize;
+                n = n.checked_mul(10).and_then(|n| n.checked_add((b - b'0') as usize))
+                    .ok_or_else(|| GlrMaskError::GrammarParse("integer in Lark source is too large".into()))?;
                 self.pos += 1;
             } else {
                 break;
             }
         }
-        n
+        Ok(n)
     }
 
     fn lex_special_token(&mut self) -> Result<Token, GlrMaskError> {
-        let prefix = b"token(";
+        let marker = self.input[self.pos..].starts_with(b"mark(");
+        let prefix: &[u8] = if marker { b"mark(" } else { b"token(" };
         if !self.input[self.pos..].starts_with(prefix) {
             return Err(GlrMaskError::GrammarParse(
                 "expected @token(<token-id>)".into(),
@@ -224,13 +250,90 @@ impl<'a> Lexer<'a> {
             ));
         }
         self.pos += 1;
-        Ok(Token::SpecialToken(token_id))
+        Ok(if marker { Token::Marker(token_id) } else { Token::SpecialToken(token_id) })
+    }
+
+    fn lex_event_set(&mut self) -> Result<Token,GlrMaskError> {
+        self.require_llm("exact-token atoms")?;
+        self.pos+=1; // '<'
+        if self.peek()==Some(b'|') {
+            self.pos+=1;let start=self.pos;
+            while self.pos+1<self.input.len() && &self.input[self.pos..self.pos+2]!=b"|>" {self.pos+=1;}
+            if self.pos==start || self.pos+1>=self.input.len(){return Err(GlrMaskError::GrammarParse("unterminated or empty named special token".into()));}
+            let name=std::str::from_utf8(&self.input[start..self.pos]).map_err(|_|GlrMaskError::GrammarParse("invalid token name".into()))?.to_owned();
+            self.pos+=2;return Ok(Token::EventSet(LarkTokenSet::Named(name)));
+        }
+        if self.advance()!=Some(b'['){return Err(GlrMaskError::GrammarParse("expected <[...]> or <|name|>".into()));}
+        self.skip_whitespace_inline();
+        let negate=if self.peek()==Some(b'^'){self.pos+=1;true}else{false};
+        self.skip_whitespace_inline();
+        if self.peek()==Some(b'*') {
+            self.pos+=1;self.skip_whitespace_inline();
+            if negate || self.advance()!=Some(b']') || self.advance()!=Some(b'>'){
+                return Err(GlrMaskError::GrammarParse("wildcard syntax is <[*]>; a negated wildcard is not supported".into()));
+            }
+            return Ok(Token::EventSet(LarkTokenSet::Any));
+        }
+        let mut ranges=Vec::new();
+        while self.peek()!=Some(b']') {
+            let number=|lexer:&mut Self|->Result<u32,GlrMaskError>{
+                let first=lexer.advance().filter(u8::is_ascii_digit).ok_or_else(||GlrMaskError::GrammarParse("expected numeric token ID".into()))?;
+                let id=lexer.lex_number(first)?;
+                u32::try_from(id).map_err(|_|GlrMaskError::GrammarParse("token ID does not fit in u32".into()))
+            };
+            let start=number(self)?;self.skip_whitespace_inline();
+            let end=if self.peek()==Some(b'-'){self.pos+=1;self.skip_whitespace_inline();number(self)?}else{start};
+            if start>end{return Err(GlrMaskError::GrammarParse("token range endpoints are reversed".into()));}
+            ranges.push((start,end));self.skip_whitespace_inline();
+            if self.peek()!=Some(b','){break;}self.pos+=1;self.skip_whitespace_inline();
+            if self.peek()==Some(b']'){return Err(GlrMaskError::GrammarParse("missing token ID after comma".into()));}
+        }
+        if self.advance()!=Some(b']') || self.advance()!=Some(b'>'){return Err(GlrMaskError::GrammarParse("unterminated <[...]> token atom".into()));}
+        Ok(Token::EventSet(LarkTokenSet::Ranges{ranges,negate}))
+    }
+
+    fn lex_json_schema(&mut self)->Result<Token,GlrMaskError> {
+        self.require_llm("inline JSON Schema")?;
+        while self.peek().is_some_and(|b|b.is_ascii_whitespace()){self.pos+=1;}
+        let start=self.pos;
+        if self.advance()!=Some(b'{'){return Err(GlrMaskError::GrammarParse("%json requires a JSON object".into()));}
+        let mut depth=1usize;let mut quoted=false;let mut escaped=false;
+        while let Some(byte)=self.advance() {
+            if quoted {
+                if escaped {escaped=false;}else if byte==b'\\'{escaped=true;}else if byte==b'"'{quoted=false;}
+                continue;
+            }
+            match byte {
+                b'"'=>quoted=true,
+                b'{'=>{depth+=1;if depth>512{return Err(GlrMaskError::GrammarParse("inline JSON nesting exceeds 512".into()));}},
+                b'}'=>{depth-=1;if depth==0{return Ok(Token::JsonSchema(start..self.pos));}},
+                _=>{},
+            }
+        }
+        Err(GlrMaskError::GrammarParse("unterminated inline JSON Schema".into()))
+    }
+
+    fn lex_at_reference(&mut self)->Result<Token,GlrMaskError> {
+        self.require_llm("external grammar references")?;
+        if self.input[self.pos..].starts_with(b"token("){return self.lex_special_token();}
+        let first=self.advance().filter(|b|b.is_ascii_alphabetic()||*b==b'_')
+            .ok_or_else(||GlrMaskError::GrammarParse("expected external grammar name after @".into()))?;
+        let mut name=self.lex_ident(first);
+        while self.peek()==Some(b'-') {
+            self.pos+=1;name.push('-');
+            let first=self.advance().filter(|b|b.is_ascii_alphanumeric()||*b==b'_')
+                .ok_or_else(||GlrMaskError::GrammarParse("invalid external grammar name".into()))?;
+            name.push_str(&self.lex_ident(first));
+        }
+        Ok(Token::External(name))
     }
 
     fn tokenize(&mut self) -> Result<Vec<Token>, GlrMaskError> {
         let mut tokens = Vec::new();
+        self.offsets.clear();
         loop {
             self.skip_whitespace_inline();
+            let start=self.pos;self.current_start=start;let count=tokens.len();
             match self.peek() {
                 None => break,
                 Some(b'/') => {
@@ -239,20 +342,28 @@ impl<'a> Lexer<'a> {
                         self.skip_comment();
                     } else {
                         let rx = self.lex_regex()?;
+                        let start = self.pos;
+                        while self.peek().is_some_and(|b| b.is_ascii_alphabetic()) { self.pos += 1; }
+                        let flags = std::str::from_utf8(&self.input[start..self.pos]).unwrap();
+                        let rx = checked_pattern(&rx, flags, true).map_err(GlrMaskError::GrammarParse)?;
                         tokens.push(Token::Regex(rx));
                     }
                 }
                 Some(b'#') => self.skip_comment(),
                 Some(b'%') => {
                     self.pos += 1;
-                    // Check for %ignore directive
-                    let rest = &self.input[self.pos..];
-                    if rest.starts_with(b"ignore") && rest.get(6).map_or(true, |b| !b.is_ascii_alphanumeric() && *b != b'_') {
-                        self.pos += 6;
-                        tokens.push(Token::PercentIgnore);
-                    } else {
-                        // Skip other %directives (e.g. %import)
-                        self.skip_comment();
+                    let start = self.pos;
+                    while self.peek().is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') {
+                        self.pos += 1;
+                    }
+                    let directive = std::str::from_utf8(&self.input[start..self.pos]).unwrap();
+                    match directive {
+                        "ignore" => tokens.push(Token::PercentIgnore),
+                        "import" => tokens.push(Token::PercentImport),
+                        "json" => tokens.push(self.lex_json_schema()?),
+                        _ => return Err(GlrMaskError::GrammarParse(format!(
+                            "unsupported Lark directive %{directive}; directives are never silently ignored"
+                        ))),
                     }
                 }
                 Some(b'\n') => {
@@ -262,12 +373,24 @@ impl<'a> Lexer<'a> {
                 Some(b'"') => {
                     self.pos += 1;
                     let s = self.lex_string(b'"')?;
-                    tokens.push(Token::Literal(s));
+                    if self.peek() == Some(b'i') {
+                        self.pos += 1;
+                        let pattern = s.chars().map(|c| format!(r"\x{{{:X}}}", c as u32)).collect::<String>();
+                        tokens.push(Token::Regex(checked_pattern(&pattern, "i", true).map_err(GlrMaskError::GrammarParse)?));
+                    } else {
+                        tokens.push(Token::Literal(s));
+                    }
                 }
                 Some(b'\'') => {
                     self.pos += 1;
                     let s = self.lex_string(b'\'')?;
-                    tokens.push(Token::Literal(s));
+                    if self.peek() == Some(b'i') {
+                        self.pos += 1;
+                        let pattern = s.chars().map(|c| format!(r"\x{{{:X}}}", c as u32)).collect::<String>();
+                        tokens.push(Token::Regex(checked_pattern(&pattern, "i", true).map_err(GlrMaskError::GrammarParse)?));
+                    } else {
+                        tokens.push(Token::Literal(s));
+                    }
                 }
                 Some(b'(') => {
                     self.pos += 1;
@@ -307,8 +430,12 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b'@') => {
                     self.pos += 1;
-                    tokens.push(self.lex_special_token()?);
+                    if self.input[self.pos..].starts_with(b"mark(") {
+                        self.require_llm("marker atoms")?;
+                        tokens.push(self.lex_special_token()?);
+                    } else { tokens.push(self.lex_at_reference()?); }
                 }
+                Some(b'<') => tokens.push(self.lex_event_set()?),
                 Some(b'~') => {
                     self.pos += 1;
                     tokens.push(Token::Tilde);
@@ -323,7 +450,7 @@ impl<'a> Lexer<'a> {
                         self.pos += 1;
                         tokens.push(Token::Arrow);
                     } else {
-                        return Err(GlrMaskError::GrammarParse("unexpected '-'".into()));
+                        tokens.push(Token::Minus);
                     }
                 }
                 Some(b':') => {
@@ -348,7 +475,7 @@ impl<'a> Lexer<'a> {
                 }
                 Some(b) if b.is_ascii_digit() => {
                     self.pos += 1;
-                    let n = self.lex_number(b);
+                    let n = self.lex_number(b)?;
                     tokens.push(Token::Number(n));
                 }
                 Some(b) => {
@@ -358,61 +485,79 @@ impl<'a> Lexer<'a> {
                     )));
                 }
             }
+            self.offsets.extend((count..tokens.len()).map(|_|(start,self.pos)));
         }
         Ok(tokens)
     }
 }
 
-fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> GrammarExpr {
-    if let Some(max) = max {
-        assert!(max >= min, "tilde max must be >= min");
+fn bounded_repeat_expr(atom: GrammarExpr, min: usize, max: Option<usize>) -> Result<GrammarExpr, GlrMaskError> {
+    if max.is_some_and(|max| max < min) {
+        return Err(GlrMaskError::GrammarParse(format!(
+            "repetition upper bound {} is smaller than lower bound {min}", max.unwrap()
+        )));
     }
-    GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, max))
-}
-
-fn escape_char_class_byte(b: u8) -> String {
-    match b {
-        b'\\' | b']' | b'^' | b'-' => format!("\\{}", b as char),
-        b'\n' => "\\n".into(),
-        b'\r' => "\\r".into(),
-        b'\t' => "\\t".into(),
-        byte if byte.is_ascii_graphic() || byte == b' ' => (byte as char).to_string(),
-        byte => format!("\\x{byte:02x}"),
-    }
+    Ok(GrammarExpr::Quantified(Box::new(atom), Quantifier::Range(min, max)))
 }
 
 fn literal_range_expr(start: &str, end: &str) -> Result<GrammarExpr, GlrMaskError> {
-    let start_bytes = start.as_bytes();
-    let end_bytes = end.as_bytes();
-    if start_bytes.len() != 1 || end_bytes.len() != 1 {
-        return Err(GlrMaskError::GrammarParse(
-            "Lark literal ranges currently require single-byte endpoints".into(),
-        ));
+    let mut a = start.chars();
+    let mut b = end.chars();
+    let (Some(a0), Some(b0), None, None) = (a.next(), b.next(), a.next(), b.next()) else {
+        return Err(GlrMaskError::GrammarParse("Lark literal ranges require single Unicode-scalar endpoints".into()));
+    };
+    if a0 > b0 {
+        return Err(GlrMaskError::GrammarParse(format!("invalid Lark literal range {start:?}..{end:?}")));
     }
+    // Unicode escapes avoid metacharacter and UTF-8 byte ambiguities.
+    Ok(GrammarExpr::RawRegex(checked_pattern(&format!(r"[\U{:08X}-\U{:08X}]", a0 as u32, b0 as u32), "", true).map_err(GlrMaskError::GrammarParse)?))
+}
 
-    let start_byte = start_bytes[0];
-    let end_byte = end_bytes[0];
-    if start_byte > end_byte {
-        return Err(GlrMaskError::GrammarParse(format!(
-            "invalid Lark literal range {:?}..{:?}",
-            start, end
-        )));
-    }
-
-    Ok(GrammarExpr::CharClass {
-        def: format!(
-            "{}-{}",
-            escape_char_class_byte(start_byte),
-            escape_char_class_byte(end_byte)
-        ),
-        negate: false,
-        utf8: true,
+// Recognition equivalents of Lark 1.3.1 common.lark (MIT licensed).
+// Resolve imports locally: no implicit file or network access. The two pattern
+// rewrites below avoid lookbehind/reluctance while retaining delimiter boundaries.
+fn common_terminal_pattern(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "DIGIT" => r"[0-9]",
+        "HEXDIGIT" => r"[0-9a-fA-F]",
+        "INT" => r"[0-9]+",
+        "SIGNED_INT" => r"[+-]?[0-9]+",
+        "DECIMAL" => r"([0-9]+\.[0-9]*|\.[0-9]+)",
+        "_EXP" => r"[eE][+-]?[0-9]+",
+        "FLOAT" => r"([0-9]+[eE][+-]?[0-9]+|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "SIGNED_FLOAT" => r"[+-]?([0-9]+[eE][+-]?[0-9]+|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "NUMBER" => r"([0-9]+([eE][+-]?[0-9]+)?|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "SIGNED_NUMBER" => r"[+-]?([0-9]+([eE][+-]?[0-9]+)?|([0-9]+\.[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?)",
+        "ESCAPED_STRING" => r#""([^"\\\n]|\\[^\n])*""#,
+        "LCASE_LETTER" => r"[a-z]",
+        "UCASE_LETTER" => r"[A-Z]",
+        "LETTER" => r"[a-zA-Z]",
+        "WORD" => r"[a-zA-Z]+",
+        "CNAME" => r"[_a-zA-Z][_a-zA-Z0-9]*",
+        "WS_INLINE" => r"[ \t]+",
+        "WS" => r"[ \t\x0c\r\n]+",
+        "CR" => r"\r",
+        "LF" => r"\n",
+        "NEWLINE" => r"(\r?\n)+",
+        "SH_COMMENT" => r"#[^\n]*",
+        "CPP_COMMENT" => r"//[^\n]*",
+        "C_COMMENT" => r"/\*[^*]*\*+([^/*][^*]*\*+)*/",
+        "SQL_COMMENT" => r"--[^\n]*",
+        _ => return None,
     })
 }
 
 struct Parser {
     tokens: Vec<Token>,
+    spans:Vec<SourceSpan>,
     pos: usize,
+    profile: LarkProfile,
+    ignored:Vec<String>,
+    events:Vec<(String,LarkTokenSet)>,
+    schemas:Vec<(String,std::ops::Range<usize>)>,
+    imports:std::collections::BTreeSet<String>,
+    source_spans:BTreeMap<String,SourceSpan>,
+    expression_depth:usize,
 }
 
 fn is_lark_terminal_name(name: &str) -> bool {
@@ -422,11 +567,11 @@ fn is_lark_terminal_name(name: &str) -> bool {
             .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
 }
 
-fn lark_start_rule_name(rules: &[NamedRule]) -> String {
+fn lark_start_rule_name(rules: &[NamedRule]) -> Result<String, GlrMaskError> {
     if rules.iter().any(|rule| rule.name == "start") {
-        "start".to_string()
+        Ok("start".to_string())
     } else {
-        rules[0].name.clone()
+        Err(GlrMaskError::GrammarParse("Lark grammar must define a rule named 'start'".into()))
     }
 }
 
@@ -436,22 +581,14 @@ fn mark_lark_terminal_rules(rules: &mut [NamedRule]) {
     }
 }
 
-fn synthesize_lark_ignore_rule(
-    rules: &mut Vec<NamedRule>,
-    ignore_exprs: Vec<GrammarExpr>,
-) -> Option<String> {
-    if ignore_exprs.is_empty() {
-        return None;
+fn synthesize_lark_ignore_rules(rules:&mut Vec<NamedRule>,expressions:Vec<GrammarExpr>)->Vec<String> {
+    let mut names=Vec::new();
+    for (i,expr) in expressions.into_iter().enumerate() {
+        let name=format!("$lark_ignore_{i}");
+        rules.push(NamedRule{name:name.clone(),expr,is_terminal:true,is_internal:false});
+        names.push(name);
     }
-
-    let ignore_name = "__IGNORE".to_string();
-    rules.push(NamedRule {
-        name: ignore_name.clone(),
-        expr: choice_or_single(ignore_exprs),
-        is_terminal: true,
-        is_internal: false,
-    });
-    Some(ignore_name)
+    names
 }
 
 const MIN_LARK_TERMINAL_GRAPH_RULES: usize = 32;
@@ -462,7 +599,7 @@ fn lark_ref_names(expr: &GrammarExpr) -> Vec<&str> {
     while let Some(expr) = stack.pop() {
         match expr {
             GrammarExpr::Ref(name) => refs.push(name.as_str()),
-            GrammarExpr::Grouped(inner) | GrammarExpr::Quantified(inner, _) => {
+            GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) | GrammarExpr::Quantified(inner, _) => {
                 stack.push(inner);
             }
             GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -489,7 +626,7 @@ fn lark_ref_names(expr: &GrammarExpr) -> Vec<&str> {
             }
             GrammarExpr::Epsilon
             | GrammarExpr::Literal(_)
-            | GrammarExpr::SpecialToken(_)
+            | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
             | GrammarExpr::CharClass { .. }
             | GrammarExpr::RawRegex(_)
             | GrammarExpr::LexerDfa(_)
@@ -523,9 +660,10 @@ fn validate_lark_terminal_refs(
 fn validate_lark_parser_refs(
     expr: &GrammarExpr,
     rule_map: &HashMap<String, GrammarExpr>,
+    externs:&HashSet<String>,
 ) -> Result<(), GlrMaskError> {
     for target in lark_ref_names(expr) {
-        if !rule_map.contains_key(target) {
+        if !rule_map.contains_key(target) && !externs.contains(target) {
             return Err(GlrMaskError::GrammarParse(format!(
                 "unknown Lark rule reference {target}"
             )));
@@ -747,11 +885,12 @@ fn compile_lark_terminal_graph_root(
     Ok(Some(Arc::new(dfa)))
 }
 
-fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMaskError> {
+fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar,additional_ignores:&[String]) -> Result<(), GlrMaskError> {
     let source = grammar.clone();
     let terminal_names = source.terminal_names_set();
     let graph_index = LarkTerminalGraphIndex::new(&source, &terminal_names);
-    let external = externally_emitted_lark_terminals(&source, &terminal_names);
+    let mut external = externally_emitted_lark_terminals(&source, &terminal_names);
+    external.extend(additional_ignores.iter().cloned());
     let mut roots = external.iter().cloned().collect::<Vec<_>>();
     roots.sort_unstable();
 
@@ -806,7 +945,10 @@ fn compress_lark_terminal_graphs(grammar: &mut NamedGrammar) -> Result<(), GlrMa
     Ok(())
 }
 
-fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskError> {
+fn normalize_lark_named(grammar:NamedGrammar)->Result<NamedGrammar,GlrMaskError> {
+    normalize_lark_named_with_externals(grammar,&HashSet::new(),&[])
+}
+fn normalize_lark_named_with_externals(grammar: NamedGrammar, externs:&HashSet<String>,additional_ignores:&[String]) -> Result<NamedGrammar, GlrMaskError> {
     let rule_map: HashMap<String, GrammarExpr> = grammar
         .rules
         .iter()
@@ -818,10 +960,11 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         if terminal_names.contains(&rule.name) {
             validate_lark_terminal_refs(&rule.expr, &rule.name, &terminal_names, &rule_map)?;
         } else {
-            validate_lark_parser_refs(&rule.expr, &rule_map)?;
+            validate_lark_parser_refs(&rule.expr, &rule_map,externs)?;
         }
     }
     validate_lark_terminal_acyclic(&rule_map, &terminal_names)?;
+    crate::grammar::ast::validate_shortest_operands(&grammar)?;
 
     let start_is_terminal = terminal_names.contains(&grammar.start);
     let output_start = if start_is_terminal {
@@ -855,13 +998,16 @@ fn normalize_lark_named(grammar: NamedGrammar) -> Result<NamedGrammar, GlrMaskEr
         lexer_literal_partitions: Default::default(),
         default_lexer_partition: None,
     };
-    compress_lark_terminal_graphs(&mut normalized)?;
+    compress_lark_terminal_graphs(&mut normalized,additional_ignores)?;
     Ok(normalized)
 }
 
 impl Parser {
+    fn locate(&self,error:GlrMaskError,position:usize)->GlrMaskError {
+        match self.spans.get(position).or_else(||self.spans.last()){Some(span)=>error.at(*span),None=>error}
+    }
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, pos: 0 }
+        Parser { tokens, spans:Vec::new(), pos: 0,profile:LarkProfile::Llm,ignored:Vec::new(),events:Vec::new(),schemas:Vec::new(),imports:Default::default(),source_spans:BTreeMap::new(),expression_depth:0 }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -879,7 +1025,8 @@ impl Parser {
     }
 
     fn expect_token(&mut self, expected: &Token) -> Result<(), GlrMaskError> {
-        match self.advance() {
+        let position=self.pos;
+        let result=match self.advance() {
             Some(ref tok) if tok == expected => Ok(()),
             Some(tok) => Err(GlrMaskError::GrammarParse(format!(
                 "expected {:?}, got {:?}",
@@ -889,7 +1036,8 @@ impl Parser {
                 "expected {:?}, got end of input",
                 expected
             ))),
-        }
+        };
+        result.map_err(|e|self.locate(e,position))
     }
 
     fn skip_newlines(&mut self) {
@@ -915,10 +1063,62 @@ impl Parser {
         }
     }
 
-    fn skip_rule_priority(&mut self) {
-        if self.peek() == Some(&Token::Dot) && matches!(self.peek_nth(1), Some(Token::Number(_))) {
-            self.pos += 2;
+    fn reject_rule_priority(&mut self) -> Result<(), GlrMaskError> {
+        if self.peek() == Some(&Token::Dot) {
+            return Err(GlrMaskError::GrammarParse(
+                "Lark rule and terminal priorities are not supported".into()
+            ));
         }
+        Ok(())
+    }
+
+    fn import_name(&mut self) -> Result<String, GlrMaskError> {
+        match self.advance() {
+            Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(name),
+            other => Err(GlrMaskError::GrammarParse(format!("expected name in Lark import, got {other:?}"))),
+        }
+    }
+
+    fn parse_import(&mut self, rules: &mut Vec<NamedRule>) -> Result<bool, GlrMaskError> {
+        if self.peek() != Some(&Token::PercentImport) { return Ok(false); }
+        self.pos += 1;
+        let module = self.import_name()?;
+        if module != "common" {
+            return Err(GlrMaskError::GrammarParse(format!("unsupported Lark import module {module:?}; only 'common' is supported")));
+        }
+        let mut imports = Vec::new();
+        if self.peek() == Some(&Token::Dot) {
+            self.pos += 1;
+            let name = self.import_name()?;
+            let alias = if self.peek() == Some(&Token::Arrow) {
+                self.pos += 1; self.import_name()?
+            } else { name.clone() };
+            imports.push((name, alias));
+        } else {
+            self.expect_token(&Token::LParen)?;
+            loop {
+                self.skip_newlines();
+                let name = self.import_name()?;
+                imports.push((name.clone(), name));
+                self.skip_newlines();
+                if self.peek() != Some(&Token::Comma) { break; }
+                self.pos += 1;
+            }
+            self.expect_token(&Token::RParen)?;
+        }
+        for (name, alias) in imports {
+            if !is_lark_terminal_name(&alias) {
+                return Err(GlrMaskError::GrammarParse(format!("imported terminal alias {alias:?} must be uppercase")));
+            }
+            let pattern = common_terminal_pattern(&name).ok_or_else(||
+                GlrMaskError::GrammarParse(format!("unknown common terminal {name:?}")))?;
+            rules.push(NamedRule { name: alias, expr: GrammarExpr::RawRegex(checked_pattern(pattern, "", true).map_err(GlrMaskError::GrammarParse)?), is_terminal: true, is_internal: false });
+        }
+        if !matches!(self.peek(), None | Some(Token::Newline)) {
+            return Err(GlrMaskError::GrammarParse("unexpected content after Lark import".into()));
+        }
+        self.skip_newlines();
+        Ok(true)
     }
 
     fn parse_bounded_repeat(&mut self, atom: GrammarExpr) -> Result<GrammarExpr, GlrMaskError> {
@@ -928,27 +1128,14 @@ impl Parser {
         };
 
         let max = if self.peek() == Some(&Token::Dot) {
-            let saved = self.pos;
             self.pos += 1;
-            if self.peek() == Some(&Token::Dot) {
-                self.pos += 1;
-                match self.advance() {
-                    Some(Token::Number(value)) => Some(value),
-                    _ => {
-                        return Err(GlrMaskError::GrammarParse(
-                            "expected number after ..".into(),
-                        ));
-                    }
-                }
-            } else {
-                self.pos = saved;
-                None
+            self.expect_token(&Token::Dot)?;
+            match self.advance() {
+                Some(Token::Number(value)) => value,
+                _ => return Err(GlrMaskError::GrammarParse("expected upper bound after '..'".into())),
             }
-        } else {
-            None
-        };
-
-        Ok(bounded_repeat_expr(atom, min, max))
+        } else { min };
+        bounded_repeat_expr(atom, min, Some(max))
     }
 
     fn parse_literal_or_range(&mut self, literal: String) -> Result<GrammarExpr, GlrMaskError> {
@@ -982,16 +1169,29 @@ impl Parser {
         }
 
         self.pos += 1;
-        ignore_exprs.push(self.parse_atom()?);
+        ignore_exprs.push(self.parse_alternatives()?);
         self.skip_newlines();
         Ok(true)
     }
 
     fn parse_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
         let name = self.parse_rule_name()?;
-        self.skip_rule_priority();
+        self.reject_rule_priority()?;
+        let lazy = if self.peek() == Some(&Token::LBracket) {
+            self.pos += 1;
+            let attribute = self.import_name()?;
+            if self.profile!=LarkProfile::Llm {
+                return Err(GlrMaskError::GrammarParse("[lazy] requires the Lark LLM compatibility profile".into()));
+            }
+            if attribute != "lazy" {
+                return Err(GlrMaskError::GrammarParse(format!("unsupported Lark rule attribute {attribute:?}; only [lazy] on regular bodies is supported")));
+            }
+            self.expect_token(&Token::RBracket)?;
+            true
+        } else { false };
         self.expect_token(&Token::Colon)?;
         let expr = self.parse_alternatives()?;
+        let expr = if lazy { GrammarExpr::Shortest(Box::new(expr)) } else { expr };
         Ok(NamedRule {
             name,
             expr,
@@ -1006,7 +1206,7 @@ impl Parser {
 
         self.skip_newlines();
         while self.pos < self.tokens.len() {
-            if self.parse_ignore_directive(&mut ignore_exprs)? {
+            if self.parse_ignore_directive(&mut ignore_exprs)? || self.parse_import(&mut rules)? {
                 continue;
             }
 
@@ -1018,9 +1218,16 @@ impl Parser {
             return Err(GlrMaskError::GrammarParse("empty grammar".into()));
         }
 
-        let start = lark_start_rule_name(&rules);
+        let mut seen = HashSet::new();
+        for rule in &rules {
+            if !seen.insert(&rule.name) {
+                return Err(GlrMaskError::GrammarParse(format!("duplicate Lark declaration {:?}", rule.name)));
+            }
+        }
+        let start = lark_start_rule_name(&rules)?;
         mark_lark_terminal_rules(&mut rules);
-        let ignore = synthesize_lark_ignore_rule(&mut rules, ignore_exprs);
+        self.ignored=synthesize_lark_ignore_rules(&mut rules,ignore_exprs);
+        let ignore=self.ignored.first().cloned();
 
         Ok(NamedGrammar {
             rules,
@@ -1032,7 +1239,14 @@ impl Parser {
         })
     }
 
-    fn parse_alternatives(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+    fn parse_alternatives(&mut self)->Result<GrammarExpr,GlrMaskError> {
+        if self.expression_depth>=128 {return Err(GlrMaskError::GrammarParse("Lark expression nesting exceeds the supported depth of 128".into()));}
+        self.expression_depth+=1;
+        let result=self.parse_alternatives_inner();
+        self.expression_depth-=1;result
+    }
+
+    fn parse_alternatives_inner(&mut self) -> Result<GrammarExpr, GlrMaskError> {
         let first = self.parse_sequence()?;
         self.consume_alias_if_present()?;
         let mut alts = vec![first];
@@ -1100,6 +1314,10 @@ impl Parser {
                 | Some(Token::Terminal(_))
                 | Some(Token::Literal(_))
                 | Some(Token::SpecialToken(_))
+                | Some(Token::Marker(_))
+                | Some(Token::EventSet(_))
+                | Some(Token::External(_))
+                | Some(Token::JsonSchema(_))
                 | Some(Token::Regex(_))
                 | Some(Token::LParen)
                 | Some(Token::LBracket)
@@ -1131,13 +1349,35 @@ impl Parser {
         }
     }
 
+    fn remember_source_span(&mut self,name:&str,position:usize) {
+        if let Some(span)=self.spans.get(position) {
+            self.source_spans.entry(name.to_owned()).or_insert(*span);
+        }
+    }
+
     fn parse_atom(&mut self) -> Result<GrammarExpr, GlrMaskError> {
+        let position=self.pos;
         match self.advance() {
             Some(Token::Ident(name)) | Some(Token::Terminal(name)) => Ok(GrammarExpr::Ref(name)),
             Some(Token::Literal(literal)) => self.parse_literal_or_range(literal),
-            Some(Token::SpecialToken(token_id)) => Ok(GrammarExpr::SpecialToken(token_id)),
+            Some(Token::Marker(id)) => Ok(GrammarExpr::marker(id)),
+            Some(Token::SpecialToken(token_id)) => {
+                let name=format!("$lark_event_{}",self.events.len());
+                self.remember_source_span(&name,position);
+                self.events.push((name.clone(),LarkTokenSet::Ranges{ranges:vec![(token_id,token_id)],negate:false}));
+                Ok(GrammarExpr::Ref(name))
+            }
+            Some(Token::EventSet(set))=>{
+                let name=format!("$lark_event_{}",self.events.len());self.remember_source_span(&name,position);self.events.push((name.clone(),set));Ok(GrammarExpr::Ref(name))
+            }
+            Some(Token::External(name))=>{self.remember_source_span(&name,position);self.imports.insert(name.clone());Ok(GrammarExpr::Ref(format!("@{name}")))}
+            Some(Token::JsonSchema(range))=>{
+                let name=format!("$lark_json_{}",self.schemas.len());self.remember_source_span(&name,position);self.schemas.push((name.clone(),range));Ok(GrammarExpr::Ref(name))
+            }
             Some(Token::Regex(regex)) => Ok(GrammarExpr::RawRegex(regex)),
-            Some(Token::Dot) => Ok(GrammarExpr::AnyByte),
+            Some(Token::Dot) => Err(GlrMaskError::GrammarParse(
+                "bare '.' is not a Lark atom; use /./ for a Unicode character".into()
+            )),
             Some(Token::LParen) => {
                 let expr = self.parse_alternatives()?;
                 self.expect_token(&Token::RParen)?;
@@ -1162,18 +1402,18 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
     lower(&factored)
 }
 
-pub fn parse_lark_to_named_uncompressed(
-    input: &str,
-) -> Result<NamedGrammar, GlrMaskError> {
-    let mut lexer = Lexer::new(input);
-    let tokens = lexer.tokenize()?;
-    let mut parser = Parser::new(tokens);
-    let named = parser.parse_grammar()?;
-    normalize_lark_named(named)
+pub fn parse_lark_to_named_uncompressed(input:&str)->Result<NamedGrammar,GlrMaskError> {
+    let document=parse_lark_document(input,LarkProfile::Llm)?;
+    document.into_plain_grammar()
 }
 
 pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
     let mut named = parse_lark_to_named_uncompressed(input)?;
+    optimize_lark_grammar(&mut named);
+    Ok(named)
+}
+
+fn optimize_lark_grammar(named:&mut NamedGrammar) {
     // The transformation is recognition-preserving and retains the ordinary
     // static backend. Keep an explicit falsey escape hatch for diagnosis and
     // rollback, but use the compressed representation by default for matching
@@ -1187,9 +1427,9 @@ pub fn parse_lark_to_named(input: &str) -> Result<NamedGrammar, GlrMaskError> {
         })
         .unwrap_or(true)
     {
-        crate::grammar::right_linear::compress_large_right_linear_grammar(&mut named);
+        crate::grammar::right_linear::compress_large_right_linear_grammar(named);
     }
-    Ok(named)
+
 }
 
 
@@ -1202,7 +1442,7 @@ mod tests {
         let mut lexer = Lexer::new("start: \" —\" / →/\n");
         let tokens = lexer.tokenize().unwrap();
         assert!(tokens.contains(&Token::Literal(" —".to_string())));
-        assert!(tokens.contains(&Token::Regex(" →".to_string())));
+        assert!(tokens.contains(&Token::Regex(checked_pattern(" →", "", true).unwrap())));
 
         let named = parse_lark_to_named_uncompressed("start: \" —\"\n").unwrap();
         let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
@@ -1210,7 +1450,7 @@ mod tests {
 
         let named = parse_lark_to_named_uncompressed("start: / →/\n").unwrap();
         let start = named.rules.iter().find(|rule| rule.name == "start").unwrap();
-        assert_eq!(start.expr, GrammarExpr::RawRegex(" →".to_string()));
+        assert_eq!(start.expr, GrammarExpr::RawRegex(checked_pattern(" →", "", true).unwrap()));
 
 
         let named = parse_lark_to_named_uncompressed(r#"start: " \u2014 \U0001F600 \uD83D\uDE00"
@@ -1358,5 +1598,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cyclic Lark terminal definition"), "{error}");
+    }
+}
+
+
+#[cfg(test)]
+mod compatibility_regressions {
+    use super::*;
+    #[test]
+    fn exact_repetition_and_invalid_ranges() {
+        let g = parse_lark_to_named_uncompressed("start: \"a\"~3").unwrap();
+        assert!(matches!(g.rules[0].expr, GrammarExpr::Quantified(_, Quantifier::Range(3, Some(3)))));
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"~3..2").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"~99999999999999999999999999999999").is_err());
+    }
+    #[test]
+    fn never_accept_priorities_or_unknown_directives() {
+        for s in ["start.0: \"a\"", "start.-2: \"a\"", "start: A\nA.2: \"a\"",
+                  "%extend start: \"x\"\nstart: \"a\"", "%unknown thing\nstart: \"a\"", "%import unknown.A\nstart: A"] {
+            assert!(parse_lark_to_named_uncompressed(s).is_err(), "{s}");
+        }
+    }
+    #[test]
+    fn common_alias_group_and_duplicate_checks() {
+        let g = parse_lark_to_named_uncompressed("%import common (INT, WS)\n%ignore WS\nstart: INT").unwrap();
+        assert!(g.rules.iter().any(|r| r.name == "INT"));
+        assert!(parse_lark_to_named_uncompressed("%import common.INT -> N\nstart: N").is_ok());
+        assert!(parse_lark_to_named_uncompressed("%import common.INT\nINT: \"a\"\nstart: INT").is_err());
+        assert!(parse_lark_to_named_uncompressed("%import common.BOGUS\nstart: BOGUS").is_err());
+    }
+    #[test]
+    fn unicode_scalar_ranges_and_missing_start() {
+        assert!(parse_lark_to_named_uncompressed("start: \"α\"..\"ω\"").is_ok());
+        assert!(parse_lark_to_named_uncompressed("start: \"ab\"..\"z\"").is_err());
+        assert!(parse_lark_to_named_uncompressed("other: \"a\"").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: .").is_err());
+        assert!(parse_lark_to_named_uncompressed("start: \"a\"\n%ignore /[ \\t]/+").is_ok());
+    }
+}
+
+#[cfg(test)]
+mod regular_frontend_regressions {
+    use super::*;
+    #[test]
+    fn flags_casefold_and_lazy_have_shared_regular_nodes() {
+        for source in [r#"start: /abc/i"#, r#"start: "abc"i"#, r#"start: /./s"#, r#"start: /\p{L}+/"#,
+                       "start: word\nword[lazy]: /[a-z]+/"] {
+            assert!(parse_lark_to_named_uncompressed(source).is_ok(), "{source}");
+        }
+        for source in ["start: x\nx[lazy]: y\ny: \"a\"", "start[capture]: /a+/", "start: /a+/q", "start: /a+?/"] {
+            assert!(parse_lark_to_named_uncompressed(source).is_err(), "{source}");
+        }
     }
 }

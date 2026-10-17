@@ -1,0 +1,31 @@
+{
+  "status": "passed",
+  "profile": "canonical release correctness after alphabet fix",
+  "library": "C:\\gnb930283\\target-release\\release\\deps\\libglrmask-e404e0ab21439412.rlib",
+  "library_sha256": "b07279e52dc1d64eb7e2987a062c61750e018d6a701b999260fd003dc5c4d865",
+  "gate": "candidate-release-alphabet-r4.json",
+  "rows": [
+    {
+      "name": "bounded_prefix_fuzz",
+      "source_sha256": "9da2df5a95853888f316e2b00749dc6a49e6c6df175f30477ccce898a68bc3dd",
+      "exe_sha256": "b8c654271a5ff6b90b81dc6f493177ee735ce2158a14f3bdc99c602fd86c9717",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\bounded_prefix_fuzz_canonical_verify_r4.log"
+    },
+    {
+      "name": "bounded_marker_frontiers",
+      "source_sha256": "ca45eaa1458d15ba9d94e63847577d89e9c5f0472c9bcd477b0134403da482f0",
+      "exe_sha256": "208f329d6329ba66add2fef65b46b9d133459b0e8cf3dde287da1b01a2c8c847",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\bounded_marker_frontiers_canonical_verify_r4.log"
+    },
+    {
+      "name": "verification_nested_alphabet",
+      "source_sha256": "23b35048cb51c31791fb505cc02676bb4d87c16e2f13955b5aed9f34ab01af40",
+      "exe_sha256": "90ed0ffe0de8be7e080768a14d08c90a9f1e28cad0c72fe3cfd1f0e494d92cf5",
+      "exit_code": 0,
+      "log": "C:\\gnb930283\\evidence\\verification_nested_alphabet_canonical_verify_r4.log"
+    }
+  ],
+  "completed_at": "2026-10-15T01:33:59.173112+08:00"
+}

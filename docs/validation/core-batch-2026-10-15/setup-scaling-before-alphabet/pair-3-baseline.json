@@ -1,0 +1,1271 @@
+{
+  "kind": "glrm-core-batch-native-scaling-v1",
+  "profile": "canonical cargo release",
+  "available_logical_parallelism": 16,
+  "notes": [
+    "Persistent caller-owned Rayon pool per measured case; pool creation excluded.",
+    "Weak scaling: fixed jobs per worker; five trials, median wall time.",
+    "Setup/requirements/compile/link, not token-mask latency. Hardware oversubscription is reported, not extra physical cores.",
+    "Same benchmark source supports return-new and mutable bind APIs."
+  ],
+  "rows": [
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000397,
+        0.0000406,
+        0.0000407,
+        0.0000426,
+        0.0000452
+      ],
+      "median_seconds": 0.0000407,
+      "throughput_jobs_per_second": 786240.7862407862,
+      "aggregate_ns_per_job": 1271.875
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000318,
+        0.0000322,
+        0.0000323,
+        0.0000324,
+        0.0000374
+      ],
+      "median_seconds": 0.0000323,
+      "throughput_jobs_per_second": 990712.0743034056,
+      "aggregate_ns_per_job": 1009.375
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000345,
+        0.0000346,
+        0.0000348,
+        0.000035,
+        0.0000385
+      ],
+      "median_seconds": 0.0000348,
+      "throughput_jobs_per_second": 919540.2298850575,
+      "aggregate_ns_per_job": 1087.5
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000349,
+        0.0000356,
+        0.0000359,
+        0.0000422,
+        0.0000892
+      ],
+      "median_seconds": 0.0000359,
+      "throughput_jobs_per_second": 1782729.8050139276,
+      "aggregate_ns_per_job": 560.9375
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000602,
+        0.0000623,
+        0.0000644,
+        0.0000651,
+        0.0000849
+      ],
+      "median_seconds": 0.0000644,
+      "throughput_jobs_per_second": 993788.8198757765,
+      "aggregate_ns_per_job": 1006.2499999999999
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000278,
+        0.0000281,
+        0.0000283,
+        0.0000402,
+        0.0000543
+      ],
+      "median_seconds": 0.0000283,
+      "throughput_jobs_per_second": 2261484.098939929,
+      "aggregate_ns_per_job": 442.1875
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000563,
+        0.0000596,
+        0.0000635,
+        0.0000668,
+        0.0000748
+      ],
+      "median_seconds": 0.0000635,
+      "throughput_jobs_per_second": 2015748.031496063,
+      "aggregate_ns_per_job": 496.09375
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000712,
+        0.0000751,
+        0.000076,
+        0.0000815,
+        0.000124
+      ],
+      "median_seconds": 0.000076,
+      "throughput_jobs_per_second": 1684210.5263157894,
+      "aggregate_ns_per_job": 593.75
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000324,
+        0.0000335,
+        0.0000405,
+        0.0000445,
+        0.0000791
+      ],
+      "median_seconds": 0.0000405,
+      "throughput_jobs_per_second": 3160493.8271604935,
+      "aggregate_ns_per_job": 316.40625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000898,
+        0.0000971,
+        0.000102,
+        0.0001273,
+        0.000151
+      ],
+      "median_seconds": 0.000102,
+      "throughput_jobs_per_second": 2509803.9215686275,
+      "aggregate_ns_per_job": 398.4375
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0001173,
+        0.0001213,
+        0.0001292,
+        0.0001565,
+        0.0001808
+      ],
+      "median_seconds": 0.0001292,
+      "throughput_jobs_per_second": 1981424.1486068112,
+      "aggregate_ns_per_job": 504.6875
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0000759,
+        0.0000771,
+        0.0000938,
+        0.0000969,
+        0.0000993
+      ],
+      "median_seconds": 0.0000938,
+      "throughput_jobs_per_second": 2729211.0874200426,
+      "aggregate_ns_per_job": 366.40625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 1,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0001623,
+        0.0001664,
+        0.0001724,
+        0.0001745,
+        0.0001928
+      ],
+      "median_seconds": 0.0001724,
+      "throughput_jobs_per_second": 2969837.5870069605,
+      "aggregate_ns_per_job": 336.71875
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 1,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0001648,
+        0.0001714,
+        0.0001729,
+        0.0001857,
+        0.0001869
+      ],
+      "median_seconds": 0.0001729,
+      "throughput_jobs_per_second": 2961249.2770387507,
+      "aggregate_ns_per_job": 337.6953125
+    },
+    {
+      "case": "requirements",
+      "slots": 1,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0001168,
+        0.0001245,
+        0.0001267,
+        0.0001318,
+        0.0001605
+      ],
+      "median_seconds": 0.0001267,
+      "throughput_jobs_per_second": 4041041.83109708,
+      "aggregate_ns_per_job": 247.46093749999997
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 1,
+      "workers": 1,
+      "jobs_per_trial": 4,
+      "jobs_per_worker": 4,
+      "wall_seconds": [
+        0.0000109,
+        0.0000131,
+        0.0000132,
+        0.0000169,
+        0.0000271
+      ],
+      "median_seconds": 0.0000132,
+      "throughput_jobs_per_second": 303030.30303030304,
+      "aggregate_ns_per_job": 3300.0
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0004314,
+        0.0004358,
+        0.000436,
+        0.0004401,
+        0.0004686
+      ],
+      "median_seconds": 0.000436,
+      "throughput_jobs_per_second": 73394.49541284403,
+      "aggregate_ns_per_job": 13625.0
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0004044,
+        0.0004071,
+        0.0004092,
+        0.0004116,
+        0.0004194
+      ],
+      "median_seconds": 0.0004092,
+      "throughput_jobs_per_second": 78201.36852394916,
+      "aggregate_ns_per_job": 12787.5
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0002604,
+        0.0002604,
+        0.0002613,
+        0.0002721,
+        0.0002857
+      ],
+      "median_seconds": 0.0002613,
+      "throughput_jobs_per_second": 122464.60007654037,
+      "aggregate_ns_per_job": 8165.625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0005721,
+        0.0005874,
+        0.0005881,
+        0.0006063,
+        0.000608
+      ],
+      "median_seconds": 0.0005881,
+      "throughput_jobs_per_second": 108825.02975684407,
+      "aggregate_ns_per_job": 9189.0625
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0004574,
+        0.000462,
+        0.0004719,
+        0.000479,
+        0.0004927
+      ],
+      "median_seconds": 0.0004719,
+      "throughput_jobs_per_second": 135621.953803772,
+      "aggregate_ns_per_job": 7373.4375
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0003135,
+        0.0003194,
+        0.0003256,
+        0.0003326,
+        0.0003538
+      ],
+      "median_seconds": 0.0003256,
+      "throughput_jobs_per_second": 196560.19656019655,
+      "aggregate_ns_per_job": 5087.5
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0006583,
+        0.0006954,
+        0.000703,
+        0.0007056,
+        0.0007578
+      ],
+      "median_seconds": 0.000703,
+      "throughput_jobs_per_second": 182076.81365576104,
+      "aggregate_ns_per_job": 5492.1875
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0005729,
+        0.0005825,
+        0.0005838,
+        0.0005885,
+        0.0005918
+      ],
+      "median_seconds": 0.0005838,
+      "throughput_jobs_per_second": 219253.16889345666,
+      "aggregate_ns_per_job": 4560.9375
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0003959,
+        0.0003959,
+        0.0004068,
+        0.0004085,
+        0.0004134
+      ],
+      "median_seconds": 0.0004068,
+      "throughput_jobs_per_second": 314650.93411996064,
+      "aggregate_ns_per_job": 3178.125
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.001167,
+        0.0012046,
+        0.0012168,
+        0.0012359,
+        0.001339
+      ],
+      "median_seconds": 0.0012168,
+      "throughput_jobs_per_second": 210387.902695595,
+      "aggregate_ns_per_job": 4753.125
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0008956,
+        0.0009093,
+        0.0009598,
+        0.0009645,
+        0.0009903
+      ],
+      "median_seconds": 0.0009598,
+      "throughput_jobs_per_second": 266722.23379870807,
+      "aggregate_ns_per_job": 3749.21875
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0005804,
+        0.000596,
+        0.0006112,
+        0.0006414,
+        0.0006578
+      ],
+      "median_seconds": 0.0006112,
+      "throughput_jobs_per_second": 418848.167539267,
+      "aggregate_ns_per_job": 2387.5
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 32,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0017666,
+        0.0018027,
+        0.0018125,
+        0.0019393,
+        0.0019687
+      ],
+      "median_seconds": 0.0018125,
+      "throughput_jobs_per_second": 282482.7586206896,
+      "aggregate_ns_per_job": 3540.0390625
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 32,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.001322,
+        0.0013277,
+        0.0013397,
+        0.001364,
+        0.0013861
+      ],
+      "median_seconds": 0.0013397,
+      "throughput_jobs_per_second": 382175.1138314548,
+      "aggregate_ns_per_job": 2616.6015625
+    },
+    {
+      "case": "requirements",
+      "slots": 32,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0009076,
+        0.0009086,
+        0.0009176,
+        0.0009186,
+        0.0009326
+      ],
+      "median_seconds": 0.0009176,
+      "throughput_jobs_per_second": 557977.3321708806,
+      "aggregate_ns_per_job": 1792.1875
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 32,
+      "workers": 1,
+      "jobs_per_trial": 4,
+      "jobs_per_worker": 4,
+      "wall_seconds": [
+        0.0016659,
+        0.0016969,
+        0.0017015,
+        0.0017312,
+        0.0017927
+      ],
+      "median_seconds": 0.0017015,
+      "throughput_jobs_per_second": 2350.8668821627975,
+      "aggregate_ns_per_job": 425375.0
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0015471,
+        0.0015638,
+        0.0015686,
+        0.0015742,
+        0.0015951
+      ],
+      "median_seconds": 0.0015686,
+      "throughput_jobs_per_second": 20400.35700624761,
+      "aggregate_ns_per_job": 49018.75
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0014261,
+        0.0014478,
+        0.0014549,
+        0.0014565,
+        0.0015382
+      ],
+      "median_seconds": 0.0014549,
+      "throughput_jobs_per_second": 21994.638806790845,
+      "aggregate_ns_per_job": 45465.625
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0010365,
+        0.0010469,
+        0.001049,
+        0.0010513,
+        0.0010801
+      ],
+      "median_seconds": 0.001049,
+      "throughput_jobs_per_second": 30505.24308865586,
+      "aggregate_ns_per_job": 32781.25
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0017753,
+        0.001788,
+        0.0017894,
+        0.0018262,
+        0.0018482
+      ],
+      "median_seconds": 0.0017894,
+      "throughput_jobs_per_second": 35766.17860735442,
+      "aggregate_ns_per_job": 27959.375
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0017051,
+        0.0017196,
+        0.0017395,
+        0.0017473,
+        0.0017558
+      ],
+      "median_seconds": 0.0017395,
+      "throughput_jobs_per_second": 36792.18166139696,
+      "aggregate_ns_per_job": 27179.6875
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0012316,
+        0.001249,
+        0.0012571,
+        0.0012603,
+        0.0012693
+      ],
+      "median_seconds": 0.0012571,
+      "throughput_jobs_per_second": 50910.826505449055,
+      "aggregate_ns_per_job": 19642.1875
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0022116,
+        0.0024262,
+        0.002519,
+        0.002538,
+        0.0027048
+      ],
+      "median_seconds": 0.002519,
+      "throughput_jobs_per_second": 50813.81500595475,
+      "aggregate_ns_per_job": 19679.6875
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0020053,
+        0.0020881,
+        0.0021928,
+        0.0023104,
+        0.0027682
+      ],
+      "median_seconds": 0.0021928,
+      "throughput_jobs_per_second": 58372.85662167092,
+      "aggregate_ns_per_job": 17131.25
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0015347,
+        0.0015536,
+        0.0019412,
+        0.0019866,
+        0.0020266
+      ],
+      "median_seconds": 0.0019412,
+      "throughput_jobs_per_second": 65938.59468370081,
+      "aggregate_ns_per_job": 15165.625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0034184,
+        0.0034704,
+        0.00351,
+        0.0036564,
+        0.0041557
+      ],
+      "median_seconds": 0.00351,
+      "throughput_jobs_per_second": 72934.47293447293,
+      "aggregate_ns_per_job": 13710.9375
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.002988,
+        0.0032445,
+        0.003291,
+        0.0033577,
+        0.0036921
+      ],
+      "median_seconds": 0.003291,
+      "throughput_jobs_per_second": 77787.9064114251,
+      "aggregate_ns_per_job": 12855.46875
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0022948,
+        0.002399,
+        0.002406,
+        0.0024095,
+        0.0024604
+      ],
+      "median_seconds": 0.002406,
+      "throughput_jobs_per_second": 106400.66500415627,
+      "aggregate_ns_per_job": 9398.4375
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 128,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.005252,
+        0.0054839,
+        0.0055677,
+        0.0057975,
+        0.0058346
+      ],
+      "median_seconds": 0.0055677,
+      "throughput_jobs_per_second": 91958.97767480288,
+      "aggregate_ns_per_job": 10874.4140625
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 128,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0049302,
+        0.0049439,
+        0.0050407,
+        0.005114,
+        0.0051994
+      ],
+      "median_seconds": 0.0050407,
+      "throughput_jobs_per_second": 101573.19419921836,
+      "aggregate_ns_per_job": 9845.1171875
+    },
+    {
+      "case": "requirements",
+      "slots": 128,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0037203,
+        0.0037367,
+        0.003848,
+        0.0039161,
+        0.004099
+      ],
+      "median_seconds": 0.003848,
+      "throughput_jobs_per_second": 133056.13305613305,
+      "aggregate_ns_per_job": 7515.625
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 128,
+      "workers": 1,
+      "jobs_per_trial": 4,
+      "jobs_per_worker": 4,
+      "wall_seconds": [
+        0.0240224,
+        0.0240638,
+        0.024254,
+        0.024339,
+        0.0244356
+      ],
+      "median_seconds": 0.024254,
+      "throughput_jobs_per_second": 164.92125010307578,
+      "aggregate_ns_per_job": 6063500.0
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0059596,
+        0.0059862,
+        0.0060398,
+        0.0060874,
+        0.0061285
+      ],
+      "median_seconds": 0.0060398,
+      "throughput_jobs_per_second": 5298.188681744429,
+      "aggregate_ns_per_job": 188743.75
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.005982,
+        0.0060611,
+        0.0060703,
+        0.0060886,
+        0.006125
+      ],
+      "median_seconds": 0.0060703,
+      "throughput_jobs_per_second": 5271.568126781213,
+      "aggregate_ns_per_job": 189696.875
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 1,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0044791,
+        0.004506,
+        0.0045965,
+        0.0046031,
+        0.0046915
+      ],
+      "median_seconds": 0.0045965,
+      "throughput_jobs_per_second": 6961.8187751550095,
+      "aggregate_ns_per_job": 143640.625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0066708,
+        0.0067971,
+        0.0068954,
+        0.0070722,
+        0.0071071
+      ],
+      "median_seconds": 0.0068954,
+      "throughput_jobs_per_second": 9281.550018853148,
+      "aggregate_ns_per_job": 107740.625
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0064221,
+        0.0064236,
+        0.0065408,
+        0.0065652,
+        0.0066027
+      ],
+      "median_seconds": 0.0065408,
+      "throughput_jobs_per_second": 9784.735812133073,
+      "aggregate_ns_per_job": 102200.0
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 2,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0048821,
+        0.0048875,
+        0.0049073,
+        0.0049101,
+        0.0052241
+      ],
+      "median_seconds": 0.0049073,
+      "throughput_jobs_per_second": 13041.794877019951,
+      "aggregate_ns_per_job": 76676.5625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0078669,
+        0.0080313,
+        0.0080358,
+        0.0081328,
+        0.0083342
+      ],
+      "median_seconds": 0.0080358,
+      "throughput_jobs_per_second": 15928.718982553077,
+      "aggregate_ns_per_job": 62779.68749999999
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0075021,
+        0.007622,
+        0.0076404,
+        0.0080279,
+        0.008104
+      ],
+      "median_seconds": 0.0076404,
+      "throughput_jobs_per_second": 16753.049578556096,
+      "aggregate_ns_per_job": 59690.625
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 4,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0058886,
+        0.0059344,
+        0.0060268,
+        0.0060684,
+        0.0061893
+      ],
+      "median_seconds": 0.0060268,
+      "throughput_jobs_per_second": 21238.468175482845,
+      "aggregate_ns_per_job": 47084.375
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0117892,
+        0.0118684,
+        0.0118749,
+        0.0119403,
+        0.0122356
+      ],
+      "median_seconds": 0.0118749,
+      "throughput_jobs_per_second": 21558.076278537083,
+      "aggregate_ns_per_job": 46386.328125
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0112991,
+        0.0115675,
+        0.0115882,
+        0.0120421,
+        0.0122668
+      ],
+      "median_seconds": 0.0115882,
+      "throughput_jobs_per_second": 22091.437841942665,
+      "aggregate_ns_per_job": 45266.40625
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 8,
+      "jobs_per_trial": 256,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0083213,
+        0.0088637,
+        0.0089082,
+        0.0090766,
+        0.0090821
+      ],
+      "median_seconds": 0.0089082,
+      "throughput_jobs_per_second": 28737.56763431445,
+      "aggregate_ns_per_job": 34797.65625
+    },
+    {
+      "case": "source_clone_one_bind",
+      "slots": 512,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0199569,
+        0.0208211,
+        0.0214031,
+        0.0222088,
+        0.0226423
+      ],
+      "median_seconds": 0.0214031,
+      "throughput_jobs_per_second": 23921.768341969153,
+      "aggregate_ns_per_job": 41802.9296875
+    },
+    {
+      "case": "prepared_clone_one_bind",
+      "slots": 512,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0178355,
+        0.0178835,
+        0.0206805,
+        0.0209674,
+        0.0217382
+      ],
+      "median_seconds": 0.0206805,
+      "throughput_jobs_per_second": 24757.62191436377,
+      "aggregate_ns_per_job": 40391.6015625
+    },
+    {
+      "case": "requirements",
+      "slots": 512,
+      "workers": 16,
+      "jobs_per_trial": 512,
+      "jobs_per_worker": 32,
+      "wall_seconds": [
+        0.0128351,
+        0.0131042,
+        0.0136213,
+        0.0136691,
+        0.0144734
+      ],
+      "median_seconds": 0.0136213,
+      "throughput_jobs_per_second": 37588.18908621057,
+      "aggregate_ns_per_job": 26604.1015625
+    },
+    {
+      "case": "source_bind_all",
+      "slots": 512,
+      "workers": 1,
+      "jobs_per_trial": 4,
+      "jobs_per_worker": 4,
+      "wall_seconds": [
+        0.3808324,
+        0.381402,
+        0.3821815,
+        0.3829457,
+        0.5423835
+      ],
+      "median_seconds": 0.3821815,
+      "throughput_jobs_per_second": 10.46623135866074,
+      "aggregate_ns_per_job": 95545375.0
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 1,
+      "jobs_per_trial": 8,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0012756,
+        0.0012866,
+        0.0016433,
+        0.0026045,
+        0.0027569
+      ],
+      "median_seconds": 0.0016433,
+      "throughput_jobs_per_second": 4868.252905738453,
+      "aggregate_ns_per_job": 205412.5
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 2,
+      "jobs_per_trial": 16,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0013962,
+        0.0013985,
+        0.0014203,
+        0.0014373,
+        0.0014611
+      ],
+      "median_seconds": 0.0014203,
+      "throughput_jobs_per_second": 11265.225656551433,
+      "aggregate_ns_per_job": 88768.75
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 4,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0016827,
+        0.0016869,
+        0.001689,
+        0.001768,
+        0.001777
+      ],
+      "median_seconds": 0.001689,
+      "throughput_jobs_per_second": 18946.121965660153,
+      "aggregate_ns_per_job": 52781.25
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 8,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0032019,
+        0.0032254,
+        0.0034485,
+        0.0047455,
+        0.0056318
+      ],
+      "median_seconds": 0.0034485,
+      "throughput_jobs_per_second": 18558.7936784109,
+      "aggregate_ns_per_job": 53882.8125
+    },
+    {
+      "case": "independent_tiny_compile",
+      "slots": 0,
+      "workers": 16,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0075233,
+        0.0076453,
+        0.0076463,
+        0.0083801,
+        0.0087024
+      ],
+      "median_seconds": 0.0076463,
+      "throughput_jobs_per_second": 16740.122673711467,
+      "aggregate_ns_per_job": 59736.71875
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 1,
+      "jobs_per_trial": 8,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0216236,
+        0.0221918,
+        0.0223212,
+        0.0229438,
+        0.0239338
+      ],
+      "median_seconds": 0.0223212,
+      "throughput_jobs_per_second": 358.4036700535814,
+      "aggregate_ns_per_job": 2790150.0
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 2,
+      "jobs_per_trial": 16,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0210816,
+        0.0213336,
+        0.0213696,
+        0.0227031,
+        0.022859
+      ],
+      "median_seconds": 0.0213696,
+      "throughput_jobs_per_second": 748.7271638215035,
+      "aggregate_ns_per_job": 1335600.0
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 4,
+      "jobs_per_trial": 32,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0249916,
+        0.0251308,
+        0.0262233,
+        0.0264157,
+        0.0266552
+      ],
+      "median_seconds": 0.0262233,
+      "throughput_jobs_per_second": 1220.288827111767,
+      "aggregate_ns_per_job": 819478.125
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 8,
+      "jobs_per_trial": 64,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0502807,
+        0.0504635,
+        0.0511684,
+        0.0513767,
+        0.0526449
+      ],
+      "median_seconds": 0.0511684,
+      "throughput_jobs_per_second": 1250.7719608195682,
+      "aggregate_ns_per_job": 799506.25
+    },
+    {
+      "case": "relink_four_events",
+      "slots": 4,
+      "workers": 16,
+      "jobs_per_trial": 128,
+      "jobs_per_worker": 8,
+      "wall_seconds": [
+        0.0860319,
+        0.0882819,
+        0.0977881,
+        0.0989563,
+        0.1047772
+      ],
+      "median_seconds": 0.0977881,
+      "throughput_jobs_per_second": 1308.9527253316098,
+      "aggregate_ns_per_job": 763969.53125
+    }
+  ]
+}

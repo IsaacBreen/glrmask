@@ -38,12 +38,7 @@ use super::mask_cache_payload::DynamicMaskCachePayload;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 
-/// Compile-time detail requested for the reusable dynamic-boundary trigger.
-///
-/// This setting is orthogonal to whether ordinary component masking is static
-/// or dynamic. `None` is the zero-cost default; `Tokens` adds only a
-/// parser-state-independent candidate set; `Exact` builds the full
-/// GSS-sensitive trigger Parser DWA when the component supports it.
+/// Optional composition-boundary metadata, independent of the masking optimization. `None` adds no metadata; `Tokens` is a conservative parser-state-independent candidate set; `Exact` adds state-sensitive metadata where supported.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BoundaryTriggerDetail {
     #[default]
@@ -1615,10 +1610,55 @@ impl FastCommitTemplateDfas {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct SpecialTokenTerminal {
     pub(crate) terminal_id: TerminalID,
+    /// Inclusive lower and upper bounds of one exact-token event.
     pub(crate) token_id: u32,
+    pub(crate) token_id_end: u32,
+}
+
+// The interval width is new wire data. Reject reversed endpoints while decoding
+// before they can reach RangeSet construction, mask allocation or composition.
+impl<'de> serde::Deserialize<'de> for SpecialTokenTerminal {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Wire { terminal_id: TerminalID, token_id: u32, token_id_end: u32 }
+        let wire = <Wire as serde::Deserialize>::deserialize(deserializer)?;
+        if wire.token_id > wire.token_id_end {
+            return Err(serde::de::Error::custom("reversed exact-token interval"));
+        }
+        Ok(Self { terminal_id: wire.terminal_id, token_id: wire.token_id,
+            token_id_end: wire.token_id_end })
+    }
+}
+
+impl SpecialTokenTerminal {
+    pub(crate) fn contains(&self, token_id: u32) -> bool {
+        self.token_id <= token_id && token_id <= self.token_id_end
+    }
+
+    pub(crate) fn token_ids(&self) -> std::ops::RangeInclusive<u32> {
+        self.token_id..=self.token_id_end
+    }
+
+    /// Union a live interval into the original-token mask in word-sized chunks.
+    pub(crate) fn or_mask(&self, mask: &mut [u32]) {
+        let first = self.token_id as usize / 32;
+        if first >= mask.len() || self.token_id > self.token_id_end { return; }
+        let last = (self.token_id_end as usize / 32).min(mask.len() - 1);
+        let first_bits = u32::MAX << (self.token_id % 32);
+        let last_bits = if last == self.token_id_end as usize / 32 {
+            u32::MAX >> (31 - self.token_id_end % 32)
+        } else { u32::MAX };
+        if first == last {
+            mask[first] |= first_bits & last_bits;
+        } else {
+            mask[first] |= first_bits;
+            mask[first + 1..last].fill(u32::MAX);
+            mask[last] |= last_bits;
+        }
+    }
 }
 
 /// Compact runtime-only vocabulary trie. It deliberately stores only the
@@ -10337,15 +10377,13 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// Fully compiled, immutable grammar constraint.
-///
-/// A `Constraint` is intended to be reused across generated sequences. Call
-/// [`Constraint::start`] to create a mutable per-sequence state.
+/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.
     /// The outer root artifact stores these separately from compiler data.
     pub(crate) end_tokens: Arc<[u32]>,
+    pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     pub(crate) static_dynamic_overlay: Option<StaticDynamicOverlayMetadata>,
     /// Reusable component-local trigger metadata for dynamic composition.
@@ -10729,6 +10767,8 @@ pub struct Constraint {
 pub(crate) struct ConstraintSerde {
     #[serde(skip, default)]
     pub(crate) end_tokens: Arc<[u32]>,
+    #[serde(skip, default)]
+    pub(crate) marker_queries: Option<Arc<crate::runtime::markers::MarkerQueries>>,
     #[serde(default)]
     pub(crate) runtime_backend: ConstraintRuntimeBackend,
     #[serde(skip, default)]

@@ -4669,3 +4669,20 @@ mod tests {
         );
     }
 }
+
+
+/// Read-only byte-ordered vocabulary data that compilation already prepared.
+/// A cold bounded-token query must not build or sort a whole new vocabulary.
+pub(crate) struct PreparedOrderedTokens { data:Arc<OrderedVocabTrieArtifacts> }
+impl PreparedOrderedTokens {
+    pub(crate) fn len(&self)->usize {self.data.ordered_vocab.ordered_token_bytes.len()}
+    pub(crate) fn bytes(&self,index:usize)->&[u8] {&self.data.ordered_vocab.ordered_token_bytes[index]}
+    pub(crate) fn originals(&self,index:usize)->&[u32] {&self.data.ordered_vocab.ordered_to_originals[index]}
+    pub(crate) fn child_end(&self,start:usize,end:usize,offset:usize)->usize {
+        let byte=self.bytes(start)[offset];
+        start+self.data.ordered_vocab.ordered_token_bytes[start..end].partition_point(|b|b[offset]==byte)
+    }
+}
+pub(crate) fn prepared_ordered_tokens(vocab:&Vocab)->Option<PreparedOrderedTokens> {
+    vocab.vocab_derived_cache_get::<OrderedVocabTrieArtifacts>().map(|data|PreparedOrderedTokens {data})
+}

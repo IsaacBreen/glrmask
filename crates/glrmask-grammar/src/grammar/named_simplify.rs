@@ -286,7 +286,7 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
         GrammarExpr::Ref(name) => {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        GrammarExpr::Grouped(inner) => {
+        GrammarExpr::Grouped(inner) | GrammarExpr::Shortest(inner) => {
             collect_ref_counts(inner, counts);
         }
         GrammarExpr::Sequence(parts) | GrammarExpr::Choice(parts) => {
@@ -321,7 +321,7 @@ fn collect_ref_counts(expr: &GrammarExpr, counts: &mut HashMap<String, usize>) {
         }
         GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
@@ -352,6 +352,7 @@ fn inline_refs_in_expr(
     stats: &mut SimplifyStats,
 ) {
     match expr {
+        GrammarExpr::Shortest(_) => {},
         GrammarExpr::Grouped(inner) => {
             inline_refs_in_expr(inner, rule_exprs, ref_counts, protected, removed, stats);
         }
@@ -397,7 +398,7 @@ fn inline_refs_in_expr(
         GrammarExpr::Ref(_)
         | GrammarExpr::Epsilon
         | GrammarExpr::Literal(_)
-        | GrammarExpr::SpecialToken(_)
+        | GrammarExpr::SpecialToken(_) | GrammarExpr::SpecialTokenRange(_, _) | GrammarExpr::MarkerProbe(_)
         | GrammarExpr::CharClass { .. }
         | GrammarExpr::RawRegex(_)
         | GrammarExpr::LexerDfa(_)
