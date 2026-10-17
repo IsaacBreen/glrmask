@@ -529,6 +529,7 @@ pub struct ConstraintState<'a> {
 }
 
 impl<'a> Clone for ConstraintState<'a> {
+    /// Independent snapshot at the current prefix; shares the compiled constraint.
     fn clone(&self) -> Self {
         ConstraintState {
             terminated: self.terminated,

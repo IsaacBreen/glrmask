@@ -1169,7 +1169,7 @@ impl PyConstraintState {
     }
 
 
-    /// Boolean array indexed by original token ID. The default covers the model ID domain; an explicit size cannot truncate it. Includes the root end-token policy.
+    /// New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1183,7 +1183,7 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
-    /// Write packed bits into a contiguous, writable one-dimensional NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` in word `id // 32` represents that original ID; signed words preserve all 32 bits.
+    /// Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -1201,7 +1201,7 @@ impl PyConstraintState {
         Ok(())
     }
 
-    /// An unknown ID raises an error. A grammatically forbidden ID rejects the state and can also raise an error; subsequent masks are zero. Sample from the mask before committing.
+    /// Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error.
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))

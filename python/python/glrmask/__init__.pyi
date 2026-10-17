@@ -76,7 +76,7 @@ class BoundaryTriggerDetail:
 
 @final
 class Token:
-    "One original token ID, independent of its byte spelling. This value stores no vocabulary identity: the target checks ID membership, so the same ID can be accepted with different bytes. Use `vocab.tokens([id])` when a singleton must retain vocabulary identity."
+    "An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton."
     def __init__(self, id: int) -> None:
         ""
         ...
@@ -87,7 +87,7 @@ class Token:
 
 @final
 class ExactTokens:
-    "One token event chosen from a vocabulary-bound set, not a sequence. Even a singleton retains the full token-ID/byte mapping; a different mapping is rejected. An empty set matches nothing, not the empty string."
+    "One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing."
     @property
     def ids(self) -> list[int]:
         "Sorted IDs, materialized on access. Prefer `ranges` for large sets."
@@ -183,7 +183,7 @@ class Grammar:
         "Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may raise an error for very large shared graphs."
         ...
     def bind(self, name: str, value: Union[Grammar, Token, ExactTokens]) -> None:
-        "Fill a declared local or `::`-qualified slot once. Accepts `Grammar`, `Token` or `ExactTokens`; a general grammar cannot fill a token slot. Captures the child’s current snapshot. Unknown, already filled, incompatible or cyclic bindings fail without changing this handle."
+        "Fill a declared slot once. Use `::` for nested paths, after attaching the parent. Token slots require `Token` or `ExactTokens`. Attached children are snapshots; failed binds leave this handle unchanged."
         ...
     def clone(self) -> Grammar:
         "Independent binding snapshot; later binds on either handle do not affect the other."
@@ -273,13 +273,13 @@ class ConstraintState:
         "Independent snapshot at the current prefix."
         ...
     def mask(self, size: Optional[int] = None) -> NDArray[np.bool_]:
-        "Boolean array indexed by original token ID. The default covers the model ID domain; an explicit size cannot truncate it. Includes the root end-token policy."
+        "New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy."
         ...
     def fill_mask(self, bitmask: NDArray[np.int32]) -> None:
-        "Write packed bits into a contiguous, writable one-dimensional NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` in word `id // 32` represents that original ID; signed words preserve all 32 bits."
+        "Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits."
         ...
     def commit_token(self, token_id: int) -> None:
-        "An unknown ID raises an error. A grammatically forbidden ID rejects the state and can also raise an error; subsequent masks are zero. Sample from the mask before committing."
+        "Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error."
         ...
     def commit_bytes(self, data: bytes) -> None:
         "Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events."

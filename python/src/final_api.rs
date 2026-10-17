@@ -99,7 +99,7 @@ fn options(
         .optimization(mode).parser_backend(backend.into())
 }
 
-/// One original token ID, independent of its byte spelling. This value stores no vocabulary identity: the target checks ID membership, so the same ID can be accepted with different bytes. Use `vocab.tokens([id])` when a singleton must retain vocabulary identity.
+/// An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
 #[pyclass(name = "Token", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyToken {
@@ -116,7 +116,7 @@ impl PyToken {
     fn id(&self) -> u32 { self.inner.id() }
 }
 
-/// One token event chosen from a vocabulary-bound set, not a sequence. Even a singleton retains the full token-ID/byte mapping; a different mapping is rejected. An empty set matches nothing, not the empty string.
+/// One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
 #[pyclass(name = "ExactTokens", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyExactTokens {
@@ -289,7 +289,7 @@ impl PyGrammar {
         Ok(Self::new(source, SourceKind::JsonSchema))
     }
 
-    /// Fill a declared local or `::`-qualified slot once. Accepts `Grammar`, `Token` or `ExactTokens`; a general grammar cannot fill a token slot. Captures the child’s current snapshot. Unknown, already filled, incompatible or cyclic bindings fail without changing this handle.
+    /// Fill a declared slot once. Use `::` for nested paths, after attaching the parent. Token slots require `Token` or `ExactTokens`. Attached children are snapshots; failed binds leave this handle unchanged.
     fn bind(slf:&Bound<'_,Self>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
         let py=slf.py();
         // Capture value first: self-attachment captures the old snapshot too.
