@@ -4,6 +4,7 @@ use crate::import::ast::{GrammarExpr, NamedRule, Quantifier};
 use serde_json::Value;
 
 use super::ast::{
+    json_number_is_integer, json_values_equal,
     AdditionalProperties, ArraySchema, ObjectSchema, PropertySchema, Schema, SchemaAssertions,
     SchemaKind, SchemaType,
 };
@@ -16,6 +17,110 @@ use super::lower::{
     JSON_VALUE_RULE,
 };
 use super::string::{plain_fully_anchored_ascii_literal, string_value_satisfies_schema};
+
+// Conservative supersets used only to prove oneOf branch separation. Number
+// and integer share a bit because their JSON Schema domains overlap.
+#[derive(Clone)]
+struct OneOfValueBounds {
+    types: u8,
+    finite: Option<Vec<Value>>,
+    required_properties: BTreeMap<String, OneOfValueBounds>,
+}
+
+impl OneOfValueBounds {
+    fn any() -> Self {
+        Self { types: 0x3f, finite: None, required_properties: BTreeMap::new() }
+    }
+
+    fn empty() -> Self {
+        Self { types: 0, ..Self::any() }
+    }
+
+    fn finite(values: Vec<Value>) -> Self {
+        Self {
+            types: values.iter().fold(0, |mask, value| mask | one_of_value_type_mask(value)),
+            finite: Some(values),
+            required_properties: BTreeMap::new(),
+        }
+    }
+
+    fn intersect(&mut self, other: Self) {
+        self.types &= other.types;
+        self.finite = match (self.finite.take(), other.finite) {
+            (Some(left), Some(right)) => Some(left.into_iter().filter(|value| {
+                right.iter().any(|candidate| one_of_values_may_equal(value, candidate))
+            }).collect()),
+            (left @ Some(_), None) => left,
+            (None, right) => right,
+        };
+        if let Some(values) = &mut self.finite {
+            values.retain(|value| one_of_value_type_mask(value) & self.types != 0);
+            if values.is_empty() { self.types = 0; }
+        }
+        for (name, bound) in other.required_properties {
+            if let Some(existing) = self.required_properties.get_mut(&name) {
+                existing.intersect(bound);
+            } else {
+                self.required_properties.insert(name, bound);
+            }
+        }
+    }
+
+    fn union(&mut self, other: Self) {
+        let was_empty = self.types == 0;
+        self.types |= other.types;
+        self.finite = match (self.finite.take(), other.finite) {
+            (Some(mut left), Some(right)) => { left.extend(right); Some(left) }
+            // The initial empty bound has no finite list.
+            (None, right) if was_empty => right,
+            _ => None,
+        };
+        // A union need not require a property required by just one alternative.
+        self.required_properties.clear();
+    }
+
+    fn disjoint(&self, other: &Self) -> bool {
+        if self.types & other.types == 0 { return true; }
+        if let (Some(left), Some(right)) = (&self.finite, &other.finite) {
+            if !left.iter().any(|value| right.iter().any(|candidate| {
+                one_of_values_may_equal(value, candidate)
+            })) { return true; }
+        }
+        // Required-property conflicts separate objects only. Both branches must
+        // exclude every non-object value, where object keywords are inapplicable.
+        self.types == one_of_type_mask(SchemaType::Object)
+            && other.types == self.types
+            && self.required_properties.iter().any(|(name, bound)| {
+                other.required_properties.get(name).is_some_and(|other| bound.disjoint(other))
+            })
+    }
+}
+
+fn one_of_type_mask(ty: SchemaType) -> u8 {
+    1 << match ty {
+        SchemaType::Null => 0,
+        SchemaType::Boolean => 1,
+        SchemaType::Object => 2,
+        SchemaType::Array => 3,
+        SchemaType::String => 4,
+        SchemaType::Number | SchemaType::Integer => 5,
+    }
+}
+
+fn one_of_value_type_mask(value: &Value) -> u8 {
+    one_of_type_mask(match value {
+        Value::Null => SchemaType::Null,
+        Value::Bool(_) => SchemaType::Boolean,
+        Value::Object(_) => SchemaType::Object,
+        Value::Array(_) => SchemaType::Array,
+        Value::String(_) => SchemaType::String,
+        Value::Number(_) => SchemaType::Number,
+    })
+}
+
+fn one_of_values_may_equal(left: &Value, right: &Value) -> bool {
+    json_values_equal(left, right)
+}
 
 fn discriminator_anyof_fastpath_disabled() -> bool {
     std::env::var_os("GLRMASK_DISABLE_DISCRIMINATOR_ANYOF_FASTPATH").is_some()
@@ -250,31 +355,93 @@ impl<'a> Lowerer<'a> {
     }
 
     pub fn lower_one_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
-        self.validate_mixed_ref_disjoint_family_one_of(assertions)?;
         let siblings = sibling_assertion_schema(assertions);
         let branches = assertions
             .one_of
             .iter()
             .map(|branch| branch_with_siblings(branch.clone(), siblings.clone()))
             .collect::<Vec<_>>();
-        if let Some(object) = self.try_merge_singleton_string_discriminator_one_of_objects(&branches)? {
-            return self.lower_object(&object);
+        // A union implements oneOf only when no value can satisfy two branches.
+        // Prove separation from supersets of each branch's accepted values; an
+        // unknown result must never be treated as an empty intersection.
+        let bounds = branches
+            .iter()
+            .map(|branch| self.one_of_value_bounds(branch, &mut BTreeSet::new()))
+            .collect::<ImportResult<Vec<_>>>()?;
+        for (index, left) in bounds.iter().enumerate() {
+            for (other_index, right) in bounds.iter().enumerate().skip(index + 1) {
+                if !left.disjoint(right) {
+                    return Err(SchemaImportError::at(
+                        &assertions.one_of[other_index].location,
+                        format!("unsupported oneOf: cannot prove branches {index} and {other_index} disjoint; exclusive validation of overlapping branches is unsupported"),
+                    ));
+                }
+            }
         }
-        if let Some(object) =
-            self.try_merge_distributed_singleton_string_discriminator_one_of(&branches)?
-        {
-            return self.lower_object(&object);
-        }
-        if let Some(expr) =
-            self.try_lower_branch_internal_singleton_string_discriminator_one_of(&branches)?
-        {
-            return Ok(expr);
-        }
+        // Lower the original branches rather than merging object shapes. This
+        // preserves all sibling assertions, including bounds and nested not.
         let alternatives = branches
             .iter()
             .map(|branch| self.lower_schema(branch))
             .collect::<ImportResult<Vec<_>>>()?;
         Ok(choice(alternatives))
+    }
+
+    fn one_of_value_bounds(
+        &self,
+        schema: &Schema,
+        visiting: &mut BTreeSet<String>,
+    ) -> ImportResult<OneOfValueBounds> {
+        match &schema.kind {
+            SchemaKind::Any => Ok(OneOfValueBounds::any()),
+            SchemaKind::Never => Ok(OneOfValueBounds::empty()),
+            SchemaKind::Ref(pointer) => {
+                let normalized = normalize_local_ref(pointer)?;
+                if !visiting.insert(normalized.clone()) {
+                    return Ok(OneOfValueBounds::any());
+                }
+                let result = self.one_of_value_bounds(self.resolve_ref_target(pointer)?, visiting);
+                visiting.remove(&normalized);
+                result
+            }
+            SchemaKind::Assertions(assertions) => {
+                let mut bound = OneOfValueBounds::any();
+                if let Some(types) = &assertions.types {
+                    bound.types = types.iter().fold(0, |mask, ty| mask | one_of_type_mask(*ty));
+                }
+                if let Some(value) = &assertions.const_value {
+                    bound.intersect(OneOfValueBounds::finite(vec![value.clone()]));
+                }
+                if let Some(values) = &assertions.enum_values {
+                    bound.intersect(OneOfValueBounds::finite(values.clone()));
+                }
+                if let Some(object) = &assertions.object {
+                    for property in &object.properties {
+                        if object.required.contains(&property.name) {
+                            bound.required_properties.insert(
+                                property.name.clone(),
+                                self.one_of_value_bounds(&property.schema, visiting)?,
+                            );
+                        }
+                    }
+                }
+                for child in &assertions.all_of {
+                    bound.intersect(self.one_of_value_bounds(child, visiting)?);
+                }
+                for children in [&assertions.any_of, &assertions.one_of] {
+                    if !children.is_empty() {
+                        let mut union = OneOfValueBounds::empty();
+                        for child in children {
+                            union.union(self.one_of_value_bounds(child, visiting)?);
+                        }
+                        bound.intersect(union);
+                    }
+                }
+                // not and type-specific assertions can only narrow this bound.
+                // In particular, object keywords never imply an object type.
+                Ok(bound)
+            }
+        }
     }
 
     fn try_merge_singleton_string_discriminator_one_of_objects(
@@ -673,6 +840,10 @@ impl<'a> Lowerer<'a> {
             branches.push(Schema::assertions("<allOf-siblings>", siblings));
         }
         branches = self.inline_all_of_refs(&branches)?;
+        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+            return Ok(never());
+        }
+        validate_object_all_of_merge_bounds(&branches)?;
         if let [left, right] = branches.as_slice() {
             if is_vacuous_object_schema(left)
                 && let Some(branch) = push_object_only_type_into_branch(right)
@@ -699,7 +870,7 @@ impl<'a> Lowerer<'a> {
                         if assertions.types.is_none() {
                             assertions.types = Some(explicit_types_vec);
                         } else if let Some(types) = &mut assertions.types {
-                            types.retain(|t| explicit_types_vec.contains(t));
+                            *types = intersect_schema_types(types, &explicit_types_vec);
                         }
                         prune_assertion_families_to_types(assertions);
                     }
@@ -709,6 +880,10 @@ impl<'a> Lowerer<'a> {
         }
         branches = flatten_pure_all_of_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
+        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+            return Ok(never());
+        }
+        validate_object_all_of_merge_bounds(&branches)?;
         branches = collapse_pure_single_choice_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
@@ -727,7 +902,7 @@ impl<'a> Lowerer<'a> {
                     if assertions.types.is_none() {
                         assertions.types = Some(explicit_types_vec.clone());
                     } else if let Some(types) = &mut assertions.types {
-                        types.retain(|t| explicit_types_vec.contains(t));
+                        *types = intersect_schema_types(types, &explicit_types_vec);
                     }
                     prune_assertion_families_to_types(assertions);
                 }
@@ -769,11 +944,10 @@ impl<'a> Lowerer<'a> {
                     }
                 }
                 ChoiceKind::OneOf => {
-                    if object_choice_branches_have_singleton_discriminator(&distributed) {
-                        if let Some(expr) = self.try_lower_open_object_any_of_variants(&distributed)? {
-                            return Ok(expr);
-                        }
-                    }
+                    return self.lower_one_of(&SchemaAssertions {
+                        one_of: distributed,
+                        ..SchemaAssertions::default()
+                    });
                 }
             }
         }
@@ -800,20 +974,10 @@ impl<'a> Lowerer<'a> {
                         Ok(choice(alternatives))
                     }
                 }
-                ChoiceKind::OneOf => {
-                    if let Some(object) =
-                        self.try_merge_distributed_singleton_string_discriminator_one_of(
-                            &distributed,
-                        )?
-                    {
-                        return self.lower_object(&object);
-                    }
-                    let alternatives = distributed
-                        .iter()
-                        .map(|branch| self.lower_schema(branch))
-                        .collect::<ImportResult<Vec<_>>>()?;
-                    Ok(choice(alternatives))
-                }
+                ChoiceKind::OneOf => self.lower_one_of(&SchemaAssertions {
+                    one_of: distributed,
+                    ..SchemaAssertions::default()
+                }),
             };
         }
 
@@ -824,14 +988,20 @@ impl<'a> Lowerer<'a> {
         if lowered.is_empty() {
             return Ok(r(JSON_VALUE_RULE));
         }
+        // A singleton conjunction needs no byte-language intersection. Parser
+        // operands (including type complements containing arrays/objects) are
+        // already exact on their own.
+        if lowered.len() == 1 {
+            return Ok(lowered.remove(0));
+        }
         if !lowered
             .iter()
             .all(|expr| all_of_intersection_terminal_safe(expr, &self.rules))
         {
-            // The generic grammar lowerer treats Intersect as terminal-ish. Parser-shaped
-            // object/array allOf operands can contain nonterminal refs or SeparatedSequence,
-            // so overapproximate them for build parity instead of emitting an invalid terminal.
-            return Ok(choice(lowered));
+            return Err(SchemaImportError::at(
+                branches.first().map_or("#", |branch| branch.location.as_str()),
+                "unsupported allOf: exact intersection of these object/array grammar operands is unsupported",
+            ));
         }
         let first = lowered.remove(0);
         Ok(lowered.into_iter().fold(first, |left, right| GrammarExpr::Intersect {
@@ -881,7 +1051,9 @@ impl<'a> Lowerer<'a> {
             return Ok(None);
         }
 
-        if sibling_object.properties.is_empty() && sibling_object.required.is_empty() {
+        if sibling_object == ObjectSchema::default()
+            && (siblings.types.is_none() || schema_has_explicit_object_only_type(target))
+        {
             return self.lower_ref(pointer).map(Some);
         }
 
@@ -1928,6 +2100,23 @@ fn finite_string_filter_assertions(
     assertions.string.as_ref()
 }
 
+fn intersect_schema_types(left: &[SchemaType], right: &[SchemaType]) -> Vec<SchemaType> {
+    let mut result = BTreeSet::new();
+    for left in left {
+        for right in right {
+            if left == right {
+                result.insert(*left);
+            } else if matches!((left, right),
+                (SchemaType::Number, SchemaType::Integer) | (SchemaType::Integer, SchemaType::Number))
+            {
+                result.insert(SchemaType::Integer);
+            }
+        }
+    }
+    if result.contains(&SchemaType::Number) { result.remove(&SchemaType::Integer); }
+    result.into_iter().collect()
+}
+
 fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<SchemaType>> {
     let mut intersection: Option<BTreeSet<SchemaType>> = None;
 
@@ -1941,7 +2130,9 @@ fn explicit_all_of_type_intersection(branches: &[Schema]) -> Option<BTreeSet<Sch
 
         let branch_types = types.iter().cloned().collect::<BTreeSet<_>>();
         intersection = Some(match intersection {
-            Some(existing) => existing.intersection(&branch_types).cloned().collect(),
+            Some(existing) => intersect_schema_types(
+                &existing.into_iter().collect::<Vec<_>>(), types,
+            ).into_iter().collect(),
             None => branch_types,
         });
     }
@@ -3125,7 +3316,7 @@ fn primitive_inline_branch_type(schema: &Schema) -> Option<SchemaType> {
 fn value_primitive_type(value: &Value) -> Option<SchemaType> {
     if value.is_string() {
         Some(SchemaType::String)
-    } else if value.is_i64() || value.is_u64() {
+    } else if value.as_number().is_some_and(json_number_is_integer) {
         Some(SchemaType::Integer)
     } else if value.is_number() {
         Some(SchemaType::Number)
@@ -3140,7 +3331,7 @@ fn value_has_primitive_type(value: &Value, schema_type: SchemaType) -> bool {
     match schema_type {
         SchemaType::String => value.is_string(),
         SchemaType::Boolean => value.is_boolean(),
-        SchemaType::Integer => value.is_i64() || value.is_u64(),
+        SchemaType::Integer => value.as_number().is_some_and(json_number_is_integer),
         SchemaType::Number => value.is_number(),
         SchemaType::Null | SchemaType::Object | SchemaType::Array => false,
     }
@@ -3202,7 +3393,43 @@ fn primitive_branch_types_overlap(left: SchemaType, right: SchemaType) -> bool {
         || matches!((left, right), (SchemaType::Integer, SchemaType::Number))
 }
 
+// The object merger unions property declarations. A closed operand, however,
+// forbids names declared only by another operand; preserving that intersection
+// requires more than combining the additionalProperties flags.
+pub(super) fn validate_object_all_of_merge_bounds(branches: &[Schema]) -> ImportResult<()> {
+    let objects = branches.iter().filter_map(|schema| {
+        let SchemaKind::Assertions(assertions) = &schema.kind else { return None; };
+        assertions.object.as_ref().map(|object| (schema, object))
+    }).collect::<Vec<_>>();
+    for (index, (left_schema, left)) in objects.iter().enumerate() {
+        for (right_schema, right) in objects.iter().skip(index + 1) {
+            if !option_schemas_shape_equivalent(left.property_names.as_ref(), right.property_names.as_ref()) {
+                return Err(SchemaImportError::at(
+                    &right_schema.location,
+                    "unsupported allOf: merging distinct propertyNames constraints is unsupported",
+                ));
+            }
+            for (closed_schema, closed, other) in [(*left_schema, *left, *right), (*right_schema, *right, *left)] {
+                if !matches!(closed.additional_properties, AdditionalProperties::AllowAny)
+                    && (!closed.pattern_properties.is_empty()
+                        || !other.pattern_properties.is_empty()
+                        || other.properties.iter().any(|property| {
+                            !closed.properties.iter().any(|allowed| allowed.name == property.name)
+                        }))
+                {
+                    return Err(SchemaImportError::at(
+                        &closed_schema.location,
+                        "unsupported allOf: exact merging of additionalProperties with differing property sets is unsupported",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn try_merge_all_of_objects(branches: &[Schema]) -> Option<ObjectSchema> {
+    if validate_object_all_of_merge_bounds(branches).is_err() { return None; }
     let mut objects = branches.iter().map(plain_object_schema).collect::<Option<Vec<_>>>()?;
     let mut merged = objects.remove(0).clone();
     for object in objects {
@@ -3217,6 +3444,10 @@ fn plain_object_schema(schema: &Schema) -> Option<&ObjectSchema> {
     };
     if assertions.const_value.is_some()
         || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
+        || assertions.not.is_some()
         || !assertions.any_of.is_empty()
         || !assertions.one_of.is_empty()
         || !assertions.all_of.is_empty()
@@ -3461,6 +3692,7 @@ impl<'a> Lowerer<'a> {
 }
 
 fn merge_all_of_object_like_schema(branches: &[Schema]) -> Option<Schema> {
+    if validate_object_all_of_merge_bounds(branches).is_err() { return None; }
     let mut objects = Vec::new();
     let has_explicit_object_only_type = branches.iter().any(schema_has_explicit_object_only_type);
 
@@ -4046,5 +4278,110 @@ mod all_of_terminal_safety_tests {
             .unwrap()
             .expect("empty finite intersection should be recognized");
         assert!(matches!(merged.kind, SchemaKind::Never));
+    }
+}
+
+#[cfg(test)]
+mod exact_one_of_policy_tests {
+    use super::*;
+    use serde_json::json;
+    use super::super::{config::JsonSchemaConfig, load::load_document, lower::lower_document};
+
+    fn compile(value: Value) -> ImportResult<crate::import::ast::NamedGrammar> {
+        let document = load_document(&value)?;
+        let mut config = JsonSchemaConfig::default();
+        config.coerce_one_of_to_any_of = false;
+        lower_document(&document, config)
+    }
+
+    #[test]
+    fn disjoint_types_false_and_single_branches_compile_exactly() {
+        for schema in [
+            json!({"oneOf":[{"type":"string"},{"type":"number"}]}),
+            json!({"oneOf":[false,{"type":"string"}]}),
+            json!({"oneOf":[{"type":"integer","minimum":2}]}),
+            json!({"$defs":{"s":{"type":"string"}},"oneOf":[{"$ref":"#/$defs/s"},{"type":"boolean"}]}),
+            json!({"oneOf":[{"enum":["x","y"]},{"const":"z"}]}),
+        ] {
+            compile(schema.clone()).unwrap_or_else(|error| panic!("{schema}: {}", error.message()));
+        }
+    }
+
+    #[test]
+    fn overlap_and_unproven_exclusivity_report_branch_locations() {
+        for schema in [
+            json!({"oneOf":[{"type":"number"},{"type":"integer"}]}),
+            json!({"oneOf":[{"enum":["x","y"]},{"const":"y"}]}),
+            json!({"oneOf":[{"const":1},{"const":1.0}]}),
+            json!({"oneOf":[{"const":{"a":1}},{"const":{"a":1.0}}]}),
+            json!({"oneOf":[{"minimum":1},{"maximum":3}]}),
+            json!({"oneOf":[true,{"type":"null"}]}),
+            // Object keywords do not exclude strings/numbers/etc.
+            json!({"oneOf":[{"properties":{"tag":{"const":"a"}},"required":["tag"]},{"properties":{"tag":{"const":"b"}},"required":["tag"]}]}),
+        ] {
+            let error = compile(schema).unwrap_err();
+            assert!(error.message().contains("oneOf/1"), "{}", error.message());
+            assert!(error.message().contains("unsupported oneOf"), "{}", error.message());
+        }
+    }
+
+    #[test]
+    fn required_discriminators_compile_without_merging_branch_constraints() {
+        compile(json!({"oneOf":[
+            {"type":"object","properties":{"tag":{"const":"a"},"n":{"type":"integer"}},"required":["tag"],"additionalProperties":false,"maxProperties":1},
+            {"type":"object","properties":{"tag":{"const":"b"},"n":{"type":"string"}},"required":["tag"],"additionalProperties":false,"maxProperties":2}
+        ]})).unwrap();
+    }
+
+    #[test]
+    fn recursive_aliases_do_not_prove_disjointness() {
+        let error = compile(json!({"$defs":{"a":{"$ref":"#/$defs/b"},"b":{"$ref":"#/$defs/a"}},"oneOf":[{"$ref":"#/$defs/a"},{"type":"string"}]})).unwrap_err();
+        assert!(error.message().contains("unsupported oneOf"));
+    }
+
+    #[test]
+    fn closed_all_of_merges_reject_different_property_sets() {
+        let error = compile(json!({"allOf":[
+            {"type":"object","properties":{"a":{"type":"string"}},"additionalProperties":false},
+            {"type":"object","properties":{"b":{"type":"string"}}}
+        ]})).unwrap_err();
+        assert!(error.message().contains("unsupported allOf"), "{}", error.message());
+        assert!(error.message().contains("additionalProperties"), "{}", error.message());
+    }
+
+    #[test]
+    fn singleton_parser_all_of_and_false_conjunction_compile_exactly() {
+        compile(json!({"allOf":[{"type":["null","boolean","object","array","number"]}]})).unwrap();
+        compile(json!({"allOf":[false,{"type":"object","properties":{"x":{"type":"string"}}}]})).unwrap();
+    }
+
+    #[test]
+    fn number_integer_intersection_is_integer_not_false() {
+        assert_eq!(intersect_schema_types(&[SchemaType::Number], &[SchemaType::Integer]), vec![SchemaType::Integer]);
+        let branches = [
+            Schema::assertions("#/a", SchemaAssertions { types: Some(vec![SchemaType::Number]), ..SchemaAssertions::default() }),
+            Schema::assertions("#/b", SchemaAssertions { types: Some(vec![SchemaType::Integer]), ..SchemaAssertions::default() }),
+        ];
+        assert_eq!(explicit_all_of_type_intersection(&branches), Some([SchemaType::Integer].into()));
+    }
+
+    #[test]
+    fn required_conflicts_do_not_exclude_nonobject_domains() {
+        let object = OneOfValueBounds {
+            required_properties: [("tag".to_owned(), OneOfValueBounds::finite(vec![json!("a")]))].into(),
+            ..OneOfValueBounds::any()
+        };
+        let other = OneOfValueBounds {
+            required_properties: [("tag".to_owned(), OneOfValueBounds::finite(vec![json!("b")]))].into(),
+            ..OneOfValueBounds::any()
+        };
+        assert!(!object.disjoint(&other));
+    }
+
+    #[test]
+    fn union_bounds_never_retain_a_partial_finite_set() {
+        let mut union = OneOfValueBounds::finite(vec![json!("a")]);
+        union.union(OneOfValueBounds { types: one_of_type_mask(SchemaType::String), ..OneOfValueBounds::any() });
+        assert!(!union.disjoint(&OneOfValueBounds::finite(vec![json!("b")])));
     }
 }

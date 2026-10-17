@@ -629,7 +629,7 @@ fn overlapping_pattern_properties_preflight_rejects_non_disjoint_regexes() {
 }
 
 #[test]
-fn overlapping_pattern_properties_preflight_allows_non_disjoint_regexes_without_compat() {
+fn overlapping_pattern_properties_report_unsupported_without_compat() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _compat = EnvVarGuard::unset(GLRMASK_LLGUIDANCE_COMPAT_ENV);
 
@@ -642,8 +642,8 @@ fn overlapping_pattern_properties_preflight_allows_non_disjoint_regexes_without_
         "additionalProperties": false
     });
 
-    schema_to_named_grammar(&schema)
-        .expect("overlapping patternProperties should still import when compat mode is off");
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("not disjoint"), "{error}");
 }
 
 fn contains_separated_sequence(expr: &GrammarExpr) -> bool {
@@ -856,7 +856,7 @@ fn typed_const_rejects_literal_that_conflicts_with_sibling_assertions() {
 }
 
 #[test]
-fn llguidance_compat_treats_untyped_format_as_typed_string() {
+fn format_annotation_remains_untyped_with_llguidance_compat() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let schema = json!({"format": "uri"});
 
@@ -868,7 +868,7 @@ fn llguidance_compat_treats_untyped_format_as_typed_string() {
 
     {
         let _guard = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
-        assert!(!schema_accepts_bytes(&schema, br#"true"#));
+        assert!(schema_accepts_bytes(&schema, br#"true"#));
         assert!(schema_accepts_bytes(&schema, br#""https://example.com""#));
     }
 }
@@ -2161,7 +2161,7 @@ fn required_property_covered_by_pattern_properties_is_synthesized() {
 }
 
 #[test]
-fn required_property_matching_multiple_patterns_applies_all_pattern_schemas() {
+fn required_property_matching_multiple_patterns_reports_unsupported_overlap() {
     // Full-JSON intent (pre-tighten): overlapping patterns apply all schemas.
     // The LlGuidanceNative default deliberately rejects overlap, so pin this
     // test to JsonSchema mode explicitly (assertions unchanged).
@@ -2177,11 +2177,8 @@ fn required_property_matching_multiple_patterns_applies_all_pattern_schemas() {
         "additionalProperties": false
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(!glrm.is_empty(), "{glrm}");
-    assert!(glrm.contains("ok") || glrm.contains("json_additional") || glrm.contains("line"), "{glrm}");
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("not disjoint"), "{error}");
 }
 
 #[test]
@@ -2349,7 +2346,7 @@ fn object_property_nullable_string_value_keeps_literal_key_boundaries() {
 }
 
 #[test]
-fn nullable_uuid_property_keeps_literal_key_boundaries() {
+fn format_annotation_nullable_uuid_property_keeps_literal_key_boundaries() {
     enable_split_literal_terminals_for_test!();
     let schema = json!({
         "type": "object",
@@ -2372,7 +2369,8 @@ fn nullable_uuid_property_keeps_literal_key_boundaries() {
         br#"{"id": "12345678-1234-1234-1234-1234567890ab"}"#,
     ));
     assert!(schema_accepts_bytes(&schema, br#"{"id": null}"#));
-    assert!(!schema_accepts_bytes(&schema, br#"{"id": "not-a-uuid"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"id": "not-a-uuid"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": true}"#));
 }
 
 #[test]
@@ -3161,7 +3159,7 @@ fn very_large_fixed_width_pattern_array_uses_contextual_item_terminals() {
 }
 
 #[test]
-fn unbounded_email_array_with_max_length_reuses_one_item_terminal() {
+fn format_annotation_unbounded_email_array_matches_plain_bounded_strings() {
     let schema = json!({
         "type": "array",
         "items": {
@@ -3172,18 +3170,10 @@ fn unbounded_email_array_with_max_length_reuses_one_item_terminal() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("unbounded_scalar_array")
-    }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("contextual_array_first_item")
-    }), "{:?}", grammar.rules);
-    assert!(!grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("contextual_array_next_item")
-    }), "{:?}", grammar.rules);
-    assert!(grammar.rules.iter().any(|rule| {
-        rule.is_terminal && rule.name.starts_with("json_string_constrained")
-    }), "{:?}", grammar.rules);
+    let plain = schema_to_named_grammar(&json!({"type":"array", "items":{"type":"string", "maxLength":1024}})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert!(schema_accepts_bytes(&schema, br#"["not-an-email"]"#));
+    assert!(!schema_accepts_bytes(&schema, b"[true]"));
     lower(&grammar).unwrap();
     assert!(schema_accepts_bytes(
         &schema,
@@ -3369,7 +3359,7 @@ fn dynamic_plain_bounded_string_arrays_keep_one_lazy_item_terminal() {
 }
 
 #[test]
-fn constrained_format_string_arrays_terminalize_the_enclosing_array() {
+fn format_annotation_string_arrays_preserve_bounds_and_item_types() {
     let schema = json!({
         "type": "array",
         "minItems": 1,
@@ -3386,7 +3376,10 @@ fn constrained_format_string_arrays_terminalize_the_enclosing_array() {
         &schema,
         br#"["12345678-1234-1234-1234-1234567890ab"]"#,
     ));
-    assert!(!schema_accepts_bytes(&schema, br#"["not-a-uuid"]"#));
+    assert!(schema_accepts_bytes(&schema, br#"["not-a-uuid"]"#));
+    assert!(!schema_accepts_bytes(&schema, b"[]"));
+    assert!(!schema_accepts_bytes(&schema, b"[true]"));
+    assert!(!schema_accepts_bytes(&schema, br#"["a","b","c","d"]"#));
 }
 
 #[test]
@@ -3464,6 +3457,7 @@ fn prefix_items_lower_with_no_tail() {
 #[test]
 fn legacy_tuple_items_use_additional_items_tail() {
     let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "array",
         "items": [
             {"const": "head"}
@@ -3645,18 +3639,13 @@ fn chunked_anchored_prefix_pattern_rejects_prefix_longer_than_max() {
 }
 
 #[test]
-fn chunked_anchored_prefix_pattern_does_not_bypass_recognized_format() {
-    let schema = json!({
-        "type": "string",
-        "format": "date-time",
-        "maxLength": 200,
-        "pattern": "^2.*"
-    });
-
+fn format_annotation_preserves_chunked_prefix_pattern_and_length_bounds() {
+    let schema = json!({"type":"string", "format":"date-time", "maxLength":200, "pattern":"^2.*"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("json_string_anchored_prefix_open"), "{glrm}");
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""2 not a date""#));
+    assert!(!schema_accepts_bytes(&schema, br#""1 not a date""#));
+    assert!(!schema_accepts_bytes(&schema, &serde_json::to_vec(&format!("2{}", "x".repeat(200))).unwrap()));
 }
 
 #[test]
@@ -3770,7 +3759,7 @@ fn bounded_pattern_map_respects_min_and_max_properties() {
 }
 
 #[test]
-fn unsupported_nonredundant_max_properties_broadens() {
+fn unsupported_nonredundant_max_properties_reports_error() {
     let schema = json!({
         "type": "object",
         "maxProperties": 1,
@@ -3780,8 +3769,8 @@ fn unsupported_nonredundant_max_properties_broadens() {
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported maxProperties"), "{error}");
 }
 
 #[test]
@@ -3801,7 +3790,7 @@ fn unsupported_nonredundant_min_properties_broadens() {
 }
 
 #[test]
-fn allof_oneof_ref_objects_with_required_sibling_factors_common_object() {
+fn allof_oneof_ref_objects_with_separate_required_sibling_reports_unproven_disjointness() {
     let schema = json!({
         "type": "object",
         "required": ["type", "typeProperties"],
@@ -3849,30 +3838,8 @@ fn allof_oneof_ref_objects_with_required_sibling_factors_common_object() {
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    let start_rule = glrm
-        .lines()
-        .find(|line| line.starts_with("nt schema_root_0 ::="))
-        .expect("start rule should be present");
-    assert!(!start_rule.is_empty(), "{glrm}");
-    assert!(
-        glrm.contains("\"structure\"") || glrm.contains("\\\"structure\\\""),
-        "{glrm}"
-    );
-    assert!(
-        glrm.contains("\"type\"") || glrm.contains("\\\"type\\\""),
-        "{glrm}"
-    );
-    assert!(glrm.contains("AzureBlob"), "{glrm}");
-    assert!(glrm.contains("AzureTable"), "{glrm}");
-    assert!(!schema_accepts_bytes(&schema, br#"{}"#));
-    assert!(!schema_accepts_bytes(&schema, br#"{"type": "AzureBlob"}"#));
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"type": "AzureBlob", "typeProperties": {}}"#
-    ));
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -3939,7 +3906,7 @@ fn oneof_ref_allof_shared_prefix_variants_use_exact_object_variant_body() {
 }
 
 #[test]
-fn oneof_ref_allof_shared_prefix_variants_fall_back_for_mismatched_prefix() {
+fn oneof_ref_allof_variants_preserve_mismatched_prefix_constraints() {
     let schema = json!({
         "type": "object",
         "oneOf": [
@@ -3992,7 +3959,9 @@ fn oneof_ref_allof_shared_prefix_variants_fall_back_for_mismatched_prefix() {
         .lines()
         .find(|line| line.starts_with("nt schema_root_0 ::="))
         .expect("start rule should be present");
-    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    assert!(glrm.contains("plate") && glrm.contains("tipbox"), "{glrm}");
+    assert!(schema_accepts_bytes(&schema, br#"{"id": "x", "kind": "plate"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"id": 1, "kind": "plate"}"#));
     lower(&grammar).unwrap();
 }
 
@@ -4234,7 +4203,7 @@ fn invalid_bounded_pattern_keeps_pattern_parse_error() {
         "maxLength": 5000
     });
     let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("invalid string pattern"), "{error}");
+    assert!(error.contains("invalid regex") && error.contains("#/pattern"), "{error}");
 }
 
 #[test]
@@ -4899,101 +4868,51 @@ fn decoded_string_patterns_are_matched_against_json_string_bodies() {
 }
 
 #[test]
-fn uuid_format_lowers_to_constrained_terminal() {
-    let schema = json!({
-        "type": "string",
-        "format": "uuid"
-    });
-
+fn format_annotation_uuid_matches_plain_strings() {
+    let schema = json!({"type":"string", "format":"uuid"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
-    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""not-a-valid-uuid""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
 }
 
 #[test]
-fn date_time_format_lowers_to_constrained_terminal() {
-    let schema = json!({
-        "type": "string",
-        "format": "date-time"
-    });
-
+fn format_annotation_date_time_matches_plain_strings() {
+    let schema = json!({"type":"string", "format":"date-time"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
-    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("[Tt]"), "{glrm}");
-    assert!(glrm.contains("[+-]"), "{glrm}");
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""not-a-valid-date-time""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
 }
 
 #[test]
-fn date_format_lowers_to_constrained_terminal() {
-    let schema = json!({
-        "type": "string",
-        "format": "date"
-    });
-
+fn format_annotation_date_matches_plain_strings() {
+    let schema = json!({"type":"string", "format":"date"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
-    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("0[1-9]|1[0-2]"), "{glrm}");
-    assert!(glrm.contains("0[1-9]|[12][0-9]|3[01]"), "{glrm}");
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""not-a-valid-date""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
 }
 
 #[test]
-fn email_format_lowers_to_constrained_terminal() {
-    let schema = json!({
-        "type": "string",
-        "format": "email"
-    });
-
+fn format_annotation_email_matches_plain_strings() {
+    let schema = json!({"type":"string", "format":"email"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
-    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("@"), "{glrm}");
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""not-a-valid-email""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
 }
 
 #[test]
-fn email_format_with_large_max_length_preserves_length_envelope() {
+fn format_annotation_email_preserves_large_max_length() {
     let schema = json!({
         "type": "string",
         "format": "email",
@@ -5001,12 +4920,9 @@ fn email_format_with_large_max_length_preserves_length_envelope() {
     });
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let rule = grammar
-        .rules
-        .iter()
-        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
-        .expect("expected constrained email terminal");
-    assert!(matches!(rule.expr, GrammarExpr::Intersect { .. }), "{:?}", rule.expr);
+    let plain = schema_to_named_grammar(&json!({"type":"string", "maxLength":1024})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
+    assert!(schema_accepts_bytes(&schema, br#""not-an-email""#));
 
     let mut at_limit = Vec::with_capacity(1026);
     at_limit.push(b'"');
@@ -5036,98 +4952,45 @@ fn email_format_with_min_length_preserves_length_envelope() {
 }
 
 #[test]
-fn fixed_width_format_with_disjoint_max_length_is_empty() {
-    let schema = json!({
-        "type": "string",
-        "format": "uuid",
-        "maxLength": 35
-    });
-
+fn format_annotation_uuid_does_not_override_max_length() {
+    let schema = json!({"type":"string", "format":"uuid", "maxLength":35});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let rule = grammar
-        .rules
-        .iter()
-        .find(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained"))
-        .expect("expected constrained UUID terminal");
-    assert!(matches!(rule.expr, GrammarExpr::Intersect { .. }), "{:?}", rule.expr);
-    assert!(!schema_accepts_bytes(
-        &schema,
-        br#""123e4567-e89b-12d3-a456-426614174000""#,
-    ));
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""short non-uuid""#));
+    assert!(!schema_accepts_bytes(&schema, br#""123e4567-e89b-12d3-a456-426614174000""#));
 }
 
 #[test]
-fn hostname_ipv4_ipv6_formats_lower_to_constrained_terminals() {
-    for (format, expected) in [
-        ("hostname", "[A-Za-z0-9]"),
-        ("ipv4", "25[0-5]"),
-        ("ipv6", "[A-Fa-f0-9]"),
-    ] {
-        let schema = json!({
-            "type": "string",
-            "format": format
-        });
-
+fn format_annotation_host_and_ip_names_match_plain_strings() {
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    for format in ["hostname", "ipv4", "ipv6", "unknown-format"] {
+        let schema = json!({"type":"string", "format":format});
         let grammar = schema_to_named_grammar(&schema).unwrap();
-        assert!(
-            grammar
-                .rules
-                .iter()
-                .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-            "{:?}",
-            grammar.rules
-        );
-        assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-        let glrm = to_glrm(&grammar);
-        assert!(glrm.contains(expected), "{glrm}");
-        lower(&grammar).unwrap();
+        assert_eq!(to_glrm(&grammar), to_glrm(&plain), "format={format}");
+        assert!(schema_accepts_bytes(&schema, br#""not a valid host or IP""#));
+        assert!(!schema_accepts_bytes(&schema, b"42"));
     }
 }
 
 #[test]
-fn uri_format_lowers_to_constrained_terminal() {
-    let schema = json!({
-        "type": "string",
-        "format": "uri"
-    });
-
+fn format_annotation_uri_matches_plain_strings() {
+    let schema = json!({"type":"string", "format":"uri"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(
-        grammar
-            .rules
-            .iter()
-            .any(|rule| rule.is_terminal && rule.name.starts_with("json_string_constrained")),
-        "{:?}",
-        grammar.rules
-    );
-    assert!(!contains_ref_named(start_expr(&grammar), "JSON_STRING"));
-
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("[A-Za-z]"), "{glrm}");
+    let plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    assert_eq!(to_glrm(&grammar), to_glrm(&plain));
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""not-a-valid-uri""#));
+    assert!(!schema_accepts_bytes(&schema, b"true"));
 }
 
 #[test]
-fn uri_format_rejects_repeated_fragment_marker_without_full_llguidance_regex() {
-    let schema = json!({
-        "type": "string",
-        "format": "uri"
-    });
-
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(!glrm.contains("path_abempty"), "should not import llguidance's full URI regex: {glrm}");
-    lower(&grammar).unwrap();
-
-    assert!(schema_accepts_bytes(&schema, br#""https://example.com/#frag""#));
-    assert!(schema_accepts_bytes(&schema, br#""https://example.com/?q=a/b""#));
-    assert!(schema_accepts_bytes(&schema, br#""https://example.com/%23ok?q=%3F#frag%20x""#));
-    assert!(schema_accepts_bytes(&schema, br#""https://[::1]/path""#));
-    assert!(!schema_accepts_bytes(&schema, br#""https://[V1.foo]/path""#));
-    assert!(!schema_accepts_bytes(&schema, br#""https://##""#));
-    assert!(!schema_accepts_bytes(&schema, br#""https://%!""#));
-    assert!(!schema_accepts_bytes(&schema, br#""https://example.com/%!""#));
+fn format_annotation_uri_preserves_ordinary_json_string_language() {
+    let schema = json!({"type":"string", "format":"uri"});
+    for input in [br#""https://example.com/#frag""#.as_slice(), br#""https://##""#, br#""https://%!""#, br#""https://[V1.foo]/path""#] {
+        assert!(schema_accepts_bytes(&schema, input));
+    }
+    assert!(!schema_accepts_bytes(&schema, br#""unterminated"#));
+    assert!(!schema_accepts_bytes(&schema, b"null"));
 }
 
 #[test]
@@ -5150,19 +5013,13 @@ fn decimal_multiple_of_cent_uses_nonnegative_compact_language_without_fixed_scal
 }
 
 #[test]
-fn string_pattern_is_intersected_with_format() {
-    let schema = json!({
-        "type": "string",
-        "format": "uuid",
-        "pattern": "^abc$"
-    });
-
+fn format_annotation_preserves_string_pattern_assertion() {
+    let schema = json!({"type":"string", "format":"uuid", "pattern":"^abc$"});
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains("a") && glrm.contains("b") && glrm.contains("c"), "{glrm}");
-    assert!(glrm.contains("[0-9A-Fa-f]{8}"), "{glrm}");
-    assert!(glrm.contains("json_string_constrained") || glrm.contains("uuid"), "{glrm}");
     lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#""abc""#));
+    assert!(!schema_accepts_bytes(&schema, br#""abcd""#));
+    assert!(!schema_accepts_bytes(&schema, br#""123e4567-e89b-12d3-a456-426614174000""#));
 }
 
 #[test]
@@ -5170,7 +5027,7 @@ fn object_nonterminals_reference_terminalized_key_and_string_patterns() {
     let schema = json!({
         "type": "object",
         "properties": {
-            "last_modification": {"type": "string", "maxLength": 32, "format": "date-time"},
+            "last_modification": {"type": "string", "maxLength": 32, "pattern": "^[a-z]+$"},
             "strings": {
                 "type": "object",
                 "patternProperties": {"^/": {"type": "string"}},
@@ -5492,12 +5349,13 @@ fn conditional_keywords_error_for_broad_lowering() {
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("conditional assertions"), "{error}");
+    assert!(error.contains("/if"), "{error}");
 }
 
 #[test]
-fn conditional_keywords_precede_nested_unique_items_in_then() {
+fn conditional_with_nested_unique_items_reports_assertion_path() {
     let schema = json!({
         "allOf": [{
             "if": {"properties": {"type": {"const": "theme"}}},
@@ -5509,12 +5367,13 @@ fn conditional_keywords_precede_nested_unique_items_in_then() {
         }]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("uniqueItems:true"), "{error}");
+    assert!(error.contains("/then/properties/regions_hidden/uniqueItems"), "{error}");
 }
 
 #[test]
-fn conditional_keywords_precede_definition_unique_items() {
+fn conditional_with_definition_unique_items_reports_unsupported_array_assertion() {
     let schema = json!({
         "definitions": {
             "bad": {"type": "array", "uniqueItems": true}
@@ -5525,8 +5384,9 @@ fn conditional_keywords_precede_definition_unique_items() {
         }]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("uniqueItems:true"), "{error}");
+    assert!(error.contains("/definitions/bad/uniqueItems"), "{error}");
 }
 
 #[test]
@@ -5548,7 +5408,7 @@ fn conditional_preflight_ignores_annotation_objects() {
 }
 
 #[test]
-fn conditional_preflight_checks_additional_items_before_definitions_unique_items() {
+fn default_dialect_rejects_legacy_items_before_nested_assertion_checks() {
     let schema = json!({
         "definitions": {
             "bad": {"type": "array", "uniqueItems": true}
@@ -5561,16 +5421,18 @@ fn conditional_preflight_checks_additional_items_before_definitions_unique_items
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("Draft 2020-12 items must be a schema"), "{error}");
+    assert!(error.contains("/items"), "{error}");
 }
 
 #[test]
 fn unique_items_still_errors_without_conditional() {
     let schema = json!({"type": "array", "uniqueItems": true});
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("uniqueItems:true"), "{error}");
+    assert!(error.contains("/uniqueItems"), "{error}");
 }
 
 #[test]
@@ -5604,6 +5466,7 @@ fn oneof_single_ref_wrapper_is_supported() {
 #[test]
 fn fragment_id_ref_alias_lowers() {
     let schema = json!({
+        "$schema": "http://json-schema.org/draft-04/schema#",
         "type": "object",
         "definitions": {
             "name": {
@@ -5625,6 +5488,7 @@ fn fragment_id_ref_alias_lowers() {
 #[test]
 fn absolute_root_id_self_ref_lowers() {
     let schema = json!({
+        "$schema": "http://json-schema.org/draft-04/schema#",
         "id": "http://example.test/schema.json#",
         "type": "object",
         "properties": {
@@ -5660,7 +5524,7 @@ fn oneof_ref_and_null_is_supported() {
 }
 
 #[test]
-fn oneof_mixed_local_ref_and_inline_object_lowers() {
+fn oneof_mixed_closed_ref_and_inline_objects_report_unproven_disjointness() {
     let schema = json!({
         "definitions": {
             "input": {
@@ -5685,8 +5549,8 @@ fn oneof_mixed_local_ref_and_inline_object_lowers() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -5734,12 +5598,12 @@ fn oneof_mixed_ref_and_inline_primitive_still_errors() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
-fn oneof_mixed_local_ref_object_targets_and_inline_primitives_lowers() {
+fn oneof_overlapping_ref_object_targets_and_primitives_report_unsupported() {
     let schema = json!({
         "definitions": {
             "features": {
@@ -5763,12 +5627,12 @@ fn oneof_mixed_local_ref_object_targets_and_inline_primitives_lowers() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
-fn oneof_mixed_local_ref_inline_primitives_and_array_lowers() {
+fn oneof_mixed_ref_primitives_and_array_reports_unproven_disjointness() {
     let schema = json!({
         "definitions": {
             "features": {
@@ -5803,8 +5667,8 @@ fn oneof_mixed_local_ref_inline_primitives_and_array_lowers() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 fn nested_config_align_oneof_schema() -> serde_json::Value {
@@ -5992,80 +5856,52 @@ fn oneof_nested_config_align_enum_ref_branches_accept_and_reject() {
 }
 
 #[test]
-fn oneof_nested_config_align_enum_ref_branches_use_object_fast_path() {
+fn oneof_nested_config_align_enum_ref_branches_lower_exactly() {
     let schema = nested_config_align_oneof_schema();
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let expr = start_expr(&grammar);
-    assert!(!matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
-    let glrm = to_glrm(&grammar);
-    let start_line = glrm
-        .lines()
-        .find(|line| line.starts_with("nt start ::= "))
-        .unwrap_or("<missing start line>");
-    assert_eq!(start_line, "nt start ::= schema_root_0;");
-    assert!(
-        glrm.contains("nt schema_root_0 ::= \"{\" json_anyof_object_body"),
-        "{glrm}"
-    );
+    // Discriminator separation is preserved while branches lower independently.
+    assert!(to_glrm(&grammar).contains("left"));
+    assert!(to_glrm(&grammar).contains("right"));
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn oneof_nested_config_align_enum_ref_branches_with_shared_content_use_object_fast_path() {
+fn oneof_nested_config_align_enum_ref_branches_preserve_shared_content() {
     let schema = nested_config_align_oneof_with_shared_content_schema();
 
     let grammar = schema_to_named_grammar(&schema).unwrap();
-    let expr = start_expr(&grammar);
-    assert!(!matches!(expr, GrammarExpr::Choice(_)), "{expr:?}");
+    // Discriminator separation is preserved while branches lower independently.
+    assert!(to_glrm(&grammar).contains("left"));
+    assert!(to_glrm(&grammar).contains("right"));
     lower(&grammar).unwrap();
 }
 
 #[test]
-fn object_constrained_allof_with_nested_oneof_accepts_declared_common_property_order() {
+fn object_constrained_allof_with_nested_oneof_reports_unproven_disjointness() {
     let schema = object_constrained_allof_with_nested_oneof_schema();
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"_elements": [{"name": "example.txt", "user": "user1", "group": "group1", "type": "file", "size": 1024, "mode": "644"}]}"#,
-    ));
-    assert!(!schema_accepts_bytes(
-        &schema,
-        br#"{"_elements": [{"name": "example.txt", "type": "file", "user": "user1", "group": "group1", "size": 1024, "mode": "644"}]}"#,
-    ));
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"_elements": [{"name": "example_remote_dir", "type": "remote_dir"}]}"#,
-    ));
-
-    assert!(count_rules_with_prefix(&grammar, "json_closed_object_body") <= 5, "{glrm}");
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
-fn object_constrained_allof_with_nested_oneof_keeps_mismatched_common_property_fallback() {
+fn object_constrained_allof_with_nested_oneof_mismatched_property_reports_unsupported() {
     let mut schema = object_constrained_allof_with_nested_oneof_schema();
     schema["definitions"]["file_file"]["properties"]["name"] = json!({"type": "number"});
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
-fn object_constrained_allof_with_nested_oneof_unsupported_pattern_falls_back() {
+fn object_constrained_allof_with_nested_oneof_pattern_reports_unsupported() {
     let mut schema = object_constrained_allof_with_nested_oneof_schema();
     schema["definitions"]["file"]["allOf"][1]["patternProperties"] =
         json!({"^x-": {"type": "string"}});
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -6086,8 +5922,8 @@ fn oneof_mixed_local_ref_and_inline_primitive_with_untyped_ref_target_errors() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -6102,7 +5938,7 @@ fn unsupported_not_shape_errors() {
 }
 
 #[test]
-fn anyof_property_not_mutual_exclusion_lowers_as_exclusive_group() {
+fn anyof_property_not_mutual_exclusion_reports_unsupported_negation() {
     let schema = json!({
         "type": "object",
         "additionalProperties": true,
@@ -6124,12 +5960,9 @@ fn anyof_property_not_mutual_exclusion_lowers_as_exclusive_group() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-
-    assert!(glrm.contains("bundleDependencies"), "{glrm}");
-    assert!(glrm.contains("bundledDependencies"), "{glrm}");
-    assert!(glrm.contains("json_anyof_object_body"), "{glrm}");
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("general negation"), "{error}");
+    assert!(error.contains("/anyOf/0/not"), "{error}");
 }
 
 #[test]
@@ -6202,7 +6035,7 @@ fn property_names_pattern_applies_to_additional_properties_keys() {
 }
 
 #[test]
-fn llguidance_compat_property_names_with_pattern_properties_broadens() {
+fn llguidance_compat_property_names_with_pattern_properties_reports_error() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "1");
     let schema = json!({
@@ -6213,9 +6046,8 @@ fn llguidance_compat_property_names_with_pattern_properties_broadens() {
         }
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
-    assert!(schema_accepts_bytes(&schema, br#"{"!": "ok"}"#));
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported propertyNames combined with patternProperties"), "{error}");
 }
 
 #[test]
@@ -6248,7 +6080,7 @@ fn oneof_mixed_local_ref_and_const_primitive_disjoint_family_lowers() {
 }
 
 #[test]
-fn property_names_non_pattern_schema_still_errors() {
+fn property_names_string_type_is_vacuous() {
     let schema = json!({
         "type": "object",
         "propertyNames": {
@@ -6259,12 +6091,15 @@ fn property_names_non_pattern_schema_still_errors() {
         }
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("string pattern schemas"), "{error}");
+    // Every JSON object key is a string, so this assertion is vacuous.
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"any-key": "ok"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"any-key": 1}"#));
 }
 
 #[test]
-fn property_names_local_ref_without_explicit_string_pattern_still_errors() {
+fn property_names_local_string_type_ref_is_vacuous() {
     let schema = json!({
         "$defs": {
             "token": {
@@ -6280,12 +6115,15 @@ fn property_names_local_ref_without_explicit_string_pattern_still_errors() {
         }
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("string pattern schemas"), "{error}");
+    // Every JSON object key is a string, so this assertion is vacuous.
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{"any-key": "ok"}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"any-key": 1}"#));
 }
 
 #[test]
-fn property_names_fixed_literal_key_outside_pattern_errors() {
+fn property_names_excludes_optional_fixed_key_outside_pattern() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -6297,8 +6135,11 @@ fn property_names_fixed_literal_key_outside_pattern_errors() {
         "additionalProperties": false
     });
 
-    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
-    assert!(error.contains("does not allow fixed property"), "{error}");
+    // An optional forbidden key leaves the empty object valid.
+    let grammar = schema_to_named_grammar(&schema).unwrap();
+    lower(&grammar).unwrap();
+    assert!(schema_accepts_bytes(&schema, br#"{}"#));
+    assert!(!schema_accepts_bytes(&schema, br#"{"Bad-Key": "x"}"#));
 }
 
 #[test]
@@ -6401,6 +6242,7 @@ fn dependencies_unknown_dependent_in_closed_object_rejects_trigger() {
 #[test]
 fn dependencies_schema_value_still_errors() {
     let schema = json!({
+        "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
         "properties": {
             "siteId": {"type": "string"},
@@ -6417,6 +6259,7 @@ fn dependencies_schema_value_still_errors() {
         error.contains("schema dependencies are not supported"),
         "{error}"
     );
+    assert!(error.contains("#/dependencies/siteId"), "{error}");
 }
 
 #[test]
@@ -6597,7 +6440,7 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
 
     assert!(literal_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
     assert!(other_terminals > 1, "partitions={:?}", grammar.lexer_partitions);
-    assert!(pattern_partitions.len() >= 5, "partitions={:?}", grammar.lexer_partitions);
+    assert!(pattern_partitions.len() >= 3, "partitions={:?}", grammar.lexer_partitions);
     assert_eq!(pattern_partitions.len(), unique_pattern_partitions.len());
     assert!(!grammar
         .lexer_partitions
@@ -6629,24 +6472,14 @@ fn json_schema_groups_literals_and_other_but_singletons_pattern_terminals_by_ori
 }
 
 #[test]
-fn recognized_formats_are_pattern_singletons_before_adaptive_determinization() {
-    for format in ["uuid", "date-time"] {
-        let schema = json!({"type": "string", "format": format});
-        let mut grammar = schema_to_named_grammar(&schema).unwrap();
+fn format_annotation_recognized_and_unknown_names_reuse_plain_string_partitions() {
+    let mut plain = schema_to_named_grammar(&json!({"type":"string"})).unwrap();
+    super::finalize_lexer_partitions(&mut plain).unwrap();
+    for format in ["uuid", "date-time", "unknown-format"] {
+        let mut grammar = schema_to_named_grammar(&json!({"type":"string", "format":format})).unwrap();
         super::finalize_lexer_partitions(&mut grammar).unwrap();
-        let GrammarExpr::Ref(rule_name) = start_expr(&grammar) else {
-            panic!("expected format terminal for {format}: {:?}", start_expr(&grammar));
-        };
-        let partition = grammar
-            .lexer_partitions
-            .get(rule_name)
-            .unwrap_or_else(|| panic!("missing partition for {format} terminal {rule_name}"));
-        assert!(
-            partition.starts_with("json_pattern_"),
-            "format={format} terminal={rule_name} partition={partition}"
-        );
-        assert_ne!(partition, super::lower::JSON_OTHER_LEXER_PARTITION);
-        assert_ne!(partition, super::lower::JSON_LITERAL_LEXER_PARTITION);
+        assert_eq!(to_glrm(&grammar), to_glrm(&plain), "format={format}");
+        assert_eq!(grammar.lexer_partitions, plain.lexer_partitions);
     }
 }
 
@@ -7252,7 +7085,7 @@ fn allof_anyof_required_properties_lowers_to_single_grouped_object() {
 }
 
 #[test]
-fn allof_anyof_ref_object_variants_distribute_through_common_object() {
+fn allof_anyof_ref_object_variants_reject_closed_common_property_conflicts() {
     let schema = json!({
         "definitions": {
             "alpha": {
@@ -7289,17 +7122,17 @@ fn allof_anyof_ref_object_variants_distribute_through_common_object() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(!matches!(start_expr(&grammar), GrammarExpr::Choice(_)));
-    assert_eq!(count_rules_with_prefix(&grammar, "json_anyof_object_body"), 1);
-    assert!(schema_accepts_bytes(&schema, br#"{"kind": "alpha", "alpha": "x"}"#));
-    assert!(schema_accepts_bytes(&schema, br#"{"kind": "beta", "beta": "x"}"#));
-    assert!(!schema_accepts_bytes(&schema, br#"{"kind":"alpha","beta":"x"}"#));
-    lower(&grammar).unwrap();
+    // The common operand closes its own property set: alpha/beta remain
+    // forbidden even though another allOf operand declares and requires them.
+    // Unioning the declarations would incorrectly admit these objects.
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("#/allOf/0"), "{error}");
+    assert!(error.contains("unsupported allOf"), "{error}");
+    assert!(error.contains("additionalProperties with differing property sets"), "{error}");
 }
 
 #[test]
-fn allof_oneof_required_properties_does_not_use_any_required_factoring() {
+fn allof_oneof_overlapping_required_properties_reports_unsupported() {
     let schema = json!({
         "type": "object",
         "properties": {
@@ -7317,10 +7150,8 @@ fn allof_oneof_required_properties_does_not_use_any_required_factoring() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert!(matches!(start_expr(&grammar), GrammarExpr::Sequence(_)));
-    assert!(count_rules_with_prefix(&grammar, "json_anyof_object_body") <= 1);
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -7409,7 +7240,7 @@ fn anyof_required_property_factoring_falls_back_for_nontrivial_branch() {
 }
 
 #[test]
-fn object_typed_anyof_branches_do_not_emit_generic_json_object_fallback() {
+fn object_typed_oneof_ref_branches_report_unproven_disjointness() {
     let schema = json!({
         "type": "object",
         "definitions": {
@@ -7441,23 +7272,8 @@ fn object_typed_anyof_branches_do_not_emit_generic_json_object_fallback() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    let start_line = glrm
-        .lines()
-        .find(|line| line.starts_with("nt schema_root_0 ::="))
-        .unwrap_or_else(|| panic!("{glrm}"));
-    assert!(!start_line.contains("| json_object"), "{glrm}");
-    assert!(!start_line.contains("JSON_STRING"), "{glrm}");
-    assert!(!start_line.contains("JSON_NUMBER"), "{glrm}");
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"{"dpp_version": 1, "file_version": 1, "parent_id": null}"#
-    ));
-    assert!(schema_accepts_bytes(&schema, br#"{"dpp_version": 1, "file_version": 1}"#));
-    assert!(!schema_accepts_bytes(&schema, br#"{"x": 1}"#));
-    assert!(!schema_accepts_bytes(&schema, br#""not an object""#));
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -8102,7 +7918,7 @@ fn anyof_required_property_factoring_falls_back_for_unknown_required_name() {
 }
 
 #[test]
-fn allof_merges_plain_object_branches() {
+fn allof_closed_object_with_differing_property_sets_reports_unsupported() {
     // Pin JsonSchema mode: full-JSON expectations predate the native default (assertions unchanged).
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _compat = CompatModeGuard::json_schema();
@@ -8122,11 +7938,8 @@ fn allof_merges_plain_object_branches() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(glrm.contains(r#"/"a": "#), "{glrm}");
-    assert!(glrm.contains("JSON_BOOL"), "{glrm}");
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported allOf"), "{error}");
 }
 
 #[test]
@@ -8197,7 +8010,7 @@ fn allof_array_min_max_items_merge_clamps_bounds() {
 }
 
 #[test]
-fn allof_array_merge_preserves_non_array_type_union_guard() {
+fn allof_array_with_non_array_type_union_reports_unsupported_intersection() {
     let schema = json!({
         "allOf": [
             {
@@ -8208,9 +8021,8 @@ fn allof_array_merge_preserves_non_array_type_union_guard() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let expr = start_expr(&grammar);
-    assert!(format!("{expr:?}").contains("Ref(\"JSON_STRING\")"), "{expr:?}");
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported allOf"), "{error}");
 }
 
 #[test]
@@ -8405,7 +8217,7 @@ fn allof_distributes_over_object_anyof_before_lowering() {
 }
 
 #[test]
-fn allof_ref_to_nested_object_oneof_with_siblings_lowers() {
+fn allof_ref_to_nested_overlapping_object_oneof_reports_unsupported() {
     let schema = json!({
         "definitions": {
             "namedObject": {
@@ -8453,8 +8265,8 @@ fn allof_ref_to_nested_object_oneof_with_siblings_lowers() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -8517,7 +8329,7 @@ fn terminal_safe_allof_keeps_intersection() {
 }
 
 #[test]
-fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
+fn oneof_closed_object_branches_with_required_anyof_report_unproven_disjointness() {
     let schema = json!({
         "type": "object",
         "oneOf": [
@@ -8554,14 +8366,8 @@ fn oneof_object_branches_with_root_type_object_and_required_anyof_lowers() {
         ]
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    let glrm = to_glrm(&grammar);
-    assert!(
-        count_rules_with_prefix(&grammar, "json_closed_object_body") > 0
-            || glrm.contains("json_anyof_object_body"),
-        "{glrm}"
-    );
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
@@ -9352,7 +9158,7 @@ fn singleton_allof_ref_with_noop_object_siblings_reuses_ref_rule() {
 }
 
 #[test]
-fn singleton_allof_ref_with_restrictive_additional_properties_skips_fast_path() {
+fn singleton_allof_ref_with_restrictive_additional_properties_reports_unsupported_merge() {
     let schema = json!({
         "$defs": {
             "base": {
@@ -9375,9 +9181,8 @@ fn singleton_allof_ref_with_restrictive_additional_properties_skips_fast_path() 
         "additionalProperties": false
     });
 
-    let grammar = schema_to_named_grammar(&schema).unwrap();
-    assert_eq!(count_rules_with_prefix(&grammar, "schema_ref"), 0);
-    lower(&grammar).unwrap();
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported allOf"), "{error}");
 }
 
 #[test]
@@ -9397,7 +9202,7 @@ fn test_reproduce_declared_key_failure() {
 
 
 #[test]
-fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
+fn allof_nested_oneof_with_separate_discriminator_requirement_reports_unsupported() {
     let schema = json!({
         "$defs": {
             "common": {
@@ -9436,11 +9241,8 @@ fn allof_propagates_object_type_into_nested_oneof_sibling_branch() {
         }
     });
 
-    assert!(schema_accepts_bytes(
-        &schema,
-        br#"[{"name": "x", "user": "u", "type": "file", "size": 1}]"#
-    ));
-    assert!(!schema_accepts_bytes(&schema, br#"[[{"name": "x", "type": "file"}]]"#));
+    let error = schema_to_named_grammar(&schema).unwrap_err().to_string();
+    assert!(error.contains("unsupported oneOf"), "{error}");
 }
 
 #[test]
