@@ -76,6 +76,13 @@ jobs:
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
           Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Git Bash prepends its own link.exe. Pin MSVC explicitly for Rust
+          # (including host build scripts) and for CMake/cc-rs native compilers.
+          $linker = (Get-Command link.exe -ErrorAction Stop).Source
+          $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','WindowsSdkDir','WindowsSDKVersion')) {
             $value = [Environment]::GetEnvironmentVariable($name)
             if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
@@ -189,6 +196,8 @@ jobs:
           --test prepared_components --test end_tokens --test token_range_bindings
           --test lark_compatibility --test marker_events --test marker_commit
           --test public_optimization_modes
+      - name: Exact boundary metadata variants and deferred policy scoping
+        run: cargo test --locked --release -p glrmask --features internal-api --lib public_api::final_boundary_option_tests
       - name: Binding ownership and direct C ABI parity tests
         run: cargo test --locked --release -p glrmask-binding-core -p glrmask-c
       - name: Generated guides remain synchronized

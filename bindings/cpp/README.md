@@ -146,7 +146,7 @@ auto parent_module = glrmask::Grammar::from_glrm(
         nt root = "[" payload "]";)").prepare(composed_vocab);
 auto child_module = child.prepare(composed_vocab);
 parent_module.bind("payload", child_module);
-auto runnable = parent_module.link(options);
+auto runnable = parent_module.link();
 ```
 
 Preparation can retain open slots, whereas compilation and final linking require a closed runnable root. Binding does not itself perform a hidden final compilation/link.
