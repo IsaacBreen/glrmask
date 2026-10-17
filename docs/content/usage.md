@@ -1,33 +1,12 @@
 GLRMask has four core types:
 
-- `Grammar`: an immutable source or constructed grammar, with its bindings.
-- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
-- `Constraint`: a complete, runnable grammar compiled against that vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: source grammar semantics and bindings.
+- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.
+- `Constraint`: a closed, runnable grammar compiled against a vocabulary.
+- `ConstraintState`: the mutable state for one generated sequence.
 
-For direct use, compile a `Grammar` into a `Constraint`. Use `prepare()` and `link()` when you need reusable components or late binding. Then call `constraint.start()` to initiate a `ConstraintState`. Then in the decoding loop:
+Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.
 
-1. Compute the next-token mask.
-2. Sample a token the mask allows.
-3. Commit that token to the state.
+`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
 
-```python pseudocode
-state = constraint.start()
-end_token_ids = configured_end_token_ids
-
-while generating:
-    in parallel:
-        logits = llm.forward(...)
-        mask = state.mask()
-
-    logits = apply_mask(logits, mask)
-    token_id = sample(logits)
-    state.commit_token(token_id)
-    if token_id in end_token_ids:
-        break
-```
-
-Optional `@mark(id)` annotations report numeric marker IDs and byte positions
-during generation. Read `state.marker_events()` immediately after `start()` and
-each commit. These are possible boundary observations, not captures or a selected
-parse. See the [marker reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/markers.md).
+See the [full guide](https://glrmask.com/guide/) for composition, persistence, optimization and special-token details.

@@ -86,6 +86,12 @@ def getting_started(flavor):
 
 
 def document(flavor):
+    if flavor in ['python', 'rust']:
+        api = 'https://glrmask.com/api/python/' if flavor == 'python' else 'https://docs.rs/glrmask/latest/glrmask/'
+        more = f'## Learn more\n\n[Full guide]({WEBSITE}/guide/) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
+        return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
+                              install(flavor, '## Installation'), quickstart(flavor, '## Quickstart'),
+                              '## Core concepts\n\n' + read('usage'), more, LICENSE]) + '\n'
     return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                           '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor),
                           '## How it works\n\n' + read('how-it-works'), LICENSE]) + '\n'
@@ -120,10 +126,31 @@ def website_payload():
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
 
 
+def language_payload():
+    # A narrow, benchmark-free import for both language references and the site.
+    payload = {'schema': 'glrmask-language-docs-v1',
+               'introduction': read('introduction'), 'usage': read('usage'),
+               'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
+               'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']}}
+    payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+
+
+def rust_module_intro():
+    source = (ROOT/'src/lib.rs').read_text()
+    start = source.index('//!')
+    end = source.index('//! # Typed bindings')
+    prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation'),
+                           quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage')])
+    block = '\n'.join('//! ' + line if line else '//!' for line in prose.splitlines()) + '\n//!\n'
+    return source[:start] + block + source[end:]
+
+
 def outputs():
     return {ROOT/'README.md': document('github'), ROOT/'README.rust.md': document('rust'),
             ROOT/'python/README.md': document('python'), ROOT/'python/PYTHON.md': document('python'), ROOT/'GUIDE.md': full_guide(),
-            ROOT/'docs/website-content.json': website_payload()}
+            ROOT/'docs/website-content.json': website_payload(), ROOT/'docs/language-docs.json': language_payload(),
+            ROOT/'src/lib.rs': rust_module_intro()}
 
 
 def main():

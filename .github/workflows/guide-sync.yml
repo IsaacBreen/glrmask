@@ -8,6 +8,7 @@ on:
       - 'README.rust.md'
       - 'python/README.md'
       - 'python/PYTHON.md'
+      - 'src/lib.rs'
       - 'Cargo.toml'
       - 'python/pyproject.toml'
       - 'docs/content/**'
@@ -27,6 +28,7 @@ on:
       - 'README.rust.md'
       - 'python/README.md'
       - 'python/PYTHON.md'
+      - 'src/lib.rs'
       - 'Cargo.toml'
       - 'python/pyproject.toml'
       - 'docs/content/**'
@@ -49,3 +51,5 @@ jobs:
           python-version: '3.x'
       - run: python scripts/sync-benchmarks.py --check
       - run: python scripts/sync-guide.py --check
+      - name: Rust documentation examples
+        run: cargo test --doc --locked -p glrmask
