@@ -61,3 +61,10 @@ jobs:
       - run: python scripts/sync-guide.py --check
       - name: Rust documentation examples
         run: cargo test --doc --locked -p glrmask
+      - name: Render Rust API reference
+        run: cargo doc --locked --no-deps -p glrmask
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-api-reference
+          path: target/doc
+          retention-days: 3
