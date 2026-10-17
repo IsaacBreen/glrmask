@@ -12466,7 +12466,7 @@ impl Constraint {
             .and_then(|id| self.packed_dwa_token_dense_masks.get(id))
     }
 
-    /// Create a fresh state for one generated sequence.
+    /// Independent state for one generated sequence.
     pub fn start(&self) -> ConstraintState<'_> {
         if self.uses_dynamic_runtime() { return self.start_dynamic(); }
         crate::runtime::initialize_hot_path_config();
@@ -12507,7 +12507,7 @@ impl Constraint {
         state
     }
 
-    /// Return the number of `u32` words required for a packed token mask.
+    /// Packed 32-bit word count, including sparse original-ID positions and root end tokens.
     pub fn mask_len(&self) -> usize {
         self.max_original_token_id()
             .map(|token_id| (token_id as usize / 32) + 1)

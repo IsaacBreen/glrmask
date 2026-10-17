@@ -133,6 +133,7 @@ def language_payload():
                'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
                'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
                'guide_url': REPO + '/blob/main/GUIDE.md',
+               'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
                'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
     payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
@@ -141,7 +142,7 @@ def language_payload():
 def rust_module_intro():
     source = (ROOT/'src/lib.rs').read_text()
     start = source.index('//!')
-    end = source.index('//! # Typed bindings')
+    end = source.index('#![deny(warnings)]')
     prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation'),
                            quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage'),
                            '# Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/)'])

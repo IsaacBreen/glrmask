@@ -8547,7 +8547,7 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
-    /// Return the allowed-token mask as a packed `u32` bitset.
+    /// Packed `u32` mask indexed by original token ID: bit `id % 32` of word `id / 32`. Includes the root end-token policy.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -8827,7 +8827,11 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
-    /// Fill the next-token mask, including final-root termination policy.
+    /// Same packed layout as [`Self::mask`]. Extra words are cleared.
+    ///
+    /// # Panics
+    ///
+    /// The buffer must contain at least [`Constraint::mask_len`] words.
     pub fn fill_mask(&self, buf: &mut [u32]) {
         assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is smaller than constraint mask");
         if self.terminated {

@@ -6060,10 +6060,7 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Serialize this compiled constraint to a versioned binary artifact.
-    ///
-    /// Current artifacts use a compact sectioned representation and retain
-    /// runtime-native sections where doing so materially reduces load latency.
+    /// Versioned artifact including the vocabulary and root stopping policy. Compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
         self.save_with_vocab_policy(false)
     }
@@ -6083,11 +6080,7 @@ impl Constraint {
         *digest.finalize().as_bytes()
     }
 
-    /// Save a parser constraint without duplicating its model vocabulary.
-    /// Load with `Constraint::load_with_vocab` and the exact original
-    /// vocabulary; an absent or incompatible binding is rejected. Supported for
-    /// both the table-free template backend and a retained LR
-    /// backend with a retained table.
+    /// Omits the vocabulary. Loading requires [`Self::load_with_vocab`] with the exact original token-ID/byte mapping, not merely the same size.
     pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
         if !self.has_template_parser() && !self.table.is_present() {
             return Err(crate::Error::Serialization(
@@ -7067,12 +7060,7 @@ impl Constraint {
         bytes
     }
 
-    /// Load a compiled constraint from an artifact produced by [`Constraint::save`].
-    ///
-    /// Passing an owned `Vec<u8>` transfers its allocation into the loaded
-    /// constraint without copying the artifact. Borrowed byte slices are also
-    /// accepted; current-format artifacts copy borrowed input once because
-    /// runtime structures retain zero-copy views into persistent backing bytes.
+    /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>` transfers its allocation; borrowed input is copied once because runtime views retain the backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
         Self::load_with_vocab_policy(bytes.into(), None)
     }
@@ -7252,14 +7240,7 @@ impl Constraint {
         Ok(constraint)
     }
 
-    /// Load a compiled constraint and bind it to an already-existing exact
-    /// model vocabulary.
-    ///
-    /// This preserves the zero-copy packed artifact representation while
-    /// sharing the caller's `Vocab` identity and derived-artifact cache. Later
-    /// subgrammar composition can therefore prove vocabulary compatibility by
-    /// `Arc` identity instead of reconstructing and repeatedly comparing the
-    /// same token byte map.
+    /// The supplied vocabulary must match the original mapping. Shares its caches and retains the packed artifact backing storage; required for artifacts from [`Self::save_without_vocab`].
     pub fn load_with_vocab<'a>(
         bytes: impl Into<Cow<'a, [u8]>>,
         vocab: &crate::Vocab,

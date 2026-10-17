@@ -839,7 +839,7 @@ pub struct GlrmWithExternalSubgrammars {
     pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
-/// The target-independent external declarations in a GLRM source descriptor.
+/// Declared slot contract: exact token events, or a grammar component. Token values can fill either kind; a general grammar cannot fill a token slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExternalKind {
     Token,

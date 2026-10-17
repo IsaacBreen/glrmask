@@ -38,12 +38,7 @@ use super::mask_cache_payload::DynamicMaskCachePayload;
 
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 
-/// Compile-time detail requested for the reusable dynamic-boundary trigger.
-///
-/// This setting is orthogonal to whether ordinary component masking is static
-/// or dynamic. `None` is the zero-cost default; `Tokens` adds only a
-/// parser-state-independent candidate set; `Exact` builds the full
-/// GSS-sensitive trigger Parser DWA when the component supports it.
+/// Optional composition-boundary metadata, independent of the masking optimization. `None` adds no metadata; `Tokens` is a conservative parser-state-independent candidate set; `Exact` adds state-sensitive metadata where supported.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum BoundaryTriggerDetail {
     #[default]
@@ -10382,10 +10377,7 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// Fully compiled, immutable grammar constraint.
-///
-/// A `Constraint` is intended to be reused across generated sequences. Call
-/// [`Constraint::start`] to create a mutable per-sequence state.
+/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.

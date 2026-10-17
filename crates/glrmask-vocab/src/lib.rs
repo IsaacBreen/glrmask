@@ -45,11 +45,7 @@ pub struct Vocab {
     max_token_byte_len: OnceLock<usize>,
 }
 
-/// Consume exactly one model token ID, ordinary or special, regardless of its bytes.
-///
-/// This value owns no vocabulary. Compilation or binding to a compiled module
-/// validates membership in the actual vocabulary; equal IDs across vocabularies
-/// are not a tokenizer identity guarantee.
+/// One original token ID, independent of its byte spelling. This value stores no vocabulary identity: the target checks ID membership, so the same ID can be accepted with different bytes. Use `vocab.tokens([id])` when a singleton must retain vocabulary identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token {
     id: u32,
@@ -63,7 +59,7 @@ impl Token {
     pub const fn id(&self) -> u32 { self.id }
 }
 
-/// Several exact model tokens, qualified by the Vocab they belong to.
+/// One token event chosen from a vocabulary-bound set, not a sequence. Even a singleton retains the full token-ID/byte mapping; a different mapping is rejected. An empty set matches nothing, not the empty string.
 #[derive(Debug, Clone)]
 pub struct ExactTokens {
     vocab: Vocab,
@@ -206,7 +202,7 @@ impl Vocab {
         }
     }
 
-    /// Resolve an exact event set for one binding. Empty sets denote the empty language.
+    /// Match one of the supplied IDs, retaining vocabulary identity even for a singleton. Unknown or duplicate IDs are errors. Empty input matches nothing, not epsilon.
     pub fn tokens(
         &self,
         token_ids: impl IntoIterator<Item = u32>,
@@ -235,13 +231,7 @@ impl Vocab {
         })
     }
 
-    /// Resolve a union of inclusive token-ID ranges without enumerating IDs.
-    ///
-    /// Ranges may be unordered or overlap; adjacent ranges are merged. Empty
-    /// input is an empty event set. Reversed ranges and unknown IDs are errors.
-    /// Construction depends on the number of ranges, not their cardinality.
-    /// For example, `vocab.token_ranges([0..=999, 2000..=2999])` binds one
-    /// token drawn from those ranges, not a sequence of tokens.
+    /// Union of inclusive ranges, normalized without enumerating IDs. Overlapping or adjacent ranges merge. Reversed ranges or unknown IDs are errors; empty input matches nothing. A match consumes one token, not a sequence.
     pub fn token_ranges(
         &self,
         ranges: impl IntoIterator<Item = std::ops::RangeInclusive<u32>>,
@@ -388,10 +378,7 @@ impl Vocab {
         self.exact_only_token_ids.iter().copied()
     }
 
-    /// Return the highest byte-backed token ID, or `0` when none exists.
-    ///
-    /// Exact-only IDs are intentionally excluded from this compiler
-    /// coordinate.
+    /// Highest byte-backed ID, or zero if none. Excludes exact-only controls; this is not an entry count.
     pub fn max_token_id(&self) -> u32 {
         self.entries
             .last_key_value()
@@ -415,7 +402,7 @@ impl Vocab {
         }
     }
 
-    /// Return the bytes associated with one token ID.
+    /// Exact byte spelling; returns `None` for unknown and exact-only IDs.
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }

@@ -603,6 +603,7 @@ fn contiguous_exact_token_range(value: &Bound<'_, PyAny>, allow_empty:bool) -> P
 // PyVocab
 // ---------------------------------------------------------------------------
 
+/// Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.
 #[pyclass(name = "Vocab")]
 #[derive(Clone)]
 pub struct PyVocab {
@@ -612,9 +613,7 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Resolve a possibly empty set of distinct exact token IDs.
-    /// Contiguous Python ranges are retained compactly; other iterables are
-    /// consumed once and compressed. This matches ONE token, not a sequence.
+    /// Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.
     fn tokens(&self, ids: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
         let result = if let Some(range) = contiguous_exact_token_range(ids,true)? {
             self.inner.token_ranges([range])
@@ -627,9 +626,7 @@ impl PyVocab {
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
-    /// Resolve a union of contiguous Python ranges without enumerating IDs.
-    /// Stops are exclusive, as in range(start, stop). Overlaps and adjacency
-    /// are merged. Each range must be nonempty with step 1 or -1.
+    /// Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides.
     fn token_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
         let ranges = ranges.try_iter()?.map(|item| {
             contiguous_exact_token_range(&item?,false)?.ok_or_else(|| PyValueError::new_err(
@@ -639,8 +636,10 @@ impl PyVocab {
             .map_err(|error| PyValueError::new_err(error.to_string()))
     }
 
+    /// Counts byte-backed entries; exact-only control IDs are excluded.
     fn __len__(&self) -> usize { self.inner.len() }
 
+    /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
     #[staticmethod]
     fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
@@ -650,6 +649,7 @@ impl PyVocab {
         })
     }
 
+    /// Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.
     #[staticmethod]
     fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
@@ -659,11 +659,7 @@ impl PyVocab {
         })
     }
 
-    /// Build the byte vocabulary used by a llama-cpp-python `Llama` model.
-    ///
-    /// EOG, control, unused, and empty-piece tokens are omitted from the byte
-    /// vocabulary. EOG IDs remain available through `llama_cpp_end_token_ids`
-    /// for the decoder's stopping policy.
+    /// Extract the byte vocabulary from a llama-cpp-python `Llama`. EOG, control, unused and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.
     #[staticmethod]
     fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
@@ -673,6 +669,7 @@ impl PyVocab {
         })
     }
 
+    /// EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.
     #[getter]
     fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
         self.llama_cpp_end_token_ids.clone()
@@ -792,7 +789,7 @@ impl PyVocabPartition {
 // PyConstraint
 // ---------------------------------------------------------------------------
 
-/// Compiled grammar constraint. Immutable, thread-safe.
+/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
 #[pyclass(name = "Constraint")]
 #[derive(Clone)]
 pub struct PyConstraint {
@@ -834,15 +831,12 @@ impl PyConstraint {
 
 #[pymethods]
 impl PyConstraint {
-    /// Caller-selected marker IDs retained by this compiled grammar, sorted.
+    /// Sorted, distinct application marker IDs, independent of model token IDs.
     fn marker_ids(&self) -> Vec<u32> {
         self.inner.marker_ids().to_vec()
     }
 
-    /// Serialize the compiled body and final termination policy as bytes.
-    ///
-    /// external_vocab=False embeds the vocabulary. With external_vocab=True,
-    /// loading requires the exact same vocabulary mapping, not just its size.
+    /// Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.
     #[pyo3(signature = (*, external_vocab=false))]
     fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
         let bytes = py.allow_threads(|| {
@@ -852,6 +846,7 @@ impl PyConstraint {
         Ok(PyBytes::new(py, &bytes))
     }
 
+    /// Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping.
     #[staticmethod]
     #[pyo3(signature = (data, vocab=None))]
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
@@ -873,6 +868,7 @@ impl PyConstraint {
         }
     }
 
+    /// Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`.
     fn mask_len(&self) -> usize {
         self.inner.mask_len()
     }
@@ -1145,7 +1141,7 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// Mutable per-sequence parse state.
+/// Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence.
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
     inner: OwnedState,
@@ -1154,15 +1150,14 @@ pub struct PyConstraintState {
 
 #[pymethods]
 impl PyConstraintState {
-    /// Copy the initial or most recent commit's marker batch as (ID, byte offset).
-    /// Observations are not captures or promises about a final parse.
+    /// Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.
     fn marker_events(&self) -> Vec<(u32, u64)> {
         self.inner.with_dependent(|_, state| {
             state.marker_events().iter().map(|event| (event.id, event.byte_offset)).collect()
         })
     }
 
-    /// Copy this sequence's exact parser state without sharing mutable state.
+    /// Independent snapshot at the current prefix.
     fn clone(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
         self.inner.with_dependent(|_, source| {
@@ -1174,6 +1169,7 @@ impl PyConstraintState {
     }
 
 
+    /// Boolean array indexed by original token ID. The default covers the model ID domain; an explicit size cannot truncate it. Includes the root end-token policy.
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1187,6 +1183,7 @@ impl PyConstraintState {
         Ok(words_to_bool_array(py, &words, size))
     }
 
+    /// Write packed bits into a contiguous, writable one-dimensional NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` in word `id // 32` represents that original ID; signed words preserve all 32 bits.
     fn fill_mask(&self, mut bitmask: PyReadwriteArray1<i32>) -> PyResult<()> {
         let slice = bitmask.as_slice_mut().map_err(|e| {
             PyValueError::new_err(format!("Array must be contiguous: {e:?}"))
@@ -1204,27 +1201,30 @@ impl PyConstraintState {
         Ok(())
     }
 
+    /// An unknown ID raises an error. A known but grammatically forbidden ID rejects the state and yields an all-zero mask. Use `mask` before sampling.
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
     }
 
+    /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
+    /// The prefix cannot be extended to a valid match.
     fn is_rejected(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
-    /// Locally inevitable original token IDs, without choosing an encoding.
-    /// Pure query; proof/resource errors propagate and no full mask is built.
+    /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
     fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
         py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
             .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
+    /// The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.
     fn is_accepting(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
     }

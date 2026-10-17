@@ -4,6 +4,7 @@ use super::*;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
+/// Recognition syntax or LLM extensions. Named-token mappings are supplied separately through `LarkOptions`.
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Default)]
 pub enum LarkProfile {
     #[default]
