@@ -94,7 +94,7 @@ impl BuildOptions {
 
 /// Vocabulary-specific compiled machinery, possibly with unresolved slots.
 ///
-/// Bind prepared children or exact events, then link a runnable root. Binding changes only this handle; clones and attached children retain independent snapshots.
+/// Binding changes only this handle; clones and attached children retain independent snapshots.
 #[derive(Debug, Clone)]
 pub struct PreparedGrammar {
     inner: Arc<RuntimeConstraint>,
@@ -595,7 +595,7 @@ impl<'a> Grammar<'a> {
         constraint.with_end_tokens(options.end_token_ids())
     }
 
-    /// Compile reusable vocabulary-specific machinery while retaining unresolved slots. Bind prepared children or exact events, then link a runnable root.
+    /// Compile reusable vocabulary-specific machinery while retaining unresolved slots.
     pub fn prepare(&self, vocab: &Vocab) -> Result<PreparedGrammar> {
         self.prepare_with(vocab, BuildOptions::default())
     }

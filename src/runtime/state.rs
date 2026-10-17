@@ -511,7 +511,7 @@ impl CommitBuffers {
     }
 }
 
-/// Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence.
+/// Mutable state for one generated sequence.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,

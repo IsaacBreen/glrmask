@@ -1141,7 +1141,7 @@ impl PyDynamicConstraintState {
 // PyConstraintState
 // ---------------------------------------------------------------------------
 
-/// Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence.
+/// Mutable state for one generated sequence.
 #[pyclass(name = "ConstraintState")]
 pub struct PyConstraintState {
     inner: OwnedState,

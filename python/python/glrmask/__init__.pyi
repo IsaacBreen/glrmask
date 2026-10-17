@@ -193,7 +193,7 @@ class Grammar:
     def prepare(
         self, vocab: Vocab, *, boundary_trigger: Optional[BoundaryTriggerDetail] = None,
     ) -> PreparedGrammar:
-        "Compile vocabulary-specific machinery while retaining unresolved slots. Reuse it with different bindings, then `link`. Only the boundary metadata request is retained for final link."
+        "Compile vocabulary-specific machinery while retaining unresolved slots. Only the boundary metadata request is retained for final link."
         ...
     def compile(
         self, vocab: Vocab, *, end_tokens: Optional[Sequence[int]] = None,
@@ -205,7 +205,7 @@ class Grammar:
 
 @final
 class PreparedGrammar:
-    "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots."
+    "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots."
     @property
     def requirements(self) -> list[Requirement]:
         "Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded."
@@ -261,7 +261,7 @@ class Constraint:
 
 @final
 class ConstraintState:
-    "Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence."
+    "Mutable state for one generated sequence."
     def marker_events(self) -> list[tuple[int, int]]:
         "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged."
         ...
