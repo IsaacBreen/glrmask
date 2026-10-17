@@ -279,7 +279,7 @@ class ConstraintState:
         "Write packed bits into a contiguous, writable one-dimensional NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` in word `id // 32` represents that original ID; signed words preserve all 32 bits."
         ...
     def commit_token(self, token_id: int) -> None:
-        "An unknown ID raises an error. A known but grammatically forbidden ID rejects the state and yields an all-zero mask. Use `mask` before sampling."
+        "An unknown ID raises an error. A grammatically forbidden ID rejects the state and can also raise an error; subsequent masks are zero. Sample from the mask before committing."
         ...
     def commit_bytes(self, data: bytes) -> None:
         "Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events."

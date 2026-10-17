@@ -74,7 +74,7 @@
     "ConstraintState.clone": "Independent snapshot at the current prefix.",
     "ConstraintState.mask": "Boolean array indexed by original token ID. The default covers the model ID domain; an explicit size cannot truncate it. Includes the root end-token policy.",
     "ConstraintState.fill_mask": "Write packed bits into a contiguous, writable one-dimensional NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` in word `id // 32` represents that original ID; signed words preserve all 32 bits.",
-    "ConstraintState.commit_token": "An unknown ID raises an error. A known but grammatically forbidden ID rejects the state and yields an all-zero mask. Use `mask` before sampling.",
+    "ConstraintState.commit_token": "An unknown ID raises an error. A grammatically forbidden ID rejects the state and can also raise an error; subsequent masks are zero. Sample from the mask before committing.",
     "ConstraintState.commit_bytes": "Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.",
     "ConstraintState.is_accepting": "The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.",
     "ConstraintState.is_rejected": "The prefix cannot be extended to a valid match.",
@@ -109,5 +109,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "1b27c4730f8c5bf0862226b429e5c8a829ad0d83671d19132cec28ef866eedfa"
+  "content_sha256": "3b1f0ac38426f7373bd5e221c41e46c6e1913249adb4f46a2ffcd5fad46cf17d"
 }

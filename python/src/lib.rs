@@ -1201,7 +1201,7 @@ impl PyConstraintState {
         Ok(())
     }
 
-    /// An unknown ID raises an error. A known but grammatically forbidden ID rejects the state and yields an all-zero mask. Use `mask` before sampling.
+    /// An unknown ID raises an error. A grammatically forbidden ID rejects the state and can also raise an error; subsequent masks are zero. Sample from the mask before committing.
     fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
