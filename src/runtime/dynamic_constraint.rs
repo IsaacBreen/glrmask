@@ -4453,7 +4453,7 @@ mod tests {
                 .tokenizer
                 .virtual_residual_bounded_code_liveness_oracle_count()
                 > 0,
-            "format/length intersections must carry the same certified JSON decoded-length liveness oracle as pattern/length intersections",
+            "annotation-only formats must retain the certified JSON decoded-length liveness oracle",
         );
 
         let accepts = |bytes: &[u8]| {
@@ -4463,7 +4463,7 @@ mod tests {
         assert!(!accepts(br#""aa""#));
         assert!(accepts(br#""aaa""#));
         assert!(accepts(br#""a.b""#));
-        assert!(!accepts(br#""a..b""#));
+        assert!(accepts(br#""a..b""#), "format is an annotation; length remains asserted");
 
         let loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
         assert!(
@@ -4472,7 +4472,7 @@ mod tests {
                 .tokenizer
                 .virtual_residual_bounded_code_liveness_oracle_count()
                 > 0,
-            "save/load must reconstruct the bounded format liveness oracle",
+            "save/load must reconstruct the bounded length liveness oracle",
         );
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
     }

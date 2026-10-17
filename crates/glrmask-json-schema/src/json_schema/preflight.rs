@@ -4,7 +4,7 @@ use derivre::{RegexAst, RegexBuilder};
 use serde_json::{Map, Value};
 
 use super::error::{ImportResult, SchemaImportError};
-use super::string::{JsonStringCompatMode, json_string_compat_mode, preprocess_ascii_shorthand};
+use super::string::preprocess_ascii_shorthand;
 
 const DEFAULT_MAX_NODES: usize = 100_000;
 const ALLOW_LARGE_ENV: &str = "GLRMASK_JSON_SCHEMA_ALLOW_LARGE";
@@ -53,7 +53,7 @@ pub fn check_schema_size(schema: &Value) -> ImportResult<()> {
 
     if metrics.nodes > max_nodes {
         return Err(SchemaImportError::new(format!(
-            "schema too large: nodes={} limit={} objects={} arrays={} refs={} definitions={} anyOf_branches={} oneOf_branches={} allOf_branches={}. Set {ALLOW_LARGE_ENV}=1 to bypass or raise {MAX_NODES_ENV}.",
+            "resource limit: schema too large: nodes={} limit={} objects={} arrays={} refs={} definitions={} anyOf_branches={} oneOf_branches={} allOf_branches={}. Set {ALLOW_LARGE_ENV}=1 to bypass or raise {MAX_NODES_ENV}.",
             metrics.nodes,
             max_nodes,
             metrics.objects,
@@ -72,29 +72,7 @@ pub fn check_schema_size(schema: &Value) -> ImportResult<()> {
 const PATTERN_PROPERTIES_CHECK_LIMIT: u64 = 10_000;
 
 fn check_pattern_properties_disjointness(schema: &Value) -> ImportResult<()> {
-    if !matches!(json_string_compat_mode(), JsonStringCompatMode::LlGuidanceNative) {
-        return Ok(());
-    }
-    if contains_kubernetes_schema_props_pattern_overlap(schema) {
-        return Ok(());
-    }
     walk_schema_for_pattern_properties(schema)
-}
-
-fn contains_kubernetes_schema_props_pattern_overlap(value: &Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            if let Some(Value::Object(patterns)) = object.get("patternProperties")
-                && patterns.contains_key("additionalProperties")
-                && patterns.contains_key("type")
-            {
-                return true;
-            }
-            object.values().any(contains_kubernetes_schema_props_pattern_overlap)
-        }
-        Value::Array(values) => values.iter().any(contains_kubernetes_schema_props_pattern_overlap),
-        _ => false,
-    }
 }
 
 fn walk_schema_for_pattern_properties(value: &Value) -> ImportResult<()> {
@@ -103,7 +81,7 @@ fn walk_schema_for_pattern_properties(value: &Value) -> ImportResult<()> {
             if let Some(pattern_properties) = object.get("patternProperties") {
                 check_pattern_properties_object(pattern_properties)?;
             }
-            for child in object.values() {
+            for (_, child) in super::load::schema_children(object) {
                 walk_schema_for_pattern_properties(child)?;
             }
         }
@@ -144,6 +122,10 @@ fn check_pattern_properties_object(value: &Value) -> ImportResult<()> {
     for (left_index, left_pattern) in patterns.iter().enumerate() {
         for (right_index, right_pattern) in patterns.iter().enumerate() {
             if left_index >= right_index {
+                continue;
+            }
+            // Identical value schemas need no intersection of value languages.
+            if pattern_properties.get(*left_pattern) == pattern_properties.get(*right_pattern) {
                 continue;
             }
             let intersection = builder

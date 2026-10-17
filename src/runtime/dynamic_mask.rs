@@ -11435,7 +11435,7 @@ mod tests {
         ];
         let vocab = Vocab::new(words.into_iter().enumerate().map(|(i,b)| (i as u32,b)).collect());
         let virtual_child = Constraint::from_json_schema(
-            r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#, &vocab,
+            r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#, &vocab,
         ).unwrap();
         assert!(virtual_child.tokenizer.has_virtual_residual_runtime());
         let epsilon_child = Constraint::compile(Grammar::glrm(r#"

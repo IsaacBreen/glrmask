@@ -256,3 +256,83 @@ impl Schema {
         Self { location: location.into(), kind: SchemaKind::Assertions(Box::new(assertions)) }
     }
 }
+
+/// JSON Schema value equality compares numbers mathematically, including within
+/// arrays and objects. serde_json's representation distinguishes 1 from 1.0.
+pub(crate) fn json_values_equal(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Number(left), Value::Number(right)) => {
+            normalized_json_number(left) == normalized_json_number(right)
+        }
+        (Value::Array(left), Value::Array(right)) => left.len() == right.len()
+            && left.iter().zip(right).all(|(left, right)| json_values_equal(left, right)),
+        (Value::Object(left), Value::Object(right)) => left.len() == right.len()
+            && left.iter().all(|(key, left)| right.get(key).is_some_and(|right| {
+                json_values_equal(left, right)
+            })),
+        _ => left == right,
+    }
+}
+
+/// Whether the JSON number has zero fractional part, independently of its
+/// serialized spelling or serde_json integer/float representation.
+pub(crate) fn json_number_is_integer(number: &serde_json::Number) -> bool {
+    let (_, digits, exponent) = normalized_json_number(number);
+    digits == "0" || exponent >= 0
+}
+
+// Canonical decimal coefficient times 10^exponent. Work on decimal digits so
+// adjacent large integers never collapse through a floating-point conversion.
+fn normalized_json_number(number: &serde_json::Number) -> (bool, String, i64) {
+    let text = number.to_string();
+    let (negative, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => (true, unsigned),
+        None => (false, text.as_str()),
+    };
+    let (coefficient, exponent) = match unsigned.find(['e', 'E']) {
+        Some(index) => (&unsigned[..index], unsigned[index + 1..].parse::<i64>()
+            .expect("serde_json serializes numbers with bounded exponents")),
+        None => (unsigned, 0),
+    };
+    let fractional_digits = coefficient.find('.')
+        .map_or(0, |index| coefficient.len() - index - 1);
+    let digits = coefficient.chars().filter(|character| *character != '.').collect::<String>();
+    let digits = digits.trim_start_matches('0');
+    if digits.is_empty() {
+        return (false, "0".to_owned(), 0);
+    }
+    let significant_digits = digits.trim_end_matches('0');
+    let trailing_zeros = digits.len() - significant_digits.len();
+    (negative, significant_digits.to_owned(), exponent - fractional_digits as i64 + trailing_zeros as i64)
+}
+
+#[cfg(test)]
+mod json_schema_value_equality_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn numbers_compare_by_decimal_value_recursively() {
+        for (left, right) in [
+            (json!(1), json!(1.0)),
+            (json!(0), json!(-0.0)),
+            (json!(1000), json!(1e3)),
+            (json!([{"a": [1, 0]}]), json!([{"a": [1.0, -0.0]}])),
+        ] {
+            assert!(json_values_equal(&left, &right));
+        }
+        assert!(!json_values_equal(&json!(9007199254740992u64), &json!(9007199254740993u64)));
+        assert!(!json_values_equal(&json!([1, 2]), &json!([2.0, 1.0])));
+        assert!(!json_values_equal(&json!(1), &json!("1")));
+    }
+
+    #[test]
+    fn integer_membership_uses_the_mathematical_value() {
+        for value in [json!(1), json!(1.0), json!(-0.0), json!(1e20)] {
+            assert!(json_number_is_integer(value.as_number().unwrap()));
+        }
+        for value in [json!(1.5), json!(1e-20)] {
+            assert!(!json_number_is_integer(value.as_number().unwrap()));
+        }
+    }
+}

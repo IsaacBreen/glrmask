@@ -1,6 +1,6 @@
 use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vocab};
 
-const URI: &str = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+const URI: &str = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
 
 fn isolated(name: &str) -> bool {
     const MARKER: &str = "GLRMASK_VIRTUAL_COMPOSITION_ISOLATED";
@@ -74,7 +74,7 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
         (307, b"\"q".to_vec()), (315, b"x:".to_vec()), (317, b"aaa".to_vec()),
         (400, b"p\"x:a\"q".to_vec()), (500, b"q\"".to_vec())]);
     let vocab = Vocab::new(tokens.clone());
-    let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#)
+    let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#)
         .compile_with(&vocab, options(Optimization::FastRuntime)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true, "test must exercise a virtual lexer");
     let child = Constraint::load(child.save()).unwrap();

@@ -256,6 +256,7 @@ fn ordered_anyof_singleton_required_ambiguity_stays_bounded() {
 }
 
 #[test]
+#[ignore = "exact object allOf intersection is unsupported; retained for future exact lowering"]
 fn minimized_anyof_pattern_object_stack_depth_stays_bounded() {
     let vocab = make_byte_vocab();
     let cases = [5usize, 35usize];
@@ -414,4 +415,18 @@ fn build_config_optional_environment_branches_collapse_stack_continuations() {
     let example = r#"{"artifacts": [{"context": ".", "image": "gcr.io/k8s-skaffold/example", "sync": {"*.py": ".", "css/**/*.css": "app/css"}}], "tagPolicy": {"gitCommit": {}}}"#;
 
     assert_eq!(measure_max_unique_stack_count(&constraint, example), 1);
+}
+
+#[test]
+fn minimized_anyof_pattern_object_reports_unsupported_intersection() {
+    let vocab = make_byte_vocab();
+    for n_props in [5usize, 35usize] {
+        let schema = minimized_stack_growth_schema(n_props);
+        let message = match Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab) {
+            Ok(_) => panic!("unsupported object intersection must not silently become a union"),
+            Err(error) => error.to_string(),
+        };
+        assert!(message.contains("#/properties/y"), "{message}");
+        assert!(message.contains("unsupported allOf"), "{message}");
+    }
 }

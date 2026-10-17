@@ -360,6 +360,14 @@ require the exact original mapping.
 
 ## Grammar formats
 
+**Unreleased JSON Schema policy — draft PR #13; not yet in published packages.**
+Compilation enforces supported assertions or reports an unsupported-feature error.
+An absent `$schema` selects Draft 2020-12; explicit Draft 4, 6, 7, 2019-09, and
+2020-12 declarations select their dialect semantics. `format` is annotation-only;
+required format-assertion and unknown required vocabularies are unsupported.
+`oneOf` remains exclusive, with no approximation mode. Existing canonical
+serialization limits remain documented in the [unreleased policy](https://github.com/IsaacBreen/glrmask/pull/13).
+
 GLRM is the native recognition language. A version header and statement semicolons
 are not required; canonical source uses explicit declarations and insignificant
 line breaks:

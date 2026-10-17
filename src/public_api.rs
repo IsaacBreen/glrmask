@@ -4530,7 +4530,7 @@ mod tests {
             (11, b"aa".to_vec()),
             (12, b"a\"".to_vec()),
         ]);
-        let schema = r#"{"type":"string","format":"uri","minLength":1,"maxLength":5000}"#;
+        let schema = r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#;
         let child = RuntimeConstraint::from_json_schema(
             schema,
             &vocab,

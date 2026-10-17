@@ -13,6 +13,7 @@ use super::ast::{
 use super::combinators::{
     all_of_schema, merge_two_objects, open_object_any_of_covers_json_object,
     simplify_finite_string_allof_schema, try_merge_all_of_objects,
+    validate_object_all_of_merge_bounds,
 };
 use super::error::{ImportResult, SchemaImportError};
 use super::split_literal_terminals_enabled;
@@ -145,6 +146,8 @@ fn is_unconstrained_open_object_schema(schema: &ObjectSchema) -> bool {
         && schema.min_properties == 0
         && schema.max_properties.is_none()
         && schema.pattern_properties.is_empty()
+        && schema.property_names.is_none()
+        && schema.property_dependencies.is_empty()
         && matches!(schema.additional_properties, AdditionalProperties::AllowAny)
 }
 
@@ -700,16 +703,56 @@ impl<'a> Lowerer<'a> {
         any_required_names: Option<&BTreeSet<String>>,
         exclusive_group: Option<(&BTreeSet<String>, bool)>,
     ) -> ImportResult<GrammarExpr> {
-        let normalized = self.object_with_required_synthetic_properties(schema)?;
-        // llguidance-compatible broad fallback: when `propertyNames` and
-        // `patternProperties` are both present, keep patternProperties lowering
-        // and ignore propertyNames.  Enforcing the name pattern here rejects
-        // tokens llguidance keeps admissible for these schemas.
-        let property_name_pattern = if normalized.pattern_properties.is_empty() {
-            self.resolve_property_names_pattern(&normalized)?
-        } else {
-            None
-        };
+        let mut normalized = self.object_with_required_synthetic_properties(schema)?;
+        if let Some(property_names) = &normalized.property_names {
+            let resolved = match &property_names.kind {
+                SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?,
+                _ => property_names,
+            };
+            if matches!(resolved.kind, SchemaKind::Never) {
+                return Ok(if normalized.required.is_empty()
+                    && normalized.min_properties == 0
+                    && any_required_names.is_none()
+                    && !exclusive_group.is_some_and(|(_, require_one)| require_one)
+                {
+                    seq(vec![lit("{"), lit("}")])
+                } else {
+                    never()
+                });
+            }
+        }
+        let property_name_pattern = self.resolve_property_names_pattern(&normalized)?;
+        // A forbidden optional name may simply be absent. Keep it excluded from
+        // additional keys, but give its fixed property an empty value language.
+        if let Some(pattern) = &property_name_pattern {
+            let mut forbidden = Vec::new();
+            for (index, property) in normalized.properties.iter().enumerate() {
+                if !self.property_name_matches_pattern_cached(pattern, &property.name)? {
+                    if normalized.required.contains(&property.name) {
+                        return Ok(never());
+                    }
+                    forbidden.push(index);
+                }
+            }
+            for index in forbidden {
+                let property = &mut normalized.to_mut().properties[index];
+                property.schema = Schema::never(property.schema.location.clone());
+            }
+            if !normalized.pattern_properties.is_empty() {
+                return Err(SchemaImportError::at(
+                    &normalized.property_names.as_ref().unwrap().location,
+                    "unsupported propertyNames combined with patternProperties: key predicate intersection is not implemented",
+                ));
+            }
+        }
+        if !normalized.property_dependencies.is_empty()
+            && (!normalized.pattern_properties.is_empty()
+                || !matches!(normalized.additional_properties, AdditionalProperties::Deny))
+        {
+            return Err(SchemaImportError::new(
+                "unsupported property dependencies: only fixed-property objects with additionalProperties: false are supported",
+            ));
+        }
         if any_required_names.is_none()
             && exclusive_group.is_none()
             && is_unconstrained_open_object_schema(&normalized)
@@ -721,6 +764,17 @@ impl<'a> Lowerer<'a> {
             .is_some_and(|max_properties| max_properties < normalized.min_properties)
         {
             return Ok(never());
+        }
+        // Dynamic key lists may repeat a name. Counting serialized members
+        // cannot establish a lower bound on distinct data-model properties.
+        if normalized.min_properties > 1
+            && normalized.min_properties > normalized.required.len()
+            && (!normalized.pattern_properties.is_empty()
+                || !matches!(normalized.additional_properties, AdditionalProperties::Deny))
+        {
+            return Err(SchemaImportError::new(
+                "unsupported minProperties: dynamic property names cannot guarantee distinct keys for minima greater than one",
+            ));
         }
         let mut max_property_group_exclusive = false;
         let mut drop_optional_fixed_properties = false;
@@ -755,13 +809,17 @@ impl<'a> Lowerer<'a> {
                     0 => drop_optional_fixed_properties = true,
                     1 => max_property_group_exclusive = true,
                     _ => {
-                        // Broad build-parity fallback: unsupported fixed-property
-                        // caps are overapproximated by ignoring maxProperties.
+                        return Err(SchemaImportError::new(
+                            "unsupported maxProperties: fixed objects currently support at most one optional property below the cap",
+                        ));
                     }
                 }
             } else if !fixed_closed_redundant && !pattern_map_candidate && !open_dynamic_map_candidate {
-                // Broad build-parity fallback: preserve the rest of the object
-                // constraints and ignore unsupported maxProperties shapes.
+                if !max_properties_filled_by_required {
+                    return Err(SchemaImportError::new(
+                        "unsupported maxProperties combined with fixed properties or patternProperties",
+                    ));
+                }
             }
         }
         let extra_min_properties =
@@ -788,9 +846,15 @@ impl<'a> Lowerer<'a> {
         {
             true
         } else {
-            // Broad build-parity fallback: preserve the rest of the object
-            // constraints and ignore unsupported minProperties shapes.
-            false
+            if matches!(normalized.additional_properties, AdditionalProperties::Deny)
+                && normalized.pattern_properties.is_empty()
+                && normalized.min_properties > normalized.properties.len()
+            {
+                return Ok(never());
+            }
+            return Err(SchemaImportError::new(
+                "unsupported minProperties combined with fixed properties or patternProperties",
+            ));
         };
         let fixed_names = (property_name_pattern.is_some()
             || !normalized.pattern_properties.is_empty()
@@ -805,18 +869,6 @@ impl<'a> Lowerer<'a> {
         let implicit_ap_default_false = self.llguidance_compat_enabled()
             && normalized.required.len() > normalized.properties.len()
             && matches!(normalized.additional_properties, AdditionalProperties::AllowAny);
-        if let Some(pattern) = &property_name_pattern {
-            for key in fixed_names
-                .as_ref()
-                .expect("propertyNames requires fixed property names")
-            {
-                if !self.property_name_matches_pattern_cached(pattern, key)? {
-                    return Err(SchemaImportError::new(format!(
-                        "propertyNames pattern {pattern:?} does not allow fixed property {key:?}"
-                    )));
-                }
-            }
-        }
         let items = normalized
             .properties
             .iter()
@@ -858,6 +910,8 @@ impl<'a> Lowerer<'a> {
                 matches!(normalized.additional_properties, AdditionalProperties::Deny)
                     && any_required_names.is_none()
                     && exclusive_group.is_none()
+                    && !min_property_group_required
+                    && !max_property_group_exclusive
                     && normalized
                         .properties
                         .iter()
@@ -876,6 +930,7 @@ impl<'a> Lowerer<'a> {
                     )?,
                     r(JSON_VALUE_RULE),
                 ])),
+                AdditionalProperties::Schema(_) if max_properties_filled_by_required => None,
                 AdditionalProperties::Schema(value_schema) => {
                     let value = self.lower_value_schema(value_schema)?;
                     Some(seq(vec![
@@ -936,9 +991,6 @@ impl<'a> Lowerer<'a> {
             ));
         }
 
-        // If `propertyNames` and `patternProperties` were both present,
-        // `property_name_pattern` has intentionally been dropped above as a
-        // broad llguidance-compatible fallback.
         if normalized.properties.is_empty()
             && normalized.required.is_empty()
             && matches!(normalized.additional_properties, AdditionalProperties::Deny)
@@ -955,7 +1007,7 @@ impl<'a> Lowerer<'a> {
             .collect::<Vec<_>>();
 
         let mut tail_pairs = Vec::new();
-        for pattern_property in &normalized.pattern_properties {
+        for pattern_property in normalized.pattern_properties.iter().filter(|_| !max_properties_filled_by_required) {
             let key = self.lower_pattern_key_colon_appearance(
                 &pattern_property.pattern,
                 fixed_names
@@ -1188,39 +1240,9 @@ impl<'a> Lowerer<'a> {
             return Ok(Some(never()));
         }
 
-        let body = match schema.max_properties {
-            Some(0) => GrammarExpr::Epsilon,
-            Some(max) => {
-                let separator_pair = seq(vec![self.item_separator_expr(), r(&pair_name)]);
-                if schema.min_properties == 0 {
-                    GrammarExpr::Quantified(Box::new(seq(vec![
-                        r(&pair_name),
-                        GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::Range(0, Some(max - 1))),
-                    ])), Quantifier::Optional)
-                } else {
-                    seq(vec![
-                        r(&pair_name),
-                        GrammarExpr::Quantified(Box::new(separator_pair), Quantifier::Range(schema.min_properties - 1, Some(max - 1))),
-                    ])
-                }
-            }
-            None => {
-                let list_name = self.fresh_rule_name("json_pattern_map_list");
-                self.add_nonterminal_rule(
-                    &list_name,
-                    choice(vec![
-                        r(&pair_name),
-                        seq(vec![r(&list_name), self.item_separator_expr(), r(&pair_name)]),
-                    ]),
-                );
-
-                if schema.min_properties == 0 {
-                    choice(vec![GrammarExpr::Epsilon, r(&list_name)])
-                } else {
-                    r(&list_name)
-                }
-            }
-        };
+        let body = self.dynamic_pair_list_body(
+            r(&pair_name), schema.min_properties, schema.max_properties,
+        );
 
         let body_name = self.fresh_rule_name("json_pattern_map_body");
         self.add_nonterminal_rule(&body_name, body);
@@ -1245,6 +1267,7 @@ impl<'a> Lowerer<'a> {
             || assertions.types.is_some()
             || !assertions.one_of.is_empty()
             || !assertions.all_of.is_empty()
+            || assertions.not.is_some()
         {
             return Ok(None);
         }
@@ -1376,7 +1399,7 @@ impl<'a> Lowerer<'a> {
     ) -> ImportResult<GrammarExpr> {
         if items.len() > PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES {
             return Err(SchemaImportError::new(format!(
-                "property dependencies support at most {PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES} fixed properties"
+                "resource limit: property dependencies support at most {PROPERTY_DEPENDENCY_MAX_FIXED_PROPERTIES} fixed properties"
             )));
         }
 
@@ -1508,6 +1531,7 @@ impl<'a> Lowerer<'a> {
             || assertions.number.is_some()
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
+            || assertions.not.is_some()
         {
             return Ok(None);
         }
@@ -1522,6 +1546,10 @@ impl<'a> Lowerer<'a> {
                 !object.properties.is_empty()
                     || !object.required.is_empty()
                     || !object.pattern_properties.is_empty()
+                    || object.property_names.is_some()
+                    || !object.property_dependencies.is_empty()
+                    || object.min_properties != 0
+                    || object.max_properties.is_some()
                     || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
             }) {
                 return Ok(None);
@@ -1548,6 +1576,10 @@ impl<'a> Lowerer<'a> {
         };
         if !matches!(object.additional_properties, AdditionalProperties::Deny)
             || !object.pattern_properties.is_empty()
+            || object.property_names.is_some()
+            || !object.property_dependencies.is_empty()
+            || object.min_properties != 0
+            || object.max_properties.is_some()
         {
             return Ok(None);
         }
@@ -1598,21 +1630,23 @@ impl<'a> Lowerer<'a> {
         &self,
         branches: &[Schema],
     ) -> ImportResult<Option<ObjectSchema>> {
-        let mut objects = Vec::with_capacity(branches.len());
+        let mut resolved_branches = Vec::with_capacity(branches.len());
         for branch in branches {
-            if let Some(object) = plain_object_schema_for_closed_any_of(branch) {
-                objects.push(object.clone());
-                continue;
+            let resolved = match &branch.kind {
+                SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?,
+                _ => branch,
+            };
+            if plain_object_schema_for_closed_any_of(resolved).is_none() {
+                return Ok(None);
             }
-            let SchemaKind::Ref(pointer) = &branch.kind else {
-                return Ok(None);
-            };
-            let Some(object) = plain_object_schema_for_closed_any_of(self.resolve_ref_target(pointer)?)
-            else {
-                return Ok(None);
-            };
-            objects.push(object.clone());
+            resolved_branches.push(resolved.clone());
         }
+        // Apply the same safety proof as ordinary allOf lowering before a union
+        // fast path can turn an intersection into a merged property union.
+        validate_object_all_of_merge_bounds(&resolved_branches)?;
+        let objects = resolved_branches.iter()
+            .map(|branch| plain_object_schema_for_closed_any_of(branch).unwrap().clone())
+            .collect::<Vec<_>>();
 
         let mut merged = objects.into_iter();
         let Some(mut object) = merged.next() else {
@@ -1660,6 +1694,7 @@ impl<'a> Lowerer<'a> {
             || assertions.number.is_some()
             || !assertions.any_of.is_empty()
             || !assertions.one_of.is_empty()
+            || assertions.not.is_some()
         {
             return Ok(None);
         }
@@ -1674,6 +1709,10 @@ impl<'a> Lowerer<'a> {
                 !object.properties.is_empty()
                     || !object.required.is_empty()
                     || !object.pattern_properties.is_empty()
+                    || object.property_names.is_some()
+                    || !object.property_dependencies.is_empty()
+                    || object.min_properties != 0
+                    || object.max_properties.is_some()
                     || !matches!(object.additional_properties, AdditionalProperties::AllowAny)
             }) {
                 return Ok(None);
@@ -1698,6 +1737,13 @@ impl<'a> Lowerer<'a> {
             }
         };
 
+        if object.property_names.is_some()
+            || !object.property_dependencies.is_empty()
+            || object.min_properties != 0
+            || object.max_properties.is_some()
+        {
+            return Ok(None);
+        }
         let normalized = self.object_with_required_synthetic_properties(object)?;
         let fixed_keys = normalized
             .properties
@@ -3996,10 +4042,13 @@ impl<'a> Lowerer<'a> {
             SchemaKind::Ref(pointer) => self.resolve_ref_target(pointer)?,
             _ => property_names,
         };
+        if matches!(resolved.kind, SchemaKind::Any) {
+            return Ok(None);
+        }
         let SchemaKind::Assertions(assertions) = &resolved.kind else {
             return Err(SchemaImportError::at(
                 &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
+                "unsupported propertyNames: only boolean or inline/local-ref string pattern schemas are supported",
             ));
         };
 
@@ -4015,7 +4064,7 @@ impl<'a> Lowerer<'a> {
         {
             return Err(SchemaImportError::at(
                 &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
+                "unsupported propertyNames: only boolean or inline/local-ref string pattern schemas are supported",
             ));
         }
         if let Some(types) = &assertions.types
@@ -4023,30 +4072,21 @@ impl<'a> Lowerer<'a> {
         {
             return Err(SchemaImportError::at(
                 &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
+                "unsupported propertyNames: only boolean or inline/local-ref string pattern schemas are supported",
             ));
         }
 
         let Some(string) = &assertions.string else {
-            return Err(SchemaImportError::at(
-                &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
-            ));
+            return Ok(None);
         };
         if string.min_length != 0 || string.max_length.is_some() || string.format.is_some() {
             return Err(SchemaImportError::at(
                 &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
+                "unsupported propertyNames: only boolean or inline/local-ref string pattern schemas are supported",
             ));
         }
 
-        let Some(pattern) = &string.pattern else {
-            return Err(SchemaImportError::at(
-                &resolved.location,
-                "propertyNames is only supported for inline/local-ref string pattern schemas",
-            ));
-        };
-        Ok(Some(pattern.clone()))
+        Ok(string.pattern.clone())
     }
 
     fn lower_object_additional_key_colon(
@@ -4348,9 +4388,13 @@ fn plain_object_schema_for_closed_any_of(schema: &Schema) -> Option<&ObjectSchem
     };
     if assertions.const_value.is_some()
         || assertions.enum_values.is_some()
+        || assertions.array.is_some()
+        || assertions.string.is_some()
+        || assertions.number.is_some()
         || !assertions.any_of.is_empty()
         || !assertions.one_of.is_empty()
         || !assertions.all_of.is_empty()
+        || assertions.not.is_some()
     {
         return None;
     }
@@ -4565,4 +4609,151 @@ fn has_non_numeric_assertions(assertions: &SchemaAssertions) -> bool {
         || !assertions.any_of.is_empty()
         || !assertions.one_of.is_empty()
         || !assertions.all_of.is_empty()
+}
+
+#[cfg(test)]
+mod object_assertion_policy_tests {
+    use super::*;
+    use crate::json_schema::ast::{SchemaDocument, StringSchema};
+    use crate::json_schema::config::JsonSchemaConfig;
+
+    fn lower_schema(schema: Schema) -> ImportResult<GrammarExpr> {
+        let document = SchemaDocument { root: schema, definitions: Vec::new(), ref_targets: Vec::new() };
+        let grammar = crate::json_schema::lower::lower_document(&document, JsonSchemaConfig::default())?;
+        let start = grammar.rules.iter().find(|rule| rule.name == grammar.start).unwrap();
+        let GrammarExpr::Ref(root) = &start.expr else { panic!("expected root reference") };
+        Ok(grammar.rules.iter().find(|rule| rule.name == *root).unwrap().expr.clone())
+    }
+
+    fn lower_object(object: &ObjectSchema) -> ImportResult<GrammarExpr> {
+        lower_schema(Schema::assertions("#", SchemaAssertions {
+            types: Some(vec![SchemaType::Object]),
+            object: Some(object.clone()),
+            ..SchemaAssertions::default()
+        }))
+    }
+
+    fn closed_properties(count: usize) -> ObjectSchema {
+        ObjectSchema {
+            properties: (0..count).map(|i| PropertySchema {
+                name: format!("p{i}"),
+                schema: Schema::any(format!("#/properties/p{i}")),
+            }).collect(),
+            additional_properties: AdditionalProperties::Deny,
+            ..ObjectSchema::default()
+        }
+    }
+
+    fn name_pattern() -> Schema {
+        Schema::assertions("#/propertyNames", SchemaAssertions {
+            string: Some(StringSchema {
+                pattern: Some("^allowed$".to_string()),
+                ..StringSchema::default()
+            }),
+            ..SchemaAssertions::default()
+        })
+    }
+
+    #[test]
+    fn unsupported_fixed_property_counts_return_keyword_errors() {
+        let mut object = closed_properties(4);
+        object.max_properties = Some(2);
+        let error = lower_object(&object).unwrap_err();
+        assert!(error.message().contains("unsupported maxProperties"));
+        object.max_properties = None;
+        object.min_properties = 2;
+        let error = lower_object(&object).unwrap_err();
+        assert!(error.message().contains("unsupported minProperties"));
+    }
+
+    #[test]
+    fn exact_and_redundant_fixed_property_counts_remain_supported() {
+        let mut object = closed_properties(4);
+        object.min_properties = 1;
+        object.max_properties = Some(1);
+        assert!(lower_object(&object).is_ok());
+        object.max_properties = Some(4);
+        assert!(lower_object(&object).is_ok());
+        object.min_properties = 5;
+        assert_eq!(lower_object(&object).unwrap(), never());
+    }
+
+    #[test]
+    fn property_names_forbids_optional_names_without_rejecting_the_object() {
+        let mut object = closed_properties(1);
+        object.property_names = Some(name_pattern());
+        assert!(lower_object(&object).is_ok());
+        object.required.insert("p0".to_string());
+        assert_eq!(lower_object(&object).unwrap(), never());
+    }
+
+    #[test]
+    fn property_names_pattern_with_pattern_properties_is_explicitly_unsupported() {
+        let mut object = ObjectSchema {
+            property_names: Some(name_pattern()),
+            pattern_properties: vec![PatternPropertySchema {
+                pattern: "^p".to_string(),
+                schema: Schema::any("#/patternProperties/^p"),
+            }],
+            ..ObjectSchema::default()
+        };
+        let error = lower_object(&object).unwrap_err();
+        assert!(error.message().contains("#/propertyNames"));
+        assert!(error.message().contains("unsupported propertyNames"));
+        object.property_names = Some(Schema::any("#/propertyNames"));
+        assert!(lower_object(&object).is_ok());
+    }
+
+    #[test]
+    fn boolean_property_names_has_exact_empty_object_case() {
+        let mut object = ObjectSchema {
+            property_names: Some(Schema::never("#/propertyNames")),
+            ..ObjectSchema::default()
+        };
+        assert_eq!(lower_object(&object).unwrap(), seq(vec![lit("{"), lit("}")]));
+        object.min_properties = 1;
+        assert_eq!(lower_object(&object).unwrap(), never());
+    }
+
+    #[test]
+    fn dynamic_dependencies_cannot_bypass_the_fixed_property_check() {
+        let mut object = ObjectSchema::default();
+        object.property_dependencies.insert("a".to_string(), BTreeSet::from(["b".to_string()]));
+        let error = lower_object(&object).unwrap_err();
+        assert!(error.message().contains("unsupported property dependencies"));
+        object.additional_properties = AdditionalProperties::Deny;
+        // Neither trigger nor dependent can appear in a closed empty object.
+        assert!(lower_object(&object).is_ok());
+    }
+
+    #[test]
+    fn anyof_collectors_defer_when_object_assertions_need_enforcement() {
+        let mut object = closed_properties(3);
+        object.min_properties = 2;
+        let branch = Schema::assertions("#/anyOf/0", SchemaAssertions {
+            types: Some(vec![SchemaType::Object]),
+            object: Some(object),
+            ..SchemaAssertions::default()
+        });
+        let schema = Schema::assertions("#", SchemaAssertions {
+            any_of: vec![branch, Schema::assertions("#/anyOf/1", SchemaAssertions {
+                types: Some(vec![SchemaType::Object]),
+                object: Some(closed_properties(1)),
+                ..SchemaAssertions::default()
+            })],
+            ..SchemaAssertions::default()
+        });
+        assert!(lower_schema(schema).unwrap_err().message().contains("unsupported minProperties"));
+    }
+
+    #[test]
+    fn unconstrained_object_shortcut_requires_no_name_or_dependency_assertions() {
+        let mut object = ObjectSchema::default();
+        assert!(is_unconstrained_open_object_schema(&object));
+        object.property_names = Some(name_pattern());
+        assert!(!is_unconstrained_open_object_schema(&object));
+        object.property_names = None;
+        object.property_dependencies.insert("a".to_string(), BTreeSet::from(["b".to_string()]));
+        assert!(!is_unconstrained_open_object_schema(&object));
+    }
 }
