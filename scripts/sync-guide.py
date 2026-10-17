@@ -80,6 +80,7 @@ def getting_started(flavor):
     return '\n\n'.join([
         '## Getting started', '### Installation',
         install('python', '#### Python'), install('rust', '#### Rust'),
+        '#### Native C++ and Node.js\n\n' + read('native-bindings'),
         '### Usage\n\n' + read('usage'),
         quickstart('python', '### Python quickstart'), quickstart('rust', '### Rust quickstart'),
         read('usage-details'),
@@ -92,7 +93,7 @@ def document(flavor):
         more = f'## Learn more\n\n[Full guide]({REPO}/blob/main/GUIDE.md) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
         return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                               install(flavor, '## Installation'), '## Usage\n\n' + read('usage'),
-                              quickstart(flavor, '## Quickstart'), more, LICENSE]) + '\n'
+                              quickstart(flavor, '## Quickstart'), more, read('native-bindings'), LICENSE]) + '\n'
     return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                           '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor),
                           '## How it works\n\n' + read('how-it-works'), LICENSE]) + '\n'
@@ -104,6 +105,7 @@ def full_guide():
         NOTICE, read('introduction'), links('github'),
         '## Benchmarks\n\n' + benchmark_body('github'), '## Installation',
         install('python', '### Python'), install('rust', '### Rust'),
+        '### Native C++ and Node.js\n\n' + read('native-bindings'),
         '## Usage\n\n' + read('usage'),
         quickstart('python', '### Python quickstart'), quickstart('rust', '### Rust quickstart'),
         reference, '## How it works\n\n' + read('how-it-works'),

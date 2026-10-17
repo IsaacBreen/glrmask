@@ -1,0 +1,65 @@
+{
+    "name":  "@glrmask/node",
+    "version":  "0.3.0",
+    "description":  "Native grammar-constrained decoding for Node.js and TypeScript",
+    "license":  "MIT OR Apache-2.0",
+    "type":  "commonjs",
+    "main":  "index.cjs",
+    "module":  "index.mjs",
+    "types":  "index.d.ts",
+    "exports":  {
+                    ".":  {
+                              "import":  {
+                                             "types":  "./index.d.mts",
+                                             "default":  "./index.mjs"
+                                         },
+                              "require":  {
+                                              "types":  "./index.d.cts",
+                                              "default":  "./index.cjs"
+                                          }
+                          },
+                    "./package.json":  "./package.json"
+                },
+    "engines":  {
+                    "node":  "\u003e=22"
+                },
+    "files":  [
+                  "index.cjs",
+                  "index.mjs",
+                  "index.d.ts",
+                  "index.d.mts",
+                  "index.d.cts",
+                  "loader.cjs",
+                  "platform.cjs",
+                  "glrmask.*.node",
+                  "native-manifest.json",
+                  "README.md",
+                  "LICENSE-MIT",
+                  "LICENSE-APACHE",
+                  "scripts",
+                  "examples",
+                  "NOTICE-LARK"
+              ],
+    "scripts":  {
+                    "build":  "node scripts/build.cjs",
+                    "build:dev":  "node scripts/build.cjs --profile bindings-dev",
+                    "test":  "node --expose-gc --test tests/native.test.cjs",
+                    "typecheck":  "tsc -p tests/tsconfig.json",
+                    "check":  "npm test \u0026\u0026 npm run typecheck",
+                    "prepack":  "node scripts/check-package.cjs",
+                    "test:installed":  "node scripts/test-installed.cjs"
+                },
+    "repository":  {
+                       "type":  "git",
+                       "url":  "git+https://github.com/IsaacBreen/glrmask.git",
+                       "directory":  "bindings/node"
+                   },
+    "homepage":  "https://glrmask.com/api/javascript/",
+    "bugs":  {
+                 "url":  "https://github.com/IsaacBreen/glrmask/issues"
+             },
+    "devDependencies":  {
+                            "@types/node":  "^22.0.0",
+                            "typescript":  "^5.9.3"
+                        }
+}

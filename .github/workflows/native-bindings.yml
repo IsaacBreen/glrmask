@@ -1,0 +1,204 @@
+name: Native C++ and Node.js
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, feat/native-cpp-js-881685]
+    paths:
+      - 'bindings/**'
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/native-bindings.yml'
+  pull_request:
+    paths:
+      - 'bindings/**'
+      - 'src/**'
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/native-bindings.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-bindings-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_BUILD_JOBS: '3'
+  CARGO_TARGET_DIR: target/native-ci
+  PYTHONUTF8: '1'
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  native:
+    name: Native / ${{ matrix.tag }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            tag: linux-x64-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            tag: linux-arm64-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            tag: darwin-x64
+          - os: macos-15
+            target: aarch64-apple-darwin
+            tag: darwin-arm64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            tag: win32-x64-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Configure MSVC
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          # Git Bash prepends its own link.exe. Pin MSVC explicitly for Rust
+          # (including host build scripts) and for CMake/cc-rs native compilers.
+          $linker = (Get-Command link.exe -ErrorAction Stop).Source
+          $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','WindowsSdkDir','WindowsSDKVersion')) {
+            $value = [Environment]::GetEnvironmentVariable($name)
+            if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
+          }
+      - name: Install build tools
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add '${{ matrix.target }}'
+          python -m pip install cmake ninja
+          npm ci --ignore-scripts --prefix bindings/node
+      - name: Validate source contracts
+        run: python bindings/ci/check.py
+      - name: Build native release libraries
+        run: cargo build --release --locked -p glrmask-c -p glrmask-node --target '${{ matrix.target }}'
+      - name: Package and test Node addon
+        working-directory: bindings/node
+        run: |
+          npm run build -- --target '${{ matrix.target }}'
+          npm run check
+          npm pack
+          node scripts/test-installed.cjs glrmask-node-0.3.0.tgz "$RUNNER_TEMP/node-consumer"
+      - name: Static/shared CMake installations and relocated C/C++ consumers
+        run: |
+          python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/${{ matrix.target }}/release" --work-dir "$RUNNER_TEMP/cpp-validation"
+      - name: Cross-language masks and artifact exchange
+        run: |
+          EXE="$RUNNER_TEMP/cpp-validation/build-static/glrmask_cpp_tests"
+          if [ "$RUNNER_OS" = Windows ]; then EXE="$EXE.exe"; fi
+          node bindings/node/scripts/parity.cjs "$EXE" "$RUNNER_TEMP/native-parity"
+      - name: Build self-contained C++ archives
+        run: python bindings/ci/package.py --install-work "$RUNNER_TEMP/cpp-validation" --platform '${{ matrix.tag }}' --output "$RUNNER_TEMP/cpp-packages"
+      - name: Node 22 ABI compatibility
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Run same native binary on Node 22
+        working-directory: bindings/node
+        run: npm test
+      - uses: actions/upload-artifact@v6
+        with:
+          name: node-native-${{ matrix.tag }}
+          path: |
+            bindings/node/glrmask.${{ matrix.tag }}.node
+            bindings/node/native-manifest.json
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cpp-native-${{ matrix.tag }}
+          path: ${{ runner.temp }}/cpp-packages/*
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: native-evidence-${{ matrix.tag }}
+          path: |
+            ${{ runner.temp }}/cpp-validation/report.json
+            ${{ runner.temp }}/cpp-validation/**/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/native-parity/parity-report.json
+            ${{ runner.temp }}/node-consumer/verification.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  package:
+    name: Assemble and install all-platform npm package
+    needs: native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: node-native-*
+          path: native-input
+      - name: Assemble checksummed platform binaries
+        run: |
+          node bindings/node/scripts/assemble.cjs native-input
+          cd bindings/node
+          node scripts/check-package.cjs --all
+          npm pack
+          node scripts/test-installed.cjs glrmask-node-0.3.0.tgz "$RUNNER_TEMP/universal-consumer"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: glrmask-node-all-platforms
+          path: bindings/node/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  contracts:
+    name: Rust public contracts and binding ABI
+    runs-on: ubuntu-22.04
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Public lifecycle regression suites
+        run: >-
+          cargo test --locked --release -p glrmask --features internal-api
+          --test core_batch --test final_public_api --test final_public_api_review
+          --test prepared_components --test end_tokens --test token_range_bindings
+          --test lark_compatibility --test marker_events --test marker_commit
+          --test public_optimization_modes
+      - name: Exact boundary metadata variants and deferred policy scoping
+        run: cargo test --locked --release -p glrmask --features internal-api --lib public_api::final_boundary_option_tests
+      - name: Binding ownership and direct C ABI parity tests
+        run: cargo test --locked --release -p glrmask-binding-core -p glrmask-c
+      - name: Generated guides remain synchronized
+        run: python scripts/sync-guide.py --check

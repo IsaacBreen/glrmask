@@ -1,0 +1,12 @@
+import {Vocab,Grammar,Optimization,Constraint,type BuildOptions} from '@glrmask/node';
+import api = require('@glrmask/node');
+const v=new Vocab([[0,new TextEncoder().encode('a')]]);
+const sameVocab:api.Vocab=v;
+const options:BuildOptions={optimization:Optimization.FastRuntime};
+const c=await Grammar.fromJsonSchema({type:'string'}).compile(v,options);
+const bytes=await c.save();const loaded=await Constraint.load(bytes);
+const words:Uint32Array=loaded.start().mask();
+const prepared=await Grammar.fromEbnf('start ::= "a"').prepare(v);
+const linked:api.Constraint=await prepared.link();
+using temporary=linked.start();
+void [sameVocab,words,temporary];

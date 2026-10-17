@@ -109,6 +109,10 @@ python -m pip install glrmask
 cargo add glrmask
 ```
 
+### Native C++ and Node.js
+
+Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The [C++ guide and C API](https://glrmask.com/api/cpp/) and [JavaScript and TypeScript guide](https://glrmask.com/api/javascript/) cover source builds, platform artifacts, ownership, composition, and the complete supported API. The Node.js addon runs the Rust engine directly; browser WebAssembly is a separate target.
+
 ## Usage
 
 GLRMask has four core types:
