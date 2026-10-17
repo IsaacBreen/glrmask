@@ -13,10 +13,10 @@ use glrmask_parser_dwa::__private::templates::admissibility::{TemplateDomain, To
 use glrmask_parser_dwa::__private::templates::native::{NativeTableIndex, ProgramCompiler};
 use crate::compiler::glr::table::AdmissionPolicy;
 
-/// Application-chosen marker identity. It is independent of model token IDs.
+/// Application marker identity, independent of model token IDs.
 pub type MarkerId = u32;
 
-/// A possible grammar-boundary observation, not a node in a selected parse.
+/// A possible boundary observation, not a selected parse node or capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarkerEvent {
     pub id: MarkerId,
@@ -263,7 +263,7 @@ impl MarkerQueries {
 }
 
 impl Constraint {
-    /// Sorted distinct application marker IDs declared by this compiled grammar.
+    /// Sorted, distinct application marker IDs.
     pub fn marker_ids(&self) -> &[MarkerId] {
         self.marker_queries.as_deref().map_or(&[], |queries| queries.ids.as_ref())
     }
@@ -424,14 +424,7 @@ impl super::ConstraintState<'_> {
         self.markers = Some(markers);
     }
 
-    /// Marker observations from `start()` or the most recent actual commit.
-    ///
-    /// Each numeric ID/absolute byte-position pair occurs at most once. Batches
-    /// are ordered by `(byte_offset, id)`, not grammatical or parse order. Read
-    /// or copy this borrowed slice before the next commit replaces the batch.
-    /// A failed commit clears its batch. Mask/forcing queries leave it unchanged.
-    /// Observations may belong to alternatives that later fail; no final-parse,
-    /// matching-span, nesting, or uniqueness guarantee is implied.
+    /// Initial or most recent commit’s observations, ordered by `(byte_offset, id)` with duplicate pairs removed. Read or copy before the next commit replaces the batch. Failed commits clear it; mask and forcing queries leave it unchanged. Alternatives may later fail: no final-parse, nesting or matching-span guarantee is implied.
     pub fn marker_events(&self) -> &[MarkerEvent] {
         self.markers.as_deref().map_or(&[], |markers| markers.events.as_slice())
     }

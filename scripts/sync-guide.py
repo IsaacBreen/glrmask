@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generate Overview, package READMEs, full Guide and website shared content."""
 import argparse
+import ast
 import hashlib
 import json
 from pathlib import Path
@@ -86,6 +87,12 @@ def getting_started(flavor):
 
 
 def document(flavor):
+    if flavor in ['python', 'rust']:
+        api = 'https://glrmask.com/api/python/' if flavor == 'python' else 'https://docs.rs/glrmask/latest/glrmask/'
+        more = f'## Learn more\n\n[Full guide]({REPO}/blob/main/GUIDE.md) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
+        return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
+                              install(flavor, '## Installation'), quickstart(flavor, '## Quickstart'),
+                              '## Core concepts\n\n' + read('usage'), more, LICENSE]) + '\n'
     return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                           '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor),
                           '## How it works\n\n' + read('how-it-works'), LICENSE]) + '\n'
@@ -120,10 +127,60 @@ def website_payload():
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
 
 
+def language_payload():
+    # A narrow, benchmark-free import for both language references and the site.
+    payload = {'schema': 'glrmask-language-docs-v1',
+               'introduction': read('introduction'), 'usage': read('usage'),
+               'installation': {'python': 'python -m pip install glrmask', 'rust': 'cargo add glrmask'},
+               'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
+               'guide_url': REPO + '/blob/main/GUIDE.md',
+               'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
+               'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
+    payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
+
+
+def rust_module_intro():
+    source = (ROOT/'src/lib.rs').read_text()
+    start = source.index('//!')
+    end = source.index('#![deny(warnings)]')
+    prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation'),
+                           quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage'),
+                           '# Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/)'])
+    block = '\n'.join('//! ' + line if line else '//!' for line in prose.splitlines()) + '\n//!\n'
+    return source[:start] + block + source[end:]
+
+
+def python_module_source(path):
+    source = path.read_text()
+    first = ast.parse(source).body[0]
+    assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
+    prose = '\n\n'.join([read('introduction'), install('python', '## Installation'),
+                            quickstart('python', '## Quickstart'), '## Core concepts\n\n' + read('usage'),
+                            '## Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](' + WEBSITE + '/api/python/)'])
+    return '"""' + prose + '\n"""\n' + ''.join(source.splitlines(keepends=True)[first.end_lineno:])
+
+
+def check_python_symbol_docs():
+    symbols = json.loads((CONTENT / 'python-api.json').read_text())
+    for file, prefix in [('__init__.pyi', ''), ('auto.py', 'auto.')]:
+        def visit(nodes, scope):
+            for node in nodes:
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+                    key = scope + node.name
+                    if key in symbols:
+                        assert (ast.get_docstring(node) or '') == symbols[key], 'Canonical symbol prose drift: ' + key
+                    if isinstance(node, ast.ClassDef):
+                        visit(node.body, key + '.')
+        visit(ast.parse((ROOT / 'python/python/glrmask' / file).read_text()).body, prefix)
+
+
 def outputs():
     return {ROOT/'README.md': document('github'), ROOT/'README.rust.md': document('rust'),
             ROOT/'python/README.md': document('python'), ROOT/'python/PYTHON.md': document('python'), ROOT/'GUIDE.md': full_guide(),
-            ROOT/'docs/website-content.json': website_payload()}
+            ROOT/'docs/website-content.json': website_payload(), ROOT/'docs/language-docs.json': language_payload(),
+            ROOT/'src/lib.rs': rust_module_intro(),
+            **{ROOT/'python/python/glrmask'/name: python_module_source(ROOT/'python/python/glrmask'/name) for name in ['__init__.py', '__init__.pyi']}}
 
 
 def main():
@@ -134,6 +191,7 @@ def main():
     python = tomllib.loads((ROOT/'python/pyproject.toml').read_text(encoding="utf-8"))
     assert cargo['package']['readme'] == 'README.rust.md', 'Cargo must select the Rust README'
     assert python['project']['readme'] == 'PYTHON.md', 'Python must select python/PYTHON.md'
+    check_python_symbol_docs()
     files = outputs()
     stale = [str(p.relative_to(ROOT)) for p, content in files.items() if not p.exists() or p.read_text(encoding="utf-8") != content]
     if args.check and stale:

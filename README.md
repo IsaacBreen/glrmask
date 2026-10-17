@@ -4,7 +4,7 @@
 
 GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. Unfortunately, there is no universally accepted EBNF dialect. In keeping with this tradition, GLRMask includes its own: GLRM. It also supports JSON schemas and Lark.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON schemas and Lark grammars. GLRM is its internal grammar format.
 
 [Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
@@ -117,111 +117,50 @@ cargo add glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: an immutable source or constructed grammar, with its bindings.
-- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
-- `Constraint`: a complete, runnable grammar compiled against that vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: source grammar semantics and bindings.
+- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.
+- `Constraint`: a closed, runnable grammar compiled against a vocabulary.
+- `ConstraintState`: the mutable state for one generated sequence.
 
-For direct use, compile a `Grammar` into a `Constraint`. Use `prepare()` and `link()` when you need reusable components or late binding. Then call `constraint.start()` to initiate a `ConstraintState`. Then in the decoding loop:
+Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.
 
-1. Compute the next-token mask.
-2. Sample a token the mask allows.
-3. Commit that token to the state.
-
-```python pseudocode
-state = constraint.start()
-end_token_ids = configured_end_token_ids
-
-while generating:
-    in parallel:
-        logits = llm.forward(...)
-        mask = state.mask()
-
-    logits = apply_mask(logits, mask)
-    token_id = sample(logits)
-    state.commit_token(token_id)
-    if token_id in end_token_ids:
-        break
-```
-
-Optional `@mark(id)` annotations report numeric marker IDs and byte positions
-during generation. Read `state.marker_events()` immediately after `start()` and
-each commit. These are possible boundary observations, not captures or a selected
-parse. See the [marker reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/markers.md).
+`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
 
 ### Python quickstart
 
-```bash
-python -m pip install glrmask llama-cpp-python torch
-```
-
 ```python
-import numpy as np
-from llama_cpp import Llama
-from torch import from_numpy
-from torch.distributions import Categorical
-
 import glrmask
 
-llm = Llama(model_path="model.gguf", logits_all=True)
-vocab = glrmask.Vocab.from_llama_cpp(llm)
-end_token_ids = vocab.llama_cpp_end_token_ids
-
-schema = {"type": "string", "enum": ["positive", "negative", "neutral"]}
-constraint = glrmask.Grammar.from_json_schema(schema).compile(
-    vocab,
-    end_tokens=end_token_ids,
-    optimization=glrmask.Optimization.AUTO,
-)
-
-prompt = "Classify this review: The story dragged badly. Sentiment: "
-input_tokens = llm.tokenize(prompt.encode())
-llm.reset()
-llm.eval(input_tokens)
-
+vocab = glrmask.Vocab.from_id_to_bytes({0: b"hello", 1: b" ", 2: b"world"})
+grammar = glrmask.Grammar.from_ebnf('start ::= "hello" " " "world"')
+constraint = grammar.compile(vocab)
 state = constraint.start()
-generated = []
-
-for _ in range(64):
-    logits = llm.scores[llm.n_tokens - 1]
-    mask = state.mask(llm.n_vocab())
-    logits[~mask] = -np.inf
-    token_id = Categorical(logits=from_numpy(logits)).sample().item()
-
-    llm.eval([token_id])
-    generated.append(token_id)
+for token_id, expected in [(0, [True, False, False]),
+                           (1, [False, True, False]),
+                           (2, [False, False, True])]:
+    assert state.mask().tolist() == expected
     state.commit_token(token_id)
-    if token_id in end_token_ids:
-        break
-
-print(llm.detokenize(generated).decode())
+assert state.is_accepting()
 ```
 
-`state.mask()` returns a NumPy Boolean array indexed by model token ID. Pass a size when the model's logits vector is wider than the constraint's natural token coordinate.
+Python masks are NumPy Boolean arrays indexed by original model token ID.
 
 ### Rust quickstart
 
 ```rust
-use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
+use glrmask::{Grammar, Vocab};
 
 fn main() -> glrmask::Result<()> {
     let vocab = Vocab::new(vec![
-        (0, b"\"yes\"".to_vec()),
-        (1, b"\"no\"".to_vec()),
-        (2, b"<eos>".to_vec()),
+        (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
     ]);
-    let schema = r#"{"type":"string","enum":["yes","no"]}"#;
-    let constraint = Grammar::from_json_schema(schema).compile_with(
-        &vocab,
-        BuildOptions::default()
-            .end_tokens([2])
-            .optimization(Optimization::Auto),
-    )?;
-
+    let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#);
+    let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
-    let mask = state.mask();
-    assert_ne!(mask[0] & 1, 0); // Token 0 is allowed.
-    state.commit_token(0)?;
+    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {
+        assert_eq!(state.mask()[0] & 7, expected);
+        state.commit_token(token_id)?;
+    }
     assert!(state.is_accepting());
     Ok(())
 }

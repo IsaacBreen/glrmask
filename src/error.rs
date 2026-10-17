@@ -8,6 +8,7 @@ pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     .map_err(Error::InternalInvariant)
 }
 
+/// Parse, build, artifact or sequence-state failure. Source coordinates are included when the frontend can locate the error.
 #[derive(ThisError, Debug, Clone)]
 pub enum Error {
     #[error("Grammar parse error: {0}")]
@@ -42,6 +43,7 @@ impl Error {
 
 pub type GlrMaskError = Error;
 
+/// GLRMask operation result; [`Error::source_span`] exposes available source coordinates.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<glrmask_grammar::Error> for Error {

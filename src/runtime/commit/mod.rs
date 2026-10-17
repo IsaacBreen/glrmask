@@ -9064,18 +9064,7 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Commit a sampled token, advancing the constraint state.
-    ///
-    /// `token_id` must either exist in the vocabulary the constraint was built
-    /// with or be declared by a special-token terminal in the grammar.
-    /// Committing a token that is grammatically invalid (not in the current
-    /// mask) drives the constraint into a fail state â€” this is normal and
-    /// observable via an all-zero mask.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if `token_id` is neither present in the vocabulary nor
-    /// declared by a special-token terminal.
+    /// An unknown ID returns an error. A grammatically forbidden ID rejects the state and may also return an error; subsequent masks are zero. Sample from the mask before committing. Commit a selected root end token before stopping.
     pub fn commit_token(
         &mut self,
         token_id: u32,
@@ -9360,7 +9349,7 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
-    /// Advance the state by raw bytes.
+    /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
         self.commit_bytes_raw(bytes).map_err(crate::Error::State)
     }

@@ -511,10 +511,7 @@ impl CommitBuffers {
     }
 }
 
-/// Mutable parser state for one generated sequence.
-///
-/// Obtain a mask, sample a permitted token, and commit it to advance the state.
-/// Create separate states for concurrently generated sequences.
+/// Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
@@ -579,14 +576,12 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Return whether the committed prefix has been irrecoverably rejected.
+    /// The prefix cannot be extended to a valid match.
     pub fn is_rejected(&self) -> bool {
         self.state.is_empty()
     }
 
-    /// Return whether the committed prefix is currently accepted by the grammar.
-    ///
-    /// An accepting prefix may still admit additional tokens.
+    /// The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.
     pub fn is_accepting(&self) -> bool {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
@@ -630,12 +625,7 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Return up to 10,000 locally inevitable original model-token IDs.
-    ///
-    /// Read-only: the source state is unchanged. A step is returned only when
-    /// exactly one original ID is admissible and the root cannot already stop.
-    /// Different encodings/aliases remain choices. No full mask is constructed;
-    /// resource/proof failures are errors rather than false ambiguity.
+    /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures return errors.
     pub fn forced_tokens(&self) -> crate::Result<Vec<u32>> {
         super::commit::bounded::forced_tokens(std::slice::from_ref(self))
     }

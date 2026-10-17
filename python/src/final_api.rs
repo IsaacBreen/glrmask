@@ -15,7 +15,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
     PyConstraint { inner: Arc::new(inner), max_token }
 }
 
-/// Preferred compilation/runtime trade-off; accepted-language semantics are unchanged.
+/// Build-time versus per-token cost. The modes preserve the supported grammar language; `AUTO` chooses a strategy.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "Optimization", module = "glrmask", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +26,7 @@ pub(super) enum PyOptimization {
     FAST_RUNTIME,
 }
 
-/// Optional boundary-query metadata, built before compile or link returns.
+/// Optional metadata for composition boundaries, independent of the masking optimization. A request at final link overrides the prepared request.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,7 +99,7 @@ fn options(
         .optimization(mode).parser_backend(backend.into())
 }
 
-/// Consume exactly one token ID; membership is validated against the target vocabulary.
+/// One original token ID, independent of its byte spelling. This value stores no vocabulary identity: the target checks ID membership, so the same ID can be accepted with different bytes. Use `vocab.tokens([id])` when a singleton must retain vocabulary identity.
 #[pyclass(name = "Token", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyToken {
@@ -116,7 +116,7 @@ impl PyToken {
     fn id(&self) -> u32 { self.inner.id() }
 }
 
-/// An exact event set (possibly empty), retaining its vocabulary identity.
+/// One token event chosen from a vocabulary-bound set, not a sequence. Even a singleton retains the full token-ID/byte mapping; a different mapping is rejected. An empty set matches nothing, not the empty string.
 #[pyclass(name = "ExactTokens", module = "glrmask", frozen)]
 #[derive(Clone)]
 pub(super) struct PyExactTokens {
@@ -125,11 +125,11 @@ pub(super) struct PyExactTokens {
 
 #[pymethods]
 impl PyExactTokens {
-    /// Materialize the individual token IDs. Use ranges for compact inspection.
+    /// Sorted IDs, materialized on access. Prefer `ranges` for large sets.
     #[getter]
     fn ids(&self) -> Vec<u32> { self.inner.ids().to_vec() }
 
-    /// Normalized disjoint Python ranges (exclusive stops), without expansion.
+    /// Normalized, disjoint Python ranges with exclusive stops; does not expand the IDs.
     #[getter]
     fn ranges(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
         let range_type = py.import("builtins")?.getattr("range")?;
@@ -138,6 +138,7 @@ impl PyExactTokens {
         }).collect()
     }
 
+    /// Number of IDs, rather than ranges.
     fn __len__(&self) -> usize { self.inner.len() }
 }
 
@@ -193,8 +194,7 @@ impl Binding {
 
 }
 
-/// Mutable grammar assembly handle. Copies share immutable instance snapshots.
-/// bind changes this handle; compile/prepare capture a stable input snapshot.
+/// Reusable source grammar with mutable bindings. `bind` changes this handle; clones and already attached children keep independent snapshots. Parsing and vocabulary checks can be deferred until preparation or compilation.
 #[pyclass(name = "Grammar", module = "glrmask")]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
@@ -213,22 +213,24 @@ impl PyGrammar {
     fn as_rust(&self)->glrmask::Result<glrmask::Grammar<'static>> {Ok(self.inner.clone())}
 }
 
-/// One outstanding typed component dependency. Qualified names are a display
-/// of the structured path; identical local names in siblings remain distinct.
+/// An unresolved typed slot. Paths distinguish the same local name in different attached children.
 #[pyclass(name="Requirement",module="glrmask",frozen)]
 #[derive(Clone)]
 pub(super) struct PyRequirement {inner:glrmask::Requirement}
 #[pymethods]
 impl PyRequirement {
+    /// Qualified path joined with `::`.
     #[getter]
     fn name(&self)->String {self.inner.name()}
+    /// Path segments from the assembly root to the unresolved slot.
     #[getter]
     fn path(&self)->Vec<String> {self.inner.path.clone()}
-    /// (start_byte, end_byte, one_based_line, one_based_scalar_column), or None.
+    /// `(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.
     #[getter]
     fn source_span(&self)->Option<(usize,usize,usize,usize)> {
         self.inner.source_span.map(|span|(span.start,span.end,span.line,span.column))
     }
+    /// A token slot accepts exact events; a grammar slot also accepts a grammar component.
     #[getter]
     fn kind(&self)->&'static str {match self.inner.kind {
         glrmask::ExternalKind::Token=>"token",glrmask::ExternalKind::Grammar=>"grammar",glrmask::ExternalKind::LegacyGeneric=>"legacy",
@@ -238,11 +240,11 @@ impl PyRequirement {
 
 #[pymethods]
 impl PyGrammar {
-    /// Create a grammar from EBNF source text.
+    /// Parsing and compilation errors can be deferred until `prepare` or `compile`.
     #[staticmethod]
     fn from_ebnf(source: String) -> Self { Self::new(source, SourceKind::Ebnf) }
 
-    /// Create a grammar from Lark source text.
+    /// The default `recognition` profile and the `llm` extension profile differ in accepted syntax. Named token atoms require explicit `token_names` mappings; they are never inferred from tokenizer spellings.
     #[staticmethod]
     #[pyo3(signature=(source, *, profile="recognition", token_names=None))]
     fn from_lark(source:String,profile:&str,token_names:Option<&Bound<'_,PyDict>>)->PyResult<Self> {
@@ -261,10 +263,11 @@ impl PyGrammar {
         Ok(Self {inner:glrmask::Grammar::from_lark_owned(source,options)})
     }
 
-    /// Explicitly adapt exact token events to a grammar-valued port.
+    /// Adapt one vocabulary-bound token event to a grammar fragment. Adds no byte spelling, ignore rule or root end-token policy.
     #[staticmethod]
     fn exact(tokens:&PyExactTokens)->Self {Self {inner:glrmask::Grammar::exact(tokens.inner.clone())}}
 
+    /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may raise an error for very large shared graphs.
     #[getter]
     fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
         let snapshot=slf.try_borrow()?.inner.clone();
@@ -272,11 +275,11 @@ impl PyGrammar {
             .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
 
-    /// Create a grammar from native GLRM source text.
+    /// GLRM supports typed external slots; fill them with `bind` before compiling a runnable root.
     #[staticmethod]
     fn from_glrm(source: String) -> Self { Self::new(source, SourceKind::Glrm) }
 
-    /// Create a grammar from JSON Schema text or a JSON-serializable object.
+    /// Accepts JSON text or a JSON-serializable object. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened. Validate generated values separately when full schema conformance matters.
     #[staticmethod]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
         let source = match schema.extract::<String>() {
@@ -286,7 +289,7 @@ impl PyGrammar {
         Ok(Self::new(source, SourceKind::JsonSchema))
     }
 
-    /// Atomically fill one slot on this handle. Attached children are snapshots.
+    /// Fill a declared local or `::`-qualified slot once. Accepts `Grammar`, `Token` or `ExactTokens`; a general grammar cannot fill a token slot. Captures the child’s current snapshot. Unknown, already filled, incompatible or cyclic bindings fail without changing this handle.
     fn bind(slf:&Bound<'_,Self>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
         let py=slf.py();
         // Capture value first: self-attachment captures the old snapshot too.
@@ -304,9 +307,12 @@ impl PyGrammar {
         Ok(())
     }
 
+    /// Independent binding snapshot; later binds on either handle do not affect the other.
     #[pyo3(name="clone")]
     fn clone_handle(&self)->Self {Self {inner:self.inner.clone()}}
+    /// Equivalent to `clone`.
     fn __copy__(&self)->Self {self.clone_handle()}
+    /// Equivalent to `clone`; immutable compiled storage may remain shared.
     fn __deepcopy__(slf:&Bound<'_,Self>,memo:&Bound<'_,PyDict>)->PyResult<Py<Self>> {
         let copy=Py::new(slf.py(),slf.try_borrow()?.clone_handle())?;
         memo.set_item(slf.as_ptr() as usize,&copy)?;
@@ -314,10 +320,7 @@ impl PyGrammar {
     }
 
 
-    /// Compile a closed, immediately runnable constraint for this vocabulary.
-    ///
-    /// end_tokens are reserved generation controls, allowed only at acceptance.
-    /// Their policy is not inherited when the result is later embedded as a child.
+    /// Requires every slot to be bound. `end_tokens` are root generation controls, allowed only at acceptance; commit the selected end token before stopping. Their policy is not inherited by an embedded child. `optimization` defaults to `AUTO`.
     #[pyo3(signature = (vocab, *, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn compile(
         slf:&Bound<'_,Self>, py: Python<'_>, vocab: &PyVocab,
@@ -331,7 +334,7 @@ impl PyGrammar {
             .map(constraint).map_err(api_error)
     }
 
-    /// Compile reusable machinery while preserving unresolved grammar/token slots.
+    /// Compile vocabulary-specific machinery while retaining unresolved slots. Reuse it with different bindings, then `link`. Only the boundary metadata request is retained for final link.
     #[pyo3(signature = (vocab, *, boundary_trigger=None))]
     fn prepare(slf:&Bound<'_,Self>, py: Python<'_>, vocab: &PyVocab,
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyPreparedGrammar> {
@@ -343,7 +346,7 @@ impl PyGrammar {
     }
 }
 
-/// Mutable prepared assembly handle with independently reusable snapshots.
+/// Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots.
 #[pyclass(name = "PreparedGrammar", module = "glrmask")]
 #[derive(Clone)]
 pub(super) struct PyPreparedGrammar {
@@ -352,13 +355,14 @@ pub(super) struct PyPreparedGrammar {
 
 #[pymethods]
 impl PyPreparedGrammar {
+    /// Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.
     #[getter]
     fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
         let snapshot=slf.try_borrow()?.inner.clone();
         slf.py().allow_threads(move ||snapshot.requirements())
             .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
-    /// Atomically fill a prepared or exact-event slot. No child is compiled here.
+    /// Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged.
     fn bind(slf:&Bound<'_,Self>,py:Python<'_>,name:String,value:&Bound<'_,PyAny>)->PyResult<()> {
         let binding=Binding::extract_for_unlinked(value)?;
         let mut target=slf.try_borrow_mut()?;
@@ -377,16 +381,19 @@ impl PyPreparedGrammar {
         Ok(())
     }
 
+    /// Independent binding snapshot sharing immutable compiled machinery.
     #[pyo3(name="clone")]
     fn clone_handle(&self)->Self {Self {inner:self.inner.clone()}}
+    /// Equivalent to `clone`.
     fn __copy__(&self)->Self {self.clone_handle()}
+    /// Equivalent to `clone`; immutable compiled storage may remain shared.
     fn __deepcopy__(slf:&Bound<'_,Self>,memo:&Bound<'_,PyDict>)->PyResult<Py<Self>> {
         let copy=Py::new(slf.py(),slf.try_borrow()?.clone_handle())?;
         memo.set_item(slf.as_ptr() as usize,&copy)?;
         Ok(copy)
     }
 
-    /// Produce a runnable root. Every required slot must already be bound.
+    /// Requires all slots to be bound. Selects final optimization and root end tokens; an explicit boundary request overrides the prepared request. End tokens become allowed only at acceptance and must be committed before stopping.
     #[pyo3(signature = (*, end_tokens=None, optimization=None, boundary_trigger=None))]
     fn link(
         slf:&Bound<'_,Self>, py: Python<'_>, end_tokens: Option<Vec<u32>>,
@@ -398,14 +405,14 @@ impl PyPreparedGrammar {
         py.allow_threads(move || snapshot.link_with(options)).map(constraint).map_err(api_error)
     }
 
-    /// Serialize compiled machinery and its open-slot manifest as bytes.
+    /// Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once.
     fn save<'py>(slf:&Bound<'py,Self>, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot=slf.try_borrow()?.inner.clone();
         let bytes = py.allow_threads(move || snapshot.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Load an unlinked constraint, retaining open slots and exact vocabulary identity.
+    /// Rejects malformed or incompatible artifacts. An optional vocabulary must match the saved token-ID/byte mapping and lets the loaded graph share its caches.
     #[staticmethod]
     #[pyo3(signature = (data, vocab=None))]
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {

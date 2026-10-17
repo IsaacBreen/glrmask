@@ -8,6 +8,11 @@ on:
       - 'README.rust.md'
       - 'python/README.md'
       - 'python/PYTHON.md'
+      - 'src/**'
+      - 'crates/glrmask-vocab/src/**'
+      - 'crates/glrmask-grammar/src/**'
+      - 'python/python/glrmask/**'
+      - 'python/src/**'
       - 'Cargo.toml'
       - 'python/pyproject.toml'
       - 'docs/content/**'
@@ -27,6 +32,11 @@ on:
       - 'README.rust.md'
       - 'python/README.md'
       - 'python/PYTHON.md'
+      - 'src/**'
+      - 'crates/glrmask-vocab/src/**'
+      - 'crates/glrmask-grammar/src/**'
+      - 'python/python/glrmask/**'
+      - 'python/src/**'
       - 'Cargo.toml'
       - 'python/pyproject.toml'
       - 'docs/content/**'
@@ -49,3 +59,12 @@ jobs:
           python-version: '3.x'
       - run: python scripts/sync-benchmarks.py --check
       - run: python scripts/sync-guide.py --check
+      - name: Rust documentation examples
+        run: cargo test --doc --locked -p glrmask
+      - name: Render Rust API reference
+        run: cargo doc --locked --no-deps -p glrmask
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rust-api-reference
+          path: target/doc
+          retention-days: 3

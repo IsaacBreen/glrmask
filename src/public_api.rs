@@ -21,19 +21,16 @@ mod snapshot_map;
 mod event_cache;
 mod prepared_artifact;
 
-/// Preferred build/runtime trade-off.
-///
-/// These variants express caller intent rather than exposing GLRMask's
-/// internal static/dynamic implementation choices.
+/// Build-time versus per-token cost; the variants preserve the supported grammar language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum Optimization {
-    /// Let GLRMask choose automatically.
+    /// Choose a strategy automatically.
     #[default]
     Auto,
-    /// Use ordinary Dynamic compilation and runtime masking (O1).
+    /// Favor shorter compilation.
     FastBuild,
-    /// Use the bounded native parser and vocabulary quotient (O2).
+    /// Balance compilation and masking cost.
     Balanced,
     /// Prefer lower per-token masking latency, accepting more build work.
     FastRuntime,
@@ -50,8 +47,7 @@ pub enum ParserBackend {
     TemplateDfa,
 }
 
-/// Options for a final runnable constraint. Pre-link compilation retains only
-/// the boundary-trigger request; all other options are selected at final link.
+/// Final compile/link options. `prepare_with` retains only the boundary metadata request; choose optimization and end tokens at final link.
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
     end_tokens: Vec<u32>,
@@ -61,22 +57,19 @@ pub struct BuildOptions {
 }
 
 impl BuildOptions {
-    /// Configure tokens that may terminate generation once the final
-    /// constraint is accepting.
+    /// Root stopping controls, allowed only at acceptance. Commit the selected end token before stopping; the policy is not inherited by embedded children.
     pub fn end_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         self.end_tokens = ids.into_iter().collect();
         self
     }
 
-    /// Select the preferred build/runtime trade-off.
+    /// Defaults to [`Optimization::Auto`].
     pub fn optimization(mut self, optimization: Optimization) -> Self {
         self.optimization = optimization;
         self
     }
 
-    /// Build optional boundary-query metadata before returning a runnable constraint.
-    /// The default adds no metadata. An explicit request at link overrides the
-    /// request retained by `prepare_with`, including explicit `None`.
+    /// Optional composition metadata. At final link an explicit request, including `None`, overrides the prepared request.
     pub fn boundary_trigger(mut self, detail: BoundaryTriggerDetail) -> Self {
         self.boundary_trigger = Some(detail);
         self
@@ -99,11 +92,9 @@ impl BuildOptions {
     }
 }
 
-/// Reusable, vocabulary-specific compiled constraint in pre-link form.
+/// Vocabulary-specific compiled machinery, possibly with unresolved slots.
 ///
-/// An unlinked constraint may retain unresolved external slots. It is
-/// deliberately not runnable; bind prepared child instances and
-/// call [`PreparedGrammar::link`] once all required slots are satisfied.
+/// Bind prepared children or exact events, then link a runnable root. Binding changes only this handle; clones and attached children retain independent snapshots.
 #[derive(Debug, Clone)]
 pub struct PreparedGrammar {
     inner: Arc<RuntimeConstraint>,
@@ -125,11 +116,12 @@ pub struct PreparedGrammar {
 #[doc(hidden)]
 pub type UnlinkedConstraint = PreparedGrammar;
 
-/// One unresolved dependency of a component instance. Path segments distinguish
-/// nested attachments from coincidentally equal local names.
+/// An unresolved typed slot. Paths distinguish the same local name in different attached children.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
+    /// Path segments distinguish slots in different attached children.
     pub path: Vec<String>,
+    /// Token slots require exact events; grammar slots also accept components.
     pub kind: ExternalKind,
     /// Coordinates in the declaring component's original source document.
     /// Constructed components may have no source location.
@@ -187,22 +179,26 @@ fn check_binding_kind(name:&str,kind:ExternalKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// Explicit dialect and vocabulary-name resolution for Lark source. Names are
-/// caller-provided mappings, never guessed from a particular model/tokenizer.
+/// Lark dialect and explicit named-token mappings. The default profile is recognition; names are never inferred from a tokenizer.
 #[derive(Debug,Clone,Default)]
 pub struct LarkOptions {
     profile: LarkProfile,
     token_names: BTreeMap<String,Vec<u32>>,
 }
 impl LarkOptions {
+    /// Use the LLM extension profile.
     pub fn llm()->Self {Self {profile:LarkProfile::Llm,token_names:BTreeMap::new()}}
+    /// Select the recognition dialect or LLM extensions.
     pub fn profile(mut self,profile:LarkProfile)->Self{self.profile=profile;self}
+    /// Map a named token atom to original vocabulary IDs; no tokenizer-name inference is performed.
     pub fn token(mut self,name:impl Into<String>,ids:impl IntoIterator<Item=u32>)->Self {
         self.token_names.insert(name.into(),ids.into_iter().collect());self
     }
 }
 
-/// Grammar description with immutable source-grammar or exact-token bindings.
+/// Reusable source grammar with mutable bindings.
+///
+/// Binding changes this handle; clones and attached children retain independent snapshots. Parsing and vocabulary checks may be deferred until preparation or compilation.
 #[derive(Debug, Clone)]
 pub struct Grammar<'a> {
     source: GrammarSource<'a>,
@@ -296,22 +292,22 @@ impl<'a> Grammar<'a> {
         grammar
     }
 
-    /// Create a grammar from EBNF source.
+    /// Parsing and compilation errors can be deferred until preparation or compilation.
     pub fn from_ebnf(source: &'a str) -> Self { Self::new(GrammarSource::Ebnf(source.into())) }
 
-    /// Create a grammar from Lark source.
+    /// Uses the recognition profile. See [`Self::from_lark_with`] for LLM extensions and named-token mappings.
     pub fn from_lark(source: &'a str) -> Self { Self::new(GrammarSource::Lark(source.into())) }
 
-    /// Read the selected Lark recognition/LLM dialect with explicit token names.
+    /// Named token atoms require explicit mappings in `options`; tokenizer spellings are never inferred.
     pub fn from_lark_with(source:&'a str,options:LarkOptions)->Self {
         let mut grammar=Self::new(GrammarSource::Lark(source.into()));grammar.lark_options=Arc::new(options);grammar
     }
 
 
-    /// Create a grammar from JSON Schema text.
+    /// Accepts JSON text. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened. Validate generated values separately when full schema conformance matters.
     pub fn from_json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source.into())) }
 
-    /// Create a grammar from native GLRM source.
+    /// GLRM supports typed external slots; bind them before compiling a runnable root.
     pub fn from_glrm(source: &'a str) -> Self { Self::new(GrammarSource::Glrm(source.into())) }
 
     fn new(source: GrammarSource<'a>) -> Self {
@@ -406,8 +402,7 @@ impl<'a> Grammar<'a> {
         Ok(())
     }
 
-    /// Adapt an exact event set into an independently scoped grammar fragment.
-    /// This explicit conversion supplies no byte spelling, ignore, or root EOS.
+    /// Adapt one vocabulary-bound token event to a grammar fragment. Adds no byte spelling, ignore rule or root end-token policy.
     pub fn exact(tokens: ExactTokens) -> Self {
         let exprs=tokens.range_pairs().iter().map(|&(a,b)|if a==b {
             glrmask_grammar::GrammarExpr::SpecialToken(a)
@@ -440,16 +435,12 @@ impl<'a> Grammar<'a> {
         grammar
     }
 
-    /// Inspect unresolved instance requirements, including attached open children.
-    /// An explicit limit prevents exponentially expanded diagnostics on shared DAGs.
+    /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may raise an error for very large shared graphs.
     pub fn requirements(&self) -> Result<Vec<Requirement>> {
         graph::source_requirements(self)
     }
 
-    /// Fill one declared slot, atomically updating this assembly handle.
-    ///
-    /// Clones and previously attached children retain their own snapshots.
-    /// No compilation occurs. On error this handle is unchanged.
+    /// Fill a declared local or `::`-qualified slot once. Accepts `Grammar`, `Token` or `ExactTokens`; a general grammar cannot fill a token slot. Captures the child’s current snapshot. Unknown, already filled, incompatible or cyclic bindings fail without changing this handle.
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
@@ -521,12 +512,12 @@ impl<'a> Grammar<'a> {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// Compile this complete grammar description into a runnable constraint.
+    /// Requires all slots to be bound; uses default [`BuildOptions`]. See [`Self::compile_with`] for optimization and root end tokens.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, BuildOptions::default())
     }
 
-    /// Compile this complete grammar description with final build options.
+    /// Requires all slots to be bound. End tokens are root generation controls: allowed only at acceptance, and must be committed before stopping. Their policy is not inherited by an embedded child.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
@@ -604,15 +595,12 @@ impl<'a> Grammar<'a> {
         constraint.with_end_tokens(options.end_token_ids())
     }
 
-    /// Compile reusable local machinery while allowing unresolved grammar
-    /// or exact-token slots to remain open.
+    /// Compile reusable vocabulary-specific machinery while retaining unresolved slots. Bind prepared children or exact events, then link a runnable root.
     pub fn prepare(&self, vocab: &Vocab) -> Result<PreparedGrammar> {
         self.prepare_with(vocab, BuildOptions::default())
     }
 
-    /// Compile reusable machinery, retaining the boundary-trigger request until
-    /// final link. Unresolved slots prevent trigger construction at this stage.
-    /// End tokens and optimization are selected by `link_with`, not retained.
+    /// Retains the boundary metadata request for final link. Optimization and end tokens are chosen by [`PreparedGrammar::link_with`], not retained from these options.
     pub fn prepare_with(&self, vocab: &Vocab, options: BuildOptions) -> Result<PreparedGrammar> {
         let _=graph::source_first(self)?;
         let module=self.prepare_cached(vocab,options,&mut SourcePreparation::default(),0)?;
@@ -775,16 +763,20 @@ impl<'a> Grammar<'a> {
 }
 
 impl Grammar<'static> {
+    /// Owns the source text; see [`Self::from_glrm`] for the source format.
     pub fn from_glrm_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::Glrm(SourceText::Owned(Arc::from(source.into()))))
     }
+    /// Owns the source text; see [`Self::from_lark_with`] for the source format.
     pub fn from_lark_owned(source:impl Into<String>,options:LarkOptions)->Self {
         let mut grammar=Self::new(GrammarSource::Lark(SourceText::Owned(Arc::from(source.into()))));
         grammar.lark_options=Arc::new(options);grammar
     }
+    /// Owns the source text; see [`Self::from_ebnf`] for the source format.
     pub fn from_ebnf_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::Ebnf(SourceText::Owned(Arc::from(source.into()))))
     }
+    /// Owns the source text; see [`Self::from_json_schema`] for the source format.
     pub fn from_json_schema_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::JsonSchema(SourceText::Owned(Arc::from(source.into()))))
     }
@@ -2273,8 +2265,7 @@ impl PreparedGrammar {
         Ok(())
     }
 
-    /// Unresolved instance paths. Binding a leaf in one attachment never changes
-    /// a sibling attachment sharing the same compiled definition.
+    /// Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.
     pub fn requirements(&self)->Result<Vec<Requirement>> {
         graph::prepared_requirements(self)
     }
@@ -2348,11 +2339,7 @@ impl PreparedGrammar {
         Ok(next)
     }
 
-    /// Fill one prepared-child or exact-event slot atomically.
-    ///
-    /// This modifies only this assembly handle. A supplied child is captured
-    /// as a snapshot; clones and already linked constraints remain unchanged.
-    /// Compilation is deferred to preparation/linking. Errors leave this handle intact.
+    /// Fill a declared local or qualified slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Prepared children must use the same vocabulary mapping. Captures a child snapshot without recompiling it. Invalid bindings leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<'a, T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where T: IntoUnlinkedValue<'a> {
@@ -2422,7 +2409,7 @@ impl PreparedGrammar {
         )
     }
 
-    /// Link a fully bound artifact into a runnable constraint.
+    /// Requires every slot to be bound. Uses default build options and inherits the prepared boundary request.
     pub fn link(&self) -> Result<RuntimeConstraint> {
         self.link_with(BuildOptions::default())
     }
@@ -2483,9 +2470,7 @@ impl PreparedGrammar {
         })?
     }
 
-    /// Link a fully bound artifact with final build options.
-    /// An explicit boundary-trigger option overrides the retained request;
-    /// otherwise the request from pre-link compilation is inherited.
+    /// Requires all slots to be bound. Selects final optimization and root end tokens; an explicit boundary request overrides the prepared request. End tokens become allowed only at acceptance and must be committed before stopping.
     pub fn link_with(&self, options: BuildOptions) -> Result<RuntimeConstraint> {
         graph::prepared_preflight(self)?;
         if let Some(name) = self.first_open_slot()? {
@@ -2504,17 +2489,15 @@ impl PreparedGrammar {
         constraint.with_end_tokens(options.end_token_ids())
     }
 
-    /// Serialize the shared definition/instance DAG, preserving unresolved ports.
-    /// Each compiled definition is written once even when many instances use it.
+    /// Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once. Artifact compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> { prepared_artifact::save(self) }
 
-    /// Load a bounded, acyclic prepared graph with shared definition storage.
+    /// Rejects malformed or incompatible prepared artifacts. Open slots and shared definitions are preserved.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         prepared_artifact::load(bytes.into().as_ref(),None)
     }
 
-    /// Load while sharing the supplied exact vocabulary. Definitions are rebound
-    /// once, not cloned by a recursive walk through every attachment path.
+    /// The supplied vocabulary must match the saved token-ID/byte mapping; loaded definitions share its caches.
     pub fn load_with_vocab<'b>(bytes:impl Into<std::borrow::Cow<'b,[u8]>>,vocab:&Vocab)->Result<Self> {
         prepared_artifact::load(bytes.into().as_ref(),Some(vocab))
     }

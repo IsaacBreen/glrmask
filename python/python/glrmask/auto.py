@@ -1,10 +1,4 @@
-"""Adaptive O1/O2/O3 constraint selection.
-
-``AutoConstraint`` selects one of GLRMask's existing exact implementations;
-it does not introduce a separate masking algorithm.  The initial JSON-Schema
-policy is intentionally small and inspectable and targets a bounded worst-TBM
-tail while avoiding O3's compile cost on schemas that do not need it.
-"""
+"Adaptive JSON Schema policy inspection and persisted tier selection. For ordinary compilation, prefer `Grammar.compile(..., optimization=Optimization.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer\u2019s partial assertion support."
 
 from __future__ import annotations
 
@@ -50,6 +44,7 @@ _REF_PASSTHROUGH_KEYS = frozenset(
 
 @dataclass(frozen=True)
 class AutoSchemaShape:
+    "Source-shape counts used by the policy, not a schema validation result. `json_bytes` measures normalized JSON serialized with sorted keys and compact separators."
     nodes: int = 0
     dicts: int = 0
     lists: int = 0
@@ -114,7 +109,7 @@ def _normalize_auto_schema(schema: Any) -> Any:
 
 
 def json_schema_auto_shape(schema: Any) -> AutoSchemaShape:
-    """Return the cheap source-shape features used by the v1 auto policy."""
+    "Extract the policy’s source-shape features from JSON text or a JSON-serializable schema."
     schema_obj = json.loads(schema) if isinstance(schema, str) else schema
     schema_text = schema if isinstance(schema, str) else json.dumps(schema, separators=(",", ":"))
     native = _native_internal.auto_json_schema_shape_counts(schema_text)
@@ -190,14 +185,7 @@ def _select_json_schema_auto_tier_from_text(schema_obj: Any, schema_text: str) -
 
 
 def select_json_schema_auto_tier(schema: Any) -> str:
-    """Return ``"o1"``, ``"o2"`` or ``"o3"`` for one JSON Schema.
-
-    The thresholds were fitted on chunks 1-3 of the surviving 2026-09-11
-    seed-7 full-corpus CFA run, with chunk 4 held out.  The target was the
-    cheapest tier whose observed per-problem maximum TBM was <= ~200 us, with
-    false-safe predictions penalized 64x so rare tail failures dominate the
-    policy rather than average throughput.
-    """
+    "Select `o1`, `o2` or `o3` using fitted source-shape thresholds. The choice predicts a compilation/masking trade-off; it does not guarantee a latency bound."
 
     if isinstance(schema, str):
         schema_text = schema
@@ -209,9 +197,10 @@ def select_json_schema_auto_tier(schema: Any) -> str:
 
 
 class AutoConstraint:
-    """A JSON-Schema constraint compiled through the adaptive O1/O2/O3 policy."""
+    "Constraint wrapper that records the selected tier and policy. Its artifact carries the tier so loading does not rerun selection. JSON Schema assertions unsupported by the importer may remain unenforced."
 
     def __init__(self, inner: Any, selected_tier: str):
+        "Use `from_json_schema` for normal construction; unknown tier names raise `ValueError`."
         if selected_tier not in _TIER_TO_TAG:
             raise ValueError(f"unknown auto tier {selected_tier!r}")
         self._inner = inner
@@ -220,6 +209,7 @@ class AutoConstraint:
 
     @classmethod
     def from_json_schema(cls, schema: str | dict[str, Any], vocab: Any) -> "AutoConstraint":
+        "Choose a tier and compile. Accepts schema text or an object; inherits the importer’s partial JSON Schema support."
         schema_obj = json.loads(schema) if isinstance(schema, str) else schema
         schema_text = schema if isinstance(schema, str) else json.dumps(schema)
         tier = _select_json_schema_auto_tier_from_text(schema_obj, schema_text)
@@ -233,6 +223,7 @@ class AutoConstraint:
 
     @classmethod
     def load(cls, data: bytes, vocab: Any) -> "AutoConstraint":
+        "Restore the recorded tier. Rejects missing or unknown artifact tags; the supplied vocabulary must match the original."
         if not data.startswith(_AUTO_MAGIC) or len(data) <= len(_AUTO_MAGIC):
             raise ValueError("not a GLRMask AutoConstraint artifact")
         tag = data[len(_AUTO_MAGIC) : len(_AUTO_MAGIC) + 1]
@@ -248,14 +239,17 @@ class AutoConstraint:
         return cls(inner, tier)
 
     def save(self) -> bytes:
+        "Includes the tier tag and underlying constraint artifact."
         return _AUTO_MAGIC + _TIER_TO_TAG[self.selected_tier] + bytes(self._inner.save())
 
     def start(self) -> Any:
         # ConstraintState and DynamicConstraintState intentionally expose the
         # same decoding surface, so callers need no auto-specific state type.
+        "Independent decoding state with the same mask/commit interface as `ConstraintState`."
         return self._inner.start()
 
     def mask_len(self) -> int:
+        "Packed 32-bit word count for a mask buffer."
         return int(self._inner.mask_len())
 
 
