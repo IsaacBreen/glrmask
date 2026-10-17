@@ -32,7 +32,8 @@ empty language. See [the policy and remaining serialization limits](json-schema-
 Notable implementation repairs include previously skipped untyped object
 assertions, lossy `allOf` union fallback and object union merging, overwritten
 numeric bounds, skipped string length checks during finite-literal filtering,
-numeric equality, recursive literal guesses, and accidental object `items`
+numeric equality, recursive literal guesses, `allOf` boolean identities and type
+intersections (including untyped/union string branches), and accidental object `items`
 interpretation. Pattern/maxLength resource refusal already existed; its stale
 documentation has been corrected, without reducing its guard.
 
@@ -47,10 +48,10 @@ made. A warm small-change probe rebuild took 13.25 seconds.
 |---|---|
 | Importer crate unit suite | 82 passed |
 | Facade JSON Schema unit suite | 339 passed; 1 existing pathological dump ignored |
-| New public policy integration suite (FastBuild and FastRuntime) | 6 passed |
+| New public policy integration suite (FastBuild and FastRuntime) | 10 passed |
 | Existing public API suite | 22 passed |
 | Existing public API review suite | Initially 21 passed; later 20 passed / 1 artifact-byte-equality failure; isolated retry passed |
-| Python policy + existing public API tests | 14 passed |
+| Python policy + existing public API tests | 15 passed |
 | Canonical guide synchronization and diff whitespace | Passed |
 
 The intermittent Rust review failure is in a GLRM-only deferred-boundary artifact
@@ -59,14 +60,16 @@ modified to hide it. The Python extension required macOS dynamic lookup and
 leaf-only `-C strip=none` to avoid the known Rust/LLVM LINKEDIT stripping bug;
 these were build-command flags, not repository configuration changes.
 
-The focused official differential covers 206 schemas / 1,005 fixture cases from
+The focused official differential covers 230 schemas / 1,065 fixture cases from
 Draft 7 and Draft 2020-12 (plus annotation fixtures). Python jsonschema 4.24.0
 checks schema validity and independently agrees with every official label.
-Each native mode builds 150 schemas, refuses 56 explicitly as unsupported, and
-judges 749 instances using token masks, commits, and final acceptance. Both
-modes have **zero invalid acceptances, zero runtime errors**, and 12 valid
+Each native mode builds 170 schemas, refuses 60 explicitly as unsupported, and
+judges 791 instances using token masks, commits, and final acceptance. Both
+modes have **zero invalid acceptances, zero runtime errors**, and 16 valid
 rejections from existing numeric spelling/object literal order restrictions.
-The differential command intentionally exits nonzero for those raw rejections;
+Adding the official `allOf` fixtures exposes four additional object-order
+rejections; the original 12 remain (eight numeric const, two integer spelling,
+two object const order cases per mode). The differential command intentionally exits nonzero for those raw rejections;
 it is not an all-conformance-tests-passed claim. Unsupported/resource refusals,
 malformed-schema claims, and unsupported empty-language claims have separate
 reporting; erroneous empty/malformed claims with valid witnesses fail the harness.
@@ -100,3 +103,22 @@ The [official validation specification](https://json-schema.org/draft/2020-12/js
 and [official test suite](https://github.com/json-schema-org/JSON-Schema-Test-Suite)
 provide semantic references. The closed LLG expansion experiment was not rerun
 or changed.
+
+## Independent review follow-up
+
+Independent OpenCode Go / Muse Spark review found two preexisting `allOf`
+defects surviving the first draft: a vacuous object guard could disappear, and
+untyped/union string constraints could become string-only. The follow-up fixes
+boolean identities at each normalization phase, preserves nested type
+intersections before pruning, and restricts the string merger to string-only
+operands. Recursive targets bypass the type guard only when their direct
+explicit types prove it redundant. The existing recursive-object compatibility
+test remains supported. Ten public policy regressions exercise both modes;
+the 82 importer, 339 facade and 15 Python tests pass after these fixes.
+
+The reviewer found no remaining issue in the final static follow-up. It did not
+independently execute the qualification suites. Its earlier claim of zero exact
+coverage loss from a blanket recursive guard was corrected after the facade
+suite disproved it; the explicit-type proof repairs that regression. The first
+implementation freeze `4ee093ad0` is superseded and must not be benchmarked as
+the qualified final source. Raw differential failures remain retained.

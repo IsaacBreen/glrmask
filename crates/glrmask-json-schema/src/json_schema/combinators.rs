@@ -826,6 +826,13 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    fn ref_implies_types(&self, branch: &Schema, required: &[SchemaType]) -> ImportResult<bool> {
+        let SchemaKind::Ref(pointer) = &branch.kind else { return Ok(false); };
+        let SchemaKind::Assertions(target) = &self.resolve_ref_target(pointer)?.kind else { return Ok(false); };
+        Ok(target.types.as_ref().is_some_and(|types| !types.is_empty()
+            && types.iter().all(|ty| intersect_schema_types(&[*ty], required) == vec![*ty])))
+    }
+
     pub fn lower_all_of(&mut self, assertions: &SchemaAssertions) -> ImportResult<GrammarExpr> {
         if let Some(expr) = self.try_lower_early_finite_string_allof(assertions)? {
             return Ok(expr);
@@ -843,6 +850,11 @@ impl<'a> Lowerer<'a> {
         if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
             return Ok(never());
         }
+        // true is the identity of intersection. Remove it before type pruning
+        // and return a sole conjunct unchanged, preserving untyped/type unions.
+        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
+        if branches.is_empty() { return Ok(r(JSON_VALUE_RULE)); }
+        if branches.len() == 1 { return self.lower_schema(&branches[0]); }
         validate_object_all_of_merge_bounds(&branches)?;
         if let [left, right] = branches.as_slice() {
             if is_vacuous_object_schema(left)
@@ -868,11 +880,16 @@ impl<'a> Lowerer<'a> {
                     let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
                     if let SchemaKind::Assertions(assertions) = &mut branch.kind {
                         if assertions.types.is_none() {
-                            assertions.types = Some(explicit_types_vec);
+                            assertions.types = Some(explicit_types_vec.clone());
                         } else if let Some(types) = &mut assertions.types {
                             *types = intersect_schema_types(types, &explicit_types_vec);
                         }
                         prune_assertion_families_to_types(assertions);
+                    } else if !self.ref_implies_types(&branch, &explicit_types_vec)? {
+                        // A recursive ref cannot inherit an object guard by
+                        // mutating assertions. Never drop the removed guard.
+                        return Err(SchemaImportError::at(&branch.location,
+                            "unsupported allOf recursive schema constraint: cannot apply the object type intersection exactly"));
                     }
                 }
                 return self.lower_schema(&branch);
@@ -883,19 +900,32 @@ impl<'a> Lowerer<'a> {
         if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
             return Ok(never());
         }
+        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
         validate_object_all_of_merge_bounds(&branches)?;
         branches = collapse_pure_single_choice_branches(branches);
         branches = self.inline_all_of_refs(&branches)?;
+        if branches.iter().any(|branch| matches!(branch.kind, SchemaKind::Never)) {
+            return Ok(never());
+        }
+        branches.retain(|branch| !matches!(branch.kind, SchemaKind::Any));
         if let Some(filtered) = drop_vacuous_untyped_family_branches(branches) {
             branches = filtered;
         } else {
             return Ok(never());
         }
-        branches = drop_vacuous_string_branches(branches);
-
-        if let Some(explicit_types) = explicit_all_of_type_intersection(&branches)
-            .or(explicit_types_before_vacuous_prune)
-        {
+        // Preserve every explicit type guard before removing redundant family
+        // branches; an untyped or union string branch does not imply string-only.
+        let explicit_types = match (
+            explicit_all_of_type_intersection(&branches),
+            explicit_types_before_vacuous_prune.clone(),
+        ) {
+            (Some(current), Some(saved)) => Some(intersect_schema_types(
+                &current.into_iter().collect::<Vec<_>>(),
+                &saved.into_iter().collect::<Vec<_>>(),
+            ).into_iter().collect::<BTreeSet<_>>()),
+            (current, saved) => current.or(saved),
+        };
+        if let Some(explicit_types) = explicit_types {
             let explicit_types_vec = explicit_types.into_iter().collect::<Vec<_>>();
             for branch in &mut branches {
                 if let SchemaKind::Assertions(assertions) = &mut branch.kind {
@@ -905,12 +935,22 @@ impl<'a> Lowerer<'a> {
                         *types = intersect_schema_types(types, &explicit_types_vec);
                     }
                     prune_assertion_families_to_types(assertions);
+                } else if matches!(branch.kind, SchemaKind::Ref(_))
+                    && !self.ref_implies_types(branch, &explicit_types_vec)? {
+                    return Err(SchemaImportError::at(&branch.location,
+                        "unsupported allOf recursive schema constraint: cannot apply the type intersection exactly"));
                 }
             }
             branches = drop_vacuous_string_branches(branches);
         }
 
         if branches.is_empty() {
+            // Flattened true-only tails can outlive a pruned object guard.
+            // The saved explicit intersection must still constrain the result.
+            if let Some(types) = explicit_types_before_vacuous_prune {
+                return self.lower_schema(&Schema::assertions("<allOf-type-intersection>",
+                    SchemaAssertions { types: Some(types.into_iter().collect()), ..SchemaAssertions::default() }));
+            }
             return Ok(r(JSON_VALUE_RULE));
         }
         if let Some(merged) = merge_all_of_finite_string_literals(&branches)? {
@@ -1752,9 +1792,11 @@ fn merge_all_of_string_like_schema(branches: &[Schema]) -> Option<Schema> {
         {
             return None;
         }
-        if let Some(types) = &assertions.types
-            && !types.iter().any(|schema_type| *schema_type == SchemaType::String)
-        {
+        // This merger emits a string-only result. Untyped and union schemas
+        // also admit nonstrings, where string assertions are vacuous.
+        if assertions.types.as_ref().is_none_or(|types| {
+            types.is_empty() || types.iter().any(|ty| *ty != SchemaType::String)
+        }) {
             return None;
         }
         if let Some(branch_string) = &assertions.string {

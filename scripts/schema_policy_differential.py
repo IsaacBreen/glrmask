@@ -17,7 +17,7 @@ import subprocess
 from jsonschema import Draft7Validator, Draft202012Validator
 
 FILES = (
-    "oneOf", "not", "if-then-else", "uniqueItems", "minProperties",
+    "allOf", "oneOf", "not", "if-then-else", "uniqueItems", "minProperties",
     "maxProperties", "propertyNames", "format", "type", "const",
     "boolean_schema", "dependencies", "dependentRequired",
 )

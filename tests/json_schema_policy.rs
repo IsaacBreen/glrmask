@@ -94,3 +94,51 @@ fn object_union_merges_and_dynamic_minima_cannot_broaden_assertions() {
         ("{\"a\": 1, \"b\": 2}",true), ("{\"a\": 1}",false)
     ]);
 }
+
+#[test]
+fn allof_identity_and_object_type_guards_are_preserved() {
+    for schema in [
+        json!({"allOf":[{"type":"object"},true]}),
+        json!({"allOf":[true,{"type":"object"}]}),
+        json!({"type":"object","allOf":[true]}),
+        json!({"allOf":[{"type":"object"},{},true]})
+    ] { check(schema, &[("{}",true),("1",false),("\"s\"",false),("true",false)]); }
+    check(json!({"allOf":[true,true]}), &[("{}",true),("1",true)]);
+    refuses(json!({"allOf":[{"type":"object"},{"$ref":"#/$defs/r"}],"$defs":{"r":{"anyOf":[{"$ref":"#/$defs/r"},{"type":"string"}]}}}), "#");
+}
+
+#[test]
+fn allof_preserves_untyped_and_union_string_alternatives() {
+    check(json!({"allOf":[{"minLength":2}]}), &[("5",true),("true",true),("\"ab\"",true),("\"a\"",false)]);
+    check(json!({"allOf":[{"type":["string","boolean"],"minLength":2}]}), &[("true",true),("false",true),("\"ab\"",true),("\"a\"",false),("5",false)]);
+    check(json!({"allOf":[{"type":["string","null"],"minLength":2}]}), &[("null",true),("\"ab\"",true),("\"a\"",false)]);
+    // Multiple untyped operands require a parser-language intersection. An
+    // explicit refusal is preferable to discarding every nonstring value.
+    refuses(json!({"allOf":[{"minLength":2},{"maxLength":3}]}), "#");
+}
+
+#[test]
+fn nested_allof_boolean_identities_preserve_type_intersections() {
+    for schema in [
+        json!({"allOf":[{"type":"object"},{"allOf":[true,true]}]}),
+        json!({"allOf":[true,{"allOf":[{"type":"object"},true]}]}),
+        json!({"allOf":[{"type":"object"},{"anyOf":[true]},{"anyOf":[true]}]})
+    ] { check(schema, &[("{}",true),("1",false),("\"s\"",false)]); }
+    for schema in [
+        json!({"allOf":[{"type":"object"},{"allOf":[true,false]}]}),
+        json!({"allOf":[{"allOf":[{"type":"object"},true]},{"allOf":[true,false]}]}),
+        json!({"allOf":[{"allOf":[{"type":"object"},true]},{"type":"string"}]}),
+        json!({"allOf":[{"type":"object"},{"allOf":[{"type":"array"},true]}]})
+    ] { check(schema, &[("{}",false),("[]",false),("1",false),("\"s\"",false)]); }
+    for schema in [
+        json!({"allOf":[{"allOf":[{"type":"integer"},true]},{"type":"number"}]}),
+        json!({"allOf":[{"allOf":[{"type":"number"},true]},{"type":"integer"}]})
+    ] { check(schema, &[("1",true),("1.5",false),("\"s\"",false)]); }
+    check(json!({"allOf":[{"type":["object","string"]},{"allOf":[{"type":"string"},true]}]}), &[("\"s\"",true),("{}",false),("1",false)]);
+}
+
+#[test]
+fn allof_string_guards_survive_untyped_and_union_families() {
+    check(json!({"allOf":[{"type":"string"},{"minLength":2}]}), &[("\"ab\"",true),("\"a\"",false),("5",false),("{}",false)]);
+    check(json!({"allOf":[{"type":"string"},{"type":["object","string"]}]}), &[("\"s\"",true),("{}",false)]);
+}

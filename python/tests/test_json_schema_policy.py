@@ -47,3 +47,13 @@ def test_removed_approximation_option_errors(monkeypatch):
     monkeypatch.setenv("GLRMASK_JSON_SCHEMA_COERCE_ONE_OF_TO_ANY_OF", "1")
     with pytest.raises(ValueError, match="approximation has been removed"):
         compile_schema({"type": "string"})
+
+
+def test_allof_boolean_identity_and_string_type_guards():
+    c = compile_schema({"allOf": [{"type": "object"}, True]})
+    assert accepts(c, {})
+    assert not accepts(c, 1)
+    c = compile_schema({"allOf": [{"type": "string"}, {"minLength": 2}]})
+    assert accepts(c, "ab")
+    assert not accepts(c, 1)
+    assert not accepts(c, "a")
