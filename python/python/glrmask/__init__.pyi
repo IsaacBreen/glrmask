@@ -1,12 +1,21 @@
 """GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON schemas and Lark grammars. GLRM is its internal grammar format.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts GLRM (its native grammar format), JSON Schema, and Lark.
 
 ## Installation
 
 ```bash
 python -m pip install glrmask
 ```
+
+## Usage
+
+GLRMask has four core types:
+
+- `Grammar`: the language you want to generate.
+- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
+- `Constraint`: a grammar compiled against a specific vocabulary.
+- `ConstraintState`: the mutable state for a single generated sequence.
 
 ## Quickstart
 
@@ -26,19 +35,6 @@ assert state.is_accepting()
 ```
 
 Python masks are NumPy Boolean arrays indexed by original model token ID.
-
-## Core concepts
-
-GLRMask has four core types:
-
-- `Grammar`: source grammar semantics and bindings.
-- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.
-- `Constraint`: a closed, runnable grammar compiled against a vocabulary.
-- `ConstraintState`: the mutable state for one generated sequence.
-
-Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.
-
-`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
 
 ## Learn more
 
@@ -197,7 +193,7 @@ class Grammar:
     def prepare(
         self, vocab: Vocab, *, boundary_trigger: Optional[BoundaryTriggerDetail] = None,
     ) -> PreparedGrammar:
-        "Compile vocabulary-specific machinery while retaining unresolved slots. Reuse it with different bindings, then `link`. Only the boundary metadata request is retained for final link."
+        "Compile vocabulary-specific machinery while retaining unresolved slots. Only the boundary metadata request is retained for final link."
         ...
     def compile(
         self, vocab: Vocab, *, end_tokens: Optional[Sequence[int]] = None,
@@ -209,7 +205,7 @@ class Grammar:
 
 @final
 class PreparedGrammar:
-    "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots."
+    "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots."
     @property
     def requirements(self) -> list[Requirement]:
         "Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded."
@@ -265,7 +261,7 @@ class Constraint:
 
 @final
 class ConstraintState:
-    "Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence."
+    "Mutable state for one generated sequence."
     def marker_events(self) -> list[tuple[int, int]]:
         "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged."
         ...

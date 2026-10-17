@@ -334,7 +334,7 @@ impl PyGrammar {
             .map(constraint).map_err(api_error)
     }
 
-    /// Compile vocabulary-specific machinery while retaining unresolved slots. Reuse it with different bindings, then `link`. Only the boundary metadata request is retained for final link.
+    /// Compile vocabulary-specific machinery while retaining unresolved slots. Only the boundary metadata request is retained for final link.
     #[pyo3(signature = (vocab, *, boundary_trigger=None))]
     fn prepare(slf:&Bound<'_,Self>, py: Python<'_>, vocab: &PyVocab,
         boundary_trigger: Option<PyRef<'_, PyBoundaryTriggerDetail>>) -> PyResult<PyPreparedGrammar> {
@@ -346,7 +346,7 @@ impl PyGrammar {
     }
 }
 
-/// Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots.
+/// Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots.
 #[pyclass(name = "PreparedGrammar", module = "glrmask")]
 #[derive(Clone)]
 pub(super) struct PyPreparedGrammar {

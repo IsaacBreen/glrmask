@@ -91,8 +91,8 @@ def document(flavor):
         api = 'https://glrmask.com/api/python/' if flavor == 'python' else 'https://docs.rs/glrmask/latest/glrmask/'
         more = f'## Learn more\n\n[Full guide]({REPO}/blob/main/GUIDE.md) · [API reference]({api}) · [Benchmarks]({WEBSITE}/#benchmarks)'
         return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
-                              install(flavor, '## Installation'), quickstart(flavor, '## Quickstart'),
-                              '## Core concepts\n\n' + read('usage'), more, LICENSE]) + '\n'
+                              install(flavor, '## Installation'), '## Usage\n\n' + read('usage'),
+                              quickstart(flavor, '## Quickstart'), more, LICENSE]) + '\n'
     return '\n\n'.join(['# GLRMask', NOTICE, read('introduction'), links(flavor),
                           '## Benchmarks\n\n' + benchmark_body(flavor), getting_started(flavor),
                           '## How it works\n\n' + read('how-it-works'), LICENSE]) + '\n'
@@ -145,7 +145,7 @@ def rust_module_intro():
     start = source.index('//!')
     end = source.index('#![deny(warnings)]')
     prose = '\n\n'.join([NOTICE, read('introduction'), install('rust', '# Installation'),
-                           quickstart('rust', '# Quickstart'), '# Core types\n\n' + read('usage'),
+                           '# Usage\n\n' + read('usage'), quickstart('rust', '# Quickstart'),
                            '# Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](https://docs.rs/glrmask/latest/glrmask/)'])
     block = '\n'.join('//! ' + line if line else '//!' for line in prose.splitlines()) + '\n//!\n'
     return source[:start] + block + source[end:]
@@ -156,7 +156,7 @@ def python_module_source(path):
     first = ast.parse(source).body[0]
     assert isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str)
     prose = '\n\n'.join([read('introduction'), install('python', '## Installation'),
-                            quickstart('python', '## Quickstart'), '## Core concepts\n\n' + read('usage'),
+                            '## Usage\n\n' + read('usage'), quickstart('python', '## Quickstart'),
                             '## Learn more\n\n[Full guide](' + REPO + '/blob/main/GUIDE.md) · [API reference](' + WEBSITE + '/api/python/)'])
     return '"""' + prose + '\n"""\n' + ''.join(source.splitlines(keepends=True)[first.end_lineno:])
 

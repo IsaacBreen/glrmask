@@ -132,3 +132,23 @@ branch. The existing Cloudflare Git integration deploys `dist-glrmask`. Source
 pushes do not rebuild an immutable docs.rs version: Rust documentation changes
 appear on docs.rs at the next normal crate publication. No package bump is
 required or authorized solely for these documentation changes.
+
+
+## Shared wording changes
+
+Edit relevant shared website and language prose in `docs/content`, then run
+`python scripts/sync-guide.py`. The introduction and core type descriptions are
+shared; Rust/Python code examples and API details remain language-specific.
+Do not add homepage-only wording overrides or hand-edit generated copies.
+
+After the library source is merged, the website imports `docs/language-docs.json`
+at one exact source revision through `scripts/python-api/sync-language-content.py`.
+Its hourly reference workflow, or a manual `python-reference.yml` run, regenerates
+and checks the homepage, guide and published Python reference before deployment.
+The website build checks shared paragraphs independently of its generators, so a
+homepage-only or Python-only rewrite fails even if generated hashes are updated.
+
+`sync-guide.py --check` verifies the Rust/Python source copies. Rust doctests and
+rendered rustdoc are checked now; existing docs.rs/package artifacts retain their
+published text until the next normal release. Never bump a package solely to
+propagate prose.

@@ -1,7 +1,7 @@
 {
   "schema": "glrmask-language-docs-v1",
-  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON schemas and Lark grammars. GLRM is its internal grammar format.",
-  "usage": "GLRMask has four core types:\n\n- `Grammar`: source grammar semantics and bindings.\n- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.\n- `Constraint`: a closed, runnable grammar compiled against a vocabulary.\n- `ConstraintState`: the mutable state for one generated sequence.\n\nCompile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.\n\n`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.",
+  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts GLRM (its native grammar format), JSON Schema, and Lark.",
+  "usage": "GLRMask has four core types:\n\n- `Grammar`: the language you want to generate.\n- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.\n- `Constraint`: a grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.",
   "installation": {
     "python": "python -m pip install glrmask",
     "rust": "cargo add glrmask"
@@ -53,9 +53,9 @@
     "Grammar.clone": "Independent binding snapshot; later binds on either handle do not affect the other.",
     "Grammar.__copy__": "Equivalent to `clone`.",
     "Grammar.__deepcopy__": "Equivalent to `clone`; immutable compiled storage may remain shared.",
-    "Grammar.prepare": "Compile vocabulary-specific machinery while retaining unresolved slots. Reuse it with different bindings, then `link`. Only the boundary metadata request is retained for final link.",
+    "Grammar.prepare": "Compile vocabulary-specific machinery while retaining unresolved slots. Only the boundary metadata request is retained for final link.",
     "Grammar.compile": "Requires every slot to be bound. `end_tokens` are root generation controls, allowed only at acceptance; commit the selected end token before stopping. Their policy is not inherited by an embedded child. `optimization` defaults to `AUTO`.",
-    "PreparedGrammar": "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bind prepared children or exact events, then link a runnable root. Bindings are mutable on this handle; clones and attached children retain independent snapshots.",
+    "PreparedGrammar": "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots.",
     "PreparedGrammar.requirements": "Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.",
     "PreparedGrammar.bind": "Fill a declared slot once. Attach a parent before binding its descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.",
     "PreparedGrammar.clone": "Independent binding snapshot sharing immutable compiled machinery.",
@@ -70,7 +70,7 @@
     "Constraint.mask_len": "Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`.",
     "Constraint.save": "Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.",
     "Constraint.load": "Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping.",
-    "ConstraintState": "Mutable state for one generated sequence. Query a mask, sample an allowed original ID, then commit it. Clone to branch the sequence.",
+    "ConstraintState": "Mutable state for one generated sequence.",
     "ConstraintState.clone": "Independent snapshot at the current prefix.",
     "ConstraintState.mask": "New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.",
     "ConstraintState.fill_mask": "Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits.",
@@ -109,5 +109,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "191b63f1d62d9ded43589ac57e56eece9f0ca81a07ac22896107debd3c4c3f40"
+  "content_sha256": "1d554f364b69e2de762da478ad160452ced94a54f7be17ace1d12701ed17c5ce"
 }

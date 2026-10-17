@@ -2,7 +2,7 @@
 
 GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.
 
-GLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON schemas and Lark grammars. GLRM is its internal grammar format.
+GLRMask supports general context-free grammars, including ambiguous ones. It accepts GLRM (its native grammar format), JSON Schema, and Lark.
 
 [Website](https://glrmask.com) · [Paper](https://doi.org/10.5281/zenodo.23273556)
 
@@ -113,14 +113,10 @@ cargo add glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: source grammar semantics and bindings.
-- `PreparedGrammar`: reusable vocabulary-specific compiled machinery, which can still have unresolved bindings.
-- `Constraint`: a closed, runnable grammar compiled against a vocabulary.
-- `ConstraintState`: the mutable state for one generated sequence.
-
-Compile a `Grammar` directly, or use `prepare()` and `link()` for reusable components. Create a state with `start()`, then compute the next-token mask, sample an allowed token, and commit it.
-
-`Grammar` and `PreparedGrammar` keep reusable definitions with mutable bindings. `bind()` fills one declared slot on the handle. Clones and previously attached children retain independent binding snapshots; a failed bind leaves the handle unchanged.
+- `Grammar`: the language you want to generate.
+- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
+- `Constraint`: a grammar compiled against a specific vocabulary.
+- `ConstraintState`: the mutable state for a single generated sequence.
 
 ### Python quickstart
 
