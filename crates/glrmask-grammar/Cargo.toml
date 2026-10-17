@@ -1,6 +1,6 @@
 [package]
 name = "glrmask-grammar"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Grammar representations, transformations, and text frontends for GLRMask"
 license = "MIT OR Apache-2.0"
@@ -12,7 +12,7 @@ internal-api = []
 
 [dependencies]
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
-glrmask-lexer = { version = "=0.1.1", path = "../glrmask-lexer", features = ["internal-api"] }
+glrmask-lexer = { version = "=0.2.0", path = "../glrmask-lexer", features = ["internal-api"] }
 rayon = "1"
 rustc-hash = "1"
 range-set-blaze = "0.3.0"
