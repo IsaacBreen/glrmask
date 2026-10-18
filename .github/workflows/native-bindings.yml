@@ -1,6 +1,7 @@
 name: Native C++ and Node.js
 
 on:
+  workflow_call:
   workflow_dispatch:
   push:
     branches: [main, feat/native-cpp-js-881685]
