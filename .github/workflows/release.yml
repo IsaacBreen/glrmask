@@ -13,6 +13,10 @@ on:
         description: 'Actions run ID for the published GitHub Release and its validated native artifacts'
         required: true
         type: string
+      python_source_run_id:
+        description: 'Optional, previously green Python wheel CI run for this exact release source tree'
+        required: false
+        type: string
   pull_request:
     paths:
       - '.github/workflows/release.yml'
@@ -309,7 +313,7 @@ jobs:
 
   npm-recovery:
     name: npm - recover vetted release via trusted publishing
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: release
@@ -395,3 +399,88 @@ jobs:
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
           npm publish "./dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
+
+  pypi-recovery:
+    name: PyPI - recover exactly source-matched validated wheels
+    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      PYTHON_SOURCE_RUN_ID: ${{ inputs.python_source_run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify published release, successful wheel CI and exact source-tree identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          [[ "$PYTHON_SOURCE_RUN_ID" =~ ^[1-9][0-9]+$ ]]
+          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry
+          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"
+          printf '%s' "$RELEASE_JSON" | jq -e '.draft == false and .prerelease == false' > /dev/null
+          RELEASE_COMMIT="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq .object.sha)"
+          test "$(printf '%s' "$RELEASE_JSON" | jq -r .target_commitish)" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${PYTHON_SOURCE_RUN_ID}")"
+          test "$(printf '%s' "$RUN_JSON" | jq -r .name)" = 'Python wheels'
+          test "$(printf '%s' "$RUN_JSON" | jq -r .event)" = pull_request
+          test "$(printf '%s' "$RUN_JSON" | jq -r .status)" = completed
+          test "$(printf '%s' "$RUN_JSON" | jq -r .conclusion)" = success
+          test "$(printf '%s' "$RUN_JSON" | jq -r .repository.full_name)" = "$GITHUB_REPOSITORY"
+          SOURCE_COMMIT="$(printf '%s' "$RUN_JSON" | jq -r .head_sha)"
+          RELEASE_TREE="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${RELEASE_COMMIT}" --jq .tree.sha)"
+          SOURCE_TREE="$(gh api "repos/${GITHUB_REPOSITORY}/git/commits/${SOURCE_COMMIT}" --jq .tree.sha)"
+          test "$SOURCE_TREE" = "$RELEASE_TREE"
+          echo "Exact source-tree match: ${SOURCE_TREE}"
+      - uses: actions/download-artifact@v7
+        with:
+          name: python-release-artifacts
+          path: dist
+          run-id: ${{ inputs.python_source_run_id }}
+          github-token: ${{ github.token }}
+      - name: Validate package set and all distribution versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
+          test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
+          find dist -type f | while IFS= read -r file; do
+            test "$(basename "$file" | grep -c "${RELEASE_VERSION}")" -eq 1
+          done
+          python -m pip install --upgrade pip twine packaging
+          python -m twine check dist/*
+          python scripts/check-python-wheel-set.py dist
+      - name: Check existing PyPI version
+        id: exists
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os,urllib.error,urllib.request
+          u=f'https://pypi.org/pypi/glrmask/{os.environ["RELEASE_VERSION"]}/json'
+          try:
+              with urllib.request.urlopen(u,timeout=20) as r:
+                  if r.status!=200: raise RuntimeError('Unexpected PyPI response')
+                  exists=True
+          except urllib.error.HTTPError as e:
+              if e.code!=404: raise
+              exists=False
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:
+              out.write(f'skip={str(exists).lower()}\n')
+          print('Already published:',exists)
+          PY
+      - name: Publish approved wheel set using GitHub OIDC
+        if: steps.exists.outputs.skip == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
