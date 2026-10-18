@@ -6,7 +6,7 @@ This is **Node.js support, not browser WebAssembly**. A browser, Bun or Deno tar
 
 ## Installation
 
-Use Node.js 22 or newer. A binary package requires no Rust compiler, C++ compiler, Python runtime or post-install network download. The release-artifact matrix contains Windows x64/MSVC, macOS x64 and arm64, and Linux x64 and arm64 with glibc. The Linux matrix builds on Ubuntu 22.04 (glibc 2.35); use a matching or newer glibc system, or build from source for your deployment. macOS artifacts target macOS 11 or newer.
+Use Node.js 22 or newer. A binary package requires no Rust compiler, C++ compiler, Python runtime or post-install network download. The release-artifact matrix contains Windows x64 and arm64/MSVC, macOS x64 and arm64, and Linux x64 and arm64 with glibc. The Linux matrix builds on Ubuntu 22.04 (glibc 2.35); use a matching or newer glibc system, or build from source for your deployment. macOS artifacts target macOS 11 or newer.
 
 Package publication is a separate release action. The source and CI commands below produce installable tarballs; they do not publish anything to npm. Install a tarball built for your platform, or the all-platform tarball assembled by the native CI workflow:
 
@@ -14,7 +14,7 @@ Package publication is a separate release action. The source and CI commands bel
 npm install /absolute/path/glrmask-node-0.3.1.tgz
 ```
 
-A per-platform development tarball contains only its recorded platform. The all-platform CI tarball bundles the five release-target binaries into one package, so installation does not depend on unpublished optional-dependency packages. A missing or incompatible native binary causes an explicit error; there is no silent Python, subprocess or WebAssembly fallback.
+A per-platform development tarball contains only its recorded platform. The all-platform CI tarball bundles the six release-target binaries into one package, so installation does not depend on unpublished optional-dependency packages. A missing or incompatible native binary causes an explicit error; there is no silent Python, subprocess or WebAssembly fallback.
 
 ### Build from a source checkout
 
@@ -33,7 +33,7 @@ Then install the generated `.tgz` in your application. `npm ci` installs develop
 
 For an owned incremental development cache, set `CARGO_TARGET_DIR` and use `npm run build:dev`. A specific Rust target can be passed with `npm run build -- --target aarch64-unknown-linux-gnu`; the corresponding Rust target, native compiler and linker must be installed. Cross-compilation is not inferred from an artifact filename.
 
-Packing refuses missing, mismatched or non-release artifacts. `GLRMASK_ALLOW_DEV_ARTIFACTS=1` is available for explicit local development installation tests, not release qualification. Production builds use portable target defaults rather than `target-cpu=native`. Source builds additionally recognize Windows arm64 and Linux musl target names, but those are not part of the five-target prebuilt validation matrix.
+Packing refuses missing, mismatched or non-release artifacts. `GLRMASK_ALLOW_DEV_ARTIFACTS=1` is available for explicit local development installation tests, not release qualification. Production builds use portable target defaults rather than `target-cpu=native`. Source builds additionally recognize Linux musl target names, but those are not part of the six-target prebuilt validation matrix.
 
 ## Quick start
 

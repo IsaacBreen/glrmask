@@ -10,7 +10,7 @@ const targets = Object.freeze({
   'aarch64-unknown-linux-musl': 'linux-arm64-musl',
 });
 const releaseTargets = Object.freeze([
-  'win32-x64-msvc', 'darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu',
+  'win32-x64-msvc', 'win32-arm64-msvc', 'darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu',
 ]);
 function currentTarget() {
   const {platform, arch} = process;

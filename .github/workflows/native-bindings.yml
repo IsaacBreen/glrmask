@@ -59,6 +59,13 @@ jobs:
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             tag: win32-x64-msvc
+            msvc_arch: x64
+            msvc_component: x86.x64
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            tag: win32-arm64-msvc
+            msvc_arch: arm64
+            msvc_component: ARM64
     defaults:
       run:
         shell: bash
@@ -74,14 +81,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.${{ matrix.msvc_component }} -property installationPath
           Import-Module "$vs\Common7\Tools\Microsoft.VisualStudio.DevShell.dll"
-          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64'
+          Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=${{ matrix.msvc_arch }} -host_arch=${{ matrix.msvc_arch }}'
           # Git Bash prepends its own link.exe. Pin MSVC explicitly for Rust
           # (including host build scripts) and for CMake/cc-rs native compilers.
           $linker = (Get-Command link.exe -ErrorAction Stop).Source
           $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
-          "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $triple = '${{ matrix.target }}'.ToUpper().Replace('-', '_')
+          "CARGO_TARGET_${triple}_LINKER=$linker" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CC=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CXX=$compiler" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           foreach ($name in @('PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','WindowsSdkDir','WindowsSDKVersion')) {

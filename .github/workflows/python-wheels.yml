@@ -16,7 +16,7 @@ on:
       - "src/**"
       - "crates/**"
   # Versioned GitHub Release publication calls this workflow via workflow_call.
-  # Do not rebuild 25 wheels on every tag push (including recovery/validation
+  # Do not rebuild 30 wheels on every tag push (including recovery/validation
   # tags); tag creation alone is not a publication event.
 
 permissions:
@@ -61,6 +61,11 @@ jobs:
             runner: windows-latest
             target: x64
             python-arch: x64
+            linux: false
+          - id: windows-arm64
+            runner: windows-11-arm
+            target: arm64
+            python-arch: arm64
             linux: false
 
     steps:

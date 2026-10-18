@@ -22,6 +22,7 @@ PLATFORMS = {
     "macos-x86_64": lambda platform: platform.startswith("macosx_") and platform.endswith("x86_64"),
     "macos-arm64": lambda platform: platform.startswith("macosx_") and platform.endswith("arm64"),
     "windows-x86_64": lambda platform: platform == "win_amd64",
+    "windows-arm64": lambda platform: platform == "win_arm64",
 }
 
 

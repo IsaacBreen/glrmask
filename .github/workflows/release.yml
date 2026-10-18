@@ -126,7 +126,7 @@ jobs:
           PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
           test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
           test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
-          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-arm64-msvc win32-x64-msvc; do
             tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
           done
           mkdir consumer
@@ -180,7 +180,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 30
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "$RELEASE_VERSION")" -eq 1
@@ -302,7 +302,7 @@ jobs:
               text=True))['assets']
           asset_by_name={item['name']:item for item in existing}
           archives=sorted(pathlib.Path('dist/cpp').rglob('*.tar.gz'))
-          if len(archives) != 10: raise RuntimeError('Expected 10 C++ release archives')
+          if len(archives) != 12: raise RuntimeError('Expected 12 C++ release archives')
           for archive in archives:
               name=archive.name
               digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -368,7 +368,7 @@ jobs:
           package-manager-cache: false
       - name: Install OIDC-compatible npm
         run: npm install --global npm@12.2.0
-      - name: Validate and install exact five-platform npm release tarball
+      - name: Validate and install exact six-platform npm release tarball
         shell: bash
         run: |
           set -euo pipefail
@@ -377,7 +377,7 @@ jobs:
           PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
           test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
           test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
-          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-arm64-msvc win32-x64-msvc; do
             tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
           done
           mkdir consumer
@@ -460,7 +460,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 30
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "${RELEASE_VERSION}")" -eq 1

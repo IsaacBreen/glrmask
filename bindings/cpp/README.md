@@ -19,7 +19,7 @@ cmake --install build/native --config Release --prefix /absolute/path/glrmask-in
 
 The default is a static library. Add `-DGLRMASK_SHARED=ON` to build against the shared library instead. The CMake build invokes Cargo with the locked dependencies and the `release` profile. It does not change the core library's normal compilation settings.
 
-The native CI matrix builds Windows x64/MSVC, macOS x64 and arm64, and Linux x64 and arm64 on Ubuntu 22.04 (glibc 2.35). macOS artifacts target macOS 11 or newer. Use the matching or newer runtime, or build from source for another deployment. CI produces platform-specific CMake-installable archives; these are build artifacts, not a promise that a new registry or GitHub release has been published. Use matching headers and binaries from the same build. Other toolchains and 32-bit targets are outside that matrix.
+The native CI matrix builds Windows x64 and arm64/MSVC, macOS x64 and arm64, and Linux x64 and arm64 on Ubuntu 22.04 (glibc 2.35). macOS artifacts target macOS 11 or newer. Use the matching or newer runtime, or build from source for another deployment. CI produces platform-specific CMake-installable archives; these are build artifacts, not a promise that a new registry or GitHub release has been published. Use matching headers and binaries from the same build. Other toolchains and 32-bit targets are outside that matrix.
 
 ### Use the installed package
 

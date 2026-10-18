@@ -9,7 +9,7 @@ import tarfile
 from pathlib import Path
 
 TARGETS = {"darwin-arm64", "darwin-x64", "linux-arm64-gnu",
-           "linux-x64-gnu", "win32-x64-msvc"}
+           "linux-x64-gnu", "win32-arm64-msvc", "win32-x64-msvc"}
 KINDS = {"static", "shared"}
 
 
@@ -58,7 +58,7 @@ def main() -> None:
             print(f"Verified {name}: {file.stat().st_size} bytes, sha256:{actual}")
     if seen != {(t, k) for t in TARGETS for k in KINDS}:
         raise RuntimeError("Incomplete native release matrix")
-    print(f"Complete 5-platform, static/shared C++ release set: {len(seen)} archives")
+    print(f"Complete 6-platform, static/shared C++ release set: {len(seen)} archives")
 
 
 if __name__ == "__main__":

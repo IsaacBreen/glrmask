@@ -16,12 +16,12 @@ must all match its tag:
 The workflow reuses the native C++/Node and Python wheel build/test workflows at that
 tag, and only publishes after their complete validation jobs pass. It releases:
 
-- **npm**: the five-platform, prebuilt `@glrmask/node` tarball through OIDC, with no
+- **npm**: the six-platform, prebuilt `@glrmask/node` tarball through OIDC, with no
   shared npm credential or post-install native compilation;
-- **PyPI**: the validated 25 wheels plus sdist, using PyPI's short-lived OIDC credential;
+- **PyPI**: the validated 30 wheels plus sdist, using PyPI's short-lived OIDC credential;
 - **crates.io**: the `glrmask` *root crate*, using `rust-lang/crates-io-auth-action`
   and a temporary token which is revoked after the job;
-- **C/C++**: ten tested, checksummed GitHub Release assets (five platforms ×
+- **C/C++**: twelve tested, checksummed GitHub Release assets (six platforms ×
   static/shared), including headers, native libraries, CMake installation and manifests.
 
 For a rerun, an already-published npm/PyPI/crates.io version is skipped. Existing GitHub
