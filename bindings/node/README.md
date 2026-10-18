@@ -13,7 +13,7 @@ an `optionalDependencies` entry (`@glrmask/node-<platform>`). No Rust
 compiler, C++ compiler, Python runtime or post-install download is needed on
 a supported platform. Prebuilt release binaries cover Windows x64 and arm64
 (MSVC), macOS x64 and arm64 (macOS 11+), and Linux x64 and arm64 in both
-glibc (Ubuntu 22.04 baseline, glibc 2.35) and musl variants. On an
+glibc (manylinux_2_28, minimum glibc 2.28) and musl (Alpine) variants. On an
 unsupported platform, or when the optional package was skipped with
 `--no-optional`/`--omit=optional`, requiring the package raises an explicit
 error naming the expected platform package; there is no silent fallback.

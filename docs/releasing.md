@@ -20,10 +20,10 @@ tag, and only publishes after their complete validation jobs pass. It releases:
   `@glrmask/node-<platform>` optional-dependency packages (Windows x64/arm64,
   macOS x64/arm64, Linux x64/arm64 × glibc/musl) through OIDC, with no
   shared npm credential or post-install native compilation;
-- **PyPI**: the validated 25 wheels plus sdist, using PyPI's short-lived OIDC credential;
+- **PyPI**: the validated wheels (covering manylinux, musllinux, macOS, and Windows) plus sdist, using PyPI's short-lived OIDC credential;
 - **crates.io**: the `glrmask` *root crate*, using `rust-lang/crates-io-auth-action`
   and a temporary token which is revoked after the job;
-- **C/C++**: ten tested, checksummed GitHub Release assets (five platforms ×
+- **C/C++**: sixteen tested, checksummed GitHub Release assets (seven platforms ×
   static/shared), including headers, native libraries, CMake installation and manifests.
 
 For a rerun, an already-published npm/PyPI/crates.io version is skipped. Existing GitHub

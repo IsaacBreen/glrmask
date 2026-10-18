@@ -19,6 +19,8 @@ PYTHONS = {
 PLATFORMS = {
     "manylinux-x86_64": lambda platform: "manylinux" in platform and platform.endswith("x86_64"),
     "manylinux-aarch64": lambda platform: "manylinux" in platform and platform.endswith("aarch64"),
+    "musllinux-x86_64": lambda platform: "musllinux" in platform and platform.endswith("x86_64"),
+    "musllinux-aarch64": lambda platform: "musllinux" in platform and platform.endswith("aarch64"),
     "macos-x86_64": lambda platform: platform.startswith("macosx_") and platform.endswith("x86_64"),
     "macos-arm64": lambda platform: platform.startswith("macosx_") and platform.endswith("arm64"),
     "windows-x86_64": lambda platform: platform == "win_amd64",

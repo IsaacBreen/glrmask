@@ -6,6 +6,7 @@
 - Add a Node-API JavaScript/TypeScript package with asynchronous compilation and persistence, synchronous packed masks and commits, owning snapshots, explicit disposal and CommonJS/ESM support.
 - Cover the current public source/prepared/constraint lifecycle, exact token sets and ranges, marker observations, forcing, and cross-language artifact interchange with matching builds.
 - Add language guides, native build artifacts, platform validation and links to the hosted C++ and JavaScript documentation. The release workflow distributes verified native package and installation artifacts for each platform using tagged, version-aligned source.
+- Overhaul Linux portability: reduce glibc minimum for Node and C++ artifacts via portable `manylinux_2_28` build container (glibc >= 2.28, matching Node 22+ runtime requirements), add native Linux musl x64 and ARM64 builds, relocated consumer tests and C++/Node packaging, and add Python musllinux wheels across Python 3.9–3.13.
 
 ## 0.3.0 — 2026-10-17
 
