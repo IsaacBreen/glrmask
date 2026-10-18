@@ -15,9 +15,9 @@ on:
       - "scripts/python-wheel-smoke.py"
       - "src/**"
       - "crates/**"
-  push:
-    tags:
-      - "v*"
+  # Versioned GitHub Release publication calls this workflow via workflow_call.
+  # Do not rebuild 25 wheels on every tag push (including recovery/validation
+  # tags); tag creation alone is not a publication event.
 
 permissions:
   contents: read
