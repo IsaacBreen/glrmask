@@ -95,11 +95,11 @@ jobs:
     uses: ./.github/workflows/python-wheels.yml
 
   npm:
-    name: npm - @glrmask/node
+    name: npm - @glrmask/node (platforms first, then thin root)
     if: github.event_name == 'release'
     needs: [verify, native-build]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment: release
     permissions:
       contents: read
@@ -109,7 +109,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v7
         with:
-          name: glrmask-node-all-platforms
+          name: glrmask-node-npm-dist
           path: dist
       - uses: actions/setup-node@v7
         with:
@@ -117,35 +117,45 @@ jobs:
           package-manager-cache: false
       - name: Install OIDC-compatible npm
         run: npm install --global npm@12.2.0
-      - name: Verify tarball metadata and available-platform binaries
+      - name: Verify thin root and all eight platform tarballs
         shell: bash
         run: |
           set -euo pipefail
-          TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
-          test -f "$TGZ"
-          PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
+          ROOT_TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          test -f "$ROOT_TGZ"
+          PKG_JSON="$(tar -xOzf "$ROOT_TGZ" package/package.json)"
           test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
           test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
-          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-arm64-msvc win32-x64-msvc; do
-            tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
+          # The thin root must not embed binaries or the retired fat manifest.
+          if tar -tzf "$ROOT_TGZ" | grep -E 'package/glrmask\..+\.node|package/native-manifest\.json'; then
+            echo 'Thin root must not contain native binaries or native-manifest.json' >&2
+            exit 1
+          fi
+          tar -xOzf "$ROOT_TGZ" package/platform-manifest.json > /tmp/platform-manifest.json
+          test "$(jq -r .version /tmp/platform-manifest.json)" = "$RELEASE_VERSION"
+          test "$(jq -r '.targets | keys | length' /tmp/platform-manifest.json)" -eq 8
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            TGZ="dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
+            test -f "$TGZ" || { echo "Missing platform tarball $TGZ" >&2; exit 1; }
+            NAME="$(tar -xOzf "$TGZ" package/package.json | jq -r .name)"
+            test "$NAME" = "@glrmask/node-${tag}"
+            test "$(tar -xOzf "$TGZ" package/package.json | jq -r .version)" = "$RELEASE_VERSION"
+            # Provenance: the binary inside the platform tarball must match the
+            # size/sha256 recorded in the thin root's platform-manifest.json.
+            EXPECTED_SIZE="$(jq -r ".targets[\"$tag\"].size" /tmp/platform-manifest.json)"
+            EXPECTED_SHA="$(jq -r ".targets[\"$tag\"].sha256" /tmp/platform-manifest.json)"
+            tar -xOzf "$TGZ" "package/glrmask.${tag}.node" > /tmp/check.node
+            test "$(stat -c%s /tmp/check.node)" = "$EXPECTED_SIZE"
+            test "$(sha256sum /tmp/check.node | cut -d' ' -f1)" = "$EXPECTED_SHA"
           done
           mkdir consumer
           printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
           cd consumer
-          npm install --ignore-scripts --no-audit --no-fund --no-save "../$TGZ"
+          npm install --ignore-scripts --no-audit --no-fund --no-save \
+            "../../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
+            "../../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
           node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
-      - name: Check whether this npm version already exists
-        id: existing
-        shell: bash
-        run: |
-          if npm view "@glrmask/node@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
-            echo 'exists=true' >> "$GITHUB_OUTPUT"
-            echo "Already released npm @glrmask/node@${RELEASE_VERSION}; no second publish."
-          else
-            echo 'exists=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish from GitHub OIDC (no npm token)
-        if: steps.existing.outputs.exists == 'false'
+      - name: Publish platforms first, then thin root (GitHub OIDC, no npm token)
         env:
           # Ensure an auth-free npmrc; npm automatically requests a GitHub OIDC
           # token using this job's id-token: write permission.
@@ -154,7 +164,37 @@ jobs:
         run: |
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
-          npm publish "./dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
+          publish_with_retry() {
+            local tgz="$1" attempts=0
+            while [ "$attempts" -lt 3 ]; do
+              attempts=$((attempts + 1))
+              if npm publish "$tgz" --access public --registry=https://registry.npmjs.org/; then
+                return 0
+              fi
+              echo "Publish attempt $attempts failed for $tgz; retrying in 30s" >&2
+              sleep 30
+            done
+            echo "Publish failed three times for $tgz" >&2
+            return 1
+          }
+          already_public() {
+            npm view "$1@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1
+          }
+          # Platform packages must be public before the thin root, so a fresh
+          # `npm install @glrmask/node` resolves every optionalDependency.
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            NAME="@glrmask/node-${tag}"
+            if already_public "$NAME"; then
+              echo "Already published $NAME@${RELEASE_VERSION}; skipping."
+            else
+              publish_with_retry "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
+            fi
+          done
+          if already_public '@glrmask/node'; then
+            echo "Already released npm @glrmask/node@${RELEASE_VERSION}; no second publish."
+          else
+            publish_with_retry "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          fi
 
   pypi:
     name: PyPI - glrmask
@@ -180,7 +220,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 30
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "$RELEASE_VERSION")" -eq 1
@@ -302,7 +342,7 @@ jobs:
               text=True))['assets']
           asset_by_name={item['name']:item for item in existing}
           archives=sorted(pathlib.Path('dist/cpp').rglob('*.tar.gz'))
-          if len(archives) != 12: raise RuntimeError('Expected 12 C++ release archives')
+          if len(archives) != 10: raise RuntimeError('Expected 10 C++ release archives')
           for archive in archives:
               name=archive.name
               digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -358,7 +398,7 @@ jobs:
           echo "Valid existing release v${RELEASE_VERSION}; native archive from Actions run ${RELEASE_RUN_ID}"
       - uses: actions/download-artifact@v7
         with:
-          name: glrmask-node-all-platforms
+          name: glrmask-node-npm-dist
           path: dist
           run-id: ${{ inputs.source_run_id }}
           github-token: ${{ github.token }}
@@ -368,42 +408,70 @@ jobs:
           package-manager-cache: false
       - name: Install OIDC-compatible npm
         run: npm install --global npm@12.2.0
-      - name: Validate and install exact six-platform npm release tarball
+      - name: Validate thin root and all eight platform tarballs
         shell: bash
         run: |
           set -euo pipefail
-          TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
-          test -f "$TGZ"
-          PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
+          ROOT_TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          test -f "$ROOT_TGZ"
+          PKG_JSON="$(tar -xOzf "$ROOT_TGZ" package/package.json)"
           test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
           test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
-          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-arm64-msvc win32-x64-msvc; do
-            tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
+          if tar -tzf "$ROOT_TGZ" | grep -E 'package/glrmask\..+\.node|package/native-manifest\.json'; then
+            echo 'Thin root must not contain native binaries or native-manifest.json' >&2
+            exit 1
+          fi
+          tar -xOzf "$ROOT_TGZ" package/platform-manifest.json > /tmp/platform-manifest.json
+          test "$(jq -r '.targets | keys | length' /tmp/platform-manifest.json)" -eq 8
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            TGZ="dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
+            test -f "$TGZ" || { echo "Missing platform tarball $TGZ" >&2; exit 1; }
+            test "$(tar -xOzf "$TGZ" package/package.json | jq -r .name)" = "@glrmask/node-${tag}"
+            test "$(tar -xOzf "$TGZ" package/package.json | jq -r .version)" = "$RELEASE_VERSION"
           done
           mkdir consumer
           printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
           cd consumer
-          npm install --ignore-scripts --no-audit --no-fund --no-save "../$TGZ"
+          npm install --ignore-scripts --no-audit --no-fund --no-save \
+            "../../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
+            "../../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
           node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
-      - name: Check whether npm version is already public
-        id: exists
-        shell: bash
-        run: |
-          if npm view "@glrmask/node@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
-            echo 'skip=true' >> "$GITHUB_OUTPUT"
-            echo "Already published @glrmask/node@${RELEASE_VERSION}"
-          else
-            echo 'skip=false' >> "$GITHUB_OUTPUT"
-          fi
-      - name: Publish existing release tarball using GitHub OIDC
-        if: steps.exists.outputs.skip == 'false'
+      - name: Publish vetted platforms first, then thin root, using GitHub OIDC
         env:
           NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/glrmask-oidc.npmrc
         shell: bash
         run: |
           set -euo pipefail
           printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
-          npm publish "./dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
+          publish_with_retry() {
+            local tgz="$1" attempts=0
+            while [ "$attempts" -lt 3 ]; do
+              attempts=$((attempts + 1))
+              if npm publish "$tgz" --access public --registry=https://registry.npmjs.org/; then
+                return 0
+              fi
+              echo "Publish attempt $attempts failed for $tgz; retrying in 30s" >&2
+              sleep 30
+            done
+            echo "Publish failed three times for $tgz" >&2
+            return 1
+          }
+          already_public() {
+            npm view "$1@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1
+          }
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            NAME="@glrmask/node-${tag}"
+            if already_public "$NAME"; then
+              echo "Already published $NAME@${RELEASE_VERSION}; skipping."
+            else
+              publish_with_retry "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
+            fi
+          done
+          if already_public '@glrmask/node'; then
+            echo "Already published @glrmask/node@${RELEASE_VERSION}"
+          else
+            publish_with_retry "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          fi
 
   pypi-recovery:
     name: PyPI - recover exactly source-matched validated wheels
@@ -460,7 +528,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 30
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "${RELEASE_VERSION}")" -eq 1

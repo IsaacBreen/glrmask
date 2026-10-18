@@ -50,6 +50,14 @@ jobs:
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             tag: linux-arm64-gnu
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            tag: linux-x64-musl
+            musl: true
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-musl
+            tag: linux-arm64-musl
+            musl: true
           - os: macos-15-intel
             target: x86_64-apple-darwin
             tag: darwin-x64
@@ -96,13 +104,19 @@ jobs:
             $value = [Environment]::GetEnvironmentVariable($name)
             if ($value) { "$name=$value" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append }
           }
+      - name: Install musl toolchain
+        if: matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_${{ matrix.target }}=musl-gcc" | tr '-' '_' >> "$GITHUB_ENV"
       - name: Install build tools
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add '${{ matrix.target }}'
           python -m pip install cmake ninja
-          npm ci --ignore-scripts --prefix bindings/node
+          npm ci --omit=optional --ignore-scripts --prefix bindings/node
       - name: Validate source contracts
         run: python bindings/ci/check.py
       - name: Build native release libraries
@@ -112,8 +126,12 @@ jobs:
         run: |
           npm run build -- --target '${{ matrix.target }}'
           npm run check
-          npm pack
-          node scripts/test-installed.cjs glrmask-node-0.3.1.tgz "$RUNNER_TEMP/node-consumer"
+          rm -rf "$RUNNER_TEMP/stage-one" && mkdir -p "$RUNNER_TEMP/stage-one/root" "$RUNNER_TEMP/stage-one/${{ matrix.tag }}"
+          cp 'glrmask.${{ matrix.tag }}.node' native-manifest.json "$RUNNER_TEMP/stage-one/${{ matrix.tag }}/"
+          node scripts/check-package.cjs --platform-dir "$RUNNER_TEMP/stage-one/${{ matrix.tag }}" --tag '${{ matrix.tag }}'
+          npm pack --pack-destination "$RUNNER_TEMP/stage-one/root"
+          npm pack --pack-destination "$RUNNER_TEMP/stage-one/${{ matrix.tag }}" "$RUNNER_TEMP/stage-one/${{ matrix.tag }}"
+          node scripts/test-installed.cjs "$RUNNER_TEMP/stage-one/root/"*.tgz "$RUNNER_TEMP/stage-one/${{ matrix.tag }}/"*.tgz "$RUNNER_TEMP/node-consumer"
       - name: Static/shared CMake installations and relocated C/C++ consumers
         run: |
           python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/${{ matrix.target }}/release" --work-dir "$RUNNER_TEMP/cpp-validation"
@@ -158,10 +176,10 @@ jobs:
           retention-days: 14
 
   package:
-    name: Assemble and install all-platform npm package
+    name: Stage and install thin root plus platform npm packages
     needs: native
     runs-on: ubuntu-22.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -171,17 +189,31 @@ jobs:
         with:
           pattern: node-native-*
           path: native-input
-      - name: Assemble checksummed platform binaries
+      - name: Stage checksummed platform packages and thin root
         run: |
-          node bindings/node/scripts/assemble.cjs native-input
+          npm ci --omit=optional --ignore-scripts --prefix bindings/node
+          node bindings/node/scripts/stage-platforms.cjs --input native-input --output npm-stage
+          cp npm-stage/platform-manifest.json bindings/node/platform-manifest.json
           cd bindings/node
           node scripts/check-package.cjs --all
-          npm pack
-          node scripts/test-installed.cjs glrmask-node-0.3.1.tgz "$RUNNER_TEMP/universal-consumer"
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            node scripts/check-package.cjs --platform-dir "$GITHUB_WORKSPACE/npm-stage/$tag" --tag "$tag"
+          done
+          mkdir -p "$GITHUB_WORKSPACE/npm-dist"
+          npm pack --pack-destination "$GITHUB_WORKSPACE/npm-dist"
+          for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
+            npm pack --pack-destination "$GITHUB_WORKSPACE/npm-dist" "$GITHUB_WORKSPACE/npm-stage/$tag"
+          done
+          ls "$GITHUB_WORKSPACE/npm-dist"
+      - name: Install thin root with its platform package
+        run: |
+          cd bindings/node
+          node scripts/test-installed.cjs "$GITHUB_WORKSPACE/npm-dist/glrmask-node-"[0-9]*.tgz \
+            "$GITHUB_WORKSPACE/npm-dist/glrmask-node-linux-x64-gnu-"*.tgz "$RUNNER_TEMP/thin-consumer"
       - uses: actions/upload-artifact@v6
         with:
-          name: glrmask-node-all-platforms
-          path: bindings/node/*.tgz
+          name: glrmask-node-npm-dist
+          path: npm-dist/*.tgz
           if-no-files-found: error
           retention-days: 14
 

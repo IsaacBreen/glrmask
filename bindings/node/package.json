@@ -9,11 +9,11 @@
     "types":  "index.d.ts",
     "exports":  {
                     ".":  {
-                              "import":  {
+                               "import":  {
                                              "types":  "./index.d.mts",
                                              "default":  "./index.mjs"
                                          },
-                              "require":  {
+                               "require":  {
                                               "types":  "./index.d.cts",
                                               "default":  "./index.cjs"
                                           }
@@ -21,8 +21,18 @@
                     "./package.json":  "./package.json"
                 },
     "engines":  {
-                    "node":  "\u003e=22"
+                    "node":  ">=22"
                 },
+    "optionalDependencies":  {
+                                 "@glrmask/node-win32-x64-msvc":  "0.3.1",
+                                 "@glrmask/node-win32-arm64-msvc":  "0.3.1",
+                                 "@glrmask/node-darwin-x64":  "0.3.1",
+                                 "@glrmask/node-darwin-arm64":  "0.3.1",
+                                 "@glrmask/node-linux-x64-gnu":  "0.3.1",
+                                 "@glrmask/node-linux-arm64-gnu":  "0.3.1",
+                                 "@glrmask/node-linux-x64-musl":  "0.3.1",
+                                 "@glrmask/node-linux-arm64-musl":  "0.3.1"
+                             },
     "files":  [
                   "index.cjs",
                   "index.mjs",
@@ -31,8 +41,7 @@
                   "index.d.cts",
                   "loader.cjs",
                   "platform.cjs",
-                  "glrmask.*.node",
-                  "native-manifest.json",
+                  "platform-manifest.json",
                   "README.md",
                   "LICENSE-MIT",
                   "LICENSE-APACHE",
@@ -43,9 +52,10 @@
     "scripts":  {
                     "build":  "node scripts/build.cjs",
                     "build:dev":  "node scripts/build.cjs --profile bindings-dev",
-                    "test":  "node --expose-gc --test tests/native.test.cjs",
+                    "stage:platforms":  "node scripts/stage-platforms.cjs",
+                    "test":  "node --expose-gc --test tests/native.test.cjs tests/platform-packages.test.cjs",
                     "typecheck":  "tsc -p tests/tsconfig.json",
-                    "check":  "npm test \u0026\u0026 npm run typecheck",
+                    "check":  "npm test && npm run typecheck",
                     "prepack":  "node scripts/check-package.cjs",
                     "test:installed":  "node scripts/test-installed.cjs"
                 },

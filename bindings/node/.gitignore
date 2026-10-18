@@ -4,3 +4,5 @@ node_modules/
 native.d.ts
 typecheck-output/
 native-manifest.json
+platform-manifest.json
+dist-stage/
