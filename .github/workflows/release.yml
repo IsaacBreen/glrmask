@@ -17,6 +17,11 @@ on:
         description: 'Optional, previously green Python wheel CI run for this exact release source tree'
         required: false
         type: string
+      verify_crates_trust:
+        description: 'Verify crates.io trusted publisher authentication only; upload nothing'
+        required: false
+        type: boolean
+        default: false
   pull_request:
     paths:
       - '.github/workflows/release.yml'
@@ -313,7 +318,7 @@ jobs:
 
   npm-recovery:
     name: npm - recover vetted release via trusted publishing
-    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id == ''
+    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id == '' && !inputs.verify_crates_trust
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: release
@@ -402,7 +407,7 @@ jobs:
 
   pypi-recovery:
     name: PyPI - recover exactly source-matched validated wheels
-    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.python_source_run_id != '' && !inputs.verify_crates_trust
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     environment: release
@@ -484,3 +489,27 @@ jobs:
       - name: Publish approved wheel set using GitHub OIDC
         if: steps.exists.outputs.skip == 'false'
         uses: pypa/gh-action-pypi-publish@release/v1
+
+
+  crates-trust-check:
+    name: crates.io - verify trusted publishing without publishing
+    if: github.event_name == 'workflow_dispatch' && inputs.verify_crates_trust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Exchange GitHub OIDC for a temporary crates.io publish credential
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Confirm trusted publishing authentication
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$CARGO_REGISTRY_TOKEN"
+          echo 'crates.io OIDC trusted publisher successfully authenticated; no package uploaded'
+      # The action's post hook revokes the temporary credential.
