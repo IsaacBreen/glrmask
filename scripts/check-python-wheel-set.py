@@ -11,10 +11,6 @@ from packaging.utils import parse_wheel_filename
 
 PYTHONS = {
     "cp39": "3.9",
-    "cp310": "3.10",
-    "cp311": "3.11",
-    "cp312": "3.12",
-    "cp313": "3.13",
 }
 PLATFORMS = {
     "manylinux-x86_64": lambda platform: "manylinux" in platform and platform.endswith("x86_64"),
@@ -31,8 +27,11 @@ PLATFORMS = {
 def classify(path: Path) -> tuple[str, str]:
     _, _, _, tags = parse_wheel_filename(path.name)
     python_tags = {tag.interpreter for tag in tags}
+    abi_tags = {tag.abi for tag in tags}
     if len(python_tags) != 1:
         raise SystemExit(f"unexpected Python tags in {path.name}: {sorted(python_tags)}")
+    if abi_tags != {"abi3"}:
+        raise SystemExit(f"unexpected ABI tags in {path.name}: {sorted(abi_tags)}, expected abi3")
     python_tag = next(iter(python_tags))
     if python_tag not in PYTHONS:
         raise SystemExit(f"unexpected Python tag in {path.name}: {python_tag}")

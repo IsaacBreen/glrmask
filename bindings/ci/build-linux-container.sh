@@ -111,7 +111,7 @@ if [ "$IS_MUSL" = false ]; then
   if [ "$ARCH" = "aarch64" ]; then NODE_ARCH="arm64"; fi
   mkdir -p /tmp/node22
   curl -fsSL "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-${NODE_ARCH}.tar.gz" | tar -xz -C /tmp/node22 --strip-components=1
-  PATH="/tmp/node22/bin:$PATH" (cd bindings/node && npm test)
+  (cd bindings/node && PATH="/tmp/node22/bin:$PATH" npm test)
 else
   # On node:22-alpine, base node is already Node 22
   (cd bindings/node && npm test)

@@ -220,7 +220,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -ge 25
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 8
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "$RELEASE_VERSION")" -eq 1
@@ -528,7 +528,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(find dist -type f -name '*.whl' | wc -l)" -ge 25
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 8
           test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
           find dist -type f | while IFS= read -r file; do
             test "$(basename "$file" | grep -c "${RELEASE_VERSION}")" -eq 1

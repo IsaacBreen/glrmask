@@ -106,7 +106,7 @@ fn dict_to_vocab(token_to_id: &Bound<'_, PyDict>) -> PyResult<glrmask::Vocab> {
     let mut entries = Vec::with_capacity(token_to_id.len());
     for (key, value) in token_to_id.iter() {
         let token_bytes = key
-            .downcast::<PyBytes>()
+            .cast::<PyBytes>()
             .map_err(|_| PyValueError::new_err("vocab keys must be Python bytes"))?
             .as_bytes()
             .to_vec();
@@ -121,7 +121,7 @@ fn id_to_bytes_dict_to_vocab(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<glrmas
     for (key, value) in id_to_bytes.iter() {
         let token_id: u32 = key.extract()?;
         let token_bytes = value
-            .downcast::<PyBytes>()
+            .cast::<PyBytes>()
             .map_err(|_| PyValueError::new_err("vocab values must be Python bytes"))?
             .as_bytes()
             .to_vec();
@@ -221,7 +221,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
             continue;
         }
 
-        let raw = buffer.getattr("raw")?.downcast_into::<PyBytes>()?;
+        let raw = buffer.getattr("raw")?.cast_into::<PyBytes>()?;
         let length = length as usize;
         let raw = raw.as_bytes();
         if length > raw.len() {
@@ -604,7 +604,7 @@ fn contiguous_exact_token_range(value: &Bound<'_, PyAny>, allow_empty:bool) -> P
 // ---------------------------------------------------------------------------
 
 /// Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches.
-#[pyclass(name = "Vocab")]
+#[pyclass(name = "Vocab", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocab {
     inner: glrmask::Vocab,
@@ -691,7 +691,7 @@ fn parse_vocab_partition_strategy(value: Option<&str>) -> PyResult<glrmask::Voca
         ))),
     }
 }
-#[pyclass(name = "VocabPartition")]
+#[pyclass(name = "VocabPartition", from_py_object)]
 #[derive(Clone)]
 pub struct PyVocabPartition {
     inner: glrmask::VocabPartition,
@@ -790,7 +790,7 @@ impl PyVocabPartition {
 // ---------------------------------------------------------------------------
 
 /// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
-#[pyclass(name = "Constraint")]
+#[pyclass(name = "Constraint", from_py_object)]
 #[derive(Clone)]
 pub struct PyConstraint {
     inner: Arc<glrmask::Constraint>,
@@ -839,7 +839,7 @@ impl PyConstraint {
     /// Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.
     #[pyo3(signature = (*, external_vocab=false))]
     fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.allow_threads(|| {
+        let bytes = py.detach(|| {
             if external_vocab { self.inner.save_without_vocab() }
             else { Ok(self.inner.save()) }
         }).map_err(final_api::api_error)?;
@@ -852,7 +852,7 @@ impl PyConstraint {
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.map(|vocab| vocab.inner.clone());
-        let loaded = py.allow_threads(move || match vocab {
+        let loaded = py.detach(move || match vocab {
             Some(vocab) => glrmask::Constraint::load_with_vocab(data, &vocab),
             None => glrmask::Constraint::load(data),
         });
@@ -879,7 +879,7 @@ impl PyConstraint {
 // PyDynamicConstraint
 // ---------------------------------------------------------------------------
 
-#[pyclass(name = "DynamicConstraint")]
+#[pyclass(name = "DynamicConstraint", from_py_object)]
 #[derive(Clone)]
 pub struct PyDynamicConstraint {
     inner: Arc<glrmask::DynamicConstraint>,
@@ -1109,7 +1109,7 @@ impl PyDynamicConstraintState {
     /// Locally inevitable original token IDs, without choosing an encoding.
     /// Pure query; proof/resource errors propagate and no full mask is built.
     fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
-        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
             .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
@@ -1220,7 +1220,7 @@ impl PyConstraintState {
 
     /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
     fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
-        py.allow_threads(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
+        py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
             .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 

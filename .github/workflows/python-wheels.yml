@@ -16,7 +16,7 @@ on:
       - "src/**"
       - "crates/**"
   # Versioned GitHub Release publication calls this workflow via workflow_call.
-  # Do not rebuild 30 wheels on every tag push (including recovery/validation
+  # Do not rebuild wheels on every tag push (including recovery/validation
   # tags); tag creation alone is not a publication event.
 
 permissions:
@@ -28,12 +28,11 @@ concurrency:
 
 jobs:
   wheels:
-    name: ${{ matrix.platform.id }} / Python ${{ matrix.python-version }}
+    name: ${{ matrix.platform.id }} (abi3)
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
         platform:
           - id: manylinux-x86_64
             runner: ubuntu-24.04
@@ -95,7 +94,7 @@ jobs:
 
       - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.12"
           architecture: ${{ matrix.platform.python-arch }}
 
       - name: Build Linux wheel
@@ -110,7 +109,7 @@ jobs:
             --release
             --locked
             --out dist
-            -i python${{ matrix.python-version }}
+            -i python3.12
             --compatibility pypi
             --manifest-path python/Cargo.toml
 
@@ -133,21 +132,53 @@ jobs:
           python -m pip install --upgrade pip twine
           python -m twine check dist/*
 
-      - name: Clean-install and smoke-test wheel (musl)
+      - name: Clean-install and smoke-test wheel (Python 3.12, musl)
         if: ${{ matrix.platform.musl }}
         run: |
-          PY_TAG="cp$(echo '${{ matrix.python-version }}' | tr -d .)"
           docker run --rm -v "$GITHUB_WORKSPACE:/io" -w /io "${{ matrix.platform.container }}" \
-            "/opt/python/${PY_TAG}-${PY_TAG}/bin/python" scripts/python-artifact-smoke.py dist --kind wheel
+            /opt/python/cp312-cp312/bin/python scripts/python-artifact-smoke.py dist --kind wheel
 
-      - name: Clean-install and smoke-test wheel (standard host)
+      - name: Clean-install and smoke-test wheel (Python 3.12, standard)
         if: ${{ !matrix.platform.musl }}
+        run: python scripts/python-artifact-smoke.py dist --kind wheel
+
+      - name: Setup Python 3.9 for ABI verification
+        if: ${{ !matrix.platform.linux && matrix.platform.id != 'windows-arm64' }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+          architecture: ${{ matrix.platform.python-arch }}
+
+      - name: Clean-install and smoke-test wheel (Python 3.9)
+        if: ${{ !matrix.platform.linux && matrix.platform.id != 'windows-arm64' }}
+        run: python scripts/python-artifact-smoke.py dist --kind wheel
+
+      - name: Setup Python 3.14 for ABI verification
+        if: ${{ !matrix.platform.linux }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          architecture: ${{ matrix.platform.python-arch }}
+
+      - name: Clean-install and smoke-test wheel (Python 3.14)
+        if: ${{ !matrix.platform.linux }}
+        run: python scripts/python-artifact-smoke.py dist --kind wheel
+
+      - name: Setup Python 3.15 for ABI verification
+        if: ${{ !matrix.platform.linux }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.15"
+          architecture: ${{ matrix.platform.python-arch }}
+
+      - name: Clean-install and smoke-test wheel (Python 3.15)
+        if: ${{ !matrix.platform.linux }}
         run: python scripts/python-artifact-smoke.py dist --kind wheel
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
         with:
-          name: wheel-${{ matrix.platform.id }}-py${{ matrix.python-version }}
+          name: wheel-${{ matrix.platform.id }}
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 14
