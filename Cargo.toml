@@ -357,3 +357,8 @@ path = "tests/marker_commit.rs"
 [[test]]
 name = "json_schema_policy"
 path = "tests/json_schema_policy.rs"
+
+[[test]]
+name = "parser_family_fallback_union"
+path = "tests/parser_family_fallback_union.rs"
+required-features = ["internal-api"]
