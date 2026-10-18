@@ -6,7 +6,7 @@
 int main(void) {
     glrmask_vocab* vocab=NULL;glrmask_grammar* grammar=NULL;glrmask_constraint* constraint=NULL;glrmask_state* state=NULL;
     const uint8_t a[]={'a'};const glrmask_vocab_entry entries[]={{0,a,1},{31,a,1}};
-    CHECK(glrmask_abi_version()==1);CHECK(strcmp(glrmask_version(),"0.3.0")==0);
+    CHECK(glrmask_abi_version()==1);CHECK(strcmp(glrmask_version(),"0.3.1")==0);
     CHECK(glrmask_vocab_new(NULL,1,NULL,0,&vocab)==GLRMASK_INVALID_ARGUMENT);CHECK(vocab==NULL);
     CHECK(glrmask_vocab_new(entries,2,NULL,0,&vocab)==GLRMASK_OK);
     const char source[]="start ::= \"a\"";
