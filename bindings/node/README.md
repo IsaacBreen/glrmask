@@ -11,7 +11,7 @@ Use Node.js 22 or newer. A binary package requires no Rust compiler, C++ compile
 Package publication is a separate release action. The source and CI commands below produce installable tarballs; they do not publish anything to npm. Install a tarball built for your platform, or the all-platform tarball assembled by the native CI workflow:
 
 ```sh
-npm install /absolute/path/glrmask-node-0.3.0.tgz
+npm install /absolute/path/glrmask-node-0.3.1.tgz
 ```
 
 A per-platform development tarball contains only its recorded platform. The all-platform CI tarball bundles the five release-target binaries into one package, so installation does not depend on unpublished optional-dependency packages. A missing or incompatible native binary causes an explicit error; there is no silent Python, subprocess or WebAssembly fallback.

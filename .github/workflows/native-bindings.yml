@@ -105,7 +105,7 @@ jobs:
           npm run build -- --target '${{ matrix.target }}'
           npm run check
           npm pack
-          node scripts/test-installed.cjs glrmask-node-0.3.0.tgz "$RUNNER_TEMP/node-consumer"
+          node scripts/test-installed.cjs glrmask-node-0.3.1.tgz "$RUNNER_TEMP/node-consumer"
       - name: Static/shared CMake installations and relocated C/C++ consumers
         run: |
           python bindings/cpp/scripts/validate-install.py --library-dir "$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/${{ matrix.target }}/release" --work-dir "$RUNNER_TEMP/cpp-validation"
@@ -169,7 +169,7 @@ jobs:
           cd bindings/node
           node scripts/check-package.cjs --all
           npm pack
-          node scripts/test-installed.cjs glrmask-node-0.3.0.tgz "$RUNNER_TEMP/universal-consumer"
+          node scripts/test-installed.cjs glrmask-node-0.3.1.tgz "$RUNNER_TEMP/universal-consumer"
       - uses: actions/upload-artifact@v6
         with:
           name: glrmask-node-all-platforms
