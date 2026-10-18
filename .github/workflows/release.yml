@@ -1,6 +1,18 @@
 name: Trusted releases (npm, PyPI, crates.io, C++)
 
 on:
+  # Manual retry, used only to publish a validated tarball from a real release.
+  # Run on a short-lived v*-prefixed recovery tag after the workflow fix lands.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version of the existing GitHub Release (e.g. 0.3.1)'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Actions run ID for the published GitHub Release and its validated native artifacts'
+        required: true
+        type: string
   pull_request:
     paths:
       - '.github/workflows/release.yml'
@@ -90,10 +102,9 @@ jobs:
         with:
           name: glrmask-node-all-platforms
           path: dist
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          registry-url: https://registry.npmjs.org
           package-manager-cache: false
       - name: Install OIDC-compatible npm
         run: npm install --global npm@12.2.0
@@ -126,7 +137,15 @@ jobs:
           fi
       - name: Publish from GitHub OIDC (no npm token)
         if: steps.existing.outputs.exists == 'false'
-        run: npm publish "dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
+        env:
+          # Ensure an auth-free npmrc; npm automatically requests a GitHub OIDC
+          # token using this job's id-token: write permission.
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/glrmask-oidc.npmrc
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
+          npm publish "./dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
 
   pypi:
     name: PyPI - glrmask
@@ -287,3 +306,92 @@ jobs:
               subprocess.run(['gh','release','upload',tag,str(archive)],check=True)
               print(f'Uploaded verified asset: {name}')
           PY
+
+  npm-recovery:
+    name: npm - recover vetted release via trusted publishing
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_RUN_ID: ${{ inputs.source_run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Require an existing approved GitHub Release and its exact CI run
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_TYPE" = tag
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]+$ ]]
+          python scripts/check-release-version.py --tag "v${RELEASE_VERSION}" --skip-ancestry
+          RELEASE_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${RELEASE_VERSION}")"
+          printf '%s' "$RELEASE_JSON" | jq -e '.draft == false and .prerelease == false' > /dev/null
+          RELEASE_COMMIT="$(printf '%s' "$RELEASE_JSON" | jq -r .target_commitish)"
+          TAG_COMMIT="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${RELEASE_VERSION}" --jq .object.sha)"
+          test "$RELEASE_COMMIT" = "$TAG_COMMIT"
+          git merge-base --is-ancestor "$RELEASE_COMMIT" origin/main
+          RUN_JSON="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${RELEASE_RUN_ID}")"
+          test "$(printf '%s' "$RUN_JSON" | jq -r .head_sha)" = "$RELEASE_COMMIT"
+          test "$(printf '%s' "$RUN_JSON" | jq -r .event)" = release
+          test "$(printf '%s' "$RUN_JSON" | jq -r .name)" = 'Trusted releases (npm, PyPI, crates.io, C++)'
+          echo "Valid existing release v${RELEASE_VERSION}; native archive from Actions run ${RELEASE_RUN_ID}"
+      - uses: actions/download-artifact@v7
+        with:
+          name: glrmask-node-all-platforms
+          path: dist
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ github.token }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install OIDC-compatible npm
+        run: npm install --global npm@12.2.0
+      - name: Validate and install exact five-platform npm release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          test -f "$TGZ"
+          PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
+          test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
+          test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
+          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
+          done
+          mkdir consumer
+          printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
+          cd consumer
+          npm install --ignore-scripts --no-audit --no-fund --no-save "../$TGZ"
+          node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
+      - name: Check whether npm version is already public
+        id: exists
+        shell: bash
+        run: |
+          if npm view "@glrmask/node@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+            echo "Already published @glrmask/node@${RELEASE_VERSION}"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish existing release tarball using GitHub OIDC
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/glrmask-oidc.npmrc
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'registry=https://registry.npmjs.org/\n' > "$NPM_CONFIG_USERCONFIG"
+          npm publish "./dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
