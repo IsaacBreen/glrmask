@@ -1,0 +1,289 @@
+name: Trusted releases (npm, PyPI, crates.io, C++)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/native-bindings.yml'
+      - '.github/workflows/python-wheels.yml'
+      - 'scripts/check-release-version.py'
+      - 'scripts/check-cpp-release-archives.py'
+      - 'docs/releasing.md'
+  release:
+    types: [published]
+
+# Publishing is enabled ONLY when a maintainer publishes a GitHub Release.
+# No token or registry credentials are stored in this workflow.
+permissions:
+  contents: read
+
+concurrency:
+  group: trusted-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Validate release ref and versions
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.versions.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Metadata regression checks on pull requests (no publishing)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
+          python scripts/check-release-version.py --tag "v$VERSION" --skip-ancestry
+          if python scripts/check-release-version.py --tag v999.0.0 --skip-ancestry; then
+            echo 'Mismatched release version was erroneously accepted' >&2
+            exit 1
+          fi
+          if python scripts/check-release-version.py --tag not-a-tag --skip-ancestry; then
+            echo 'Invalid release tag was erroneously accepted' >&2
+            exit 1
+          fi
+      - name: Require version-aligned tag on merged main
+        id: versions
+        if: github.event_name == 'release'
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
+
+  native-build:
+    name: Build and test all native C++/Node targets
+    if: github.event_name == 'release'
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-bindings.yml
+
+  python-build:
+    name: Build and validate all Python distributions
+    if: github.event_name == 'release'
+    needs: verify
+    permissions:
+      contents: read
+    uses: ./.github/workflows/python-wheels.yml
+
+  npm:
+    name: npm - @glrmask/node
+    if: github.event_name == 'release'
+    needs: [verify, native-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: glrmask-node-all-platforms
+          path: dist
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install OIDC-compatible npm
+        run: npm install --global npm@12.2.0
+      - name: Verify tarball metadata and available-platform binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          TGZ="dist/glrmask-node-${RELEASE_VERSION}.tgz"
+          test -f "$TGZ"
+          PKG_JSON="$(tar -xOzf "$TGZ" package/package.json)"
+          test "$(printf '%s' "$PKG_JSON" | jq -r .name)" = '@glrmask/node'
+          test "$(printf '%s' "$PKG_JSON" | jq -r .version)" = "$RELEASE_VERSION"
+          for platform in darwin-arm64 darwin-x64 linux-arm64-gnu linux-x64-gnu win32-x64-msvc; do
+            tar -tzf "$TGZ" "package/glrmask.${platform}.node" > /dev/null
+          done
+          mkdir consumer
+          printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
+          cd consumer
+          npm install --ignore-scripts --no-audit --no-fund --no-save "../$TGZ"
+          node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
+      - name: Check whether this npm version already exists
+        id: existing
+        shell: bash
+        run: |
+          if npm view "@glrmask/node@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1; then
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "Already released npm @glrmask/node@${RELEASE_VERSION}; no second publish."
+          else
+            echo 'exists=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish from GitHub OIDC (no npm token)
+        if: steps.existing.outputs.exists == 'false'
+        run: npm publish "dist/glrmask-node-${RELEASE_VERSION}.tgz" --access public --registry=https://registry.npmjs.org/
+
+  pypi:
+    name: PyPI - glrmask
+    if: github.event_name == 'release'
+    needs: [verify, python-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: python-release-artifacts
+          path: dist
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate distributions are for the requested release
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find dist -type f -name '*.whl' | wc -l)" -eq 25
+          test "$(find dist -type f -name '*.tar.gz' | wc -l)" -eq 1
+          find dist -type f | while IFS= read -r file; do
+            test "$(basename "$file" | grep -c "$RELEASE_VERSION")" -eq 1
+          done
+      - name: Check PyPI release status
+        id: existing
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, urllib.request, urllib.error
+          version = os.environ['RELEASE_VERSION']
+          url = f'https://pypi.org/pypi/glrmask/{version}/json'
+          try:
+              with urllib.request.urlopen(url, timeout=20) as response:
+                  if response.status != 200: raise RuntimeError('Unexpected PyPI response')
+                  exists = True
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404: raise
+              exists = False
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write(f'exists={str(exists).lower()}\n')
+          print(f'PyPI glrmask {version} already exists: {exists}')
+          PY
+      - name: Publish to PyPI using GitHub OIDC
+        if: steps.existing.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  crates:
+    name: crates.io - glrmask root crate
+    if: github.event_name == 'release'
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Check crates.io published versions
+        id: existing
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, urllib.request, urllib.error
+          version=os.environ['RELEASE_VERSION']
+          url=f'https://crates.io/api/v1/crates/glrmask/{version}'
+          req=urllib.request.Request(url, headers={'User-Agent':'GLRMask-release-workflow/1.0 (https://github.com/IsaacBreen/glrmask)'})
+          try:
+              with urllib.request.urlopen(req, timeout=20) as response:
+                  if response.status != 200: raise RuntimeError('Unexpected crates.io response')
+                  exists=True
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404: raise
+              exists=False
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
+              output.write(f'exists={str(exists).lower()}\n')
+          print(f'crates.io glrmask {version} already exists: {exists}')
+          PY
+      - name: Install stable Rust toolchain
+        if: steps.existing.outputs.exists == 'false'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Validate root crate publication
+        if: steps.existing.outputs.exists == 'false'
+        run: cargo publish --locked --dry-run -p glrmask
+      - name: Exchange GitHub OIDC for short-lived crates.io credential
+        if: steps.existing.outputs.exists == 'false'
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish root crate
+        if: steps.existing.outputs.exists == 'false'
+        run: cargo publish --locked -p glrmask
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  cpp:
+    name: GitHub Release - C/C++ static and shared libraries
+    if: github.event_name == 'release'
+    needs: [verify, native-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: cpp-native-*
+          path: dist/cpp
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Verify every archive and matching CMake installation manifest
+        run: python scripts/check-cpp-release-archives.py dist/cpp "$RELEASE_VERSION"
+      - name: Upload matching C++ release assets without overwriting prior assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          tag=os.environ['RELEASE_TAG']
+          # GitHub's REST release asset objects include sha256 digests; the
+          # gh release view --json assets projection does not expose them.
+          existing=json.loads(subprocess.check_output(
+              ['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/releases/tags/{tag}'],
+              text=True))['assets']
+          asset_by_name={item['name']:item for item in existing}
+          archives=sorted(pathlib.Path('dist/cpp').rglob('*.tar.gz'))
+          if len(archives) != 10: raise RuntimeError('Expected 10 C++ release archives')
+          for archive in archives:
+              name=archive.name
+              digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest()
+              if name in asset_by_name:
+                  recorded=asset_by_name[name].get('digest')
+                  if recorded != digest:
+                      raise RuntimeError(f'Existing release asset differs or lacks digest: {name}')
+                  print(f'Already uploaded with matching checksum: {name}')
+                  continue
+              subprocess.run(['gh','release','upload',tag,str(archive)],check=True)
+              print(f'Uploaded verified asset: {name}')
+          PY
