@@ -65,7 +65,7 @@ else
     ARCH="$(uname -m)"
     NODE_ARCH="x64"
     if [ "$ARCH" = "aarch64" ]; then NODE_ARCH="arm64"; fi
-    curl -fsSL "https://nodejs.org/dist/v24.2.0/node-v24.2.0-linux-${NODE_ARCH}.tar.gz" | tar -xz -C /usr/local --strip-components=1
+    curl -fsSL "https://nodejs.org/dist/v24.22.0/node-v24.22.0-linux-${NODE_ARCH}.tar.gz" | tar -xz -C /usr/local --strip-components=1
   fi
   python -m pip install --upgrade pip cmake ninja
 fi
@@ -97,6 +97,8 @@ npm run build -- --target "$TARGET"
 python "$GITHUB_WORKSPACE/bindings/ci/check.py" --addon "glrmask.$TAG.node" --platform "$TAG"
 npm run check
 npm test
+npm run typecheck
+node scripts/test-platform-artifact.cjs
 cd "$GITHUB_WORKSPACE"
 
 # 6. Static/shared CMake installations and relocated C/C++ consumers

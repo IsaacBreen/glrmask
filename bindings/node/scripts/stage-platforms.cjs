@@ -27,17 +27,23 @@ const pkg = require('../package.json');
 const rootDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(rootDir, '..', '..');
 function usage() {
-  console.error('Usage: node scripts/stage-platforms.cjs --input ARTIFACT_DIR --output STAGE_DIR');
+  console.error('Usage: node scripts/stage-platforms.cjs --input ARTIFACT_DIR --output STAGE_DIR [--tag SINGLE_TEST_TARGET]');
   process.exit(2);
 }
 const cli = process.argv.slice(2);
-let input, output;
+let input, output, selectedTag;
 for (let i = 0; i < cli.length; ++i) {
   if (cli[i] === '--input' && cli[i + 1]) input = path.resolve(cli[++i]);
   else if (cli[i] === '--output' && cli[i + 1]) output = path.resolve(cli[++i]);
+  else if (cli[i] === '--tag' && cli[i + 1]) selectedTag = cli[++i];
   else usage();
 }
 if (!input || !output) usage();
+if (selectedTag && !releaseTargets.includes(selectedTag)) throw new Error(`Unknown platform ${selectedTag}`);
+// Partial staging exists only for per-runner installation tests. Production
+// aggregation omits --tag and still requires every target; --all validation
+// rejects a partial manifest if someone attempts to release it as the root.
+const wanted = selectedTag ? [selectedTag] : releaseTargets;
 function sha256(data) { return crypto.createHash('sha256').update(data).digest('hex'); }
 const collected = new Map();
 function walk(dir) {
@@ -65,11 +71,11 @@ function walk(dir) {
   }
 }
 walk(input);
-const missing = releaseTargets.filter(t => !collected.has(t));
+const missing = wanted.filter(t => !collected.has(t));
 if (missing.length) throw new Error(`Missing CI targets: ${missing.join(', ')}`);
 fs.mkdirSync(output, {recursive: true});
 const combined = {schema: 1, kind: 'platform-manifest', version: pkg.version, napi: 8, targets: {}};
-for (const tag of releaseTargets) {
+for (const tag of wanted) {
   const {data, item} = collected.get(tag);
   const routing = PLATFORM_PACKAGES[tag];
   const rustTarget = Object.keys(targets).find(t => targets[t] === tag);
@@ -109,4 +115,4 @@ for (const tag of releaseTargets) {
   };
 }
 fs.writeFileSync(path.join(output, 'platform-manifest.json'), JSON.stringify(combined, null, 2) + '\n');
-console.log(`Staged ${releaseTargets.length} platform packages in ${output}`);
+console.log(`Staged ${wanted.length} platform packages in ${output}`);

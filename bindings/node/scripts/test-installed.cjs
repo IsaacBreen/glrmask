@@ -54,7 +54,7 @@ function runCapture(program, args, options = {}) {
 }
 fs.writeFileSync(path.join(work, 'package.json'), JSON.stringify({name: 'glrmask-installed-consumer', private: true, type: 'module'}, null, 2) + '\n');
 const toInstall = platformArtifact ? [rootArtifact, platformArtifact] : [rootArtifact];
-run(process.execPath, [npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund', ...offline, ...toInstall]);
+run(process.execPath, [npm, 'install', '--ignore-scripts', '--no-audit', '--no-fund', ...(platformArtifact ? [] : ['--omit=optional']), ...offline, ...toInstall]);
 const installed = path.join(work, 'node_modules/@glrmask/node');
 if (!fs.realpathSync(installed).startsWith(fs.realpathSync(work) + path.sep)) {
   throw new Error('Installation resolved outside the isolated consumer');
