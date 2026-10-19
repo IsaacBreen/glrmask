@@ -14,6 +14,8 @@ exclude = [
     ".agents/**",
     ".github/**",
     "AGENTS.md",
+    "CORE-API.md",
+    "CORE-PROGRESS.md",
     "docs/validation/**",
     ".benchmarks/**",
     ".cache/**",
@@ -373,3 +375,7 @@ path = "tests/json_schema_policy.rs"
 name = "parser_family_fallback_union"
 path = "tests/parser_family_fallback_union.rs"
 required-features = ["internal-api"]
+
+[[test]]
+name = "module_expr_core"
+path = "tests/module_expr_core.rs"

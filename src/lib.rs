@@ -76,10 +76,10 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{BuildOptions, Grammar, Optimization, PreparedGrammar, Requirement, LarkOptions};
+pub use public_api::{BuildOptions, Grammar, Optimization, PreparedGrammar, LarkOptions, Module, ModuleOptions, CompileOptions, ModuleValue, IntoModuleValue, Expr, IntoExpr, UnboundExtern};
 #[cfg(any(test,feature="internal-api"))]
 #[doc(hidden)]
-pub use public_api::UnlinkedConstraint;
+pub use public_api::{UnlinkedConstraint, Requirement};
 pub use glrmask_grammar::SourceSpan;
 pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
 pub use glrmask_grammar::LarkProfile;
