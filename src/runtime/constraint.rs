@@ -9748,6 +9748,7 @@ impl Constraint {
                 let inventory = self.weight_token_set_inventory();
                 let prebuilt_sparse = self.compute_direct_sparse_weight_token_buf_masks(
                     &inventory.final_sets,
+                    &self.internal_token_buf_masks,
                 );
                 let (dense_words, dense_masks) =
                     self.compute_dense_token_masks_excluding_direct_final(
@@ -10032,6 +10033,7 @@ impl Constraint {
                         .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
                     let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                         &weight_token_sets.final_sets,
+                        &internal_token_buf_masks,
                     );
                     let prebuilt_weight_sparse_ms = started
                         .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -10139,6 +10141,7 @@ impl Constraint {
                                 .weight_token_set_inventory_with_packed(packed_weight_token_sets.take());
                             let prebuilt_weight_caches = self.compute_direct_sparse_weight_token_buf_masks(
                                 &weight_token_sets.final_sets,
+                                &internal_token_buf_masks,
                             );
                             let prebuilt_weight_sparse_ms = started
                                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
@@ -11356,6 +11359,7 @@ impl Constraint {
     fn compute_direct_sparse_weight_token_buf_masks(
         &self,
         final_token_sets: &[(usize, Arc<RangeSetBlaze<u32>>) ],
+        prepared_internal_token_buf_masks: &[InternalTokenBufMasks],
     ) -> DirectSparseWeightBufCaches {
         if final_token_sets.is_empty() {
             return DirectSparseWeightBufCaches::default();
@@ -11370,7 +11374,18 @@ impl Constraint {
         let direct_token_limit = ((buf_words / 2).min(2048)) as u64;
         let direct_work_limit = direct_token_limit;
         let prefix_started = profile.then(std::time::Instant::now);
-        let work_prefix = self.direct_sparse_work_prefix_current(buf_words);
+        // Finalization may have moved resident rows out of self or only just
+        // computed them. Price replay against those prepared output fragments,
+        // rather than an empty/stale resident cache that would price it at zero.
+        let work_prefix = if prepared_internal_token_buf_masks.len() == self.internal_token_count() {
+            Self::direct_sparse_work_prefix(prepared_internal_token_buf_masks, buf_words)
+        } else {
+            self.direct_sparse_work_prefix_current(buf_words)
+        };
+        // Missing fragment coverage must decline this acceleration, never make
+        // unpriced final sets eligible for direct replay.
+        let direct_sparse = direct_sparse
+            && work_prefix.len() == self.internal_token_count().saturating_add(1);
         let prefix_ms = prefix_started
             .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
         let classify_started = profile.then(std::time::Instant::now);
@@ -14651,6 +14666,128 @@ mod dense_internal_token_mask_tests {
         let internal_tokens = RangeSetBlaze::from_iter([63u32..=65, 190..=400]);
         let actual = Constraint::dense_words_from_internal_set_with_words(&internal_tokens, 3);
         assert_eq!(actual.as_ref(), &[1u64 << 63, 0b11, 1u64 << 62 | 1u64 << 63]);
+    }
+
+    // Duplicate bytes make a genuine internal class whose expansion exceeds
+    // the direct replay budget, alongside a cheap singleton class.
+    fn prepared_fragment_fixture() -> Constraint {
+        let mut entries = (0..512u32).map(|id| (id, b"a".to_vec())).collect::<Vec<_>>();
+        entries.extend([(512, b"b".to_vec()), (513, b"x".to_vec()),
+            (514, b"aa".to_vec()), (515, b"ab".to_vec()),
+            (516, b"bb".to_vec()), (517, b"ba".to_vec())]);
+        Constraint::from_glrm_grammar(
+            "start start;\nt A ::= \"a\";\nt B ::= \"b\";\nnt start ::= A B | A start B;\n",
+            &Vocab::new(entries),
+        ).unwrap()
+    }
+
+    fn clear_resident_fragments(constraint: &mut Constraint) {
+        constraint.internal_token_buf_masks.clear();
+        constraint.internal_token_buf_flat = Default::default();
+        constraint.internal_token_buf_offsets = Default::default();
+        constraint.backed_internal_token_buf_flat = None;
+    }
+
+    #[test]
+    fn prepared_fragments_price_direct_sparse_sets_without_resident_rows() {
+        for threads in [1, 2] {
+            rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
+                let mut constraint = prepared_fragment_fixture();
+                let rows = constraint.compute_buf_masks();
+                assert_eq!(rows.len(), constraint.internal_token_count());
+                assert!(!rows.is_empty());
+                assert_eq!(constraint.final_mask_mapping.internal_len(), 0);
+                let words = constraint.body_mask_len();
+                let limit = (words / 2).min(2048) as u64;
+                let prefix = Constraint::direct_sparse_work_prefix(&rows, words);
+                let sets = (0..rows.len()).map(|id| (id, Arc::new(
+                    RangeSetBlaze::from_iter([id as u32..=id as u32])
+                ))).collect::<Vec<_>>();
+                let expected = sets.iter().filter_map(|(key, set)|
+                    (Constraint::direct_sparse_expanded_work(set, &prefix) <= limit).then_some(*key)
+                ).collect::<DirectSparseWeightTokenSetCache>();
+                assert!(!expected.is_empty(), "fixture must admit a cheap class");
+                assert!(expected.len() < sets.len(), "fixture must reject an over-budget class");
+                // Real packed/backed resident rows must also provide a valid fallback.
+                let loaded = Constraint::load(constraint.save()).unwrap();
+                assert_eq!(loaded.compute_direct_sparse_weight_token_buf_masks(&sets, &[]).eligible, expected);
+                clear_resident_fragments(&mut constraint);
+                assert_eq!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &rows).eligible, expected);
+                assert!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &[]).eligible.is_empty());
+                assert!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &rows[..rows.len()-1]).eligible.is_empty());
+                // A complete prepared table is authoritative over stale resident data.
+                constraint.internal_token_buf_masks = vec![Vec::new(); rows.len()];
+                assert_eq!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &rows).eligible, expected);
+                // Complete owned resident rows are another supported fallback.
+                constraint.internal_token_buf_masks = rows;
+                assert_eq!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &[]).eligible, expected);
+            });
+        }
+    }
+
+    #[test]
+    fn prepared_fragment_rebuild_preserves_every_mask_and_commit_outcome() {
+        for threads in [1, 2] {
+            rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
+                let mut rebuilt = prepared_fragment_fixture();
+                let loaded = Constraint::load(rebuilt.save()).unwrap();
+                // Current artifacts keep weights packed. Exercise the supported
+                // compiler materialization path before rebuilding derived caches.
+                rebuilt.materialize_non_dwa_weights_for_compilation().unwrap();
+                rebuilt.materialize_parser_dwa_for_compilation().unwrap();
+                rebuilt.parser_runtime_caches_prebuilt = false;
+                clear_resident_fragments(&mut rebuilt);
+                rebuilt.rebuild_runtime_caches_impl(false, None);
+                let rows = rebuilt.compute_buf_masks();
+                let prefix = Constraint::direct_sparse_work_prefix(&rows, rebuilt.body_mask_len());
+                let limit = (rebuilt.body_mask_len() / 2).min(2048) as u64;
+                let inventory = rebuilt.weight_token_set_inventory();
+                assert!(!inventory.final_sets.is_empty());
+                let over_budget = inventory.final_sets.iter().filter(|(_, set)|
+                    Constraint::direct_sparse_expanded_work(set, &prefix) > limit
+                ).count();
+                assert!(over_budget > 0, "real final weights must exercise the replay cap");
+                eprintln!("prepared-fragment rebuild: threads={threads} classes={} final_sets={} over_budget={over_budget}",
+                    rows.len(), inventory.final_sets.len());
+                for (key, set) in &inventory.final_sets {
+                    if rebuilt.direct_sparse_weight_token_sets.contains(key) {
+                        assert!(Constraint::direct_sparse_expanded_work(set, &prefix) <= limit);
+                    }
+                }
+                // Include duplicate aliases, a successful sequence, and failures
+                // both initially and after an otherwise valid prefix.
+                for sequence in [&[0, 512][..], &[511, 512], &[0, 513], &[513], &[0, 512, 0]] {
+                    let mut actual = rebuilt.start();
+                    let mut reference = loaded.start();
+                    assert_eq!(actual.mask(), reference.mask());
+                    let mut committed = 0;
+                    for &token in sequence {
+                        let mask = actual.mask();
+                        let mut expected = vec![0u32; rebuilt.mask_len()];
+                        if committed < 2 { expected[..16].fill(u32::MAX); }
+                        if committed < 2 { expected[16] = 0b1100; }
+                        if committed == 1 { expected[16] |= 1; }
+                        assert_eq!(mask, expected, "exact a^n b^n language at prefix length {committed}");
+                        assert_eq!(actual.is_accepting(), committed == 2);
+                        let allowed = mask[token as usize / 32] & (1 << (token % 32)) != 0;
+                        assert_eq!(mask, reference.mask());
+                        assert_eq!(actual.is_accepting(), reference.is_accepting());
+                        if !allowed {
+                            assert!(actual.commit_token(token).is_err());
+                            assert!(reference.commit_token(token).is_err());
+                            assert_eq!(actual.is_rejected(), reference.is_rejected());
+                            break;
+                        }
+                        actual.commit_token(token).unwrap();
+                        reference.commit_token(token).unwrap();
+                        committed += 1;
+                        assert_eq!(actual.is_accepting(), committed == 2);
+                        assert_eq!(actual.mask(), reference.mask());
+                        assert_eq!(actual.is_accepting(), reference.is_accepting());
+                    }
+                }
+            });
+        }
     }
 
     #[test]
