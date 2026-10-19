@@ -1,4 +1,4 @@
-"""Strict original-ID forcing, aliases, exact events and acceptance barriers."""
+"""Canonical forcing, aliases, exact events and acceptance barriers."""
 
 
 def _bound_snapshot(grammar, name, value):
@@ -31,16 +31,27 @@ def assert_read_only_and_replay(state, method):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_forcing_does_not_choose_between_equivalent_tokenizations(mode):
+def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 3:b"ab"})
     compiled = glrmask.Grammar.from_ebnf('start ::= "ab"').compile(vocab, optimization=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert not hasattr(state, "forced")
         assert not hasattr(state, "forced_token_ids")
-        assert assert_read_only_and_replay(state,"forced_tokens") == []
+        assert assert_read_only_and_replay(state,"forced_tokens") == [2]
         state.commit_token(0)
         assert assert_read_only_and_replay(state,"forced_tokens") == [1]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
+    vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"ab"})
+    for source, expected in [('start ::= "ab"', [1]), ('start ::= "ab" | "ac"', [])]:
+        compiled = glrmask.Grammar.from_ebnf(source).compile(vocab, optimization=mode)
+        for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
+            state = constraint.start()
+            assert np.flatnonzero(state.mask()).tolist() == [0, 1]
+            assert assert_read_only_and_replay(state,"forced_tokens") == expected
 
 
 @pytest.mark.parametrize("mode", MODES)

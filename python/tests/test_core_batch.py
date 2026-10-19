@@ -1,4 +1,4 @@
-"""The public mutable/snapshot and strict-forcing contracts (no fixture adapter)."""
+"""The public mutable/snapshot and canonical-forcing contracts (no fixture adapter)."""
 
 import copy
 from concurrent.futures import ThreadPoolExecutor
@@ -88,10 +88,10 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_strict_forcing_is_not_greedy_tokenization_and_stops_at_acceptance(mode):
+def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
     v = vocab()
     state = glrmask.Grammar.from_ebnf('r ::= "ab"').compile(v, optimization=mode).start()
-    assert state.forced_tokens() == []  # token 0 and token 2 are both admissible
+    assert state.forced_tokens() == [2]  # longest spelling of the forced bytes
     state.commit_token(0)
     assert state.forced_tokens() == [1]
     before = state.mask().copy()

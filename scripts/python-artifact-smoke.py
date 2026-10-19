@@ -51,7 +51,10 @@ def main() -> None:
         version = artifact.name.removeprefix("glrmask-").split("-")[0].removesuffix(".tar.gz")
         run(str(python), "-I", "-X", "faulthandler", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
         run(str(python), "-I", "-X", "faulthandler", "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            str(repo_root / "python" / "tests" / "test_python_compatibility.py"), cwd=Path(tmp))
+            str(repo_root / "python" / "tests" / "test_python_compatibility.py"),
+            str(repo_root / "python" / "tests" / "test_core_batch.py"),
+            str(repo_root / "python" / "tests" / "test_forcing_semantics.py"),
+            str(repo_root / "python" / "tests" / "test_markers.py"), cwd=Path(tmp))
 
     print(f"clean-install smoke test passed: {artifact.name}")
 
