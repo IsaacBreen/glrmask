@@ -5,7 +5,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from subprocess import CompletedProcess, CalledProcessError
+from types import SimpleNamespace
+from subprocess import CalledProcessError
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,54 +86,42 @@ class CppReleaseArchivesMatrixTest(unittest.TestCase):
 
 class RuntimeDependenciesVerifierTest(unittest.TestCase):
     def test_portable_glibc_allowed(self):
-        report = """
- 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]
- Version needs section '.gnu.version_r' contains 1 entry:
- Name: GLIBC_2.2.5  Flags: none  Version: 2
- Name: GLIBC_2.17   Flags: none  Version: 3
- Name: GLIBC_2.28   Flags: none  Version: 4
-"""
-        ci_check.validate_elf_runtime_report(report, "linux-x64-gnu", "fixture.so")
+        ci_check.validate_elf_runtime_report(
+            "(NEEDED) Shared library: [libc.so.6]\nName: GLIBC_2.17\nName: GLIBC_2.28",
+            "linux-x64-gnu", "test.so")
 
     def test_glibc_exceeding_baseline_rejected(self):
-        with self.assertRaisesRegex(RuntimeError, "exceeds 2.28 minimum portability baseline"):
-            ci_check.validate_elf_runtime_report(
-                "Name: GLIBC_2.35 Flags: none Version: 2", "linux-x64-gnu", "fixture.so"
-            )
+        with self.assertRaisesRegex(RuntimeError, "exceeds 2.28"):
+            ci_check.validate_elf_runtime_report("Name: GLIBC_2.35", "linux-x64-gnu", "test.so")
 
     def test_musl_binary_passes(self):
         ci_check.validate_elf_runtime_report(
-            "0x1 (NEEDED) Shared library: [libc.musl-x86_64.so.1]",
-            "linux-x64-musl", "fixture.so",
-        )
+            "(NEEDED) Shared library: [libc.musl-aarch64.so.1]", "linux-arm64-musl", "test.so")
 
     def test_musl_binary_with_glibc_leak_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "unexpectedly links to libc.so.6"):
             ci_check.validate_elf_runtime_report(
-                "0x1 (NEEDED) Shared library: [libc.so.6]", "linux-x64-musl", "fixture.so"
-            )
+                "(NEEDED) Shared library: [libc.so.6]", "linux-x64-musl", "test.so")
 
-    def test_musl_version_import_rejected(self):
+    def test_musl_versioned_glibc_import_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "unexpectedly references GLIBC"):
-            ci_check.validate_elf_runtime_report(
-                "Name: GLIBC_2.28 Flags: none Version: 2", "linux-arm64-musl", "fixture.so"
-            )
+            ci_check.validate_elf_runtime_report("Name: GLIBC_2.17", "linux-arm64-musl", "test.so")
 
-    def test_rodata_probe_strings_are_not_imports(self):
-        # Rust may embed optional dlsym probes named GLIBC_2.0 in .rodata.
-        # Only readelf's dynamic/version tables, not these bytes, count.
-        with tempfile.TemporaryDirectory() as temp:
-            binary = Path(temp) / "fixture.so"
-            binary.write_bytes(b"\x7fELF" + b"GLIBC_2.0\x00libc.so.6\x00")
-            report = "0x1 (NEEDED) Shared library: [libc.musl-aarch64.so.1]"
-            with patch.object(ci_check.subprocess, "run", return_value=CompletedProcess([], 0, report, "")) as run:
-                ci_check.verify_runtime_dependencies(binary, "linux-arm64-musl")
-            self.assertEqual(run.call_args.args[0][:4], ["readelf", "--dynamic", "--version-info", "--wide"])
-            self.assertTrue(run.call_args.kwargs["check"])
+    def test_embedded_lookup_strings_are_not_runtime_imports(self):
+        with tempfile.TemporaryDirectory() as work:
+            binary = Path(work) / "native.so"
+            # A runtime may contain dlsym lookup strings without importing them.
+            binary.write_bytes(b"\x7fELF" + b"GLIBC_2.99\x00libc.so.6\x00")
+            result = SimpleNamespace(stdout="(NEEDED) Shared library: [libc.musl-x86_64.so.1]")
+            with patch.object(ci_check.subprocess, "run", return_value=result) as readelf:
+                ci_check.verify_runtime_dependencies(binary, "linux-x64-musl")
+                self.assertEqual(readelf.call_args.args[0],
+                    ["readelf", "--dynamic", "--version-info", "--wide", str(binary)])
+                self.assertTrue(readelf.call_args.kwargs["check"])
 
     def test_broken_elf_inspection_fails_closed(self):
-        with tempfile.TemporaryDirectory() as temp:
-            binary = Path(temp) / "broken.so"
+        with tempfile.TemporaryDirectory() as work:
+            binary = Path(work) / "broken.so"
             binary.write_bytes(b"\x7fELF")
             with patch.object(ci_check.subprocess, "run", side_effect=CalledProcessError(1, ["readelf"])):
                 with self.assertRaises(CalledProcessError):
