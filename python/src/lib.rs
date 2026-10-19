@@ -2005,7 +2005,10 @@ fn add_internal_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-#[pymodule]
+// The stable-ABI wheels target ordinary, GIL-enabled CPython. Do not silently
+// opt in to free-threaded execution when upgrading PyO3: global initialization
+// and mutable state must be audited before we promise that separately.
+#[pymodule(gil_used = true)]
 fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
     configure_mimalloc_runtime_default();
     // rust-numpy lazily publishes and caches its mutable-borrow checking API on
