@@ -87,12 +87,12 @@ class CppReleaseArchivesMatrixTest(unittest.TestCase):
 class RuntimeDependenciesVerifierTest(unittest.TestCase):
     def test_portable_glibc_allowed(self):
         ci_check.validate_elf_runtime_report(
-            "(NEEDED) Shared library: [libc.so.6]\nName: GLIBC_2.17\nName: GLIBC_2.28",
+            "(NEEDED) Shared library: [libc.so.6]\n1: 0 0 FUNC GLOBAL DEFAULT UND old@GLIBC_2.17\n2: 0 0 FUNC GLOBAL DEFAULT UND recent@GLIBC_2.28",
             "linux-x64-gnu", "test.so")
 
     def test_glibc_exceeding_baseline_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "exceeds 2.28"):
-            ci_check.validate_elf_runtime_report("Name: GLIBC_2.35", "linux-x64-gnu", "test.so")
+            ci_check.validate_elf_runtime_report("1: 0 0 FUNC GLOBAL DEFAULT UND newer@GLIBC_2.35", "linux-x64-gnu", "test.so")
 
     def test_musl_binary_passes(self):
         ci_check.validate_elf_runtime_report(
@@ -105,7 +105,7 @@ class RuntimeDependenciesVerifierTest(unittest.TestCase):
 
     def test_musl_versioned_glibc_import_rejected(self):
         with self.assertRaisesRegex(RuntimeError, "unexpectedly references GLIBC"):
-            ci_check.validate_elf_runtime_report("Name: GLIBC_2.17", "linux-arm64-musl", "test.so")
+            ci_check.validate_elf_runtime_report("1: 0 0 FUNC GLOBAL DEFAULT UND foreign@GLIBC_2.17", "linux-arm64-musl", "test.so")
 
     def test_embedded_lookup_strings_are_not_runtime_imports(self):
         with tempfile.TemporaryDirectory() as work:
@@ -116,8 +116,16 @@ class RuntimeDependenciesVerifierTest(unittest.TestCase):
             with patch.object(ci_check.subprocess, "run", return_value=result) as readelf:
                 ci_check.verify_runtime_dependencies(binary, "linux-x64-musl")
                 self.assertEqual(readelf.call_args.args[0],
-                    ["readelf", "--dynamic", "--version-info", "--wide", str(binary)])
+                    ["readelf", "--dynamic", "--dyn-syms", "--version-info", "--wide", str(binary)])
                 self.assertTrue(readelf.call_args.kwargs["check"])
+
+    def test_defined_glibc_compatibility_symbols_are_not_imports(self):
+        report = """(NEEDED) Shared library: [libc.musl-aarch64.so.1]
+  1: 00001000 4 FUNC GLOBAL DEFAULT 12 compat@GLIBC_2.0
+Version definition section '.gnu.version_d':
+  Name: GLIBC_2.0
+"""
+        ci_check.validate_elf_runtime_report(report, "linux-arm64-musl", "exports.so")
 
     def test_broken_elf_inspection_fails_closed(self):
         with tempfile.TemporaryDirectory() as work:

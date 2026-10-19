@@ -11,9 +11,13 @@ def validate_elf_runtime_report(report: str, platform: str | None, name: str) ->
     scanning every byte would mistake those strings for imported GLIBC symbols.
     readelf's dynamic and version tables describe the actual loader contract.
     """
+    # The version table also lists versions DEFINED/exported by the binary.
+    # Only undefined dynamic symbols impose a GLIBC requirement on its host.
+    imported_symbols = "\n".join(line for line in report.splitlines()
+                                 if re.search(r"\bUND\b", line))
     glibc_versions = [
         (int(m.group(1)), int(m.group(2)))
-        for m in re.finditer(r'\bGLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b', report)
+        for m in re.finditer(r'@GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b', imported_symbols)
     ]
     needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', report)
     is_musl = (platform and 'musl' in platform) or any('musl' in lib for lib in needed)
@@ -37,10 +41,14 @@ def verify_runtime_dependencies(path: Path, platform: str | None = None) -> None
         if binary.read(4) != b'\x7fELF':
             return
     result = subprocess.run(
-        ['readelf', '--dynamic', '--version-info', '--wide', str(path)],
+        ['readelf', '--dynamic', '--dyn-syms', '--version-info', '--wide', str(path)],
         check=True, capture_output=True, text=True,
     )
-    validate_elf_runtime_report(result.stdout, platform, path.name)
+    try:
+        validate_elf_runtime_report(result.stdout, platform, path.name)
+    except RuntimeError:
+        print(result.stdout, flush=True)
+        raise
 
 def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)
