@@ -32,13 +32,14 @@ ci_check_spec.loader.exec_module(ci_check)
 class WheelMatrixClassificationTest(unittest.TestCase):
     def test_wheel_classification(self):
         samples = [
-            ("glrmask-0.3.1-cp39-cp39-manylinux2014_x86_64.whl", "cp39", "manylinux-x86_64"),
-            ("glrmask-0.3.1-cp310-cp310-manylinux2014_aarch64.whl", "cp310", "manylinux-aarch64"),
-            ("glrmask-0.3.1-cp311-cp311-musllinux_1_2_x86_64.whl", "cp311", "musllinux-x86_64"),
-            ("glrmask-0.3.1-cp312-cp312-musllinux_1_2_aarch64.whl", "cp312", "musllinux-aarch64"),
-            ("glrmask-0.3.1-cp313-cp313-macosx_11_0_x86_64.whl", "cp313", "macos-x86_64"),
-            ("glrmask-0.3.1-cp312-cp312-macosx_11_0_arm64.whl", "cp312", "macos-arm64"),
-            ("glrmask-0.3.1-cp311-cp311-win_amd64.whl", "cp311", "windows-x86_64"),
+            ("glrmask-0.3.1-cp39-abi3-manylinux2014_x86_64.whl", "cp39", "manylinux-x86_64"),
+            ("glrmask-0.3.1-cp39-abi3-manylinux2014_aarch64.whl", "cp39", "manylinux-aarch64"),
+            ("glrmask-0.3.1-cp39-abi3-musllinux_1_2_x86_64.whl", "cp39", "musllinux-x86_64"),
+            ("glrmask-0.3.1-cp39-abi3-musllinux_1_2_aarch64.whl", "cp39", "musllinux-aarch64"),
+            ("glrmask-0.3.1-cp39-abi3-macosx_11_0_x86_64.whl", "cp39", "macos-x86_64"),
+            ("glrmask-0.3.1-cp39-abi3-macosx_11_0_arm64.whl", "cp39", "macos-arm64"),
+            ("glrmask-0.3.1-cp39-abi3-win_amd64.whl", "cp39", "windows-x86_64"),
+            ("glrmask-0.3.1-cp39-abi3-win_arm64.whl", "cp39", "windows-arm64"),
         ]
         for name, expected_py, expected_plat in samples:
             py_tag, plat = wheel_checker.classify(Path(name))
@@ -54,11 +55,12 @@ class WheelMatrixClassificationTest(unittest.TestCase):
             "macos-x86_64",
             "macos-arm64",
             "windows-x86_64",
+            "windows-arm64",
         }
         self.assertEqual(set(wheel_checker.PLATFORMS.keys()), expected_platforms)
-        self.assertEqual(len(wheel_checker.PYTHONS), 5)
-        # 7 platforms * 5 pythons = 35 total wheels
-        self.assertEqual(len(wheel_checker.PLATFORMS) * len(wheel_checker.PYTHONS), 35)
+        self.assertEqual(len(wheel_checker.PYTHONS), 1)
+        # 8 platforms * 1 abi3 = 8 total wheels
+        self.assertEqual(len(wheel_checker.PLATFORMS) * len(wheel_checker.PYTHONS), 8)
 
 
 class CppReleaseArchivesMatrixTest(unittest.TestCase):
@@ -71,11 +73,12 @@ class CppReleaseArchivesMatrixTest(unittest.TestCase):
             "linux-x64-gnu",
             "linux-x64-musl",
             "win32-x64-msvc",
+            "win32-arm64-msvc",
         }
         self.assertEqual(cpp_checker.TARGETS, expected_targets)
         self.assertEqual(cpp_checker.KINDS, {"static", "shared"})
-        # 7 targets * 2 kinds = 14 archives
-        self.assertEqual(len(cpp_checker.TARGETS) * len(cpp_checker.KINDS), 14)
+        # 8 targets * 2 kinds = 16 archives
+        self.assertEqual(len(cpp_checker.TARGETS) * len(cpp_checker.KINDS), 16)
 
 
 class RuntimeDependenciesVerifierTest(unittest.TestCase):

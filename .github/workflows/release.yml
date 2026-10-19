@@ -152,8 +152,8 @@ jobs:
           printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
           cd consumer
           npm install --ignore-scripts --no-audit --no-fund --no-save \
-            "../../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
-            "../../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
+            "../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
+            "../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
           node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
       - name: Publish platforms first, then thin root (GitHub OIDC, no npm token)
         env:
@@ -342,7 +342,7 @@ jobs:
               text=True))['assets']
           asset_by_name={item['name']:item for item in existing}
           archives=sorted(pathlib.Path('dist/cpp').rglob('*.tar.gz'))
-          if len(archives) < 10: raise RuntimeError(f'Expected at least 10 C++ release archives, got {len(archives)}')
+          if len(archives) != 16: raise RuntimeError(f'Expected exactly 16 C++ release archives, got {len(archives)}')
           for archive in archives:
               name=archive.name
               digest='sha256:'+hashlib.sha256(archive.read_bytes()).hexdigest()
@@ -433,8 +433,8 @@ jobs:
           printf '{"name":"release-smoke","version":"0.0.0","private":true}\n' > consumer/package.json
           cd consumer
           npm install --ignore-scripts --no-audit --no-fund --no-save \
-            "../../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
-            "../../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
+            "../dist/glrmask-node-${RELEASE_VERSION}.tgz" \
+            "../dist/glrmask-node-linux-x64-gnu-${RELEASE_VERSION}.tgz"
           node --input-type=module -e "import { Grammar, Vocab } from '@glrmask/node'; if (!Grammar || !Vocab) throw Error('Missing exports')"
       - name: Publish vetted platforms first, then thin root, using GitHub OIDC
         env:

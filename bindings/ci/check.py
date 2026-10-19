@@ -45,7 +45,7 @@ def main() -> None:
     assert package['name']=='@glrmask/node'
     assert 'dependencies' not in package,'No runtime npm dependency is required'
     platform_cjs = (root/'bindings/node/platform.cjs').read_text(encoding='utf-8')
-    for target in ['win32-x64-msvc', 'darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu', 'linux-x64-musl', 'linux-arm64-musl']:
+    for target in ['win32-x64-msvc', 'win32-arm64-msvc', 'darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu', 'linux-x64-musl', 'linux-arm64-musl']:
         assert f"'{target}'" in platform_cjs, f"Missing {target} in bindings/node/platform.cjs"
     for license,source in [('LICENSE-MIT','LICENSE-MIT'),('LICENSE-APACHE','LICENSE-APACHE'),('NOTICE-LARK','crates/glrmask-grammar/NOTICE-LARK')]:
         assert (root/f'bindings/node/{license}').read_bytes().replace(b'\r\n',b'\n')==(root/source).read_bytes().replace(b'\r\n',b'\n'),license
@@ -61,16 +61,15 @@ def main() -> None:
     assert len(symbols)>=60,len(symbols)
     if args.library:
         verify_runtime_dependencies(args.library.resolve(), args.platform)
-        try:
-            library=ctypes.CDLL(str(args.library.resolve()))
-            for name in symbols:assert getattr(library,name),name
-            library.glrmask_abi_version.restype=ctypes.c_uint32
-            library.glrmask_version.restype=ctypes.c_char_p
-            assert library.glrmask_abi_version()==1
-            assert library.glrmask_version().decode()==version
-        except OSError as e:
-            # Cross-platform or foreign-libc library might not load in host ctypes
-            print(f"Note: host ctypes load skipped ({e}); static ELF inspection passed")
+        # Library verification runs on the target runtime (inside its Linux
+        # container where applicable). A loader failure is a failed check,
+        # not evidence that the exports or runtime dependencies are correct.
+        library=ctypes.CDLL(str(args.library.resolve()))
+        for name in symbols:assert getattr(library,name),name
+        library.glrmask_abi_version.restype=ctypes.c_uint32
+        library.glrmask_version.restype=ctypes.c_char_p
+        assert library.glrmask_abi_version()==1
+        assert library.glrmask_version().decode()==version
     if args.addon:
         verify_runtime_dependencies(args.addon.resolve(), args.platform)
     print(f'Native source/version/license/docs checks passed; {len(symbols)} declared C symbols'+(' verified in binary' if args.library else ''))

@@ -12,7 +12,9 @@ if [ -z "$TARGET" ] || [ -z "$TAG" ]; then
   exit 1
 fi
 
-CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/native-ci}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/native-ci}"
+export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-3}"
+export CARGO_INCREMENTAL=0
 RUNNER_TEMP="${RUNNER_TEMP:-/tmp}"
 GITHUB_WORKSPACE="${GITHUB_WORKSPACE:-$(pwd)}"
 
@@ -39,7 +41,13 @@ if [ "$IS_MUSL" = true ]; then
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
     export PATH="$HOME/.cargo/bin:$PATH"
   fi
-  rustup target add "$TARGET" || true
+  export PATH="$HOME/.cargo/bin:$PATH"
+  rustup target add "$TARGET"
+  # musl Rust targets default to a static C runtime, which cannot be used
+  # for a dlopen-able cdylib. Scope this flag to the actual target, leaving
+  # host build scripts and CPU portability unchanged.
+  TARGET_ENV="$(printf '%s' "$TARGET" | tr '[:lower:]-' '[:upper:]_')"
+  export "CARGO_TARGET_${TARGET_ENV}_RUSTFLAGS=-C target-feature=-crt-static"
 else
   echo "Setting up manylinux_2_28 (glibc 2.28) toolchains..."
   # manylinux_2_28 has Python in /opt/python/cp312-cp312/bin or system python3
@@ -50,7 +58,8 @@ else
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
     export PATH="$HOME/.cargo/bin:$PATH"
   fi
-  rustup target add "$TARGET" || true
+  export PATH="$HOME/.cargo/bin:$PATH"
+  rustup target add "$TARGET"
   # Install Node 24 for building/testing if not present
   if ! command -v node >/dev/null 2>&1; then
     ARCH="$(uname -m)"
@@ -67,7 +76,7 @@ echo "Node: $(node --version)"
 echo "Python: $(python --version)"
 
 # 1. Install Node dependencies
-npm ci --ignore-scripts --prefix bindings/node
+npm ci --omit=optional --ignore-scripts --prefix bindings/node
 
 # 2. Validate source contracts
 python bindings/ci/check.py
@@ -79,13 +88,15 @@ cargo build --release --locked -p glrmask-c -p glrmask-node --target "$TARGET"
 LIB_DIR="$GITHUB_WORKSPACE/$CARGO_TARGET_DIR/$TARGET/release"
 python bindings/ci/check.py --library "$LIB_DIR/libglrmask_c.so" --platform "$TAG"
 
-# 5. Package and test Node addon
+# 5. Validate and exercise the locally built native Node addon.
+# The distribution-wide thin root and eight platform packages are packed and
+# smoke-tested by the aggregator after every CI native target has uploaded
+# its checksum-verified binary and manifest; no per-target fat package exists.
 cd bindings/node
 npm run build -- --target "$TARGET"
 python "$GITHUB_WORKSPACE/bindings/ci/check.py" --addon "glrmask.$TAG.node" --platform "$TAG"
 npm run check
-npm pack
-node scripts/test-installed.cjs glrmask-node-0.3.1.tgz "$RUNNER_TEMP/node-consumer"
+npm test
 cd "$GITHUB_WORKSPACE"
 
 # 6. Static/shared CMake installations and relocated C/C++ consumers

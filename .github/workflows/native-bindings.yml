@@ -142,18 +142,16 @@ jobs:
       - name: Build native release libraries
         if: ${{ !matrix.linux }}
         run: cargo build --release --locked -p glrmask-c -p glrmask-node --target '${{ matrix.target }}'
-      - name: Package and test Node addon
+      - name: Build and test single-target Node addon
         if: ${{ !matrix.linux }}
         working-directory: bindings/node
         run: |
           npm run build -- --target '${{ matrix.target }}'
           npm run check
-          rm -rf "$RUNNER_TEMP/stage-one" && mkdir -p "$RUNNER_TEMP/stage-one/root" "$RUNNER_TEMP/stage-one/${{ matrix.tag }}"
-          cp 'glrmask.${{ matrix.tag }}.node' native-manifest.json "$RUNNER_TEMP/stage-one/${{ matrix.tag }}/"
-          node scripts/check-package.cjs --platform-dir "$RUNNER_TEMP/stage-one/${{ matrix.tag }}" --tag '${{ matrix.tag }}'
-          npm pack --pack-destination "$RUNNER_TEMP/stage-one/root"
-          npm pack --pack-destination "$RUNNER_TEMP/stage-one/${{ matrix.tag }}" "$RUNNER_TEMP/stage-one/${{ matrix.tag }}"
-          node scripts/test-installed.cjs "$RUNNER_TEMP/stage-one/root/"*.tgz "$RUNNER_TEMP/stage-one/${{ matrix.tag }}/"*.tgz "$RUNNER_TEMP/node-consumer"
+          npm test
+      # Each native job uploads only a signed/checksummed target fragment;
+      # the aggregate job stages all eight optional-dependency npm packages
+      # and verifies the actual thin-root installed consumer.
       - name: Static/shared CMake installations and relocated C/C++ consumers
         if: ${{ !matrix.linux }}
         run: |
