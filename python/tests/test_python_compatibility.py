@@ -2,8 +2,6 @@
 
 import sys
 import glrmask
-import numpy as np
-import pytest
 
 
 def test_supported_python_version():
@@ -35,9 +33,12 @@ def test_forcing_tokens_query():
     g = glrmask.Grammar.from_ebnf('start ::= "a" "b"')
     c = g.compile(v)
     s = c.start()
-    # At start, "a" (0) is inevitable
+    # Both tokens are forced along this unique completion. Querying must not
+    # advance the original state; this also exercises the migrated PyO3 detach.
     forced = s.forced_tokens()
-    assert forced == [0]
+    assert forced == [0, 1]
+    assert s.forced_tokens() == forced
+    assert s.mask().tolist() == [True, False]
 
 
 def test_gil_status_contract():
@@ -50,4 +51,4 @@ def test_gil_status_contract():
         gil_enabled = sys._is_gil_enabled()
         # Extension is built with stable abi3 targeting non-free-threaded runtime
         # unless running in an environment where GIL was disabled.
-        assert isinstance(gil_enabled, bool)
+        assert gil_enabled, "This compatibility matrix qualifies only GIL-enabled CPython"

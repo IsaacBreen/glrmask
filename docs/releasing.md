@@ -23,7 +23,7 @@ tag, and only publishes after their complete validation jobs pass. It releases:
 - **PyPI**: eight regular CPython abi3 wheels (manylinux, musllinux, macOS and Windows) plus sdist, using PyPI's short-lived OIDC credential;
 - **crates.io**: the `glrmask` *root crate*, using `rust-lang/crates-io-auth-action`
   and a temporary token which is revoked after the job;
-- **C/C++**: sixteen tested, checksummed GitHub Release assets (seven platforms ×
+- **C/C++**: sixteen tested, checksummed GitHub Release assets (eight platforms ×
   static/shared), including headers, native libraries, CMake installation and manifests.
 
 For a rerun, an already-published npm/PyPI/crates.io version is skipped. Existing GitHub
@@ -106,3 +106,7 @@ trusted-publishing-only setting.
 For later C++ dependency-manager adoption, ConanCenter/vcpkg would be a separate
 package submission and maintenance process. Binary GitHub Release assets are the
 currently supported self-contained distribution format.
+
+## Compatibility build layout
+
+See [Supported platforms and installation](compatibility.md) for the complete eight-platform matrix, the ABI3 Python runtime tests, and the thin npm package layout. These source changes require a new release; they do not replace the existing 0.3.1 packages.

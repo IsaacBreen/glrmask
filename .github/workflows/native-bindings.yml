@@ -149,6 +149,8 @@ jobs:
           npm run build -- --target '${{ matrix.target }}'
           npm run check
           npm test
+          npm run typecheck
+          node scripts/test-platform-artifact.cjs
       # Each native job uploads only a signed/checksummed target fragment;
       # the aggregate job stages all eight optional-dependency npm packages
       # and verifies the actual thin-root installed consumer.
@@ -197,6 +199,7 @@ jobs:
             ${{ runner.temp }}/cpp-validation/**/Testing/Temporary/LastTest.log
             ${{ runner.temp }}/native-parity/parity-report.json
             ${{ runner.temp }}/node-consumer/verification.json
+            ${{ runner.temp }}/platform-install-report.json
           if-no-files-found: warn
           retention-days: 14
 
