@@ -180,6 +180,25 @@ jobs:
           already_public() {
             npm view "$1@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1
           }
+          wait_until_public() {
+            local name="$1" tgz="$2" expected got
+            expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
+            for attempt in $(seq 1 20); do
+              if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
+                got="$(printf '%s' "$got" | jq -r .)"
+                if [ "$got" != "$expected" ]; then
+                  echo "Published integrity mismatch for $name@${RELEASE_VERSION}; refusing to advance the root package" >&2
+                  return 1
+                fi
+                echo "Public and integrity-verified: $name@${RELEASE_VERSION}"
+                return 0
+              fi
+              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/20)"
+              sleep 15
+            done
+            echo "Package did not become publicly resolvable: $name@${RELEASE_VERSION}" >&2
+            return 1
+          }
           # Platform packages must be public before the thin root, so a fresh
           # `npm install @glrmask/node` resolves every optionalDependency.
           for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
@@ -189,12 +208,14 @@ jobs:
             else
               publish_with_retry "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
             fi
+            wait_until_public "$NAME" "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
           done
           if already_public '@glrmask/node'; then
             echo "Already released npm @glrmask/node@${RELEASE_VERSION}; no second publish."
           else
             publish_with_retry "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
           fi
+          wait_until_public '@glrmask/node' "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
 
   pypi:
     name: PyPI - glrmask
@@ -459,6 +480,25 @@ jobs:
           already_public() {
             npm view "$1@${RELEASE_VERSION}" version --registry=https://registry.npmjs.org/ >/dev/null 2>&1
           }
+          wait_until_public() {
+            local name="$1" tgz="$2" expected got
+            expected="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");console.log("sha512-"+c.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$tgz")"
+            for attempt in $(seq 1 20); do
+              if got="$(npm view "$name@${RELEASE_VERSION}" dist.integrity --json --prefer-online --fetch-retries=0 --fetch-timeout=15000 --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
+                got="$(printf '%s' "$got" | jq -r .)"
+                if [ "$got" != "$expected" ]; then
+                  echo "Published integrity mismatch for $name@${RELEASE_VERSION}; refusing to advance the root package" >&2
+                  return 1
+                fi
+                echo "Public and integrity-verified: $name@${RELEASE_VERSION}"
+                return 0
+              fi
+              echo "Waiting for npm processing: $name@${RELEASE_VERSION} ($attempt/20)"
+              sleep 15
+            done
+            echo "Package did not become publicly resolvable: $name@${RELEASE_VERSION}" >&2
+            return 1
+          }
           for tag in win32-x64-msvc win32-arm64-msvc darwin-x64 darwin-arm64 linux-x64-gnu linux-arm64-gnu linux-x64-musl linux-arm64-musl; do
             NAME="@glrmask/node-${tag}"
             if already_public "$NAME"; then
@@ -466,12 +506,14 @@ jobs:
             else
               publish_with_retry "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
             fi
+            wait_until_public "$NAME" "./dist/glrmask-node-${tag}-${RELEASE_VERSION}.tgz"
           done
           if already_public '@glrmask/node'; then
             echo "Already published @glrmask/node@${RELEASE_VERSION}"
           else
             publish_with_retry "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
           fi
+          wait_until_public '@glrmask/node' "./dist/glrmask-node-${RELEASE_VERSION}.tgz"
 
   pypi-recovery:
     name: PyPI - recover exactly source-matched validated wheels
