@@ -530,6 +530,7 @@ dependencies = [
  "glrmask-weighted-automata",
  "hashbrown 0.15.5",
  "im",
+ "libc",
  "once_cell",
  "pretty_assertions",
  "rand",

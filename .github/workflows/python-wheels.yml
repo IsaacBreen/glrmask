@@ -181,11 +181,12 @@ jobs:
         run: python scripts/python-artifact-smoke.py dist --kind wheel
 
       - name: Upload wheel artifact
+        if: always()
         uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.platform.id }}
           path: dist/*.whl
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14
 
   sdist:

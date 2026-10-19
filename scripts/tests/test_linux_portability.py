@@ -4,6 +4,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from subprocess import CompletedProcess, CalledProcessError
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -83,51 +85,58 @@ class CppReleaseArchivesMatrixTest(unittest.TestCase):
 
 class RuntimeDependenciesVerifierTest(unittest.TestCase):
     def test_portable_glibc_allowed(self):
-        with tempfile.NamedTemporaryFile(suffix=".so", delete=False) as f:
-            # Fake ELF with GLIBC_2.17 and GLIBC_2.28
-            f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 40 + b"GLIBC_2.2.5\x00GLIBC_2.17\x00GLIBC_2.28\x00")
-            f.flush()
-            temp_path = Path(f.name)
-        try:
-            # Should succeed because max glibc is 2.28
-            ci_check.verify_runtime_dependencies(temp_path, "linux-x64-gnu")
-        finally:
-            temp_path.unlink()
+        report = """
+ 0x0000000000000001 (NEEDED) Shared library: [libc.so.6]
+ Version needs section '.gnu.version_r' contains 1 entry:
+ Name: GLIBC_2.2.5  Flags: none  Version: 2
+ Name: GLIBC_2.17   Flags: none  Version: 3
+ Name: GLIBC_2.28   Flags: none  Version: 4
+"""
+        ci_check.validate_elf_runtime_report(report, "linux-x64-gnu", "fixture.so")
 
     def test_glibc_exceeding_baseline_rejected(self):
-        with tempfile.NamedTemporaryFile(suffix=".so", delete=False) as f:
-            # Fake ELF requiring GLIBC_2.35 (e.g. built on bare Ubuntu 22.04 without container)
-            f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 40 + b"GLIBC_2.35\x00")
-            f.flush()
-            temp_path = Path(f.name)
-        try:
-            with self.assertRaisesRegex(RuntimeError, "exceeds 2.28 minimum portability baseline"):
-                ci_check.verify_runtime_dependencies(temp_path, "linux-x64-gnu")
-        finally:
-            temp_path.unlink()
+        with self.assertRaisesRegex(RuntimeError, "exceeds 2.28 minimum portability baseline"):
+            ci_check.validate_elf_runtime_report(
+                "Name: GLIBC_2.35 Flags: none Version: 2", "linux-x64-gnu", "fixture.so"
+            )
 
     def test_musl_binary_passes(self):
-        with tempfile.NamedTemporaryFile(suffix=".so", delete=False) as f:
-            # Fake musl ELF
-            f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 40 + b"libc.musl-x86_64.so.1\x00musl_alloc\x00")
-            f.flush()
-            temp_path = Path(f.name)
-        try:
-            ci_check.verify_runtime_dependencies(temp_path, "linux-x64-musl")
-        finally:
-            temp_path.unlink()
+        ci_check.validate_elf_runtime_report(
+            "0x1 (NEEDED) Shared library: [libc.musl-x86_64.so.1]",
+            "linux-x64-musl", "fixture.so",
+        )
 
     def test_musl_binary_with_glibc_leak_rejected(self):
-        with tempfile.NamedTemporaryFile(suffix=".so", delete=False) as f:
-            # Fake musl ELF that accidentally links glibc
-            f.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 40 + b"libc.musl-x86_64.so.1\x00libc.so.6\x00")
-            f.flush()
-            temp_path = Path(f.name)
-        try:
-            with self.assertRaisesRegex(RuntimeError, "unexpectedly links to libc.so.6"):
-                ci_check.verify_runtime_dependencies(temp_path, "linux-x64-musl")
-        finally:
-            temp_path.unlink()
+        with self.assertRaisesRegex(RuntimeError, "unexpectedly links to libc.so.6"):
+            ci_check.validate_elf_runtime_report(
+                "0x1 (NEEDED) Shared library: [libc.so.6]", "linux-x64-musl", "fixture.so"
+            )
+
+    def test_musl_version_import_rejected(self):
+        with self.assertRaisesRegex(RuntimeError, "unexpectedly references GLIBC"):
+            ci_check.validate_elf_runtime_report(
+                "Name: GLIBC_2.28 Flags: none Version: 2", "linux-arm64-musl", "fixture.so"
+            )
+
+    def test_rodata_probe_strings_are_not_imports(self):
+        # Rust may embed optional dlsym probes named GLIBC_2.0 in .rodata.
+        # Only readelf's dynamic/version tables, not these bytes, count.
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "fixture.so"
+            binary.write_bytes(b"\x7fELF" + b"GLIBC_2.0\x00libc.so.6\x00")
+            report = "0x1 (NEEDED) Shared library: [libc.musl-aarch64.so.1]"
+            with patch.object(ci_check.subprocess, "run", return_value=CompletedProcess([], 0, report, "")) as run:
+                ci_check.verify_runtime_dependencies(binary, "linux-arm64-musl")
+            self.assertEqual(run.call_args.args[0][:4], ["readelf", "--dynamic", "--version-info", "--wide"])
+            self.assertTrue(run.call_args.kwargs["check"])
+
+    def test_broken_elf_inspection_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "broken.so"
+            binary.write_bytes(b"\x7fELF")
+            with patch.object(ci_check.subprocess, "run", side_effect=CalledProcessError(1, ["readelf"])):
+                with self.assertRaises(CalledProcessError):
+                    ci_check.verify_runtime_dependencies(binary, "linux-x64-gnu")
 
 
 if __name__ == "__main__":

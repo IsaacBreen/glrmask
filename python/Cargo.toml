@@ -21,3 +21,8 @@ self_cell = "1"
 mimalloc = "=0.1.52"
 libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+
+# Python imports the extension after process startup. musl cannot safely use
+# the allocator's initial-exec TLS assumptions in a dynamically loaded module.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "=0.1.52", features = ["local_dynamic_tls"] }

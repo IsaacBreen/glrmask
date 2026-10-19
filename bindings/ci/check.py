@@ -1,32 +1,46 @@
 #!/usr/bin/env python3
 """Check native versions, licenses, documented API files and actual C exports."""
 from __future__ import annotations
-import argparse, ctypes, json, re, tomllib
+import argparse, ctypes, json, re, subprocess, tomllib
 from pathlib import Path
 
-def verify_runtime_dependencies(path: Path, platform: str | None = None) -> None:
-    data = path.read_bytes()
-    if not data.startswith(b'\x7fELF'):
-        return
+def validate_elf_runtime_report(report: str, platform: str | None, name: str) -> None:
+    """Validate dynamic dependencies, not arbitrary strings embedded in .rodata.
+
+    Rust's runtime contains compatibility lookup strings even in musl builds;
+    scanning every byte would mistake those strings for imported GLIBC symbols.
+    readelf's dynamic and version tables describe the actual loader contract.
+    """
     glibc_versions = [
         (int(m.group(1)), int(m.group(2)))
-        for m in re.finditer(rb'\bGLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b', data)
+        for m in re.finditer(r'\bGLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b', report)
     ]
-    is_musl = (platform and 'musl' in platform) or (b'musl' in data and not glibc_versions)
+    needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', report)
+    is_musl = (platform and 'musl' in platform) or any('musl' in lib for lib in needed)
     if is_musl:
         if glibc_versions:
-            raise RuntimeError(f"{path.name}: Musl binary unexpectedly references GLIBC symbols: {glibc_versions}")
-        if b'libc.so.6' in data:
-            raise RuntimeError(f"{path.name}: Musl binary unexpectedly links to libc.so.6")
-        print(f"Verified musl runtime independence for {path.name}")
+            raise RuntimeError(f"{name}: Musl binary unexpectedly references GLIBC symbols: {glibc_versions}")
+        if 'libc.so.6' in needed:
+            raise RuntimeError(f"{name}: Musl binary unexpectedly links to libc.so.6")
+        print(f"Verified musl runtime independence for {name}")
     else:
         if glibc_versions:
             max_v = max(glibc_versions)
             if max_v > (2, 28):
-                raise RuntimeError(f"{path.name}: GLIBC requirement {max_v[0]}.{max_v[1]} exceeds 2.28 minimum portability baseline")
-            print(f"Verified glibc runtime dependency baseline for {path.name} (max {max_v[0]}.{max_v[1]} <= 2.28)")
+                raise RuntimeError(f"{name}: GLIBC requirement {max_v[0]}.{max_v[1]} exceeds 2.28 minimum portability baseline")
+            print(f"Verified glibc runtime dependency baseline for {name} (max {max_v[0]}.{max_v[1]} <= 2.28)")
         else:
-            print(f"Verified ELF binary {path.name} without versioned GLIBC symbols")
+            print(f"Verified ELF binary {name} without versioned GLIBC symbols")
+
+def verify_runtime_dependencies(path: Path, platform: str | None = None) -> None:
+    with path.open('rb') as binary:
+        if binary.read(4) != b'\x7fELF':
+            return
+    result = subprocess.run(
+        ['readelf', '--dynamic', '--version-info', '--wide', str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    validate_elf_runtime_report(result.stdout, platform, path.name)
 
 def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)

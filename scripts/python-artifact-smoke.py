@@ -49,7 +49,7 @@ def main() -> None:
         run(str(python), "-I", "-m", "pip", "install", "--upgrade", "pip", cwd=Path(tmp))
         run(str(python), "-I", "-m", "pip", "install", str(artifact), "pytest", cwd=Path(tmp))
         version = artifact.name.removeprefix("glrmask-").split("-")[0].removesuffix(".tar.gz")
-        run(str(python), "-I", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
+        run(str(python), "-I", "-X", "faulthandler", str(repo_root / "scripts" / "python-wheel-smoke.py"), version, cwd=Path(tmp))
         run(str(python), "-I", "-m", "pytest", "-q", "-p", "no:cacheprovider",
             str(repo_root / "python" / "tests" / "test_python_compatibility.py"), cwd=Path(tmp))
 
