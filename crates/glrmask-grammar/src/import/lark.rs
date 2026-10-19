@@ -1651,3 +1651,73 @@ mod regular_frontend_regressions {
         }
     }
 }
+
+#[cfg(test)]
+mod lazy_prefix_minimal_regressions {
+    use super::*;
+    use crate::automata::lexer::tokenizer::Lexer as _;
+    use crate::grammar::ast::resolved_named_terminal_exprs;
+    use crate::grammar::glrm::{from_glrm, to_glrm, to_glrm_v1};
+
+    fn assert_language(grammar: &NamedGrammar, name: &str, samples: &[(&[u8], bool)]) {
+        lower(grammar).unwrap();
+        // Resolve a regular lowercase parser body as a byte language too,
+        // without changing the original grammar or what its dumper sees.
+        let mut terminals = grammar.clone();
+        terminals.rules.iter_mut().find(|r| r.name == name).unwrap().is_terminal = true;
+        let resolved = resolved_named_terminal_exprs(&terminals).unwrap();
+        let expr = resolved[name].clone();
+        let lexer = expr.clone().build().into_tokenizer(1, Some(Arc::from([expr])));
+        for &(input, expected) in samples {
+            let accepted = input.iter().try_fold(lexer.initial_state(), |state, &byte| lexer.step(state, byte))
+                .is_some_and(|state| lexer.matched_terminal_bitset(state).contains(0));
+            assert_eq!(accepted, expected, "input {input:?}");
+        }
+    }
+
+    #[test]
+    fn lazy_retains_prefix_minimal_language_and_native_dump_roundtrips() {
+        for (body, samples) in [
+            ("/a|ab/", vec![(b"a".as_slice(), true), (b"ab", false), (b"", false)]),
+            ("/ab|abc|ac/", vec![(b"ab".as_slice(), true), (b"ac", true), (b"abc", false)]),
+            ("/a*/", vec![(b"".as_slice(), true), (b"a", false), (b"aa", false)]),
+            (r"/.*END/s", vec![(b"END".as_slice(), true), (b"a\nEND", true),
+                (b"ENDxEND", false), (b"no end", false)]),
+            (r"/é|é\n|😀|😀x/s", vec![("é".as_bytes(), true), ("é\n".as_bytes(), false),
+                ("😀".as_bytes(), true), ("😀x".as_bytes(), false)]),
+        ] {
+            for name in ["WORD", "word"] {
+                let source = format!("start: {name}\n{name}[lazy]: {body}");
+                let grammar = parse_lark_document(&source, LarkProfile::Llm).unwrap().grammar;
+                assert!(matches!(&grammar.rules.iter().find(|r| r.name == name).unwrap().expr,
+                    GrammarExpr::Shortest(_)));
+                assert_language(&grammar, name, &samples);
+                for dump in [to_glrm(&grammar), to_glrm_v1(&grammar).unwrap()] {
+                    assert!(!dump.contains("shortest {"), "{dump}");
+                    assert_language(&from_glrm(&dump).unwrap(), name, &samples);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_still_requires_llm_profile_and_regular_operands() {
+        for source in [
+            "start: WORD\nWORD[lazy]: /a|ab/",
+            "start: word\nword[lazy]: /a|ab/",
+        ] {
+            let error = parse_lark_document(source, LarkProfile::Recognition).unwrap_err();
+            assert!(error.to_string().contains("[lazy] requires"), "{error}");
+        }
+        for source in [
+            "start: word\nword[lazy]: other\nother: \"a\"",
+            "start: word\nword[lazy]: @child",
+            "start: word\nword[lazy]: <[1]>",
+            "start: word\nword[lazy]: %json {}",
+            "start: word\nword[lazy]: word \"a\" | \"b\"",
+            "start: WORD\nWORD[lazy]: /a+?/",
+        ] {
+            assert!(parse_lark_document(source, LarkProfile::Llm).is_err(), "{source}");
+        }
+    }
+}

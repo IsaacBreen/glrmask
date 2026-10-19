@@ -613,7 +613,21 @@ fn dump_nt_postfix(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
 
 fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
-        GrammarExpr::Shortest(inner) => format!("shortest {{ {} }}", dump_nt_expr_with_flavor(inner, false, flavor)),
+        GrammarExpr::Shortest(inner) => {
+            // PrefixMin(L) = L - (L AnyByte+). Keep both copies grouped so
+            // alternatives, set operations and nested PrefixMin nodes retain
+            // their scope. The suffix covers bytes, including malformed UTF-8.
+            // Legacy NT bodies cannot contain raw regex literals. Expand those
+            // atoms to their exact byte language rather than relaxing parsing.
+            let legacy_operand;
+            let inner = if flavor == DumpFlavor::Legacy {
+                legacy_operand = legacy_prefix_min_operand(inner);
+                &legacy_operand
+            } else { inner.as_ref() };
+            let operand = dump_nt_expr_with_flavor(inner, false, flavor);
+            let any_byte = dump_nt_atom(&GrammarExpr::AnyByte, flavor);
+            format!("(({operand}) - (({operand}) {any_byte}+))")
+        }
         GrammarExpr::Ref(name) => if flavor==DumpFlavor::V1 {source_identifier(name)} else {name.clone()},
         GrammarExpr::Grouped(inner) => {
             format!("({})", dump_nt_expr_with_flavor(inner, false, flavor))
@@ -622,7 +636,13 @@ fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
         GrammarExpr::MarkerProbe(id) => format!("@mark({id})"),
         GrammarExpr::SpecialToken(token_id) => format!("@token({token_id})"),
         GrammarExpr::SpecialTokenRange(start, end) => format!("@tokens({start}, {end})"),
-        GrammarExpr::RawRegex(pat) => source_regex_literal(pat).unwrap_or_else(||format!("/{}/", escape_regex_for_slash(pat))),
+        GrammarExpr::RawRegex(pat) => {
+            // Legacy input deliberately preserves internal regex patterns.
+            // Retain the checked mode wrapper there, including Unicode flags
+            // and properties, instead of peeling it into an unchecked literal.
+            if flavor == DumpFlavor::Legacy { format!("/{}/", escape_regex_for_slash(pat)) }
+            else { source_regex_literal(pat).unwrap_or_else(||format!("/{}/", escape_regex_for_slash(pat))) }
+        }
         GrammarExpr::CharClass { def, negate, utf8 } => {
             let inner = if *negate { format!("^{def}") } else { def.clone() };
             if flavor==DumpFlavor::Legacy {
@@ -695,6 +715,37 @@ fn dump_nt_atom(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     }
 }
 
+/// Make regex atoms inside a legacy PrefixMin expression legal in both
+/// terminal and nonterminal bodies, without changing the legacy scanner.
+fn legacy_prefix_min_operand(expr: &GrammarExpr) -> GrammarExpr {
+    match expr {
+        GrammarExpr::RawRegex(pattern) => {
+            let bytes = crate::automata::lexer::regex::parse_regex(pattern, true);
+            legacy_prefix_min_operand(&crate::grammar::ast::expr_to_grammar_expr(&bytes))
+        }
+        // Regex lowering represents an empty byte class as an empty choice;
+        // spell it explicitly so legacy () cannot turn that into epsilon.
+        GrammarExpr::Choice(parts) if parts.is_empty() => GrammarExpr::CharClass {
+            def: r"\x00-\xFF".into(), negate: true, utf8: false,
+        },
+        GrammarExpr::Choice(parts) => GrammarExpr::Choice(parts.iter().map(legacy_prefix_min_operand).collect()),
+        GrammarExpr::Sequence(parts) => GrammarExpr::Sequence(parts.iter().map(legacy_prefix_min_operand).collect()),
+        GrammarExpr::Grouped(inner) => GrammarExpr::Grouped(Box::new(legacy_prefix_min_operand(inner))),
+        GrammarExpr::Shortest(inner) => GrammarExpr::Shortest(Box::new(legacy_prefix_min_operand(inner))),
+        GrammarExpr::Quantified(inner, quantifier) => GrammarExpr::Quantified(
+            Box::new(legacy_prefix_min_operand(inner)), quantifier.clone()),
+        GrammarExpr::Exclude { expr, exclude } => GrammarExpr::Exclude {
+            expr: Box::new(legacy_prefix_min_operand(expr)),
+            exclude: Box::new(legacy_prefix_min_operand(exclude)),
+        },
+        GrammarExpr::Intersect { expr, intersect } => GrammarExpr::Intersect {
+            expr: Box::new(legacy_prefix_min_operand(expr)),
+            intersect: Box::new(legacy_prefix_min_operand(intersect)),
+        },
+        _ => expr.clone(),
+    }
+}
+
 fn dump_set_operand(expr: &GrammarExpr, flavor: DumpFlavor) -> String {
     match expr {
         GrammarExpr::Choice(_) | GrammarExpr::Exclude { .. } | GrammarExpr::Intersect { .. } => {
@@ -747,7 +798,7 @@ fn format_literal(bytes: &[u8], flavor: DumpFlavor) -> String {
 }
 
 fn source_identifier(name: &str) -> String {
-    if is_declaration_keyword(name) || matches!(name,"eps"|"fa"|"shortest"|"token") {
+    if is_declaration_keyword(name) || matches!(name,"eps"|"fa"|"token") {
         format!("`{name}`")
     } else {name.to_owned()}
 }
@@ -2819,11 +2870,6 @@ impl GlrmParser {
             Tok::EscapedIdent(name) => {self.advance();Ok(GrammarExpr::Ref(name))}
             Tok::Ident(ref kw) => {
                 match kw.as_str() {
-                    "shortest" if matches!(self.token_at(1),Tok::LBrace) => {
-                        self.advance();self.consume(&Tok::LBrace)?;
-                        let inner=self.parse_nt_expr(true)?;self.consume(&Tok::RBrace)?;
-                        Ok(GrammarExpr::Shortest(Box::new(inner)))
-                    }
                     "eps" => {
                         self.advance();
                         Ok(GrammarExpr::Epsilon)
@@ -5218,11 +5264,22 @@ mod redesigned_surface_tests {
 
     fn terminal_matches(source: &str, name: &str, input: &[u8]) -> bool {
         let grammar=from_glrm(source).unwrap();
-        let resolved=resolved_named_terminal_exprs(&grammar).unwrap();
+        named_terminal_matcher(&grammar, name)(input)
+    }
+
+    fn named_terminal_matcher(grammar: &NamedGrammar, name: &str) -> impl Fn(&[u8]) -> bool + use<> {
+        let resolved=resolved_named_terminal_exprs(grammar).unwrap();
         let expr=resolved[name].clone();
         let lexer=expr.clone().build().into_tokenizer(1,Some(Arc::from([expr])));
-        lexer.execute_from_state(input,lexer.initial_state()).matches.iter()
-            .any(|m|m.id==0 && m.width==input.len())
+        move |input| input.iter().try_fold(lexer.initial_state(), |state, &byte| lexer.step(state, byte))
+            .is_some_and(|state| lexer.matched_terminal_bitset(state).contains(0))
+    }
+
+    fn shortest_grammar(body: &str) -> NamedGrammar {
+        let mut grammar = from_glrm(&format!("start root t VALUE={body} nt root=VALUE")).unwrap();
+        let rule = grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap();
+        rule.expr = GrammarExpr::Shortest(Box::new(rule.expr.clone()));
+        grammar
     }
 
     #[test]
@@ -5271,17 +5328,162 @@ mod redesigned_surface_tests {
     }
 
     #[test]
-    fn shortest_is_regular_and_handles_nfa_competition_and_epsilon() {
-        let source=r#"start root t VALUE=shortest { /a|ab/ } nt root=VALUE"#;
-        assert!(terminal_matches(source,"VALUE",b"a"));
-        assert!(!terminal_matches(source,"VALUE",b"ab"));
-        let source=r#"start root t VALUE=shortest { /ab|abc|ac/ } nt root=VALUE"#;
-        for bytes in [b"ab".as_slice(),b"ac"] {assert!(terminal_matches(source,"VALUE",bytes));}
-        assert!(!terminal_matches(source,"VALUE",b"abc"));
-        assert!(from_glrm(r#"start root t EMPTY=shortest { /a*/ } nt root=EMPTY"#).is_ok());
-        assert!(from_glrm(r#"start root ignore EMPTY t EMPTY=shortest { /a*/ } nt root="b""#).is_err());
-        assert!(from_glrm(r#"start root nt X="a" nt root=shortest { X }"#).is_err());
+    fn native_shortest_syntax_is_rejected_but_the_identifier_is_ordinary() {
+        for source in [
+            r#"start root t VALUE=shortest { /a|ab/ } nt root=VALUE"#,
+            r#"start root; t VALUE ::= shortest { /a|ab/ }; nt root ::= VALUE;"#,
+            r#"start root nt root=shortest { "a" }"#,
+            r#"start root t VALUE=(shortest { "a" })+ nt root=VALUE"#,
+            r#"start root grammar child {start value t VALUE=shortest { "a" } nt value=VALUE} nt root=child"#,
+            r#"start root t VALUE=fa {start q0 accept q1 edge q0 -> q1: shortest { "a" }} nt root=VALUE"#,
+        ] {
+            assert!(from_glrm(source).is_err(), "{source}");
+            assert!(format_glrm_v1(source).is_err(), "{source}");
+            assert!(ParsedComponent::parse_glrm(source).is_err(), "{source}");
+        }
+        for source in [
+            r#"start root t shortest="a" t VALUE=shortest{2} nt root=VALUE"#,
+            r#"start root; t shortest ::= "a"; t VALUE ::= shortest{2}; nt root ::= VALUE;"#,
+            r#"start root t `shortest`="a" t VALUE=`shortest`{2} nt root=VALUE"#,
+        ] {
+            assert!(terminal_matches(source, "VALUE", b"aa"), "{source}");
+            assert!(!terminal_matches(source, "VALUE", b"a"), "{source}");
+        }
+        let source = r#"start shortest nt shortest="a" shortest{0,1}"#;
+        assert!(ParsedComponent::parse_glrm(source).is_ok());
+        let formatted = format_glrm_v1(source).unwrap();
+        assert!(!formatted.contains("`shortest`"), "{formatted}");
+        assert!(from_glrm(&formatted).is_ok());
+    }
+
+    #[test]
+    fn internal_shortest_is_regular_and_handles_nfa_competition_and_epsilon() {
+        let grammar = shortest_grammar("/a|ab/");
+        let matches = named_terminal_matcher(&grammar, "VALUE");
+        assert!(matches(b"a"));
+        assert!(!matches(b"ab"));
+        crate::grammar::ast::lower(&grammar).unwrap();
+
+        let grammar = shortest_grammar("/ab|abc|ac/");
+        let matches = named_terminal_matcher(&grammar, "VALUE");
+        for bytes in [b"ab".as_slice(), b"ac"] { assert!(matches(bytes)); }
+        assert!(!matches(b"abc"));
+
+        let mut grammar = shortest_grammar("/a*/");
+        let matches = named_terminal_matcher(&grammar, "VALUE");
+        assert!(matches(b""));
+        assert!(!matches(b"a"));
+        assert!(!matches(b"aa"));
+        crate::grammar::ast::lower(&grammar).unwrap();
+        grammar.ignore = Some("VALUE".into());
+        assert!(validate_ignore_terminal(&grammar, "test").is_err());
+
+        let mut grammar = from_glrm(r#"start root nt X="a" nt root=X"#).unwrap();
+        grammar.rules.iter_mut().find(|r| r.name == "root").unwrap().expr =
+            GrammarExpr::Shortest(Box::new(GrammarExpr::Ref("X".into())));
+        assert!(crate::grammar::ast::validate_shortest_operands(&grammar).is_err());
+        assert!(crate::grammar::ast::lower(&grammar).is_err());
         assert!(from_glrm(r#"start root t VALUE=/a+?/ nt root=VALUE"#).is_err());
+    }
+
+    fn assert_shortest_dump_language(grammar: &NamedGrammar, samples: &[(&[u8], bool)]) {
+        crate::grammar::ast::lower(grammar).unwrap();
+        let original_matches = named_terminal_matcher(grammar, "VALUE");
+        for &(input, expected) in samples {
+            assert_eq!(original_matches(input), expected, "internal input {input:?}");
+        }
+        for dump in [to_glrm(grammar), to_glrm_v1(grammar).unwrap()] {
+            assert!(!dump.contains("shortest {"), "{dump}");
+            let reparsed = from_glrm(&dump).unwrap();
+            crate::grammar::ast::lower(&reparsed).unwrap();
+            let reparsed_matches = named_terminal_matcher(&reparsed, "VALUE");
+            for &(input, expected) in samples {
+                assert_eq!(reparsed_matches(input), expected, "input {input:?}\n{dump}");
+            }
+            // Explicitly migrate legacy output before canonical v1 formatting.
+            let modern = to_glrm_v1(&reparsed).unwrap();
+            let formatted = format_glrm_v1(&modern).unwrap();
+            assert_eq!(formatted, format_glrm_v1(&formatted).unwrap());
+            let formatted_grammar = from_glrm(&formatted).unwrap();
+            let formatted_matches = named_terminal_matcher(&formatted_grammar, "VALUE");
+            for &(input, expected) in samples {
+                assert_eq!(formatted_matches(input), expected, "input {input:?}\n{formatted}");
+            }
+        }
+    }
+
+    #[test]
+    fn shortest_dumps_reparse_with_exact_byte_and_unicode_languages() {
+        for (body, samples) in [
+            ("/a|ab/", vec![(b"".as_slice(), false), (b"a", true), (b"ab", false), (b"b", false)]),
+            ("/ab|abc|ac/", vec![(b"a".as_slice(), false), (b"ab", true), (b"abc", false), (b"ac", true)]),
+            ("/a*/", vec![(b"".as_slice(), true), (b"a", false), (b"aa", false), (b"b", false)]),
+            (r"b/[^\x00-\xFF]/", vec![(b"".as_slice(), false), (b"a", false), (&[255], false)]),
+            (r#"eps | b/./s"#, vec![(b"".as_slice(), true), (b"\n", false), (&[255], false)]),
+            (r#"b"\xFF" | b"\xFF\x00" | b"\xFF\xFE""#,
+                vec![(&[255][..], true), (&[255, 0], false), (&[255, 254], false), (b"", false)]),
+            (r#"b"\xC3" | "é""#, vec![(&[0xC3][..], true), ("é".as_bytes(), false), (&[0xFF], false)]),
+            (r#"/é|é\n|😀|😀x/s"#, vec![("é".as_bytes(), true), ("é\n".as_bytes(), false),
+                ("😀".as_bytes(), true), ("😀x".as_bytes(), false), (b"\n", false)]),
+            (r"/\p{L}+/", vec![("é".as_bytes(), true), ("éa".as_bytes(), false),
+                ("α".as_bytes(), true), ("😀".as_bytes(), false)]),
+            (r#"/a.*END/is"#, vec![(b"aEND".as_slice(), true), (b"A\nend", true),
+                (b"aENDxEND", false), (b"a\nEND\nEND", false)]),
+            (r#"("a" | "ab" | "b") - "b""#, vec![(b"a".as_slice(), true), (b"ab", false), (b"b", false)]),
+            (r#"(/a|ab|b/ & /a.*/)"#, vec![(b"a".as_slice(), true), (b"ab", false), (b"b", false)]),
+        ] {
+            assert_shortest_dump_language(&shortest_grammar(body), &samples);
+        }
+        for (operand, nullable) in [
+            (GrammarExpr::Epsilon, true),
+            (GrammarExpr::Sequence(vec![]), true),
+        ] {
+            let mut grammar = shortest_grammar("eps");
+            grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap().expr =
+                GrammarExpr::Shortest(Box::new(operand));
+            assert_shortest_dump_language(&grammar, &[(b"", nullable), (b"a", false), (&[255], false)]);
+        }
+        let mut grammar = shortest_grammar("eps");
+        grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap().expr =
+            GrammarExpr::Shortest(Box::new(GrammarExpr::Quantified(
+                Box::new(GrammarExpr::AnyByte), Quantifier::OnePlus)));
+        let mut samples = vec![(b"".as_slice(), false), (b"ab".as_slice(), false),
+            ("é".as_bytes(), false), (b"\n\xFF".as_slice(), false)];
+        let single_bytes = (0..=255).map(|b| [b]).collect::<Vec<_>>();
+        samples.extend(single_bytes.iter().map(|b| (b.as_slice(), true)));
+        assert_shortest_dump_language(&grammar, &samples);
+    }
+
+    #[test]
+    fn shortest_dump_preserves_nested_and_surrounding_operator_scopes() {
+        let mut helpers = from_glrm(r"start root internal t LETTER=/\p{L}+/ t VALUE=LETTER nt root=VALUE").unwrap();
+        let value = helpers.rules.iter_mut().find(|r| r.name == "VALUE").unwrap();
+        value.expr = GrammarExpr::Shortest(Box::new(value.expr.clone()));
+        assert_shortest_dump_language(&helpers, &[("é".as_bytes(), true), ("éa".as_bytes(), false), (b"", false)]);
+
+        let mut grammar = shortest_grammar("/a|ab/");
+        let rule = grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap();
+        let shortest = rule.expr.clone();
+        rule.expr = GrammarExpr::Shortest(Box::new(GrammarExpr::Choice(vec![
+            shortest.clone(), GrammarExpr::Literal(b"ac".to_vec()),
+            GrammarExpr::Literal(b"b".to_vec()),
+        ])));
+        assert_shortest_dump_language(&grammar, &[(b"a", true), (b"ab", false), (b"ac", false), (b"b", true)]);
+
+        for expr in [
+            GrammarExpr::Sequence(vec![shortest.clone(), GrammarExpr::Literal(b"!".to_vec())]),
+            GrammarExpr::Quantified(Box::new(shortest.clone()), Quantifier::OnePlus),
+            GrammarExpr::Choice(vec![shortest.clone(), GrammarExpr::Literal(b"z".to_vec())]),
+            GrammarExpr::Exclude {expr: Box::new(shortest.clone()), exclude: Box::new(GrammarExpr::Literal(b"z".to_vec()))},
+            GrammarExpr::Intersect {expr: Box::new(shortest.clone()), intersect: Box::new(GrammarExpr::Literal(b"a".to_vec()))},
+        ] {
+            grammar.rules.iter_mut().find(|r| r.name == "VALUE").unwrap().expr = expr;
+            // Compute expectations here to check enclosing operator precedence.
+            let matches = named_terminal_matcher(&grammar, "VALUE");
+            let samples = [b"".as_slice(), b"a", b"ab", b"a!", b"aa", b"z", b"ab!"]
+                .map(|input| (input, matches(input)));
+            assert_shortest_dump_language(&grammar, &samples);
+        }
     }
 
     #[test]
@@ -5297,7 +5499,7 @@ mod redesigned_surface_tests {
     #[test]
     fn canonical_formatter_is_idempotent_and_retains_literal_alphabets() {
         for source in [
-            r#"start root t VALUE=shortest { /.*END/s } nt root=VALUE"#,
+            r#"start root internal t L=/.*END/s t VALUE=L - (L b/./s+) nt root=VALUE"#,
             r#"start root t VALUE=b/[\x00-\xFF]+/ nt root=VALUE"#,
             r#"start root t VALUE="é\u{1F600}\n" nt root=VALUE"#,
             r#"start `start` nt `start`=b"\xFF\x00""#,
