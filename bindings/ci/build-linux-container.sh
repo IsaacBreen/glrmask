@@ -33,7 +33,7 @@ fi
 # Toolchain setup
 if [ "$IS_MUSL" = true ]; then
   echo "Setting up Alpine musl toolchains..."
-  apk add --no-cache bash git build-base cmake ninja python3 py3-pip curl binutils
+  apk add --no-cache bash git build-base cmake ninja python3 py3-pip curl binutils gdb
   if [ ! -f /usr/bin/python ] && [ -f /usr/bin/python3 ]; then
     ln -sf /usr/bin/python3 /usr/bin/python
   fi

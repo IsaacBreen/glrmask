@@ -165,7 +165,13 @@ int main(int argc,char** argv) {
         if(argc==2 && std::string(argv[1])=="--parity"){emit_parity();return 0;}
         if(argc==3 && std::string(argv[1])=="--save"){artifacts(argv[2],false);return 0;}
         if(argc==3 && std::string(argv[1])=="--check"){artifacts(argv[2],true);return 0;}
-        CHECK(argc==1);basic();exact_and_unicode();end_tokens();composition_and_persistence();markers_and_frontends();threads_and_errors();
+        CHECK(argc==1);
+        std::cerr << "C++ regression: basic" << std::endl; basic();
+        std::cerr << "C++ regression: exact_and_unicode" << std::endl; exact_and_unicode();
+        std::cerr << "C++ regression: end_tokens" << std::endl; end_tokens();
+        std::cerr << "C++ regression: composition_and_persistence" << std::endl; composition_and_persistence();
+        std::cerr << "C++ regression: markers_and_frontends" << std::endl; markers_and_frontends();
+        std::cerr << "C++ regression: threads_and_errors" << std::endl; threads_and_errors();
         std::cout << "C++ binding regression groups: 6 passed\n";return 0;
     } catch(const std::exception& e) {std::cerr << e.what() << '\n';return 1;}
 }

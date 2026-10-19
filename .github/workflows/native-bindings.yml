@@ -206,6 +206,7 @@ jobs:
           path: |
             ${{ runner.temp }}/cpp-validation/report.json
             ${{ runner.temp }}/cpp-validation/**/Testing/Temporary/LastTest.log
+            ${{ runner.temp }}/cpp-validation/**/failure-backtrace.txt
             ${{ runner.temp }}/native-parity/parity-report.json
             ${{ runner.temp }}/node-consumer/verification.json
             ${{ runner.temp }}/platform-install-report.json

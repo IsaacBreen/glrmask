@@ -11,14 +11,42 @@ def validate_elf_runtime_report(report: str, platform: str | None, name: str) ->
     scanning every byte would mistake those strings for imported GLIBC symbols.
     readelf's dynamic and version tables describe the actual loader contract.
     """
-    # The version table also lists versions DEFINED/exported by the binary.
-    # Only undefined dynamic symbols impose a GLIBC requirement on its host.
-    imported_symbols = "\n".join(line for line in report.splitlines()
-                                 if re.search(r"\bUND\b", line))
-    glibc_versions = [
-        (int(m.group(1)), int(m.group(2)))
-        for m in re.finditer(r'@GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?\b', imported_symbols)
-    ]
+    # Version *names* do not identify the supplying library. Alpine's libgcc
+    # retains GLIBC_2.0 labels for two weak unwind-registration hooks even
+    # though it is a musl library. Verify the version-needs provider before
+    # excluding those exact historical libgcc hooks from the libc contract.
+    providers: dict[int, tuple[str, str]] = {}
+    provider = None
+    in_needs = False
+    for line in report.splitlines():
+        if line.startswith('Version needs section'):
+            in_needs = True
+        elif line.startswith('Version ') and 'section' in line:
+            in_needs = False
+        if not in_needs:
+            continue
+        file = re.search(r'\bFile:\s+(\S+)\s+Cnt:', line)
+        if file:
+            provider = file.group(1)
+        version = re.search(r'\bName:\s+(\S+).*?\bVersion:\s+(\d+)', line)
+        if provider and version:
+            providers[int(version.group(2))] = (provider, version.group(1))
+    glibc_versions = []
+    for line in report.splitlines():
+        if not re.search(r'\bUND\b', line):
+            continue
+        symbol = re.search(r'\bUND\s+(\S+)@GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:\s+\((\d+)\))?', line)
+        if not symbol:
+            continue
+        index = int(symbol.group(5)) if symbol.group(5) else None
+        historical_libgcc_hook = (
+            symbol.group(1) in {'__register_frame_info', '__deregister_frame_info'}
+            and symbol.group(2, 3, 4) == ('2', '0', None)
+            and re.search(r'\bWEAK\b', line)
+            and providers.get(index) == ('libgcc_s.so.1', 'GLIBC_2.0')
+        )
+        if not historical_libgcc_hook:
+            glibc_versions.append((int(symbol.group(2)), int(symbol.group(3))))
     needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', report)
     is_musl = (platform and 'musl' in platform) or any('musl' in lib for lib in needed)
     if is_musl:

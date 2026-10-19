@@ -85,6 +85,43 @@ class CppReleaseArchivesMatrixTest(unittest.TestCase):
 
 
 class RuntimeDependenciesVerifierTest(unittest.TestCase):
+    @staticmethod
+    def libgcc_unwind_report(provider="libgcc_s.so.1", symbol="__register_frame_info", binding="WEAK", version="GLIBC_2.0"):
+        return f"""
+ 0x0000000000000001 (NEEDED) Shared library: [libgcc_s.so.1]
+ 0x0000000000000001 (NEEDED) Shared library: [libc.musl-aarch64.so.1]
+ 37: 0000000000000000 0 FUNC {binding} DEFAULT UND {symbol}@{version} (5)
+Version needs section '.gnu.version_r' contains 1 entry:
+ 000000: Version: 1 File: {provider} Cnt: 1
+ 0x0010: Name: {version} Flags: none Version: 5
+"""
+
+    def test_musl_allows_proven_historical_libgcc_unwind_labels(self):
+        for symbol in ("__register_frame_info", "__deregister_frame_info"):
+            ci_check.validate_elf_runtime_report(
+                self.libgcc_unwind_report(symbol=symbol), "linux-arm64-musl", "native.so"
+            )
+
+    def test_musl_unwind_allowance_requires_correct_provider_and_exact_weak_hook(self):
+        for change in (
+            {"provider": "libc.so.6"}, {"provider": "unknown.so"},
+            {"symbol": "malloc"}, {"binding": "GLOBAL"}, {"version": "GLIBC_2.17"},
+        ):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "unexpectedly references GLIBC"):
+                ci_check.validate_elf_runtime_report(
+                    self.libgcc_unwind_report(**change), "linux-arm64-musl", "native.so"
+                )
+
+    def test_musl_unwind_allowance_cannot_spoof_another_version_index(self):
+        report = self.libgcc_unwind_report().replace("Version: 5", "Version: 6")
+        with self.assertRaisesRegex(RuntimeError, "unexpectedly references GLIBC"):
+            ci_check.validate_elf_runtime_report(report, "linux-arm64-musl", "native.so")
+
+    def test_musl_unwind_allowance_never_allows_libc_dependency(self):
+        report = self.libgcc_unwind_report() + "\n0x1 (NEEDED) Shared library: [libc.so.6]\n"
+        with self.assertRaisesRegex(RuntimeError, "unexpectedly links to libc.so.6"):
+            ci_check.validate_elf_runtime_report(report, "linux-arm64-musl", "native.so")
+
     def test_portable_glibc_allowed(self):
         ci_check.validate_elf_runtime_report(
             "(NEEDED) Shared library: [libc.so.6]\n1: 0 0 FUNC GLOBAL DEFAULT UND old@GLIBC_2.17\n2: 0 0 FUNC GLOBAL DEFAULT UND recent@GLIBC_2.28",
