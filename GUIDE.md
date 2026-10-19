@@ -300,12 +300,15 @@ supply the enclosing generation's root termination policy.
 
 ### Determined output
 
-`state.forced_tokens()` returns locally inevitable original token IDs without
-choosing between encodings. It is read-only and stops before the root can finish
-or more than one next ID is admissible. The private proof does not construct a
-full vocabulary mask. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
-and raises errors for proof/resource failures. There is no public byte-forcing or
-canonical-tokenization query. See [forcing contracts](docs/forcing.md).
+`state.forced_tokens()` returns a read-only library-canonical prefix for genuinely
+forced ordinary text. It greedily chooses the longest admitted nonempty spelling,
+then the lowest original-ID alias. Exact-token events retain their IDs, and the
+query stops before root acceptance or an intermediate event opportunity that a
+greedy text token would cross. The correctness-first implementation may construct
+a full vocabulary mask. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
+and raises errors for typed proof/resource failures. The result is one canonical
+sequence, not an exhaustive tree of equivalent token histories. See
+[forcing contracts](docs/forcing.md).
 
 ### Streaming markers
 

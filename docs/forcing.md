@@ -1,27 +1,26 @@
-# Strict token forcing
+# Canonical forced-token lookahead
 
-`ConstraintState.forced_tokens()` is a read-only query for a prefix of
-**individually inevitable original model-token IDs**. Rust returns
-`Result<Vec<u32>>`; Python returns `list[int]` and raises an exception if a
-recognition proof fails for reasons other than grammatical rejection.
+`ConstraintState.forced_tokens()` is a read-only query for a safe prefix of
+**library-canonical forced output**. Rust returns `Result<Vec<u32>>`; Python
+returns `list[int]` and raises an exception for a typed recognition/resource
+failure.
 
-The query never selects a canonical tokenization. There is no public
-`forced()`, `forced_token_ids()`, or `forced_bytes()` method.
+There is no public `forced()`, `forced_token_ids()`, or `forced_bytes()` method.
+The historical canonical implementation remains an implementation detail behind
+the single public `forced_tokens()` surface.
 
 ## What is forced?
 
-At each prospective token boundary the query checks two things:
+The query first proves ordinary bytes that every live parser/lexer alternative
+must consume. It encodes that text greedily with the longest currently admitted,
+nonempty model-token spelling; the lowest original ID breaks equal-spelling
+ties. This is GLRMask's stable canonicalization policy, not the model tokenizer's
+BPE algorithm and not preservation of the model's original distribution.
 
-1. Can the root already finish? If so, stop rather than remove that choice.
-2. Is exactly one original token ID admissible? If so, advance a private
-   recognition cursor with that complete ID and continue. Otherwise, stop.
-
-For a grammar requiring `ab`, a vocabulary containing tokens for `a`, `b`, and
-`ab` gives an empty initial forcing result: both `a` and `ab` can start the
-output. Choosing the longest token would be a tokenization policy, not forcing.
-After committing `a`, the query can return the ID for `b` if it is the only
-admissible next ID. Two different IDs with identical byte spellings remain
-two choices.
+For a grammar requiring `ab`, a vocabulary containing `a`, `b`, and `ab`
+therefore returns the ID for `ab`. Duplicate admitted `ab` IDs are resolved to
+the lowest original ID. A vocabulary spelling that is not actually admitted at
+the current state does not participate in the choice.
 
 The source state does not advance. The caller commits the returned IDs when
 using the result:
@@ -33,77 +32,68 @@ for token_id in ids:
 ```
 
 An inference integration must also feed those IDs through its model to update
-the model's decoding state. Skipping token sampling does not remove that work.
-An empty list does not mean that the grammar is complete or rejected; inspect
-acceptance and use ordinary masking as appropriate.
+the model's decoding state. An empty list does not mean that the grammar is
+complete or rejected; inspect acceptance and use ordinary masking as needed.
 
-## Exact events and ambiguous successors
+## Acceptance and exact-event boundaries
 
-An exact-token event is one original ID, not its printed spelling. A
-spelling-less event can be forced. Empty bytes are not such an event, and
-byte-identical IDs are not interchangeable.
+The query stops before a boundary where the root can already accept. Exact-token
+terminals and special LLM tokens are original-ID events, not their decoded byte
+spellings. A spelling-less event can be returned, and an empty byte spelling is
+not silently assumed to be such an event. The compiled terminal-to-ID mapping is
+authoritative.
 
-One allowed ID can have several valid parser/lexer successors, including
-both its byte interpretation and an exact-event interpretation. All remain
-live after the private token commit. Dynamic grammar alternatives are queried
-together: a repeated ID is counted once across their union, not once per owner.
-Child acceptance is a call/return possibility, not necessarily root completion.
-Root end-token controls retain the same policy as ordinary masking.
+An event opportunity also prevents canonical text from crossing its boundary.
+For example, consider these two grammar paths with vocabulary tokens `A`, `AB`,
+`B`, and exact event `MARK`:
 
-The query proves **local next-ID admission**, not the existence of a complete
-future tokenization. A sparse model vocabulary can have a locally admissible
-prefix without a vocabulary-realizable finish. Forcing does not introduce a
-global completion search or choose another tokenization to work around that.
+```text
+AB | A MARK B
+```
 
-## Bounded proof without a full token mask
+Both paths project to ordinary bytes `AB`, but returning token `AB` would cross
+the valid event boundary after `A`. Returning `A` would abandon the greedy
+canonical tokenization of the proved text. The safe canonical result is therefore
+empty. Without the event path, the result is token `AB`.
 
-The implementation uses a private cardinality query rather than constructing
-every vocabulary bit and counting afterward. It can stop as soon as two
-distinct, finally admissible original IDs are proved. It may read an existing
-exact mask or already-prepared vocabulary data; it does not generate a full
-mask merely to establish uniqueness.
+At an exact-event frontier, the query advances only a unique admitted original
+ID. If the same ID has both byte and event interpretations, its complete commit
+keeps all valid successors correlated. Multiple event IDs remain ambiguous.
 
-Candidate lexer matches alone are insufficient. Maximal munch, parser
-continuations, nullable boundaries, exact events and root policy must all be
-accounted for before an ID is a positive witness. When two alternatives admit
-the same ID, that is still one witness. A class of grammar-equivalent tokens
-can contain multiple original IDs and must not be counted as one token.
+## This is one canonical sequence, not an exhaustive token tree
 
-Proving that only one ID exists can require more work than finding two. The
-query is not guaranteed to be faster than ordinary masking for every state.
-Normal `mask()` and `fill_mask()` do not run the bounded-cardinality logic.
+`forced_tokens()` returns at most one canonical prefix. It does not enumerate all
+original-ID histories that realize the same bytes. In particular, a result using
+`AB` does not prove that the alternate history `A, B` is impossible. Applications
+that need exhaustive guaranteed-token trees across aliases, alternate segmentations,
+end IDs, special events, and boundary-crossing tokens need a different API and
+must not treat this canonical prefix as tree completion.
 
-## Limits and errors
+## Full-mask reference implementation and bounds
 
-One call returns at most 10,000 IDs. Reaching that output limit returns the
-proved prefix, which the caller can commit before asking again. This is not a
-grammar length budget or a total wall-clock limit.
+The current correctness-first implementation may construct ordinary full token
+masks. It proves bytes with bounded private recognition cursors, then commits each
+selected original ID through the complete token/event successor before continuing.
+Mask-generation performance is not part of this initial reference contract.
 
-Proof/resource errors are errors, not fabricated empty masks, ambiguity, or
-grammar completion. The original state remains unchanged. A real rejection can
-remove an alternative; a resource failure cannot be used to prove that a
-competing alternative is impossible.
+One call returns at most 10,000 IDs and proves at most 10,000 output bytes using
+at most 100,000 byte/event probes. Reaching a query bound returns the proved
+prefix. A typed library resource failure is returned as an error rather than
+fabricated ambiguity, completion, or rejection. The original state remains
+unchanged.
 
-## Raw-byte recognition is a separate operation
+## Raw-byte recognition is separate
 
-`commit_bytes(data)` remains available for incrementally recognizing raw text
-or testing grammar-covered input. It does not deliver exact-ID events and may
-reach a state that cannot be reached using the model vocabulary. When the
-application knows the actual model token IDs, it should use `commit_token` to
-preserve their semantics. No corresponding public byte-forcing operation is
-required for raw-byte input to be useful.
+`commit_bytes(data)` incrementally recognizes raw text. It does not deliver
+exact-ID events and may reach a state that no model-token sequence can reach.
+When actual model token IDs are known, use `commit_token` to preserve their
+semantics.
 
 ## Validation contract
 
-Bounded-query tests compare cold and warm results against complete ordinary
-masks at multiple thresholds and across optimization modes. Forcing is checked
-against the full-mask singleton reference and replayed with ordinary token
-commits. Coverage includes duplicate spellings, event-only IDs, empty event
-sets, root controls, partial UTF-8 sequences, child scopes, dynamic unions and
-saved/loaded artifacts. The earlier canonical algorithm is retained only as an
-internal test/reference facility, not a public serving policy.
-
-## Measured qualification
-
-See the [15 October 2026 core-batch report](validation/core-batch-2026-10-15.md)
-for matched measurements, exact correctness gates and remaining trade-offs.
+Tests compare the public query with an independent finite byte/event trace model,
+replay every returned ID through authoritative masks and commits, and verify
+source-state preservation. Coverage includes duplicate IDs, greedy prefix
+choices, root acceptance, UTF-8 fragments, exact events before and after text,
+empty and spelling-less event representations, multiple event IDs, composed
+children, all optimization modes, and saved/loaded artifacts.

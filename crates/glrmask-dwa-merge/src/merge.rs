@@ -790,7 +790,7 @@ fn immediate_dwa_accepting_edges(dwa: &DWA) -> Option<Vec<(i32, Weight)>> {
 
     let mut accepting = Vec::with_capacity(start.transitions.len());
     for (&label, (target, edge_weight)) in &start.transitions {
-        if label < 0 || *target as usize != final_id || edge_weight.is_empty() {
+        if label < 0 || label == DEFAULT_LABEL || *target as usize != final_id || edge_weight.is_empty() {
             return None;
         }
         let weight = edge_weight.intersection(final_weight);
@@ -954,7 +954,24 @@ fn try_graft_immediate_parser_dwa(immediate: &DWA, mut other: DWA) -> Option<DWA
 /// residuals remain explicit. This distinction preserves structural fallback
 /// row selection, not just raw weighted language. Paired subsets always retain
 /// at most one state from each input.
-fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
+fn union_two_parser_dwas_direct(left: DWA, right: DWA) -> DWA {
+    union_two_parser_dwas_impl::<false>(left, right)
+}
+
+/// Union the languages actually consumed by the parser-stack evaluator.
+/// Each operand selects its explicit edge, or its own default when absent,
+/// BEFORE the two contributions are combined. A raw alphabet union is not
+/// equivalent: an explicit edge contributed by one family would shadow the
+/// other family's fallback and silently lose valid token/lexer coordinates.
+fn union_two_parser_dwas_with_fallback(left: DWA, right: DWA) -> DWA {
+    union_two_parser_dwas_impl::<true>(left, right)
+}
+
+fn has_parser_fallback(dwa: &DWA) -> bool {
+    dwa.states().iter().any(|row| row.transitions.contains_key(&DEFAULT_LABEL))
+}
+
+fn union_two_parser_dwas_impl<const FALLBACK: bool>(mut left: DWA, mut right: DWA) -> DWA {
     type PairKey = (u32, u32, Weight, Weight);
     const ABSENT: u32 = u32::MAX;
 
@@ -994,6 +1011,25 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     let right_start = right.start_state();
     let mut left_states = std::mem::take(left.states_mut());
     let mut right_states = std::mem::take(right.states_mut());
+    if FALLBACK {
+        // An explicit empty edge suppresses an operand's fallback. Preserve
+        // that structural barrier with a nonaccepting sink, rather than
+        // deleting it as raw-alphabet normalization legitimately would.
+        for states in [&mut left_states, &mut right_states] {
+            let dead = states.len() as u32;
+            let mut needed = false;
+            for row in states.iter_mut() {
+                for (target, weight) in row.transitions.values_mut() {
+                    if weight.is_empty() {
+                        *target = dead;
+                        *weight = Weight::all();
+                        needed = true;
+                    }
+                }
+            }
+            if needed { states.push(DWAState::default()); }
+        }
+    }
     let right_offset = left_states.len() as u32;
     let source_state_count = right_offset + right_states.len() as u32;
     // NWA::union_in_place appends each source without adding states. Use the
@@ -1004,7 +1040,11 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
     for row in left_states.iter_mut().chain(right_states.iter_mut()) {
         row.transitions.retain(|_, (_, weight)| !weight.is_empty());
     }
-    let mut pair_states = Vec::<DWAState>::new();
+    // A zero contribution on a concrete label still needs to shadow a
+    // nonzero default in the merged row. Its explicit dead edge must survive
+    // ordinary empty-weight cleanup and singleton-row reuse.
+    let mut pair_states = if FALLBACK { vec![DWAState::default()] } else { Vec::new() };
+    let dead_output = source_state_count;
 
     let mut pairs = FxHashMap::<PairKey, u32>::default();
     let mut worklist = VecDeque::<(u32, u32, u32, Weight, Weight)>::new();
@@ -1061,6 +1101,8 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
                 .is_some_and(|(candidate, _)| **candidate == label)
             {
                 left_transitions.next().map(|(_, edge)| edge)
+            } else if FALLBACK {
+                left_state.and_then(|row| row.transitions.get(&DEFAULT_LABEL))
             } else {
                 None
             };
@@ -1069,6 +1111,8 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
                 .is_some_and(|(candidate, _)| **candidate == label)
             {
                 right_transitions.next().map(|(_, edge)| edge)
+            } else if FALLBACK {
+                right_state.and_then(|row| row.transitions.get(&DEFAULT_LABEL))
             } else {
                 None
             };
@@ -1083,6 +1127,8 @@ fn union_two_parser_dwas_direct(mut left: DWA, mut right: DWA) -> DWA {
             });
 
             let transition = match (left_contribution, right_contribution) {
+                (None, None) if FALLBACK && label != DEFAULT_LABEL =>
+                    Some((dead_output, Weight::all())),
                 (None, None) => None,
                 (Some((target, weight)), None) => {
                     let out_target = if normalize_singletons { target } else {
@@ -1222,6 +1268,22 @@ pub fn merge_mapped_parser_dwas(
         let reconcile_ms = reconcile_started_at.elapsed().as_secs_f64() * 1000.0;
         let (dwas, common_id_map) = reconciled.into_parts();
 
+        if dwas.iter().any(has_parser_fallback) {
+            let union_started_at = Instant::now();
+            let mut iter = dwas.into_iter();
+            let dwa = union_two_parser_dwas_with_fallback(
+                iter.next().expect("left parser family"),
+                iter.next().expect("right parser family"),
+            );
+            if compile_profile_enabled() {
+                eprintln!("[glrmask/profile][parser_dwa_merge] inputs=2 mode=fallback_semantic_union reconcile_ms={:.3} union_ms={:.3} states={} transitions={} total_ms={:.3}",
+                    reconcile_ms, union_started_at.elapsed().as_secs_f64()*1000.0,
+                    dwa.num_states(), dwa.num_transitions(),
+                    total_started_at.elapsed().as_secs_f64()*1000.0);
+            }
+            return MappedArtifact::new(dwa, common_id_map);
+        }
+
         let source_states: usize = dwas.iter().map(|dwa| dwa.states().len()).sum();
         // Large normalized unions are dominated by copying and re-expanding
         // singleton rows. Small unions keep the existing builder unless an
@@ -1300,6 +1362,16 @@ pub fn merge_mapped_parser_dwas(
             );
         }
         return MappedArtifact::new(dwa, common_id_map);
+    }
+
+    if inputs.iter().any(|input| has_parser_fallback(input.artifact())) {
+        let (dwas, common_id_map) = MappedArtifact::reconcile_vec(inputs).into_parts();
+        let mut iter = dwas.into_iter();
+        let mut merged = iter.next().expect("nonempty parser families");
+        for next in iter {
+            merged = union_two_parser_dwas_with_fallback(merged, next);
+        }
+        return MappedArtifact::new(merged, common_id_map);
     }
 
     let locals: Vec<LocalIdMapTerminalDwa> = inputs
@@ -3671,6 +3743,140 @@ mod tests {
                     "padded={padded} boundary={boundary} word={word:?}");
             }
         }
+        }
+    }
+
+    fn parser_fallback_eval(dwa: &DWA, word: &[i32]) -> Weight {
+        let mut state = dwa.start_state();
+        let mut path = Weight::all();
+        for label in word {
+            let row = &dwa.states()[state as usize];
+            let Some((target, weight)) = row.transitions.get(label)
+                .or_else(|| row.transitions.get(&DEFAULT_LABEL)) else {
+                    return Weight::empty();
+                };
+            path = path.intersection(weight);
+            state = *target;
+        }
+        dwa.states()[state as usize].final_weight.as_ref()
+            .map(|weight| path.intersection(weight)).unwrap_or_else(Weight::empty)
+    }
+
+    #[test]
+    fn parser_family_union_preserves_each_sources_fallback_contribution() {
+        let mut left = DWA::new(1, 1);
+        let left_middle = left.add_state();
+        let left_final = left.add_state();
+        left.add_transition(0, 7, left_middle, singleton_weight(0));
+        left.add_transition(left_middle, DEFAULT_LABEL, left_final, singleton_weight(0));
+        left.set_final_weight(left_final, Weight::all());
+        let mut right = DWA::new(1, 1);
+        let right_middle = right.add_state();
+        let right_final = right.add_state();
+        right.add_transition(0, 7, right_middle, singleton_weight(1));
+        right.add_transition(right_middle, 8, right_final, singleton_weight(1));
+        right.set_final_weight(right_final, Weight::all());
+        let id_map = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0], 1),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1], 2),
+            deferred_vocab_singleton_original_ids: None,
+        };
+        let expected = parser_fallback_eval(&left, &[7, 8])
+            .union(&parser_fallback_eval(&right, &[7, 8]));
+        assert_eq!(expected, token_range_weight(0, 1));
+        let merged = merge_mapped_parser_dwas(vec![
+            MappedArtifact::new(left, id_map.clone()),
+            MappedArtifact::new(right, id_map),
+        ], 1, 1);
+        assert_eq!(parser_fallback_eval(merged.artifact(), &[7, 8]), expected,
+            "one family's explicit label must not suppress the other family's default edge");
+    }
+
+    #[test]
+    fn fallback_semantic_union_matches_independent_operands_with_empty_edges_and_cycles() {
+        let words = all_words(&[7, 8, 9, 10], 4);
+        for variant in 0..64u32 {
+            let mut left = DWA::new(1, 2);
+            let l1 = left.add_state(); let l2 = left.add_state();
+            left.add_transition(0, 7, l1, token_range_weight(0, 1));
+            left.add_transition(l1, DEFAULT_LABEL, l2, token_range_weight(0, 2));
+            if variant & 1 != 0 { left.add_transition(l1, 8, l2, singleton_weight(2)); }
+            if variant & 2 != 0 { left.add_transition(l1, 9, l2, Weight::empty()); }
+            if variant & 4 != 0 { left.add_transition(l2, DEFAULT_LABEL, l1, singleton_weight(0)); }
+            left.set_final_weight(l2, token_range_weight(0, 2));
+            let mut right = DWA::new(1, 2);
+            let r1 = right.add_state(); let r2 = right.add_state();
+            right.add_transition(0, if variant & 8 != 0 { 10 } else { 7 }, r1, token_range_weight(1, 2));
+            right.add_transition(r1, 8, r2, singleton_weight(2));
+            if variant & 16 != 0 { right.add_transition(r1, DEFAULT_LABEL, r2, singleton_weight(1)); }
+            if variant & 32 != 0 { right.add_transition(r1, 9, r2, Weight::empty()); }
+            right.add_transition(r2, 7, r1, token_range_weight(1, 2));
+            right.set_final_weight(r2, token_range_weight(0, 2));
+            let merged = union_two_parser_dwas_with_fallback(left.clone(), right.clone());
+            for word in &words {
+                let expected = parser_fallback_eval(&left, word).union(&parser_fallback_eval(&right, word));
+                assert_eq!(parser_fallback_eval(&merged, word), expected, "variant={variant} word={word:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_semantic_union_preserves_singleton_normalization_and_rejecting_barriers() {
+        for padded in [false, true] {
+            let mut left = DWA::new(1, 2);
+            let l1 = left.add_state(); let l2 = left.add_state();
+            left.add_transition(0, 7, l1, singleton_weight(0));
+            left.add_transition(l1, DEFAULT_LABEL, l2, token_range_weight(0, 2));
+            // Structurally present, but empty after the incoming residual.
+            left.add_transition(l1, 8, l2, singleton_weight(1));
+            left.add_transition(l1, 9, l2, Weight::empty());
+            left.set_final_weight(l2, Weight::all());
+            let mut right = DWA::new(1, 2);
+            let r1 = right.add_state(); let r2 = right.add_state();
+            right.add_transition(0, 10, r1, singleton_weight(2));
+            right.add_transition(r1, DEFAULT_LABEL, r2, singleton_weight(2));
+            right.set_final_weight(r2, Weight::all());
+            if padded { while left.num_states() < 16_384 { left.add_state(); } }
+            let merged = union_two_parser_dwas_with_fallback(left.clone(), right.clone());
+            for word in all_words(&[7, 8, 9, 10, 11], 3) {
+                let expected = parser_fallback_eval(&left, &word).union(&parser_fallback_eval(&right, &word));
+                assert_eq!(parser_fallback_eval(&merged, &word), expected, "padded={padded} word={word:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn mapped_three_family_union_and_immediate_default_overlay_remain_exact() {
+        let identity = InternalIdMap {
+            tokenizer_states: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0], 1),
+            vocab_tokens: ManyToOneIdMap::from_original_to_internal_allowing_unmapped(vec![0, 1, 2], 3),
+            deferred_vocab_singleton_original_ids: None,
+        };
+        let mut dwas = Vec::new();
+        for token in 0..3 {
+            let mut dwa = DWA::new(1, 2);
+            let final_state = dwa.add_state();
+            dwa.add_transition(0, if token == 0 { DEFAULT_LABEL } else { 7 + token as i32 }, final_state, singleton_weight(token));
+            dwa.set_final_weight(final_state, Weight::all());
+            dwas.push(dwa);
+        }
+        let inputs = dwas.iter().cloned().map(|dwa| MappedArtifact::new(dwa, identity.clone())).collect();
+        let merged = merge_mapped_parser_dwas(inputs, 1, 2);
+        for word in all_words(&[7, 8, 9, 10], 2) {
+            let expected = dwas.iter().fold(Weight::empty(), |acc, dwa| acc.union(&parser_fallback_eval(dwa, &word)));
+            assert_eq!(parser_fallback_eval(merged.artifact(), &word), expected, "word={word:?}");
+        }
+        // A default-labelled immediate input must not be reduced to an
+        // explicit-key overlay; explicit-only overlays still compose safely.
+        assert!(immediate_dwa_accepting_edges(&dwas[0]).is_none());
+        assert!(immediate_dwa_accepting_edges(&dwas[1]).is_some());
+        let inputs = dwas.iter().cloned().map(|dwa| MappedArtifact::new(dwa, identity.clone())).collect();
+        let (body, overlay) = merge_mapped_parser_dwas_with_top_accept(inputs, 1, 2);
+        for label in [7, 8, 9, 10] {
+            let expected = dwas.iter().fold(Weight::empty(), |acc, dwa| acc.union(&parser_fallback_eval(dwa, &[label])));
+            let actual = parser_fallback_eval(body.artifact(), &[label])
+                .union(overlay.get(&label).unwrap_or(&Weight::empty()));
+            assert_eq!(actual, expected, "overlay label={label}");
         }
     }
 

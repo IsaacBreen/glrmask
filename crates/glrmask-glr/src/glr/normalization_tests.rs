@@ -441,3 +441,97 @@ fn arena_publication_moves_unchanged_rhs_allocations() {
     assert_eq!(published[0].rhs.as_ptr(), second_pointer);
     assert_eq!(published[1].rhs.as_ptr(), first_pointer);
 }
+
+#[test]
+fn indirect_cycle_with_interior_self_loop_preserves_its_language() {
+    // A = A x | B x | y; B = A z. Simple head paths omit the
+    // interior A -> A x loop when expanding B -> A z.
+    let input = vec![
+        rule(0, vec![nt(1)]),
+        rule(1, vec![nt(1), t(0)]),
+        rule(1, vec![nt(2), t(0)]),
+        rule(1, vec![t(1)]),
+        rule(2, vec![nt(1), t(2)]),
+    ];
+    let mut actual = input.clone();
+    normalize_impl(&mut actual, 2);
+    assert!(earley_accepts(&input, 2, &[1, 0, 2]));
+    assert!(earley_accepts(&actual, 2, &[1, 0, 2]),
+        "eliminating an indirect cycle must retain arbitrary interior self loops: {actual:?}");
+    let expected = bounded_language(&input, 2, 8);
+    assert_eq!(bounded_language(&actual, 2, 8), expected);
+    assert!(!has_indirect_left_recursion(&actual));
+}
+
+#[test]
+fn indirect_cycle_with_proper_subcycle_preserves_its_language() {
+    let input = vec![
+        rule(0, vec![nt(1), t(0)]),
+        rule(0, vec![t(3)]),
+        rule(1, vec![nt(0), t(1)]),
+        rule(1, vec![nt(2), t(1)]),
+        rule(2, vec![nt(1), t(2)]),
+        rule(2, vec![t(4)]),
+    ];
+    let mut actual = input.clone();
+    normalize_impl(&mut actual, 0);
+    assert_eq!(bounded_language(&actual, 0, 8), bounded_language(&input, 0, 8));
+    assert!(!has_indirect_left_recursion(&actual));
+}
+
+
+#[test]
+fn every_three_node_terminal_edge_graph_preserves_all_bounded_words() {
+    // All 512 directed graphs, including self-loops and overlapping proper
+    // subcycles. Distinguishable edge and exit terminals expose both lost
+    // words and accidentally admitted words, not only successful fixtures.
+    for bits in 0u32..512 {
+        let mut input = (0..3).map(|i| rule(i, vec![t(i + 2)])).collect::<Vec<_>>();
+        for from in 0..3 { for to in 0..3 {
+            if bits & (1 << (from * 3 + to)) != 0 {
+                input.push(rule(from, vec![nt(to), t((from + to) % 2)]));
+            }
+        }}
+        for start in 0..3 {
+            let normalized = compare_ordered(&input, start);
+            assert_eq!(bounded_language(&normalized, start, 6), bounded_language(&input, start, 6),
+                "graph={bits:09b} start={start}");
+            assert!(!has_indirect_left_recursion(&normalized), "graph={bits} start={start}");
+        }
+    }
+}
+
+#[test]
+fn interior_cycles_with_nullable_exits_and_prefixes_remain_exact() {
+    for nullable in 0..8 {
+        let mut input = vec![
+            rule(0, vec![nt(0), t(0)]), rule(0, vec![nt(1), t(1)]),
+            rule(0, vec![t(2)]), rule(1, vec![nt(0), t(0)]),
+            rule(1, vec![nt(2), nt(0), t(1)]), rule(2, vec![t(3)]),
+        ];
+        for i in 0..3 { if nullable & (1 << i) != 0 { input.push(rule(i, vec![])); }}
+        for start in 0..3 {
+            let normalized = compare_ordered(&input, start);
+            let mut expected = bounded_language(&input, start, 6);
+            expected.remove(&Vec::new());
+            assert_eq!(bounded_language(&normalized, start, 6), expected,
+                "nullable={nullable} start={start}");
+        }
+    }
+}
+
+#[test]
+fn interior_loop_closure_is_not_a_finite_unrolling() {
+    let input = vec![
+        rule(0, vec![nt(0), t(0)]), rule(0, vec![nt(1), t(0)]),
+        rule(0, vec![t(1)]), rule(1, vec![nt(0), t(2)]),
+    ];
+    let normalized = compare_ordered(&input, 1);
+    for repetitions in [0, 1, 2, 7, 31, 128, 513] {
+        let mut word = vec![1]; word.extend(std::iter::repeat_n(0, repetitions)); word.push(2);
+        assert!(earley_accepts(&input, 1, &word));
+        assert!(earley_accepts(&normalized, 1, &word), "repetitions={repetitions}");
+        word.push(0);
+        assert!(!earley_accepts(&normalized, 1, &word), "unexpected trailing token");
+    }
+}

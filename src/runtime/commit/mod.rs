@@ -2,7 +2,6 @@ use crate::runtime::markers::{CommitObserver, NoMarkers, LiveMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 pub(crate) mod bounded;
-#[cfg(any(test,feature="internal-api"))]
 pub(crate) mod forcing_reference;
 pub(crate) mod template_advance;
 pub(crate) mod push_suffixes;
@@ -315,6 +314,18 @@ impl Default for FlatFrontierScratch {
 }
 
 impl FlatFrontierScratch {
+    // Keep the large construction temporary out of state/FFI caller frames.
+    // Box::new alone does not guarantee that LLVM initializes in place.
+    #[inline(never)]
+    pub(crate) fn boxed_with_preallocated_gss(preallocated_gss: usize) -> Box<Self> {
+        Box::new(Self::with_preallocated_gss(preallocated_gss))
+    }
+
+    #[inline(never)]
+    pub(crate) fn boxed_for_mask_only_shadow() -> Box<Self> {
+        Box::new(Self::for_mask_only_shadow())
+    }
+
     /// Read-only mask shadows never execute the flat commit frontier. Avoid
     /// reserving 128 unused branch stacks as well as the already-omitted GSS
     /// pool. Logical empty state is identical; ordinary commits keep their
@@ -467,7 +478,6 @@ impl FlatFrontierScratch {
     }
 
     fn recycle_old_entries(&mut self, old_entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>) {
-        self.reclaim_retired_gss();
         for (_, gss) in old_entries {
             if gss.can_replace_single_path_state_in_place(&[0]) {
                 debug_assert!(self.gss_pool.len() < FLAT_FRONTIER_GSS_POOL_CAPACITY);
@@ -477,6 +487,10 @@ impl FlatFrontierScratch {
                 self.retired_gss.push(gss);
             }
         }
+        // The preflight reserved capacity for these active entries. Reclaim
+        // retired entries only after that reservation has been consumed;
+        // reclaiming first can fill the same slots and overflow the pool.
+        self.reclaim_retired_gss();
     }
 
     fn replace_state_with_shared_uniform_stack_keys(
@@ -486,13 +500,15 @@ impl FlatFrontierScratch {
         stack: &[u32],
         acc: &TerminalsDisallowed,
     ) -> bool {
+        // Include reclaimed spares in the capacity preflight, before an
+        // atomic replacement reserves space for the displaced active state.
+        self.reclaim_retired_gss();
         if keys.is_empty()
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
             || !self.can_recycle_old_state(state, 1)
         {
             return false;
         }
-        self.reclaim_retired_gss();
         let Some(pool_index) = self
             .gss_pool
             .iter()
@@ -7904,7 +7920,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
             &mut bufs.linear_stack_original,
             &mut bufs.linear_stack_work,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.flat_frontier,
+            bufs.flat_frontier.get_or_insert_with(FlatFrontierScratch::boxed_for_mask_only_shadow),
          observer)
     {
         if debug_path {
@@ -7919,7 +7935,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
             state,
             bytes,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.flat_frontier,
+            bufs.flat_frontier.get_or_insert_with(FlatFrontierScratch::boxed_for_mask_only_shadow),
             &mut bufs.linear_stack_original,
             &mut bufs.admission_cache,
         );
@@ -7967,7 +7983,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
             &mut bufs.linear_stack_original,
             &mut bufs.linear_stack_work,
             &mut bufs.reusable_tokenizer_exec,
-            &mut bufs.flat_frontier,
+            bufs.flat_frontier.get_or_insert_with(FlatFrontierScratch::boxed_for_mask_only_shadow),
          observer)
     {
         if debug_path {
@@ -8019,7 +8035,7 @@ fn commit_bytes_impl_inner_observed<O: CommitObserver>(
         bytes,
         ignore_terminal,
         &mut bufs.reusable_tokenizer_exec,
-        &mut bufs.flat_frontier,
+        bufs.flat_frontier.get_or_insert_with(FlatFrontierScratch::boxed_for_mask_only_shadow),
         &mut bufs.linear_stack_original,
     ) {
         if debug_path && constraint.uses_compact_segmented_parser_runtime() {
@@ -11429,9 +11445,11 @@ mod boxed_small_queue_tests {
     fn read_only_mask_buffers_leave_commit_queue_uninitialized() {
         let mut buffers = CommitBuffers::for_mask_only_shadow();
         assert!(buffers.small_queue.is_none());
+        assert!(buffers.flat_frontier.is_none());
         buffers.clear_all();
         buffers.reset_all();
         assert!(buffers.small_queue.is_none());
+        assert!(buffers.flat_frontier.is_none());
         // An internal caller that subsequently commits still gets an ordinary
         // empty queue; this does not change the eager policy of real states.
         let queue = buffers.small_queue.get_or_insert_with(SmallCommitQueueScratch::boxed);
@@ -11453,4 +11471,19 @@ mod boxed_small_queue_tests {
         assert_eq!(std::mem::size_of::<Option<Box<SmallCommitQueueScratch>>>(),
             std::mem::size_of::<*mut SmallCommitQueueScratch>());
     }
+
+    #[test]
+    fn state_buffers_keep_large_frontier_storage_indirect_and_reusable() {
+        // Guard the nested construction/copy frames, not a platform-specific
+        // total stack size. Native pthread tests cover the actual call chain.
+        assert!(std::mem::size_of::<CommitBuffers>() < 8 * 1024);
+        let mut buffers = CommitBuffers::default();
+        let initial = buffers.flat_frontier.as_deref().unwrap() as *const super::FlatFrontierScratch;
+        buffers.clear_all();
+        buffers.reset_all();
+        assert_eq!(initial, buffers.flat_frontier.as_deref().unwrap() as *const super::FlatFrontierScratch);
+    }
 }
+
+#[cfg(test)]
+mod flat_pool_order_tests;

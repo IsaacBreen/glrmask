@@ -4035,10 +4035,11 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
 
-    /// Strictly inevitable original IDs across all live alternatives.
-    /// Read-only; exact-event and byte successors remain correlated.
+    /// Return a read-only prefix of library-canonical forced output.
+    /// Ordinary text uses longest admitted spelling and lowest-ID alias
+    /// selection; exact-token events retain their IDs.
     pub fn forced_tokens(&self)->crate::Result<Vec<u32>> {
-        crate::runtime::bounded_forced_tokens(&self.alternatives)
+        crate::runtime::force_for_states_result(&self.alternatives,Some(true))
     }
     pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
         crate::runtime::mask_for_states_at_most(&self.alternatives,max_allowed)

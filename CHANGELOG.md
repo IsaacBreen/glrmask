@@ -58,14 +58,14 @@
 
 ### Correctness and packaging
 
-- Expose only `forced_tokens()` for strict, locally inevitable original token
-  IDs. Remove `forced()` and `forced_token_ids()`; do not choose a canonical
-  encoding among alternative model tokenizations. Keep `commit_bytes()` as a
-  separate raw-byte recognition operation, not an exact-token commit substitute.
-  The private bounded-cardinality query finds final distinct ID witnesses without
-  constructing a complete vocabulary mask. Existing exact-mask caches may be
-  read; no public bounded-mask or byte-forcing API is added. Internal proof errors
-  are reported rather than silently treated as ambiguity or completion.
+- Expose only `forced_tokens()` for a safe library-canonical prefix of genuinely
+  forced text. Remove `forced()` and `forced_token_ids()` while retaining the
+  canonical engine as an implementation detail. Ordinary text uses longest
+  admitted spelling and lowest-ID alias selection; exact events retain their IDs,
+  and greedy text never crosses an intermediate exact-event opportunity. The
+  correctness-first reference may construct full masks. `commit_bytes()` remains
+  a separate raw-byte recognition operation, and typed resource failures remain
+  errors rather than fabricated ambiguity or completion.
 - Correct trailing-unmapped vocabulary-coordinate refinement, productionless
   start coordinates and zero-terminal component ownership, with independent
   byte/event and empty-language regressions.

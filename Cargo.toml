@@ -128,6 +128,14 @@ path = "tests/end_tokens.rs"
 name = "glrm_v1"
 path = "tests/glrm_v1.rs"
 
+[[test]]
+name = "forcing_semantics"
+path = "tests/forcing_semantics.rs"
+
+[[test]]
+name = "forcing_semantics_oracle"
+path = "tests/forcing_semantics_oracle.rs"
+
 # Focused JSON Schema suites.
 [[test]]
 name = "json_schema_unicode_class_pattern"
@@ -360,3 +368,8 @@ path = "tests/marker_commit.rs"
 [[test]]
 name = "json_schema_policy"
 path = "tests/json_schema_policy.rs"
+
+[[test]]
+name = "parser_family_fallback_union"
+path = "tests/parser_family_fallback_union.rs"
+required-features = ["internal-api"]

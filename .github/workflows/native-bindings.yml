@@ -207,6 +207,7 @@ jobs:
             ${{ runner.temp }}/cpp-validation/report.json
             ${{ runner.temp }}/cpp-validation/**/Testing/Temporary/LastTest.log
             ${{ runner.temp }}/cpp-validation/**/failure-backtrace.txt
+            ${{ runner.temp }}/cpp-validation/**/stack-probe-*.txt
             ${{ runner.temp }}/native-parity/parity-report.json
             ${{ runner.temp }}/node-consumer/verification.json
             ${{ runner.temp }}/platform-install-report.json
@@ -279,6 +280,8 @@ jobs:
         run: cargo test --locked --release -p glrmask --features internal-api --lib public_api::final_boundary_option_tests
       - name: Linux tracing remains compatible with the glibc baseline
         run: cargo test --locked --release -p glrmask --lib native_thread_id_query_is_stable_and_thread_specific
+      - name: State construction keeps large frontier storage indirect
+        run: cargo test --locked --release -p glrmask --lib boxed_small_queue_tests
       - name: Binding ownership and direct C ABI parity tests
         run: cargo test --locked --release -p glrmask-binding-core -p glrmask-c
       - name: Generated guides remain synchronized

@@ -98,7 +98,11 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         let original_mask = state.mask();
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
-            let got = if canonical { state.forced_canonical_reference() } else { state.forced_token_ids_reference() };
+            let got = if canonical {
+                let public=state.forced_tokens().expect("canonical forcing query failed");
+                assert_eq!(public,state.forced_canonical_reference(),"public/reference divergence: {label}; trace={trace:?}");
+                public
+            } else { state.forced_token_ids_reference() };
             // Both query contracts permit a shorter answer when a conservative
             // byte/proof boundary intervenes, but never a different encoding.
             assert!(expected.starts_with(&got),

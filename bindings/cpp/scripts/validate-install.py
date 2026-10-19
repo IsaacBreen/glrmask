@@ -23,9 +23,17 @@ def run_source_tests(build: Path, config: str) -> None:
         executable = build / 'glrmask_cpp_tests'
         if debugger and executable.is_file():
             try:
+                for stack_bytes in ('1048576', '0'):
+                    probe = subprocess.run([str(executable), '--thread-stack-probe', stack_bytes],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
+                    (build / f'stack-probe-{stack_bytes}.txt').write_text(
+                        f'exit={probe.returncode}\n' + probe.stdout, encoding='utf-8')
+                    print(f'Stack diagnostic {stack_bytes}: exit={probe.returncode}\n{probe.stdout}', flush=True)
                 result = subprocess.run([
                     debugger, '--batch', '-ex', 'set pagination off',
                     '-ex', 'run', '-ex', 'info registers sp',
+                    '-ex', 'x/12i $pc-24', '-ex', 'info proc mappings',
+                    '-ex', 'disassemble /r',
                     '-ex', 'thread apply all bt 40', '--args', str(executable),
                 ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
                 (build / 'failure-backtrace.txt').write_text(result.stdout, encoding='utf-8')
