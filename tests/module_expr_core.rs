@@ -179,3 +179,36 @@ fn grammar_binds_source_expressions_directly_and_rejects_configured_leaves_atomi
     let configured=a().module().with_options(ModuleOptions::default().optimization(Optimization::Balanced)).unwrap();
     let mut source=Grammar::from_glrm(HOST);assert!(source.bind("child",configured.into_expr()).is_err());assert_eq!(source.unbound().unwrap()[0].name(),"child");
 }
+
+#[test]
+fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
+    let v=vocab();let opts=ModuleOptions::default().optimization(Optimization::FastBuild);
+    let mut root=Grammar::from_glrm(HOST).module().with_options(opts.clone()).unwrap();
+    root.precompile(&v).unwrap();let open=root.save();
+    let mut leaf=a().module().with_options(opts.clone()).unwrap();leaf.precompile(&v).unwrap();
+    root.bind("child",&leaf).unwrap();
+    for m in [root.clone(),Module::load_with_vocab(root.save(),&v).unwrap()] {
+        let c=m.compile(&v).unwrap();assert!(accepts(&c,&[4]));assert!(!accepts(&c,&[6]));
+    }
+    let mut token=Module::load_with_vocab(open,&v).unwrap();token.bind("child",v.tokens([7,99]).unwrap()).unwrap();
+    let c=token.compile(&v).unwrap();assert!(accepts(&c,&[0,7,3]));assert!(!accepts(&c,&[0,1,3]));
+    let mut terminal=Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").module().with_options(opts).unwrap();
+    terminal.precompile(&v).unwrap();terminal.bind("mark",Token::new(99)).unwrap();
+    let c=Module::load(terminal.save()).unwrap().compile(&v).unwrap();assert!(accepts(&c,&[99]));
+}
+#[test]
+fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
+    let v=vocab();let opts=ModuleOptions::default().optimization(Optimization::FastBuild);
+    let a=a().module().with_options(opts.clone()).unwrap();let b=b().module().with_options(opts.clone()).unwrap();
+    let mut expression=Module::from_expr(&Expr::sequence([a,b])).unwrap().with_options(opts.clone()).unwrap();
+    expression.precompile(&v).unwrap();let c=expression.compile(&v).unwrap();assert!(accepts(&c,&[5]));
+    let mut parent=Grammar::from_glrm(HOST).module().with_options(opts).unwrap();parent.precompile(&v).unwrap();parent.bind("child",expression).unwrap();
+    let c=Module::load(parent.save()).unwrap().compile(&v).unwrap();assert!(accepts(&c,&[0,5,3]));
+}
+#[test]
+fn fastbuild_nullable_child_is_a_precise_capability_error() {
+    let v=vocab();let opts=ModuleOptions::default().optimization(Optimization::FastBuild);
+    let mut root=Grammar::from_glrm(HOST).module().with_options(opts.clone()).unwrap();
+    root.bind("child",Grammar::from_ebnf("start ::= \"\"").module().with_options(opts).unwrap()).unwrap();
+    let error=root.compile(&v).unwrap_err().to_string();assert!(error.contains("nullable children"),"{error}");
+}

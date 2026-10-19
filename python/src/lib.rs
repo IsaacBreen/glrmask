@@ -2031,6 +2031,11 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "__all__",
         [
             "Grammar",
+            "Module",
+            "ModuleOptions",
+            "CompileOptions",
+            "Expr",
+            "UnboundExtern",
             "PreparedGrammar",
             "Requirement",
             "Token",

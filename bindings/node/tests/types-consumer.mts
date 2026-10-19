@@ -1,4 +1,4 @@
-import {Vocab,Grammar,Optimization,Constraint,type BuildOptions} from '@glrmask/node';
+import {Vocab,Grammar,Module,Expr,ModuleOptions,Optimization,Constraint,type BuildOptions} from '@glrmask/node';
 import api = require('@glrmask/node');
 const v=new Vocab([[0,new TextEncoder().encode('a')]]);
 const sameVocab:api.Vocab=v;
@@ -10,3 +10,11 @@ const prepared=await Grammar.fromEbnf('start ::= "a"').prepare(v);
 const linked:api.Constraint=await prepared.link();
 using temporary=linked.start();
 void [sameVocab,words,temporary];
+
+const module=new Module(Grammar.fromEbnf('start ::= "a"'),new ModuleOptions({optimization:Optimization.Balanced}));
+await module.precompile(v);
+const expr=Expr.choice([module,Grammar.fromEbnf('start ::= "a"')]);
+const assembled=new Module(expr);
+const restored=await Module.load(await assembled.save(),v);
+const canonical:api.Constraint=await restored.compile(v);
+void canonical;

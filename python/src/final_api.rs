@@ -1,4 +1,5 @@
 //! Python's source/module/root lifecycle, backed by the production Rust API.
+mod canonical;
 use super::{PyConstraint, PyVocab};
 use glrmask::__private::ConstraintExt as _;
 use pyo3::exceptions::{PyTypeError, PyValueError};
@@ -164,7 +165,11 @@ impl Binding {
         if let Ok(value) = value.extract::<PyRef<'_, PyExactTokens>>() {
             return Ok(Self::Tokens(value.inner.clone()));
         }
-        Err(PyTypeError::new_err("Grammar.bind accepts Grammar, Token, or ExactTokens"))
+        if let Ok(value)=value.extract::<PyRef<'_,canonical::PyExpr>>() {
+            let expr=value.inner.clone();let py=value.py();drop(value);
+            return py.detach(move ||glrmask::Grammar::from_expr(&expr)).map(Self::Source).map_err(api_error);
+        }
+        Err(PyTypeError::new_err("Grammar.bind accepts Grammar, Expr, Token, or ExactTokens"))
     }
 
     fn extract_for_unlinked(value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -213,10 +218,17 @@ impl PyGrammar {
     fn as_rust(&self)->glrmask::Result<glrmask::Grammar<'static>> {Ok(self.inner.clone())}
 }
 
+impl Drop for PyGrammar {
+    fn drop(&mut self) {
+        let inner=std::mem::replace(&mut self.inner,glrmask::Grammar::from_ebnf_owned(String::new()));
+        let _=Python::try_attach(move |py|py.detach(move ||drop(inner)));
+    }
+}
+
 /// An unresolved typed slot. Paths distinguish the same local name in different attached children.
-#[pyclass(name="Requirement",module="glrmask",frozen, from_py_object)]
+#[pyclass(name="UnboundExtern",module="glrmask",frozen, from_py_object)]
 #[derive(Clone)]
-pub(super) struct PyRequirement {inner:glrmask::Requirement}
+pub(super) struct PyRequirement {inner:glrmask::UnboundExtern}
 #[pymethods]
 impl PyRequirement {
     /// Qualified path joined with `::`.
@@ -235,11 +247,30 @@ impl PyRequirement {
     fn kind(&self)->&'static str {match self.inner.kind {
         glrmask::ExternalKind::Token=>"token",glrmask::ExternalKind::Grammar=>"grammar",glrmask::ExternalKind::LegacyGeneric=>"legacy",
     }}
-    fn __repr__(&self)->String {format!("Requirement({:?}, kind={:?})",self.name(),self.kind())}
+    fn __repr__(&self)->String {format!("UnboundExtern({:?}, kind={:?})",self.name(),self.kind())}
 }
 
 #[pymethods]
 impl PyGrammar {
+    /// Cheap owned assembly snapshot. Grammar retains no compilation options.
+    fn module(&self)->canonical::PyModule {canonical::PyModule::from_inner(self.inner.module())}
+
+    /// Convert source-only expression leaves, rejecting configured or prepared Modules.
+    #[staticmethod]
+    fn from_expr(py:Python<'_>, expr:&canonical::PyExpr)->PyResult<Self> {
+        let expr=expr.inner.clone();
+        py.detach(move ||glrmask::Grammar::from_expr(&expr)).map(|inner|Self {inner}).map_err(api_error)
+    }
+
+    #[getter]
+    fn unbound(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {Self::requirements(slf)}
+    #[getter]
+    fn externs(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
+        let snapshot=slf.try_borrow()?.inner.clone();
+        slf.py().detach(move ||snapshot.externs())
+            .map(|values|values.into_iter().map(|inner|PyRequirement {inner}).collect()).map_err(api_error)
+    }
+
     /// Parsing and compilation errors can be deferred until `prepare` or `compile`.
     #[staticmethod]
     fn from_ebnf(source: String) -> Self { Self::new(source, SourceKind::Ebnf) }
@@ -426,9 +457,12 @@ impl PyPreparedGrammar {
 }
 
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    canonical::register(module)?;
     module.add_class::<PyGrammar>()?;
     module.add_class::<PyPreparedGrammar>()?;
     module.add_class::<PyRequirement>()?;
+    // Migration alias; canonical diagnostics use UnboundExtern.
+    module.add("Requirement",module.getattr("UnboundExtern")?)?;
     module.add_class::<PyToken>()?;
     module.add_class::<PyExactTokens>()?;
     module.add_class::<PyOptimization>()?;

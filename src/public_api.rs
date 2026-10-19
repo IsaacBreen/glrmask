@@ -20,6 +20,7 @@ mod graph;
 mod snapshot_map;
 mod event_cache;
 mod prepared_artifact;
+mod artifact_limits;
 mod module;
 mod expr;
 pub use module::{Module, ModuleOptions, CompileOptions, IntoModuleValue, ModuleValue};
@@ -1871,8 +1872,12 @@ fn compose_named_children(
     if present.is_empty() {
         return Ok(parent);
     }
-    require_composable_parser(&parent)?;
-    for &child_index in &present { require_composable_parser(&children[child_index].1)?; }
+    // This branch is only for ordinary retained-LR Dynamic components.
+    // Native components were dispatched above and may never enter LR machinery.
+    if !parent.table.is_present() || present.iter().any(|&i|
+        children[i].1.has_template_parser() || !children[i].1.table.is_present()) {
+        return Err(Error::Compilation("FastBuild/LR composition requires homogeneous retained-LR components".into()));
+    }
 
     let remaining_parent_slots = parent
         .late_grammar_slots
@@ -3567,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn lr_component_composition_returns_compilation_error() {
+    fn mixed_native_lr_component_composition_returns_compilation_error() {
         let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec())]);
         let lr = |source: &str| crate::import::compile_dynamic_glrm_fixture(
             source, &vocab, crate::runtime::parser_backend::DynamicParserBackend::LrTable,
@@ -3583,14 +3588,20 @@ mod tests {
             parent.bind_grammar("child", &child).unwrap_err(),
             parent.bind_grammar_dynamic_boundary("child", &child).unwrap_err()] {
             assert!(matches!(error, Error::Compilation(_)));
-            assert!(error.to_string().contains("LR-backed components are unsupported"));
+            let message=error.to_string();
+            assert!(message.contains("LR-backed components are unsupported") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
         }
         let lr_parent = lr(source);
         let native_child = RuntimeConstraint::compile(Grammar::ebnf("start ::= 'y'"), &vocab).unwrap();
         for error in [lr_parent.bind_grammar("child", &native_child).unwrap_err(),
             lr_parent.bind_grammar_dynamic_boundary("child", &native_child).unwrap_err()] {
             assert!(matches!(error, Error::Compilation(_)));
-            assert!(error.to_string().contains("LR-backed components are unsupported"));
+            let message=error.to_string();
+            assert!(message.contains("LR-backed components are unsupported") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
         }
         // Failed linking must leave the retained LR object usable.
         assert_eq!(child.start().mask()[0] & 2, 2);

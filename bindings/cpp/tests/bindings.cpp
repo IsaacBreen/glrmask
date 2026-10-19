@@ -200,6 +200,34 @@ void artifacts(const std::filesystem::path& directory,bool check) {
         }
     }
 }
+void canonical_modules() {
+    auto v=Vocab({{0,"x"},{1,"a"},{2,"y"},{3,"xay"},{4,"b"}});
+    auto host=Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";");
+    auto parent=host.module();parent.precompile(v);
+    auto original=parent.clone();
+    auto child=Module(Grammar::from_ebnf("start ::= \"a\""),{Optimization::Balanced,BoundaryTriggerDetail::Tokens});
+    child.precompile(v);parent.bind("child",child);
+    auto loaded=Module::load(parent.save(),&v);
+    CHECK(loaded.unbound().empty());CHECK(original.unbound().at(0).name=="child");
+    CHECK(loaded.externs().at(0).path==std::vector<std::string>{"child"});
+    auto state=loaded.compile(v).start();loaded.dispose();parent.dispose();child.dispose();
+    state.commit_token(3);CHECK(state.is_accepting());
+    bool failed=false;try {original.bind("missing",Grammar::from_ebnf("start ::= \"a\""));}catch(const Error&){failed=true;}CHECK(failed);
+    CHECK(original.unbound().at(0).name=="child");
+    original.bind("child",original);CHECK(original.unbound().at(0).name=="child::child");
+    auto expr=Expr::sequence({Grammar::from_ebnf("start ::= \"x\""),
+        Expr::choice({Grammar::from_ebnf("start ::= \"a\""),Grammar::from_ebnf("start ::= \"b\"")}),Grammar::from_ebnf("start ::= \"y\"")});
+    auto c=Module(expr).compile(v);auto s=c.start();s.commit_token(3);CHECK(s.is_accepting());
+    CHECK(Grammar::from_expr(expr).compile(v).start().mask()==c.start().mask());
+    CHECK(Module(Expr::sequence({})).compile(v).start().is_accepting());
+    failed=false;try {Module empty(Expr::choice({}));}catch(const Error&){failed=true;}CHECK(failed);
+    auto configured=Module(Grammar::from_ebnf("start ::= \"a\""),{Optimization::Balanced,BoundaryTriggerDetail::None});
+    auto configured_expr=Expr::sequence({configured});
+    failed=false;try {Grammar::from_expr(configured_expr);}catch(const Error&){failed=true;}CHECK(failed);
+    configured.precompile(v);auto bytes=configured.save();
+    failed=false;try {configured.set_options({Optimization::FastRuntime,BoundaryTriggerDetail::None});}catch(const Error&){failed=true;}CHECK(failed);
+    CHECK(configured.save()==bytes);
+}
 int main(int argc,char** argv) {
     try {
 #if defined(__linux__)
@@ -209,12 +237,13 @@ int main(int argc,char** argv) {
         if(argc==3 && std::string(argv[1])=="--save"){artifacts(argv[2],false);return 0;}
         if(argc==3 && std::string(argv[1])=="--check"){artifacts(argv[2],true);return 0;}
         CHECK(argc==1);
+        canonical_modules();
         std::cerr << "C++ regression: basic" << std::endl; basic();
         std::cerr << "C++ regression: exact_and_unicode" << std::endl; exact_and_unicode();
         std::cerr << "C++ regression: end_tokens" << std::endl; end_tokens();
         std::cerr << "C++ regression: composition_and_persistence" << std::endl; composition_and_persistence();
         std::cerr << "C++ regression: markers_and_frontends" << std::endl; markers_and_frontends();
         std::cerr << "C++ regression: threads_and_errors" << std::endl; threads_and_errors();
-        std::cout << "C++ binding regression groups: 6 passed\n";return 0;
+        std::cout << "C++ binding regression groups: 7 passed\n";return 0;
     } catch(const std::exception& e) {std::cerr << e.what() << '\n';return 1;}
 }

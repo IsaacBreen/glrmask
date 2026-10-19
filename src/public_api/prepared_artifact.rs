@@ -12,13 +12,14 @@ const HEADER: usize = 16;
 struct Definition {
     bytes: u64,
     runnable: bool,
+    #[serde(deserialize_with="artifact_limits::items")]
     exact_only_token_ids: Vec<u32>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 enum Binding {
     Prepared(u32),
     Runnable(u32),
-    Events(Vec<(u32, u32)>),
+    Events(#[serde(deserialize_with="artifact_limits::items")] Vec<(u32, u32)>),
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Instance {
@@ -26,11 +27,14 @@ struct Instance {
     slot_kinds: BTreeMap<String, ExternalKind>,
     slot_spans: BTreeMap<String, glrmask_grammar::SourceSpan>,
     boundary_trigger: u8,
+    #[serde(deserialize_with="artifact_limits::items")]
     bindings: Vec<(String, Binding)>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Manifest {
+    #[serde(deserialize_with="artifact_limits::definitions")]
     definitions: Vec<Definition>,
+    #[serde(deserialize_with="artifact_limits::nodes")]
     instances: Vec<Instance>,
 }
 fn error(message: impl Into<String>) -> Error { Error::Serialization(message.into()) }
@@ -145,6 +149,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     }
     if data.len() < HEADER || !data.starts_with(MAGIC) { return Err(error("invalid prepared-grammar artifact header")); }
     let manifest_len = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    if data.len()>1<<30 || manifest_len>1<<30 {return Err(error("excessive prepared artifact length"));}
     let start = usize::try_from(manifest_len).ok().and_then(|n|n.checked_add(HEADER))
         .filter(|&n|n<=data.len()).ok_or_else(||error("invalid prepared manifest length"))?;
     let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(manifest_len)

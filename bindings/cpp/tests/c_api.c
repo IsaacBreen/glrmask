@@ -16,6 +16,21 @@ int main(void) {
     options=glrmask_default_build_options();options.optimization=999;
     CHECK(glrmask_grammar_compile(grammar,vocab,&options,&constraint)==GLRMASK_INVALID_ARGUMENT);CHECK(constraint==NULL);
     CHECK(glrmask_grammar_compile(grammar,vocab,NULL,&constraint)==GLRMASK_OK);
+    /* Canonical Module/Expr handles own snapshots across source destruction. */
+    glrmask_module *module=NULL,*loaded=NULL;glrmask_expr* expr=NULL;glrmask_bytes* saved=NULL;
+    glrmask_module_options local=glrmask_default_module_options();local.optimization=GLRMASK_BALANCED;
+    CHECK(glrmask_module_new(grammar,&local,&module)==GLRMASK_OK);
+    CHECK(glrmask_module_precompile(module,vocab)==GLRMASK_OK);
+    CHECK(glrmask_module_bind_token(module,"missing",7,0)!=GLRMASK_OK);
+    CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
+    const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);
+    CHECK(glrmask_module_load(artifact,artifact_len,vocab,&loaded)==GLRMASK_OK);
+    glrmask_bytes_free(saved);glrmask_module_free(module);
+    glrmask_module_options snapshot;CHECK(glrmask_module_get_options(loaded,&snapshot)==GLRMASK_OK);CHECK(snapshot.optimization==GLRMASK_BALANCED);
+    const glrmask_expr_operand operand={1,loaded};CHECK(glrmask_expr_new(0,&operand,1,&expr)==GLRMASK_OK);
+    CHECK(glrmask_module_from_expr(expr,NULL,&module)==GLRMASK_OK);glrmask_expr_free(expr);glrmask_module_free(loaded);
+    glrmask_constraint* canonical=NULL;CHECK(glrmask_module_compile(module,vocab,NULL,&canonical)==GLRMASK_OK);
+    glrmask_module_free(module);glrmask_constraint_free(canonical);
     CHECK(glrmask_constraint_start(constraint,&state)==GLRMASK_OK);
     glrmask_constraint_free(constraint);glrmask_grammar_free(grammar);glrmask_vocab_free(vocab);
     uint32_t words[3]={123,123,123};

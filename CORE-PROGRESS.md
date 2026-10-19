@@ -141,3 +141,26 @@ A portable patch containing only the 11 owned files is retained at
 /private/tmp/glrmask-module-core-469935.patch for parent integration. Git staging
 was empty immediately after the denied operation. Code verification results
 above are unchanged; this final update is only the progress artifact.
+
+## Follow-up review milestone 1 (2026-10-20)
+
+- Baseline HEAD verified 83436690e (includes parent commit 636452c26).
+  Read AGENTS.md, CORE-API.md, this log and all three parent task/review files.
+  Python/bindings and shared documentation remain under their separate owners.
+- Replaced Module.bind's repeated index/target graph walks with immutable cached
+  certificates and ancestor-spine updates; oversized occurrence upper bounds
+  retain exact distinct-node/port validation. Exact target checks stay atomic.
+- Planned distinct local definition/option keys once and dispatched missing work
+  through Rayon par_iter in the caller's pool. Results install in a postorder
+  pass only after all jobs succeed. No per-node thread pools introduced.
+- Investigated the disabled retained-LR composition code. A guarded existing
+  recursive DynamicDirect path can retain actual LR leaves without reconstructing
+  native tables or reparsing sources. Added explicit homogeneous dispatch and
+  ordinary-Dynamic exact-event adapters. Nullable child/global-ignore alias
+  limitations remain precise errors, pending focused tests.
+- Expr skeleton now uses the existing typed NamedGrammar/ParsedComponent AST.
+  Canonical source formatting is confined to artifact persistence.
+- First ordinary library check passed, incremental dev rebuild 12.58s. Focused
+  integration build is queued behind the other worker's shared target lock.
+  Added work-count, 2/4-worker concurrency, deduplication and atomic-failure tests;
+  results are not yet claimed. No benchmarks or release builds performed.

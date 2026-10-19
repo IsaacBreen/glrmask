@@ -19,7 +19,7 @@ fn main() -> glrmask::Result<()> {
     prepared.bind("MARK", Token::new(0))?;
     let closed = prepared.link()?;
     assert_eq!(closed.start().forced_tokens()?, vec![0]);
-    let regex = Grammar::from_glrm("start root\nt A = shortest { /a|ab/ }\nnt root = A");
+    let regex = Grammar::from_glrm("start root\nt A = (/a|ab/ - (/a|ab/ b/./s+))\nnt root = A");
     let c = regex.compile(&vocab)?;
     let mut s = c.start();
     s.commit_bytes(b"a")?;

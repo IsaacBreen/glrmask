@@ -102,3 +102,14 @@ payloads are limited to 1 GiB at load.
 are source-only. Configured or prepared operands return an error atomically;
 use Module::bind for those values. No explicit Grammar::from_expr wrapper is
 needed for ordinary source-expression binding.
+
+## Parent integration checkpoint, 2026-10-20 01:23 Perth
+Initial core committed by parent:636452c26; independent shortest removal now
+cherry-picked as83436690e. Python/native worker's diffs remain untouched.
+Parent `cargo fetch --locked` outside nested Codex network sandbox succeeded:
+Node napi3.14.2/convert_case0.12.0 and all lockfile dependencies are now cached.
+Wrapper worker can retry OFFLINE Node checks. Parent will handle full-root
+shortest fixture adaptation if old native syntax appears outside grammar crate.
+Core receives a follow-up implementation review for parallel preparation,
+binding metadata scaling and homogeneous FastBuild composition capabilities.
+Canonical signatures stay stable unless explicitly coordinated here.

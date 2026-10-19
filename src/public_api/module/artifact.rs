@@ -5,9 +5,9 @@ use serde::{Serialize,Deserialize};
 const MAGIC:&[u8;8]=b"GLRASM01";
 const MAX_BYTES:u64=1<<30;
 #[derive(Serialize,Deserialize)]
-struct Vocabulary { entries:Vec<(u32,Vec<u8>)>, exact_only:Vec<u32> }
+struct Vocabulary { #[serde(deserialize_with="artifact_limits::items")] entries:Vec<(u32,Vec<u8>)>, #[serde(deserialize_with="artifact_limits::items")] exact_only:Vec<u32> }
 #[derive(Serialize,Deserialize)]
-struct Exact { target:u32,ranges:Vec<(u32,u32)> }
+struct Exact { target:u32,#[serde(deserialize_with="artifact_limits::items")] ranges:Vec<(u32,u32)> }
 #[derive(Serialize,Deserialize)]
 enum Source {
     Ebnf(String), Glrm(String), Json(String),
@@ -17,11 +17,16 @@ enum Source {
 #[derive(Serialize,Deserialize)]
 enum Value { Module(u32),Token(u32),Exact(Exact) }
 #[derive(Serialize,Deserialize)]
-struct Instance {source:u32,optimization:u8,boundary:u8,prepared:Option<u32>,bindings:Vec<(String,Value)>}
+struct Instance {source:u32,optimization:u8,boundary:u8,prepared:Option<u32>,#[serde(deserialize_with="artifact_limits::items")] bindings:Vec<(String,Value)>}
 #[derive(Serialize,Deserialize)]
 struct Preparation { source:u32,optimization:u8,boundary:u8,bytes:Vec<u8> }
 #[derive(Serialize,Deserialize)]
-struct Manifest {vocabs:Vec<Vocabulary>,sources:Vec<Source>,prepared:Vec<Preparation>,instances:Vec<Instance>}
+struct Manifest {
+    #[serde(deserialize_with="artifact_limits::nodes")] vocabs:Vec<Vocabulary>,
+    #[serde(deserialize_with="artifact_limits::nodes")] sources:Vec<Source>,
+    #[serde(deserialize_with="artifact_limits::nodes")] prepared:Vec<Preparation>,
+    #[serde(deserialize_with="artifact_limits::nodes")] instances:Vec<Instance>,
+}
 fn err(message:impl Into<String>)->Error {Error::Serialization(message.into())}
 fn vocab_id(vocab:&Vocab,vocabs:&mut Vec<Vocab>)->u32 {
     if let Some(id)=vocabs.iter().position(|v|v.same_model_vocab(vocab)){return id as u32;}
@@ -39,9 +44,8 @@ fn source(grammar:&Grammar<'_>,vocabs:&mut Vec<Vocab>)->Source {
             llm:grammar.lark_options.profile==LarkProfile::Llm,tokens:grammar.lark_options.token_names.clone()},
         // Constructed public source operands are exact events (handled above).
         // Internal closed AST fixtures can still be stored in the canonical source format.
-        GrammarSource::Constructed=>Source::Glrm(format!("glrm 1;\n{}",crate::grammar::glrm::to_glrm_v1(
-            &grammar.component().expect("validated constructed source").lower_closed().expect("closed constructed source"))
-            .expect("serializable constructed source"))),
+        GrammarSource::Constructed=>Source::Glrm(grammar.component().expect("validated constructed source")
+            .to_glrm_source().expect("serializable constructed source")),
     }
 }
 pub(super) fn save(root:&Module)->Vec<u8> {
@@ -151,7 +155,7 @@ pub(super) fn load(data:&[u8],supplied:Option<&Vocab>)->Result<Module> {
             let value=match value {Value::Module(i)=>ModuleValue::Module(instances[i as usize].clone()),Value::Token(id)=>ModuleValue::Token(Token::new(id)),Value::Exact(e)=>ModuleValue::ExactTokens(decode_exact(e,&vocabs)?)};
             bindings.insert(name,value);
         }
-        let module=Module {node:Arc::new(Node {source,options,prepared:retained,bindings})};
+        let module=Module {node:Arc::new(Node {source,options,prepared:retained,bindings,certificate:Arc::new(OnceLock::new())})};
         // Cold raw source may defer parse errors, just like Grammar. Bound or prepared source must have a valid authored interface.
         if module.node.prepared.is_some() || !module.node.bindings.is_empty() {
             let declared=module.node.source.declarations().map_err(|e|err(e.to_string()))?;
@@ -172,13 +176,19 @@ pub(super) fn load(data:&[u8],supplied:Option<&Vocab>)->Result<Module> {
                 if p.slot_kinds.as_ref()!=&expected || p.bindings.keys().cloned().collect::<BTreeSet<_>>()!=generated
                     || p.boundary_trigger!=module.node.options.boundary_trigger {return Err(err("retained Module interface/options mismatch"));}
                 let native=p.inner.has_template_parser();
+                if native && p.inner.table.is_present() {return Err(err("native Module artifact retains physical LR storage"));}
+                if !native && !p.inner.table.is_present() {return Err(err("Module artifact has no supported parser representation"));}
                 if module.node.options.optimization!=Optimization::FastBuild && !native {return Err(err("native Module artifact contains LR runtime"));}
+                if module.node.options.optimization==Optimization::FastBuild && !p.inner.uses_dynamic_runtime() {
+                    return Err(err("FastBuild Module artifact contains a non-Dynamic local body"));
+                }
                 // FastBuild may use its internal development override; its actual serialized representation is authoritative.
             }
         }
         instances.push(module);
     }
     let root=instances.pop().ok_or_else(||err("empty Module artifact"))?;
+    root.check_limits().map_err(|e|err(e.to_string()))?;
     root.validate_targets(supplied).map_err(|e|err(e.to_string()))?;Ok(root)
 }
 
@@ -207,4 +217,27 @@ mod tests {
         let mut m=read(&bytes);if let Value::Exact(e)=&mut m.instances[0].bindings[0].1{e.ranges=vec![(7,7),(7,7)];}assert!(Module::load(write(&m)).is_err());
         let mut m=read(&bytes);m.vocabs[0].exact_only.push(0);assert!(Module::load(write(&m)).is_err());
     }
+    #[test]
+    fn tiny_manifests_cannot_claim_unbounded_vector_allocations() {
+        for offset in [0,8,16,24] {
+            // Four empty vectors, with one impossible count. No payload exists
+            // to justify allocation, and the count visitor must reject first.
+            let mut body=vec![0u8;32];body[offset..offset+8].copy_from_slice(&u64::MAX.to_le_bytes());
+            let mut bytes=MAGIC.to_vec();bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());bytes.extend(body);
+            let error=Module::load(bytes).unwrap_err().to_string();
+            assert!(error.contains("excessive artifact element count"),"{offset}: {error}");
+        }
+        let mut bytes=MAGIC.to_vec();bytes.extend_from_slice(&u64::MAX.to_le_bytes());assert!(Module::load(bytes).is_err());
+    }
+    #[test]
+    fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
+        let v=Vocab::new(vec![(0,b"a".to_vec())]);
+        let mut module=Grammar::from_ebnf("start ::= \"a\"").module().with_options(ModuleOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        module.precompile(&v).unwrap();let mut m=read(&module.save());
+        m.instances[0].optimization=2;m.prepared[0].optimization=2;
+        let error=Module::load(write(&m)).unwrap_err().to_string();assert!(error.contains("native Module artifact contains LR"),"{error}");
+        let mut m=read(&module.save());m.instances[0].source=1;m.sources.push(Source::Ebnf("start ::= \"b\"".into()));
+        assert!(Module::load(write(&m)).is_err(),"preparation must match its immutable source reference");
+    }
+
 }

@@ -117,10 +117,16 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: the language you want to generate.
-- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
-- `Constraint`: a grammar compiled against a specific vocabulary.
+- `Grammar`: the source-language definition, without compilation settings.
+- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
+- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
+
+Use direct `Grammar.compile` for a closed source, or a `Module` when local
+settings, late-bound children, or retained work are needed. `Expr.choice` and
+`Expr.sequence` group grammar leaves without adding an extra lexer scope at each
+operator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)
+for construction, open precompilation, and persistence examples.
 
 ### Python quickstart
 
@@ -216,11 +222,14 @@ widens an exact event into a general fragment without changing its meaning.
 a standalone event-aware grammar. Neither conversion uses decoded token spelling.
 An arbitrary grammar cannot bind a token-valued parameter.
 
-### Prepare, attach, specialize, link
+### Configure, precompile, attach and execute
 
-`Grammar.prepare(vocab)` creates a non-runnable `PreparedGrammar`. The parent and
-its children may both have unresolved parameters. `bind(name, value)` mutates the
-receiving assembly handle and returns `Result<()>` in Rust or `None` in Python.
+`Module` is a reusable, independently configured grammar snapshot. Constructing
+one from a `Grammar` needs no vocabulary and does no grammar compilation.
+Compilation settings belong to the module, never to the source `Grammar`.
+The parent and its children may both have unresolved parameters.
+`bind(name, value)` mutates the receiving handle and returns `Result<()>` in Rust
+or `None` in Python.
 Each successful bind publishes a new shared snapshot; an error leaves the previous
 configuration intact. Attaching a child captures its current configuration, not
 a live reference to later edits. Use `clone()` to specialize independently:
@@ -231,36 +240,43 @@ import glrmask
 vocab = glrmask.Vocab.from_id_to_bytes({
     0: b"x", 1: b"|", 2: b"x", 4: b"", 5: b"",
 })
-leaf = glrmask.Grammar.from_glrm('''
+leaf = glrmask.Module(glrmask.Grammar.from_glrm('''
     extern token MARK
     start body
     nt body = "x" MARK
-''').prepare(vocab)
-parent = glrmask.Grammar.from_glrm('''
+'''))
+leaf.precompile(vocab)
+parent = glrmask.Module(glrmask.Grammar.from_glrm('''
     extern grammar LEFT
     extern grammar RIGHT
     start pair
     nt pair = LEFT "|" RIGHT
-''').prepare(vocab)
+'''))
+parent.precompile(vocab)
 
 package = parent.clone()
 package.bind("LEFT", leaf)
 package.bind("RIGHT", leaf)
-assert [r.name for r in package.requirements] == ["LEFT::MARK", "RIGHT::MARK"]
+assert [r.name for r in package.unbound] == ["LEFT::MARK", "RIGHT::MARK"]
 complete = package.clone()
 complete.bind("LEFT::MARK", vocab.tokens([4]))
 complete.bind("RIGHT::MARK", vocab.tokens([5]))
-constraint = complete.link()
+constraint = complete.compile(vocab)
 state = constraint.start()
 for token_id in [0, 4, 1, 2, 5]:
     assert state.mask()[token_id]
     state.commit_token(token_id)
 assert state.is_accepting()
-assert [r.name for r in leaf.requirements] == ["MARK"]
+assert [r.name for r in leaf.unbound] == ["MARK"]
 ```
 
-Rust uses the same operations: `prepare(&vocab)?`, `bind(name, &child)?`, and
-`link()?` or `link_with(options)?`. Source `Grammar` objects also support open
+Rust uses `Module::new(&grammar)` or `grammar.module()`, `precompile(&vocab)?`,
+`bind(name, &child)?`, and `compile(&vocab)?` or `compile_with(&vocab, options)?`.
+The instance `with_options` method returns a configured snapshot; `set_options`
+updates local settings in place. Both reject changes incompatible with retained
+local work. Each explicitly configured child keeps its own settings; a raw
+grammar child receives default local settings, not an inherited parent override.
+Source `Grammar` objects also support open
 attachment and later `CHILD::PARAM` binding. A descendant can be bound only after
 its attachment exists. Unknown names and attempts to rebind a filled parameter
 are rejected.
@@ -268,35 +284,59 @@ are rejected.
 Each inline `grammar NAME { ... }` has an isolated interface, start rule, terminals,
 and ignore policy. It does not inherit enclosing externs. Two references to the
 same named inline grammar share that definition's bindings. Attaching the same
-prepared child at two different names creates independently bindable occurrences.
+module at two different names creates independently bindable occurrences.
 
-`requirements()` in Rust, or `.requirements` in Python, reports structured paths,
-expected kinds, and available original source spans. Preparation is allowed while
-requirements remain; final `compile()` or `link()` requires every declared
+Rust `unbound()` (Python `.unbound`) reports unresolved structured paths,
+expected kinds, and available original source spans. Rust `externs()` (Python
+`.externs`) also includes bound declarations. Records use
+the descriptive `UnboundExtern` metadata rather than the old `Requirement` name.
+Advance compilation is allowed while slots remain open; final `compile()` requires every declared
 parameter to be bound, including declarations whose uses are unreachable.
 Introspection has finite traversal limits rather than expanding arbitrary shared
 graphs without a bound.
 
 ### Persistence and root policy
 
-Prepared components can be saved while incomplete:
+Modules can be saved while incomplete, including mixed raw and precompiled
+children. Retained work, settings and source identities survive the round-trip:
 
 ```python
 saved = package.save()
-restored = glrmask.PreparedGrammar.load(saved, vocab=vocab)
-assert [r.name for r in restored.requirements] == ["LEFT::MARK", "RIGHT::MARK"]
+restored = glrmask.Module.load(saved, vocab=vocab)
+assert [r.name for r in restored.unbound] == ["LEFT::MARK", "RIGHT::MARK"]
 ```
 
 Runnable constraints separately support `save()` and `Constraint.load(...)`.
 Artifacts preserve original token coordinates and vocabulary identity, not merely
 a set of decoded spellings. Unsupported older pre-release formats are rejected.
-Prepared artifacts are vocabulary-specific, not portable across arbitrary models.
+Retained compiled work is vocabulary-specific, not portable across arbitrary models.
+The vocabulary is supplied once to each root `precompile` or `compile` operation,
+not once per child. Final compilation handles outstanding work, so attaching a
+cold child never requires a separate manual precompilation step. Incompatible
+retained representations or targets produce errors, not implicit loss of work.
 
-Configure `end_tokens` on the final compile or link operation. Acceptance means a
+Configure `end_tokens` on the final compile operation. Acceptance means a
 complete grammar match exists; it does not require generation to stop when longer
 matches remain possible. A configured end ID is admitted only at acceptance. Commit
 the sampled end ID before ending the generation loop. Child components do not
 supply the enclosing generation's root termination policy.
+
+### Lightweight expressions
+
+`Expr.choice([a, b])` is unordered context-free alternation, and
+`Expr.sequence([a, b])` is language concatenation. Whole grammar and module
+leaves keep their own lexical scopes, bindings and settings. Intermediate
+expression operators add neither scope nor public path segments; anonymous
+leaves use deterministic positional names such as `leaf0` and `leaf1`.
+A model-token spelling may cross leaf boundaries.
+
+An expression can be bound directly into a grammar-valued slot. Source-only
+expressions also support `Grammar.from_expr(expr)`. Expressions with configured
+or precompiled module leaves require `Module(expr)` in Python or
+`Module::from_expr(&expr)` in Rust; converting them to source-only `Grammar`
+fails rather than silently dropping options or retained work. Rust's `IntoExpr`
+conversion makes heterogeneous operand collections explicit.
+See [module lifecycle and examples](docs/module-lifecycle.md).
 
 ### Determined output
 
@@ -380,13 +420,13 @@ require the exact original mapping.
 
 ## Grammar formats
 
-**Unreleased JSON Schema policy — draft PR #13; not yet in published packages.**
+**JSON Schema acceptance policy.**
 Compilation enforces supported assertions or reports an unsupported-feature error.
 An absent `$schema` selects Draft 2020-12; explicit Draft 4, 6, 7, 2019-09, and
 2020-12 declarations select their dialect semantics. `format` is annotation-only;
 required format-assertion and unknown required vocabularies are unsupported.
 `oneOf` remains exclusive, with no approximation mode. Existing canonical
-serialization limits remain documented in the [unreleased policy](https://github.com/IsaacBreen/glrmask/pull/13).
+serialization limits remain documented in the [acceptance policy](https://github.com/IsaacBreen/glrmask/pull/13).
 
 GLRM is the native recognition language. A version header and statement semicolons
 are not required; canonical source uses explicit declarations and insignificant
@@ -401,8 +441,10 @@ nt value = INTEGER | "null"
 
 It retains `internal t`, unordered context-free alternatives, scoped grammars,
 regular intersection/subtraction, structural nonterminal-alternative subtraction,
-separated sequences, explicit finite automata, Unicode/byte expressions and
-terminal-only `shortest { ... }`. See [the native format](docs/glrm-format.md).
+separated sequences, explicit finite automata and Unicode/byte expressions.
+Native `shortest { ... }` notation is removed; the internal prefix-minimal
+regular-language operation remains available to the Lark importer and can be
+expressed with native regular subtraction. See [the native format](docs/glrm-format.md).
 
 Lark is a recognition-focused frontend with an explicit optional LLM compatibility
 profile. That profile adds selected exact-token syntax, named token resolution,

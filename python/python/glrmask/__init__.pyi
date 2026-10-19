@@ -12,10 +12,16 @@ python -m pip install glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: the language you want to generate.
-- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
-- `Constraint`: a grammar compiled against a specific vocabulary.
+- `Grammar`: the source-language definition, without compilation settings.
+- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
+- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
+
+Use direct `Grammar.compile` for a closed source, or a `Module` when local
+settings, late-bound children, or retained work are needed. `Expr.choice` and
+`Expr.sequence` group grammar leaves without adding an extra lexer scope at each
+operator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)
+for construction, open precompilation, and persistence examples.
 
 ## Quickstart
 
@@ -139,8 +145,8 @@ class Vocab:
         ...
 
 @final
-class Requirement:
-    "An unresolved typed slot. Paths distinguish the same local name in different attached children."
+class UnboundExtern:
+    "An external declaration with a qualified occurrence path, declared kind and original source coordinates. Module.unbound contains unresolved declarations; Module.externs also includes bound declarations."
     @property
     def name(self) -> str:
         "Qualified path joined with `::`."
@@ -161,9 +167,115 @@ class Requirement:
         ""
         ...
 
+# Legacy diagnostics spelling retained for migration.
+Requirement = UnboundExtern
+
+@final
+class ModuleOptions:
+    "Immutable local compilation settings owned by a Module, never by its source Grammar. Independently configured children keep their own settings."
+    def __init__(self, *, optimization: Optional[Optimization] = None, boundary_trigger: Optional[BoundaryTriggerDetail] = None) -> None:
+        "Use AUTO and NONE when omitted. This creates an options value only; it performs no grammar compilation."
+        ...
+    @property
+    def optimization(self) -> Optimization:
+        "Local compilation objective. Unsupported combinations with retained child representations fail explicitly rather than silently changing modes."
+        ...
+    @property
+    def boundary_trigger(self) -> BoundaryTriggerDetail:
+        "Local boundary-metadata request. The NONE default builds no such metadata."
+        ...
+
+@final
+class CompileOptions:
+    "Immutable final root settings. Pass this to Module.compile(options=...) or use its end_tokens keyword, but not both."
+    def __init__(self, *, end_tokens: Optional[Sequence[int]] = None) -> None:
+        "Root end-token controls apply only at acceptance and are not inherited by children."
+        ...
+    @property
+    def end_tokens(self) -> list[int]:
+        "Original token IDs allowed as root stopping controls at acceptance."
+        ...
+
+@final
+class Expr:
+    "Immutable scope-preserving union or concatenation of whole grammar/module snapshots. Grouping operators add neither lexical scopes nor public path segments."
+    @staticmethod
+    def choice(values: Iterable[Union[Grammar, Module, Expr]]) -> Expr:
+        "Unordered context-free union, not prioritized choice. Each Grammar or Module leaf retains its own scope. Empty choice is rejected when materializing the expression."
+        ...
+    @staticmethod
+    def sequence(values: Iterable[Union[Grammar, Module, Expr]]) -> Expr:
+        "Language concatenation, including model tokens crossing leaf boundaries. Empty sequence denotes epsilon. Configured leaves retain their settings and work."
+        ...
+
+@final
+class Module:
+    "An owned, independently configured reusable grammar with snapshot-safe mutable bindings and optional retained compilation work. It may remain open or contain raw and precompiled children."
+    def __init__(self, grammar_or_expr: Union[Grammar, Expr], *, options: Optional[ModuleOptions] = None, optimization: Optional[Optimization] = None, boundary_trigger: Optional[BoundaryTriggerDetail] = None) -> None:
+        "Create a cold module from Grammar or Expr, without compilation or vocabulary. Supply either an options value or local keyword settings. Configured expression leaves keep their own settings."
+        ...
+    @property
+    def options(self) -> ModuleOptions:
+        "Immutable snapshot of this module owner's local options; it does not combine child options."
+        ...
+    def with_options(self, options: Optional[ModuleOptions] = None, *, optimization: Optional[Optimization] = None, boundary_trigger: Optional[BoundaryTriggerDetail] = None) -> Module:
+        "Return a configured snapshot without changing the original. An options object replaces local settings; keywords alone update selected fields. Do not combine both forms. Incompatible locally retained work rejects the change."
+        ...
+    def set_options(self, options: Optional[ModuleOptions] = None, *, optimization: Optional[Optimization] = None, boundary_trigger: Optional[BoundaryTriggerDetail] = None) -> None:
+        "Update local options atomically and return None. An options object replaces the settings; keywords alone update selected fields. Incompatible retained local work rejects the change without altering bindings or children."
+        ...
+    def bind(self, path: str, value: Union[Grammar, Module, Expr, Token, ExactTokens]) -> None:
+        "Fill one declared or qualified extern atomically. Capture a child snapshot, including open descendants, options and retained work; never compile during binding. Unknown, duplicate, wrong-kind or target-conflicting inputs fail without partial mutation."
+        ...
+    def precompile(self, vocab: Vocab) -> None:
+        "Perform and retain currently possible definition-local work for this vocabulary even while externs are open. Mutates this handle and returns None; existing clones are unchanged. Work is shared across equivalent definitions and uses the caller's bounded compilation context."
+        ...
+    def compile(self, vocab: Vocab, *, options: Optional[CompileOptions] = None, end_tokens: Optional[Sequence[int]] = None) -> Constraint:
+        "Create a runnable constraint, completing outstanding work while reusing compatible retained work. Requires all externs resolved and matching vocabulary. Supply either CompileOptions or end_tokens, not both; local settings are not overridden here."
+        ...
+    @property
+    def unbound(self) -> list[UnboundExtern]:
+        "Read-only list of unresolved external declarations, with qualified occurrence paths and available source spans."
+        ...
+    @property
+    def externs(self) -> list[UnboundExtern]:
+        "Read-only list of all external declarations, including bound slots and declarations in attached child occurrences."
+        ...
+    def clone(self) -> Module:
+        "Return an independent snapshot sharing immutable source and retained work. Later edits to either handle do not change the other."
+        ...
+    def __copy__(self) -> Module:
+        "Return a cheap independent snapshot; bindings and options edits do not affect previously captured values."
+        ...
+    def __deepcopy__(self, memo: dict[int, Any]) -> Module:
+        "Return a logically independent snapshot while sharing immutable native data; retain Python deepcopy memo semantics."
+        ...
+    def save(self) -> bytes:
+        "Serialize source, options, open bindings, target commitments and retained work without compilation. The result may still have unresolved externs."
+        ...
+    @staticmethod
+    def load(data: bytes, vocab: Optional[Vocab] = None) -> Module:
+        "Load a validated cold, open or work-bearing module without compilation. If supplied, the vocabulary must match stored original-ID mappings and exact-only tokens."
+        ...
+
 @final
 class Grammar:
     "Reusable source grammar with mutable bindings. `bind` changes this handle; clones and already attached children keep independent snapshots. Parsing and vocabulary checks can be deferred until preparation or compilation."
+    @staticmethod
+    def from_expr(expr: Expr) -> Grammar:
+        "Construct source grammar from an expression containing source-only leaves. Reject configured or precompiled Module leaves instead of discarding settings or retained work."
+        ...
+    def module(self) -> Module:
+        "Create a cold default-configured Module snapshot without compilation. Settings belong only to the returned Module."
+        ...
+    @property
+    def unbound(self) -> list[UnboundExtern]:
+        "Read-only unresolved external declaration paths in this source grammar and attached source snapshots."
+        ...
+    @property
+    def externs(self) -> list[UnboundExtern]:
+        "Read-only all external declarations, including resolved slots and independently attached source occurrences."
+        ...
     @staticmethod
     def from_ebnf(source: str) -> Grammar:
         "Parsing and compilation errors can be deferred until `prepare` or `compile`."
@@ -191,7 +303,7 @@ class Grammar:
     def requirements(self) -> list[Requirement]:
         "Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may raise an error for very large shared graphs."
         ...
-    def bind(self, name: str, value: Union[Grammar, Token, ExactTokens]) -> None:
+    def bind(self, name: str, value: Union[Grammar, Expr, Token, ExactTokens]) -> None:
         "Fill a declared slot once. Use `::` for nested paths, after attaching the parent. Token slots require `Token` or `ExactTokens`. Attached children are snapshots; failed binds leave this handle unchanged."
         ...
     def clone(self) -> Grammar:
@@ -206,7 +318,7 @@ class Grammar:
     def prepare(
         self, vocab: Vocab, *, boundary_trigger: Optional[BoundaryTriggerDetail] = None,
     ) -> PreparedGrammar:
-        "Compile vocabulary-specific machinery while retaining unresolved slots. Only the boundary metadata request is retained for final link."
+        "Legacy compatibility method producing PreparedGrammar. For new reusable graphs, create Module(self) and call its precompile(vocab) operation."
         ...
     def compile(
         self, vocab: Vocab, *, end_tokens: Optional[Sequence[int]] = None,
@@ -218,7 +330,7 @@ class Grammar:
 
 @final
 class PreparedGrammar:
-    "Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots."
+    "Legacy preparation-stage compatibility API. New reusable graphs should use Module, which supports cold and precompiled children without a separate public preparation phase."
     @property
     def requirements(self) -> list[Requirement]:
         "Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded."

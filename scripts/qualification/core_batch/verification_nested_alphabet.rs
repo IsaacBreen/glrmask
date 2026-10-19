@@ -6,7 +6,7 @@ fn examine(c:&Constraint,prefix:&[u8],n:&mut usize) {
     let before=state.marker_events().to_vec();let accepting=state.is_accepting();
     // Cold forcing first, full-mask oracle only afterwards.
     let got=state.forced_tokens().unwrap_or_else(|e|panic!("prefix {prefix:?}: {e}"));
-    let expected=state.forced_token_ids_reference();assert_eq!(got,expected,"prefix={prefix:?}");
+    let expected=state.forced_canonical_reference();assert_eq!(got,expected,"prefix={prefix:?}");
     assert_eq!(before,state.marker_events());assert_eq!(accepting,state.is_accepting());
     let full=state.mask();assert_eq!(state.forced_tokens().unwrap(),expected);assert_eq!(state.mask(),full);
     let mut cursor=state.clone();for id in got{assert!(!cursor.is_accepting());let m=cursor.mask();assert_eq!(m.iter().map(|v|v.count_ones()).sum::<u32>(),1);cursor.commit_token(id).unwrap();}
@@ -20,7 +20,7 @@ fn main(){
         "grammar C { start x t W=/[ \\t]+/ ignore W nt x=\"xy\" } start r nt r=\"A\" C \"B\"",
         "grammar C { start x nt x=\"xy\" } start r t W=/ +/ ignore W nt r=\"A\" C \"B\"",
         "grammar C { grammar D { start d nt d=\"yz\"? } start c nt c=\"x\" D } start r nt r=\"A\" C \"!\"",
-        "grammar C { start x t T=shortest { /a|ab/ } nt x=T \"c\" } start r nt r=\"!\" C \"?\"",
+        "grammar C { start x t T=(/a|ab/ - (/a|ab/ b/./s+)) nt x=T \"c\" } start r nt r=\"!\" C \"?\"",
         "grammar C { start x t T=/a|ab/ nt x=T \"c\"? } start r nt r=C \"!\"",
         "grammar C { start x t T=/[a-z]+/ - /bad/ nt x=T } start r nt r=\"[\" C \"]\"",
         "grammar C { start x nt x=\"\u{e9}\" } start r nt r=\"A\" C \"!\"",
@@ -45,7 +45,7 @@ fn main(){
         let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",Token::new(9000)).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar C start r nt r=\"A\" C \"B\"");parent.bind("C",&child).unwrap();
         let c=parent.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
-        for c in [&c,&Constraint::load(c.save()).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_token_ids_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}
+        for c in [&c,&Constraint::load(c.save()).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}
         }
     }
     println!("PASS {n} nested/nullable/ignore/Unicode/shortest/alias/exact-event frontier comparisons across {compiled} compiled cases and all 4 modes, each source + loaded");

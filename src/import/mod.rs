@@ -517,6 +517,16 @@ pub(crate) fn compile_component_shell(
     })
 }
 
+/// Ordinary Dynamic resolves its internal override on the caller before jobs.
+pub(crate) fn compile_component_shell_dynamic_with_backend(
+    component:&crate::grammar::glrm::ParsedComponent,vocab:&crate::Vocab,
+    backend:crate::runtime::parser_backend::DynamicParserBackend,
+)->crate::Result<Constraint> {
+    compile_component_shell_using(component,vocab,&[],|named| {
+        compile_dynamic_named_single_with_backend(named,vocab,GlrTableConstruction::ExperimentalCoreMerged,false,backend)
+    })
+}
+
 pub(crate) fn compile_component_shell_balanced(
     component:&crate::grammar::glrm::ParsedComponent,
     vocab:&crate::Vocab, token_bindings:&[(&str,&[(u32,u32)])],
@@ -585,10 +595,18 @@ pub(crate) fn compile_dynamic_named_single(
     named: ast::NamedGrammar, vocab: &crate::Vocab,
     table_construction: GlrTableConstruction, prepare_json_schema: bool,
 ) -> crate::Result<Constraint> {
+    compile_dynamic_named_single_with_backend(named,vocab,table_construction,prepare_json_schema,
+        crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())
+}
+
+pub(crate) fn compile_dynamic_named_single_with_backend(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    prepare_json_schema:bool,backend:crate::runtime::parser_backend::DynamicParserBackend,
+)->crate::Result<Constraint> {
     let mut named = factor_named_grammar(named);
     if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
     let dynamic = compile_dynamic_owned_with_backend(ast::lower(&named)?, vocab,
-        table_construction, crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())?;
+        table_construction, backend)?;
     Ok(dynamic.into_constraint())
 }
 

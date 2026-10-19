@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased — configured modules and source expressions
+
+- Add an owned `Module` graph with independently stored local compilation
+  settings, snapshot-safe mutable binding, optional open-graph `precompile`,
+  and final `compile`. Source `Grammar` values never retain settings.
+- Add instance `with_options` for configured snapshots and atomic `set_options`
+  updates. Locally retained work freezes incompatible settings; independently
+  configured children remain independent. Python supports options objects or
+  keyword updates with explicit conflict checking.
+- Preserve cold, open, partly compiled and mixed module graphs across save/load,
+  including exact vocabulary identity, occurrence bindings and retained work.
+  Deduplicate local work and use the caller's bounded parallel execution context;
+  reject incompatible retained representations rather than silently rebuilding.
+- Add scope-preserving `Expr.choice` and `Expr.sequence`. Grouping operators do
+  not add namespaces; raw and configured leaves retain independent scopes and
+  deterministic external paths. Original model-token spellings may cross leaves.
+- Expose `UnboundExtern`, unresolved/all-extern introspection, and matching
+  Python, C/C++ and JavaScript/TypeScript module/expression APIs. Existing
+  preparation-stage spellings remain a migration surface, not the primary API.
+- Remove native GLRM `shortest { ... }` syntax. Preserve internal prefix-minimal
+  regular languages and Lark `[lazy]`, and emit reparsable byte-correct regular
+  subtraction from the formatter.
+- Disable debug-info stripping on language-binding shared images to avoid the
+  upstream Mach-O string-table alignment issue exposed by macOS 27. Core
+  optimization and canonical performance profiles are unchanged.
+
 ## 0.3.1 — 2026-10-18
 
 - Add native C ABI and C++17 RAII bindings, static/shared libraries, CMake installation and external-consumer support.

@@ -25,29 +25,33 @@ impl Expr {
         Self(Arc::new(ExprNode::Sequence(items.into_iter().map(IntoExpr::into_expr).collect())))
     }
     fn skeleton(&self)->Result<(Grammar<'static>,Vec<Module>)> {
-        fn walk(expr:&Expr,leaves:&mut Vec<Module>,depth:usize,count:&mut usize)->Result<String> {
+        fn walk(expr:&Expr,leaves:&mut Vec<Module>,depth:usize,count:&mut usize)->Result<crate::grammar::ast::GrammarExpr> {
             *count+=1;
             if depth>graph::MAX_DEPTH || *count>graph::MAX_NODES {
                 return Err(Error::Compilation("expression graph exceeds depth/node limits".into()));
             }
             Ok(match expr.0.as_ref() {
-                ExprNode::Leaf(module)=>{let name=format!("leaf{}",leaves.len());leaves.push(module.clone());name},
+                ExprNode::Leaf(module)=>{let name=format!("leaf{}",leaves.len());leaves.push(module.clone());crate::grammar::ast::GrammarExpr::Ref(name)},
                 ExprNode::Choice(parts)=>{
                     if parts.is_empty(){return Err(Error::Compilation("empty Expr::choice is unsupported; use a nonempty choice".into()));}
                     let parts=parts.iter().map(|p|walk(p,leaves,depth+1,count)).collect::<Result<Vec<_>>>()?;
-                    format!("({})",parts.join(" | "))
+                    crate::grammar::ast::GrammarExpr::Choice(parts)
                 },
                 ExprNode::Sequence(parts)=>{
                     let parts=parts.iter().map(|p|walk(p,leaves,depth+1,count)).collect::<Result<Vec<_>>>()?;
-                    if parts.is_empty(){"eps".into()}else{format!("({})",parts.join(" "))}
+                    crate::grammar::ast::GrammarExpr::Sequence(parts)
                 },
             })
         }
         let mut leaves=Vec::new();let body=walk(self,&mut leaves,0,&mut 0)?;
-        let mut source=String::from("glrm 1; start expr_root;\n");
-        for i in 0..leaves.len(){source.push_str(&format!("extern grammar leaf{i};\n"));}
-        source.push_str(&format!("nt expr_root = {body};\n"));
-        let grammar=Grammar::new(GrammarSource::Glrm(SourceText::Owned(Arc::from(source))));
+        let externs=(0..leaves.len()).map(|i|(format!("leaf{i}"),ExternalKind::Grammar)).collect::<Vec<_>>();
+        let named=crate::grammar::ast::NamedGrammar {
+            start:"expr_root".into(),
+            rules:vec![crate::grammar::ast::NamedRule {name:"expr_root".into(),expr:body,is_terminal:false,is_internal:false}],
+            ignore:None,lexer_partitions:BTreeMap::new(),lexer_literal_partitions:BTreeMap::new(),default_lexer_partition:None,
+        };
+        let grammar=Grammar::new(GrammarSource::Constructed);
+        let _=grammar.parsed_component.set(ParsedComponent::from_named(named,&externs).map_err(Into::into));
         grammar.component()?;Ok((grammar,leaves))
     }
 }

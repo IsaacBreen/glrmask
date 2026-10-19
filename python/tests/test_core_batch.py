@@ -132,11 +132,24 @@ def test_incremental_many_bindings_and_requirements_preserve_all_snapshots():
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_shortest_braces_are_compositional_not_parser_priority(mode):
+def test_prefix_minimal_subtraction_is_compositional_not_parser_priority(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b"ac", 1: b"abc", 2: b"a", 3: b"b", 4: b"c"})
-    local = glrmask.Grammar.from_glrm('t A=/a|ab/ t T=shortest { A } "c" start r nt r=T')
-    whole = glrmask.Grammar.from_glrm('t A=/a|ab/ t T=shortest { A "c" } start r nt r=T')
+    local = glrmask.Grammar.from_glrm('t A=/a|ab/ t T=(A - (A b/./s+)) "c" start r nt r=T')
+    whole = glrmask.Grammar.from_glrm('t A=/a|ab/ t T=((A "c") - ((A "c") b/./s+)) start r nt r=T')
     assert local.compile(v, optimization=mode).start().mask()[0]
     assert not local.compile(v, optimization=mode).start().mask()[1]
     mask = whole.compile(v, optimization=mode).start().mask()
     assert mask[0] and mask[1]
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_removed_shortest_syntax_is_rejected_and_identifier_remains_valid(mode):
+    v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"aa"})
+    removed = glrmask.Grammar.from_glrm('t T=shortest { "a" } start r nt r=T')
+    with pytest.raises(ValueError):
+        removed.compile(v, optimization=mode)
+    ordinary = glrmask.Grammar.from_glrm('t shortest="a" t T=shortest{2} start r nt r=T')
+    state = ordinary.compile(v, optimization=mode).start()
+    assert state.mask()[1]
+    state.commit_token(1)
+    assert state.is_accepting()

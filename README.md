@@ -121,10 +121,16 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: the language you want to generate.
-- `PreparedGrammar`: vocabulary-specific reusable machinery, which can still have unresolved bindings.
-- `Constraint`: a grammar compiled against a specific vocabulary.
+- `Grammar`: the source-language definition, without compilation settings.
+- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
+- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
+
+Use direct `Grammar.compile` for a closed source, or a `Module` when local
+settings, late-bound children, or retained work are needed. `Expr.choice` and
+`Expr.sequence` group grammar leaves without adding an extra lexer scope at each
+operator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)
+for construction, open precompilation, and persistence examples.
 
 ### Python quickstart
 
@@ -185,22 +191,25 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 
 Use `extern token NAME` for a one-event exact-token contract and
 `extern grammar NAME` for a general byte/event grammar fragment. Bind source
-children to `Grammar`, or independently prepared children to `PreparedGrammar`.
-Neither child needs to be complete before attachment:
+children to `Grammar`, or cold and independently precompiled children to `Module`.
+Neither child needs to be complete before attachment. Modules keep their own
+local compilation settings; `Grammar` does not store those settings:
 
 ```rust
-use glrmask::{Grammar, Result, Vocab};
+use glrmask::{Grammar, Module, Result, Vocab};
 
 # fn demo(vocab: &Vocab, marker: u32) -> Result<()> {
-let child = Grammar::from_glrm(
+let mut child = Module::new(&Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
-).prepare(vocab)?;
-let mut parent = Grammar::from_glrm(
+));
+child.precompile(vocab)?;
+let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
-).prepare(vocab)?;
+));
+parent.precompile(vocab)?;
 parent.bind("ITEM", &child)?;
 parent.bind("ITEM::MARK", glrmask::Token::new(marker))?;
-let constraint = parent.link()?;
+let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
 # }
@@ -211,9 +220,11 @@ editable handle sharing immutable internals. Children are captured as snapshots;
 editing the original child later does not change existing parents. Repeated
 references to one inline grammar share bindings, while separately attached
 occurrences can be specialized independently.
-`requirements()` (Python: `.requirements`) exposes outstanding typed paths such as
-`ITEM::MARK`. Final compile/link requires every declared parameter to be resolved.
-Open prepared graphs support save/load with the same vocabulary identity.
+`unbound()` exposes outstanding typed paths such as `ITEM::MARK`; `externs()` also
+includes bound declarations. Final compilation requires every declared parameter
+to be resolved. `Module.save()` and `Module.load()` preserve source, settings,
+open bindings and retained work with the same vocabulary identity. Vocabulary
+is supplied to root compilation operations, not every cold child constructor.
 
 Exact token sets and compact ranges consume one original ID, never its decoded
 spelling. A JSON Schema is an ordinary grammar-valued child. Exact event values
@@ -221,12 +232,21 @@ can also bind directly to grammar slots; `Grammar::exact` constructs a standalon
 event-set grammar when needed. See the [full guide](GUIDE.md),
 [native syntax](docs/glrm-format.md), and [exact-token ranges](docs/exact-token-ranges.md).
 
+`Expr.choice` and `Expr.sequence` combine whole grammar or module leaves without
+adding scopes at intermediate grouping operators. The leaves retain independent
+bindings, options and any retained work. Use `Grammar.from_expr` for source-only
+expressions, and `Module::from_expr` (Rust) or `Module(expr)` (Python) for
+configured expressions. See [module lifecycle](docs/module-lifecycle.md).
+
 ### Choosing an optimization mode
 
 `FastBuild` favors short cold starts using ordinary Dynamic, `Balanced` uses the
 native middle-ground configuration, and `FastRuntime` favors mask-generation speed.
 `Auto` is the default. Python exposes the corresponding uppercase names. These are
 implementation trade-offs, not different language semantics.
+Each Module captures its own `ModuleOptions`. A raw child uses default options,
+not its parent's overrides. Unsupported combinations of retained representations
+produce an error instead of silently rebuilding or discarding supplied work.
 
 ```rust
 # use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
@@ -242,7 +262,7 @@ let constraint = grammar.compile_with(
 
 ### Completion and forcing
 
-Set `end_tokens` on the final compile or link call. `is_accepting()` means the
+Set `end_tokens` on the final compile call. `is_accepting()` means the
 current output is a complete match, possibly with valid continuations. Commit the
 sampled end token before stopping. An initially accepting grammar can instead stop
 immediately if that is the application's policy.
@@ -259,7 +279,8 @@ Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forc
 
 Native GLRM has optional semicolons, `grammar NAME { ... }`, explicit `t`/`nt`
 declarations, typed externs, scoped ignore, Unicode/byte expressions and regular
-`shortest { ... }`. Native source contains no numeric-token, special-token-name or
+intersection/subtraction. Native `shortest { ... }` syntax is removed; the internal
+prefix-minimal operation and Lark's regular-body `[lazy]` remain. Native source contains no numeric-token, special-token-name or
 inline JSON literals. Lark accepts those selected compatibility forms only in its
 explicit `llm` profile. Unsupported priorities, capture/sampling annotations,
 substring generation and regex-internal lazy quantifiers are errors.

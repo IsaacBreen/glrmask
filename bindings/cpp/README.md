@@ -4,6 +4,49 @@ GLRMask's native C++ interface calls the same Rust compiler and decoding engine 
 
 Bring the exact token-ID-to-byte mapping from your inference backend. GLRMask compiles a grammar for that vocabulary, returns the allowed-token mask, and advances when you commit a sampled token. It does not run the language model or choose a sampling policy.
 
+## Owned assemblies and expressions
+
+`Grammar` retains source and source bindings. `Module` owns an independent mutable
+snapshot, local `ModuleOptions`, and any reusable work. `Expr` composes whole
+Grammar, Module and Expr values without merging their lexical scopes.
+
+```cpp
+auto vocab = glrmask::Vocab({{0,"xay"},{1,"xby"}});
+auto child = glrmask::Module(glrmask::Grammar::from_ebnf("start ::= \"a\""),
+    {glrmask::Optimization::Balanced,glrmask::BoundaryTriggerDetail::None});
+child.precompile(vocab);
+auto parent = glrmask::Grammar::from_glrm(
+    "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";").module();
+parent.bind("child",child); // Also accepts cold Grammar, Expr, Token and ExactTokens.
+auto restored = glrmask::Module::load(parent.save(),&vocab);
+auto constraint = restored.compile(vocab);
+auto expression = glrmask::Expr::choice({child,glrmask::Grammar::from_ebnf("start ::= \"b\"")});
+```
+
+`bind` and `precompile` mutate the receiver and return `void`; failure preserves
+its prior snapshot. Copies and `clone()` have independent bindings and share
+immutable work. `options()` returns a value; `with_options()` creates an
+independent configured copy and `set_options()` mutates atomically. Incompatible
+options cannot replace retained local preparation. Children keep their own local
+settings. Final `CompileOptions` contains only root `end_tokens`.
+
+`unbound()` and `externs()` return `UnboundExtern` values, including name, exact
+path segments, kind and optional source span. Expression leaves use `leaf0`,
+`leaf1`, and so on; grouping adds no path segments. Empty sequence is epsilon;
+empty choice fails on materialization. `Grammar::from_expr()` and source
+`Grammar::bind(..., expr)` reject configured or prepared leaves.
+
+`Module::load` never compiles. Optional vocabulary validation checks the exact
+saved target identity. Standalone FastBuild modules retain LR work; explicit
+composition edges require native components and report unsupported LR edges
+without conversion. C callers use the equivalent owning `glrmask_module` and
+`glrmask_expr` handles, separate local/root option structs, and status-returning
+functions declared in `glrmask.h`. All input handles are snapshotted as needed;
+states independently keep their compiled owners alive.
+
+`PreparedGrammar` and `Requirement` remain migration spellings in the older
+examples below. New assembly code should use Module and UnboundExtern.
+
 ## Build and install
 
 Building from source requires a current stable Rust toolchain, CMake 3.20 or newer, and the platform C/C++ compiler. On Windows, use the MSVC toolchain from a Visual Studio Developer PowerShell or Developer Command Prompt. C++ consumers require C++17. Binary consumers of an installed package do not need Rust.

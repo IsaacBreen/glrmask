@@ -24,3 +24,20 @@ g.compileSync(v,{optimisation:'auto'});
 new api.ConstraintState();
 s[Symbol.dispose]();c.dispose();
 void [range,accepted,offset];
+
+const local=new api.ModuleOptions({optimization:api.Optimization.Balanced});
+const module=new api.Module(g,local);
+const expr=api.Expr.sequence([g,module,api.Expr.choice([g])]);
+const composed=new api.Module(expr);
+const entry:api.UnboundExtern|undefined=composed.unbound[0];
+module.precompileSync(v);
+const independent:api.Module=module.clone();
+const result:api.Constraint=independent.compileSync(v,new api.CompileOptions({endTokens:[99]}));
+const savedModule:Uint8Array=module.saveSync();api.Module.loadSync(savedModule,v);
+// @ts-expect-error Root compilation cannot override local component optimization.
+module.compileSync(v,{optimization:api.Optimization.Auto});
+// @ts-expect-error Options are frozen snapshots.
+local.optimization=api.Optimization.FastBuild;
+// @ts-expect-error Token events are not whole expression leaves.
+api.Expr.choice([new api.Token(0)]);
+void [entry,result];

@@ -20,6 +20,11 @@ def vocab():
 def test_top_level_surface_hides_engine_and_experimental_policy_types():
     for name in [
         "Grammar",
+        "Module",
+        "ModuleOptions",
+        "CompileOptions",
+        "Expr",
+        "UnboundExtern",
         "PreparedGrammar",
         "Requirement",
         "Token",
@@ -31,7 +36,6 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
     ]:
         assert hasattr(glrmask, name), name
     for name in [
-        "Expr",
         "ExactToken",
         "DynamicConstraint",
         "DynamicConstraintState",
@@ -139,7 +143,7 @@ def test_token_constructor_rejects_out_of_u32_range(id):
 
 def test_token_constructor_and_sparse_membership_validation():
     assert not hasattr(glrmask.Vocab, "token")
-    assert not hasattr(glrmask, "Expr")
+    assert hasattr(glrmask, "Expr")
     token = glrmask.Token(id=7)
     assert token.id == 7
     with pytest.raises(AttributeError):
