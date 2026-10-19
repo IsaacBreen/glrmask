@@ -25,7 +25,7 @@ On Windows, the parity executable has `.exe`. The install-validation script refu
 
 The Node package's `prepack` guard validates versions, checksums, declaration re-exports, licenses and the current-platform binary. `scripts/test-installed.cjs PACKAGE.tgz NEW_DIRECTORY` tests a real package outside the source tree with install scripts disabled and no Rust toolchain on the runtime PATH. The parity helper compares masks/state transitions and exchanges embedded/external-vocabulary artifacts in both directions for all four optimization modes.
 
-`.github/workflows/native-bindings.yml` runs Windows x64, Linux glibc x64/arm64, and macOS x64/arm64 release builds. It tests the same addon on Node 24 and Node 22, validates CMake packages and two-way artifacts, and assembles checksummed universal npm and per-platform C++ artifacts. No workflow publishes a registry package, creates a release tag, or bumps versions. Ordinary release authorization remains separate.
+`.github/workflows/native-bindings.yml` runs Windows x64, Linux glibc x64/arm64 (glibc 2.28 portable container), Linux musl x64/arm64 (Alpine container), and macOS x64/arm64 release builds. It tests the same addon on Node 24 and Node 22, validates CMake packages and two-way artifacts, and assembles checksummed universal npm and per-platform C++ artifacts. No workflow publishes a registry package, creates a release tag, or bumps versions. Ordinary release authorization remains separate.
 
 ## Documentation ownership
 

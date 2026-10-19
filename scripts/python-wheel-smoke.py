@@ -11,10 +11,18 @@ import glrmask
 
 # A release smoke must execute the fresh installed distribution.
 assert Path(glrmask.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
-metadata = importlib.metadata.metadata("glrmask")
+distribution = importlib.metadata.distribution("glrmask")
+metadata = distribution.metadata
 assert metadata["Name"] == "glrmask"
 expected_description = (Path(__file__).resolve().parents[1] / "python" / "PYTHON.md").read_text(encoding="utf-8")
-assert metadata.get_payload().strip() == expected_description.strip()
+# Compare the UTF-8 metadata body actually installed from the wheel, not an
+# email.Message payload adapter whose decoding policy changes between Python
+# releases. Normalize only platform newline spelling, preserving all content.
+raw_metadata = distribution.read_text("METADATA")
+assert raw_metadata is not None, "Installed distribution has no METADATA"
+header, separator, description = raw_metadata.replace("\r\n", "\n").partition("\n\n")
+assert separator, "Installed METADATA has no description body"
+assert description.strip() == expected_description.strip(), "Installed package description differs from source"
 if len(sys.argv) > 1:
     assert metadata["Version"] == sys.argv[1]
 

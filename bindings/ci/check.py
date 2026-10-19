@@ -1,12 +1,88 @@
 #!/usr/bin/env python3
 """Check native versions, licenses, documented API files and actual C exports."""
 from __future__ import annotations
-import argparse, ctypes, json, re, tomllib
+import argparse, ctypes, json, re, subprocess, tomllib
 from pathlib import Path
+
+def validate_elf_runtime_report(report: str, platform: str | None, name: str) -> None:
+    """Validate dynamic dependencies, not arbitrary strings embedded in .rodata.
+
+    Rust's runtime contains compatibility lookup strings even in musl builds;
+    scanning every byte would mistake those strings for imported GLIBC symbols.
+    readelf's dynamic and version tables describe the actual loader contract.
+    """
+    # Version *names* do not identify the supplying library. Alpine's libgcc
+    # retains GLIBC_2.0 labels for two weak unwind-registration hooks even
+    # though it is a musl library. Verify the version-needs provider before
+    # excluding those exact historical libgcc hooks from the libc contract.
+    providers: dict[int, tuple[str, str]] = {}
+    provider = None
+    in_needs = False
+    for line in report.splitlines():
+        if line.startswith('Version needs section'):
+            in_needs = True
+        elif line.startswith('Version ') and 'section' in line:
+            in_needs = False
+        if not in_needs:
+            continue
+        file = re.search(r'\bFile:\s+(\S+)\s+Cnt:', line)
+        if file:
+            provider = file.group(1)
+        version = re.search(r'\bName:\s+(\S+).*?\bVersion:\s+(\d+)', line)
+        if provider and version:
+            providers[int(version.group(2))] = (provider, version.group(1))
+    glibc_versions = []
+    for line in report.splitlines():
+        if not re.search(r'\bUND\b', line):
+            continue
+        symbol = re.search(r'\bUND\s+(\S+)@GLIBC_([0-9]+)\.([0-9]+)(?:\.([0-9]+))?(?:\s+\((\d+)\))?', line)
+        if not symbol:
+            continue
+        index = int(symbol.group(5)) if symbol.group(5) else None
+        historical_libgcc_hook = (
+            symbol.group(1) in {'__register_frame_info', '__deregister_frame_info'}
+            and symbol.group(2, 3, 4) == ('2', '0', None)
+            and re.search(r'\bWEAK\b', line)
+            and providers.get(index) == ('libgcc_s.so.1', 'GLIBC_2.0')
+        )
+        if not historical_libgcc_hook:
+            glibc_versions.append((int(symbol.group(2)), int(symbol.group(3))))
+    needed = re.findall(r'\(NEEDED\).*?\[([^\]]+)\]', report)
+    is_musl = (platform and 'musl' in platform) or any('musl' in lib for lib in needed)
+    if is_musl:
+        if glibc_versions:
+            raise RuntimeError(f"{name}: Musl binary unexpectedly references GLIBC symbols: {glibc_versions}")
+        if 'libc.so.6' in needed:
+            raise RuntimeError(f"{name}: Musl binary unexpectedly links to libc.so.6")
+        print(f"Verified musl runtime independence for {name}")
+    else:
+        if glibc_versions:
+            max_v = max(glibc_versions)
+            if max_v > (2, 28):
+                raise RuntimeError(f"{name}: GLIBC requirement {max_v[0]}.{max_v[1]} exceeds 2.28 minimum portability baseline")
+            print(f"Verified glibc runtime dependency baseline for {name} (max {max_v[0]}.{max_v[1]} <= 2.28)")
+        else:
+            print(f"Verified ELF binary {name} without versioned GLIBC symbols")
+
+def verify_runtime_dependencies(path: Path, platform: str | None = None) -> None:
+    with path.open('rb') as binary:
+        if binary.read(4) != b'\x7fELF':
+            return
+    result = subprocess.run(
+        ['readelf', '--dynamic', '--dyn-syms', '--version-info', '--wide', str(path)],
+        check=True, capture_output=True, text=True,
+    )
+    try:
+        validate_elf_runtime_report(result.stdout, platform, path.name)
+    except RuntimeError:
+        print(result.stdout, flush=True)
+        raise
 
 def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library',type=Path)
+    parser.add_argument('--addon',type=Path)
+    parser.add_argument('--platform')
     args=parser.parse_args()
     root=Path(__file__).resolve().parents[2]
     version=tomllib.loads((root/'Cargo.toml').read_text(encoding='utf-8'))['package']['version']
@@ -18,6 +94,9 @@ def main() -> None:
     assert package['version']==version
     assert package['name']=='@glrmask/node'
     assert 'dependencies' not in package,'No runtime npm dependency is required'
+    platform_cjs = (root/'bindings/node/platform.cjs').read_text(encoding='utf-8')
+    for target in ['win32-x64-msvc', 'win32-arm64-msvc', 'darwin-x64', 'darwin-arm64', 'linux-x64-gnu', 'linux-arm64-gnu', 'linux-x64-musl', 'linux-arm64-musl']:
+        assert f"'{target}'" in platform_cjs, f"Missing {target} in bindings/node/platform.cjs"
     for license,source in [('LICENSE-MIT','LICENSE-MIT'),('LICENSE-APACHE','LICENSE-APACHE'),('NOTICE-LARK','crates/glrmask-grammar/NOTICE-LARK')]:
         assert (root/f'bindings/node/{license}').read_bytes().replace(b'\r\n',b'\n')==(root/source).read_bytes().replace(b'\r\n',b'\n'),license
     for name in ['cpp','node']:
@@ -31,12 +110,18 @@ def main() -> None:
     symbols=set(re.findall(r'GLRMASK_API[^;]+?\b(glrmask_\w+)\(',header))
     assert len(symbols)>=60,len(symbols)
     if args.library:
+        verify_runtime_dependencies(args.library.resolve(), args.platform)
+        # Library verification runs on the target runtime (inside its Linux
+        # container where applicable). A loader failure is a failed check,
+        # not evidence that the exports or runtime dependencies are correct.
         library=ctypes.CDLL(str(args.library.resolve()))
         for name in symbols:assert getattr(library,name),name
         library.glrmask_abi_version.restype=ctypes.c_uint32
         library.glrmask_version.restype=ctypes.c_char_p
         assert library.glrmask_abi_version()==1
         assert library.glrmask_version().decode()==version
+    if args.addon:
+        verify_runtime_dependencies(args.addon.resolve(), args.platform)
     print(f'Native source/version/license/docs checks passed; {len(symbols)} declared C symbols'+(' verified in binary' if args.library else ''))
 
 if __name__=='__main__':main()

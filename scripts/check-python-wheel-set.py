@@ -11,25 +11,27 @@ from packaging.utils import parse_wheel_filename
 
 PYTHONS = {
     "cp39": "3.9",
-    "cp310": "3.10",
-    "cp311": "3.11",
-    "cp312": "3.12",
-    "cp313": "3.13",
 }
 PLATFORMS = {
     "manylinux-x86_64": lambda platform: "manylinux" in platform and platform.endswith("x86_64"),
     "manylinux-aarch64": lambda platform: "manylinux" in platform and platform.endswith("aarch64"),
+    "musllinux-x86_64": lambda platform: "musllinux" in platform and platform.endswith("x86_64"),
+    "musllinux-aarch64": lambda platform: "musllinux" in platform and platform.endswith("aarch64"),
     "macos-x86_64": lambda platform: platform.startswith("macosx_") and platform.endswith("x86_64"),
     "macos-arm64": lambda platform: platform.startswith("macosx_") and platform.endswith("arm64"),
     "windows-x86_64": lambda platform: platform == "win_amd64",
+    "windows-arm64": lambda platform: platform == "win_arm64",
 }
 
 
 def classify(path: Path) -> tuple[str, str]:
     _, _, _, tags = parse_wheel_filename(path.name)
     python_tags = {tag.interpreter for tag in tags}
+    abi_tags = {tag.abi for tag in tags}
     if len(python_tags) != 1:
         raise SystemExit(f"unexpected Python tags in {path.name}: {sorted(python_tags)}")
+    if abi_tags != {"abi3"}:
+        raise SystemExit(f"unexpected ABI tags in {path.name}: {sorted(abi_tags)}, expected abi3")
     python_tag = next(iter(python_tags))
     if python_tag not in PYTHONS:
         raise SystemExit(f"unexpected Python tag in {path.name}: {python_tag}")

@@ -69,12 +69,23 @@ fn native_thread_id() -> Option<u64> {
 
 #[cfg(target_os = "linux")]
 fn native_thread_id() -> Option<u64> {
-    unsafe extern "C" {
-        fn gettid() -> std::ffi::c_int;
-    }
-    // SAFETY: this OS query has no arguments or caller-owned memory.
-    let id = unsafe { gettid() };
+    // The gettid() libc wrapper was added after the glibc 2.28 baseline.
+    // Query the long-established Linux syscall instead, using libc's
+    // architecture-specific number rather than hard-coding x86/ARM values.
+    // SAFETY: SYS_gettid has no pointer arguments or caller-owned memory.
+    let id = unsafe { libc::syscall(libc::SYS_gettid) };
     (id >= 0).then_some(id as u64)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn native_thread_id_query_is_stable_and_thread_specific() {
+    let current = native_thread_id().expect("Linux TID lookup failed");
+    assert!(current > 0);
+    assert_eq!(native_thread_id(), Some(current));
+    let other = std::thread::spawn(native_thread_id).join().unwrap();
+    assert!(other.is_some());
+    assert_ne!(other, Some(current));
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]

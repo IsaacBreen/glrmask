@@ -8,7 +8,7 @@ SOURCE = 'glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);'
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_cold_strict_forcing_is_silent_across_exact_events_and_markers(mode):
+def test_cold_canonical_forcing_is_silent_across_exact_events_and_markers(mode):
     v = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"ab", 10: b""})
     grammar = glrmask.Grammar.from_glrm(
         'extern token EVENT start root '
@@ -20,7 +20,7 @@ def test_cold_strict_forcing_is_silent_across_exact_events_and_markers(mode):
         state = constraint.start()
         before = state.marker_events()
         assert before == [(1, 0)]
-        # No mask() call precedes this query: exercise the mask-free cold proof.
+        # No mask() call precedes this query: internal lookahead must be silent.
         assert state.forced_tokens() == [10, 0]
         assert state.marker_events() == before
         state.commit_token(10)

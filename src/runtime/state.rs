@@ -387,7 +387,10 @@ pub(crate) struct CommitBuffers {
     // arrays. Ordinary states still prepare them eagerly at construction;
     // owning them indirectly also keeps recursive mask/state frames small.
     pub small_queue: Option<Box<crate::runtime::commit::SmallCommitQueueScratch>>,
-    pub flat_frontier: crate::runtime::commit::FlatFrontierScratch,
+    // The fixed frontier arrays are large enough that embedding them here
+    // makes several nested state-construction frames exceed a native musl
+    // pthread stack. Retain one eagerly prepared allocation across commits.
+    pub flat_frontier: Option<Box<crate::runtime::commit::FlatFrontierScratch>>,
     pub linear_stack_original: Vec<u32>,
     pub linear_stack_work: Vec<u32>,
     pub processing_queue: Vec<FxHashMap<u32, ParserGSS>>,
@@ -445,9 +448,9 @@ impl CommitBuffers {
                     std::env::var("GLRMASK_LAZY_MASK_COMMIT_SCRATCH")
                         .map_or(true, |v| matches!(v.as_str(), "1" | "true"))
                 }) {
-                    crate::runtime::commit::FlatFrontierScratch::for_mask_only_shadow()
+                    None
                 } else {
-                    crate::runtime::commit::FlatFrontierScratch::with_preallocated_gss(preallocated_gss)
+                    Some(crate::runtime::commit::FlatFrontierScratch::boxed_with_preallocated_gss(preallocated_gss))
                 }
             },
             linear_stack_original: Vec::with_capacity(if MASK_ONLY { 0 } else { LINEAR_STACK_RESERVE }),
@@ -495,7 +498,7 @@ impl CommitBuffers {
         self.prune_tokenizer_exec.states.clear();
         self.prune_tokenizer_exec.matches.clear();
         if let Some(queue) = self.small_queue.as_mut() { queue.clear(); }
-        self.flat_frontier.clear();
+        if let Some(frontier) = self.flat_frontier.as_mut() { frontier.clear(); }
         self.linear_stack_original.clear();
         self.linear_stack_work.clear();
         for bucket in &mut self.processing_queue {

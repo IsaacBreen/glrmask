@@ -13,6 +13,35 @@ def run(*args: str, env: dict[str,str]|None=None) -> None:
     print('+', ' '.join(map(str,args)), flush=True)
     subprocess.run(list(map(str,args)), check=True, env=env)
 
+def run_source_tests(build: Path, config: str) -> None:
+    try:
+        run('ctest','--test-dir',str(build),'-C',config,'--output-on-failure')
+    except subprocess.CalledProcessError:
+        # Diagnose native crashes on Alpine while preserving the failed test.
+        # No production flags or thread limits are changed by this test helper.
+        debugger = shutil.which('gdb') if sys.platform.startswith('linux') else None
+        executable = build / 'glrmask_cpp_tests'
+        if debugger and executable.is_file():
+            try:
+                for stack_bytes in ('1048576', '0'):
+                    probe = subprocess.run([str(executable), '--thread-stack-probe', stack_bytes],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
+                    (build / f'stack-probe-{stack_bytes}.txt').write_text(
+                        f'exit={probe.returncode}\n' + probe.stdout, encoding='utf-8')
+                    print(f'Stack diagnostic {stack_bytes}: exit={probe.returncode}\n{probe.stdout}', flush=True)
+                result = subprocess.run([
+                    debugger, '--batch', '-ex', 'set pagination off',
+                    '-ex', 'run', '-ex', 'info registers sp',
+                    '-ex', 'x/12i $pc-24', '-ex', 'info proc mappings',
+                    '-ex', 'disassemble /r',
+                    '-ex', 'thread apply all bt 40', '--args', str(executable),
+                ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90)
+                (build / 'failure-backtrace.txt').write_text(result.stdout, encoding='utf-8')
+                print(result.stdout, flush=True)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f'Additional native crash diagnostics unavailable: {exc}', flush=True)
+        raise
+
 def main() -> None:
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--library-dir',type=Path,required=True)
@@ -38,7 +67,7 @@ def main() -> None:
             f'-DCMAKE_BUILD_TYPE={args.config}',f'-DGLRMASK_LIBRARY_DIR={args.library_dir.resolve()}',
             f'-DGLRMASK_SHARED={"ON" if shared else "OFF"}', '-DGLRMASK_BUILD_TESTS=ON')
         run('cmake','--build',str(build),'--config',args.config)
-        run('ctest','--test-dir',str(build),'-C',args.config,'--output-on-failure')
+        run_source_tests(build,args.config)
         run('cmake','--install',str(build),'--config',args.config,'--prefix',str(installed))
         installed.rename(moved)
         shutil.copytree(root/'bindings/cpp/tests/consumer',source)

@@ -17,7 +17,7 @@ pub(super) fn constraint(inner: glrmask::Constraint) -> PyConstraint {
 
 /// Build-time versus per-token cost. The modes preserve the supported grammar language.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "Optimization", module = "glrmask", eq, eq_int)]
+#[pyclass(name = "Optimization", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyOptimization {
     AUTO,
@@ -28,7 +28,7 @@ pub(super) enum PyOptimization {
 
 /// Optional metadata for composition boundaries, independent of the masking optimization. A request at final link overrides the prepared request.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int)]
+#[pyclass(name = "BoundaryTriggerDetail", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyBoundaryTriggerDetail { NONE, TOKENS, EXACT }
 
@@ -46,7 +46,7 @@ fn with_boundary(options: glrmask::BuildOptions, detail: Option<PyRef<'_, PyBoun
 
 /// Parser execution and storage backend, independent of mask optimization.
 #[allow(non_camel_case_types)]
-#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int)]
+#[pyclass(name = "ParserBackend", module = "glrmask._internal", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyParserBackend {
     LR_TABLE,
@@ -100,7 +100,7 @@ fn options(
 }
 
 /// An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
-#[pyclass(name = "Token", module = "glrmask", frozen)]
+#[pyclass(name = "Token", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyToken {
     pub(super) inner: glrmask::Token,
@@ -117,7 +117,7 @@ impl PyToken {
 }
 
 /// One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
-#[pyclass(name = "ExactTokens", module = "glrmask", frozen)]
+#[pyclass(name = "ExactTokens", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyExactTokens {
     pub(super) inner: glrmask::ExactTokens,
@@ -195,7 +195,7 @@ impl Binding {
 }
 
 /// Reusable source grammar with mutable bindings. `bind` changes this handle; clones and already attached children keep independent snapshots. Parsing and vocabulary checks can be deferred until preparation or compilation.
-#[pyclass(name = "Grammar", module = "glrmask")]
+#[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
     inner:glrmask::Grammar<'static>,
@@ -214,7 +214,7 @@ impl PyGrammar {
 }
 
 /// An unresolved typed slot. Paths distinguish the same local name in different attached children.
-#[pyclass(name="Requirement",module="glrmask",frozen)]
+#[pyclass(name="Requirement",module="glrmask",frozen, from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyRequirement {inner:glrmask::Requirement}
 #[pymethods]
@@ -271,7 +271,7 @@ impl PyGrammar {
     #[getter]
     fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
         let snapshot=slf.try_borrow()?.inner.clone();
-        slf.py().allow_threads(move ||snapshot.requirements())
+        slf.py().detach(move ||snapshot.requirements())
             .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
 
@@ -296,14 +296,14 @@ impl PyGrammar {
         let binding=Binding::extract_for_grammar(value)?;
         let mut target=slf.try_borrow_mut()?;
         let mut next=target.inner.clone();
-        let next=py.allow_threads(move || {
+        let next=py.detach(move || {
             binding.apply(&mut next,&name)?;
             Ok::<_,glrmask::Error>(next)
         }).map_err(api_error)?;
         let previous=std::mem::replace(&mut target.inner,next);
         // A last snapshot drop may release cached diagnostic paths. Never hold
         // the GIL through that potentially large native destruction.
-        py.allow_threads(move ||drop(previous));
+        py.detach(move ||drop(previous));
         Ok(())
     }
 
@@ -330,7 +330,7 @@ impl PyGrammar {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
         let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.compile_with(&vocab, options))
+        py.detach(move || grammar.compile_with(&vocab, options))
             .map(constraint).map_err(api_error)
     }
 
@@ -341,13 +341,13 @@ impl PyGrammar {
         let options = with_boundary(glrmask::BuildOptions::default(), boundary_trigger);
         let grammar = slf.try_borrow()?.inner.clone();
         let vocab = vocab.inner.clone();
-        py.allow_threads(move || grammar.prepare_with(&vocab, options))
+        py.detach(move || grammar.prepare_with(&vocab, options))
             .map(|inner| PyPreparedGrammar { inner }).map_err(api_error)
     }
 }
 
 /// Reusable compiled machinery tied to one vocabulary, possibly with open slots. Bindings are mutable on this handle; clones and attached children retain independent snapshots.
-#[pyclass(name = "PreparedGrammar", module = "glrmask")]
+#[pyclass(name = "PreparedGrammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyPreparedGrammar {
     inner: glrmask::PreparedGrammar,
@@ -359,7 +359,7 @@ impl PyPreparedGrammar {
     #[getter]
     fn requirements(slf:&Bound<'_,Self>)->PyResult<Vec<PyRequirement>> {
         let snapshot=slf.try_borrow()?.inner.clone();
-        slf.py().allow_threads(move ||snapshot.requirements())
+        slf.py().detach(move ||snapshot.requirements())
             .map(|values|values.into_iter().map(|inner|PyRequirement{inner}).collect()).map_err(api_error)
     }
     /// Fill a declared slot once. Attach a parent before binding its descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.
@@ -367,7 +367,7 @@ impl PyPreparedGrammar {
         let binding=Binding::extract_for_unlinked(value)?;
         let mut target=slf.try_borrow_mut()?;
         let mut next=target.inner.clone();
-        let next=py.allow_threads(move || {
+        let next=py.detach(move || {
             match binding {
                 Binding::Prepared(child)=>next.bind(&name,child)?,
                 Binding::Token(token)=>next.bind(&name,token)?,
@@ -377,7 +377,7 @@ impl PyPreparedGrammar {
             Ok::<_,glrmask::Error>(next)
         }).map_err(api_error)?;
         let previous=std::mem::replace(&mut target.inner,next);
-        py.allow_threads(move ||drop(previous));
+        py.detach(move ||drop(previous));
         Ok(())
     }
 
@@ -402,13 +402,13 @@ impl PyPreparedGrammar {
     ) -> PyResult<PyConstraint> {
         let options = with_boundary(options(end_tokens, optimization, None), boundary_trigger);
         let snapshot=slf.try_borrow()?.inner.clone();
-        py.allow_threads(move || snapshot.link_with(options)).map(constraint).map_err(api_error)
+        py.detach(move || snapshot.link_with(options)).map(constraint).map_err(api_error)
     }
 
     /// Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once.
     fn save<'py>(slf:&Bound<'py,Self>, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
         let snapshot=slf.try_borrow()?.inner.clone();
-        let bytes = py.allow_threads(move || snapshot.save());
+        let bytes = py.detach(move || snapshot.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
@@ -418,7 +418,7 @@ impl PyPreparedGrammar {
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.map(|v| v.inner.clone());
-        py.allow_threads(move || match vocab {
+        py.detach(move || match vocab {
             Some(vocab) => glrmask::PreparedGrammar::load_with_vocab(data, &vocab),
             None => glrmask::PreparedGrammar::load(data),
         }).map(|inner| Self { inner }).map_err(api_error)
@@ -451,7 +451,7 @@ fn compile_with_backend(
 ) -> PyResult<PyConstraint> {
     let options = options(end_tokens, optimization, parser_backend);
     let grammar = grammar.as_rust().map_err(api_error)?;
-    py.allow_threads(|| grammar.compile_with(&vocab.inner, options)).map(constraint).map_err(api_error)
+    py.detach(|| grammar.compile_with(&vocab.inner, options)).map(constraint).map_err(api_error)
 }
 
 #[pyfunction]
@@ -462,7 +462,7 @@ fn link_with_backend(
     parser_backend: Option<PyRef<'_, PyParserBackend>>,
 ) -> PyResult<PyConstraint> {
     let options = options(end_tokens, optimization, parser_backend);
-    py.allow_threads(|| module.inner.link_with(options)).map(constraint).map_err(api_error)
+    py.detach(|| module.inner.link_with(options)).map(constraint).map_err(api_error)
 }
 
 pub(super) fn register_internal(module: &Bound<'_, PyModule>) -> PyResult<()> {
