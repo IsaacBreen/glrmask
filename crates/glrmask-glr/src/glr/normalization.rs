@@ -822,13 +822,39 @@ fn expand_cycle_head_paths(
 
 fn eliminate_hidden_left_recursion(edit: &mut Edit, nullable: &Nullable) -> bool {
     let mut changed = false;
+    let mut refreshed_nullable = None;
 
     loop {
+        let nullable = refreshed_nullable.as_ref().unwrap_or(nullable);
         let mut graph = BoundaryGraph::build(edit.view(), nullable, Boundary::Left);
         if !graph.has_indirect_cycle() {
             return changed;
         }
         let membership = graph.nontrivial_components();
+        // A simple ring has no interior subcycle. Keep its borrowed-rule
+        // fast path; materialize an exact repair only for branching SCCs.
+        let needs_closure = graph.edges.iter().enumerate().any(|(source, targets)| {
+            let component = membership[source];
+            if component == NO_COMPONENT { return false; }
+            let mut inside = targets.iter().copied().filter(|&target| membership[target] == component);
+            inside.clone().any(|target| target == source) || inside.nth(1).is_some()
+        });
+        if needs_closure {
+            let mut components = BTreeMap::<usize, BTreeSet<u32>>::new();
+            for (nt, &component) in membership.iter().enumerate() {
+                if component != NO_COMPONENT { components.entry(component).or_default().insert(nt as u32); }
+            }
+            let components = components.into_values().collect::<Vec<_>>();
+            let nullable_set = (0..membership.len()).filter(|&nt| nullable.contains(nt as u32))
+                .map(|nt| nt as u32).collect();
+            let current = edit.view().iter().cloned().collect::<Vec<_>>();
+            if let Some(repaired) = super::left_corner_closure::repair(&current, &components, &nullable_set) {
+                edit.replace_with_owned(repaired);
+                refreshed_nullable = Some(Nullable::compute(edit.view()));
+                changed = true;
+                continue;
+            }
+        }
 
         let (additions, replaced) = {
             let view = edit.view();
