@@ -6,6 +6,9 @@
 #include <iostream>
 #include <iterator>
 #include <thread>
+#if defined(__linux__)
+#include <pthread.h>
+#endif
 using namespace glrmask;
 #define CHECK(x) do { if (!(x)) throw std::runtime_error(std::string(__FILE__)+":"+std::to_string(__LINE__)+": " #x); } while(false)
 template<class F> void throws(F&& fn,glrmask_status status=-1) {
@@ -133,6 +136,34 @@ void threads_and_errors() {
     throws([&]{Vocab duplicate({{0,"a"},{0,"b"}});},GLRMASK_INVALID_ARGUMENT);
     throws([&]{Vocab overlap({{0,"a"}},{0});},GLRMASK_INVALID_ARGUMENT);
 }
+#if defined(__linux__)
+// Diagnostic subprocess entry point: compare the same state construction on
+// the libc default stack and an explicitly sized pthread, without changing the
+// ordinary std::thread regression or the library's threading policy.
+int thread_stack_probe(std::size_t stack_bytes) {
+    auto v=vocabulary();auto c=simple().compile(v);
+    struct Probe { Constraint* constraint; bool okay=false; } probe{&c};
+    pthread_attr_t requested;CHECK(pthread_attr_init(&requested)==0);
+    if(stack_bytes)CHECK(pthread_attr_setstacksize(&requested,stack_bytes)==0);
+    pthread_t worker;
+    CHECK(pthread_create(&worker,&requested,[](void* context)->void* {
+        auto& p=*static_cast<Probe*>(context);
+        pthread_attr_t actual;
+        if(pthread_getattr_np(pthread_self(),&actual)==0) {
+            void* base=nullptr;std::size_t size=0,guard=0;
+            pthread_attr_getstack(&actual,&base,&size);
+            pthread_attr_getguardsize(&actual,&guard);
+            std::cerr<<"native worker stack base="<<base<<" bytes="<<size<<" guard="<<guard<<std::endl;
+            pthread_attr_destroy(&actual);
+        }
+        try { for(int j=0;j<8;++j) { auto s=p.constraint->start();s.commit_token(31);CHECK(s.is_accepting()); } p.okay=true; }
+        catch(const std::exception& error) { std::cerr<<error.what()<<std::endl; }
+        return nullptr;
+    },&probe)==0);
+    pthread_attr_destroy(&requested);CHECK(pthread_join(worker,nullptr)==0);CHECK(probe.okay);
+    return 0;
+}
+#endif
 void emit_parity() {
     auto v=vocabulary(); std::cout << '[';
     for(unsigned i=0;i<4;++i) {
@@ -162,6 +193,9 @@ void artifacts(const std::filesystem::path& directory,bool check) {
 }
 int main(int argc,char** argv) {
     try {
+#if defined(__linux__)
+        if(argc==3 && std::string(argv[1])=="--thread-stack-probe")return thread_stack_probe(std::stoull(argv[2]));
+#endif
         if(argc==2 && std::string(argv[1])=="--parity"){emit_parity();return 0;}
         if(argc==3 && std::string(argv[1])=="--save"){artifacts(argv[2],false);return 0;}
         if(argc==3 && std::string(argv[1])=="--check"){artifacts(argv[2],true);return 0;}

@@ -65,7 +65,7 @@
   "ConstraintState.commit_bytes": "Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.",
   "ConstraintState.is_accepting": "The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.",
   "ConstraintState.is_rejected": "The prefix cannot be extended to a valid match.",
-  "ConstraintState.forced_tokens": "Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.",
+  "ConstraintState.forced_tokens": "Read-only library-canonical prefix of genuinely forced text. Uses longest admitted nonempty spelling and the lowest original-ID alias; exact events retain their IDs. Stops at root acceptance, unstable tokenization, intermediate exact-event opportunities, or proof limits. May construct full masks; typed resource failures raise errors.",
   "ConstraintState.marker_events": "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged.",
   "auto": "Adaptive JSON Schema policy inspection and persisted tier selection. For ordinary compilation, prefer `Grammar.compile(..., optimization=Optimization.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer’s partial assertion support.",
   "auto.AUTO_POLICY_NAME": "Policy identifier stored on `AutoConstraint` instances.",

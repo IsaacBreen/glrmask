@@ -2,7 +2,6 @@ use crate::runtime::markers::{CommitObserver, NoMarkers, LiveMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 pub(crate) mod bounded;
-#[cfg(any(test,feature="internal-api"))]
 pub(crate) mod forcing_reference;
 pub(crate) mod template_advance;
 pub(crate) mod push_suffixes;
@@ -467,7 +466,6 @@ impl FlatFrontierScratch {
     }
 
     fn recycle_old_entries(&mut self, old_entries: SmallVec<[(u32, ParserGSS); INLINE_PARSER_STATE_CAPACITY]>) {
-        self.reclaim_retired_gss();
         for (_, gss) in old_entries {
             if gss.can_replace_single_path_state_in_place(&[0]) {
                 debug_assert!(self.gss_pool.len() < FLAT_FRONTIER_GSS_POOL_CAPACITY);
@@ -477,6 +475,10 @@ impl FlatFrontierScratch {
                 self.retired_gss.push(gss);
             }
         }
+        // The preflight reserved capacity for these active entries. Reclaim
+        // retired entries only after that reservation has been consumed;
+        // reclaiming first can fill the same slots and overflow the pool.
+        self.reclaim_retired_gss();
     }
 
     fn replace_state_with_shared_uniform_stack_keys(
@@ -486,13 +488,15 @@ impl FlatFrontierScratch {
         stack: &[u32],
         acc: &TerminalsDisallowed,
     ) -> bool {
+        // Include reclaimed spares in the capacity preflight, before an
+        // atomic replacement reserves space for the displaced active state.
+        self.reclaim_retired_gss();
         if keys.is_empty()
             || keys.windows(2).any(|pair| pair[0] >= pair[1])
             || !self.can_recycle_old_state(state, 1)
         {
             return false;
         }
-        self.reclaim_retired_gss();
         let Some(pool_index) = self
             .gss_pool
             .iter()
@@ -11454,3 +11458,6 @@ mod boxed_small_queue_tests {
             std::mem::size_of::<*mut SmallCommitQueueScratch>());
     }
 }
+
+#[cfg(test)]
+mod flat_pool_order_tests;

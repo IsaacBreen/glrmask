@@ -543,7 +543,8 @@ mod tests {
         let initial=state.state.clone();let accepting=state.is_accepting();
         let limits=[0,1,2,3,8,usize::MAX];
         let cold=limits.map(|k|state.mask_if_at_most(k).unwrap_or_else(|e|panic!("{context}: K={k}: {e}")));
-        let forced=state.forced_tokens().unwrap_or_else(|e|panic!("{context}: force: {e}"));
+        let forced=forced_tokens(std::slice::from_ref(state))
+            .unwrap_or_else(|e|panic!("{context}: strict force: {e}"));
         let full=state.mask();let allowed=ids(&full);
         for ((k,result),warm) in limits.into_iter().zip(cold).zip(limits.map(|k|state.mask_if_at_most(k).unwrap())) {
             let expected=(allowed.len()<=k).then(||full.clone());
@@ -653,7 +654,7 @@ mod tests {
                     let cached_before=state.mask_cache.lock().unwrap().as_ref()
                         .map(|m|(m.generation,m.mask.clone()));
                     BYTE_PROOFS.with(|n|n.set(0));
-                    assert_eq!(state.forced_tokens().unwrap(),expected,"{mode:?}, loaded={loaded}");
+                    assert_eq!(forced_tokens(std::slice::from_ref(&state)).unwrap(),expected,"{mode:?}, loaded={loaded}");
                     let work=BYTE_PROOFS.with(|n|n.get());
                     assert!(work<expected.len()*12,"{mode:?}, loaded={loaded}: {work} byte proofs for {} IDs",expected.len());
                     assert_eq!(state.mask_cache.lock().unwrap().as_ref()
@@ -701,7 +702,8 @@ mod differential_tests {
             if ids.len()<=k {assert_eq!(actual,Some(expected.clone()),"{tag}, K={k}, ids={ids:?}");}
             else {assert!(actual.is_none(),"{tag}, K={k}, actual={actual:?}, ids={ids:?}");}
         }
-        let forced=state.forced_tokens().unwrap_or_else(|e|panic!("{tag} forced: {e}"));
+        let forced=forced_tokens(std::slice::from_ref(state))
+            .unwrap_or_else(|e|panic!("{tag} strict force: {e}"));
         assert_eq!(forced,state.clone().forced_token_ids_reference(),"{tag} strict forcing");
         assert_eq!(state.mask_cache.lock().unwrap().as_ref().map(|c|(c.generation,c.mask.clone())),cached_before,
             "{tag}: bounded query must not create or overwrite normal mask cache");

@@ -1657,8 +1657,10 @@ fn eliminate_hidden_left_recursion(
 ) -> bool {
     let profile_enabled = compile_profile_enabled();
     let mut changed = false;
+    let mut refreshed_nullable = None;
 
     loop {
+        let nullable = refreshed_nullable.as_ref().unwrap_or(nullable);
         let rules_len = rules.len();
         let lr_graph_started_at = profile_enabled.then(Instant::now);
         let lr_graph = build_left_reachability_graph(rules, nullable);
@@ -1690,6 +1692,12 @@ fn eliminate_hidden_left_recursion(
                 );
             }
             return changed;
+        }
+        if let Some(repaired) = super::left_corner_closure::repair(rules, &cycle_sccs, nullable) {
+            *rules = repaired;
+            refreshed_nullable = Some(compute_nullable(rules, max_nt_id(rules) + 1));
+            changed = true;
+            continue;
         }
         let rhs_by_lhs_started_at = profile_enabled.then(Instant::now);
         let rhs_by_lhs = build_rhs_by_lhs(rules);

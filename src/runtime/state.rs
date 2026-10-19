@@ -626,9 +626,15 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures return errors.
+    /// Return a read-only prefix of library-canonical forced output.
+    ///
+    /// Genuinely forced ordinary text is encoded with the longest admitted
+    /// nonempty token spelling, then the lowest original ID. Exact-token events
+    /// retain their IDs. The query stops at root acceptance, byte/event
+    /// ambiguity, unstable canonical tokenization, or a proof limit. It may
+    /// construct full masks; the original state is unchanged.
     pub fn forced_tokens(&self) -> crate::Result<Vec<u32>> {
-        super::commit::bounded::forced_tokens(std::slice::from_ref(self))
+        super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
     }
 
     #[cfg(any(test,feature="internal-api"))]
@@ -642,7 +648,6 @@ impl<'a> ConstraintState<'a> {
         super::commit::forcing_reference::force_token_ids(std::slice::from_ref(self),None)
     }
 
-    #[cfg(any(test,feature="internal-api"))]
     pub(super) fn mask_for_forced(&self, dynamic: bool) -> Vec<u32> {
         if !self.constraint.end_tokens.is_empty() { return self.mask(); }
         if dynamic {
