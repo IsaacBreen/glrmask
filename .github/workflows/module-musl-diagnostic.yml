@@ -1,0 +1,72 @@
+name: Diagnose existing Module musl wheel
+on:
+  push:
+    branches: [diagnostic/module-musl-469935]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  diagnose:
+    name: Existing wheel / ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            os: ubuntu-24.04-arm
+          - arch: x86_64
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v6
+        with:
+          name: wheel-musllinux-${{ matrix.arch }}
+          run-id: 39302017318
+          github-token: ${{ github.token }}
+          path: dist
+      - name: Run exact existing wheel verbosely with native backtrace
+        env:
+          IMAGE: quay.io/pypa/musllinux_1_2_${{ matrix.arch }}:latest
+        run: |
+          mkdir -p evidence
+          docker run --rm --cap-add=SYS_PTRACE --security-opt seccomp=unconfined \
+            -v "$PWD:/io" -w /io "$IMAGE" sh -lc '
+              set -eu
+              /opt/python/cp39-cp39/bin/python -m venv /tmp/diag-venv
+              /tmp/diag-venv/bin/python -m pip install --only-binary=:all: /io/dist/*.whl pytest > /io/evidence/install.log 2>&1
+              /tmp/diag-venv/bin/python -c "import glrmask,sys; print(sys.version); print(glrmask.__file__)"
+              sha256sum /io/dist/*.whl > /io/evidence/wheel.sha256
+              apk add --no-cache gdb > /io/evidence/debugger-install.log 2>&1 || true
+              export RUST_BACKTRACE=full PYTHONFAULTHANDLER=1
+              set +e
+              /tmp/diag-venv/bin/python -I -X faulthandler -m pytest -vv -s -p no:cacheprovider \
+                /io/python/tests/test_python_compatibility.py /io/python/tests/test_core_batch.py \
+                /io/python/tests/test_forcing_semantics.py /io/python/tests/test_markers.py \
+                > /io/evidence/verbose-tests.log 2>&1
+              first=$?
+              printf "%s\n" "$first" > /io/evidence/exit-code.txt
+              tail -120 /io/evidence/verbose-tests.log
+              if [ "$first" -ne 0 ] && command -v gdb >/dev/null; then
+                timeout 180 gdb --batch -ex "set pagination off" -ex run -ex "thread apply all bt 25" \
+                  --args /tmp/diag-venv/bin/python -I -X faulthandler -m pytest -vv -s -p no:cacheprovider \
+                  /io/python/tests/test_python_compatibility.py /io/python/tests/test_core_batch.py \
+                  /io/python/tests/test_forcing_semantics.py /io/python/tests/test_markers.py \
+                  > /io/evidence/native-backtrace.log 2>&1
+                tail -150 /io/evidence/native-backtrace.log
+              fi
+              RAYON_NUM_THREADS=1 /tmp/diag-venv/bin/python -I -X faulthandler -m pytest -vv -s -p no:cacheprovider \
+                /io/python/tests/test_python_compatibility.py /io/python/tests/test_core_batch.py \
+                /io/python/tests/test_forcing_semantics.py /io/python/tests/test_markers.py \
+                > /io/evidence/single-worker-diagnostic.log 2>&1
+              echo "single_worker_exit=$?"
+              tail -80 /io/evidence/single-worker-diagnostic.log
+              exit "$first"
+            '
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: module-musl-diagnostic-${{ matrix.arch }}
+          path: evidence
+          retention-days: 14
