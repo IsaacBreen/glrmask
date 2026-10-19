@@ -209,9 +209,16 @@ fn commit_selected(
 }
 
 pub(crate) fn force(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
-    // Catch only the library's typed resource limit; do not hide arbitrary bugs.
+    force_result(states, dynamic).unwrap_or_default()
+}
+
+/// Public-query adapter for the canonical reference implementation. Catch only
+/// the library's typed resource limit; arbitrary bugs still propagate.
+pub(crate) fn force_result(
+    states: &[ConstraintState<'_>], dynamic: Option<bool>,
+) -> crate::Result<Vec<u32>> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(states, dynamic))
-        .unwrap_or_default()
+        .map_err(|message| crate::Error::State(format!("forced token proof: {message}")))
 }
 
 /// Strict token-ID forcing: no canonical spelling selection. Each next ID is
@@ -319,6 +326,23 @@ mod tests {
         let first=Grammar::from_ebnf("start ::= \"a\"").compile(&a).unwrap();
         let second=Grammar::from_ebnf("start ::= \"b\"").compile(&b).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
+    }
+
+    #[test]
+    fn greedy_ab_stops_before_optional_event_after_a() {
+        let vocab=Vocab::new_with_exact_token_ids(
+            vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())],[9]);
+        let ordinary=Grammar::from_glrm("start root nt root=\"ab\"");
+        let guarded=Grammar::from_glrm(
+            "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"")
+            .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap();
+        for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
+            let options=BuildOptions::default().optimization(mode);
+            let baseline=ordinary.compile_with(&vocab,options.clone()).unwrap();
+            assert_eq!(baseline.start().forced_tokens().unwrap(),[1],"{mode:?}");
+            let event=guarded.compile_with(&vocab,options).unwrap();
+            assert!(event.start().forced_tokens().unwrap().is_empty(),"{mode:?}");
+        }
     }
 
     #[test]

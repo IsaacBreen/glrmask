@@ -125,6 +125,14 @@ path = "tests/end_tokens.rs"
 name = "glrm_v1"
 path = "tests/glrm_v1.rs"
 
+[[test]]
+name = "forcing_semantics"
+path = "tests/forcing_semantics.rs"
+
+[[test]]
+name = "forcing_semantics_oracle"
+path = "tests/forcing_semantics_oracle.rs"
+
 # Focused JSON Schema suites.
 [[test]]
 name = "json_schema_unicode_class_pattern"

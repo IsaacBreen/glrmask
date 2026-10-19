@@ -20,7 +20,8 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     let state = constraint.start();
     let before = state.mask();
     let accepted = state.is_accepting();
-    let ids = state.forced_canonical_reference();
+    let ids = state.forced_tokens().expect("canonical forcing query failed");
+    assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
     assert!(!state.is_rejected());
@@ -103,6 +104,61 @@ fn canonical_text_forcing_is_not_token_id_uniqueness() {
             .compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         // ID4 is not admitted. Its longer spelling must not block the stable ID2.
         assert_eq!(checked_force(&c),[2],"{mode:?}");
+    }
+}
+
+#[test]
+fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() {
+    let vocab=Vocab::new_with_exact_token_ids(vec![
+        (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),
+    ],[9]);
+    let ordinary=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";");
+    let guarded=Grammar::from_glrm(
+        "glrm 1; start root; extern token MARK; nt root = \"ab\" | \"a\" MARK \"b\";",
+    ).bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap();
+    for mode in MODES {
+        let options=BuildOptions::default().optimization(mode);
+        let baseline=ordinary.compile_with(&vocab,options.clone()).unwrap();
+        assert_eq!(checked_force(&baseline),[1],"ordinary baseline {mode:?}");
+
+        let guarded=guarded.compile_with(&vocab,options).unwrap();
+        for guarded in [guarded.clone(),Constraint::load(&guarded.save()).unwrap()] {
+            // Both paths project to ordinary bytes `ab`, but greedy token 1
+            // would cross the valid MARK opportunity after `a`. Returning token
+            // 0 instead would cease to be the canonical greedy tokenization.
+            assert!(checked_force(&guarded).is_empty(),"event boundary {mode:?}");
+            let mask=guarded.start().mask();
+            assert!(allows(&mask,0) && allows(&mask,1));
+            let mut event_path=guarded.start();
+            for id in [0,9,2] { assert!(allows(&event_path.mask(),id));event_path.commit_token(id).unwrap(); }
+            assert!(event_path.is_accepting());
+        }
+    }
+}
+
+#[test]
+fn exact_events_before_and_after_text_keep_their_original_ids() {
+    let vocab=Vocab::new_with_exact_token_ids(vec![
+        (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),(8,Vec::new()),
+    ],[9,10]);
+    for (event,expected) in [
+        (8,vec![8,1,8]),
+        (9,vec![9,1,9]),
+    ] {
+        let grammar=Grammar::from_glrm(
+            "glrm 1; start root; extern token BEFORE; extern token AFTER; nt root = BEFORE \"ab\" AFTER;",
+        ).bind_snapshot("BEFORE",vocab.tokens([event]).unwrap()).unwrap()
+            .bind_snapshot("AFTER",vocab.tokens([event]).unwrap()).unwrap();
+        for mode in MODES {
+            let c=grammar.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+            assert_eq!(checked_force(&c),expected,"event={event}, {mode:?}");
+        }
+    }
+    let ambiguous=Grammar::from_glrm("extern token MARK start root nt root=MARK \"ab\"")
+        .bind_snapshot("MARK",vocab.tokens([9,10]).unwrap()).unwrap();
+    for mode in MODES {
+        let c=ambiguous.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+        assert!(checked_force(&c).is_empty(),"multiple exact IDs {mode:?}");
     }
 }
 

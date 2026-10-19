@@ -2,7 +2,6 @@ use crate::runtime::markers::{CommitObserver, NoMarkers, LiveMarkers};
 use crate::automata::lexer::Lexer;
 pub(crate) mod profile;
 pub(crate) mod bounded;
-#[cfg(any(test,feature="internal-api"))]
 pub(crate) mod forcing_reference;
 pub(crate) mod template_advance;
 pub(crate) mod push_suffixes;

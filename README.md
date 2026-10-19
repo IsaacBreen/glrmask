@@ -234,12 +234,13 @@ current output is a complete match, possibly with valid continuations. Commit th
 sampled end token before stopping. An initially accepting grammar can instead stop
 immediately if that is the application's policy.
 
-The read-only `forced_tokens()` query returns only individually inevitable
-original IDs; it never chooses between alternative tokenizations or constructs a
-full token mask merely to prove uniqueness. It stops at root acceptance or a
-non-singleton allowed set, and reports proof/resource failures as errors. Raw-byte
-`commit_bytes()` remains a separate recognition operation, not a substitute for
-committing exact model IDs. See [the forcing contract](docs/forcing.md).
+The read-only `forced_tokens()` query returns a safe library-canonical prefix of
+genuinely forced ordinary text. It uses the longest admitted nonempty spelling
+and lowest-ID alias, retains exact-event IDs, and stops at root acceptance or an
+event boundary that greedy text would cross. The correctness-first reference may
+construct full masks and reports typed resource failures as errors. This is one
+canonical sequence, not an exhaustive tree of equivalent original-ID histories.
+Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forcing.md).
 
 ### Source formats
 

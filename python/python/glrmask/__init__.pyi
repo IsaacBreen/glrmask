@@ -105,7 +105,7 @@ class Vocab:
         ...
     @staticmethod
     def from_id_to_bytes(id_to_bytes: dict[int, bytes]) -> Vocab:
-        "Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings."
+        "Use the tokenizer\u2019s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings."
         ...
     @staticmethod
     def from_llama_cpp(llm: Any) -> Vocab:
@@ -263,13 +263,13 @@ class Constraint:
 class ConstraintState:
     "Mutable state for one generated sequence."
     def marker_events(self) -> list[tuple[int, int]]:
-        "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged."
+        "Initial or most recent commit\u2019s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID, with duplicate pairs removed. These are possible observations, not captures or promises about the final parse. A failed commit clears the batch; mask and forcing queries leave it unchanged."
         ...
     def clone(self) -> ConstraintState:
         "Independent snapshot at the current prefix."
         ...
     def mask(self, size: Optional[int] = None) -> NDArray[np.bool_]:
-        "New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy."
+        "New Boolean array indexed by original token ID. `size` must cover the constraint\u2019s entire ID range; extra positions are false. Includes the root end-token policy."
         ...
     def fill_mask(self, bitmask: NDArray[np.int32]) -> None:
         "Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words. Bit `id % 32` of word `id // 32` represents that original ID. Extra words are zeroed. Signed words retain all 32 mask bits."
@@ -287,5 +287,5 @@ class ConstraintState:
         "The prefix cannot be extended to a valid match."
         ...
     def forced_tokens(self) -> list[int]:
-        "Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors."
+        "Read-only library-canonical prefix of genuinely forced text. Uses longest admitted nonempty spelling and the lowest original-ID alias; exact events retain their IDs. Stops at root acceptance, unstable tokenization, intermediate exact-event opportunities, or proof limits. May construct full masks; typed resource failures raise errors."
         ...
