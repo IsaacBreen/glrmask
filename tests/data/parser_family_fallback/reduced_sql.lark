@@ -1,0 +1,137 @@
+start: root
+root: r370 factor_prefix_185
+factor_prefix_0: WS
+factor_prefix_1: factor_prefix_0
+factor_prefix_11: r233
+factor_prefix_114: r0
+factor_prefix_125: r1
+factor_prefix_161: r127
+factor_prefix_185: r400
+factor_prefix_19: r154
+factor_prefix_26: r345
+factor_prefix_3: r232
+factor_prefix_30: r117
+factor_prefix_33: r254
+factor_prefix_35: r130
+factor_prefix_41: r143
+factor_prefix_42: r255
+factor_prefix_45: r120
+factor_prefix_49: r144
+factor_prefix_54: r137
+factor_prefix_55: r13
+factor_prefix_57: r14
+factor_prefix_61: r331
+factor_prefix_63: r381
+factor_prefix_68: r376
+factor_prefix_77: r146
+r0: r381 factor_prefix_3
+r1: NUMBER
+r110: r429 factor_prefix_19
+r117: r439 factor_prefix_26
+r120: r110 factor_prefix_30
+r127: r17 factor_prefix_45
+r13: STRING factor_prefix_1
+r130: r131 factor_prefix_54
+r131: r406 factor_prefix_57
+r137: r406 factor_prefix_55
+r14: r331 factor_prefix_11 | r344 factor_prefix_49 | r381 factor_prefix_11
+r143: r414 factor_prefix_61
+r144: r414 factor_prefix_63
+r146: r406 factor_prefix_68
+r154: r376 factor_prefix_77
+r158: IDENT factor_prefix_0
+r17: r14 factor_prefix_35
+r232: r427 factor_prefix_61
+r233: r427 factor_prefix_63
+r254: r261 factor_prefix_114
+r255: r261 factor_prefix_125
+r261: T037 factor_prefix_1 | T043 factor_prefix_1
+r331: IDENT factor_prefix_0
+r344: r0 factor_prefix_33
+r345: r0 factor_prefix_42
+r370: r421 factor_prefix_161
+r376: r158 factor_prefix_41
+r381: IDENT
+r400: T000
+r406: T003 factor_prefix_1
+r414: T006 factor_prefix_0
+r421: T011 factor_prefix_0
+r427: T014
+r429: T015 factor_prefix_0
+r439: T022 factor_prefix_0
+IDENT: /[a-z_][a-z_0-9]*/
+NUMBER: /(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/
+QIDENT: /"(?:[^"\x00]|"")+"/
+STRING: /'(?:[^'\x00]|'')*'/
+T000: /;/
+T001: /WITH/
+T002: /RECURSIVE/
+T003: /,/
+T004: /\(/
+T005: /\)/
+T006: /AS/
+T007: /UNION/
+T008: /ALL/
+T009: /INTERSECT/
+T010: /EXCEPT/
+T011: /SELECT/
+T012: /DISTINCT/
+T013: /\*/
+T014: /\./
+T015: /FROM/
+T016: /JOIN/
+T017: /INNER/
+T018: /LEFT/
+T019: /OUTER/
+T020: /ON/
+T021: /CROSS/
+T022: /WHERE/
+T023: /GROUP/
+T024: /BY/
+T025: /HAVING/
+T026: /ORDER/
+T027: /ASC/
+T028: /DESC/
+T029: /NULLS/
+T030: /FIRST/
+T031: /LAST/
+T032: /LIMIT/
+T033: /OFFSET/
+T034: /OR/
+T035: /AND/
+T036: /NOT/
+T037: /=/
+T038: /==/
+T039: /!=/
+T040: /<>/
+T041: /</
+T042: /<=/
+T043: />/
+T044: />=/
+T045: /IS/
+T046: /LIKE/
+T047: /GLOB/
+T048: /BETWEEN/
+T049: /IN/
+T050: /\+/
+T051: /\-/
+T052: /\//
+T053: /%/
+T054: /\|\|/
+T055: /\~/
+T056: /NULL/
+T057: /TRUE/
+T058: /FALSE/
+T059: /EXISTS/
+T060: /CASE/
+T061: /WHEN/
+T062: /THEN/
+T063: /ELSE/
+T064: /END/
+T065: /CAST/
+T066: /INTEGER/
+T067: /REAL/
+T068: /TEXT/
+T069: /BLOB/
+T070: /NUMERIC/
+WS: /[ \t\r\n]+/
