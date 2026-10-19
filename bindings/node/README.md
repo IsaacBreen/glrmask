@@ -6,7 +6,7 @@ This is **Node.js support, not browser WebAssembly**. A browser, Bun or Deno tar
 
 ## Installation
 
-Use Node.js 22 or newer. The published package is a thin root: `@glrmask/node`
+Use Node.js 22 or newer. This source revision prepares a thin root: `@glrmask/node`
 itself contains only JavaScript, TypeScript declarations and a loader, while
 the native binary for your OS/architecture/libc arrives automatically through
 an `optionalDependencies` entry (`@glrmask/node-<platform>`). No Rust
@@ -17,6 +17,11 @@ glibc (manylinux_2_28, minimum glibc 2.28) and musl (Alpine) variants. On an
 unsupported platform, or when the optional package was skipped with
 `--no-optional`/`--omit=optional`, requiring the package raises an explicit
 error naming the expected platform package; there is no silent fallback.
+
+The existing **0.3.1 registry release** still uses the earlier universal package
+with five native binaries. The thin layout and expanded eight-target matrix
+described here will reach registry installations in a subsequent release; the
+public package name stays `@glrmask/node`.
 
 Package publication is a separate release action. The source and CI commands below produce installable tarballs; they do not publish anything to npm. Install the thin-root tarball together with your platform tarball:
 
@@ -35,14 +40,21 @@ You need the **complete GLRMask repository**, a current stable Rust toolchain, a
 
 ```sh
 cd glrmask/bindings/node
-npm ci
+npm ci --omit=optional
 npm run build
 npm test
 npm run typecheck
-npm pack
+node scripts/test-platform-artifact.cjs
 ```
 
-Then install the generated `.tgz` in your application. `npm ci` installs development tools; there are no JavaScript runtime package dependencies. The build script reads Cargo's actual artifact output, records the target and checksums, and copies the native library into the package. Running `npm install` against an unbuilt Git checkout is not a replacement for that build step.
+The final command stages and packs the thin root and the actual host platform,
+then tests both together in isolated temporary installations. For local
+development, import this checkout after `npm run build`; the loader uses that
+local native binary. For distribution, use the root and matching platform
+tarballs from the CI artifact set. A thin-root `.tgz` alone intentionally does
+not contain the binary. `npm ci` installs development tools; the package has no
+JavaScript runtime dependencies other than its native optional package. Running
+`npm install` against an unbuilt checkout is not a replacement for the build.
 
 For an owned incremental development cache, set `CARGO_TARGET_DIR` and use `npm run build:dev`. A specific Rust target can be passed with `npm run build -- --target aarch64-unknown-linux-gnu`; the corresponding Rust target, native compiler and linker must be installed. Cross-compilation is not inferred from an artifact filename.
 

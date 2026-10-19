@@ -114,8 +114,12 @@ if(GLRMASK_BUILD_EXAMPLES)
 endif()
 if(GLRMASK_BUILD_TESTS)
   enable_testing()
+  # The test executable creates std::threads itself. A shared Rust library's
+  # dependencies do not supply the executable's pthread link requirements on
+  # older glibc (libpthread was separate before glibc 2.34).
+  find_package(Threads REQUIRED)
   add_executable(glrmask_cpp_tests tests/bindings.cpp)
-  target_link_libraries(glrmask_cpp_tests PRIVATE glrmask::glrmask)
+  target_link_libraries(glrmask_cpp_tests PRIVATE glrmask::glrmask Threads::Threads)
   glrmask_runtime_for(glrmask_cpp_tests)
   add_test(NAME glrmask_cpp COMMAND glrmask_cpp_tests)
   add_executable(glrmask_c_tests tests/c_api.c)
