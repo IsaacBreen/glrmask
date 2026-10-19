@@ -27,7 +27,7 @@ const pkg = require('../package.json');
 const rootDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(rootDir, '..', '..');
 function usage() {
-  console.error('Usage: node scripts/stage-platforms.cjs --input ARTIFACT_DIR --output STAGE_DIR');
+  console.error('Usage: node scripts/stage-platforms.cjs --input ARTIFACT_DIR --output STAGE_DIR [--tag SINGLE_TEST_TARGET]');
   process.exit(2);
 }
 const cli = process.argv.slice(2);
@@ -40,6 +40,9 @@ for (let i = 0; i < cli.length; ++i) {
 }
 if (!input || !output) usage();
 if (selectedTag && !releaseTargets.includes(selectedTag)) throw new Error(`Unknown platform ${selectedTag}`);
+// Partial staging exists only for per-runner installation tests. Production
+// aggregation omits --tag and still requires every target; --all validation
+// rejects a partial manifest if someone attempts to release it as the root.
 const wanted = selectedTag ? [selectedTag] : releaseTargets;
 function sha256(data) { return crypto.createHash('sha256').update(data).digest('hex'); }
 const collected = new Map();

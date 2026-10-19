@@ -176,6 +176,15 @@ jobs:
         if: ${{ !matrix.linux }}
         working-directory: bindings/node
         run: npm test
+      - name: Node 26 ABI compatibility
+        if: ${{ !matrix.linux }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: '26'
+      - name: Run same native binary on Node 26
+        if: ${{ !matrix.linux }}
+        working-directory: bindings/node
+        run: npm test
       - uses: actions/upload-artifact@v6
         with:
           name: node-native-${{ matrix.tag }}
