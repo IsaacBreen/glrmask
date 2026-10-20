@@ -1085,9 +1085,21 @@ fn collect_protected_nonterminals(grammar: &GrammarDef) -> BTreeSet<NonterminalI
         .collect()
 }
 
+/// Remove the literal identity unit productions `X -> X` before any grammar
+/// normalization or parser-table construction. A finite derivation containing
+/// such a production can omit that step, so deleting it preserves the CFG's
+/// complete finite terminal language (including nullability). Leaving these
+/// edges for later rewrites can retain nonproductive parser control cycles.
+fn discard_reflexive_unit_rules(rules: &mut Vec<Rule>) {
+    rules.retain(|rule| {
+        !matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(id)] if *id == rule.lhs)
+    });
+}
+
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
-pub(crate) fn prepare_grammar_transforms_only(grammar: GrammarDef) -> GrammarDef {
+pub(crate) fn prepare_grammar_transforms_only(mut grammar: GrammarDef) -> GrammarDef {
+    discard_reflexive_unit_rules(&mut grammar.rules);
     let profiling = compile_profile_enabled();
     let nullable_rules_before = grammar.rules.len();
     let nullable_started_at = profiling.then(Instant::now);
@@ -1159,7 +1171,8 @@ pub(crate) fn prepare_dynamic_glr_transforms_only_lr(grammar: GrammarDef) -> Gra
     prepare_dynamic_glr_transforms_impl(grammar, true)
 }
 
-fn prepare_dynamic_glr_transforms_impl(grammar: GrammarDef, use_lr_normalizer: bool) -> GrammarDef {
+fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalizer: bool) -> GrammarDef {
+    discard_reflexive_unit_rules(&mut grammar.rules);
     let profiling = compile_profile_enabled();
     let nullable_terminals = nullable_terminals_for_grammar(&grammar);
     let mut normalized = grammar;
@@ -1207,6 +1220,7 @@ fn prepare_dynamic_glr_transforms_impl(grammar: GrammarDef, use_lr_normalizer: b
 /// stable terminal domain before parser-only normalization. This lets tokenizer
 /// construction overlap the parser normalization/analysis/table lane.
 pub(crate) fn prepare_dynamic_shared_terminal_domain(mut grammar: GrammarDef) -> GrammarDef {
+    discard_reflexive_unit_rules(&mut grammar.rules);
     let nullable_terminals = nullable_terminals_for_grammar(&grammar);
     expand_nullable_terminals(&mut grammar.rules, grammar.start, &nullable_terminals);
     grammar.rules = prune_unreachable_rules(&grammar.rules, grammar.start);
@@ -1234,6 +1248,7 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
     mut normalized: GrammarDef,
     use_lr_normalizer: bool,
 ) -> (GrammarDef, bool) {
+    discard_reflexive_unit_rules(&mut normalized.rules);
     if use_lr_normalizer {
         normalize_dynamic_glr_grammar(&mut normalized.rules, normalized.start);
     } else {
@@ -1530,6 +1545,31 @@ mod tests {
 
     fn t(id: TerminalID) -> Symbol {
         Symbol::Terminal(id)
+    }
+
+    #[test]
+    fn discard_reflexive_unit_rules_preserves_other_rules_and_nullable_alternatives() {
+        let mut rules = vec![
+            Rule { lhs: 0, rhs: vec![nt(0)] },
+            Rule { lhs: 0, rhs: vec![nt(1)] },
+            Rule { lhs: 1, rhs: vec![nt(1)] },
+            Rule { lhs: 1, rhs: vec![nt(0)] },
+            Rule { lhs: 1, rhs: vec![] },
+            Rule { lhs: 1, rhs: vec![t(0)] },
+            Rule { lhs: 1, rhs: vec![nt(1), nt(1)] },
+        ];
+        discard_reflexive_unit_rules(&mut rules);
+        assert_eq!(rules, vec![
+            Rule { lhs: 0, rhs: vec![nt(1)] },
+            Rule { lhs: 1, rhs: vec![nt(0)] },
+            Rule { lhs: 1, rhs: vec![] },
+            Rule { lhs: 1, rhs: vec![t(0)] },
+            Rule { lhs: 1, rhs: vec![nt(1), nt(1)] },
+        ]);
+        // The transformation is idempotent, not just a one-time cleanup.
+        let expected = rules.clone();
+        discard_reflexive_unit_rules(&mut rules);
+        assert_eq!(rules, expected);
     }
 
     #[test]

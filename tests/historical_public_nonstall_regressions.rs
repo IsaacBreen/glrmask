@@ -104,7 +104,6 @@ n3: "c" |  | "a" n0
 }
 
 #[test]
-#[ignore = "Observed prolonged >60 seconds in 2026-10-20 local V3rev9 public audit; pending bounded performance qualification"]
 fn archived_public_acceptance_seed_2556() {
     // Historical baseline mismatch modes: balanced, fastruntime.
     let lark = r####"start: n2
@@ -117,7 +116,6 @@ n3: "a" | n2 n1 | n0
 }
 
 #[test]
-#[ignore = "Observed prolonged >60 seconds in 2026-10-20 local V3rev9 public audit; pending bounded performance qualification"]
 fn archived_public_acceptance_seed_3204() {
     // Historical baseline mismatch modes: balanced, fastruntime.
     let lark = r####"start: n1
