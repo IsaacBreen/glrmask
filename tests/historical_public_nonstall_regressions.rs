@@ -12,7 +12,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
         (0, vec![b'a']), (1, vec![b'b']), (2, vec![b'c']),
         (3, b"ab".to_vec()), (4, b"bc".to_vec()), (5, b"ca".to_vec()),
     ]);
-    for mode in [Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
+    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
         let c = Grammar::from_lark(lark)
             .compile_with(&vocab, BuildOptions::default().optimization(mode))
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: {e:?}"));
