@@ -54,6 +54,63 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             at += consumed;
         }
         assert!(pair_state.is_accepting(), "seed {seed} mode {mode:?}: paired-token acceptance");
+
+        // Independently computed finite fixed-point CFG languages from the
+        // ORIGINAL archived integer-symbol rules, before Lark lowering and
+        // before any GLRMask normalization (terminals -1/-2/-3 = a/b/c).
+        // Check all 364 possible complete words over a/b/c up to length 5,
+        // both accepting and rejecting, for each of all 8 archived seeds.
+        let bounded_oracle: Option<&[&str]> = match seed {
+            // Archived integer-rule input sha256: 1a035c81ad06504510a5fbe555eebf92d80ca1f0aaae0d493693cb25d0bd4192
+            1313 => Some(&["a", "ba", "ca", "bac", "bba", "bca", "cca", "acca", "baac", "bbac", "bbba", "bbca", "bcac", "bcca", "ccca", "accca", "baacc", "babac", "bacac", "bacca", "bbaac", "bbacc", "bbbac", "bbbba", "bbbca", "bbcac", "bbcca", "bcaac", "bccac", "bccca", "cacca"]),
+            // Archived integer-rule input sha256: b61aed16b2d4f697e11a5fb87f517115d631242bbb5bd59965990f8534541885
+            1730 => Some(&["", "b", "c", "bc", "cc", "bbc", "bcc", "cbc", "ccc", "bbbc", "bbcc", "bcbc", "cbbc", "cbcc", "ccbc", "bbbbc", "bbcbc", "bcbbc", "bcbcc", "bccbc", "cbbbc", "cbcbc", "ccbbc", "ccbcc", "cccbc"]),
+            // Archived integer-rule input sha256: 0cdfe65104fd9c6ece8bd29522f5051fc0373a93aa6d4b483b335556e935d4a9
+            2009 => Some(&["b", "c", "ab", "cb", "aab", "aba", "aca", "acb", "ccb", "aaab", "aaba", "aacb", "acba", "accb", "cacb", "cccb", "aaaba", "aaacb", "aabaa", "aacaa", "aacba", "aaccb", "acacb", "accba", "acccb", "caacb", "caccb", "ccacb", "ccccb"]),
+            // Archived integer-rule input sha256: f09f3dcfadd8e3168bfd150c45d46275faf8036f2a3dab803749af62ae57eb32
+            2374 => Some(&["", "b", "c", "ac", "ca", "cc", "abc", "acc", "bca", "cca", "aacc", "acac", "acca", "accc", "caca", "ccca", "aabcc", "aaccc", "abcac", "abcca", "accac", "accca", "bcaca", "ccaca"]),
+            // Archived integer-rule input sha256: 00e3e8ae53799835a81e4c04c2fd347e93961d88f792da5660b2303765613d43
+            2556 => Some(&["", "a", "b", "ab", "ba", "bb", "aba", "abb", "bab", "bbb", "aabb", "abab", "abbb", "babb", "bbab", "bbbb", "aabbb", "ababb", "abbab", "abbbb", "baabb", "babab", "babbb", "bbabb", "bbbbb"]),
+            // Archived integer-rule input sha256: 0957805b2866074120b97c4a8cecedb8f9f946edc27c4c8c8b7a51c4da203a24
+            3204 => Some(&["a", "c", "ab", "ca", "cc", "cab", "cca", "ccb", "ccc", "bacc", "cabb", "cbac", "ccab", "ccca", "cccb", "cccc", "babac", "cbacc", "ccabb", "ccbac", "cccab", "cccbb", "cccca", "ccccb", "ccccc"]),
+            // Archived integer-rule input sha256: 8f8bd6f50406cb4ed3deafdff9815662475462a3808228b98d51a6f716779284
+            3274 => Some(&["", "a", "aa", "ab", "ac", "bb", "aac", "abb", "bba", "aaac", "aabc", "aacc", "abbc", "bbbb", "aaacc", "aabbc", "abbac"]),
+            // Archived integer-rule input sha256: b59189b0f28b7e0770ee64dc8abcc63d389b393fc6e8b4446f1fac0207cb4967
+            3810 => Some(&["b", "c", "ca", "cc", "caa", "cac", "cba", "cbb", "cca", "ccb", "ccc", "caaa", "caac", "caba", "caca", "cacc", "cbba", "cbbc", "ccaa", "ccab", "ccac", "ccba", "ccbc", "ccca", "cccb", "cccc", "caaba", "caaca", "cacaa", "cacba", "cacca", "cbaba", "cbaca", "cbbaa", "cbbac", "cbbba", "cbbca", "cbbcc", "ccaaa", "ccaab", "ccaba", "ccabc", "ccaca", "ccacb", "ccbaa", "ccbab", "ccbac", "ccbba", "ccbbb", "ccbca", "ccbcc", "cccaa", "cccab", "cccba", "cccbb", "cccbc", "cccca", "ccccb"]),
+            _ => None,
+        };
+        if let Some(expected) = bounded_oracle {
+            for len in 0..=5usize {
+                for number in 0..3usize.pow(len as u32) {
+                    let mut word = vec![b'a'; len];
+                    let mut value = number;
+                    for byte in word.iter_mut().rev() {
+                        *byte += (value % 3) as u8;
+                        value /= 3;
+                    }
+                    let accepted_by_original_cfg = expected.iter().any(|x| x.as_bytes() == word);
+                    let mut query = c.start();
+                    let observed = query.commit_bytes(&word).is_ok() && query.is_accepting();
+                    assert_eq!(observed, accepted_by_original_cfg,
+                        "seed {seed} mode {mode:?} unexpected recognition for {word:?}");
+                    if accepted_by_original_cfg {
+                        // A valid complete word has a viable next token at
+                        // every proper prefix, not just at the saved witness.
+                        let mut incremental = c.start();
+                        for &next_byte in &word {
+                            let token = u32::from(next_byte - b'a');
+                            assert_ne!(incremental.mask()[0] & (1u32 << token), 0,
+                                "seed {seed} mode {mode:?} missing valid token {token} after a prefix of {word:?}");
+                            incremental.commit_token(token).unwrap_or_else(|e| {
+                                panic!("seed {seed} mode {mode:?} invalid token commit on {word:?}: {e:?}")
+                            });
+                        }
+                        assert!(incremental.is_accepting(),
+                            "seed {seed} mode {mode:?} token-path completion missing for {word:?}");
+                    }
+                }
+            }
+        }
     }
 }
 
