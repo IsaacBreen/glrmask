@@ -400,3 +400,7 @@ path = "tests/module_expr_core.rs"
 [[test]]
 name = "module_lifecycle_contract"
 path = "tests/module_lifecycle_contract.rs"
+
+[[test]]
+name = "public_thread_safety"
+path = "tests/public_thread_safety.rs"

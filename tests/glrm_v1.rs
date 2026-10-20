@@ -4,14 +4,16 @@ use glrmask::{
 };
 
 // Composition fixtures explicitly materialize the native parser before binding.
-// The ordinary Dynamic default remains LR-backed and its rejection is checked.
+// The ordinary Dynamic default remains LR-backed; mixed native/LR rejection is checked.
 fn compile_native_dynamic_fixture(grammar: Grammar<'_>, vocab: &Vocab) -> glrmask::Result<DynamicConstraint> {
     glrmask::__private::into_dynamic_template_parser(DynamicConstraint::compile(grammar, vocab)?)
 }
 
 fn assert_lr_composition_rejected<T>(result: glrmask::Result<T>) {
     match result {
-        Err(glrmask::Error::Compilation(message)) => assert!(message.contains("LR-backed components"), "{message}"),
+        Err(glrmask::Error::Compilation(message)) => assert!(
+            message.contains("LR-backed components") ||
+            message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}"),
         Err(error) => panic!("unexpected composition error: {error}"),
         Ok(_) => panic!("LR-backed composition unexpectedly succeeded"),
     }

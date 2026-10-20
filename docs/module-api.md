@@ -160,15 +160,15 @@ module = Module(expression)
 In Rust, mixed operand types require an explicit common `Expr` conversion:
 
 ```rust
-use glrmask::{Expr, Grammar, Module};
+use glrmask::{Expr, Grammar, IntoExpr, Module};
 
 fn alternatives() -> glrmask::Result<Module> {
     let a = Grammar::from_glrm(r#"start root nt root = "a""#);
     let b = Grammar::from_glrm(r#"start root nt root = "b""#);
     let c = Grammar::from_glrm(r#"start root nt root = "c""#);
     let expression = Expr::sequence([
-        Expr::choice([Expr::from(&a), Expr::from(&b)]),
-        Expr::from(&c),
+        Expr::choice([(&a).into_expr(), (&b).into_expr()]),
+        (&c).into_expr(),
     ]);
     Module::from_expr(&expression)
 }

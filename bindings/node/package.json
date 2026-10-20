@@ -53,7 +53,7 @@
                     "build":  "node scripts/build.cjs",
                     "build:dev":  "node scripts/build.cjs --profile bindings-dev",
                     "stage:platforms":  "node scripts/stage-platforms.cjs",
-                    "test":  "node --expose-gc --test tests/native.test.cjs tests/platform-packages.test.cjs",
+                    "test":  "node --expose-gc --test tests/native.test.cjs tests/module-expr.test.cjs tests/platform-packages.test.cjs",
                     "typecheck":  "tsc -p tests/tsconfig.json",
                     "check":  "npm test && npm run typecheck",
                     "prepack":  "node scripts/check-package.cjs",

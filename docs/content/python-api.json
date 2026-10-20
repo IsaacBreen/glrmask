@@ -119,5 +119,11 @@
   "UnboundExtern.path": "Path segments from the assembly root to the unresolved slot.",
   "UnboundExtern.kind": "A token slot accepts exact events; a grammar slot also accepts a grammar component.",
   "UnboundExtern.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
-  "UnboundExtern.__repr__": ""
+  "UnboundExtern.__repr__": "",
+  "Requirement": "Compatibility name for unresolved external-slot metadata in earlier published packages. The new API uses UnboundExtern. An unresolved typed slot. Paths distinguish the same local name in different attached children.",
+  "Requirement.name": "Qualified path joined with `::`.",
+  "Requirement.path": "Path segments from the assembly root to the unresolved slot.",
+  "Requirement.kind": "A token slot accepts exact events; a grammar slot also accepts a grammar component.",
+  "Requirement.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
+  "Requirement.__repr__": ""
 }

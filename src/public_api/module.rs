@@ -32,9 +32,27 @@ pub struct Module { node: Arc<Node> }
 struct Node {
     source: Arc<Grammar<'static>>,
     options: ModuleOptions,
-    prepared: Option<Arc<PreparedGrammar>>,
+    prepared: Option<Arc<dyn RetainedPreparation>>,
     bindings: OrdMap<String,ModuleValue>,
     certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
+}
+
+// Bound external auto-trait proofs at the prepared-work boundary. A Module's
+// source graph must not expose the runtime's deeply recursive parser/GSS types
+// to a downstream crate's default Send/Sync proof budget. The coercion below
+// checks both traits in this crate; no unsafe auto-trait assertion is needed.
+trait RetainedPreparation: Send + Sync + std::fmt::Debug {
+    fn prepared(&self) -> &PreparedGrammar;
+}
+impl RetainedPreparation for PreparedGrammar {
+    fn prepared(&self) -> &PreparedGrammar { self }
+}
+impl std::ops::Deref for dyn RetainedPreparation {
+    type Target = PreparedGrammar;
+    fn deref(&self) -> &Self::Target { self.prepared() }
+}
+fn retain_local(prepared: PreparedGrammar) -> Arc<dyn RetainedPreparation> {
+    Arc::new(prepared)
 }
 
 // Immutable, monotone binding certificates. Only an edited ancestor spine is
@@ -306,7 +324,7 @@ impl Module {
         let results=jobs.par_iter().map(|m| {
             #[cfg(test)]
             let _probe=preparation_probe::enter(m);
-            m.prepare_local(vocab,backend).map(|p|(key(m),Arc::new(p)))
+            m.prepare_local(vocab,backend).map(|p|(key(m),retain_local(p)))
         }).collect::<Result<Vec<_>>>()?;
         locals.extend(results);
         let mut instances=HashMap::<usize,Module>::new();
@@ -342,7 +360,7 @@ impl Module {
             let mut instances=HashMap::<usize,Module>::new();
             for m in module.index()? {
                 let mut next=m.clone();let node=Arc::make_mut(&mut next.node);
-                node.prepared=Some(Arc::new(m.prepare_local(vocab,backend)?));
+                node.prepared=Some(retain_local(m.prepare_local(vocab,backend)?));
                 node.certificate=Arc::new(OnceLock::new());
                 for (name,value) in &m.node.bindings {if let ModuleValue::Module(child)=value {
                     node.bindings.insert(name.clone(),ModuleValue::Module(instances[&(Arc::as_ptr(&child.node) as usize)].clone()));
@@ -383,7 +401,7 @@ impl Module {
         prepared.validate_local_slot_manifest(vocab)?;prepared.validate_slot_manifest()?;Ok(prepared)
     }
     fn as_prepared(&self)->Result<PreparedGrammar> {
-        let mut local=self.node.prepared.as_ref().ok_or_else(||error("module is not prepared"))?.as_ref().clone();
+        let mut local=self.node.prepared.as_ref().ok_or_else(||error("module is not prepared"))?.prepared().clone();
         for (name,value) in &self.node.bindings {
             match value {
                 ModuleValue::Module(child)=>local.bind(name,child.as_prepared()?)?,

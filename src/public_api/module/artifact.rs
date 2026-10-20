@@ -55,7 +55,7 @@ pub(super) fn save(root:&Module)->Vec<u8> {
     for module in modules {
         let node=&module.node;let source_key=Arc::as_ptr(&node.source.parsed_component) as usize;
         let source_id=*source_ids.entry(source_key).or_insert_with(||{let id=sources.len() as u32;sources.push(source(&node.source,&mut vocabs));id});
-        let prep=node.prepared.as_ref().map(|p|*prepared_ids.entry(Arc::as_ptr(p) as usize)
+        let prep=node.prepared.as_ref().map(|p|*prepared_ids.entry(Arc::as_ptr(p) as *const () as usize)
             .or_insert_with(||{let id=prepared.len() as u32;prepared.push(Preparation {source:source_id,optimization:node.options.optimization as u8,boundary:node.options.boundary_trigger as u8,bytes:p.save()});id}));
         let bindings=node.bindings.iter().map(|(name,value)|{
             let value=match value {ModuleValue::Module(m)=>Value::Module(instance_ids[&(Arc::as_ptr(&m.node) as usize)]),
@@ -143,7 +143,7 @@ pub(super) fn load(data:&[u8],supplied:Option<&Vocab>)->Result<Module> {
     }).collect::<Result<Vec<_>>>()?;
     let sources=manifest.sources.into_iter().map(|s|decode_source(s,&vocabs).map(Arc::new)).collect::<Result<Vec<_>>>()?;
     let prepared=manifest.prepared.into_iter().map(|p|{
-        prepared_artifact::load(&p.bytes,supplied).map(Arc::new)
+        prepared_artifact::load(&p.bytes,supplied).map(retain_local)
     }).collect::<Result<Vec<_>>>()?;
     let mut instances=Vec::<Module>::new();
     for node in manifest.instances {

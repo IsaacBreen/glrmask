@@ -6299,12 +6299,16 @@ fn compile_prepared_with_profile_and_table_construction(
         profile.finalize_ms = elapsed_ms(finalize_started_at);
         profile.compile_ms = elapsed_ms(compile_started_at);
 
-        (constraint, profile)
+        // Rayon keeps the job result on the submitting thread as well as on
+        // the worker. Moving this large tuple through that machinery exhausted
+        // musl-created Python thread stacks. Transfer only a pointer; construction
+        // still runs in the original compile pool and retains the same timers.
+        Box::new((constraint, profile))
     });
     // Keep the output constraint alive while the final sweep removes only dead
     // weak entries from the compile-time interners.
     interner_cleanup.finish();
-    result
+    *result
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {

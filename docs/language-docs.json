@@ -132,11 +132,17 @@
     "UnboundExtern.path": "Path segments from the assembly root to the unresolved slot.",
     "UnboundExtern.kind": "A token slot accepts exact events; a grammar slot also accepts a grammar component.",
     "UnboundExtern.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
-    "UnboundExtern.__repr__": ""
+    "UnboundExtern.__repr__": "",
+    "Requirement": "Compatibility name for unresolved external-slot metadata in earlier published packages. The new API uses UnboundExtern. An unresolved typed slot. Paths distinguish the same local name in different attached children.",
+    "Requirement.name": "Qualified path joined with `::`.",
+    "Requirement.path": "Path segments from the assembly root to the unresolved slot.",
+    "Requirement.kind": "A token slot accepts exact events; a grammar slot also accepts a grammar component.",
+    "Requirement.source_span": "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based.",
+    "Requirement.__repr__": ""
   },
   "api_reference": {
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "af10adb920bf7e29d55e90a76b76f6a0cbd5331e245b788a3537ca6a4bb02973"
+  "content_sha256": "e42fa3ca67805f900b3c5cc583e21812634c894e067d933e19ef85f3130c6e11"
 }
