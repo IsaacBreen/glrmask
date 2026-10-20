@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — configured modules and source expressions
+## Unreleased (0.4.0 candidate) — configured modules and source expressions
 
 - Add an owned `Module` graph with independently stored local compilation
   settings, snapshot-safe mutable binding, optional open-graph `precompile`,

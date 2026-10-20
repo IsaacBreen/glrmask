@@ -72,7 +72,7 @@ The native CI matrix builds Windows x64 and arm64/MSVC, macOS x64 and arm64, and
 ```cmake
 cmake_minimum_required(VERSION 3.20)
 project(my_decoder LANGUAGES CXX)
-find_package(glrmask 0.3 CONFIG REQUIRED)
+find_package(glrmask 0.4 CONFIG REQUIRED)
 add_executable(my_decoder main.cpp)
 target_link_libraries(my_decoder PRIVATE glrmask::glrmask)
 ```
