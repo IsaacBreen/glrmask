@@ -50,20 +50,44 @@ pub fn vocab(entries: Vec<(u32, Vec<u8>)>, exact_only: Vec<u32>) -> Result<glrma
     guarded(|| Ok(glrmask::Vocab::new_with_exact_token_ids(entries, exact_only)))
 }
 
-pub fn build_options(optimization: u32, end_tokens: Vec<u32>, boundary: Option<u32>) -> Result<glrmask::BuildOptions> {
-    use glrmask::{Optimization as O, BoundaryTriggerDetail as B};
-    let optimization = match optimization {
-        0 => O::Auto, 1 => O::FastBuild, 2 => O::Balanced, 3 => O::FastRuntime,
-        _ => return Err(Error::invalid("unknown optimization; expected 0..3")),
-    };
-    let mut options = glrmask::BuildOptions::default().optimization(optimization).end_tokens(end_tokens);
-    if let Some(boundary) = boundary {
-        options = options.boundary_trigger(match boundary {
-            0 => B::None, 1 => B::Tokens, 2 => B::Exact,
-            _ => return Err(Error::invalid("unknown boundary detail; expected 0..2")),
-        });
+pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {
+    match val {
+        0 => Ok(glrmask::MaskStrategy::Auto),
+        1 => Ok(glrmask::MaskStrategy::ParserDwa),
+        2 => Ok(glrmask::MaskStrategy::TokenTrie),
+        3 => Ok(glrmask::MaskStrategy::TokenClassTrie),
+        _ => Err(Error::invalid("unknown mask strategy; expected 0..3")),
     }
-    Ok(options)
+}
+
+pub fn mask_strategy_value(strategy: glrmask::MaskStrategy) -> u32 {
+    match strategy {
+        glrmask::MaskStrategy::Auto => 0,
+        glrmask::MaskStrategy::ParserDwa => 1,
+        glrmask::MaskStrategy::TokenTrie => 2,
+        glrmask::MaskStrategy::TokenClassTrie => 3,
+        _ => 0,
+    }
+}
+
+pub fn boundary_mask_strategy(val: u32) -> Result<glrmask::BoundaryMaskStrategy> {
+    match val {
+        0 => Ok(glrmask::BoundaryMaskStrategy::FastBuild),
+        1 => Ok(glrmask::BoundaryMaskStrategy::FastRuntime),
+        _ => Err(Error::invalid("unknown boundary mask strategy; expected 0..1")),
+    }
+}
+
+pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> u32 {
+    match strategy {
+        glrmask::BoundaryMaskStrategy::FastBuild => 0,
+        glrmask::BoundaryMaskStrategy::FastRuntime => 1,
+        _ => 0,
+    }
+}
+
+pub fn compile_options(end_tokens: Vec<u32>) -> glrmask::CompileOptions {
+    glrmask::CompileOptions::default().end_tokens(end_tokens)
 }
 
 type BorrowedState<'a> = glrmask::ConstraintState<'a>;
@@ -132,10 +156,12 @@ mod tests {
     use super::*;
     #[test]
     fn state_retains_owner_and_clones_independently() {
-        let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec())], vec![]).unwrap();
+        let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())], vec![]).unwrap();
         for mode in 0..4 {
-            let c = Arc::new(glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"")
-                .compile_with(&vocab, build_options(mode,vec![],None).unwrap()).unwrap());
+            let grammar = glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"");
+            let mut module = glrmask::Module::new(&grammar);
+            module.set_mask_strategy(mask_strategy(mode).unwrap()).unwrap();
+            let c = Arc::new(module.compile(&vocab).unwrap());
             let expected = c.start().mask();
             let mut a = State::start(c).unwrap();
             assert_eq!(a.mask().unwrap(), expected);
@@ -155,31 +181,4 @@ mod tests {
         assert!(vocab(vec![(1,vec![]),(1,vec![1])],vec![]).is_err());
         assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Panic);
     }
-}
-
-/// Validate component-local options without introducing a second compiler path.
-pub fn module_options(optimization:u32,boundary:u32)->Result<glrmask::ModuleOptions> {
-    let optimization=match optimization {
-        0=>glrmask::Optimization::Auto,1=>glrmask::Optimization::FastBuild,
-        2=>glrmask::Optimization::Balanced,3=>glrmask::Optimization::FastRuntime,
-        _=>return Err(Error::invalid("unknown optimization; expected 0..3")),
-    };
-    let boundary=match boundary {
-        0=>glrmask::BoundaryTriggerDetail::None,1=>glrmask::BoundaryTriggerDetail::Tokens,
-        2=>glrmask::BoundaryTriggerDetail::Exact,
-        _=>return Err(Error::invalid("unknown boundary detail; expected 0..2")),
-    };
-    Ok(glrmask::ModuleOptions::default().optimization(optimization).boundary_trigger(boundary))
-}
-pub fn module_option_values(options:&glrmask::ModuleOptions)->Result<(u32,u32)> {
-    let mode=match options.optimization_value() {
-        glrmask::Optimization::Auto=>0,glrmask::Optimization::FastBuild=>1,
-        glrmask::Optimization::Balanced=>2,glrmask::Optimization::FastRuntime=>3,
-        _=>return Err(Error::invalid("unsupported optimization")),
-    };
-    let boundary=match options.boundary_trigger_value() {
-        glrmask::BoundaryTriggerDetail::None=>0,glrmask::BoundaryTriggerDetail::Tokens=>1,
-        glrmask::BoundaryTriggerDetail::Exact=>2,
-    };
-    Ok((mode,boundary))
 }
