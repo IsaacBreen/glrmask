@@ -30,3 +30,16 @@ The Module/Expr public test suites separately cover independently configured
 owners, open/mixed persistence, vocabulary mismatch, failure atomicity, scoped
 expression paths and crossing original tokens. Native C/C++, Node and installed
 Python tests must exercise the artifacts actually built from the recorded source.
+
+Run the forcing pair controller after both executables are frozen:
+
+```sh
+python scripts/qualification/final_api/qualify_forcing_pair.py \
+  --baseline BASELINE_FORCING --candidate CANDIDATE_FORCING \
+  --baseline-ref BASE_SHA --candidate-ref CANDIDATE_SHA \
+  --output NEW_RESULT_DIRECTORY --repetitions 2000 --pairs 3
+```
+
+The controller verifies all 48 scenario identities and original-ID outputs,
+refuses to overwrite results, checks executable hashes before and after timing,
+and retains every raw run. Repeatability flags do not constitute acceptance.

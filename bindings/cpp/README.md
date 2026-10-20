@@ -6,6 +6,9 @@ Bring the exact token-ID-to-byte mapping from your inference backend. GLRMask co
 
 ## Owned assemblies and expressions
 
+The Module/Expr interfaces in this section are unreleased and require a matching
+source build. Published 0.3.1 packages retain the PreparedGrammar lifecycle.
+
 `Grammar` retains source and source bindings. `Module` owns an independent mutable
 snapshot, local `ModuleOptions`, and any reusable work. `Expr` composes whole
 Grammar, Module and Expr values without merging their lexical scopes.

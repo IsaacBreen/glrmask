@@ -6,6 +6,9 @@ This is **Node.js support, not browser WebAssembly**. A browser, Bun or Deno tar
 
 ## Owned assemblies and expressions
 
+The Module/Expr interfaces in this section are unreleased and require a matching
+source build. Published 0.3.1 packages retain the PreparedGrammar lifecycle.
+
 `Grammar` retains source. `Module` owns mutable assembly snapshots, local options
 and any reusable work. `Expr.choice(iterable)` and `Expr.sequence(iterable)` take
 mixed Grammar, Module and Expr snapshots. Each leaf keeps its lexical scope;

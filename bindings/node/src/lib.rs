@@ -1,3 +1,8 @@
+// Older supported Rust solvers need this budget for the legacy PreparedGrammar
+// N-API Task output's recursive GSS auto-traits. This is internal binding-crate
+// compilation only; public Grammar/Module/Expr work at the default caller budget.
+#![recursion_limit = "256"]
+
 //! Native Node-API bindings. Public JS classes live in index.cjs.
 mod arrays;
 use module_api::{NativeExpr,NativeModule};
