@@ -203,7 +203,9 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             let reloaded_eos = glrmask::Constraint::load(with_eos.save())
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));
             for eos_constraint in [&with_eos, &reloaded_eos] {
-                for len in 0..=3usize {
+                // Cover completion decisions on 364 complete byte strings,
+                // including nullable acceptance and longer recursive paths.
+                for len in 0..=5usize {
                     for number in 0..3usize.pow(len as u32) {
                         let mut word = vec![b'a'; len];
                         let mut value = number;
