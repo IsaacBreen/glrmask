@@ -98,21 +98,24 @@ atomic and cannot be rolled back by deleting already published versions.
 GitHub repository **`IsaacBreen/glrmask`**, trusted workflow filename **`release.yml`**,
 GitHub Actions environment **`release`** for all three OIDC services.
 
-1. **npm**: first approve the initial staged `@glrmask/node@0.3.0` release so the
-   actual package version is public. Repeat the same trusted-publisher setup
-   for each of the eight `@glrmask/node-<platform>` packages: npm trust is
-   per package, so every platform package needs its own **Settings → Trusted
-   Publisher** entry before its first OIDC publish. Then open each package's npm **Settings → Trusted
-   Publisher** and choose **GitHub Actions**. Use owner `IsaacBreen`, repository
-   `glrmask`, workflow **`release.yml`**, environment **`release`**, and enable
-   **Allow npm publish** (not stage-only, which would require 2FA every time).
-   The account owner must complete an interactive 2FA challenge. npm documentation
-   says a newly added trust configuration must be used for a successful first publish
-   within two days, or it will expire: register this near the **next version release**.
-   A successful trusted publish enables provenance for this public package.
-   The release workflow publishes the eight platform packages first (with
-   per-package existence checks and retries) and the thin root last, so a
-   fresh install always resolves every optional dependency.
+1. **npm**: the root `@glrmask/node@0.3.1` is already public; **do not**
+   attempt to republish the old `0.3.0` release. The eight separate
+   `@glrmask/node-<platform>` package identities may not yet be public.
+   The account owner must establish each previously unpublished package using
+   npm's permitted first-publication/2FA process, then configure **each**
+   package's **Settings → Trusted publishing → GitHub Actions** separately.
+   Use owner `IsaacBreen`, repository `glrmask`, workflow filename
+   `release.yml`, environment `release`, and enable **Allow npm publish**.
+   Do the same for the existing thin-root package, if not already configured.
+   npm's trusted-publisher configuration must successfully publish within two
+   days of creation or the configuration expires; register this near the release.
+   The account owner must complete any interactive 2FA required for the initial
+   package identities/settings. Never store npm publishing tokens in Actions.
+   The workflow publishes all eight platforms **before** the thin root and
+   checks the exact prebuilt platform tarball integrity of any version already
+   published; do not use a mismatched bootstrap tarball at the intended final
+   release version. No `v0.4.0` GitHub Release should be published until all
+   package identities/trusted publishers are ready.
    [Official npm instructions](https://docs.npmjs.com/trusted-publishers/).
 2. **PyPI**: sign in to PyPI, manage existing project **`glrmask`**, open
    **Publishing → Add a trusted publisher → GitHub Actions**. Enter owner
