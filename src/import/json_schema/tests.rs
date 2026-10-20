@@ -6162,6 +6162,7 @@ fn dependencies_property_array_requires_dependents() {
         &schema,
         br#"{"vendor": "v", "model": "m"}"#
     ));
+    // Production llguidance compatibility intentionally restricts member order.
     assert!(!schema_accepts_bytes(
         &schema,
         br#"{"model": "m", "vendor": "v"}"#
@@ -9264,7 +9265,7 @@ fn llguidance_compat_closed_optional_object_keeps_declared_property_order() {
 }
 
 #[test]
-fn json_schema_lowering_closed_optional_object_keeps_declared_property_order() {
+fn json_schema_lowering_small_closed_object_accepts_unordered_properties() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
     let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
     let schema = json!({
@@ -9277,12 +9278,59 @@ fn json_schema_lowering_closed_optional_object_keeps_declared_property_order() {
         }
     });
     let prefix = br#"{"organisations": [], ""#;
-    assert!(!schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"a"));
+    assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 300, b"a"));
     assert!(schema_mask_allows_token_after_prefix(&schema, prefix, 301, b"u"));
 }
 
 #[test]
-fn property_dependencies_preserve_declared_property_order() {
+fn json_schema_opt_in_two_and_three_property_permutations() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
+    let two_keys = json!({
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}},
+        "additionalProperties": false
+    });
+    for example in [
+        br#"{}"#.as_slice(),
+        br#"{"a": 1}"#,
+        br#"{"b": 2}"#,
+        br#"{"a": 1, "b": 2}"#,
+        br#"{"b": 2, "a": 1}"#,
+    ] {
+        assert!(
+            schema_accepts_bytes(&two_keys, example),
+            "must accept {}",
+            String::from_utf8_lossy(example)
+        );
+    }
+    assert!(!schema_accepts_bytes(&two_keys, br#"{"a": 1, "a": 2}"#));
+
+    let three_keys = json!({
+        "type": "object",
+        "properties": {"a": {"type": "integer"}, "b": {"type": "integer"}, "c": {"type": "integer"}},
+        "required": ["a"],
+        "additionalProperties": false
+    });
+    for example in [
+        br#"{"a": 1}"#.as_slice(),
+        br#"{"c": 3, "a": 1, "b": 2}"#,
+        br#"{"b": 2, "c": 3, "a": 1}"#,
+        br#"{"a": 1, "c": 3, "b": 2}"#,
+    ] {
+        assert!(
+            schema_accepts_bytes(&three_keys, example),
+            "must accept {}",
+            String::from_utf8_lossy(example)
+        );
+    }
+    assert!(!schema_accepts_bytes(&three_keys, br#"{"b": 2}"#));
+}
+
+#[test]
+fn small_property_dependencies_allow_unordered_keys() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+    let _guard = EnvVarGuard::set(GLRMASK_LLGUIDANCE_COMPAT_ENV, "0");
     let schema = json!({
         "type": "object",
         "additionalProperties": false,
@@ -9299,7 +9347,7 @@ fn property_dependencies_preserve_declared_property_order() {
     assert!(schema_accepts_bytes(&schema, br#"{}"#));
     assert!(schema_accepts_bytes(&schema, br#"{"a": "x", "c": "z"}"#));
     assert!(!schema_accepts_bytes(&schema, br#"{"c": "z"}"#));
-    assert!(!schema_accepts_bytes(&schema, br#"{"c": "z", "a": "x"}"#));
+    assert!(schema_accepts_bytes(&schema, br#"{"c": "z", "a": "x"}"#));
 }
 
 #[test]

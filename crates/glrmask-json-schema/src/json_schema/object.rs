@@ -27,6 +27,8 @@ use super::lower::{
     JSON_KEY_SEPARATOR_RULE, JSON_KEY_SUFFIX_RULE, JSON_QUOTE_RULE,
     JSON_NUMBER_RULE, JSON_OBJECT_RULE, JSON_STRING_RULE, JSON_VALUE_RULE,
 };
+
+const EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS: usize = 3;
 const LARGE_OBJECT_LITERAL_KEY_TRIE_MIN_ITEMS: usize = 64;
 const LARGE_OBJECT_KEY_TRIE_PREFIX_SPLIT_BYTES: usize = 1;
 const SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES: usize = 64;
@@ -1442,6 +1444,22 @@ impl<'a> Lowerer<'a> {
         };
 
         let mut builder = ExprNfaBuilder::new();
+        if !self.llguidance_compat_enabled()
+            && (2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len())
+        {
+            self.build_unordered_small_fixed_object_dfa(
+                &mut builder,
+                items,
+                &item_symbols,
+                |seen| accepts(seen as u64),
+            );
+            let rule_name = self.fresh_rule_name("json_closed_object_body");
+            let body = GrammarExpr::ExprNFA(Box::new(
+                builder.build().into_determinized_and_minimized(),
+            ));
+            self.add_nonterminal_rule(&rule_name, body);
+            return Ok(seq(vec![lit("{"), r(&rule_name), lit("}")]));
+        }
         let mut states = Vec::with_capacity(items.len() + 1);
         for index in 0..=items.len() {
             let prefix_masks = 1usize << index;
@@ -2813,6 +2831,60 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    // Exact subset construction for very small closed objects. JSON Schema
+    // never constrains the order of distinct object member names. The usual
+    // linear-size ordered lowering conservatively restricts that order; this
+    // bitmask DFA restores all permutations without permitting duplicate keys.
+    // The 2^n bound is deliberately small to protect cold-start latency.
+    fn build_unordered_small_fixed_object_dfa<F: Fn(usize) -> bool>(
+        &self,
+        builder: &mut ExprNfaBuilder,
+        items: &[ObjectItem],
+        item_symbols: &[[GrammarExpr; 2]],
+        accepts: F,
+    ) {
+        debug_assert!((2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len()));
+        let separator = self.item_separator_expr();
+        // Preserve the symbol ordering expected by fixed-object templates.
+        for item in item_symbols {
+            builder.add_symbol(item[0].clone());
+            builder.add_symbol(item[1].clone());
+            builder.add_symbol(separator.clone());
+        }
+        let state_count = 1usize << items.len();
+        let mut states = Vec::with_capacity(state_count);
+        states.push(builder.start_state());
+        for _ in 1..state_count {
+            states.push(builder.add_state());
+        }
+        for seen in 0..state_count {
+            if accepts(seen) {
+                builder.set_accepting(states[seen]);
+            }
+            if seen == state_count - 1 {
+                continue;
+            }
+            let before_key = if seen == 0 {
+                states[seen]
+            } else {
+                let sep_state = builder.add_state();
+                builder.add_transition(states[seen], separator.clone(), sep_state);
+                sep_state
+            };
+            for (index, item) in item_symbols.iter().enumerate() {
+                if seen & (1usize << index) != 0 {
+                    continue;
+                }
+                let key_state = builder.add_state();
+                builder.add_transition(before_key, item[0].clone(), key_state);
+                builder.add_transition(
+                    key_state,
+                    item[1].clone(),
+                    states[seen | (1usize << index)],
+                );
+            }
+        }
+    }
     fn build_ordered_fixed_object_dfa(
         &self,
         builder: &mut ExprNfaBuilder,
@@ -2951,7 +3023,25 @@ impl<'a> Lowerer<'a> {
         let sparse_direct_nfa = self.config.sparse_large_optional_objects
             && optional_count >= SPARSE_FIXED_OBJECT_MIN_OPTIONAL_PROPERTIES;
         if tail_pair.is_none() && !sparse_direct_nfa {
-            self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
+            if !self.llguidance_compat_enabled()
+                && (2..=EXACT_UNORDERED_SMALL_OBJECT_MAX_ITEMS).contains(&items.len())
+            {
+                let required_mask = items.iter().enumerate().fold(0usize, |bits, (idx, item)| {
+                    if item.required {
+                        bits | (1usize << idx)
+                    } else {
+                        bits
+                    }
+                });
+                self.build_unordered_small_fixed_object_dfa(
+                    &mut builder,
+                    items,
+                    &item_symbols,
+                    |seen| seen & required_mask == required_mask,
+                );
+            } else {
+                self.build_ordered_fixed_object_dfa(&mut builder, items, &item_symbols);
+            }
         } else {
         let mut states = vec![[0u32; 2]; items.len() + 1];
         states[0][0] = builder.start_state();
