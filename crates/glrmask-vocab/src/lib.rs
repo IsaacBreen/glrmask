@@ -91,6 +91,10 @@ impl ExactTokens {
     #[doc(hidden)]
     pub fn range_pairs(&self) -> &[(u32, u32)] { &self.ranges }
 
+    /// Complete vocabulary identity for versioned composition artifacts.
+    #[doc(hidden)]
+    pub fn target_vocab(&self) -> &Vocab { &self.vocab }
+
     /// Whether this value belongs to exactly vocab's token-ID/byte mapping.
     #[doc(hidden)]
     pub fn targets(&self, vocab: &Vocab) -> bool {

@@ -14,7 +14,7 @@ pub struct glrmask_constraint(Arc<g::Constraint>);
 pub struct glrmask_state(core::State);
 pub struct glrmask_bytes(Vec<u8>);
 pub struct glrmask_u32s(Vec<u32>);
-pub struct glrmask_requirements(Vec<(String,g::Requirement)>);
+pub struct glrmask_requirements(Vec<(String,g::UnboundExtern)>);
 pub struct glrmask_events(Vec<glrmask_marker_event>);
 
 #[repr(C)] pub struct glrmask_vocab_entry { pub id:u32, pub bytes:*const u8, pub bytes_len:usize }
@@ -80,7 +80,7 @@ unsafe fn lark_options(p:*const glrmask_lark_options)->Result<g::LarkOptions> {
     }
     Ok(result)
 }
-fn requirements(values:Vec<g::Requirement>)->glrmask_requirements {
+fn requirements(values:Vec<g::UnboundExtern>)->glrmask_requirements {
     glrmask_requirements(values.into_iter().map(|r|(r.name(),r)).collect())
 }
 
@@ -104,6 +104,8 @@ macro_rules! clone_handle {($name:ident,$ty:ident)=>{
         ffi(||unsafe{produce(out,||Ok($ty(read(p)?.0.clone())))})
     }
 };}
+mod module_api;
+pub use module_api::*;
 free!(glrmask_vocab_free,glrmask_vocab); free!(glrmask_exact_tokens_free,glrmask_exact_tokens);
 free!(glrmask_grammar_free,glrmask_grammar); free!(glrmask_prepared_free,glrmask_prepared);
 free!(glrmask_constraint_free,glrmask_constraint); free!(glrmask_state_free,glrmask_state);
@@ -225,7 +227,7 @@ data!(glrmask_bytes_data,glrmask_bytes,u8); data!(glrmask_u32s_data,glrmask_u32s
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_requirements_get(p:*const glrmask_requirements,index:usize,out:*mut glrmask_requirement)->i32 {
     ffi(||unsafe{
         let (name,r)=read(p)?.0.get(index).ok_or_else(||Error::invalid("requirement index out of range"))?;
-        let mut value=glrmask_requirement{name:name.as_ptr().cast(),name_len:name.len(),kind:match r.kind{g::ExternalKind::Token=>0,g::ExternalKind::Grammar=>1,_=>return Err(Error::invalid("unsupported requirement kind"))},has_source_span:0,start_byte:0,end_byte:0,line:0,column:0};
+        let mut value=glrmask_requirement{name:name.as_ptr().cast(),name_len:name.len(),kind:match r.kind{g::ExternalKind::Token=>0,g::ExternalKind::Grammar=>1,g::ExternalKind::LegacyGeneric=>2},has_source_span:0,start_byte:0,end_byte:0,line:0,column:0};
         if let Some(span)=r.source_span {value.has_source_span=1;value.start_byte=span.start as u64;value.end_byte=span.end as u64;value.line=span.line as u64;value.column=span.column as u64;}
         *write(out)?=value;Ok(())
     })

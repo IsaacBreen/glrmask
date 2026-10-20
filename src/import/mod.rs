@@ -508,14 +508,45 @@ pub(crate) fn compile_component_shell(
     component:&crate::grammar::glrm::ParsedComponent,
     vocab:&crate::Vocab,token_bindings:&[(&str,&[(u32,u32)])],dynamic:bool,
 )->crate::Result<Constraint> {
+    compile_component_shell_using(component,vocab,token_bindings,|named| {
+        if dynamic {
+            compile_dynamic_named_single(named,vocab,GlrTableConstruction::ExperimentalCoreMerged,false)
+        } else {
+            compile_from_named_grammar(named,vocab,"component",GlrTableConstruction::ExperimentalCoreMerged,&[])
+        }
+    })
+}
+
+/// Ordinary Dynamic resolves its internal override on the caller before jobs.
+pub(crate) fn compile_component_shell_dynamic_with_backend(
+    component:&crate::grammar::glrm::ParsedComponent,vocab:&crate::Vocab,
+    backend:crate::runtime::parser_backend::DynamicParserBackend,
+)->crate::Result<Constraint> {
+    compile_component_shell_using(component,vocab,&[],|named| {
+        compile_dynamic_named_single_with_backend(named,vocab,GlrTableConstruction::ExperimentalCoreMerged,false,backend)
+    })
+}
+
+pub(crate) fn compile_component_shell_balanced(
+    component:&crate::grammar::glrm::ParsedComponent,
+    vocab:&crate::Vocab, token_bindings:&[(&str,&[(u32,u32)])],
+)->crate::Result<Constraint> {
+    compile_component_shell_using(component,vocab,token_bindings,|named| {
+        let mut bodies=compile_bounded_template_from_named(named,vocab,GlrTableConstruction::ExperimentalCoreMerged,None)?.into_constraints();
+        if bodies.len()!=1 {return Err(crate::Error::Compilation("Balanced component requires one parser body".into()));}
+        Ok(bodies.pop().unwrap())
+    })
+}
+
+fn compile_component_shell_using(
+    component:&crate::grammar::glrm::ParsedComponent,
+    vocab:&crate::Vocab, token_bindings:&[(&str,&[(u32,u32)])],
+    compile:impl FnOnce(ast::NamedGrammar)->crate::Result<Constraint>,
+)->crate::Result<Constraint> {
     let has_open=component.declarations().names.iter().any(|name|!token_bindings.iter().any(|(bound,_)|*bound==name));
     let first=if has_open {first_external_placeholder_token_id(vocab)?}else{0};
     let parsed=component.lower_shell(first,std::iter::empty(),token_bindings)?;
-    let mut parent=if dynamic {
-        compile_dynamic_named_single(parsed.grammar,vocab,GlrTableConstruction::ExperimentalCoreMerged,false)?
-    } else {
-        compile_from_named_grammar(parsed.grammar,vocab,"component",GlrTableConstruction::ExperimentalCoreMerged,&[])?
-    };
+    let mut parent=compile(parsed.grammar)?;
     for placeholder in parsed.placeholders {
         let terminals=parent.special_token_terminals.iter().filter(|t|t.token_id==placeholder.token_id)
             .map(|t|t.terminal_id).collect::<BTreeSet<_>>();
@@ -564,10 +595,18 @@ pub(crate) fn compile_dynamic_named_single(
     named: ast::NamedGrammar, vocab: &crate::Vocab,
     table_construction: GlrTableConstruction, prepare_json_schema: bool,
 ) -> crate::Result<Constraint> {
+    compile_dynamic_named_single_with_backend(named,vocab,table_construction,prepare_json_schema,
+        crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())
+}
+
+pub(crate) fn compile_dynamic_named_single_with_backend(
+    named:ast::NamedGrammar,vocab:&crate::Vocab,table_construction:GlrTableConstruction,
+    prepare_json_schema:bool,backend:crate::runtime::parser_backend::DynamicParserBackend,
+)->crate::Result<Constraint> {
     let mut named = factor_named_grammar(named);
     if prepare_json_schema { prepare_json_schema_named(&mut named)?; }
     let dynamic = compile_dynamic_owned_with_backend(ast::lower(&named)?, vocab,
-        table_construction, crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic())?;
+        table_construction, backend)?;
     Ok(dynamic.into_constraint())
 }
 

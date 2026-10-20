@@ -746,7 +746,7 @@ mod differential_tests {
             "start root t WORD=/a|ab/ nt root=WORD \"c\"?",
             "start root t A=/[ab]+/ t B=/ab/ nt root=A \"c\" | B",
             "start root ignore WS t WS=/ +/ nt root=\"ab\"",
-            "start root t X=shortest { /a|ab/ } nt root=X \"b\"?",
+            "start root t X=(/a|ab/ - (/a|ab/ b/./s+)) nt root=X \"b\"?",
             "start root nt root=\"(\" root \" )\" | \"()\"",
             "start root nt root=\"\u{e9}\" \"a\"?",
             "start root nt root=eps",

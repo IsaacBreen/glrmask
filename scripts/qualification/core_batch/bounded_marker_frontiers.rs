@@ -12,7 +12,7 @@ fn main(){
     "start root nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2) \"c\" @mark(3)",
     "start root nt root=@mark(0) (\"a\" @mark(1) \"b\" | \"a\" @mark(2) \"c\") @mark(3)",
     "start root t A=/a|ab/ nt root=@mark(0) A @mark(1) \"c\" @mark(2)",
-    "start root t A=shortest { /a|ab/ } nt root=@mark(0) A @mark(1) \"b\" @mark(2)",
+    "start root t A=(/a|ab/ - (/a|ab/ b/./s+)) nt root=@mark(0) A @mark(1) \"b\" @mark(2)",
     "start root t WS=/ +/ ignore WS nt root=@mark(0) \"a\" @mark(1) \"b\" @mark(2)",
    ]{
     let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
@@ -24,7 +24,7 @@ fn main(){
       if !alive{continue;}
       let before=state.marker_events().to_vec();let accepting=state.is_accepting();
       let actual=state.forced_tokens().unwrap();assert_eq!(before,state.marker_events(),"query modified event batch {mode:?}");
-      assert_eq!(accepting,state.is_accepting());assert_eq!(actual,state.forced_token_ids_reference());
+      assert_eq!(accepting,state.is_accepting());assert_eq!(actual,state.forced_canonical_reference());
       let mut reference=state.clone();for id in actual{state.commit_token(id).unwrap();reference.commit_token(id).unwrap();assert_eq!(state.marker_events(),reference.marker_events());}
       assert_eq!(state.mask(),reference.mask());queries+=1;
      }
@@ -32,7 +32,7 @@ fn main(){
    }
    let mut g=Grammar::from_glrm("extern token E start root nt root=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",Token::new(9000)).unwrap();
    let c=g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();let mut state=c.start();state.commit_token(0).unwrap();
-   let before=state.marker_events().to_vec();let forced=state.forced_tokens().unwrap();assert_eq!(forced,state.forced_token_ids_reference());assert_eq!(before,state.marker_events());
+   let before=state.marker_events().to_vec();let forced=state.forced_tokens().unwrap();assert_eq!(forced,state.forced_canonical_reference());assert_eq!(before,state.marker_events());
    assert_eq!(forced,vec![9000,1]);for id in forced{state.commit_token(id).unwrap();}assert!(state.is_accepting());queries+=1;
   }
  }

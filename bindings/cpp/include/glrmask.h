@@ -47,7 +47,7 @@ enum { GLRMASK_BOUNDARY_NONE=0, GLRMASK_BOUNDARY_TOKENS=1, GLRMASK_BOUNDARY_EXAC
 #define GLRMASK_BOUNDARY_DEFAULT UINT32_MAX
 enum { GLRMASK_EBNF=0, GLRMASK_GLRM=1, GLRMASK_JSON_SCHEMA=2, GLRMASK_LARK=3 };
 enum { GLRMASK_LARK_RECOGNITION=0, GLRMASK_LARK_LLM=1 };
-enum { GLRMASK_TOKEN_REQUIREMENT=0, GLRMASK_GRAMMAR_REQUIREMENT=1 };
+enum { GLRMASK_TOKEN_REQUIREMENT=0, GLRMASK_GRAMMAR_REQUIREMENT=1, GLRMASK_LEGACY_REQUIREMENT=2 };
 
 typedef struct glrmask_vocab glrmask_vocab;
 typedef struct glrmask_exact_tokens glrmask_exact_tokens;
@@ -150,6 +150,48 @@ GLRMASK_API glrmask_status glrmask_requirements_get(const glrmask_requirements*,
 GLRMASK_API void glrmask_requirements_free(glrmask_requirements*);
 GLRMASK_API glrmask_status glrmask_events_data(const glrmask_events*,const glrmask_marker_event**,size_t*);
 GLRMASK_API void glrmask_events_free(glrmask_events*);
+
+/* Canonical owned assembly lifecycle. Options are local to each node. */
+typedef struct glrmask_module glrmask_module;
+typedef struct glrmask_expr glrmask_expr;
+typedef glrmask_requirement glrmask_unbound_extern;
+typedef struct { size_t struct_size; uint32_t optimization, boundary_trigger; } glrmask_module_options;
+typedef struct { size_t struct_size; const uint32_t* end_tokens; size_t end_tokens_len; } glrmask_compile_options;
+/* kind 0=Grammar, 1=Module, 2=Expr. All operands are snapshotted. */
+typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
+GLRMASK_API glrmask_module_options glrmask_default_module_options(void);
+GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
+GLRMASK_API void glrmask_module_free(glrmask_module*);
+GLRMASK_API void glrmask_expr_free(glrmask_expr*);
+GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module*,glrmask_module**);
+GLRMASK_API glrmask_status glrmask_expr_clone(const glrmask_expr*,glrmask_expr**);
+GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar*,const glrmask_module_options*,glrmask_module**);
+GLRMASK_API glrmask_status glrmask_module_from_expr(const glrmask_expr*,const glrmask_module_options*,glrmask_module**);
+GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr*,glrmask_grammar**);
+/* operator 0=choice, 1=sequence. Empty choice fails at materialization; empty sequence is epsilon. */
+GLRMASK_API glrmask_status glrmask_expr_new(uint32_t,const glrmask_expr_operand*,size_t,glrmask_expr**);
+GLRMASK_API glrmask_status glrmask_module_get_options(const glrmask_module*,glrmask_module_options*);
+GLRMASK_API glrmask_status glrmask_module_with_options(const glrmask_module*,const glrmask_module_options*,glrmask_module**);
+GLRMASK_API glrmask_status glrmask_module_set_options(glrmask_module*,const glrmask_module_options*);
+GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module*,const char*,size_t,const glrmask_grammar*);
+GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module*,const char*,size_t,const glrmask_module*);
+GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module*,const char*,size_t,const glrmask_expr*);
+GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module*,const char*,size_t,uint32_t);
+GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_exact_tokens*);
+GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar*,const char*,size_t,const glrmask_expr*);
+/* Mutates atomically using stored options, returning a status only. */
+GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*);
+GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
+GLRMASK_API glrmask_status glrmask_module_unbound(const glrmask_module*,glrmask_requirements**);
+GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module*,glrmask_requirements**);
+GLRMASK_API glrmask_status glrmask_grammar_unbound(const glrmask_grammar*,glrmask_requirements**);
+GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar*,glrmask_requirements**);
+GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module*,glrmask_bytes**);
+/* Loading never compiles. Optional vocabulary validates saved target identity. */
+GLRMASK_API glrmask_status glrmask_module_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_module**);
+/* Borrowed path views live as long as the owning requirements result. */
+GLRMASK_API glrmask_status glrmask_requirements_path_len(const glrmask_requirements*,size_t,size_t*);
+GLRMASK_API glrmask_status glrmask_requirements_path(const glrmask_requirements*,size_t,size_t,const char**,size_t*);
 
 #ifdef __cplusplus
 }

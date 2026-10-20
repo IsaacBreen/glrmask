@@ -69,28 +69,37 @@ Backreferences, lookaround, anchors, locale/line-anchor modes and internal
 reluctant quantifiers (`*?`, `+?`, `??`, `{m,n}?`) are rejected. Regular-language
 recognition has no implicit Python-style ordered-regex match-selection policy.
 
-## Shortest terminal language
+## Prefix-minimal terminal language
+
+Use regular-language subtraction to retain only words with no strictly shorter
+accepted prefix:
 
 ```glrm
-t THROUGH_END = shortest { /.*END/s }
+internal t THROUGH_END_BODY = /.*END/s
+t THROUGH_END = THROUGH_END_BODY - (THROUGH_END_BODY b/./s+)
 nt response = THROUGH_END "!"
 start response
 ```
 
-`shortest(L)` retains exactly the words in the regular language `L` that have no
-strictly shorter accepted prefix. For example, `shortest { /a|ab/ }` accepts `a`, not
-`ab`. The operation acts on one regular terminal expression before unrelated
+For a regular byte language `L`, its prefix-minimal language is
+`L - (L b/./s+)`. The suffix must match one or more arbitrary bytes, including
+newline and malformed UTF-8; Unicode `/./s+` is not an equivalent substitute for
+mixed byte/Unicode operands. Parenthesize alternatives and the right-hand
+concatenation. For example, `(/a|ab/) - ((/a|ab/) b/./s+)` accepts `a`, not `ab`.
+There is no native `shortest { ... }` expression form.
+
+This subtraction acts on one regular terminal expression before unrelated
 terminals are combined. It does not globally change lexer policy or commit a
-context-free rule to its first completion.
+context-free rule to its first completion. Operands may use regular terminal
+helpers, literals, regexes and regular algebra, but not parser-rule references,
+grammar calls or exact-token events. If `L` accepts epsilon, its prefix-minimal
+language is exactly epsilon; that remains invalid as an ignored terminal. Other
+terminals retain maximal-munch semantics.
 
-An operand may use regular terminal helpers, literals, regexes and regular
-algebra. It may not contain parser-rule references, grammar calls or exact-token
-events. If `L` accepts epsilon, `shortest(L)` is exactly epsilon; that remains
-invalid as an ignored terminal. Other terminals retain maximal-munch semantics.
-
-The operation is not a translation for an internal lazy quantifier. In an ordered
-regex matcher, `a+?b.*` can retain a long final suffix; shortest of the entire
-language is a different operation.
+This is not a translation for an internal lazy quantifier. In an ordered regex
+matcher, `a+?b.*` can retain a long final suffix; prefix-minimal acceptance of the
+entire language is a different operation. Lark's LLM-profile `[lazy]` annotation
+continues to provide that whole-terminal operation.
 
 ## Algebra and repetitions
 
@@ -157,9 +166,11 @@ grammar-valued parameter; token ports never accept decoded-text substitutes.
 
 Both source and prepared components can be attached while incomplete. A qualified
 path through an externally supplied child becomes available after that attachment.
-Bindings return new immutable values, so two attachments of one definition can
-have independent parameters. Complete all declared requirements before final
-compile/link. See [the guide](../GUIDE.md) for the host lifecycle.
+Source `Grammar.bind` mutates the receiving handle. Attachments capture stable
+snapshots, so later mutations of the original definition do not change earlier
+attachments, and two attachments can have independent parameters. Complete all
+declared requirements before final compile/link. See [the guide](../GUIDE.md) for
+the host lifecycle.
 
 Numeric token literals (`<[123]>`), named special-token literals (`<|name|>`) and
 inline JSON Schema (`%json`) are deliberately absent from GLRM. Bind exact events

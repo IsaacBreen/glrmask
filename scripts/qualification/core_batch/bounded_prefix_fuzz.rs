@@ -1,4 +1,4 @@
-//! Compare new no-mask forcing with the retained full-mask oracle at arbitrary
+//! Compare public canonical forcing with its retained reference at arbitrary
 //! raw byte frontiers, including frontiers not reachable by a complete model token.
 use glrmask::{BuildOptions,Constraint,Grammar,Optimization,Token,Vocab};
 use std::time::Instant;
@@ -15,7 +15,7 @@ fn main() {
         "start root nt root=\"abc\" | \"ac\" | \"abcc\"",
         "start root t A=/a|ab/ nt root=A \"c\"",
         "start root t A=/a|ab/ t B=/a|ac/ nt root=A B",
-        "start root t A=shortest { /a|ab/ } nt root=A /[bc]{1,3}/",
+        "start root t A=(/a|ab/ - (/a|ab/ b/./s+)) nt root=A /[bc]{1,3}/",
         "start root t A=/[ab]{1,3}/ - /ab|baa/ nt root=A \"c\"",
         "start root t A=/[a-c]{1,3}/ & /a.*/ nt root=A /bc?/",
         "start root nt root=\"a\"? \"b\"? \"c\"?",
@@ -38,7 +38,7 @@ fn main() {
             for prefix in &prefixes {
               let mut state=c.start();if state.commit_bytes(prefix).is_err(){continue;}
               let actual=state.forced_tokens().unwrap_or_else(|e|panic!("g{gno} {mode:?} dense={dense} loaded={is_loaded} prefix={prefix:?}: {e}"));
-              let expected=state.forced_token_ids_reference();
+              let expected=state.forced_canonical_reference();
               assert_eq!(actual,expected,"g{gno} {mode:?} dense={dense} loaded={is_loaded} prefix={prefix:?}");
               checked+=1;
             }
@@ -51,7 +51,7 @@ fn main() {
         let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         for prefix in &prefixes {
           let mut state=c.start();if state.commit_bytes(prefix).is_err(){continue;}
-          assert_eq!(state.forced_tokens().unwrap(),state.forced_token_ids_reference(),"event branch {mode:?} prefix={prefix:?}");checked+=1;
+          assert_eq!(state.forced_tokens().unwrap(),state.forced_canonical_reference(),"event branch {mode:?} prefix={prefix:?}");checked+=1;
         }
       }
     }

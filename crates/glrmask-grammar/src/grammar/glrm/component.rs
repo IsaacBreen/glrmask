@@ -75,6 +75,14 @@ impl ParsedComponent {
         let mut scope=self.scope.as_ref().clone();walk(&mut scope,"",spans);Self::from_scope(scope)
     }
 
+    /// Canonical persistence for an internal typed component, including open
+    /// interfaces. Compiler construction itself never reparses generated text.
+    pub fn to_glrm_source(&self)->Result<String,GlrMaskError> {
+        let mut out=String::from("glrm 1;\n");
+        dump_parsed_scope_v1(&self.scope,0,&mut out)?;
+        Ok(out)
+    }
+
     pub fn declarations(&self) -> &GlrmExternalDeclarations { &self.declarations }
 
     /// Bind exact events structurally. Other dependencies stay open.

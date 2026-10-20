@@ -14,6 +14,8 @@ exclude = [
     ".agents/**",
     ".github/**",
     "AGENTS.md",
+    "CORE-API.md",
+    "CORE-PROGRESS.md",
     "docs/validation/**",
     ".benchmarks/**",
     ".cache/**",
@@ -299,9 +301,26 @@ required-features = ["internal-api"]
 
 # Older supported Rust toolchains can misalign a stripped Mach-O string pool,
 # which prevents Python from loading the extension on macOS 27. This affects
-# only the Python shared library, not runtime artifacts or native benchmarks.
+# the final language-binding shared libraries, not runtime artifacts or native
+# benchmarks. The same issue affects C and Node images and debug=0 dev builds:
+# implicit strip=debuginfo can produce LC_SYMTAB.stroff % 8 == 4.
 # Upstream tracking: https://github.com/rust-lang/rust/issues/157750
 [profile.release.package._glrmask]
+strip = "none"
+
+[profile.release.package.glrmask-c]
+strip = "none"
+
+[profile.release.package.glrmask-node]
+strip = "none"
+
+[profile.dev.package._glrmask]
+strip = "none"
+
+[profile.dev.package.glrmask-c]
+strip = "none"
+
+[profile.dev.package.glrmask-node]
 strip = "none"
 
 [[test]]
@@ -373,3 +392,15 @@ path = "tests/json_schema_policy.rs"
 name = "parser_family_fallback_union"
 path = "tests/parser_family_fallback_union.rs"
 required-features = ["internal-api"]
+
+[[test]]
+name = "module_expr_core"
+path = "tests/module_expr_core.rs"
+
+[[test]]
+name = "module_lifecycle_contract"
+path = "tests/module_lifecycle_contract.rs"
+
+[[test]]
+name = "public_thread_safety"
+path = "tests/public_thread_safety.rs"

@@ -1,5 +1,11 @@
+// Older supported Rust solvers need this budget for the legacy PreparedGrammar
+// N-API Task output's recursive GSS auto-traits. This is internal binding-crate
+// compilation only; public Grammar/Module/Expr work at the default caller budget.
+#![recursion_limit = "256"]
+
 //! Native Node-API bindings. Public JS classes live in index.cjs.
 mod arrays;
+use module_api::{NativeExpr,NativeModule};
 use glrmask_binding_core::{self as core, glrmask as g};
 use napi::{bindgen_prelude::*, Env, Task, Unknown};
 use napi_derive::napi;
@@ -53,9 +59,9 @@ pub struct NativeRequirement {
     pub name:String,pub path:Vec<String>,pub kind:String,
     pub source_span:Option<Vec<f64>>,
 }
-fn requirements(values:Vec<g::Requirement>)->core::Result<Vec<NativeRequirement>> {
+fn requirements(values:Vec<g::UnboundExtern>)->core::Result<Vec<NativeRequirement>> {
     values.into_iter().map(|r|{
-        let kind=match r.kind {g::ExternalKind::Token=>"token",g::ExternalKind::Grammar=>"grammar",_=>return Err(core::Error::invalid("unsupported requirement kind"))};
+        let kind=match r.kind {g::ExternalKind::Token=>"token",g::ExternalKind::Grammar=>"grammar",g::ExternalKind::LegacyGeneric=>"legacy"};
         Ok(NativeRequirement{name:r.name(),path:r.path,kind:kind.into(),source_span:r.source_span.map(|s|vec![s.start as f64,s.end as f64,s.line as f64,s.column as f64])})
     }).collect()
 }
@@ -121,6 +127,21 @@ impl NativeExactTokens {
 pub struct NativeGrammar {inner:Handle<g::Grammar<'static>>}
 #[napi]
 impl NativeGrammar {
+    #[napi(factory)]
+    pub fn from_expr(value:&NativeExpr)->napi::Result<Self> {
+        call(||Ok(Self{inner:Handle::new(g::Grammar::from_expr(&*live(&value.inner)?)?)}))
+    }
+    #[napi]
+    pub fn module(&self)->napi::Result<NativeModule> {call(||Ok(NativeModule::new(live(&self.inner)?.module())))}
+    #[napi]
+    pub fn bind_expr(&self,name:String,value:&NativeExpr)->napi::Result<()> {
+        call(||{let child=g::Grammar::from_expr(&*live(&value.inner)?)?;live(&self.inner)?.bind(name,child)?;Ok(())})
+    }
+    #[napi]
+    pub fn unbound(&self)->napi::Result<Vec<NativeRequirement>> {call(||requirements(live(&self.inner)?.unbound()?))}
+    #[napi]
+    pub fn externs(&self)->napi::Result<Vec<NativeRequirement>> {call(||requirements(live(&self.inner)?.externs()?))}
+
     #[napi(factory)]
     pub fn from_source(format:String,source:String,profile:Option<String>,token_names:Option<BTreeMap<String,Vec<f64>>>)->napi::Result<Self> {
         call(||{
@@ -302,7 +323,7 @@ impl Task for LinkTask {
     fn compute(&mut self)->napi::Result<Self::Output> {call(||Ok(Arc::new(self.prepared.link_with(self.options.clone())?)))}
     fn resolve(&mut self,_:Env,value:Self::Output)->napi::Result<Self::JsValue> {Ok(NativeConstraint{inner:Handle::new(value)})}
 }
-enum SaveObject {Constraint(Arc<g::Constraint>,bool),Prepared(g::PreparedGrammar)}
+enum SaveObject {Module(g::Module),Constraint(Arc<g::Constraint>,bool),Prepared(g::PreparedGrammar)}
 pub struct SaveTask {object:SaveObject}
 #[napi]
 impl Task for SaveTask {
@@ -311,7 +332,7 @@ impl Task for SaveTask {
     fn compute(&mut self)->napi::Result<Self::Output> {
         call(||Ok(match &self.object {
             SaveObject::Constraint(c,false)=>c.save(),SaveObject::Constraint(c,true)=>c.save_without_vocab()?,
-            SaveObject::Prepared(p)=>p.save(),
+            SaveObject::Prepared(p)=>p.save(),SaveObject::Module(m)=>m.save(),
         }))
     }
     fn resolve(&mut self,_:Env,value:Self::Output)->napi::Result<Self::JsValue> {Ok(value.into())}
@@ -360,3 +381,5 @@ pub fn load_prepared_sync(env:Env,bytes:Unknown<'_>,vocab:Option<&NativeVocab>)-
 }
 #[napi]
 pub fn version()->String {env!("CARGO_PKG_VERSION").to_owned()}
+
+mod module_api;

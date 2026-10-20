@@ -132,6 +132,10 @@ class Grammar extends Owned {
     }
     return wrap(Grammar,invoke(() => native.NativeGrammar.fromSource('lark',string(source),profile,names)));
   }
+  static fromExpr(expr) { return wrap(Grammar,invoke(() => native.NativeGrammar.fromExpr(handle(expr,Expr)))); }
+  module() { return wrap(Module,invoke(() => handle(this,Grammar).module())); }
+  get unbound() { return requirements(invoke(() => handle(this,Grammar).unbound())); }
+  get externs() { return requirements(invoke(() => handle(this,Grammar).externs())); }
   static exact(tokens) { return wrap(Grammar,invoke(() => native.NativeGrammar.exact(handle(tokens,ExactTokens)))); }
   get requirements() { return requirements(invoke(() => handle(this,Grammar).requirements())); }
   clone() { return wrap(Grammar,invoke(() => handle(this,Grammar).clone())); }
@@ -142,7 +146,8 @@ class Grammar extends Owned {
       if (value instanceof Grammar) target.bindGrammar(name,handle(value,Grammar));
       else if (value instanceof Token) target.bindToken(name,tokenId(value.id));
       else if (value instanceof ExactTokens) target.bindTokens(name,handle(value,ExactTokens));
-      else throw new TypeError('A source binding requires Grammar, Token or ExactTokens');
+      else if (value instanceof Expr) target.bindExpr(name,handle(value,Expr));
+      else throw new TypeError('A source binding requires Grammar, Expr, Token or ExactTokens');
     });
   }
   compileSync(vocab, options) {
@@ -160,6 +165,99 @@ class Grammar extends Owned {
   async prepare(vocab, options) {
     const b = prepareOptions(options);
     return wrap(PreparedGrammar,await invokeAsync(() => handle(this,Grammar).prepare(handle(vocab,Vocab),b)));
+  }
+}
+class ModuleOptions {
+  constructor(options) {
+    const o = checkedOptions(options,['optimization','boundaryTrigger']);
+    this.optimization = o.optimization === undefined ? Optimization.Auto : o.optimization;
+    this.boundaryTrigger = o.boundaryTrigger === undefined ? BoundaryTriggerDetail.None : o.boundaryTrigger;
+    if (!modes.has(this.optimization)) throw new TypeError('Unknown optimization');
+    boundary(this.boundaryTrigger);
+    Object.freeze(this);
+  }
+}
+class CompileOptions {
+  constructor(options) {
+    const o = checkedOptions(options,['endTokens']);
+    this.endTokens = Object.freeze(o.endTokens === undefined ? [] : ids(o.endTokens));
+    Object.freeze(this);
+  }
+}
+function localOptions(options) {
+  const o = new ModuleOptions(options);
+  return [modes.get(o.optimization),boundary(o.boundaryTrigger)];
+}
+function rootOptions(options) { return new CompileOptions(options).endTokens; }
+class Expr extends Owned {
+  static _make(values, operator) {
+    // Materialize the iterator before borrowing any native handle. Getters and
+    // generators may run JS; every native operand is an immediate snapshot.
+    if (values == null || typeof values[Symbol.iterator] !== 'function') throw new TypeError('Expression operands must be iterable');
+    const parts = [];
+    try {
+      for (const value of values) parts.push(invoke(() => {
+        if (value instanceof Grammar) return native.NativeExpr.fromGrammar(handle(value,Grammar));
+        if (value instanceof Module) return native.NativeExpr.fromModule(handle(value,Module));
+        if (value instanceof Expr) return handle(value,Expr).clone();
+        throw new TypeError('Expr operands must be Grammar, Module or Expr');
+      }));
+      return wrap(Expr,invoke(() => native.NativeExpr[operator](parts)));
+    } finally { for (const part of parts) part.dispose(); }
+  }
+  static choice(values) { return Expr._make(values,'choice'); }
+  static sequence(values) { return Expr._make(values,'sequence'); }
+  clone() { return wrap(Expr,invoke(() => handle(this,Expr).clone())); }
+}
+class Module extends Owned {
+  constructor(value, options) {
+    if (value === key) { super(key,options); return; }
+    const args = localOptions(options);
+    let inner;
+    if (value instanceof Grammar) inner = invoke(() => native.NativeModule.fromGrammar(handle(value,Grammar),...args));
+    else if (value instanceof Expr) inner = invoke(() => native.NativeModule.fromExpr(handle(value,Expr),...args));
+    else throw new TypeError('Module expects Grammar or Expr');
+    super(key,inner);
+  }
+  get options() {
+    const o = invoke(() => handle(this,Module).options);
+    return new ModuleOptions({optimization:[...modes.keys()][o.optimization],boundaryTrigger:[...boundaries.keys()][o.boundaryTrigger]});
+  }
+  withOptions(options) { const args = localOptions(options); return wrap(Module,invoke(() => handle(this,Module).withOptions(...args))); }
+  setOptions(options) { const args = localOptions(options); invoke(() => handle(this,Module).setOptions(...args)); }
+  get unbound() { return requirements(invoke(() => handle(this,Module).unbound())); }
+  get externs() { return requirements(invoke(() => handle(this,Module).externs())); }
+  clone() { return wrap(Module,invoke(() => handle(this,Module).clone())); }
+  bind(name, value) {
+    string(name,'binding path');
+    invoke(() => {
+      const target = handle(this,Module);
+      if (value instanceof Grammar) target.bindGrammar(name,handle(value,Grammar));
+      else if (value instanceof Module) target.bindModule(name,handle(value,Module));
+      else if (value instanceof Expr) target.bindExpr(name,handle(value,Expr));
+      else if (value instanceof Token) target.bindToken(name,tokenId(value.id));
+      else if (value instanceof ExactTokens) target.bindTokens(name,handle(value,ExactTokens));
+      else throw new TypeError('Module.bind requires Grammar, Module, Expr, Token or ExactTokens');
+    });
+  }
+  precompileSync(vocab) { invoke(() => handle(this,Module).precompileSync(handle(vocab,Vocab))); }
+  // A concurrent mutation rejects completion instead of overwriting newer bindings.
+  async precompile(vocab) { await invokeAsync(() => handle(this,Module).precompile(handle(vocab,Vocab))); }
+  compileSync(vocab, options) {
+    const end = rootOptions(options);
+    return wrap(Constraint,invoke(() => handle(this,Module).compileSync(handle(vocab,Vocab),end)));
+  }
+  async compile(vocab, options) {
+    const end = rootOptions(options);
+    return wrap(Constraint,await invokeAsync(() => handle(this,Module).compile(handle(vocab,Vocab),end)));
+  }
+  saveSync() { return invoke(() => handle(this,Module).saveSync()); }
+  async save() { return invokeAsync(() => handle(this,Module).save()); }
+  static loadSync(data, vocab) {
+    bytes(data); return wrap(Module,invoke(() => native.loadModuleSync(data,vocab === undefined ? undefined : handle(vocab,Vocab))));
+  }
+  static async load(data, vocab) {
+    bytes(data); return wrap(Module,await invokeAsync(() => native.loadModule(data,vocab === undefined ? undefined : handle(vocab,Vocab))));
   }
 }
 class PreparedGrammar extends Owned {
@@ -226,6 +324,6 @@ class ConstraintState extends Owned {
   markerEvents() { return invoke(() => handle(this,ConstraintState).markerEvents()); }
 }
 module.exports = Object.freeze({
-  Vocab, Token, ExactTokens, Grammar, PreparedGrammar, Constraint, ConstraintState,
+  Vocab, Token, ExactTokens, Grammar, Module, ModuleOptions, CompileOptions, Expr, PreparedGrammar, Constraint, ConstraintState,
   Optimization, BoundaryTriggerDetail, LarkProfile, GlrMaskError, version:native.version(),
 });

@@ -20,6 +20,11 @@ mod graph;
 mod snapshot_map;
 mod event_cache;
 mod prepared_artifact;
+mod artifact_limits;
+mod module;
+mod expr;
+pub use module::{Module, ModuleOptions, CompileOptions, IntoModuleValue, ModuleValue};
+pub use expr::{Expr, IntoExpr};
 
 /// Build-time versus per-token cost; the variants preserve the supported grammar language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -118,7 +123,7 @@ pub type UnlinkedConstraint = PreparedGrammar;
 
 /// An unresolved typed slot. Paths distinguish the same local name in different attached children.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Requirement {
+pub struct UnboundExtern {
     /// Path segments distinguish slots in different attached children.
     pub path: Vec<String>,
     /// Token slots require exact events; grammar slots also accept components.
@@ -127,9 +132,12 @@ pub struct Requirement {
     /// Constructed components may have no source location.
     pub source_span: Option<glrmask_grammar::SourceSpan>,
 }
-impl Requirement {
+impl UnboundExtern {
     pub fn name(&self) -> String { self.path.join("::") }
 }
+
+/// Legacy diagnostic spelling. Prefer [`UnboundExtern`].
+pub type Requirement = UnboundExtern;
 
 #[derive(Debug, Clone)]
 enum ModuleBinding {
@@ -148,7 +156,7 @@ pub(crate) enum GrammarValue<'a> {
 
 #[doc(hidden)]
 pub(crate) trait IntoGrammarValue<'a> {
-    fn into_grammar_value(self) -> GrammarValue<'a>;
+    fn into_grammar_value(self) -> Result<GrammarValue<'a>>;
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +210,8 @@ impl LarkOptions {
 #[derive(Debug, Clone)]
 pub struct Grammar<'a> {
     source: GrammarSource<'a>,
+    owned_text: Arc<OnceLock<Arc<str>>>,
+    module_snapshot: Arc<OnceLock<Module>>,
     bindings: OrdMap<String, GrammarValue<'a>>,
     declarations_cache: Arc<OnceLock<Result<GlrmExternalDeclarations>>>,
     analysis: graph::SummaryCache,
@@ -311,7 +321,7 @@ impl<'a> Grammar<'a> {
     pub fn from_glrm(source: &'a str) -> Self { Self::new(GrammarSource::Glrm(source.into())) }
 
     fn new(source: GrammarSource<'a>) -> Self {
-        Self { source, bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_options:Arc::new(LarkOptions::default()),lark_document:Arc::new(OnceLock::new()) }
+        Self { source, owned_text: Arc::new(OnceLock::new()), module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_options:Arc::new(LarkOptions::default()),lark_document:Arc::new(OnceLock::new()) }
     }
 
     fn component(&self) -> Result<&ParsedComponent> {
@@ -436,17 +446,19 @@ impl<'a> Grammar<'a> {
     }
 
     /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may return an error for very large shared graphs.
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
     pub fn requirements(&self) -> Result<Vec<Requirement>> {
         graph::source_requirements(self)
     }
 
-    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, `Token` or `ExactTokens`; token slots require exact events. Attached children are snapshots. Failed binds leave this handle unchanged.
+    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, `Token` or `ExactTokens`; token slots require exact events. Attached children are snapshots. Failed binds leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
         T: IntoGrammarValue<'a>,
     {
-        let next = self.bind_value(name.as_ref(), value.into_grammar_value())?;
+        let next = self.bind_value(name.as_ref(), value.into_grammar_value()?)?;
         *self = next;
         Ok(())
     }
@@ -476,6 +488,7 @@ impl<'a> Grammar<'a> {
                 let mut next=self.clone();
                 next.bindings.insert(head.to_owned(),GrammarValue::Source(Arc::new(child)));
                 next.analysis=graph::filled_cache(previous.changed(head,Some(summary)));
+                next.module_snapshot=Arc::new(OnceLock::new());
                 graph::check_source_limits(&next)?;
                 return Ok(next);
             }
@@ -501,6 +514,7 @@ impl<'a> Grammar<'a> {
         };
         let mut next=self.clone();next.bindings.insert(name.to_owned(),value);
         next.analysis=graph::filled_cache(previous.changed(name,child_summary));
+        next.module_snapshot=Arc::new(OnceLock::new());
         graph::check_source_limits(&next)?;
         Ok(next)
     }
@@ -758,6 +772,7 @@ impl<'a> Grammar<'a> {
         let mut source=self;
         let bindings=std::mem::take(&mut source.bindings);
         source.analysis=graph::empty_cache();
+        source.module_snapshot=Arc::new(OnceLock::new());
         (source,bindings)
     }
 }
@@ -783,26 +798,37 @@ impl Grammar<'static> {
 }
 
 impl<'a> IntoGrammarValue<'a> for Grammar<'a> {
-    fn into_grammar_value(self) -> GrammarValue<'a> {
-        GrammarValue::Source(Arc::new(self))
+    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+        Ok(GrammarValue::Source(Arc::new(self)))
     }
 }
 
 impl<'a> IntoGrammarValue<'a> for &Grammar<'a> {
-    fn into_grammar_value(self) -> GrammarValue<'a> {
-        GrammarValue::Source(Arc::new(self.clone()))
+    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+        Ok(GrammarValue::Source(Arc::new(self.clone())))
     }
 }
 
 impl<'a> IntoGrammarValue<'a> for Token {
-    fn into_grammar_value(self) -> GrammarValue<'a> {
-        GrammarValue::Token(self)
+    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+        Ok(GrammarValue::Token(self))
     }
 }
 
 impl<'a> IntoGrammarValue<'a> for ExactTokens {
-    fn into_grammar_value(self) -> GrammarValue<'a> {
-        GrammarValue::ExactTokens(self)
+    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+        Ok(GrammarValue::ExactTokens(self))
+    }
+}
+
+impl<'a> IntoGrammarValue<'a> for Expr {
+    fn into_grammar_value(self)->Result<GrammarValue<'a>> {
+        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(&self)?)))
+    }
+}
+impl<'a> IntoGrammarValue<'a> for &Expr {
+    fn into_grammar_value(self)->Result<GrammarValue<'a>> {
+        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(self)?)))
     }
 }
 
@@ -1846,8 +1872,12 @@ fn compose_named_children(
     if present.is_empty() {
         return Ok(parent);
     }
-    require_composable_parser(&parent)?;
-    for &child_index in &present { require_composable_parser(&children[child_index].1)?; }
+    // This branch is only for ordinary retained-LR Dynamic components.
+    // Native components were dispatched above and may never enter LR machinery.
+    if !parent.table.is_present() || present.iter().any(|&i|
+        children[i].1.has_template_parser() || !children[i].1.table.is_present()) {
+        return Err(Error::Compilation("FastBuild/LR composition requires homogeneous retained-LR components".into()));
+    }
 
     let remaining_parent_slots = parent
         .late_grammar_slots
@@ -2266,9 +2296,32 @@ impl PreparedGrammar {
     }
 
     /// Unresolved paths, including slots inside attached children. Diagnostic expansion is bounded.
+    #[cfg(any(test,feature="internal-api"))]
+    #[doc(hidden)]
     pub fn requirements(&self)->Result<Vec<Requirement>> {
         graph::prepared_requirements(self)
     }
+
+    pub fn unbound(&self)->Result<Vec<UnboundExtern>> {graph::prepared_requirements(self)}
+
+    /// Authored slots, including bound slots and distinct attached occurrences.
+    pub fn externs(&self)->Result<Vec<UnboundExtern>> {
+        self.validate_slot_manifest()?;
+        let mut pending=vec![(self,Vec::<String>::new())];let mut out=Vec::new();let mut visits=0;
+        while let Some((module,prefix))=pending.pop() {
+            visits+=1;if visits>131_072 {return Err(Error::Compilation("expanded extern traversal exceeds its limit".into()));}
+            for (name,&kind) in module.slot_kinds.iter() {
+                let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));
+                out.push(UnboundExtern {path,kind,source_span:module.slot_spans.get(name).copied()});
+                if out.len()>65_536 {return Err(Error::Compilation("too many expanded extern paths".into()));}
+            }
+            for (name,binding) in &module.bindings {if let ModuleBinding::Module(child)=binding {
+                let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));pending.push((child,path));
+            }}
+        }
+        out.sort_by(|a,b|a.path.cmp(&b.path));Ok(out)
+    }
+
 
     fn bind_value(&self, name: &str, value: UnlinkedValue<'_>) -> Result<Self> {
         let previous=graph::prepared_summary(self)?;
@@ -3519,7 +3572,7 @@ mod tests {
     }
 
     #[test]
-    fn lr_component_composition_returns_compilation_error() {
+    fn mixed_native_lr_component_composition_returns_compilation_error() {
         let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec()), (2, b"xy".to_vec())]);
         let lr = |source: &str| crate::import::compile_dynamic_glrm_fixture(
             source, &vocab, crate::runtime::parser_backend::DynamicParserBackend::LrTable,
@@ -3535,14 +3588,20 @@ mod tests {
             parent.bind_grammar("child", &child).unwrap_err(),
             parent.bind_grammar_dynamic_boundary("child", &child).unwrap_err()] {
             assert!(matches!(error, Error::Compilation(_)));
-            assert!(error.to_string().contains("LR-backed components are unsupported"));
+            let message=error.to_string();
+            assert!(message.contains("LR-backed components are unsupported") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
         }
         let lr_parent = lr(source);
         let native_child = RuntimeConstraint::compile(Grammar::ebnf("start ::= 'y'"), &vocab).unwrap();
         for error in [lr_parent.bind_grammar("child", &native_child).unwrap_err(),
             lr_parent.bind_grammar_dynamic_boundary("child", &native_child).unwrap_err()] {
             assert!(matches!(error, Error::Compilation(_)));
-            assert!(error.to_string().contains("LR-backed components are unsupported"));
+            let message=error.to_string();
+            assert!(message.contains("LR-backed components are unsupported") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
         }
         // Failed linking must leave the retained LR object usable.
         assert_eq!(child.start().mask()[0] & 2, 2);

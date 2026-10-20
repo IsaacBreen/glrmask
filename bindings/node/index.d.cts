@@ -23,8 +23,9 @@ export interface SourceSpan {
 }
 export interface Requirement {
   readonly name:string; readonly path:readonly string[];
-  readonly kind:'token'|'grammar'; readonly sourceSpan:SourceSpan|null;
+  readonly kind:'token'|'grammar'|'legacy'; readonly sourceSpan:SourceSpan|null;
 }
+export type UnboundExtern = Requirement;
 export interface MarkerEvent {readonly id:number; readonly byteOffset:bigint}
 export interface VocabOptions {exactOnlyIds?:Iterable<number>}
 export interface PrepareOptions {boundaryTrigger?:BoundaryTriggerDetail}
@@ -68,9 +69,13 @@ export declare class Grammar implements Disposable {
   static fromJsonSchema(schema:unknown):Grammar;
   static fromLark(source:string,options?:LarkOptions):Grammar;
   static exact(tokens:ExactTokens):Grammar;
+  static fromExpr(expr:Expr):Grammar;
+  module():Module;
+  readonly unbound:UnboundExtern[];
+  readonly externs:UnboundExtern[];
   readonly requirements:Requirement[];
   /** Mutates this handle transactionally; qualified paths use ::. */
-  bind(name:string,value:Grammar|Token|ExactTokens):void;
+  bind(name:string,value:Grammar|Expr|Token|ExactTokens):void;
   clone():Grammar;
   /** Snapshots inputs immediately and compiles on a native worker, without blocking the JS event loop. */
   compile(vocab:Vocab,options?:BuildOptions):Promise<Constraint>;
@@ -78,6 +83,51 @@ export declare class Grammar implements Disposable {
   compileSync(vocab:Vocab,options?:BuildOptions):Constraint;
   prepare(vocab:Vocab,options?:PrepareOptions):Promise<PreparedGrammar>;
   prepareSync(vocab:Vocab,options?:PrepareOptions):PreparedGrammar;
+  dispose():void;
+  [Symbol.dispose]():void;
+}
+export interface ModuleSettings {optimization?:Optimization; boundaryTrigger?:BoundaryTriggerDetail}
+export interface RootSettings {endTokens?:Iterable<number>}
+/** Frozen component-local snapshot; children retain their own settings. */
+export declare class ModuleOptions {
+  constructor(options?:ModuleSettings);
+  readonly optimization:Optimization;
+  readonly boundaryTrigger:BoundaryTriggerDetail;
+}
+export declare class CompileOptions {
+  constructor(options?:RootSettings);
+  readonly endTokens:readonly number[];
+}
+/** Immutable expression of whole independently scoped source/module snapshots. */
+export declare class Expr implements Disposable {
+  private constructor();
+  private readonly __exprBrand:void;
+  static choice(values:Iterable<Grammar|Module|Expr>):Expr;
+  static sequence(values:Iterable<Grammar|Module|Expr>):Expr;
+  clone():Expr;
+  dispose():void;
+  [Symbol.dispose]():void;
+}
+/** Mutable owned assembly; no vocabulary is required until precompile or compile. */
+export declare class Module implements Disposable {
+  private readonly __moduleBrand:void;
+  constructor(value:Grammar|Expr,options?:ModuleSettings);
+  readonly options:ModuleOptions;
+  readonly unbound:UnboundExtern[];
+  readonly externs:UnboundExtern[];
+  withOptions(options:ModuleSettings):Module;
+  setOptions(options:ModuleSettings):void;
+  bind(path:string,value:Grammar|Module|Expr|Token|ExactTokens):void;
+  clone():Module;
+  /** Mutates atomically; concurrent mutations reject completion, preserving newer data. */
+  precompile(vocab:Vocab):Promise<void>;
+  precompileSync(vocab:Vocab):void;
+  compile(vocab:Vocab,options?:RootSettings):Promise<Constraint>;
+  compileSync(vocab:Vocab,options?:RootSettings):Constraint;
+  save():Promise<Uint8Array>;
+  saveSync():Uint8Array;
+  static load(data:Uint8Array,vocab?:Vocab):Promise<Module>;
+  static loadSync(data:Uint8Array,vocab?:Vocab):Module;
   dispose():void;
   [Symbol.dispose]():void;
 }

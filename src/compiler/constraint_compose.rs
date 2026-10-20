@@ -19046,6 +19046,7 @@ fn build_composed_constraint_unfinalized(
     defer_internal_token_bytes: bool,
     defer_dynamic_mask_vocab: bool,
     vocab: &Vocab,
+    retained_lr_coordinator: bool,
 ) -> ConstraintComposition {
     let tokenizer = tokenizer.into();
     let total_started_at = Instant::now();
@@ -19128,7 +19129,12 @@ fn build_composed_constraint_unfinalized(
         direct_regular_dynamic_hot_frontiers: Vec::new(),
         direct_regular_parser_state_acceptance: Vec::new(),
         direct_regular_automaton: None,
-        table: table.into(),
+        table: if retained_lr_coordinator {
+            // Only a nonexecutable coordinate shell. Actual LR execution stays
+            // in the retained Dynamic leaves; native constructors never use it.
+            assert!(table.num_states==0 && table.action.is_empty() && table.goto.is_empty());
+            crate::runtime::parser_backend::ParserTableStorage::explicit(table)
+        } else {table.into()},
         terminal_display_names,
         tokenizer,
         boundary_completion_index: None,
@@ -19277,6 +19283,7 @@ fn finalize_composed_constraint(
         false,
         false,
         vocab,
+        false,
     );
     composition.constraint.parser_top_accept = parser_top_accept;
     let lexer_product_started_at = Instant::now();
@@ -19678,6 +19685,7 @@ fn compose_dynamic_recursive_shared_fast(
         true,
         true,
         vocab,
+        true,
     );
     let coordinator_ms = coordinator_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -20765,7 +20773,29 @@ fn compose_constraints_owned_parent_impl(
             .map(|(&count, offset)| (0..count).map(|local| vec![offset + local]).collect()).collect();
         return Ok(ConstraintComposition { constraint, terminal_offsets, tokenizer_state_offsets, parser_state_relations });
     }
-    panic!("LR-BACKED CONSTRAINT COMPOSITION IS FORBIDDEN");
+    // Ordinary Dynamic has a real executable table in every leaf. Reuse the
+    // existing recursive linker, never a native-to-LR reconstruction or a
+    // flattened source/compiler view. Its nullable/global-ignore boundary is
+    // checked by that linker and returns a capability error.
+    if explicit_segmented_boundary != Some(SegmentedBoundaryBackend::Dynamic)
+        || !parent.table.is_present()
+        || children.iter().any(|input|input.constraint.has_template_parser() || !input.constraint.table.is_present()) {
+        return Err("FastBuild/LR composition requires homogeneous retained-LR Dynamic components".into());
+    }
+    let shared=shared_children.ok_or("retained-LR composition requires owned shared children")?;
+    let owned=shared.iter().map(|child| {
+        let mut child=child.clone();
+        if child.deferred_composition_metadata_blob.is_some() && !child.composition_link_metadata_materialized {
+            Arc::make_mut(&mut child).materialize_composition_link_metadata_for_compilation()?;
+        }
+        Ok(child)
+    }).collect::<Result<Vec<_>,String>>()?;
+    let inputs=children.iter().zip(&owned).map(|(input,child)|CompiledSubgrammarInput {
+        placeholder_terminal:input.placeholder_terminal,
+        additional_placeholder_terminals:input.additional_placeholder_terminals,
+        constraint:child.as_ref(),
+    }).collect::<Vec<_>>();
+    compose_dynamic_recursive_shared_fast(parent,&inputs,&owned,vocab)
 }
 
 // Keep the unsupported compiler reference in a separate frame. Debug builds
@@ -22067,6 +22097,7 @@ fn compose_constraints_owned_parent_legacy_impl(
             true,
             explicit_segmented_boundary.is_some(),
             vocab,
+        false,
         );
         let unfinalized_ms = unfinalized_started_at.elapsed().as_secs_f64() * 1000.0;
         result.constraint.composition_parser_templates_by_terminal =
@@ -22940,6 +22971,7 @@ fn compose_constraints_owned_parent_legacy_impl(
         true,
         false,
         vocab,
+        false,
     );
     result.constraint.composition_parser_templates_by_terminal =
         composition_parser_templates_by_terminal;

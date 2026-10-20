@@ -75,9 +75,12 @@ text[lazy]: /.*END/s
 ```
 
 The body must be representable as a regular terminal expression. `[lazy]` means
-prefix-minimal acceptance of the whole expression, the same operation as native
-GLRM `shortest { ... }`. It does not apply to arbitrary CFG rules, grammar calls,
-exact events, or a regularization that erases implicit ignore boundaries.
+prefix-minimal acceptance of the whole expression: it retains words with no
+strictly shorter accepted prefix. Native GLRM expresses the same regular byte
+language as `L - (L b/./s+)`, with parentheses around compound operands; it has no
+`shortest { ... }` expression form. `[lazy]` does not apply to arbitrary CFG rules,
+grammar calls, exact events, or a regularization that erases implicit ignore
+boundaries.
 
 Internal reluctant quantifiers such as `/a+?b.*/` are rejected, not silently treated
 as ordinary quantifiers or translated into a different whole-terminal language.

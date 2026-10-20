@@ -275,7 +275,9 @@ jobs:
           --test core_batch --test final_public_api --test final_public_api_review
           --test prepared_components --test end_tokens --test token_range_bindings
           --test lark_compatibility --test marker_events --test marker_commit
-          --test public_optimization_modes
+          --test public_optimization_modes --test module_expr_core --test public_thread_safety
+      - name: Module sharing, options and artifact integrity
+        run: cargo test --locked --release -p glrmask --features internal-api --lib public_api::module
       - name: Exact boundary metadata variants and deferred policy scoping
         run: cargo test --locked --release -p glrmask --features internal-api --lib public_api::final_boundary_option_tests
       - name: Linux tracing remains compatible with the glibc baseline

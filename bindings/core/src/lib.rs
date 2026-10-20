@@ -156,3 +156,30 @@ mod tests {
         assert_eq!(guarded::<()>(|| panic!("test containment")).unwrap_err().kind, ErrorKind::Panic);
     }
 }
+
+/// Validate component-local options without introducing a second compiler path.
+pub fn module_options(optimization:u32,boundary:u32)->Result<glrmask::ModuleOptions> {
+    let optimization=match optimization {
+        0=>glrmask::Optimization::Auto,1=>glrmask::Optimization::FastBuild,
+        2=>glrmask::Optimization::Balanced,3=>glrmask::Optimization::FastRuntime,
+        _=>return Err(Error::invalid("unknown optimization; expected 0..3")),
+    };
+    let boundary=match boundary {
+        0=>glrmask::BoundaryTriggerDetail::None,1=>glrmask::BoundaryTriggerDetail::Tokens,
+        2=>glrmask::BoundaryTriggerDetail::Exact,
+        _=>return Err(Error::invalid("unknown boundary detail; expected 0..2")),
+    };
+    Ok(glrmask::ModuleOptions::default().optimization(optimization).boundary_trigger(boundary))
+}
+pub fn module_option_values(options:&glrmask::ModuleOptions)->Result<(u32,u32)> {
+    let mode=match options.optimization_value() {
+        glrmask::Optimization::Auto=>0,glrmask::Optimization::FastBuild=>1,
+        glrmask::Optimization::Balanced=>2,glrmask::Optimization::FastRuntime=>3,
+        _=>return Err(Error::invalid("unsupported optimization")),
+    };
+    let boundary=match options.boundary_trigger_value() {
+        glrmask::BoundaryTriggerDetail::None=>0,glrmask::BoundaryTriggerDetail::Tokens=>1,
+        glrmask::BoundaryTriggerDetail::Exact=>2,
+    };
+    Ok((mode,boundary))
+}

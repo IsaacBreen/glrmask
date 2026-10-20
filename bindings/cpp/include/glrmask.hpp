@@ -20,7 +20,7 @@ using Bytes = std::vector<std::uint8_t>;
 enum class Optimization : std::uint32_t { Auto=0, FastBuild=1, Balanced=2, FastRuntime=3 };
 enum class BoundaryTriggerDetail : std::uint32_t { None=0, Tokens=1, Exact=2 };
 enum class LarkProfile : std::uint32_t { Recognition=0, Llm=1 };
-enum class RequirementKind { Token, Grammar };
+enum class RequirementKind { Token, Grammar, Legacy };
 class Error : public std::runtime_error {
     glrmask_status status_;
 public:
@@ -34,6 +34,16 @@ struct Requirement {
     std::vector<std::string> path;
     RequirementKind kind;
     std::optional<SourceSpan> source_span;
+};
+using UnboundExtern = Requirement; // Legacy name retained for migration.
+struct ModuleOptions {
+    Optimization optimization=Optimization::Auto;
+    BoundaryTriggerDetail boundary_trigger=BoundaryTriggerDetail::None;
+    glrmask_module_options native() const noexcept {return {sizeof(glrmask_module_options),static_cast<std::uint32_t>(optimization),static_cast<std::uint32_t>(boundary_trigger)};}
+};
+struct CompileOptions {
+    std::vector<TokenId> end_tokens;
+    glrmask_compile_options native() const noexcept {return {sizeof(glrmask_compile_options),end_tokens.data(),end_tokens.size()};}
 };
 struct VocabEntry {
     TokenId id;
@@ -97,12 +107,11 @@ inline std::vector<Requirement> take_requirements(glrmask_requirements* raw) {
         glrmask_requirement value{}; check(glrmask_requirements_get(raw,i,&value));
         Requirement r; r.name.assign(value.name,value.name_len);
         r.kind=value.kind==GLRMASK_TOKEN_REQUIREMENT ? RequirementKind::Token : RequirementKind::Grammar;
-        std::size_t begin=0;
-        while (true) {
-            const auto end=r.name.find("::",begin);
-            r.path.push_back(r.name.substr(begin,end==std::string::npos ? end : end-begin));
-            if (end==std::string::npos) break;
-            begin=end+2;
+        r.kind=value.kind==0 ? RequirementKind::Token : value.kind==1 ? RequirementKind::Grammar : RequirementKind::Legacy;
+        std::size_t segments=0;check(glrmask_requirements_path_len(raw,i,&segments));
+        for (std::size_t j=0;j<segments;++j) {
+            const char* text=nullptr;std::size_t size=0;check(glrmask_requirements_path(raw,i,j,&text,&size));
+            r.path.emplace_back(text,size);
         }
         if (value.has_source_span) r.source_span=SourceSpan{value.start_byte,value.end_byte,value.line,value.column};
         result.push_back(std::move(r));
@@ -113,6 +122,8 @@ inline std::vector<Requirement> take_requirements(glrmask_requirements* raw) {
 class Vocab;
 class Grammar;
 class PreparedGrammar;
+class Module;
+class Expr;
 class Constraint;
 class ConstraintState;
 class ExactTokens : public detail::Owned<glrmask_exact_tokens,glrmask_exact_tokens_free,glrmask_exact_tokens_clone> {
@@ -169,6 +180,13 @@ public:
     static Grammar exact(const ExactTokens& tokens) {
         glrmask_grammar* p=nullptr; detail::check(glrmask_grammar_exact(tokens.native_handle(),&p)); return Grammar(p);
     }
+    static Grammar from_expr(const Expr&);
+    Module module() const;
+    void bind(std::string_view name,const Expr& value);
+    std::vector<UnboundExtern> unbound() const {return requirements();}
+    std::vector<UnboundExtern> externs() const {
+        glrmask_requirements* p=nullptr;detail::check(glrmask_grammar_externs(native_handle(),&p));return detail::take_requirements(p);
+    }
     Grammar clone() const { return *this; }
     void bind(std::string_view name,const Grammar& value) { detail::check(glrmask_grammar_bind_grammar(native_handle(),name.data(),name.size(),value.native_handle())); }
     void bind(std::string_view name,Token value) { detail::check(glrmask_grammar_bind_token(native_handle(),name.data(),name.size(),value.id)); }
@@ -179,6 +197,69 @@ public:
     PreparedGrammar prepare(const Vocab&,std::optional<BoundaryTriggerDetail> boundary=std::nullopt) const;
     Constraint compile(const Vocab&,const BuildOptions& options={}) const;
 };
+// Operand handles are borrowed only during expression construction; the result owns snapshots.
+struct ExprOperand {
+    glrmask_expr_operand value;
+    ExprOperand(const Grammar&);
+    ExprOperand(const Module&);
+    ExprOperand(const Expr&);
+};
+class Expr : public detail::Owned<glrmask_expr,glrmask_expr_free,glrmask_expr_clone> {
+    using Base=detail::Owned<glrmask_expr,glrmask_expr_free,glrmask_expr_clone>;
+    explicit Expr(glrmask_expr* p):Base(p) {}
+    static Expr make(std::uint32_t kind,const std::vector<ExprOperand>& values) {
+        std::vector<glrmask_expr_operand> items;items.reserve(values.size());
+        for(const auto& value:values)items.push_back(value.value);
+        glrmask_expr* p=nullptr;detail::check(glrmask_expr_new(kind,items.data(),items.size(),&p));return Expr(p);
+    }
+public:
+    static Expr choice(const std::vector<ExprOperand>& values) {return make(0,values);}
+    static Expr sequence(const std::vector<ExprOperand>& values) {return make(1,values);}
+    Expr clone() const {return *this;}
+};
+class Module : public detail::Owned<glrmask_module,glrmask_module_free,glrmask_module_clone> {
+    using Base=detail::Owned<glrmask_module,glrmask_module_free,glrmask_module_clone>;
+    explicit Module(glrmask_module* p):Base(p) {}
+    static glrmask_module* create(const Grammar& grammar,const ModuleOptions& options) {
+        auto o=options.native();glrmask_module* p=nullptr;detail::check(glrmask_module_new(grammar.native_handle(),&o,&p));return p;
+    }
+    static glrmask_module* create(const Expr& expr,const ModuleOptions& options) {
+        auto o=options.native();glrmask_module* p=nullptr;detail::check(glrmask_module_from_expr(expr.native_handle(),&o,&p));return p;
+    }
+public:
+    explicit Module(const Grammar& grammar,const ModuleOptions& options={}):Base(create(grammar,options)) {}
+    explicit Module(const Expr& expr,const ModuleOptions& options={}):Base(create(expr,options)) {}
+    Module clone() const {return *this;}
+    ModuleOptions options() const {
+        glrmask_module_options o{};detail::check(glrmask_module_get_options(native_handle(),&o));
+        return {static_cast<Optimization>(o.optimization),static_cast<BoundaryTriggerDetail>(o.boundary_trigger)};
+    }
+    Module with_options(const ModuleOptions& options) const {
+        auto o=options.native();glrmask_module* p=nullptr;detail::check(glrmask_module_with_options(native_handle(),&o,&p));return Module(p);
+    }
+    void set_options(const ModuleOptions& options) {auto o=options.native();detail::check(glrmask_module_set_options(native_handle(),&o));}
+    void bind(std::string_view name,const Grammar& value) {detail::check(glrmask_module_bind_grammar(native_handle(),name.data(),name.size(),value.native_handle()));}
+    void bind(std::string_view name,const Module& value) {detail::check(glrmask_module_bind_module(native_handle(),name.data(),name.size(),value.native_handle()));}
+    void bind(std::string_view name,const Expr& value) {detail::check(glrmask_module_bind_expr(native_handle(),name.data(),name.size(),value.native_handle()));}
+    void bind(std::string_view name,Token value) {detail::check(glrmask_module_bind_token(native_handle(),name.data(),name.size(),value.id));}
+    void bind(std::string_view name,const ExactTokens& value) {detail::check(glrmask_module_bind_tokens(native_handle(),name.data(),name.size(),value.native_handle()));}
+    void precompile(const Vocab& vocab) {detail::check(glrmask_module_precompile(native_handle(),vocab.native_handle()));}
+    Constraint compile(const Vocab&,const CompileOptions& options={}) const;
+    std::vector<UnboundExtern> unbound() const {glrmask_requirements* p=nullptr;detail::check(glrmask_module_unbound(native_handle(),&p));return detail::take_requirements(p);}
+    std::vector<UnboundExtern> externs() const {glrmask_requirements* p=nullptr;detail::check(glrmask_module_externs(native_handle(),&p));return detail::take_requirements(p);}
+    Bytes save() const {glrmask_bytes* p=nullptr;detail::check(glrmask_module_save(native_handle(),&p));return detail::take_bytes(p);}
+    static Module load(const Bytes& bytes,const Vocab* vocab=nullptr) {
+        glrmask_module* p=nullptr;detail::check(glrmask_module_load(bytes.data(),bytes.size(),vocab?vocab->native_handle():nullptr,&p));return Module(p);
+    }
+};
+inline ExprOperand::ExprOperand(const Grammar& value):value{0,value.native_handle()} {}
+inline ExprOperand::ExprOperand(const Module& value):value{1,value.native_handle()} {}
+inline ExprOperand::ExprOperand(const Expr& value):value{2,value.native_handle()} {}
+inline Grammar Grammar::from_expr(const Expr& expr) {
+    glrmask_grammar* p=nullptr;detail::check(glrmask_grammar_from_expr(expr.native_handle(),&p));return Grammar(p);
+}
+inline Module Grammar::module() const {return Module(*this);}
+inline void Grammar::bind(std::string_view name,const Expr& value) {detail::check(glrmask_grammar_bind_expr(native_handle(),name.data(),name.size(),value.native_handle()));}
 class PreparedGrammar : public detail::Owned<glrmask_prepared,glrmask_prepared_free,glrmask_prepared_clone> {
     using Base=detail::Owned<glrmask_prepared,glrmask_prepared_free,glrmask_prepared_clone>;
     explicit PreparedGrammar(glrmask_prepared* p) : Base(p) {}
@@ -200,7 +281,7 @@ public:
 class Constraint : public detail::Owned<glrmask_constraint,glrmask_constraint_free,glrmask_constraint_clone> {
     using Base=detail::Owned<glrmask_constraint,glrmask_constraint_free,glrmask_constraint_clone>;
     explicit Constraint(glrmask_constraint* p) : Base(p) {}
-    friend class Grammar; friend class PreparedGrammar;
+    friend class Grammar; friend class PreparedGrammar; friend class Module;
 public:
     Constraint clone() const { return *this; }
     ConstraintState start() const;
@@ -243,6 +324,10 @@ inline PreparedGrammar Grammar::prepare(const Vocab& vocab,std::optional<Boundar
 inline Constraint Grammar::compile(const Vocab& vocab,const BuildOptions& options) const {
     const auto native=options.native(); glrmask_constraint* p=nullptr;
     detail::check(glrmask_grammar_compile(native_handle(),vocab.native_handle(),&native,&p)); return Constraint(p);
+}
+inline Constraint Module::compile(const Vocab& vocab,const CompileOptions& options) const {
+    const auto native=options.native();glrmask_constraint* p=nullptr;
+    detail::check(glrmask_module_compile(native_handle(),vocab.native_handle(),&native,&p));return Constraint(p);
 }
 inline Constraint PreparedGrammar::link(const BuildOptions& options) const {
     const auto native=options.native(); glrmask_constraint* p=nullptr;

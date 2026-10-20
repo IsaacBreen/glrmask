@@ -4,6 +4,52 @@
 
 This is **Node.js support, not browser WebAssembly**. A browser, Bun or Deno target is not implied by the JavaScript interface. Bring your inference backend's exact token-ID-to-byte mapping; the package does not run a model, download a tokenizer, apply GPU logits, or choose a sampling policy.
 
+## Owned assemblies and expressions
+
+The Module/Expr interfaces in this section are unreleased and require a matching
+source build. Published 0.3.1 packages retain the PreparedGrammar lifecycle.
+
+`Grammar` retains source. `Module` owns mutable assembly snapshots, local options
+and any reusable work. `Expr.choice(iterable)` and `Expr.sequence(iterable)` take
+mixed Grammar, Module and Expr snapshots. Each leaf keeps its lexical scope;
+paths use `leaf0`, `leaf1`, and so on, without operator path segments.
+
+```js
+const {Vocab,Grammar,Module,ModuleOptions,Expr,Optimization} = require('@glrmask/node');
+const vocab = new Vocab([[0,Buffer.from('xay')],[1,Buffer.from('xby')]]);
+const child = new Module(Grammar.fromEbnf('start ::= "a"'),
+  new ModuleOptions({optimization:Optimization.Balanced}));
+await child.precompile(vocab);
+const parent = Grammar.fromGlrm(
+  'glrm 1; start start; extern grammar child; nt start = "x" child "y";').module();
+parent.bind('child',child); // Also accepts cold Grammar, Expr, Token and ExactTokens.
+const restored = await Module.load(await parent.save(),vocab);
+const constraint = await restored.compile(vocab);
+const expression = Expr.choice([child,Grammar.fromEbnf('start ::= "b"')]);
+```
+
+`bind` mutates atomically and returns undefined; `precompile` returns
+`Promise<void>`. Explicit `precompileSync`, `compileSync`, `saveSync` and
+`loadSync` methods block the caller. Async compile/save capture snapshots at
+scheduling, retaining their native owners after JS disposal. Async precompile
+checks the receiver revision at completion: concurrent mutation rejects the
+promise and preserves newer bindings; retry against the current snapshot.
+
+`options` is a frozen ModuleOptions snapshot. `withOptions` returns an independent
+configured copy; `setOptions` changes local settings atomically. Retained local
+work prevents incompatible option changes. Children retain their own settings;
+final compile accepts only `{endTokens}`. `unbound` and `externs` return frozen
+entries with name, path, kind and sourceSpan. Copies share immutable work and
+retain independent mutable bindings.
+
+Loading never compiles; the optional vocabulary validates exact saved target
+identity. Empty sequence accepts epsilon; empty choice fails when materialized.
+`Grammar.fromExpr` and source Grammar.bind reject configured or prepared leaves.
+Standalone FastBuild modules retain LR work; explicit composition edges require
+native components and reject unsupported LR combinations without conversion.
+The older PreparedGrammar API remains available for migration; new assembly code
+uses Module.
+
 ## Installation
 
 Use Node.js 22 or newer. This source revision prepares a thin root: `@glrmask/node`
