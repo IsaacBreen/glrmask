@@ -125,7 +125,19 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                         assert_eq!(committed, original_cfg_viable,
                             "seed {seed} mode {mode:?}: prefix viability for {prefix:?}");
                         if committed {
+                            // The byte-fed and token-fed states must expose
+                            // the same future language at EVERY viable
+                            // source-CFG prefix, not only complete witnesses.
+                            let mut separately_fed = c.start();
+                            for &byte in &prefix {
+                                separately_fed.commit_token(u32::from(byte - b'a'))
+                                    .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} token-feed prefix {prefix:?}: {e:?}"));
+                            }
+                            assert_eq!(state.is_accepting(), separately_fed.is_accepting(),
+                                "seed {seed} mode {mode:?} byte/token prefix acceptance {prefix:?}");
                             let mask = state.mask();
+                            assert_eq!(mask, separately_fed.mask(),
+                                "seed {seed} mode {mode:?} byte/token prefix masks {prefix:?}");
                             for (id, token) in token_bytes.into_iter().enumerate() {
                                 let mut extended = prefix.clone();
                                 extended.extend_from_slice(token);
@@ -134,6 +146,18 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                                     .is_some_and(|w| w & (1u32 << (id % 32)) != 0);
                                 assert_eq!(actual_allowed, expected_allowed,
                                     "seed {seed} mode {mode:?} mask token {id} after {prefix:?}");
+                                if actual_allowed {
+                                    let mut by_token = state.clone();
+                                    by_token.commit_token(id as u32)
+                                        .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} allowed token {id} after {prefix:?}: {e:?}"));
+                                    let mut by_bytes = c.start();
+                                    by_bytes.commit_bytes(&extended)
+                                        .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} viable extended prefix {extended:?}: {e:?}"));
+                                    assert_eq!(by_token.is_accepting(), by_bytes.is_accepting(),
+                                        "seed {seed} mode {mode:?} token-vs-byte continuation acceptance {extended:?}");
+                                    assert_eq!(by_token.mask(), by_bytes.mask(),
+                                        "seed {seed} mode {mode:?} token-vs-byte continuation mask {extended:?}");
+                                }
                             }
                         }
                     }
