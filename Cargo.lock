@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "_glrmask"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "glrmask",
  "libmimalloc-sys",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "bincode",
@@ -561,7 +561,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-binding-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "glrmask",
  "self_cell",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-c"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "glrmask-binding-core",
 ]
@@ -663,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-node"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "glrmask-binding-core",
  "napi",

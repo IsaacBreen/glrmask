@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(glrmask VERSION 0.3.1 LANGUAGES C CXX)
+project(glrmask VERSION 0.4.0 LANGUAGES C CXX)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 option(GLRMASK_SHARED "Use the Rust shared library instead of the static library" OFF)
@@ -127,6 +127,9 @@ if(GLRMASK_BUILD_TESTS)
     add_test(NAME glrmask_cpp_small_pthread_stack COMMAND glrmask_cpp_tests --thread-stack-probe 131072)
   endif()
   add_executable(glrmask_c_tests tests/c_api.c)
+  # Keep the binary-version assertion aligned with the package's CMake
+  # version on every future release; avoid a second hardcoded version.
+  target_compile_definitions(glrmask_c_tests PRIVATE GLRMASK_TEST_EXPECTED_VERSION="${PROJECT_VERSION}")
   target_link_libraries(glrmask_c_tests PRIVATE glrmask::c)
   glrmask_runtime_for(glrmask_c_tests)
   add_test(NAME glrmask_c COMMAND glrmask_c_tests)

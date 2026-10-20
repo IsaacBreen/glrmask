@@ -14,7 +14,7 @@ const closed=fn=>assert.throws(fn,e=>e instanceof GlrMaskError && e.code==='GLRM
 for(const optimization of modes) {
   test(`${optimization}: packed masks, sparse IDs, aliases, forcing, clone and owner disposal`,()=>{
     const v=vocab(),g=simple(),c=g.compileSync(v,{optimization}),s=c.start();
-    assert.equal(version,'0.3.1');assert.equal(c.maskLength,3);assert.equal(s.maskLength,3);
+    assert.equal(version,require('../package.json').version);assert.equal(c.maskLength,3);assert.equal(s.maskLength,3);
     const initial=s.mask();assert.ok(types.isUint32Array(initial));
     assert.ok(allowed(initial,0));assert.ok(allowed(initial,31));assert.ok(allowed(initial,32));
     assert.ok(!allowed(initial,1));assert.ok(!allowed(initial,65));
