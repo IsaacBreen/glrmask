@@ -2743,6 +2743,9 @@ fn append_dfa_expr(dfa: &DFA, nfa: &mut NFA, start: u32, end: u32) {
         for (byte, &target) in state.transitions.iter() {
             nfa.add_transition(mapped_state, byte, state_map[target as usize]);
         }
+        for &target in &state.epsilon_transitions {
+            nfa.add_epsilon(mapped_state, state_map[target as usize]);
+        }
         if !state.finalizers.is_empty() {
             nfa.add_epsilon(mapped_state, end);
         }
