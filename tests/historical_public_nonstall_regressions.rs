@@ -116,6 +116,44 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                 }
                 }
             }
+
+            // With an explicitly configured EOS token that is absent from
+            // the vocabulary, stop admission must agree with the ORIGINAL
+            // source grammar's acceptance (not merely with the fast parser).
+            let with_eos = Grammar::from_lark(lark)
+                .compile_with(&vocab, BuildOptions::default().optimization(mode).end_tokens([99]))
+                .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
+            let reloaded_eos = glrmask::Constraint::load(with_eos.save())
+                .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));
+            for eos_constraint in [&with_eos, &reloaded_eos] {
+                for len in 0..=3usize {
+                    for number in 0..3usize.pow(len as u32) {
+                        let mut word = vec![b'a'; len];
+                        let mut value = number;
+                        for byte in word.iter_mut().rev() {
+                            *byte += (value % 3) as u8;
+                            value /= 3;
+                        }
+                        let expected_accepts = expected.iter().any(|x| x.as_bytes() == word);
+                        let mut state = eos_constraint.start();
+                        let admitted = state.commit_bytes(&word).is_ok();
+                        assert_eq!(admitted && state.is_accepting(), expected_accepts,
+                            "seed {seed} mode {mode:?} EOS grammar acceptance for {word:?}");
+                        if admitted {
+                            let mask = state.mask();
+                            let eos_is_allowed = mask.get(99 / 32).is_some_and(|w| w & (1u32 << (99 % 32)) != 0);
+                            assert_eq!(eos_is_allowed, expected_accepts,
+                                "seed {seed} mode {mode:?} EOS mask for {word:?}");
+                            if expected_accepts {
+                                state.commit_token(99).expect("allowed EOS must commit");
+                                assert!(state.is_accepting());
+                                assert!(state.mask().iter().all(|&w| w == 0),
+                                    "seed {seed} mode {mode:?} EOS did not terminate generation");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
