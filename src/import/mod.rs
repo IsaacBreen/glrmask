@@ -2655,31 +2655,26 @@ mod tests {
     }
 
     #[test]
-    fn glrm_external_subgrammars_support_qualified_nested_bindings() {
-        let vocab = vocab(&["<", ">", "[", "]", "a", "<[a]>"]);
-        let leaf = Constraint::from_glrm_grammar(
-            "start leaf; nt leaf ::= \"a\";",
-            &vocab,
-        )
-        .unwrap();
-        let composed = Constraint::from_glrm_grammar_with_subgrammars(
-            r#"
-                start document;
-                g wrapper ::= {
-                    start value;
-                    extern leaf;
-                    nt value ::= "[" leaf "]";
-                };
-                nt document ::= "<" wrapper ">";
-            "#,
-            &[("wrapper::leaf", &leaf)],
-            &vocab,
-        )
-        .unwrap();
+    fn glrm_nested_externs_and_qualified_paths_are_rejected() {
+        use crate::{Grammar, Module};
 
-        let mut state = composed.start();
-        state.commit_token(5).unwrap();
-        assert!(state.is_accepting());
+        let vocab = vocab(&["[", "]", "<", ">", "a", "<[a]>"]);
+        let source = r#"
+            start document;
+            grammar wrapper {
+                start value;
+                extern leaf;
+                nt value = "[" leaf "]";
+            };
+            nt document = "<" wrapper ">";
+        "#;
+        let err = Grammar::from_glrm(source).compile(&vocab).unwrap_err().to_string();
+        assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
+
+        let mut host = Module::new(&Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;"));
+        let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
+        let err2 = host.bind("wrapper::leaf", leaf).unwrap_err().to_string();
+        assert!(err2.contains("qualified paths are not supported"), "{err2}");
     }
 
     #[test]

@@ -296,10 +296,7 @@ impl Module {
                 if !unbound.is_empty() {
                     return Err(error(format!("cannot bind \"{name}\": the value has unbound externs [{}]", unbound.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", "))));
                 }
-                let mut child = Module::from_expr(&expr)?;
-                if child.node.mask_strategy == MaskStrategy::Auto && self.node.mask_strategy == MaskStrategy::TokenTrie {
-                    child.set_mask_strategy(MaskStrategy::TokenTrie)?;
-                }
+                let child = Module::from_expr(&expr)?;
                 BoundValue::Module(child)
             }
             BindingKind::Token(token) => {
@@ -341,17 +338,8 @@ impl Module {
     pub(crate) fn from_expr(expr: &Expr) -> Result<Self> {
         let (grammar, leaves) = expr.skeleton()?;
         let mut module = Module::new(&grammar);
-        let mut expr_strategy = None;
         for (name, leaf) in leaves {
-            if let Binding(BindingKind::Module(ref m)) = leaf {
-                if m.node.mask_strategy != MaskStrategy::Auto {
-                    expr_strategy = Some(m.node.mask_strategy);
-                }
-            }
             module.bind(&name, leaf)?;
-        }
-        if let Some(strategy) = expr_strategy {
-            module.set_mask_strategy(strategy)?;
         }
         Ok(module)
     }
@@ -433,16 +421,20 @@ impl Module {
     }
 
     /// Retains vocabulary-specific compilation artifacts across all modules in this assembly.
+    ///
+    /// Modules using `TOKEN_TRIE` retain no work and are compiled from source by `compile`.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         let modules = self.index()?;
-        let backend = crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic();
 
         type JobKey = (usize, MaskStrategy, u8);
         let mut locals: HashMap<JobKey, Arc<dyn RetainedPreparation>> = HashMap::new();
 
         for m in &modules {
             let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
+            if engine == MaskStrategy::TokenTrie {
+                continue;
+            }
             let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             if let Some(p) = m.node.prepared.get(&engine) {
@@ -456,6 +448,9 @@ impl Module {
         let mut seen = std::collections::HashSet::new();
         let jobs: Vec<&Module> = modules.iter().filter(|m| {
             let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
+            if engine == MaskStrategy::TokenTrie {
+                return false;
+            }
             let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             !locals.contains_key(&key) && seen.insert(key)
@@ -467,7 +462,7 @@ impl Module {
             let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
             let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            m.prepare_local_for(vocab, backend, engine, target_b).map(|p| (key, retain_local(p)))
+            m.prepare_local_for(vocab, engine, target_b).map(|p| (key, retain_local(p)))
         }).collect::<Result<Vec<_>>>()?;
 
         locals.extend(results);
@@ -478,10 +473,12 @@ impl Module {
             let mut c = m.certificate()?.as_ref().clone();
             c.target(vocab)?;
             let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
-            let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
-            let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             let node = Arc::make_mut(&mut next.node);
-            node.prepared.insert(engine, locals[&key].clone());
+            if engine != MaskStrategy::TokenTrie {
+                let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
+                let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
+                node.prepared.insert(engine, locals[&key].clone());
+            }
             node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
             for (name, value) in &m.node.bindings {
                 if let BoundValue::Module(child) = value {
@@ -494,7 +491,7 @@ impl Module {
         Ok(())
     }
 
-    fn prepare_local_for(&self, vocab: &Vocab, backend: crate::runtime::parser_backend::DynamicParserBackend, engine: MaskStrategy, target_b: BoundaryTriggerDetail) -> Result<PreparedGrammar> {
+    fn prepare_local_for(&self, vocab: &Vocab, engine: MaskStrategy, target_b: BoundaryTriggerDetail) -> Result<PreparedGrammar> {
         if let Some(existing) = self.node.prepared.get(&engine) {
             let mut upgraded = existing.prepared().clone();
             Arc::make_mut(&mut upgraded.inner).build_boundary_trigger(target_b).map_err(Error::Compilation)?;
@@ -504,35 +501,12 @@ impl Module {
         let source = &self.node.source;
         if matches!(source.source, GrammarSource::Lark(_)) {
             let resolved = source.resolve_lark(vocab)?;
-            if engine == MaskStrategy::TokenTrie && !resolved.bindings.is_empty() {
-                if !source.declarations()?.kinds.is_empty() {
-                    return Err(error("mask strategy TOKEN_TRIE cannot compile Lark with both inline schemas and open imports"));
-                }
-                let mut inner = crate::import::compile_dynamic_named_single_with_backend(
-                    source.resolve_dynamic_source(vocab, false)?,
-                    vocab,
-                    crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
-                    false,
-                    backend,
-                )?;
-                let _ = inner.late_bind_vocab.set(vocab.clone());
-                inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
-                return Ok(PreparedGrammar {
-                    inner: Arc::new(inner),
-                    bindings: OrdMap::new(),
-                    analysis: graph::empty_cache(),
-                    event_adapters: Arc::new(event_cache::ExactAdapterCache::default()),
-                    boundary_trigger: target_b,
-                    slot_kinds: Arc::new(BTreeMap::new()),
-                    slot_spans: Arc::new(BTreeMap::new()),
-                });
-            }
             let mut module = Module::new(&resolved);
             module.set_mask_strategy(engine)?;
             let mut instances = HashMap::<usize, Module>::new();
             for m in module.index()? {
                 let mut next = m.clone();
-                let p = m.prepare_local_for(vocab, backend, engine, target_b)?;
+                let p = m.prepare_local_for(vocab, engine, target_b)?;
                 let node = Arc::make_mut(&mut next.node);
                 node.prepared.insert(engine, retain_local(p));
                 node.certificate = Arc::new(OnceLock::new());
@@ -560,22 +534,7 @@ impl Module {
 
         let declared = source.declarations()?;
         let mut inner = match engine {
-            MaskStrategy::TokenTrie => match source.source {
-                GrammarSource::Glrm(_) | GrammarSource::Constructed => {
-                    crate::import::compile_component_shell_dynamic_with_backend(source.component()?, vocab, backend)?
-                }
-                _ => crate::import::compile_dynamic_named_single_with_backend(
-                    source.resolve_dynamic_source(vocab, false)?,
-                    vocab,
-                    if matches!(source.source, GrammarSource::JsonSchema(_)) {
-                        crate::compiler::glr::table::GlrTableConstruction::Lalr
-                    } else {
-                        crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged
-                    },
-                    matches!(source.source, GrammarSource::JsonSchema(_)),
-                    backend,
-                )?,
-            },
+            MaskStrategy::TokenTrie => unreachable!("TOKEN_TRIE modules are never precompiled"),
             MaskStrategy::TokenClassTrie => match source.source {
                 GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
                     crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
@@ -649,26 +608,19 @@ impl Module {
         if expanded[&(Arc::as_ptr(&self.node) as usize)] > graph::MAX_NODES {
             return Err(error("expanded Module runtime construction exceeds its limit"));
         }
-        let native = |m: &Module| {
-            let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
-            m.node.prepared.get(&engine).map_or(
-                engine != MaskStrategy::TokenTrie,
-                |p| p.inner.has_template_parser(),
-            )
+        // TOKEN_TRIE compiles the whole composition as one ordinary Dynamic
+        // grammar, inlined at source level. Auto parts join either kind of
+        // composition; explicit strategies of the other kind are an error.
+        let token_trie = resolve_engine(self.node.mask_strategy, &self.node.prepared) == MaskStrategy::TokenTrie;
+        let conflicting = |m: &Module| match m.node.mask_strategy {
+            MaskStrategy::TokenTrie => !token_trie,
+            MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie => token_trie,
+            _ => false,
         };
-        for module in &modules {
-            for value in module.node.bindings.values() {
-                if let BoundValue::Module(child) = value {
-                    if native(module) != native(child) {
-                        return Err(error("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"));
-                    }
-                }
-            }
+        if modules.iter().any(conflicting) {
+            return Err(error("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"));
         }
-        if !native(self) {
-            // TOKEN_TRIE parts compile as one ordinary Dynamic grammar: the
-            // composition is inlined at source level, so the result keeps
-            // markers, nullable children and plain serialization.
+        if token_trie {
             let constraint = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?;
             return constraint.with_end_tokens(&options.end_tokens);
         }
@@ -697,9 +649,6 @@ impl Module {
                 BoundValue::Token(t) => self.event_adapter(&[(t.id(), t.id())], vocab, parent.has_template_parser(), engine)?,
                 BoundValue::ExactTokens(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
             };
-            if parent.has_template_parser() != child.has_template_parser() {
-                return Err(error("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"));
-            }
             Ok((name.clone(), Arc::new(child)))
         }).collect::<Result<Vec<_>>>()?;
         let linked = !children.is_empty();

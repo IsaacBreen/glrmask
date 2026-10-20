@@ -100,6 +100,7 @@ impl Expr {
 - `mask_strategy` is resolved at compile time, so changing it never invalidates or discards precompiled work.
 - `boundary_mask_strategy` is a minimum: raising it builds more later; lowering it never removes built metadata, and the best metadata built is always used.
 - `MaskStrategy` explicit requests (`ParserDwa`, `TokenTrie`, `TokenClassTrie`) never fall back silently. If the engine cannot handle the grammar or cannot link with neighbouring parts, compilation errors explicitly.
+- `TokenTrie` compiles the whole composition from source; `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; explicit `ParserDwa`/`TokenClassTrie` parts cannot be combined with `TokenTrie` parts.
 - Implicit modules (a bare `Grammar` or `Expr` used as a binding or part) receive default settings.
 - `end_tokens` is a root compile setting configured via `CompileOptions` (`CompileOptions::default().end_tokens(...)`). It applies only to the root of that `compile` call and is not inherited by children.
 

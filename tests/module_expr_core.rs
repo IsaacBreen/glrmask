@@ -304,13 +304,14 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
 }
 
 #[test]
-fn fastbuild_nullable_child_is_a_precise_capability_error() {
+fn token_trie_nullable_child_compiles_as_one_grammar() {
     let v = vocab();
     let mut root = Module::new(&Grammar::from_glrm(HOST));
     root.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
-    let mut child = Module::new(&Grammar::from_ebnf("start ::= \"\""));
+    let mut child = Module::new(&Grammar::from_ebnf(r#"start ::= "" | "a""#));
     child.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
     root.bind("child", child).unwrap();
-    let error = root.compile(&v).unwrap_err().to_string();
-    assert!(error.contains("nullable children"), "{error}");
+    let c = root.compile(&v).unwrap();
+    assert!(accepts(&c, &[0, 3]));
+    assert!(accepts(&c, &[0, 1, 3]));
 }

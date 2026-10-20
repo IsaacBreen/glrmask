@@ -445,12 +445,27 @@ mod tests {
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
         let v = Vocab::new(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
-        module.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
+        module.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
         module.precompile(&v).unwrap();
         let mut m = read(&module.save());
-        m.instances[0].mask_strategy = 1;
-        m.instances[0].prepared[0].0 = 1;
-        m.prepared[0].engine = 1;
+        let inner = crate::import::compile_dynamic_named_single_with_backend(
+            Grammar::from_ebnf("start ::= \"a\"").resolve_dynamic_source(&v, false).unwrap(),
+            &v,
+            crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+            false,
+            crate::runtime::parser_backend::DynamicParserBackend::ordinary_dynamic(),
+        ).unwrap();
+        let _ = inner.late_bind_vocab.set(v.clone());
+        let non_native = PreparedGrammar {
+            inner: Arc::new(inner),
+            bindings: OrdMap::new(),
+            analysis: graph::empty_cache(),
+            event_adapters: Arc::new(event_cache::ExactAdapterCache::default()),
+            boundary_trigger: BoundaryTriggerDetail::None,
+            slot_kinds: Arc::new(BTreeMap::new()),
+            slot_spans: Arc::new(BTreeMap::new()),
+        };
+        m.prepared[0].bytes = non_native.save();
         let error = Module::load(&write(&m), None).unwrap_err().to_string();
         assert!(error.contains("native Module artifact contains LR"), "{error}");
         let mut m = read(&module.save());

@@ -116,6 +116,8 @@ whole graph; callers do not pass one to every constructor.
 - `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
 - `TokenClassTrie`: token-trie walk over token equivalence classes.
 
+`TokenTrie` compiles the whole composition as one grammar: bound children are inlined at source level, so `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; an explicit `ParserDwa` or `TokenClassTrie` part cannot be combined with a `TokenTrie` part, and compilation reports an error.
+
 `BoundaryMaskStrategy` replaces `BoundaryTriggerDetail`:
 - `FastBuild`: conservative token-set boundary trigger (faster build, default).
 - `FastRuntime`: full exact proper-prefix boundary trigger (lower latency).
