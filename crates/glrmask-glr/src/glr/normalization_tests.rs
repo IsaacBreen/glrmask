@@ -535,3 +535,6 @@ fn interior_loop_closure_is_not_a_finite_unrolling() {
         assert!(!earley_accepts(&normalized, 1, &word), "unexpected trailing token");
     }
 }
+
+#[path = "normalization_archived_mismatches_tests.rs"]
+mod archived_mismatch_tests;
