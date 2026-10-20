@@ -166,12 +166,15 @@ def python_module_source(path):
 def check_python_symbol_docs():
     symbols = json.loads((CONTENT / 'python-api.json').read_text())
     for file, prefix in [('__init__.pyi', ''), ('auto.py', 'auto.')]:
+        seen = set()
         def visit(nodes, scope):
             for node in nodes:
                 if isinstance(node, (ast.ClassDef, ast.FunctionDef)):
                     key = scope + node.name
-                    if key in symbols:
+                    is_setter = any(isinstance(d, ast.Attribute) and d.attr == 'setter' for d in getattr(node, 'decorator_list', []))
+                    if not is_setter and key in symbols and key not in seen:
                         assert (ast.get_docstring(node) or '') == symbols[key], 'Canonical symbol prose drift: ' + key
+                        seen.add(key)
                     if isinstance(node, ast.ClassDef):
                         visit(node.body, key + '.')
         visit(ast.parse((ROOT / 'python/python/glrmask' / file).read_text()).body, prefix)

@@ -1,10 +1,10 @@
 ### Composition and reusable grammars
 
 Use `extern token NAME` for a one-event exact-token contract and
-`extern grammar NAME` for a general byte/event grammar fragment. Bind source
-children to `Grammar`, or cold and independently precompiled children to `Module`.
-Neither child needs to be complete before attachment. Modules keep their own
-local compilation settings; `Grammar` does not store those settings:
+`extern grammar NAME` for a general byte/event grammar fragment. Bind
+children to a `Module`. A child must have every extern bound before it is
+attached. Modules keep their own local compilation settings; `Grammar` does not
+store those settings:
 
 ```rust
 use glrmask::{Grammar, Module, Result, Vocab};
@@ -13,58 +13,67 @@ use glrmask::{Grammar, Module, Result, Vocab};
 let mut child = Module::new(&Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
 ));
+child.bind("MARK", glrmask::Token::new(marker))?;
 child.precompile(vocab)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
 ));
-parent.precompile(vocab)?;
 parent.bind("ITEM", &child)?;
-parent.bind("ITEM::MARK", glrmask::Token::new(marker))?;
+parent.precompile(vocab)?;
 let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
 # }
 ```
 
-Binding mutates the receiving handle atomically. `clone()` makes an independently
-editable handle sharing immutable internals. Children are captured as snapshots;
-editing the original child later does not change existing parents. Repeated
-references to one inline grammar share bindings, while separately attached
-occurrences can be specialized independently.
-`unbound()` exposes outstanding typed paths such as `ITEM::MARK`; `externs()` also
-includes bound declarations. Final compilation requires every declared parameter
-to be resolved. `Module.save()` and `Module.load()` preserve source, settings,
-open bindings and retained work with the same vocabulary identity. Vocabulary
-is supplied to root compilation operations, not every cold child constructor.
+Binding mutates the receiving handle atomically. In Rust, `clone()` produces an
+independent snapshot sharing immutable internals; in Python, use `copy()`.
+Children are captured as snapshots; editing the original child later does not
+change existing parents. Repeated references to one inline grammar share
+bindings, while separately attached occurrences can be specialized
+independently.
+`m.externs().unbound()` (Python: `m.externs.unbound`) reports outstanding
+unresolved externs; `m.externs()` (Python: `m.externs`) also includes bound
+declarations. Qualified `::` paths are not supported; each extern is bound once
+on the module that declared it. Final compilation requires every declared
+extern to be resolved. `Module.save()` and `Module.load()` preserve source,
+settings, bindings and retained work with the same vocabulary identity.
+Vocabulary is supplied to root compilation operations, not every cold child
+constructor.
 
 Exact token sets and compact ranges consume one original ID, never its decoded
 spelling. A JSON Schema is an ordinary grammar-valued child. Exact event values
-can also bind directly to grammar slots; `Grammar::exact` constructs a standalone
-event-set grammar when needed. See the [full guide](GUIDE.md),
+can also bind directly to grammar externs. See the [full guide](GUIDE.md),
 [native syntax](docs/glrm-format.md), and [exact-token ranges](docs/exact-token-ranges.md).
 
-`Expr.choice` and `Expr.sequence` combine whole grammar or module leaves without
-adding scopes at intermediate grouping operators. The leaves retain independent
-bindings, options and any retained work. Use `Grammar.from_expr` for source-only
-expressions, and `Module::from_expr` (Rust) or `Module(expr)` (Python) for
-configured expressions. See [module lifecycle](docs/module-lifecycle.md).
+`Expr.choice` and `Expr.sequence` combine whole grammar, module, or token leaves
+without adding scopes at intermediate grouping operators. `Expr.literal` matches
+exact bytes. The pieces retain independent bindings and any retained work.
+Expressions can be bound directly to module externs.
 
-### Choosing an optimization mode
+### Choosing a mask strategy
 
-`FastBuild` favors short cold starts using ordinary Dynamic, `Balanced` uses the
-native middle-ground configuration, and `FastRuntime` favors mask-generation speed.
-`Auto` is the default. Python exposes the corresponding uppercase names. These are
-implementation trade-offs, not different language semantics.
-Each Module captures its own `ModuleOptions`. A raw child uses default options,
-not its parent's overrides. Unsupported combinations of retained representations
-produce an error instead of silently rebuilding or discarding supplied work.
+`MaskStrategy` trades off compilation time against per-token masking latency:
+
+- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest runtime masks).
+- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
+- `TokenClassTrie`: token-trie walk over token equivalence classes.
+- `Auto`: library chooses the strategy (the default).
+
+`BoundaryMaskStrategy` configures the minimum metadata to build for composition
+boundaries: `FastBuild` (conservative token-set boundary trigger, default) and
+`FastRuntime` (full exact proper-prefix boundary trigger).
+
+Each Module captures its own settings via `set_mask_strategy` and
+`set_boundary_mask_strategy` (in Python: constructor keywords or properties).
+Compile options apply to the root compile call only:
 
 ```rust
-# use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
+# use glrmask::{CompileOptions, Grammar, Result, Vocab};
 # fn demo(grammar: &Grammar<'_>, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
-    BuildOptions::default().optimization(Optimization::FastBuild),
+    CompileOptions::default(),
 )?;
 # let _ = constraint;
 # Ok(())
