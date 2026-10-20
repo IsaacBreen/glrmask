@@ -80,7 +80,12 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             _ => None,
         };
         if let Some(expected) = bounded_oracle {
-            for len in 0..=5usize {
+            let reloaded = glrmask::Constraint::load(c.save())
+                .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: reload failed: {e:?}"));
+            assert_eq!(c.start().mask(), reloaded.start().mask(),
+                "seed {seed} mode {mode:?}: initial masks differ after save/load");
+            for c in [&c, &reloaded] {
+                for len in 0..=5usize {
                 for number in 0..3usize.pow(len as u32) {
                     let mut word = vec![b'a'; len];
                     let mut value = number;
@@ -108,6 +113,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                         assert!(incremental.is_accepting(),
                             "seed {seed} mode {mode:?} token-path completion missing for {word:?}");
                     }
+                }
                 }
             }
         }
