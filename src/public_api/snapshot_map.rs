@@ -1,4 +1,4 @@
-﻿//! Small covariant persistent map for assembly snapshots.
+//! Small covariant persistent map for assembly snapshots.
 //!
 //! Unlike containers backed by interior-mutable node pools, this representation
 //! preserves the covariance of borrowed grammar sources. Only an updated AVL
@@ -12,15 +12,15 @@ struct Node<K,V> {
     key: Arc<K>, value: V, left: Link<K,V>, right: Link<K,V>, height: u16, len: usize,
 }
 #[derive(Debug)]
-pub(super) struct SnapshotMap<K,V> { root: Link<K,V> }
+pub(crate) struct SnapshotMap<K,V> { root: Link<K,V> }
 impl<K,V> Clone for SnapshotMap<K,V> {
     fn clone(&self)->Self {Self {root:self.root.clone()}}
 }
 impl<K,V> Default for SnapshotMap<K,V> { fn default()->Self {Self::new()} }
 impl<K,V> SnapshotMap<K,V> {
-    pub(super) fn new()->Self {Self {root:None}}
-    pub(super) fn len(&self)->usize {Self::size(&self.root)}
-    pub(super) fn is_empty(&self)->bool {self.root.is_none()}
+    pub(crate) fn new()->Self {Self {root:None}}
+    pub(crate) fn len(&self)->usize {Self::size(&self.root)}
+    pub(crate) fn is_empty(&self)->bool {self.root.is_none()}
     fn height(link:&Link<K,V>)->u16 {link.as_ref().map_or(0,|n|n.height)}
     fn size(link:&Link<K,V>)->usize {link.as_ref().map_or(0,|n|n.len)}
     fn node(key:Arc<K>,value:V,left:Link<K,V>,right:Link<K,V>)->Arc<Node<K,V>> {
@@ -94,7 +94,7 @@ impl<K:Ord,V:Clone> SnapshotMap<K,V> {
         let (root,old)=Self::inserted(&self.root,Arc::new(key),value);self.root=Some(root);old
     }
 }
-pub(super) struct Iter<'a,K,V> {stack:Vec<&'a Node<K,V>>,remaining:usize}
+pub(crate) struct Iter<'a,K,V> {stack:Vec<&'a Node<K,V>>,remaining:usize}
 impl<'a,K,V> Iter<'a,K,V> {
     fn left(&mut self,mut node:Option<&'a Node<K,V>>) {
         while let Some(n)=node {self.stack.push(n);node=n.left.as_deref();}

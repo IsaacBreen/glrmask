@@ -39,7 +39,7 @@ use super::mask_cache_payload::DynamicMaskCachePayload;
 pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 
 /// Optional composition-boundary metadata, independent of the masking optimization. `None` adds no metadata; `Tokens` is a conservative parser-state-independent candidate set; `Exact` adds state-sensitive metadata where supported.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BoundaryTriggerDetail {
     #[default]
     None,
@@ -68,6 +68,14 @@ pub(crate) enum BoundaryTrigger {
 }
 
 impl BoundaryTrigger {
+    pub(crate) fn detail(&self) -> BoundaryTriggerDetail {
+        match self {
+            Self::None => BoundaryTriggerDetail::None,
+            Self::Tokens(_) => BoundaryTriggerDetail::Tokens,
+            Self::Exact(_) => BoundaryTriggerDetail::Exact,
+        }
+    }
+
     pub(crate) fn is_none(&self) -> bool {
         matches!(self, Self::None)
     }

@@ -4,7 +4,7 @@
 //! parser, no template DFAs and no direct-regular runtime bypass.
 
 use super::ParserTableStorage;
-use crate::public_api::{BuildOptions, Optimization, ParserBackend};
+use crate::public_api::{BuildOptions, MaskStrategy, ParserBackend};
 use crate::Grammar;
 
 fn vocab_from(words: &[&str]) -> crate::Vocab {
@@ -24,9 +24,9 @@ fn lr(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
 
 fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
     Grammar::from_ebnf(source)
-        .compile_with(
+        .compile_with_build_options(
             vocab,
-            BuildOptions::default().optimization(Optimization::Balanced),
+            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
         )
         .expect("native template compile")
 }

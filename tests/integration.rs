@@ -456,6 +456,7 @@ fn json_schema_filtered_enum_does_not_overaccept_merged_group() {
 
 #[test]
 fn json_schema_closed_object_all_optional_accepts_sparse_in_order_members() {
+    let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
     let constraint = byte_schema(
         r#"{
             "type": "object",

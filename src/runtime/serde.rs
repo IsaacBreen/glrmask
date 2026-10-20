@@ -9448,9 +9448,9 @@ mod tests {
 
         // Native artifact relabeled as LR must also be rejected, not panic.
         let native = grammar
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
-                crate::BuildOptions::default().optimization(crate::Optimization::Balanced),
+                crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenClassTrie),
             )
             .unwrap();
         let mut native_as_lr = native.save();

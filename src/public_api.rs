@@ -23,22 +23,155 @@ mod prepared_artifact;
 mod artifact_limits;
 mod module;
 mod expr;
-pub use module::{Module, ModuleOptions, CompileOptions, IntoModuleValue, ModuleValue};
-pub use expr::{Expr, IntoExpr};
+pub use module::{Module, CompileOptions, Binding};
+pub use expr::Expr;
 
-/// Build-time versus per-token cost; the variants preserve the supported grammar language.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// Build-time versus per-token mask latency strategy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
-pub enum Optimization {
-    /// The default.
+pub enum MaskStrategy {
+    /// Library chooses the mask strategy (ParserDwa or retained TokenClassTrie).
     #[default]
     Auto,
-    /// Favor shorter compilation.
+    /// Static parser-DWA masks (slowest build, fastest runtime masks).
+    ParserDwa,
+    /// Dynamic token-trie walk (fastest build).
+    TokenTrie,
+    /// Token-trie walk over token equivalence classes.
+    TokenClassTrie,
+}
+
+impl MaskStrategy {
+    /// Alias for TokenTrie.
+    pub const FAST_BUILD: Self = Self::TokenTrie;
+    /// Alias for ParserDwa.
+    pub const FAST_RUNTIME: Self = Self::ParserDwa;
+}
+
+/// Minimum boundary mask detail level required for composition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[non_exhaustive]
+pub enum BoundaryMaskStrategy {
+    /// Token-set boundary trigger (faster build).
+    #[default]
     FastBuild,
-    /// Balance compilation and masking cost.
-    Balanced,
-    /// Prefer lower per-token masking latency, accepting more build work.
+    /// Full exact proper-prefix boundary trigger (lower runtime latency).
     FastRuntime,
+}
+
+impl BoundaryMaskStrategy {
+    pub(crate) fn to_detail(self) -> BoundaryTriggerDetail {
+        match self {
+            Self::FastBuild => BoundaryTriggerDetail::Tokens,
+            Self::FastRuntime => BoundaryTriggerDetail::Exact,
+        }
+    }
+}
+
+/// One declared extern slot contract on a Module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Extern {
+    pub(crate) name: String,
+    pub(crate) kind: ExternalKind,
+    pub(crate) span: Option<glrmask_grammar::SourceSpan>,
+}
+
+impl Extern {
+    /// Returns the declared name of this extern.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    /// Returns the declared kind (token or grammar) of this extern.
+    pub fn kind(&self) -> ExternalKind {
+        self.kind
+    }
+    /// Returns the source span of this extern declaration, if available.
+    pub fn span(&self) -> Option<glrmask_grammar::SourceSpan> {
+        self.span
+    }
+}
+
+/// View over a Module's declared externs in declaration order.
+#[derive(Debug, Clone)]
+pub struct Externs<'a> {
+    pub(crate) module: &'a Module,
+    pub(crate) only_unbound: bool,
+}
+
+impl<'a> Externs<'a> {
+    /// Looks up a declared extern by name.
+    pub fn get(&self, name: &str) -> Option<Extern> {
+        let declared = self.module.node.source.declarations().ok()?;
+        if self.only_unbound && self.module.node.bindings.contains_key(name) {
+            return None;
+        }
+        let kind = *declared.kinds.get(name)?;
+        Some(Extern {
+            name: name.to_string(),
+            kind,
+            span: declared.spans.get(name).copied(),
+        })
+    }
+
+    /// Returns the number of externs in this view.
+    pub fn len(&self) -> usize {
+        let Ok(declared) = self.module.node.source.declarations() else { return 0; };
+        if self.only_unbound {
+            declared.names.iter().filter(|n| !self.module.node.bindings.contains_key(n.as_str())).count()
+        } else {
+            declared.names.len()
+        }
+    }
+
+    /// Returns true if there are no externs in this view.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Filters this view to only unresolved externs.
+    pub fn unbound(&self) -> Externs<'a> {
+        Externs {
+            module: self.module,
+            only_unbound: true,
+        }
+    }
+
+    /// Iterates over the externs in this view in declaration order.
+    pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
+        let items: Vec<Extern> = match self.module.node.source.declarations() {
+            Ok(declared) => declared
+                .names
+                .iter()
+                .filter(|name| !self.only_unbound || !self.module.node.bindings.contains_key(name.as_str()))
+                .filter_map(|name| {
+                    let kind = *declared.kinds.get(name)?;
+                    Some(Extern {
+                        name: name.clone(),
+                        kind,
+                        span: declared.spans.get(name).copied(),
+                    })
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
+        items.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for Externs<'a> {
+    type Item = Extern;
+    type IntoIter = std::vec::IntoIter<Extern>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Externs<'a> {
+    type Item = Extern;
+    type IntoIter = std::vec::IntoIter<Extern>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter().collect::<Vec<_>>().into_iter()
+    }
 }
 
 /// Parser implementation used by a final runnable constraint. TemplateDfa
@@ -56,7 +189,7 @@ pub enum ParserBackend {
 #[derive(Debug, Clone, Default)]
 pub struct BuildOptions {
     end_tokens: Vec<u32>,
-    optimization: Optimization,
+    optimization: MaskStrategy,
     parser_backend: ParserBackend,
     boundary_trigger: Option<BoundaryTriggerDetail>,
 }
@@ -68,8 +201,8 @@ impl BuildOptions {
         self
     }
 
-    /// Defaults to [`Optimization::Auto`].
-    pub fn optimization(mut self, optimization: Optimization) -> Self {
+    /// Defaults to [`MaskStrategy::Auto`].
+    pub fn optimization(mut self, optimization: MaskStrategy) -> Self {
         self.optimization = optimization;
         self
     }
@@ -92,7 +225,7 @@ impl BuildOptions {
         &self.end_tokens
     }
 
-    pub(crate) fn optimization_value(&self) -> Optimization {
+    pub(crate) fn optimization_value(&self) -> MaskStrategy {
         self.optimization
     }
 }
@@ -121,23 +254,15 @@ pub struct PreparedGrammar {
 #[doc(hidden)]
 pub type UnlinkedConstraint = PreparedGrammar;
 
-/// An unresolved typed slot. Paths distinguish the same local name in different attached children.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnboundExtern {
-    /// Path segments distinguish slots in different attached children.
+pub struct Requirement {
     pub path: Vec<String>,
-    /// Token slots require exact events; grammar slots also accept components.
     pub kind: ExternalKind,
-    /// Coordinates in the declaring component's original source document.
-    /// Constructed components may have no source location.
     pub source_span: Option<glrmask_grammar::SourceSpan>,
 }
-impl UnboundExtern {
+impl Requirement {
     pub fn name(&self) -> String { self.path.join("::") }
 }
-
-/// Legacy diagnostic spelling. Prefer [`UnboundExtern`].
-pub type Requirement = UnboundExtern;
 
 #[derive(Debug, Clone)]
 enum ModuleBinding {
@@ -412,7 +537,8 @@ impl<'a> Grammar<'a> {
         Ok(())
     }
 
-    /// Adapt one vocabulary-bound token event to a grammar fragment. Adds no byte spelling, ignore rule or root end-token policy.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn exact(tokens: ExactTokens) -> Self {
         let exprs=tokens.range_pairs().iter().map(|&(a,b)|if a==b {
             glrmask_grammar::GrammarExpr::SpecialToken(a)
@@ -453,6 +579,8 @@ impl<'a> Grammar<'a> {
     }
 
     /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, `Token` or `ExactTokens`; token slots require exact events. Attached children are snapshots. Failed binds leave this handle unchanged.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
@@ -526,26 +654,36 @@ impl<'a> Grammar<'a> {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// Requires all slots to be bound; uses default [`BuildOptions`]. See [`Self::compile_with`] for optimization and root end tokens.
+    /// Compiles this grammar against the target vocabulary using default settings.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
-        self.compile_with(vocab, BuildOptions::default())
+        Module::new(self).compile(vocab)
     }
 
-    /// Requires all slots to be bound. End tokens are root generation controls: allowed only at acceptance, and must be committed before stopping. Their policy is not inherited by an embedded child.
+    /// Compiles this grammar against the target vocabulary using root compile options.
     pub fn compile_with(
+        &self,
+        vocab: &Vocab,
+        options: CompileOptions,
+    ) -> Result<RuntimeConstraint> {
+        Module::new(self).compile_with(vocab, options)
+    }
+
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn compile_with_build_options(
         &self,
         vocab: &Vocab,
         options: BuildOptions,
     ) -> Result<RuntimeConstraint> {
         graph::source_preflight(self)?;
-        if matches!(self.source,GrammarSource::Lark(_)){return self.resolve_lark(vocab)?.compile_with(vocab,options);}
+        if matches!(self.source,GrammarSource::Lark(_)){return self.resolve_lark(vocab)?.compile_with_build_options(vocab,options);}
         self.validate_exact_target(vocab)?;
         if let Some(name) = self.unresolved_external_names()?.first() {
             return Err(Error::Compilation(format!(
                 "external {name:?} is unbound; prepare() if a reusable pre-link artifact is intended",
             )));
         }
-        if options.optimization == Optimization::FastBuild {
+        if options.optimization == MaskStrategy::TokenTrie {
             // Use the ordinary Dynamic compiler with one complete, unsplit source
             // body. Resolve bindings as typed nodes before compilation, without
             // rebuilding the resulting Constraint through the native/O2 path.
@@ -561,7 +699,7 @@ impl<'a> Grammar<'a> {
             return constraint.with_end_tokens(options.end_token_ids());
         }
         if options.parser_backend == ParserBackend::TemplateDfa {
-            if options.optimization == Optimization::Balanced && self.bindings.is_empty() {
+            if options.optimization == MaskStrategy::TokenClassTrie && self.bindings.is_empty() {
                 // Use the existing O2 runtime with the bounded grammar normal
                 // form required by finite templates. Ordinary dynamic grammar
                 // preparation intentionally allows recursive action closures.
@@ -609,12 +747,14 @@ impl<'a> Grammar<'a> {
         constraint.with_end_tokens(options.end_token_ids())
     }
 
-    /// Compile reusable vocabulary-specific machinery while retaining unresolved slots.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn prepare(&self, vocab: &Vocab) -> Result<PreparedGrammar> {
         self.prepare_with(vocab, BuildOptions::default())
     }
 
-    /// Retains the boundary metadata request for final link. Optimization and end tokens are chosen by [`PreparedGrammar::link_with`], not retained from these options.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
     pub fn prepare_with(&self, vocab: &Vocab, options: BuildOptions) -> Result<PreparedGrammar> {
         let _=graph::source_first(self)?;
         let module=self.prepare_cached(vocab,options,&mut SourcePreparation::default(),0)?;
@@ -649,7 +789,7 @@ impl<'a> Grammar<'a> {
         let slot_spans=Arc::new(declarations.spans.clone());
         // Compile this component locally. Grammar-child attachments remain
         // compiled values in the unlinked graph and are linked only by link_with,
-        // where the caller's Optimization choice is finally known.
+        // where the caller's MaskStrategy choice is finally known.
         let (local_grammar, source_bindings) = self.clone().into_source_only_and_bindings();
         let mut builder = ConstraintSpec::builder(local_grammar, vocab)?;
         let event_adapters=Arc::new(event_cache::ExactAdapterCache::default());
@@ -755,6 +895,11 @@ impl<'a> Grammar<'a> {
                 Ok(self.component()?.with_tokens(&token_refs)?.with_children(&children)?.lower_closed()?)
             }
         }
+    }
+
+    pub(crate) fn from_expr(expr: &Expr) -> Result<Grammar<'static>> {
+        let module = Module::from_expr(expr)?;
+        module.to_source()
     }
 
     fn unresolved_external_names(&self) -> Result<BTreeSet<String>> {
@@ -1250,10 +1395,10 @@ impl<'a> ConstraintSpec<'a> {
         Ok(constraint)
     }
 
-    fn compile_final(&self, optimization: Optimization) -> Result<RuntimeConstraint> {
+    fn compile_final(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
         match optimization {
-            Optimization::FastBuild => Ok(self.compile_dynamic()?.into_constraint()),
-            Optimization::Balanced => {
+            MaskStrategy::TokenTrie => Ok(self.compile_dynamic()?.into_constraint()),
+            MaskStrategy::TokenClassTrie => {
                 let dynamic = self.compile_dynamic()?;
                 collapse_dynamic_alternatives(
                     dynamic.into_constraints(),
@@ -1261,7 +1406,7 @@ impl<'a> ConstraintSpec<'a> {
                     SegmentedBoundaryBackend::Dynamic,
                 )
             }
-            Optimization::Auto | Optimization::FastRuntime => self.compile(),
+            MaskStrategy::Auto | MaskStrategy::ParserDwa => self.compile(),
         }
     }
 
@@ -1651,7 +1796,7 @@ impl GrammarBinding<'_> {
                         }
                     }
                     let module = grammar.prepare(vocab)?;
-                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(Optimization::Auto)?)))
+                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {
                     let spec = ConstraintSpec::builder(grammar.clone(), vocab)?.build()?;
@@ -1693,7 +1838,7 @@ impl GrammarBinding<'_> {
                         )));
                     }
                     let module = grammar.prepare(vocab)?;
-                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(Optimization::Auto)?)))
+                    Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {
                     let spec = ConstraintSpec::builder(grammar, vocab)?.build()?;
@@ -2207,11 +2352,11 @@ fn compile_exact_token_adapter(vocab: &Vocab, token_ids: &[(u32, u32)]) -> Resul
 fn boundary_for_optimization(
     parent: &RuntimeConstraint,
     children: &[(String, Arc<RuntimeConstraint>)],
-    optimization: Optimization,
+    optimization: MaskStrategy,
 ) -> Result<SegmentedBoundaryBackend> {
     match optimization {
-        Optimization::FastBuild | Optimization::Balanced => Ok(SegmentedBoundaryBackend::Dynamic),
-        Optimization::Auto | Optimization::FastRuntime => {
+        MaskStrategy::TokenTrie | MaskStrategy::TokenClassTrie => Ok(SegmentedBoundaryBackend::Dynamic),
+        MaskStrategy::Auto | MaskStrategy::ParserDwa => {
             select_supported_boundary(parent, children)
         }
     }
@@ -2302,17 +2447,17 @@ impl PreparedGrammar {
         graph::prepared_requirements(self)
     }
 
-    pub fn unbound(&self)->Result<Vec<UnboundExtern>> {graph::prepared_requirements(self)}
+    pub fn unbound(&self)->Result<Vec<Requirement>> {graph::prepared_requirements(self)}
 
     /// Authored slots, including bound slots and distinct attached occurrences.
-    pub fn externs(&self)->Result<Vec<UnboundExtern>> {
+    pub fn externs(&self)->Result<Vec<Requirement>> {
         self.validate_slot_manifest()?;
         let mut pending=vec![(self,Vec::<String>::new())];let mut out=Vec::new();let mut visits=0;
         while let Some((module,prefix))=pending.pop() {
             visits+=1;if visits>131_072 {return Err(Error::Compilation("expanded extern traversal exceeds its limit".into()));}
             for (name,&kind) in module.slot_kinds.iter() {
                 let mut path=prefix.clone();path.extend(name.split("::").map(str::to_owned));
-                out.push(UnboundExtern {path,kind,source_span:module.slot_spans.get(name).copied()});
+                out.push(Requirement {path,kind,source_span:module.slot_spans.get(name).copied()});
                 if out.len()>65_536 {return Err(Error::Compilation("too many expanded extern paths".into()));}
             }
             for (name,binding) in &module.bindings {if let ModuleBinding::Module(child)=binding {
@@ -2409,7 +2554,7 @@ impl PreparedGrammar {
         let mut next=self.clone();next.bind(name,value)?;Ok(next)
     }
 
-    fn materialize(&self, optimization: Optimization) -> Result<RuntimeConstraint> {
+    fn materialize(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
         self.validate_slot_manifest()?;
         if self.bindings.is_empty() {
             return Ok(self.inner.as_ref().clone());
@@ -2481,7 +2626,7 @@ impl PreparedGrammar {
         })
     }
 
-    fn materialize_template_components(&self, optimization: Optimization) -> Result<RuntimeConstraint> {
+    fn materialize_template_components(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
         self.validate_slot_manifest()?;
         let vocab = constraint_vocab(self.inner.as_ref());
         let mut parent = self.inner.as_ref().clone();
@@ -2516,7 +2661,7 @@ impl PreparedGrammar {
         if children.is_empty(){return Ok(parent);}
         crate::error::catch_internal_invariant(|| {
             let mut linked = crate::runtime::parser_backend::link::compose_owned(parent, children, &vocab)?;
-            if optimization == Optimization::FastRuntime {
+            if optimization == MaskStrategy::ParserDwa {
                 crate::compiler::template_boundary::install(&mut linked, &vocab)?;
             }
             Ok(linked)
@@ -2866,7 +3011,7 @@ mod tests {
         let (vocab, parent, child) = compose_owned_test_fixture();
         let parent_bytes = parent.save(); let parent_mask = parent.inner.start().mask();
         let child = Arc::new(child); let child_bytes = child.save(); let child_mask = child.start().mask();
-        let options = BuildOptions::default().optimization(Optimization::Balanced).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
+        let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa).end_tokens([99]);
         let borrowed_bound = parent.bind_snapshot("child", child.as_ref()).unwrap();
         let owned_bound = parent.bind_snapshot("child", Arc::clone(&child)).unwrap();
         let borrowed_bytes = borrowed_bound.save(); let owned_bytes = owned_bound.save();
@@ -5877,10 +6022,10 @@ mod final_unlinked_optimization_tests {
         assert!(bound.inner.static_dynamic_overlay.is_none(), "bind must not compile a boundary eagerly");
 
         let fast_build = bound.link_with(
-            BuildOptions::default().optimization(Optimization::Balanced),
+            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
         ).unwrap();
         let fast_runtime = bound.link_with(
-            BuildOptions::default().optimization(Optimization::FastRuntime),
+            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
         ).unwrap();
         assert_dynamic_boundary(&fast_build);
         assert_static_boundary(&fast_runtime);
@@ -5889,10 +6034,10 @@ mod final_unlinked_optimization_tests {
         let loaded = PreparedGrammar::load(bound.save()).unwrap();
         assert!(loaded.inner.late_grammar_slots.iter().any(|slot| slot.name == "child"));
         assert_dynamic_boundary(&loaded.link_with(
-            BuildOptions::default().optimization(Optimization::Balanced),
+            BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
         ).unwrap());
         assert_static_boundary(&loaded.link_with(
-            BuildOptions::default().optimization(Optimization::FastRuntime),
+            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
         ).unwrap());
     }
 }
@@ -6073,15 +6218,15 @@ mod cached_parent_main_tests {
         ]);
         let grammar = Grammar::ebnf(r#"start ::= "a" "b""#);
         let fast_build = grammar
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(Optimization::Balanced),
+                BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
             )
             .unwrap();
         let fast_runtime = grammar
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
-                BuildOptions::default().optimization(Optimization::FastRuntime),
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
             )
             .unwrap();
         assert!(fast_build.uses_dynamic_runtime());
@@ -6125,11 +6270,11 @@ mod final_boundary_option_tests {
     fn trigger_metadata_exists_before_first_use_in_every_public_mode() {
         let v = vocab();
         let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#);
-        for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
+        for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
-                let result = grammar.compile_with(&v,
+                let result = grammar.compile_with_build_options(&v,
                     BuildOptions::default().optimization(mode).boundary_trigger(detail));
-                if mode == Optimization::FastBuild && detail == BoundaryTriggerDetail::Exact {
+                if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
                     assert!(result.unwrap_err().to_string().contains("retained-LR Dynamic"));
                     continue;
                 }
@@ -6186,7 +6331,7 @@ mod final_ordinary_dynamic_selection_tests {
     fn fast_build_uses_the_actual_dynamic_compiler_and_preserves_loaded_representation() {
         let v=Vocab::new(vec![(0,b"(".to_vec()),(1,b")".to_vec()),(2,b"()".to_vec()),(3,b"x".to_vec())]);
         let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#);
-        let actual=g.compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
         let oracle=DynamicConstraint::compile(g.clone(),&v).unwrap().into_constraint();
         assert!(actual.uses_dynamic_runtime());
         assert!(!actual.has_template_parser()); assert!(actual.table.is_present());
@@ -6201,11 +6346,11 @@ mod final_ordinary_dynamic_selection_tests {
                 assert_eq!(a.mask(),b.mask());assert_eq!(a.is_accepting(),b.is_accepting());
             }
         }
-        let balanced=g.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        let balanced=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
         assert!(balanced.uses_dynamic_runtime()); assert!(balanced.has_template_parser());
         assert!(!balanced.table.is_present());
-        for mode in [Optimization::Auto,Optimization::FastRuntime] {
-            assert!(!g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap().uses_dynamic_runtime());
+        for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
+            assert!(!g.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap().uses_dynamic_runtime());
         }
     }
 }
@@ -6316,8 +6461,8 @@ mod static_whole_token_regression_tests {
         let mut word=vec![b'a';30];word.push(b'b');
         for entries in [vec![(3,word.clone())],vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),(3,word.clone())]] {
             let singleton=entries.len()==1;let v=Vocab::new(entries);
-            for mode in [Optimization::Auto,Optimization::FastRuntime] {
-                let c=Grammar::from_lark(&source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+            for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
+                let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 assert!(c.direct_regular_automaton.is_some());
                 for c in [c.clone(),RuntimeConstraint::load(c.save()).unwrap(),RuntimeConstraint::load_with_vocab(c.save_without_vocab().unwrap(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);

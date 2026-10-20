@@ -1,5 +1,5 @@
 use std::{collections::BTreeSet, error::Error, hint::black_box, time::Instant};
-use glrmask::{BuildOptions, Constraint, Grammar, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
 use serde_json::{json,Value};
 use glrmask::PreparedGrammar as Prepared;
 const JSON_SOURCE:&str=r#"{"type":"object","properties":{"name":{"type":"string","pattern":"^[a-z]+$"},"events":{"type":"array","items":{"type":"integer","minimum":0,"maximum":99},"maxItems":5},"active":{"type":"boolean"}},"required":["name","events","active"],"additionalProperties":false}"#;
@@ -70,15 +70,15 @@ fn capture_masks(c: &Constraint, ids: &[u32]) -> Value {
     assert!(state.is_accepting());
     json!(masks)
 }
-fn run(case:&str,text:&str,mode:Optimization,n:usize,reps:usize)->Result<Value,Box<dyn Error>>{
+fn run(case:&str,text:&str,mode:MaskStrategy,n:usize,reps:usize)->Result<Value,Box<dyn Error>>{
     let (entries,vocab_input_ns)=time(||input_vocab(n));let ids=trace(text,&entries,case=="exact_token_set");
     let (v,vocab_ns)=time(||Vocab::new(entries));
     let (g,source_ns)=time(||grammar(case,&v));let g=g?;
     let options=BuildOptions::default().optimization(mode);
-    let (c,compile_ns)=time(||g.compile_with(&v,options.clone()));let c=c?;
+    let (c,compile_ns)=time(||g.compile_with_build_options(&v,options.clone()));let c=c?;
     let fingerprint=mask_trace(&c,&ids);
     let captured_masks=capture_masks(&c,&ids);
-    let mut builds=Vec::new();for _ in 0..5 {let (next,t)=time(||g.compile_with(&v,options.clone()));assert_eq!(mask_trace(&next?,&ids),fingerprint);builds.push(t);}
+    let mut builds=Vec::new();for _ in 0..5 {let (next,t)=time(||g.compile_with_build_options(&v,options.clone()));assert_eq!(mask_trace(&next?,&ids),fingerprint);builds.push(t);}
     let (prepared,prepare_ns)=time(||prepare(&g,&v));let prepared=prepared?;
     let (linked,link_ns)=time(||prepared.link_with(options.clone()));assert_eq!(mask_trace(&linked?,&ids),fingerprint);
     let mut links=Vec::new();for _ in 0..7 {let (next,t)=time(||prepared.link_with(options.clone()));assert_eq!(mask_trace(&next?,&ids),fingerprint);links.push(t);}
@@ -106,7 +106,7 @@ fn main()->Result<(),Box<dyn Error>>{
     let reps=args.get(1).map(|s|s.parse()).transpose()?.unwrap_or(2000usize);
     assert!(n>=2048&&reps>=20&&!cfg!(debug_assertions));
     let mut rows=Vec::new();
-    for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
+    for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
         for (case,text) in TEXTS {eprintln!("RUN {case} {mode:?}");rows.push(run(case,text,mode,n,reps)?);}
     }
     println!("{}",serde_json::to_string_pretty(&json!({"kind":"glrm-core-batch-matched-public-api-v2","redesign":true,"profile":"cargo-release-defaults","vocabulary":"deterministic synthetic bytes + corpus ngrams + ASCII identifiers","repetitions":reps,"notes":["Identical measured loops, vocabularies and token traces; only return-new versus mutable binding setup differs.","Parse/binding, vocabulary, compile, prepare, final link, save/load and runtime operations timed separately.","Warm compile/link samples share vocabulary caches; small sample counts describe these cases, not global tails.","Runtime measured in release with reusable mask buffer, new state per trace and explicit warmup.","Not a full schema-corpus or real model benchmark. Mask fingerprints and trace acceptance compared exactly."],"rows":rows}))?);Ok(())

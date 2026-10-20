@@ -10,7 +10,7 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackState, StackTemplate,
     StackTransition, TemplateBuildOptions, TerminalPattern,
 };
-use glrmask::{Constraint, Optimization, ParserBackend, Vocab};
+use glrmask::{Constraint, MaskStrategy, ParserBackend, Vocab};
 use std::collections::{BTreeSet, VecDeque};
 
 fn next(s: &mut u64) -> u64 {
@@ -281,7 +281,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
         };
         let program = ParserProgram::new(definition).unwrap();
         let mut compiled = Vec::new();
-        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
+        for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = program
                 .compile_with(
                     &lexer,
@@ -291,7 +291,7 @@ fn verify_phase_programs(offset: u64, count: u64, prefixes_limit: usize) {
                         .end_tokens([255]),
                 )
                 .unwrap();
-            let name = if optimization == Optimization::Balanced {
+            let name = if optimization == MaskStrategy::TokenClassTrie {
                 "dynamic"
             } else {
                 "static"
@@ -495,7 +495,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
         })
         .unwrap();
         let mut parsers = Vec::new();
-        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
+        for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = p
                 .compile_with(
                     &lex,
@@ -505,7 +505,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                         .end_tokens([255]),
                 )
                 .unwrap();
-            let name = if optimization == Optimization::Balanced {
+            let name = if optimization == MaskStrategy::TokenClassTrie {
                 "dynamic"
             } else {
                 "static"

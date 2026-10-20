@@ -430,7 +430,7 @@ impl CompileStatic for ParserProgram {
             lexer,
             vocab,
             glrmask::template_parser::TemplateBuildOptions::default()
-                .optimization(glrmask::Optimization::FastRuntime),
+                .optimization(glrmask::MaskStrategy::ParserDwa),
         )
     }
 }

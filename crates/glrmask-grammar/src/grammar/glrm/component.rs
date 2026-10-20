@@ -41,6 +41,11 @@ impl ParsedComponent {
     }
 
     pub fn from_named_with_ignores(grammar:NamedGrammar,externs:&[(String,ExternalKind)],additional_ignores:&[String])->Result<Self,GlrMaskError> {
+        for (name, _) in externs {
+            if name.contains("::") {
+                return Err(err("'::' is not valid in extern names"));
+            }
+        }
         let scope=ParsedGlrmScope {
             extra_ignores:additional_ignores.to_vec(),
             rules:grammar.rules,start:grammar.start,ignore:grammar.ignore,

@@ -30,6 +30,6 @@ fn scoped_threads_share_module_snapshots_without_mutating_the_source() {
             });
         }
     });
-    assert_eq!(module.unbound().unwrap().len(), 1);
-    assert_eq!(source.unbound().unwrap().len(), 1);
+    assert_eq!(module.externs().unbound().len(), 1);
+    assert_eq!(Module::new(&source).externs().unbound().len(), 1);
 }

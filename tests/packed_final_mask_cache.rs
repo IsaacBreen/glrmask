@@ -2,7 +2,7 @@
 //! Derived caches must preserve exact masks, cloned artifacts and serialized
 //! bytes for both parser backends. Cache misses do not authorize a token.
 use glrmask::__private::{assert_packed_final_mask_cache, assert_tokenizer_transition_cache};
-use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
 
 fn vocabulary() -> Vocab {
     let mut words = (32u8..=126).map(|b| vec![b]).collect::<Vec<_>>();
@@ -95,13 +95,13 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
     let mut transition_checks = 0;
     for schema in schemas {
         let source = schema.to_string();
-        for optimization in [Optimization::FastRuntime, Optimization::Balanced] {
+        for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
             for explicit_backend in [false, true] {
                 let backend = ParserBackend::TemplateDfa;
                 let options = BuildOptions::default().optimization(optimization);
                 let options = if explicit_backend { options.parser_backend(backend) } else { options };
                 let fresh = Grammar::from_json_schema(&source)
-                    .compile_with(&vocab, options)
+                    .compile_with_build_options(&vocab, options)
                     .unwrap();
                 let bytes = fresh.save();
                 let loaded = Constraint::load(&bytes).unwrap();
@@ -166,10 +166,10 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
     ]);
     for explicit_backend in [false, true] {
         let backend = ParserBackend::TemplateDfa;
-        let options = BuildOptions::default().optimization(Optimization::Balanced);
+        let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie);
         let options = if explicit_backend { options.parser_backend(backend) } else { options };
         let fresh = Grammar::from_glrm(&source)
-            .compile_with(&vocab, options)
+            .compile_with_build_options(&vocab, options)
             .unwrap();
         let bytes = fresh.save();
         let loaded = Constraint::load(&bytes).unwrap();

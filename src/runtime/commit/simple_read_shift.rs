@@ -297,7 +297,7 @@ mod tests {
             LexerDefinition, ParserDefinition, ParserProgram, StackLabel, StackTemplate,
             TemplateBuildOptions, TerminalPattern,
         };
-        use crate::{Constraint, Optimization, Vocab};
+        use crate::{Constraint, MaskStrategy, Vocab};
         let tokens = [
             "a", "b", "aa", "ab", "ba", "bb", "aab", "aba", "aabb", "aaba", "abab", "aaabbb",
         ];
@@ -325,7 +325,7 @@ mod tests {
             .compile_with(
                 &lexer,
                 &vocab,
-                TemplateBuildOptions::default().optimization(Optimization::Balanced),
+                TemplateBuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
             )
             .unwrap();
         let loaded = Constraint::load(fresh.save()).unwrap();
@@ -509,7 +509,7 @@ mod tests {
             LexerDefinition, ParserDefinition, ParserProgram, StackTemplate, TemplateBuildOptions,
             TerminalPattern,
         };
-        use crate::{Constraint, Optimization, Vocab};
+        use crate::{Constraint, MaskStrategy, Vocab};
 
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec())]);
         let parser = ParserProgram::new(ParserDefinition {
@@ -519,7 +519,7 @@ mod tests {
         })
         .unwrap();
         let lexer = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
-        for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
+        for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let fresh = parser
                 .compile_with(
                     &lexer,

@@ -1669,8 +1669,8 @@ mod tests {
         let mut expected = vec![0; 8];
         expected[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut errors = Vec::new();
-        for optimization in [crate::Optimization::Auto, crate::Optimization::Balanced] {
-            let compiled = crate::Grammar::glrm(source).compile_with(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
+        for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
+            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
             let loaded = crate::Constraint::load(compiled.save()).unwrap();
             let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
@@ -1706,8 +1706,8 @@ mod tests {
         initial[b'!' as usize / 32] = 1 << (b'!' % 32);
         let mut after_bang = vec![0; 8];
         after_bang[b'x' as usize / 32] = 1 << (b'x' % 32);
-        for optimization in [crate::Optimization::Auto, crate::Optimization::Balanced] {
-            let compiled = crate::Grammar::glrm(source).compile_with(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
+        for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
+            let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
             let loaded = crate::Constraint::load(compiled.save()).unwrap();
             let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
             for constraint in [compiled, loaded, external] {

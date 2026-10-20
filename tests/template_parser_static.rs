@@ -4,14 +4,14 @@ use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, StackDfa, StackLabel, StackState,
     StackTemplate, StackTransition, TemplateBuildOptions, TerminalPattern,
 };
-use glrmask::{Constraint, Optimization, ParserBackend, Vocab};
+use glrmask::{Constraint, MaskStrategy, ParserBackend, Vocab};
 
 fn compile_static(p: &ParserProgram, l: &LexerDefinition, v: &Vocab) -> Constraint {
     let c = p
         .compile_with(
             l,
             v,
-            TemplateBuildOptions::default().optimization(Optimization::FastRuntime),
+            TemplateBuildOptions::default().optimization(MaskStrategy::ParserDwa),
         )
         .unwrap();
     assert_eq!(c.parser_backend(), ParserBackend::TemplateDfa);
@@ -85,7 +85,7 @@ fn recursive_static_parser_matches_literal_prefix_oracle_in_all_artifact_forms()
             &lexer,
             &v,
             TemplateBuildOptions::default()
-                .optimization(Optimization::FastRuntime)
+                .optimization(MaskStrategy::ParserDwa)
                 .end_tokens([64]),
         )
         .unwrap();
@@ -388,7 +388,7 @@ fn static_expansion_budget_is_a_build_error_not_a_table_or_dynamic_fallback() {
     let l = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
     let v = vocabulary(&[b"a", b"aa"]);
     let error = p.compile_with(&l, &v, TemplateBuildOptions::default()
-        .optimization(Optimization::FastRuntime)).unwrap_err();
+        .optimization(MaskStrategy::ParserDwa)).unwrap_err();
     assert!(error.to_string().contains("budget"), "{error}");
     // The immutable program remains usable with the explicitly requested
     // dynamic compiler; an 18-symbol pop is not valid on the initial [0].

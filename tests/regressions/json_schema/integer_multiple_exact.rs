@@ -1,5 +1,5 @@
 //! General integer divisibility may not silently degrade to a range or wildcard.
-use glrmask::{BuildOptions, Constraint, Grammar, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
 
 fn allowed(mask: &[u32], id: usize) -> bool {
     mask.get(id / 32).is_some_and(|word| word & (1 << (id % 32)) != 0)
@@ -21,9 +21,9 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
                 "type": "object", "properties": {"v": number},
                 "required": ["v"], "additionalProperties": false,
             }).to_string();
-            for mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
+            for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                 let constraint = Grammar::from_json_schema(&schema)
-                    .compile_with(&vocab, BuildOptions::default().optimization(mode)).unwrap();
+                    .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
                 let loaded = Constraint::load(constraint.save()).unwrap();
                 for instance in [&constraint, &loaded] {
                     let mask = instance.start().mask();
@@ -46,10 +46,10 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
 fn integer_multiple_exact_large_divisor_is_bounded_or_explicitly_unsupported() {
     let vocab = Vocab::new(vec![(0, b"0".to_vec()), (1, b"1000003".to_vec()), (2, b"7".to_vec())]);
     let unbounded = Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003}"#);
-    assert!(unbounded.compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).is_err());
+    assert!(unbounded.compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).is_err());
     // Finite exact expansion remains supported even above the generic DFA budget.
     let bounded = Grammar::from_json_schema(r#"{"type":"integer","multipleOf":1000003,"minimum":0,"maximum":2000006}"#)
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     for id in [0, 1] {
         let mut state = bounded.start();
         state.commit_token(id).unwrap();
