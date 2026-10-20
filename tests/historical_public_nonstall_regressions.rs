@@ -79,12 +79,65 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             3810 => Some(&["b", "c", "ca", "cc", "caa", "cac", "cba", "cbb", "cca", "ccb", "ccc", "caaa", "caac", "caba", "caca", "cacc", "cbba", "cbbc", "ccaa", "ccab", "ccac", "ccba", "ccbc", "ccca", "cccb", "cccc", "caaba", "caaca", "cacaa", "cacba", "cacca", "cbaba", "cbaca", "cbbaa", "cbbac", "cbbba", "cbbca", "cbbcc", "ccaaa", "ccaab", "ccaba", "ccabc", "ccaca", "ccacb", "ccbaa", "ccbab", "ccbac", "ccbba", "ccbbb", "ccbca", "ccbcc", "cccaa", "cccab", "cccba", "cccbb", "cccbc", "cccca", "ccccb", "caaaba", "caaaca", "caacaa", "caacba", "caacca", "cababa", "cabaca", "cacaaa", "cacaba", "cacaca", "cacbaa", "cacbba", "caccaa", "caccba", "caccca", "cbacaa", "cbacca", "cbbaba", "cbbaca", "cbbcaa", "cbbcba", "cbbcca", "ccaaaa", "ccaaab", "ccaaba", "ccaabc", "ccaaca", "ccaacb", "ccabaa", "ccabab", "ccabac", "ccabba", "ccabca", "ccabcc", "ccacaa", "ccacab", "ccacba", "ccacbc", "ccacca", "ccaccb", "ccbaba", "ccbabc", "ccbaca", "ccbbaa", "ccbbab", "ccbbba", "ccbbbc", "ccbbca", "ccbbcb", "ccbcaa", "ccbcba", "ccbcca", "cccaaa", "cccaab", "cccaba", "cccabb", "cccabc", "cccaca", "cccacb", "cccbaa", "cccbab", "cccbac", "cccbba", "cccbbc", "cccbca", "cccbcb", "cccbcc", "ccccaa", "ccccab", "ccccba", "ccccbb", "ccccbc", "ccccca", "cccccb", "caaacaa", "caaacca", "caababa", "caabaca", "caacaaa", "caacaba", "caacaca", "caacbaa", "caacbba", "caaccaa", "caaccba", "caaccca", "cabacaa", "cabacca", "cacaaaa", "cacaaba", "cacaaca", "cacabaa", "cacacaa", "cacacca", "cacbaba", "cacbaca", "cacbbaa", "cacbbca", "caccaaa", "caccaba", "caccaca", "caccbaa", "caccbba", "caccbca", "cacccaa", "cacccba", "cacccca", "cbababa", "cbabaca", "cbacaaa", "cbacaba", "cbacaca", "cbacbaa", "cbacbba", "cbaccaa", "cbaccba", "cbaccca", "cbbaaba", "cbbaaca", "cbbacaa", "cbbacba", "cbbacca", "cbbbaba", "cbbbaca", "cbbcaaa", "cbbcaba", "cbbcaca", "cbbcbaa", "cbbcbba", "cbbccaa", "cbbccba", "cbbccca", "ccaaaba", "ccaaabc", "ccaaaca", "ccaabaa", "ccaabab", "ccaabac", "ccaabba", "ccaabca", "ccaabcc", "ccaacaa", "ccaacab", "ccaacba", "ccaacbc", "ccaacca", "ccababa", "ccababc", "ccabaca", "ccabcaa", "ccabcba", "ccabcca", "ccacaaa", "ccacaab", "ccacaba", "ccacabc", "ccacaca", "ccacbaa", "ccacbab", "ccacbac", "ccacbba", "ccacbca", "ccacbcc", "ccaccaa", "ccaccab", "ccaccba", "ccaccbc", "ccaccca", "ccbaaba", "ccbaaca", "ccbabaa", "ccbabab", "ccbabac", "ccbabba", "ccbabca", "ccbabcc", "ccbacaa", "ccbacab", "ccbacba", "ccbacca", "ccbbaaa", "ccbbaab", "ccbbaba", "ccbbabc", "ccbbaca", "ccbbacb", "ccbbbaa", "ccbbbab", "ccbbbac", "ccbbbba", "ccbbbca", "ccbbbcc", "ccbbcaa", "ccbbcab", "ccbbcba", "ccbbcbc", "ccbbcca", "ccbbccb", "ccbcaaa", "ccbcaba", "ccbcaca", "ccbcbaa", "ccbcbba", "ccbccaa", "ccbccba", "ccbccca", "cccaaaa", "cccaaab", "cccaaba", "cccaabb", "cccaabc", "cccaaca", "cccabaa", "cccabab", "cccabac", "cccabba", "cccabbc", "cccabca", "cccabcb", "cccabcc", "cccacaa", "cccacab", "cccacba", "cccacbb", "cccacbc", "cccacca", "cccbaaa", "cccbaab", "cccbaba", "cccbabb", "cccbabc", "cccbaca", "cccbacb", "cccbbaa", "cccbbab", "cccbbac", "cccbbba", "cccbbbb", "cccbbca", "cccbbcc", "cccbcaa", "cccbcab", "cccbcba", "cccbcbc", "cccbcca", "cccbccb", "ccccaaa", "ccccaab", "ccccaba", "ccccabb", "ccccabc", "ccccaca", "ccccbaa", "ccccbab", "ccccbac", "ccccbba", "ccccbbb", "ccccbbc", "ccccbca", "ccccbcb", "ccccbcc", "cccccaa", "cccccab", "cccccba", "cccccbb", "cccccbc", "cccccca"]),
             _ => None,
         };
+        // This oracle is independently derived from original integer CFG
+        // productions using a bounded-prefix fixed point, including words
+        // LONGER than the bound. Unlike truncating complete-word enumeration,
+        // this distinguishes a dead prefix from a viable long continuation.
+        // Includes all viable prefixes up to 5 bytes (including epsilon).
+        let prefix_oracle: Option<&[&str]> = match seed {
+            // Original input SHA256 1a035c81ad06504510a5fbe555eebf92d80ca1f0aaae0d493693cb25d0bd4192
+            1313 => Some(&["", "a", "b", "c", "ac", "ba", "bb", "bc", "ca", "cb", "cc", "aca", "acb", "acc", "baa", "bab", "bac", "bba", "bbb", "bbc", "bca", "bcb", "bcc", "cac", "cba", "cbb", "cbc", "cca", "ccb", "ccc", "acac", "acba", "acbb", "acbc", "acca", "accb", "accc", "baac", "baba", "babb", "babc", "baca", "bacb", "bacc", "bbaa", "bbab", "bbac", "bbba", "bbbb", "bbbc", "bbca", "bbcb", "bbcc", "bcaa", "bcab", "bcac", "bcba", "bcbb", "bcbc", "bcca", "bccb", "bccc", "caca", "cacb", "cacc", "cbaa", "cbab", "cbac", "cbba", "cbbb", "cbbc", "cbca", "cbcb", "cbcc", "ccac", "ccba", "ccbb", "ccbc", "ccca", "cccb", "cccc", "acaca", "acacb", "acacc", "acbaa", "acbab", "acbac", "acbba", "acbbb", "acbbc", "acbca", "acbcb", "acbcc", "accac", "accba", "accbb", "accbc", "accca", "acccb", "acccc", "baaca", "baacb", "baacc", "babaa", "babab", "babac", "babba", "babbb", "babbc", "babca", "babcb", "babcc", "bacac", "bacba", "bacbb", "bacbc", "bacca", "baccb", "baccc", "bbaac", "bbaba", "bbabb", "bbabc", "bbaca", "bbacb", "bbacc", "bbbaa", "bbbab", "bbbac", "bbbba", "bbbbb", "bbbbc", "bbbca", "bbbcb", "bbbcc", "bbcaa", "bbcab", "bbcac", "bbcba", "bbcbb", "bbcbc", "bbcca", "bbccb", "bbccc", "bcaac", "bcaba", "bcabb", "bcabc", "bcaca", "bcacb", "bcacc", "bcbaa", "bcbab", "bcbac", "bcbba", "bcbbb", "bcbbc", "bcbca", "bcbcb", "bcbcc", "bccaa", "bccab", "bccac", "bccba", "bccbb", "bccbc", "bccca", "bcccb", "bcccc", "cacac", "cacba", "cacbb", "cacbc", "cacca", "caccb", "caccc", "cbaac", "cbaba", "cbabb", "cbabc", "cbaca", "cbacb", "cbacc", "cbbaa", "cbbab", "cbbac", "cbbba", "cbbbb", "cbbbc", "cbbca", "cbbcb", "cbbcc", "cbcaa", "cbcab", "cbcac", "cbcba", "cbcbb", "cbcbc", "cbcca", "cbccb", "cbccc", "ccaca", "ccacb", "ccacc", "ccbaa", "ccbab", "ccbac", "ccbba", "ccbbb", "ccbbc", "ccbca", "ccbcb", "ccbcc", "cccac", "cccba", "cccbb", "cccbc", "cccca", "ccccb", "ccccc"]),
+            // Original input SHA256 b61aed16b2d4f697e11a5fb87f517115d631242bbb5bd59965990f8534541885
+            1730 => Some(&["", "b", "c", "bb", "bc", "cb", "cc", "bbb", "bbc", "bcb", "bcc", "cbb", "cbc", "ccb", "ccc", "bbbb", "bbbc", "bbcb", "bbcc", "bcbb", "bcbc", "bccb", "bccc", "cbbb", "cbbc", "cbcb", "cbcc", "ccbb", "ccbc", "cccb", "cccc", "bbbbb", "bbbbc", "bbbcb", "bbbcc", "bbcbb", "bbcbc", "bbccb", "bbccc", "bcbbb", "bcbbc", "bcbcb", "bcbcc", "bccbb", "bccbc", "bcccb", "bcccc", "cbbbb", "cbbbc", "cbbcb", "cbbcc", "cbcbb", "cbcbc", "cbccb", "cbccc", "ccbbb", "ccbbc", "ccbcb", "ccbcc", "cccbb", "cccbc", "ccccb", "ccccc"]),
+            // Original input SHA256 0cdfe65104fd9c6ece8bd29522f5051fc0373a93aa6d4b483b335556e935d4a9
+            2009 => Some(&["", "a", "b", "c", "aa", "ab", "ac", "ca", "cb", "cc", "aaa", "aab", "aac", "aba", "aca", "acb", "acc", "caa", "cac", "cca", "ccb", "ccc", "aaaa", "aaab", "aaac", "aaba", "aaca", "aacb", "aacc", "acaa", "acac", "acba", "acca", "accb", "accc", "caaa", "caac", "caca", "cacb", "cacc", "ccaa", "ccac", "ccca", "cccb", "cccc", "aaaaa", "aaaab", "aaaac", "aaaba", "aaaca", "aaacb", "aaacc", "aabaa", "aacaa", "aacac", "aacba", "aacca", "aaccb", "aaccc", "acaaa", "acaac", "acaca", "acacb", "acacc", "accaa", "accac", "accba", "accca", "acccb", "acccc", "caaac", "caaca", "caacb", "caacc", "cacaa", "cacac", "cacca", "caccb", "caccc", "ccaaa", "ccaac", "ccaca", "ccacb", "ccacc", "cccaa", "cccac", "cccca", "ccccb", "ccccc"]),
+            // Original input SHA256 f09f3dcfadd8e3168bfd150c45d46275faf8036f2a3dab803749af62ae57eb32
+            2374 => Some(&["", "a", "b", "c", "aa", "ab", "ac", "bc", "ca", "cc", "aaa", "aab", "aac", "abc", "aca", "acc", "bca", "cac", "cca", "ccc", "aaaa", "aaab", "aaac", "aabc", "aaca", "aacc", "abca", "abcc", "acac", "acca", "accc", "bcac", "caca", "ccac", "ccca", "aaaaa", "aaaab", "aaaac", "aaabc", "aaaca", "aaacc", "aabca", "aabcc", "aacac", "aacca", "aaccc", "abcac", "abcca", "acaca", "acacc", "accac", "accca", "acccc", "bcaca", "cacac", "ccaca", "cccac"]),
+            // Original input SHA256 00e3e8ae53799835a81e4c04c2fd347e93961d88f792da5660b2303765613d43
+            2556 => Some(&["", "a", "b", "aa", "ab", "ba", "bb", "aab", "aba", "abb", "baa", "bab", "bba", "bbb", "aabb", "abaa", "abab", "abba", "abbb", "baab", "baba", "babb", "bbaa", "bbab", "bbba", "bbbb", "aabba", "aabbb", "abaab", "ababa", "ababb", "abbaa", "abbab", "abbba", "abbbb", "baabb", "babaa", "babab", "babba", "babbb", "bbaab", "bbaba", "bbabb", "bbbaa", "bbbab", "bbbba", "bbbbb"]),
+            // Original input SHA256 0957805b2866074120b97c4a8cecedb8f9f946edc27c4c8c8b7a51c4da203a24
+            3204 => Some(&["", "a", "b", "c", "ab", "ba", "ca", "cb", "cc", "bab", "bac", "cab", "cba", "cca", "ccb", "ccc", "baba", "bacc", "cabb", "cbab", "cbac", "ccab", "ccba", "ccca", "cccb", "cccc", "babac", "cbaba", "cbacc", "ccabb", "ccbab", "ccbac", "cccab", "cccba", "cccbb", "cccca", "ccccb", "ccccc"]),
+            // Original input SHA256 8f8bd6f50406cb4ed3deafdff9815662475462a3808228b98d51a6f716779284
+            3274 => Some(&["", "a", "b", "aa", "ab", "ac", "bb", "aaa", "aab", "aac", "abb", "bba", "bbb", "aaaa", "aaab", "aaac", "aabb", "aabc", "aacc", "abba", "abbb", "abbc", "bbbb", "aaaaa", "aaaab", "aaaac", "aaabb", "aaabc", "aaacc", "aabba", "aabbb", "aabbc", "abbac", "abbbb"]),
+            // Original input SHA256 b59189b0f28b7e0770ee64dc8abcc63d389b393fc6e8b4446f1fac0207cb4967
+            3810 => Some(&["", "b", "c", "ca", "cb", "cc", "caa", "cab", "cac", "cba", "cbb", "cca", "ccb", "ccc", "caaa", "caab", "caac", "caba", "caca", "cacb", "cacc", "cbab", "cbac", "cbba", "cbbb", "cbbc", "ccaa", "ccab", "ccac", "ccba", "ccbb", "ccbc", "ccca", "cccb", "cccc", "caaab", "caaac", "caaba", "caaca", "caacb", "caacc", "cabab", "cabac", "cacaa", "cacab", "cacac", "cacba", "cacbb", "cacca", "caccb", "caccc", "cbaba", "cbaca", "cbacb", "cbacc", "cbbaa", "cbbab", "cbbac", "cbbba", "cbbca", "cbbcb", "cbbcc", "ccaaa", "ccaab", "ccaac", "ccaba", "ccabb", "ccabc", "ccaca", "ccacb", "ccacc", "ccbaa", "ccbab", "ccbac", "ccbba", "ccbbb", "ccbbc", "ccbca", "ccbcb", "ccbcc", "cccaa", "cccab", "cccac", "cccba", "cccbb", "cccbc", "cccca", "ccccb", "ccccc"]),
+            _ => None,
+        };
         if let Some(expected) = bounded_oracle {
             let reloaded = glrmask::Constraint::load(c.save())
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: reload failed: {e:?}"));
             assert_eq!(c.start().mask(), reloaded.start().mask(),
                 "seed {seed} mode {mode:?}: initial masks differ after save/load");
             for c in [&c, &reloaded] {
+                let viable = prefix_oracle.expect("each tested seed needs independent prefix oracle");
+                let token_bytes: [&[u8]; 6] = [b"a", b"b", b"c", b"ab", b"bc", b"ca"];
+                for len in 0..=3usize {
+                    for number in 0..3usize.pow(len as u32) {
+                        let mut prefix = vec![b'a'; len];
+                        let mut value = number;
+                        for byte in prefix.iter_mut().rev() {
+                            *byte += (value % 3) as u8;
+                            value /= 3;
+                        }
+                        let original_cfg_viable = viable.iter().any(|p| p.as_bytes() == prefix);
+                        let mut state = c.start();
+                        let committed = state.commit_bytes(&prefix).is_ok();
+                        assert_eq!(committed, original_cfg_viable,
+                            "seed {seed} mode {mode:?}: prefix viability for {prefix:?}");
+                        if committed {
+                            let mask = state.mask();
+                            for (id, token) in token_bytes.into_iter().enumerate() {
+                                let mut extended = prefix.clone();
+                                extended.extend_from_slice(token);
+                                let expected_allowed = viable.iter().any(|p| p.as_bytes() == extended);
+                                let actual_allowed = mask.get(id / 32)
+                                    .is_some_and(|w| w & (1u32 << (id % 32)) != 0);
+                                assert_eq!(actual_allowed, expected_allowed,
+                                    "seed {seed} mode {mode:?} mask token {id} after {prefix:?}");
+                            }
+                        }
+                    }
+                }
                 for len in 0..=7usize {
                 for number in 0..3usize.pow(len as u32) {
                     let mut word = vec![b'a'; len];
