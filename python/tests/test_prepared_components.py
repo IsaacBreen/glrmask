@@ -1,121 +1,200 @@
-"""Typed source/prepared snapshots and Lark compatibility profiles."""
+"""Tests for v1 API rules and semantics."""
 
-
-def _bound_snapshot(grammar, name, value):
-    """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
-
-import gc
-
+from collections.abc import Mapping
+import copy
 import numpy as np
 import pytest
-
 import glrmask
 
-MODES = [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
-         glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]
-LEAF = 'extern token MARK start body nt body="x" MARK'
-PAIR = 'extern grammar LEFT extern grammar RIGHT start root nt root=LEFT "|" RIGHT'
+HOST = 'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
+TWO_EXTERNS = 'glrm 1; start start; extern token A; extern grammar B; nt start = A B;'
+MARK = 'glrm 1; start start; extern token MARK; nt start = MARK;'
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"|", 2: b"x", 4: b"", 5: b""})
+    return glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"a", 2: b"b", 3: b"y", 4: b"xay", 5: b"xb", 63: b""})
 
 
-def accepts(constraint, ids):
-    state = constraint.start()
-    for token in ids:
-        mask = state.mask()
-        if token >= len(mask) or not mask[token]:
-            return False
-        state.commit_token(token)
-    return state.is_accepting()
+def test_atomic_kwargs_bind():
+    m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
+    # Valid atomic keyword bind
+    m.bind(A=glrmask.Token(1), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+    assert len(m.externs.unbound) == 0
+
+    # Failed atomic keyword bind: second argument is invalid
+    m2 = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
+    saved = m2.save()
+    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
+    with pytest.raises(ValueError, match="unbound externs"):
+        m2.bind(A=glrmask.Token(1), B=open_child)
+    # On error, m2 must be completely unchanged; A was not bound!
+    assert m2.save() == saved
+    assert "A" in m2.externs.unbound
+    assert "B" in m2.externs.unbound
+
+    # Mixing positional and keyword arguments is a TypeError
+    with pytest.raises(TypeError, match="mix"):
+        m2.bind("A", glrmask.Token(1), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+
+    # Zero arguments is a TypeError
+    with pytest.raises(TypeError):
+        m2.bind()
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_owned_source_and_independent_open_prepared_children(mode):
+def test_rebinding_error():
+    m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
+    m.bind("A", glrmask.Token(1))
+    with pytest.raises(ValueError, match="already bound"):
+        m.bind("A", glrmask.Token(1))
+
+
+def test_qualified_paths_rejected():
+    m = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
+    with pytest.raises(ValueError, match="qualified paths are not supported"):
+        m.bind("child::sub", glrmask.Grammar.from_ebnf('start ::= "a"'))
+
+
+def test_open_child_rejected():
+    open_child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
+    parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
+    # Binding open child to parent raises ValueError
+    with pytest.raises(ValueError, match="unbound externs"):
+        parent.bind("child", open_child)
+    # Expr.choice / sequence with open child raises ValueError immediately
+    with pytest.raises(ValueError, match="unbound externs"):
+        glrmask.Expr.choice(open_child, glrmask.Grammar.from_ebnf('start ::= "a"'))
+    with pytest.raises(ValueError, match="unbound externs"):
+        glrmask.Expr.sequence(open_child)
+
+
+def test_externs_mapping_semantics():
+    m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
+    externs = m.externs
+    assert isinstance(externs, Mapping)
+    assert len(externs) == 2
+    assert "A" in externs
+    assert "B" in externs
+    assert "C" not in externs
+
+    # Declaration order preserved
+    assert list(externs) == ["A", "B"]
+    assert externs.keys() == ["A", "B"]
+
+    # Item access
+    a = externs["A"]
+    assert a.name == "A"
+    assert a.kind == "token"
+    assert a.span is not None
+
+    b = externs["B"]
+    assert b.name == "B"
+    assert b.kind == "grammar"
+
+    with pytest.raises(KeyError):
+        _ = externs["missing"]
+
+    assert externs.get("A").name == "A"
+    assert externs.get("missing") is None
+    assert externs.get("missing", 42) == 42
+
+    # Unbound view
+    assert list(externs.unbound) == ["A", "B"]
+    assert isinstance(externs.unbound, Mapping)
+    assert externs.unbound.unbound == externs.unbound
+
+    # After binding A, unbound only has B, but externs still has A and B
+    m.bind("A", glrmask.Token(1))
+    assert list(m.externs.unbound) == ["B"]
+    assert list(m.externs) == ["A", "B"]
+
+
+def test_copy_independence():
+    m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
+    assert not hasattr(m, "clone")
+
+    copied = copy.copy(m)
+    method_copied = m.copy()
+
+    # Changing settings on copy does not affect original
+    copied.mask_strategy = glrmask.MaskStrategy.PARSER_DWA
+    assert m.mask_strategy == glrmask.MaskStrategy.AUTO
+    assert copied.mask_strategy == glrmask.MaskStrategy.PARSER_DWA
+
+    # Binding on copy does not affect original
+    copied.bind("A", glrmask.Token(1))
+    assert "A" in m.externs.unbound
+    assert "A" not in copied.externs.unbound
+
+
+def test_settings_properties_and_save_load_roundtrip():
     v = vocab()
-    child = glrmask.Grammar.from_glrm("".join([LEAF]))
-    open_child = child.prepare(v)
-    parent = glrmask.Grammar.from_glrm(PAIR).prepare(v)
-    package = _bound_snapshot(_bound_snapshot(parent, "LEFT", open_child), "RIGHT", open_child)
-    assert isinstance(package, glrmask.PreparedGrammar)
-    assert [(r.path, r.kind) for r in package.requirements] == [
-        (["LEFT", "MARK"], "token"), (["RIGHT", "MARK"], "token")]
-    assert [r.name for r in open_child.requirements] == ["MARK"]
-    loaded = glrmask.PreparedGrammar.load(package.save(), vocab=v)
-    complete = _bound_snapshot(_bound_snapshot(loaded, "LEFT::MARK", v.tokens([4])), "RIGHT::MARK", v.tokens([5]))
-    del child, parent, open_child
-    gc.collect()
-    compiled = complete.link(optimization=mode)
-    assert accepts(compiled, [0, 4, 1, 2, 5])
-    assert not accepts(compiled, [0, 5, 1, 2, 4])
-    assert len(package.requirements) == 2
-    with pytest.raises(ValueError):
-        _bound_snapshot(complete, "LEFT::MARK", v.tokens([5]))
+    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    m = glrmask.Module(
+        g,
+        mask_strategy=glrmask.MaskStrategy.PARSER_DWA,
+        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_RUNTIME,
+    )
+    assert m.mask_strategy == glrmask.MaskStrategy.PARSER_DWA
+    assert m.boundary_mask_strategy == glrmask.BoundaryMaskStrategy.FAST_RUNTIME
+
+    # Modifying properties
+    m.mask_strategy = glrmask.MaskStrategy.TOKEN_TRIE
+    assert m.mask_strategy == glrmask.MaskStrategy.TOKEN_TRIE
+
+    # Aliases
+    assert glrmask.MaskStrategy.FAST_BUILD is glrmask.MaskStrategy.TOKEN_TRIE
+    assert glrmask.MaskStrategy.FAST_RUNTIME is glrmask.MaskStrategy.PARSER_DWA
+
+    # Save / load round-trip preserves settings
+    saved = m.save()
+    loaded = glrmask.Module.load(saved, vocab=v)
+    assert loaded.mask_strategy == glrmask.MaskStrategy.TOKEN_TRIE
+    assert loaded.boundary_mask_strategy == glrmask.BoundaryMaskStrategy.FAST_RUNTIME
 
 
-def test_typed_bindings_and_explicit_event_adapter():
+def test_expr_literal_str_rejection_and_empty_choice():
     v = vocab()
-    leaf = glrmask.Grammar.from_glrm(LEAF)
-    pair = glrmask.Grammar.from_glrm(PAIR)
-    with pytest.raises(ValueError):
-        _bound_snapshot(leaf, "MARK", glrmask.Grammar.from_glrm('start x nt x="x"'))
-    widened = _bound_snapshot(pair, "LEFT", v.tokens([4]))
-    assert [r.name for r in widened.requirements] == ["RIGHT"]
-    assert [r.name for r in pair.requirements] == ["LEFT", "RIGHT"]
-    widened.bind("RIGHT", glrmask.Grammar.from_glrm('start x nt x="x"'))
-    for mode in MODES:
-        compiled = widened.compile(v, optimization=mode)
-        assert accepts(compiled, [4, 1, 0])
-        assert not accepts(compiled, [5, 1, 0])
-    event = glrmask.Grammar.exact(v.tokens([2, 4]))
-    g = _bound_snapshot(glrmask.Grammar.from_glrm('extern grammar EVENT start root nt root=EVENT'), "EVENT", event)
-    mask = g.compile(v).start().mask()
-    assert not mask[0] and mask[2] and mask[4]
-    source = _bound_snapshot(_bound_snapshot(pair, "LEFT", leaf), "RIGHT", leaf)
-    complete = _bound_snapshot(_bound_snapshot(source, "LEFT::MARK", v.tokens([4])), "RIGHT::MARK", v.tokens([5]))
-    assert len(source.requirements) == 2 and complete.requirements == []
+    # Expr.literal accepts str and bytes
+    lit_str = glrmask.Expr.literal("x")
+    lit_bytes = glrmask.Expr.literal(b"x")
+    assert isinstance(lit_str, glrmask.Expr)
+    assert isinstance(lit_bytes, glrmask.Expr)
+
+    # Plain str in Expr.choice / sequence raises TypeError mentioning Expr.literal
+    with pytest.raises(TypeError, match="Expr.literal"):
+        glrmask.Expr.choice("x")
+    with pytest.raises(TypeError, match="Expr.literal"):
+        glrmask.Expr.sequence("x")
+
+    # Empty choice matches nothing, does not error
+    empty_choice = glrmask.Expr.choice()
+    assert isinstance(empty_choice, glrmask.Expr)
+
+    # Empty sequence matches empty string
+    empty_seq = glrmask.Expr.sequence()
+    assert isinstance(empty_seq, glrmask.Expr)
 
 
-@pytest.mark.parametrize("mode", MODES)
-def test_lark_llm_numeric_names_and_prepared_bindings(mode):
+def test_grammar_compile_sugar():
     v = vocab()
-    with pytest.raises(ValueError):
-        glrmask.Grammar.from_lark('start: <[2]>').compile(v)
-    g = glrmask.Grammar.from_lark('start: <|begin|> @payload <[^0-2]>', profile="llm", token_names={"begin": 2})
-    assert [r.name for r in g.requirements] == ["payload"]
-    child = glrmask.Grammar.from_glrm('start root nt root="|"')
-    compiled = _bound_snapshot(g.prepare(v), "payload", child.prepare(v)).link(optimization=mode)
-    assert accepts(compiled, [2, 1, 4]) and accepts(compiled, [2, 1, 5])
-    assert not accepts(compiled, [0, 1, 4])
-    with pytest.raises(ValueError):
-        glrmask.Grammar.from_lark('start: <|missing|>', profile="llm").compile(v)
+    g = glrmask.Grammar.from_ebnf('start ::= "a"')
+    sugar_constraint = g.compile(
+        v,
+        mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
+        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_BUILD,
+    )
+    module_constraint = glrmask.Module(
+        g,
+        mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
+        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_BUILD,
+    ).compile(v)
+    assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())
 
-
-@pytest.mark.parametrize("mode", MODES)
-def test_inline_json_and_host_bound_json_are_mask_equivalent(mode):
-    v = glrmask.Vocab.from_id_to_bytes({0: b'<"a b">', 1: b'<"ab">', 2: b"<", 3: b'"a b"', 4: b">"})
-    schema = {"type": "string", "const": "a b"}
-    inline = glrmask.Grammar.from_lark('start: "<" %json {"type":"string","const":"a b"} ">"', profile="llm")
-    bound = _bound_snapshot(glrmask.Grammar.from_lark('start: "<" @json ">"', profile="llm"), "json", glrmask.Grammar.from_json_schema(schema))
-    left = inline.compile(v, optimization=mode)
-    right = bound.compile(v, optimization=mode)
-    assert np.array_equal(left.start().mask(), right.start().mask())
-    assert accepts(left, [0]) and accepts(left, [2, 3, 4]) and not accepts(left, [1])
-
-
-def test_original_requirement_source_span():
-    source = "// α\nextern token MARK\nstart root\nnt root=MARK"
-    v = vocab()
-    g = glrmask.Grammar.from_glrm(source)
-    req = g.requirements[0]
-    start, end, line, column = req.source_span
-    assert source.encode("utf-8")[start:end] == b"MARK"
-    assert (line, column) == (2, 14)
-    saved = glrmask.PreparedGrammar.load(g.prepare(v).save(), vocab=v)
-    assert saved.requirements[0].source_span == req.source_span
-    lark = glrmask.Grammar.from_lark("start: @payload", profile="llm")
-    assert lark.requirements[0].source_span == (7, 15, 1, 8)
+    # Grammar is source-only
+    assert not hasattr(g, "bind")
+    assert not hasattr(g, "prepare")
+    assert not hasattr(g, "module")
+    assert not hasattr(g, "unbound")
+    assert not hasattr(g, "externs")
+    assert not hasattr(g, "clone")
+    assert not hasattr(g, "exact")

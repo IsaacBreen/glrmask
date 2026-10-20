@@ -684,18 +684,7 @@ impl<'a> Grammar<'a> {
             )));
         }
         if options.optimization == MaskStrategy::TokenTrie {
-            // Use the ordinary Dynamic compiler with one complete, unsplit source
-            // body. Resolve bindings as typed nodes before compilation, without
-            // rebuilding the resulting Constraint through the native/O2 path.
-            let named = self.resolve_dynamic_source(vocab, false)?;
-            let construction = match &self.source {
-                GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
-                _ => crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
-            };
-            let mut constraint = crate::import::compile_dynamic_named_single(named, vocab, construction, matches!(self.source, GrammarSource::JsonSchema(_)))?;
-            let _ = constraint.late_bind_vocab.set(vocab.clone());
-            ensure_runnable_constraint(&constraint)?;
-            apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
+            let constraint = self.compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?;
             return constraint.with_end_tokens(options.end_token_ids());
         }
         if options.parser_backend == ParserBackend::TemplateDfa {
@@ -895,6 +884,27 @@ impl<'a> Grammar<'a> {
                 Ok(self.component()?.with_tokens(&token_refs)?.with_children(&children)?.lower_closed()?)
             }
         }
+    }
+
+    // Use the ordinary Dynamic compiler with one complete, unsplit source
+    // body. Resolve bindings as typed nodes before compilation, without
+    // rebuilding the resulting Constraint through the native/O2 path.
+    pub(crate) fn compile_token_trie(&self, vocab: &Vocab, boundary: BoundaryTriggerDetail) -> Result<RuntimeConstraint> {
+        graph::source_preflight(self)?;
+        if matches!(self.source, GrammarSource::Lark(_)) {
+            return self.resolve_lark(vocab)?.compile_token_trie(vocab, boundary);
+        }
+        self.validate_exact_target(vocab)?;
+        let named = self.resolve_dynamic_source(vocab, false)?;
+        let construction = match &self.source {
+            GrammarSource::JsonSchema(_) => crate::compiler::glr::table::GlrTableConstruction::Lalr,
+            _ => crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
+        };
+        let mut constraint = crate::import::compile_dynamic_named_single(named, vocab, construction, matches!(self.source, GrammarSource::JsonSchema(_)))?;
+        let _ = constraint.late_bind_vocab.set(vocab.clone());
+        ensure_runnable_constraint(&constraint)?;
+        apply_final_boundary_trigger(&mut constraint, boundary)?;
+        Ok(constraint)
     }
 
     pub(crate) fn from_expr(expr: &Expr) -> Result<Grammar<'static>> {

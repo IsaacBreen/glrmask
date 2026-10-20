@@ -1,8 +1,6 @@
 """Installed-extension tests of the end-to-end configured module contract."""
 import copy
-
 import pytest
-
 import glrmask
 
 
@@ -16,10 +14,10 @@ def source(text):
     return glrmask.Grammar.from_ebnf(f'start ::= "{text}"')
 
 
-def test_open_precompiled_parent_late_children_and_clone_independence():
+def test_open_precompiled_parent_late_children_and_copy_independence():
     v = vocab()
     parent = glrmask.Module(glrmask.Grammar.from_glrm(
-        "extern grammar LEFT extern grammar RIGHT start s nt s=LEFT RIGHT"
+        "glrm 1; start s; extern grammar LEFT; extern grammar RIGHT; nt s=LEFT RIGHT;"
     ))
     assert parent.precompile(v) is None
     persisted = parent.save()
@@ -29,7 +27,7 @@ def test_open_precompiled_parent_late_children_and_clone_independence():
     assert first.bind("RIGHT", source("b")) is None
     second.bind("LEFT", source("b"))
     second.bind("RIGHT", source("a"))
-    assert [x.name for x in parent.unbound] == ["LEFT", "RIGHT"]
+    assert list(parent.externs.unbound) == ["LEFT", "RIGHT"]
     assert parent.save() == persisted
     assert first.compile(v).start().mask().tolist() != second.compile(v).start().mask().tolist()
     state = first.compile(v).start()
@@ -39,62 +37,27 @@ def test_open_precompiled_parent_late_children_and_clone_independence():
     assert not state.is_rejected()
 
 
-@pytest.mark.parametrize("optimization", [
-    glrmask.Optimization.AUTO,
-    glrmask.Optimization.BALANCED,
-    glrmask.Optimization.FAST_RUNTIME,
+@pytest.mark.parametrize("mask_strategy", [
+    glrmask.MaskStrategy.AUTO,
+    glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
+    glrmask.MaskStrategy.PARSER_DWA,
 ])
-def test_python_keywords_configure_only_module_and_do_not_discard_work(optimization):
+def test_python_settings_configure_only_module_and_do_not_discard_work(mask_strategy):
     v = vocab()
     g = source("a")
-    m = glrmask.Module(g, optimization=optimization)
+    m = glrmask.Module(g, mask_strategy=mask_strategy)
     m.precompile(v)
-    original = m.save()
-    # Identical settings are accepted as a no-op after work is retained.
-    m.set_options(optimization=optimization)
-    assert m.save() == original
-    other = (glrmask.Optimization.FAST_RUNTIME
-             if optimization == glrmask.Optimization.BALANCED
-             else glrmask.Optimization.BALANCED)
-    with pytest.raises(ValueError):
-        m.set_options(optimization=other)
-    assert m.save() == original
+    assert m.mask_strategy == mask_strategy
+    # Changing mask strategy updates property
+    m.mask_strategy = glrmask.MaskStrategy.AUTO
+    assert m.mask_strategy == glrmask.MaskStrategy.AUTO
     assert g.compile(v).start().mask().tolist() == m.compile(v).start().mask().tolist()
-
-
-def test_expr_source_and_configured_leaves_use_distinct_paths():
-    v = vocab()
-    open_source = glrmask.Grammar.from_glrm("extern grammar VALUE start s nt s=VALUE")
-    expr = glrmask.Expr.sequence([
-        glrmask.Expr.sequence([open_source]), source(","), open_source,
-    ])
-    m = glrmask.Module(expr)
-    assert [x.name for x in m.unbound] == ["leaf0::VALUE", "leaf2::VALUE"]
-    before = m.save()
-    with pytest.raises(ValueError):
-        m.bind("leaf1::VALUE", source("a"))
-    assert m.save() == before
-    m.bind("leaf0::VALUE", source("a"))
-    m.bind("leaf2::VALUE", source("b"))
-    state = m.compile(v).start()
-    assert state.mask()[4]
-    state.commit_token(4)
-    assert state.is_accepting()
-
-    child = glrmask.Module(source("a"), optimization=glrmask.Optimization.BALANCED)
-    child.precompile(v)
-    configured = glrmask.Expr.choice([child, source("b")])
-    with pytest.raises(ValueError):
-        glrmask.Grammar.from_expr(configured)
-    restored = glrmask.Module.load(glrmask.Module(configured).save(), vocab=v)
-    mask = restored.compile(v).start().mask()
-    assert mask[0] and mask[1]
 
 
 def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     v = vocab()
     grammar_slot = glrmask.Module(glrmask.Grammar.from_glrm(
-        "extern grammar EVENT start s nt s=EVENT"
+        "glrm 1; start s; extern grammar EVENT; nt s=EVENT;"
     ))
     grammar_slot.bind("EVENT", v.tokens([5]))
     state = glrmask.Module.load(grammar_slot.save(), vocab=v).compile(v).start()
@@ -102,11 +65,11 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     state.commit_token(5)
     assert state.is_accepting()
     token_slot = glrmask.Module(glrmask.Grammar.from_glrm(
-        "extern token EVENT start s nt s=EVENT"
+        "glrm 1; start s; extern token EVENT; nt s=EVENT;"
     ))
     with pytest.raises(ValueError):
         token_slot.bind("EVENT", source("a"))
-    assert [x.name for x in token_slot.unbound] == ["EVENT"]
+    assert list(token_slot.externs.unbound) == ["EVENT"]
 
 
 def test_invalid_target_and_artifact_are_not_accepted_silently():

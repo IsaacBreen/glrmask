@@ -1,18 +1,18 @@
 """Exact token sets are model-ID sets, not byte strings or token sequences."""
 
 
-def _bound_snapshot(grammar, name, value):
+def _bound_snapshot(source, name, value):
     """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
+    m = glrmask.Module(source) if isinstance(source, glrmask.Grammar) else source.copy()
+    assert m.bind(name, value) is None
+    return m
 
 import pytest
 import glrmask
 
 ONE = "glrm 1; start start; extern token T; nt start = T;"
-MODES = [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
-         glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]
+MODES = [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
+         glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]
 
 
 def vocab(n=128):
@@ -60,8 +60,9 @@ def test_missing_ids_and_duplicate_explicit_ids_are_rejected():
 def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
     source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
-    c = (_bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", v.tokens(range(10, 31))), "B", v.token_ranges([range(20, 41), range(70, 81)]))
-         .compile(v, optimization=mode))
+    module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", v.tokens(range(10, 31))), "B", v.token_ranges([range(20, 41), range(70, 81)]))
+    module.mask_strategy = mode
+    c = module.compile(v)
     for first in (10, 20, 30):
         state = c.start()
         assert accepted_ids(state) == set(range(10, 31))
@@ -75,15 +76,17 @@ def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
 
 def test_deferred_range_binding_and_serialization():
     v = vocab()
-    module = glrmask.Grammar.from_glrm(ONE).prepare(v)
+    module = glrmask.Module(glrmask.Grammar.from_glrm(ONE))
+    module.precompile(v)
     bound = _bound_snapshot(module, "T", v.token_ranges([range(3, 9), range(90, 100)]))
     expected = set(range(3, 9)) | set(range(90, 100))
-    loaded = glrmask.PreparedGrammar.load(bound.save())
+    loaded = glrmask.Module.load(bound.save(), vocab=v)
     for mode in MODES:
-        constraint = loaded.link(optimization=mode)
+        loaded.mask_strategy = mode
+        constraint = loaded.compile(v)
         assert accepted_ids(constraint.start()) == expected
     with pytest.raises(ValueError):
-        module.link()
+        module.compile(v)
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -95,7 +98,9 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
                              (v.token_ranges([range(0, 65_535), range(65_536, n)]), 65_535)]:
         assert len(tokens.ranges) == (1 if excluded is None else 2)
         assert len(tokens) == n - (excluded is not None)
-        constraint = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens).compile(v, optimization=mode)
+        module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
+        module.mask_strategy = mode
+        constraint = module.compile(v)
         state = constraint.start()
         mask = state.mask()
         assert int(mask.sum()) == len(tokens)
@@ -130,21 +135,20 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
     for expression in ["A B", "(A | B) A", '\"a\" A \"b\" | \"ab\" B',
                        "A? B+", "(A B)*"]:
         source = "glrm 1; start start; extern token A; extern token B; nt start = " + expression + ";"
-        compact = glrmask.Grammar.from_glrm(source)
-        pointwise = glrmask.Grammar.from_glrm(source.replace("extern token A;", "extern grammar A;").replace("extern token B;", "extern grammar B;"))
+        compact = glrmask.Module(glrmask.Grammar.from_glrm(source))
+        pointwise = glrmask.Module(glrmask.Grammar.from_glrm(source.replace("extern token A;", "extern grammar A;").replace("extern token B;", "extern grammar B;")))
         if deferred:
-            compact = compact.prepare(v)
-            pointwise = pointwise.prepare(v)
+            compact.precompile(v)
+            pointwise.precompile(v)
         for name, ranges in selections.items():
             compact = _bound_snapshot(compact, name, v.token_ranges(ranges))
             oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
-            pointwise = _bound_snapshot(pointwise, name, oracle.prepare(v) if deferred else oracle)
-        if deferred:
-            actual = compact.link(optimization=mode)
-            expected = pointwise.link(optimization=mode)
-        else:
-            actual = compact.compile(v, optimization=mode)
-            expected = pointwise.compile(v, optimization=mode)
+            oracle.mask_strategy = mode
+            pointwise = _bound_snapshot(pointwise, name, oracle)
+        compact.mask_strategy = mode
+        pointwise.mask_strategy = mode
+        actual = compact.compile(v)
+        expected = pointwise.compile(v)
         # Exhaust every legal prefix through two model tokens, comparing the
         # full next-token mask and acceptance at every node.
         prefixes = [()]
@@ -172,7 +176,8 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = _bound_snapshot(grammar, "A", v.tokens(range(6)) if compact else glrmask.Token(0))
     grammar = _bound_snapshot(grammar, "B", v.tokens(range(3, 10)) if compact else glrmask.Token(1))
-    constraint = grammar.compile(v, optimization=mode, end_tokens=[15])
+    grammar.mask_strategy = mode
+    constraint = grammar.compile(v, end_tokens=[15])
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)
@@ -189,8 +194,9 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
                                       8: b"b", 9: b"c", 10: b"bb", 11: b"x"})
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
-    constraint = _bound_snapshot(_bound_snapshot(grammar, "A", v.tokens(a)), "B", v.tokens(b)).compile(
-        v, optimization=mode, end_tokens=[15])
+    module = _bound_snapshot(_bound_snapshot(grammar, "A", v.tokens(a)), "B", v.tokens(b))
+    module.mask_strategy = mode
+    constraint = module.compile(v, end_tokens=[15])
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)

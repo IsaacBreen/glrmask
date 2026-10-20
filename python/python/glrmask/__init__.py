@@ -17,10 +17,6 @@ GLRMask has four core types:
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
-**Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages
-use `PreparedGrammar` for reusable preparation. The decoding quickstarts below
-work with that release; the new assembly APIs require a matching source build.
-
 Use direct `Grammar.compile` for a closed source, or a `Module` when local
 settings, late-bound children, or retained work are needed. `Expr.choice` and
 `Expr.sequence` group grammar leaves without adding an extra lexer scope at each
@@ -45,23 +41,38 @@ assert state.is_accepting()
 ```
 
 Python masks are NumPy Boolean arrays indexed by original model token ID.
-
-The next compatibility release targets ordinary, GIL-enabled CPython 3.9
-through 3.15. Its `cp39-abi3` wheels use Python's stable extension ABI, so one
-wheel per operating-system/architecture combination can serve multiple Python
-versions. This does not imply support for free-threaded Python (`cp314t`,
-`cp315t` or `abi3t`): the extension explicitly retains the GIL requirement.
-
-The expanded build matrix covers Windows x64/ARM64, macOS Intel/Apple Silicon,
-and Linux x64/ARM64 with either glibc or musl. Linux glibc Python wheels retain
-the manylinux2014 baseline; native C++/Node binaries use glibc 2.28 or newer.
-See [the compatibility guide](https://github.com/IsaacBreen/glrmask/blob/main/docs/compatibility.md)
-for runtime requirements and the distinction between source support and
-published package availability.
-
-## Learn more
-
-[Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://glrmask.com/api/python/)
 """
+from collections.abc import Mapping
+from ._glrmask import (
+    BoundaryMaskStrategy,
+    Constraint,
+    ConstraintState,
+    ExactTokens,
+    Expr,
+    Extern,
+    Externs,
+    Grammar,
+    MaskStrategy,
+    Module,
+    Token,
+    Vocab,
+    _internal,
+)
 
-from ._glrmask import *
+Mapping.register(Externs)
+
+__all__ = [
+    "BoundaryMaskStrategy",
+    "Constraint",
+    "ConstraintState",
+    "ExactTokens",
+    "Expr",
+    "Extern",
+    "Externs",
+    "Grammar",
+    "MaskStrategy",
+    "Module",
+    "Token",
+    "Vocab",
+    "_internal",
+]

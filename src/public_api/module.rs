@@ -241,12 +241,23 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// Returns a view over the module's declared externs.
+    /// Returns a view over the module's declared externs, in declaration order.
+    ///
+    /// Sources are parsed lazily, so a source that fails to parse yields an
+    /// empty view; [`bind`](Self::bind), [`precompile`](Self::precompile) and
+    /// [`compile`](Self::compile) report the parse error.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             module: self,
             only_unbound: false,
         }
+    }
+
+    // Lets bindings surface a parse error where the Rust view must stay infallible.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn check_source(&self) -> Result<()> {
+        self.node.source.declarations().map(|_| ())
     }
 
     /// Binds an unresolved extern by name to a module, expression, token, or exact token sequence.
@@ -654,6 +665,13 @@ impl Module {
                 }
             }
         }
+        if !native(self) {
+            // TOKEN_TRIE parts compile as one ordinary Dynamic grammar: the
+            // composition is inlined at source level, so the result keeps
+            // markers, nullable children and plain serialization.
+            let constraint = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?;
+            return constraint.with_end_tokens(&options.end_tokens);
+        }
         let mut prepared = self.clone();
         prepared.precompile(vocab)?;
         let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
@@ -711,13 +729,20 @@ impl Module {
         if !self.node.prepared.is_empty() || self.node.mask_strategy != MaskStrategy::default() || self.node.boundary_mask_strategy != BoundaryMaskStrategy::default() {
             return Err(error("expressions with configured or precompiled operands cannot be converted to source Grammar; bind directly to Module instead"));
         }
+        self.flatten_source()
+    }
+
+    // The whole composition as one source Grammar, with every bound child
+    // inlined as a scoped source body. Retained work and settings are ignored.
+    fn flatten_source(&self) -> Result<Grammar<'static>> {
         let mut grammar = self.node.source.as_ref().clone();
         for (name, value) in &self.node.bindings {
-            match value {
-                BoundValue::Module(child) => grammar.bind(name, child.to_source()?)?,
-                BoundValue::Token(t) => grammar.bind(name, *t)?,
-                BoundValue::ExactTokens(t) => grammar.bind(name, t.clone())?,
-            }
+            let value = match value {
+                BoundValue::Module(child) => GrammarValue::Source(Arc::new(child.flatten_source()?)),
+                BoundValue::Token(t) => GrammarValue::Token(*t),
+                BoundValue::ExactTokens(t) => GrammarValue::ExactTokens(t.clone()),
+            };
+            grammar = grammar.bind_value(name, value)?;
         }
         Ok(grammar)
     }

@@ -54,11 +54,11 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
                 DynamicConstraint.load(bytes(old), vocab)
 
 
-@pytest.mark.parametrize("mode", [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD, glrmask.Optimization.BALANCED,
-                                  glrmask.Optimization.FAST_RUNTIME])
+@pytest.mark.parametrize("mode", [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD, glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
+                                  glrmask.MaskStrategy.FAST_RUNTIME])
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    compiled = glrmask.Grammar.from_ebnf(SOURCE).compile(vocab, optimization=mode, end_tokens=[26])
+    compiled = glrmask.Grammar.from_ebnf(SOURCE).compile(vocab, mask_strategy=mode, end_tokens=[26])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
