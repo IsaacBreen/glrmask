@@ -1,7 +1,8 @@
 //! Saved 2026-10-19 public-pipeline false-rejection regressions,
 //! excluding seed 3229 (historical separately restricted stall investigation).
 //! The other eight seed grammars had 19 historical baseline false rejections;
-//! this checks each at all three optimization settings.
+//! this checks each at all three optimization settings and all four saved
+//! feed styles: whole bytes, individual bytes, tokens, and paired tokens.
 //! Frozen archive SHA256 1c3d4ba6453af11d0f39ea16029105a0a4d159d05e20956ef97153489deee9e3.
 
 use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
@@ -18,6 +19,41 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
         let mut state = c.start();
         assert!(state.commit_bytes(bytes).is_ok(), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
         assert!(state.is_accepting(), "seed {seed} mode {mode:?} did not accept {bytes:?}");
+        // The historical source harness also checked incremental byte and
+        // token feeds. Exercise those separately from whole-string commitment.
+        let mut byte_state = c.start();
+        for &byte in bytes {
+            assert!(byte_state.commit_bytes(&[byte]).is_ok(), "seed {seed} mode {mode:?} byte {byte:?}");
+        }
+        assert!(byte_state.is_accepting(), "seed {seed} mode {mode:?} byte-by-byte acceptance");
+        let mut token_state = c.start();
+        for &byte in bytes {
+            let token = u32::from(byte - b'a');
+            assert!((token_state.mask()[0] & (1u32 << token)) != 0,
+                "seed {seed} mode {mode:?}: expected token {token} absent from mask");
+            assert!(token_state.commit_token(token).is_ok(),
+                "seed {seed} mode {mode:?}: token {token} falsely rejected");
+        }
+        assert!(token_state.is_accepting(), "seed {seed} mode {mode:?}: token acceptance");
+        // The original E2E harness packs the three cross-terminal byte pairs
+        // into a single model token when the next two bytes match.
+        let mut pair_state = c.start();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let pair_token = bytes.get(at..at + 2).and_then(|pair| match pair {
+                b"ab" => Some(3u32),
+                b"bc" => Some(4u32),
+                b"ca" => Some(5u32),
+                _ => None,
+            });
+            let (token, consumed) = pair_token.map_or((u32::from(bytes[at] - b'a'), 1), |token| (token, 2));
+            assert!((pair_state.mask()[0] & (1u32 << token)) != 0,
+                "seed {seed} mode {mode:?}: expected paired token {token} absent from mask");
+            assert!(pair_state.commit_token(token).is_ok(),
+                "seed {seed} mode {mode:?}: paired token {token} falsely rejected");
+            at += consumed;
+        }
+        assert!(pair_state.is_accepting(), "seed {seed} mode {mode:?}: paired-token acceptance");
     }
 }
 
