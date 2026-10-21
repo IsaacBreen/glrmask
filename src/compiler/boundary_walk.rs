@@ -3774,7 +3774,7 @@ mod tests {
     };
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{
-        GLRTable, SubgrammarTableInput, compose_subgrammar_tables, control_elimination_budget_exhausted,
+        GLRTable, SubgrammarTableInput, compose_subgrammar_tables,
         control_elimination_run_count, empty_terminals_in_composed_table,
     };
     use crate::compiler::pipeline::compute_disallowed_follows;
@@ -4320,272 +4320,276 @@ mod tests {
         );
     }
 
-    /// Production-path selected10 crossing flow shared by the plain gate and the
-    /// two-stage strict gate below: one shared equivalence, one standard walk
-    /// per component, NWA-level crossing filter. Asserts the 143-token dispatch
-    /// crossing set (MINBOUND oracle dump) and the 26-state true-minimal
-    /// crossing DWA, plus the empty core shard.
-    fn run_selected10_boundary_walk_crossing() {
-        require_release_selected10_gate("selected10_boundary_walk_crossing");
-        let fixture = load_selected10_outer();
-        let vocab = &fixture.vocab;
-        let core = &fixture.core;
-        let dispatch = &fixture.dispatch;
-        let composed = &fixture.composed;
-        let grammar = &fixture.grammar;
-        let disallowed = &fixture.disallowed;
-        let flat: Arc<[u32]> =
-            Arc::from(tdwa::l1::build_flat_transition_table(&composed.tokenizer));
-        let ownership = Arc::new(
-            tdwa::scope::BoundaryOwnership::flat(
-                &composed.table.terminal_offsets,
-                grammar.num_terminals,
-            )
-            .expect("selected10 terminal ownership"),
-        );
-        // Frozen output of the independent Phase-1 MINBOUND B-A oracle for
-        // this exact selected10 fixture. The original artifact is preserved
-        // in the 2026-09-18 linker compaction with SHA-256
-        // 689820493b69f3a603c1c38235a74b4b91aa2a6449f22cddbdbc5a5e3d60bf6d.
-        // Keep the oracle in-repo so this regression never depends on
-        // historical /tmp state or a machine-local PHASE1_DUMP_DIR.
-        let oracle_text = include_str!("testdata/selected10_minbound_tokens.txt");
-        let oracle: BTreeSet<u32> =
-            oracle_text.split_whitespace().map(|value| value.parse::<u32>().unwrap()).collect();
-        assert_eq!(oracle.len(), 143, "oracle dump must hold the 143 MINBOUND tokens");
+    // The 2026-09 selected10 gates loaded `core.bin` and
+    // `dispatch-literal.bin` and spliced them with `low_level_compose`. That
+    // token-sentinel artifact carries every child parser terminal in its table
+    // while its merged tokenizer only carries the parent's literal terminals,
+    // so its terminal coordinates disagree by construction (1369 vs 123 on the
+    // original fixture). No public API produces that shape: nested `Module`
+    // binding and the prepared linker keep child terminals scoped. The frozen
+    // 143-token MINBOUND crossing set and its 26-state DWA were properties of
+    // that spliced artifact, not of a supported composition, so the gates
+    // below exercise the supported shape end-to-end instead: compile the
+    // selected10 tools as a nested Module and require every runtime mask to
+    // match the prepared-linker build over the maskbench positive corpus.
 
-        let component_states = [core.tokenizer.num_states(), dispatch.tokenizer.num_states()];
-        for (index, num_states) in component_states.into_iter().enumerate() {
-            let commit = commit_states_for_component(
-                &composed.tokenizer_offsets,
-                num_states,
-                index,
-                composed.tokenizer.num_states() as usize,
-            );
-            let scope = tdwa::scope::BoundaryAnalysisScope::new(
-                tdwa::scope::InitialStateDomain::from_mask(
-                    composed.tokenizer.num_states() as usize,
-                    commit.clone(),
-                )
-                .expect("selected10 initial-state domain"),
-                composed
-                    .tokenizer
-                    .deterministic_reset_states()
-                    .into_iter()
-                    .collect(),
-                Arc::clone(&ownership),
-                tdwa::scope::ImmediateComponentId(index as u32),
-                true,
-                None,
-            )
-            .expect("selected10 boundary scope");
-            let output = build_boundary_terminal_dwa(&BoundaryWalkInputs {
-                merged_tokenizer: &composed.tokenizer,
-                vocab,
-                grammar,
-                disallowed_follows: disallowed,
-                ignore_terminal: composed.ignore_canonical,
-                follow_transparent_ignores: None,
-                scope: &scope,
-                flat_trans: Some(&flat),
-                retain_non_crossing_paths: false,
+    const SELECTED10_TOOLS: [(&str, &str); 10] = [
+        ("o31994", "Github_hard---o31994.json"),
+        ("kb_620_Normalized", "Kubernetes---kb_620_Normalized.json"),
+        (
+            "sil-kit-participant-configuration",
+            "JsonSchemaStore---sil-kit-participant-configuration.json",
+        ),
+        ("o9792", "Github_medium---o9792.json"),
+        ("o9896", "Github_easy---o9896.json"),
+        ("o16060", "Github_hard---o16060.json"),
+        ("kb_678_Normalized", "Kubernetes---kb_678_Normalized.json"),
+        ("o83390", "Github_ultra---o83390.json"),
+        ("taurus", "JsonSchemaStore---taurus.json"),
+        ("kb_1104_Normalized", "Kubernetes---kb_1104_Normalized.json"),
+    ];
+
+    const SELECTED10_MODULE_CORE: &str = "extern grammar PROGRAMMATIC_TOOL_SUFFIX start core nt core = \"tools.\" PROGRAMMATIC_TOOL_SUFFIX | \"plain\"";
+
+    /// CFA checkout holding the selected10 JSON schemas and `js.glrm`.
+    /// `SELECTED10_CFA_ROOT` overrides the documented sibling checkout next to
+    /// the workspace (`../../constraint-framework-analysis`).
+    fn selected10_cfa_root() -> std::path::PathBuf {
+        std::env::var_os("SELECTED10_CFA_ROOT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("..")
+                    .join("..")
+                    .join("constraint-framework-analysis")
             })
-            .expect("selected10 shard walk must produce a DWA");
-            assert!(output.dwa.is_acyclic(), "shard {index} DWA must be acyclic");
-            let tokens = boundary_accepted_tokens(&output.dwa, &output.id_map);
-            let emitted =
-                boundary_emitted_terminals(&output.dwa, grammar.num_terminals as usize);
-            let emitted_count = emitted.iter().filter(|slot| **slot).count();
-            let profile = &output.profile;
-            eprintln!(
-                "BOUNDARY_WALK shard={index} states={} trans={} tokens={} emitted_terms={} \
-                 setup_ms={:.3} walk_ms={:.3} id_map_ms={:.3} dwa_ms={:.3} det_ms={:.3} min_ms={:.3} compact_ms={:.3}",
-                output.dwa.num_states(),
-                output.dwa.num_transitions(),
-                tokens.len(),
-                emitted_count,
-                profile.setup_ms,
-                profile.walk_ms,
-                profile.id_map_ms,
-                profile.terminal_dwa_ms,
-                profile.determinize_ms,
-                profile.minimize_ms,
-                profile.compact_ms,
-            );
-            if index == 0 {
-                assert!(tokens.is_empty(), "core shard must be empty, got {}", tokens.len());
-                assert_eq!(output.dwa.num_states(), 1, "empty core shard DWA shape");
-            } else {
-                if tokens != oracle {
-                    let missing = oracle.difference(&tokens).copied().collect::<Vec<_>>();
-                    let extra = tokens.difference(&oracle).copied().collect::<Vec<_>>();
-                    eprintln!(
-                        "BOUNDARY_WALK oracle_diff missing={missing:?} extra={extra:?}"
-                    );
+    }
+
+    fn selected10_schema_wrapper(file: &str) -> serde_json::Value {
+        let path = selected10_cfa_root()
+            .join("data/sources/jsonschemabench/maskbench/data")
+            .join(file);
+        serde_json::from_slice(&std::fs::read(&path).expect("read selected10 schema"))
+            .expect("parse selected10 schema")
+    }
+
+    fn selected10_schema_source(file: &str) -> String {
+        serde_json::to_string(
+            selected10_schema_wrapper(file)
+                .get("schema")
+                .expect("selected10 wrapper has a schema"),
+        )
+        .expect("serialize selected10 schema")
+    }
+
+    fn selected10_dispatcher_source(tools: usize) -> String {
+        let mut source = String::new();
+        for index in 0..tools {
+            source.push_str(&format!("extern grammar TOOL_ARGS_SLOT_{index} "));
+        }
+        source.push_str("start suffix nt suffix = ");
+        for index in 0..tools {
+            if index != 0 {
+                source.push_str(" | ");
+            }
+            source.push_str(&format!(r#"".tool_{index}(" TOOL_ARGS_SLOT_{index} ")""#));
+        }
+        source
+    }
+
+    fn selected10_module(tools: usize, _vocab: &Vocab) -> crate::Result<crate::Module> {
+        let mut dispatch =
+            crate::Module::new(&crate::Grammar::from_glrm(&selected10_dispatcher_source(tools)));
+        for (index, (_, file)) in SELECTED10_TOOLS.iter().take(tools).enumerate() {
+            dispatch.bind(
+                &format!("TOOL_ARGS_SLOT_{index}"),
+                crate::Module::new(&crate::Grammar::json_schema(&selected10_schema_source(file))),
+            )?;
+        }
+        let mut core = crate::Module::new(&crate::Grammar::from_glrm(SELECTED10_MODULE_CORE));
+        core.bind("PROGRAMMATIC_TOOL_SUFFIX", dispatch)?;
+        Ok(core)
+    }
+
+    fn selected10_prepared(tools: usize, vocab: &Vocab) -> crate::Result<Constraint> {
+        let leaves = SELECTED10_TOOLS
+            .iter()
+            .take(tools)
+            .map(|(_, file)| {
+                crate::Grammar::json_schema(&selected10_schema_source(file)).prepare(vocab)
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let mut dispatch =
+            crate::Grammar::from_glrm(&selected10_dispatcher_source(tools)).prepare(vocab)?;
+        for (index, leaf) in leaves.iter().enumerate() {
+            dispatch = dispatch.bind_snapshot(format!("TOOL_ARGS_SLOT_{index}"), leaf)?;
+        }
+        let dispatch = dispatch.link_with(crate::BuildOptions::default())?;
+        let mut core = crate::Grammar::from_glrm(SELECTED10_MODULE_CORE).prepare(vocab)?;
+        core = core.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)?;
+        core.link_with(crate::BuildOptions::default())
+    }
+
+    /// Compact JSON with the separator whitespace the JSON-schema frontend
+    /// expects (`": "` after keys and `", "` between elements).
+    fn selected10_spaced_json(value: &serde_json::Value, out: &mut String) {
+        match value {
+            serde_json::Value::Object(map) => {
+                out.push('{');
+                for (index, (key, value)) in map.iter().enumerate() {
+                    if index != 0 {
+                        out.push_str(", ");
+                    }
+                    out.push('"');
+                    out.push_str(&key.replace('\\', "\\\\").replace('"', "\\\""));
+                    out.push_str("\": ");
+                    selected10_spaced_json(value, out);
                 }
-                assert_eq!(tokens.len(), 143, "dispatch shard token count");
-                assert_eq!(tokens, oracle, "dispatch shard must match the oracle set");
-                assert_eq!(
-                    output.dwa.num_states(),
-                    26,
-                    "dispatch crossing DWA must be the true-minimal 26-state form"
+                out.push('}');
+            }
+            serde_json::Value::Array(values) => {
+                out.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index != 0 {
+                        out.push_str(", ");
+                    }
+                    selected10_spaced_json(value, out);
+                }
+                out.push(']');
+            }
+            serde_json::Value::String(text) => {
+                out.push('"');
+                out.push_str(&text.replace('\\', "\\\\").replace('"', "\\\""));
+                out.push('"');
+            }
+            other => out.push_str(&other.to_string()),
+        }
+    }
+
+    fn selected10_token_table(vocab: &Vocab) -> Vec<(u32, Vec<u8>)> {
+        let mut table = vocab
+            .entries_map()
+            .iter()
+            .map(|(id, token)| (*id, token.clone()))
+            .collect::<Vec<_>>();
+        table.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        table
+    }
+
+    /// Greedy segmentation of `text`, committing the same token to both
+    /// constraints on every step. Panics on the first differing mask, a
+    /// disagreement on a sampled invalid token, or a non-accepting end.
+    fn selected10_compare_masks(
+        module: &Constraint,
+        prepared: &Constraint,
+        text: &str,
+        table: &[(u32, Vec<u8>)],
+    ) -> usize {
+        let bytes = text.as_bytes();
+        let mut module_state = module.start();
+        let mut prepared_state = prepared.start();
+        let mut offset = 0usize;
+        let mut positions = 0usize;
+        loop {
+            let module_mask = module_state.mask();
+            let prepared_mask = prepared_state.mask();
+            assert_eq!(module_mask, prepared_mask, "mask mismatch at position {positions}");
+            for probe in 0..3u32 {
+                let bits = module_mask.len() as u32 * 32;
+                let id = (positions as u32)
+                    .wrapping_mul(7919)
+                    .wrapping_add(probe.wrapping_mul(104_729))
+                    % bits;
+                if module_mask[id as usize / 32] & (1 << (id % 32)) != 0 {
+                    continue;
+                }
+                let mut module_trial = module_state.clone();
+                let mut prepared_trial = prepared_state.clone();
+                assert!(
+                    module_trial.commit_token(id).is_err(),
+                    "module accepted invalid token {id} at position {positions}",
+                );
+                assert!(
+                    prepared_trial.commit_token(id).is_err(),
+                    "prepared accepted invalid token {id} at position {positions}",
                 );
             }
-        }
-    }
-
-    /// Production-path selected10 crossing gate (no strict reference).
-    #[test]
-    #[ignore]
-    fn selected10_boundary_walk_crossing() {
-        run_selected10_boundary_walk_crossing();
-    }
-
-    /// Exact weighted-language gate for scoped vocabulary partitioning. The
-    /// full-vocabulary all-L2P build is the conservative reference. Reconcile
-    /// both private TSID/token quotients into one common coordinate before
-    /// asking the acyclic weighted-DWA equivalence checker for a distinguishing
-    /// terminal word.
-    #[test]
-    #[ignore]
-    fn selected10_partitioned_scoped_matches_full_weighted_relation() {
-        require_release_selected10_gate(
-            "selected10_partitioned_scoped_matches_full_weighted_relation",
-        );
-        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        let fixture = load_selected10_outer();
-        let component_state_counts = [
-            fixture.core.tokenizer.num_states(),
-            fixture.dispatch.tokenizer.num_states(),
-        ];
-        let build = || {
-            build_boundary_shard_walks(&BoundaryShardLinkInputs {
-                merged_tokenizer: &fixture.composed.tokenizer,
-                vocab: &fixture.vocab,
-                grammar: &fixture.grammar,
-                disallowed_follows: &fixture.disallowed,
-                ignore_terminal: fixture.composed.ignore_canonical,
-                follow_transparent_ignores: None,
-                terminal_offsets: &fixture.composed.table.terminal_offsets,
-                leaf_to_immediate: None,
-                tokenizer_offsets: &fixture.composed.tokenizer_offsets,
-                component_state_counts: &component_state_counts,
-                candidate_tokens_by_component: None,
-                retain_parent_non_crossing_paths: false,
-                walk_plans: None,
-            })
-            .expect("selected10 scoped boundary build")
-            .0
-        };
-
-        let full = {
-            let _full = EnvVarGuard::set("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB", "1");
-            build()
-        };
-        let partitioned = {
-            let _partitioned = EnvVarGuard::unset("GLRMASK_DEBUG_SCOPED_FORCE_FULL_VOCAB");
-            build()
-        };
-        assert_eq!(full.len(), partitioned.len(), "nonempty shard set differs");
-        for (full, partitioned) in full.into_iter().zip(partitioned) {
-            let start_component = full.start_component;
-            assert_eq!(
-                start_component, partitioned.start_component,
-                "shard publication order differs",
-            );
-            let full = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
-                full.output.dwa,
-                full.output.id_map,
-            );
-            let partitioned = crate::compiler::stages::mapped_artifact::MappedArtifact::new(
-                partitioned.output.dwa,
-                partitioned.output.id_map,
-            );
-            let reconciled: crate::compiler::stages::mapped_artifact::MappedArtifact<(DWA, DWA)> =
-                (full, partitioned).into();
-            let ((full, partitioned), _) = reconciled.into_parts();
-            match crate::automata::weighted_u32::equivalence::find_difference(
-                &full,
-                &partitioned,
-            ) {
-                Ok(None) => {}
-                Ok(Some(word)) => panic!(
-                    "partitioned scoped shard {start_component} changed weighted language at terminal word {word:?}",
-                ),
-                Err(error) => panic!("weighted equivalence checker failed: {error:?}"),
+            if offset >= bytes.len() {
+                break;
             }
+            let (id, len) = table
+                .iter()
+                .find_map(|(id, token)| {
+                    (token.len() <= bytes.len() - offset
+                        && bytes[offset..].starts_with(token)
+                        && module_mask[*id as usize / 32] & (1 << (*id % 32)) != 0)
+                        .then_some((*id, token.len()))
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no allowed token at byte {offset} in {:?}",
+                        &text[offset..(offset + 40).min(text.len())],
+                    )
+                });
+            module_state.commit_token(id).expect("module commit");
+            prepared_state.commit_token(id).expect("prepared commit");
+            offset += len;
+            positions += 1;
         }
+        assert!(
+            module_state.is_accepting() && prepared_state.is_accepting(),
+            "trajectory must be accepting",
+        );
+        positions
     }
 
-    /// Durable two-stage strict acceptance gate for boundary shards. Arms the
-    /// factor strict reference for BOTH the shard label (`boundary_shard`,
-    /// stage-2 completed-artifact compare in each walk) and the
-    /// shared-equivalence label (`boundary_shard_test`, stage-1
-    /// factored-vs-exact class assert), then runs the production crossing
-    /// flow. The selector assertions below prove both stages are ENABLED, not
-    /// that they execute (they share the test's hardcoded label names, so a
-    /// construction-side label rename would still pass them while disabling a
-    /// stage). Execution is proven by the stage-1 and stage-2 `differs=false`
-    /// markers, which the gate runner script checks in the captured output.
+    /// End-to-end selected10 gate over the public nested `Module` shape.
     #[test]
     #[ignore]
-    fn selected10_boundary_shard_two_stage_strict_reference() {
-        let _env_lock = crate::TEST_ENV_LOCK.lock().unwrap();
-        let _strict = EnvVarGuard::set(
-            "GLRMASK_L2P_FIRST_BYTE_VOCAB_FACTOR_STRICT_REFERENCE",
-            "boundary_shard,boundary_shard_test",
+    fn selected10_public_nested_module_matches_prepared() {
+        require_release_selected10_gate("selected10_public_nested_module_matches_prepared");
+        let vocab = phase1_vocab();
+        assert_eq!(
+            vocab.entries_map().len(),
+            128_256,
+            "selected10 expects the CFA Llama-3.1 vocabulary",
         );
-        // The stage-2 completed-artifact marker only prints when L2P timing
-        // profiling is on (`l2p_timing_profile_enabled`); arm it in-process
-        // so the gate markers appear without relying on ambient env.
-        let _timing = EnvVarGuard::set("GLRMASK_PROFILE_L2P_TIMING", "1");
-        assert!(
-            tdwa::l2p::l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(
-                "boundary_shard",
-            ),
-            "stage-2 shard strict reference must be armed for boundary_shard",
-        );
-        assert!(
-            tdwa::l2p::l2p_first_byte_vocab_factor_strict_reference_enabled_for_partition(
-                "boundary_shard_test",
-            ),
-            "stage-1 shared-equivalence strict reference must be armed for boundary_shard_test",
-        );
-        run_selected10_boundary_walk_crossing();
-    }
-
-    /// Convergence-bound regression gate (Phase 2 step 4): the selected10
-    /// outer recursive table's control elimination provably diverges (cyclic
-    /// reduce graph defeats the DFS visiting set), so it must decline via
-    /// the convergence budget quickly instead of stalling the link.
-    #[test]
-    #[ignore]
-    fn recursive_table_convergence_bound_fails_fast() {
-        let fixture = load_selected10_outer();
-        let dyn_children = [CompiledSubgrammarInput {
-            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
-            additional_placeholder_terminals: &[],
-            constraint: &fixture.dispatch,
-        }];
-        let dynamic = compose_constraints_owned_parent_segmented(
-            fixture.core.clone(),
-            &dyn_children,
-            &fixture.vocab,
-            SegmentedBoundaryBackend::Dynamic,
-        )
-        .expect("dynamic compose")
-        .constraint;
         let started = Instant::now();
-        let error = dynamic
-            .recursive_control_eliminated_parser_table()
-            .expect_err("outer recursive table must decline via the convergence budget");
-        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-        eprintln!("BOUNDARY_INSTALL convergence_decline_ms={elapsed_ms:.3} error={error}");
-        assert!(
-            control_elimination_budget_exhausted(&error),
-            "decline must be budget exhaustion, got: {error}"
+        let compiled = selected10_module(SELECTED10_TOOLS.len(), &vocab)
+            .expect("build nested module")
+            .compile(&vocab)
+            .expect("nested Module compile");
+        eprintln!(
+            "SELECTED10_PUBLIC compile_s={:.3} bytes={}",
+            started.elapsed().as_secs_f64(),
+            compiled.save().len(),
         );
-        assert!(elapsed_ms < 15_000.0, "decline must fail fast, took {elapsed_ms:.0} ms");
+        let prepared = selected10_prepared(SELECTED10_TOOLS.len(), &vocab)
+            .expect("prepared-linker compile");
+        let table = selected10_token_table(&vocab);
+        let mut positions = 0usize;
+        for (index, (_, file)) in SELECTED10_TOOLS.iter().enumerate() {
+            let wrapper = selected10_schema_wrapper(file);
+            let test = wrapper
+                .get("tests")
+                .and_then(|tests| tests.as_array())
+                .and_then(|tests| {
+                    tests.iter().find(|test| {
+                        test.get("valid").and_then(|valid| valid.as_bool()) == Some(true)
+                    })
+                })
+                .unwrap_or_else(|| panic!("no valid instance for {file}"));
+            let mut json = String::new();
+            selected10_spaced_json(test.get("data").unwrap(), &mut json);
+            let text = format!("tools..tool_{index}({json})");
+            positions += selected10_compare_masks(&compiled, &prepared, &text, &table);
+        }
+        positions += selected10_compare_masks(&compiled, &prepared, "plain", &table);
+        assert!(
+            positions > 5_000,
+            "corpus must cover the selected10 trajectories, got {positions}",
+        );
+        eprintln!("SELECTED10_PUBLIC positions={positions} masks_equal=true");
     }
 
     fn phase1_root() -> std::path::PathBuf {
@@ -4597,12 +4601,28 @@ mod tests {
         Path::new(&root).to_path_buf()
     }
 
-    /// Phase-1 cache vocab path, reusing the existing `load_selected10_outer`
-    /// pattern (PHASE1_VOCAB override, else PHASE1_DIR/vocab_dump.bin).
-    /// No new hardcoded fallbacks beyond the established default root.
+    /// Selected10 vocabulary. `PHASE1_VOCAB` wins, then
+    /// `PHASE1_DIR/vocab_dump.bin`, then the documented local recreation next
+    /// to the workspace at
+    /// `../../glrmask-ptc-selected10-cache-20260827-pc/vocab_dump.bin`.
+    /// These gates read no other file from `PHASE1_DIR`.
     fn phase1_vocab_path() -> String {
-        std::env::var("PHASE1_VOCAB")
-            .unwrap_or_else(|_| phase1_root().join("vocab_dump.bin").to_string_lossy().into_owned())
+        if let Ok(path) = std::env::var("PHASE1_VOCAB") {
+            return path;
+        }
+        if let Ok(dir) = std::env::var("PHASE1_DIR") {
+            return std::path::Path::new(&dir)
+                .join("vocab_dump.bin")
+                .to_string_lossy()
+                .into_owned();
+        }
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("glrmask-ptc-selected10-cache-20260827-pc")
+            .join("vocab_dump.bin")
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn phase1_vocab() -> Vocab {
@@ -4726,167 +4746,6 @@ mod tests {
         })
     }
 
-    /// Step-4 install gate: build walk shards through the link orchestration,
-    /// publish against the spliced control-free boundary table (unbound
-    /// slots emptied), install by replacing the dynamic composition's
-    /// dynamic shards, and require mask-for-mask equality with the dynamic
-    /// backend over a byte-prefix corpus. No fallback: a nonzero control
-    /// count or a publish failure is a hard gate failure.
-    #[test]
-    #[ignore]
-    fn selected10_walk_shard_install_matches_dynamic() {
-        require_release_selected10_gate("selected10_walk_shard_install_matches_dynamic");
-        let fixture = load_selected10_outer();
-        let dyn_children = [CompiledSubgrammarInput {
-            placeholder_terminal: terminal_id(&fixture.core, "PROGRAMMATIC_TOOL_SUFFIX"),
-            additional_placeholder_terminals: &[],
-            constraint: &fixture.dispatch,
-        }];
-        let compose_started = Instant::now();
-        let dynamic = compose_constraints_owned_parent_segmented(
-            fixture.core.clone(),
-            &dyn_children,
-            &fixture.vocab,
-            SegmentedBoundaryBackend::Dynamic,
-        )
-        .expect("dynamic compose")
-        .constraint;
-        eprintln!(
-            "BOUNDARY_INSTALL dynamic_compose_ms={:.3}",
-            compose_started.elapsed().as_secs_f64() * 1000.0,
-        );
-
-        let component_state_counts =
-            [fixture.core.tokenizer.num_states(), fixture.dispatch.tokenizer.num_states()];
-        let link_started = Instant::now();
-        let (built, link_profile) = build_boundary_shard_walks(&BoundaryShardLinkInputs {
-            merged_tokenizer: &fixture.composed.tokenizer,
-            vocab: &fixture.vocab,
-            grammar: &fixture.grammar,
-            disallowed_follows: &fixture.disallowed,
-            ignore_terminal: fixture.composed.ignore_canonical,
-            follow_transparent_ignores: None,
-            terminal_offsets: &fixture.composed.table.terminal_offsets,
-            leaf_to_immediate: None,
-            tokenizer_offsets: &fixture.composed.tokenizer_offsets,
-            component_state_counts: &component_state_counts,
-            candidate_tokens_by_component: None,
-            // Core and dispatch schemas are never start-nullable.
-            retain_parent_non_crossing_paths: false,
-            walk_plans: None,
-        })
-        .expect("walk shards");
-        eprintln!(
-            "BOUNDARY_INSTALL walks shared_ms={:.3} flat_ms={:.3} shards={:?} link_ms={:.3}",
-            link_profile.shared_wall_ms,
-            link_profile.flat_ms,
-            built
-                .iter()
-                .map(|shard| (
-                    shard.start_component,
-                    shard.candidate_tokens.len(),
-                    shard.output.profile.walk_ms,
-                ))
-                .collect::<Vec<_>>(),
-            link_started.elapsed().as_secs_f64() * 1000.0,
-        );
-        assert_eq!(built.len(), 1, "only the dispatch shard is nonempty");
-        assert_eq!(built[0].start_component, 1);
-        assert_eq!(built[0].candidate_tokens.len(), 143);
-
-        // Outer unbound slots: dispatch's TOOL_ARGS_SLOT_* (component 1, none
-        // bound — the 10-way segmented dispatch link is unavailable) plus any
-        // unbound parent slots (core binds its only slot; expect none).
-        let mut unbound: Vec<(usize, TerminalID)> = unbound_slot_terminals(&fixture.core, &[])
-            .into_iter()
-            .map(|local| (0usize, local))
-            .collect();
-        unbound.extend(
-            unbound_slot_terminals(&fixture.dispatch, &[]).into_iter().map(|local| (1usize, local)),
-        );
-        let (boundary_table, table_ms) =
-            prepare_spliced_boundary_table("outer", &fixture.composed, &unbound);
-        eprintln!("BOUNDARY_INSTALL table_ms={table_ms:.3}");
-        let mut published = Vec::with_capacity(built.len());
-        for shard in built {
-            let work = WalkBoundaryShardWork {
-                start_component: shard.start_component as u32,
-                terminal_automaton: TerminalAutomaton::Dwa(shard.output.dwa),
-                id_map: shard.output.id_map,
-                candidate_tokens: shard.candidate_tokens.into_iter().collect::<Vec<_>>().into(),
-            };
-            let (shard, profile) = publish_walk_boundary_shard_work(
-                work,
-                &boundary_table,
-                &fixture.composed.tokenizer_offsets,
-                &component_state_counts,
-            )
-            .expect("publish walk shard");
-            eprintln!(
-                "BOUNDARY_INSTALL shard={} parser_states={} parser_trans={} candidates={} uses_composed={} terms={} templates_ms={:.3} materialize_ms={:.3} normalize_ms={:.3}",
-                shard.start_component,
-                profile.parser_states,
-                profile.parser_trans,
-                shard.candidate_tokens.len(),
-                shard.boundary.uses_composed_tsid_coordinate,
-                profile.terms,
-                profile.templates_ms,
-                profile.materialize_ms,
-                profile.normalize_ms,
-            );
-            published.push(shard);
-        }
-
-        let mut static_comp = dynamic.clone();
-        install_published_static_boundary_shards(
-            static_comp.static_dynamic_overlay.as_mut().expect("overlay"),
-            published,
-        )
-        .expect("install");
-        assert!(
-            static_comp.uses_compact_segmented_parser_runtime(),
-            "installed composition must stay on the compact runtime",
-        );
-        assert_scoped_tokenizer_packing("outer", &static_comp, &component_state_counts);
-        // Optional prepare: save/reload round-trip + pins, then return BEFORE
-        // the in-process differential (the prepared-pair differential test
-        // owns windowed mask comparison). Default path unchanged.
-        if let Some(dir) = install_prepare_dir("BOUNDARY_INSTALL_PREPARE_OUT_DIR") {
-            let shard_ids: Vec<(u32, usize)> = static_comp
-                .static_dynamic_overlay
-                .as_ref()
-                .expect("overlay")
-                .segmented_parser_components
-                .iter()
-                .filter_map(|component| {
-                    component.boundary.as_ref().map(|shard| {
-                        (
-                            shard.start_component,
-                            shard.candidate_tokens.as_ref().map(|tokens| tokens.len()).unwrap_or(0),
-                        )
-                    })
-                })
-                .collect();
-            save_reload_install_pair(
-                "selected10_walk_shard_install_matches_dynamic",
-                &dir,
-                &dynamic,
-                &static_comp,
-                &component_state_counts,
-                "outer",
-                &fixture.vocab,
-            );
-            write_install_prepare_manifest(
-                &dir,
-                "selected10_walk_shard_install_matches_dynamic",
-                &shard_ids,
-                &component_state_counts,
-                &fixture.vocab,
-            );
-            return;
-        }
-        run_install_differential(&dynamic, &mut static_comp, false);
-    }
 
     /// Byte-prefix corpus for the install differential. The expected coverage
     /// is 248 mask positions (initial + one per committed byte across all 12
