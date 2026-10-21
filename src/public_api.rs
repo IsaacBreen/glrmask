@@ -23,8 +23,12 @@ mod prepared_artifact;
 mod artifact_limits;
 mod module;
 mod expr;
+mod stack;
 pub use module::{Module, CompileOptions, Binding};
 pub use expr::Expr;
+pub(crate) use stack::with_deep_stack;
+#[allow(unused_imports)]
+pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
 /// Build-time versus per-token mask latency strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
@@ -747,10 +751,12 @@ impl<'a> Grammar<'a> {
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn prepare_with(&self, vocab: &Vocab, options: BuildOptions) -> Result<PreparedGrammar> {
-        let _=graph::source_first(self)?;
-        let module=self.prepare_cached(vocab,options,&mut SourcePreparation::default(),0)?;
-        module.validate_slot_manifest()?;
-        Ok(module.as_ref().clone())
+        with_deep_stack(|| {
+            let _ = graph::source_first(self)?;
+            let module = self.prepare_cached(vocab, options, &mut SourcePreparation::default(), 0)?;
+            module.validate_slot_manifest()?;
+            Ok(module.as_ref().clone())
+        })
     }
 
     #[cfg(any(test,feature="internal-api"))]
@@ -1370,41 +1376,43 @@ impl<'a> ConstraintSpec<'a> {
     // Keep the large native value off compiler/join frames that can remain
     // live while Rayon executes another source compilation on this worker.
     fn compile_boxed(&self) -> Result<Box<RuntimeConstraint>> {
-        let mut constraint = self.compile_static_with_trigger_boxed()?;
-        // A constraint with unresolved external grammars is explicitly a
-        // reusable late-bind parent.  Cache its exact tokenizer-reset
-        // terminal -> model-token relation now, while compilation already owns
-        // the vocabulary, instead of rescanning the vocabulary on every later
-        // bind.  The cache is part of composition metadata and therefore
-        // survives ordinary save/load.
-        if !constraint.late_grammar_slots.is_empty() {
-            constraint.ensure_composition_reset_tokens_by_terminal();
-        }
-        match self.boundary_summary_policy {
-            BoundarySummaryPolicy::Disabled => {
-                let _ = constraint.boundary_candidate_summary.set(
-                    crate::runtime::BoundaryCandidateSummary::Unknown {
-                        reason: crate::runtime::SummaryUnavailable::Disabled,
-                    },
-                );
+        with_deep_stack(|| {
+            let mut constraint = self.compile_static_with_trigger_boxed()?;
+            // A constraint with unresolved external grammars is explicitly a
+            // reusable late-bind parent.  Cache its exact tokenizer-reset
+            // terminal -> model-token relation now, while compilation already owns
+            // the vocabulary, instead of rescanning the vocabulary on every later
+            // bind.  The cache is part of composition metadata and therefore
+            // survives ordinary save/load.
+            if !constraint.late_grammar_slots.is_empty() {
+                constraint.ensure_composition_reset_tokens_by_terminal();
             }
-            BoundarySummaryPolicy::LazyOnCompose => {}
-            BoundarySummaryPolicy::BoundedPrepare => {
-                crate::compiler::boundary_candidates::prepare_boundary_candidate_summary(
-                    &constraint,
-                    self.vocab,
-                );
+            match self.boundary_summary_policy {
+                BoundarySummaryPolicy::Disabled => {
+                    let _ = constraint.boundary_candidate_summary.set(
+                        crate::runtime::BoundaryCandidateSummary::Unknown {
+                            reason: crate::runtime::SummaryUnavailable::Disabled,
+                        },
+                    );
+                }
+                BoundarySummaryPolicy::LazyOnCompose => {}
+                BoundarySummaryPolicy::BoundedPrepare => {
+                    crate::compiler::boundary_candidates::prepare_boundary_candidate_summary(
+                        &constraint,
+                        self.vocab,
+                    );
+                }
             }
-        }
-        // Keep first-save latency bounded without charging serialization to
-        // every ordinary compile. Static virtual-residual constraints can carry
-        // very large runtime sections, while exceptionally large parser-template
-        // caches are expensive to encode on demand. Prime only those structural
-        // tails; ordinary constraints serialize when save() is actually called.
-        if should_prime_first_save_artifact(&constraint) {
-            constraint.cache_serialized_artifact_for_save();
-        }
-        Ok(constraint)
+            // Keep first-save latency bounded without charging serialization to
+            // every ordinary compile. Static virtual-residual constraints can carry
+            // very large runtime sections, while exceptionally large parser-template
+            // caches are expensive to encode on demand. Prime only those structural
+            // tails; ordinary constraints serialize when save() is actually called.
+            if should_prime_first_save_artifact(&constraint) {
+                constraint.cache_serialized_artifact_for_save();
+            }
+            Ok(constraint)
+        })
     }
 
     fn compile_final(&self, optimization: MaskStrategy) -> Result<RuntimeConstraint> {
@@ -2700,16 +2708,18 @@ impl PreparedGrammar {
     }
 
     /// Preserves compiled machinery, vocabulary and unresolved slots. Shared definitions are serialized once. Artifact compatibility across GLRMask releases is not guaranteed.
-    pub fn save(&self) -> Vec<u8> { prepared_artifact::save(self) }
+    pub fn save(&self) -> Vec<u8> {
+        with_deep_stack(|| prepared_artifact::save(self))
+    }
 
     /// Rejects malformed or incompatible prepared artifacts. Open slots and shared definitions are preserved.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
-        prepared_artifact::load(bytes.into().as_ref(),None)
+        with_deep_stack(|| prepared_artifact::load(bytes.into().as_ref(), None))
     }
 
     /// The supplied vocabulary must match the saved token-ID/byte mapping; loaded definitions share its caches.
-    pub fn load_with_vocab<'b>(bytes:impl Into<std::borrow::Cow<'b,[u8]>>,vocab:&Vocab)->Result<Self> {
-        prepared_artifact::load(bytes.into().as_ref(),Some(vocab))
+    pub fn load_with_vocab<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>, vocab: &Vocab) -> Result<Self> {
+        with_deep_stack(|| prepared_artifact::load(bytes.into().as_ref(), Some(vocab)))
     }
 
 }

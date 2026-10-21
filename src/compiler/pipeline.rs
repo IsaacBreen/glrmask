@@ -369,10 +369,14 @@ fn compile_thread_count() -> Option<usize> {
     }
 }
 
+// Compilation recurses deeply in unoptimised builds; rayon's 2 MiB default is too small.
+const COMPILE_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     let thread_count = compile_thread_count()?;
     rayon::ThreadPoolBuilder::new()
         .num_threads(thread_count)
+        .stack_size(COMPILE_WORKER_STACK_SIZE)
         .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()
@@ -381,6 +385,7 @@ static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
 static SINGLE_THREAD_COMPILE_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     rayon::ThreadPoolBuilder::new()
         .num_threads(1)
+        .stack_size(COMPILE_WORKER_STACK_SIZE)
         .start_handler(|_| initialize_compile_worker())
         .build()
         .ok()

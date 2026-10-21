@@ -6062,7 +6062,7 @@ impl Constraint {
 
     /// Versioned artifact including the vocabulary and root stopping policy. Compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
-        self.save_with_vocab_policy(false)
+        crate::with_deep_stack(|| self.save_with_vocab_policy(false))
     }
 
     pub(crate) fn artifact_vocab_digest(&self) -> [u8; 32] {
@@ -6082,11 +6082,13 @@ impl Constraint {
 
     /// Omits the vocabulary. Loading requires [`Self::load_with_vocab`] with the exact original token-ID/byte mapping, not merely the same size.
     pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
-        if !self.has_template_parser() && !self.table.is_present() {
-            return Err(crate::Error::Serialization(
-                "external-vocabulary Constraint artifacts require a template parser or a retained LR table".into()));
-        }
-        Ok(self.save_with_vocab_policy(true))
+        crate::with_deep_stack(|| {
+            if !self.has_template_parser() && !self.table.is_present() {
+                return Err(crate::Error::Serialization(
+                    "external-vocabulary Constraint artifacts require a template parser or a retained LR table".into()));
+            }
+            Ok(self.save_with_vocab_policy(true))
+        })
     }
 
     pub(crate) fn save_template_with_external_vocab(&self) -> Vec<u8> {
@@ -7062,7 +7064,7 @@ impl Constraint {
 
     /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>` transfers its allocation; borrowed input is copied once because runtime views retain the backing bytes.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
-        Self::load_with_vocab_policy(bytes.into(), None)
+        crate::with_deep_stack(|| Self::load_with_vocab_policy(bytes.into(), None))
     }
 
     fn load_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
@@ -7245,11 +7247,13 @@ impl Constraint {
         bytes: impl Into<Cow<'a, [u8]>>,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
-        let mut constraint = Self::load_with_vocab_policy(bytes.into(), Some(vocab))?;
-        constraint
-            .bind_vocab_exact(vocab)
-            .map_err(crate::GlrMaskError::Serialization)?;
-        Ok(constraint)
+        crate::with_deep_stack(|| {
+            let mut constraint = Self::load_with_vocab_policy(bytes.into(), Some(vocab))?;
+            constraint
+                .bind_vocab_exact(vocab)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            Ok(constraint)
+        })
     }
 
     // Keep section decode temporaries off the stack while installing caches
