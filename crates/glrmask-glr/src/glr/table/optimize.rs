@@ -276,6 +276,9 @@ const ABORT_ITERATIONS: u8 = 2;
 const ABORT_CELLS: u8 = 3;
 const ABORT_SYNTHETIC_STATES: u8 = 4;
 const ABORT_STACK_EFFECT_VISITS: u8 = 5;
+// A dirty synthetic row could not be rebuilt. Abort the optional optimization
+// instead of keeping a stale row after originals change.
+const ABORT_REFRESH_REBUILD: u8 = 6;
 
 /// Convergence caps for exact control elimination (see
 /// `exact_control_elimination`). Legitimate tables use a handful of visits
@@ -292,6 +295,7 @@ fn abort_reason_str(code: u8) -> Option<&'static str> {
         ABORT_CELLS => Some("cells"),
         ABORT_SYNTHETIC_STATES => Some("synthetic_states"),
         ABORT_STACK_EFFECT_VISITS => Some("stack_effect_visits"),
+        ABORT_REFRESH_REBUILD => Some("refresh_rebuild"),
         _ => None,
     }
 }
@@ -2664,13 +2668,18 @@ impl GLRTable {
                         predecessor_edges_changed += usize::from(
                             old_action
                                 .as_ref()
-                                .and_then(runtime_predecessor_transition)
-                                != runtime_predecessor_transition(&new_action),
+                                .and_then(action_predecessor_signature)
+                                != action_predecessor_signature(&new_action),
                         );
                         self.action[state].insert(tid, new_action);
                     }
                     CellUpdate::Remove => {
-                        predecessor_edges_changed += usize::from(old_action.as_ref().and_then(runtime_predecessor_transition).is_some());
+                        predecessor_edges_changed += usize::from(
+                            old_action
+                                .as_ref()
+                                .and_then(action_predecessor_signature)
+                                .is_some(),
+                        );
                         self.action[state].remove(&tid);
                         if self.advance.len() == self.num_states as usize
                             && let Some(bit) = self.terminal_bit(tid)
@@ -4420,39 +4429,104 @@ fn is_trivial_origin_dependent_one_push(
     saw_effect
 }
 
-fn runtime_predecessor_transition(action: &Action) -> Option<(u32, bool)> {
+fn action_predecessor_signature(action: &Action) -> Option<&Action> {
     match action {
-        Action::Shift(target, replace) => Some((*target, *replace)),
-        Action::Split { shift: Some((target, replace)), .. } => Some((*target, *replace)),
+        Action::Shift(..)
+        | Action::Split { shift: Some(_), .. }
+        | Action::ReplaceShifts(_)
+        | Action::StackShifts(_)
+        | Action::GuardedStackShifts(_) => Some(action),
         _ => None,
     }
 }
 
+fn states_at_predecessor_depth(
+    src: u32,
+    depth: u32,
+    predecessors: &[PredecessorSet],
+) -> PredecessorSet {
+    if depth == 0 {
+        return smallvec![src];
+    }
+    let mut current = predecessors[src as usize].clone();
+    for _ in 1..depth {
+        if current.is_empty() {
+            break;
+        }
+        let mut next: PredecessorSet = SmallVec::new();
+        for &st in &current {
+            if let Some(preds) = predecessors.get(st as usize) {
+                next.extend_from_slice(preds);
+            }
+        }
+        next.sort_unstable();
+        next.dedup();
+        current = next;
+    }
+    current
+}
+
 fn build_runtime_state_predecessors(
     table: &GLRTable,
-    original_num_states: u32,
+    _original_num_states: u32,
     constituent_sets: &[StateSubset],
 ) -> RuntimePredecessors {
     let mut predecessors = vec![PredecessorSet::new(); table.num_states as usize];
 
-    // Collect direct non-replace edges first, then normalize each compact row
-    // once. This preserves the sorted set iteration used by the old BTreeSet
-    // implementation without paying a tree insertion for every edge.
+    let add_direct_edge = |pred: u32, dst: u32, preds: &mut [PredecessorSet]| {
+        if (dst as usize) < preds.len() {
+            // Constituent expansion is an over-approximation, not a
+            // replacement for the concrete runtime label. A later pop can
+            // traverse this literal synthetic symbol to its own predecessors.
+            preds[dst as usize].push(pred);
+            if let Some(constituents) = constituent_sets.get(pred as usize) {
+                preds[dst as usize].extend_from_slice(constituents);
+            }
+        }
+    };
+
+    // Phase 1: Collect direct (pop == 0 and internal push pairs) edges first.
     for src in 0..table.num_states as usize {
-        for action in table.action[src].values() {
+        for (tid, action) in table.action[src].iter() {
             match action {
-                Action::Shift(dst, false) => {
-                    predecessors[*dst as usize].extend_from_slice(&constituent_sets[src]);
+                // A forwarded replace-flagged Shift is semantically an append.
+                // The literal source label must then precede its target.
+                Action::Shift(dst, replace)
+                    if !*replace || table.forwarded_shifts.contains(&(src as u32, tid)) =>
+                {
+                    add_direct_edge(src as u32, *dst, &mut predecessors);
                 }
-                Action::Split { shift: Some((dst, false)), .. } => {
-                    predecessors[*dst as usize].extend_from_slice(&constituent_sets[src]);
+                Action::Split { shift: Some((dst, replace)), .. }
+                    if !*replace || table.forwarded_shifts.contains(&(src as u32, tid)) =>
+                {
+                    add_direct_edge(src as u32, *dst, &mut predecessors);
+                }
+                Action::StackShifts(shifts) => {
+                    for shift in shifts {
+                        for i in 0..shift.pushes.len().saturating_sub(1) {
+                            add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
+                        }
+                        if shift.pop == 0 && let Some(&first) = shift.pushes.first() {
+                            add_direct_edge(src as u32, first, &mut predecessors);
+                        }
+                    }
+                }
+                Action::GuardedStackShifts(shifts) => {
+                    for shift in shifts {
+                        for i in 0..shift.pushes.len().saturating_sub(1) {
+                            add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
+                        }
+                        if shift.pop == 0 && let Some(&first) = shift.pushes.first() {
+                            add_direct_edge(src as u32, first, &mut predecessors);
+                        }
+                    }
                 }
                 _ => {}
             }
         }
         for &(dst, replace) in table.goto[src].values() {
             if !replace {
-                predecessors[dst as usize].extend_from_slice(&constituent_sets[src]);
+                add_direct_edge(src as u32, dst, &mut predecessors);
             }
         }
     }
@@ -4461,40 +4535,77 @@ fn build_runtime_state_predecessors(
         predecessors_for_state.dedup();
     }
 
-    // Replacement edges inherit the predecessor set of their source.  Rows
-    // stay sorted between passes, so each propagation has deterministic set
-    // semantics and the fixed point matches the old BTreeSet version exactly.
+    // Phase 2: Replacement and pop >= 1 edges propagate via fixed point.
+    let propagate_to_dst = |dst: u32, incoming: &[u32], preds: &mut [PredecessorSet]| -> bool {
+        if (dst as usize) >= preds.len() || incoming.is_empty() {
+            return false;
+        }
+        let destination_preds = &mut preds[dst as usize];
+        let before = destination_preds.len();
+        destination_preds.extend_from_slice(incoming);
+        destination_preds.sort_unstable();
+        destination_preds.dedup();
+        destination_preds.len() != before
+    };
+
     let mut changed = true;
     while changed {
         changed = false;
-        for src in 0..original_num_states as usize {
+        for src in 0..table.num_states as usize {
             let src_preds = predecessors[src].clone();
-            for action in table.action[src].values() {
-                let destination = match action {
-                    Action::Shift(dst, true) => Some(*dst),
-                    Action::Split { shift: Some((dst, true)), .. } => Some(*dst),
-                    _ => None,
-                };
-                let Some(dst) = destination else {
-                    continue;
-                };
-                let destination_preds = &mut predecessors[dst as usize];
-                let before = destination_preds.len();
-                destination_preds.extend_from_slice(&src_preds);
-                destination_preds.sort_unstable();
-                destination_preds.dedup();
-                changed |= destination_preds.len() != before;
-            }
-            for &(dst, replace) in table.goto[src].values() {
-                if !replace {
-                    continue;
+
+            for (tid, action) in table.action[src].iter() {
+                match action {
+                    // Ordinary replacement inherits the popped state's source
+                    // predecessors; forwarded replacement is handled as append
+                    // by the direct-edge collection above.
+                    Action::Shift(dst, true)
+                        if !table.forwarded_shifts.contains(&(src as u32, tid)) =>
+                    {
+                        changed |= propagate_to_dst(*dst, &src_preds, &mut predecessors);
+                    }
+                    Action::Split { shift: Some((dst, true)), .. }
+                        if !table.forwarded_shifts.contains(&(src as u32, tid)) =>
+                    {
+                        changed |= propagate_to_dst(*dst, &src_preds, &mut predecessors);
+                    }
+                    Action::ReplaceShifts(targets) => {
+                        for &dst in targets.iter() {
+                            changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
+                        }
+                    }
+                    Action::StackShifts(shifts) => {
+                        for shift in shifts {
+                            if let Some(&dst) = shift.pushes.first() {
+                                if shift.pop == 1 {
+                                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
+                                } else if shift.pop > 1 {
+                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
+                                }
+                            }
+                        }
+                    }
+                    Action::GuardedStackShifts(shifts) => {
+                        for shift in shifts {
+                            if let Some(&dst) = shift.pushes.first() {
+                                if shift.pop == 1 {
+                                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
+                                } else if shift.pop > 1 {
+                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-                let destination_preds = &mut predecessors[dst as usize];
-                let before = destination_preds.len();
-                destination_preds.extend_from_slice(&src_preds);
-                destination_preds.sort_unstable();
-                destination_preds.dedup();
-                changed |= destination_preds.len() != before;
+            }
+
+            for &(dst, replace) in table.goto[src].values() {
+                if replace {
+                    changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
+                }
             }
         }
     }
@@ -6019,6 +6130,24 @@ fn ensure_subset_state(
         return Ok(subset[0]);
     }
 
+    // Forwarded replace-flagged shifts actually APPEND in the runtime.
+    // A synthetic row copies a raw shift flag but has no per-terminal
+    // forwarded_shifts metadata. Even OR-ing constituent flags cannot
+    // represent a mixture of effective append and replace stack effects.
+    // Decline this optional merge until it can represent both exactly.
+    if subset.iter().any(|&member| {
+        table.action[member as usize].iter().any(|(tid, action)| {
+            let is_replace_shift = match action {
+                Action::Shift(_, replace) => *replace,
+                Action::Split { shift: Some((_, replace)), .. } => *replace,
+                _ => false,
+            };
+            is_replace_shift && table.forwarded_shifts.contains(&(member, tid))
+        })
+    }) {
+        return Err(());
+    }
+
     let key = subset_key(subset);
     if let Some(&state) = subset_to_state.get(&key) {
         return Ok(state);
@@ -6070,15 +6199,19 @@ fn ensure_subset_state(
             Ok(state)
         }
         Err(()) => {
-            subset_to_state.remove(&key);
+            // The row builders can recursively create nested synthetic states.
+            // A single pop would discard the last child but retain this parent's
+            // provisional row and stale child mappings. Roll back every state
+            // allocated since the parent reserved its ID, including descendants.
+            subset_to_state.retain(|_, mapped| *mapped < state);
             failed_subsets.insert(key);
-            table.action.pop();
-            table.goto.pop();
+            table.action.truncate(state as usize);
+            table.goto.truncate(state as usize);
             if had_advance_rows {
-                table.advance.pop();
+                table.advance.truncate(state as usize);
             }
-            table.num_states -= 1;
-            constituent_sets.pop();
+            table.num_states = state;
+            constituent_sets.truncate(state as usize);
             Err(())
         }
     }
@@ -6110,6 +6243,10 @@ fn refresh_merged_states_depending_on(
         }
 
         let subset = constituent_sets[state].clone();
+        // Rebuilding an existing synthetic row can allocate *new* child
+        // subset states before a later merge fails. Keep refresh atomic.
+        let synthetic_savepoint = table.num_states;
+        let had_advance_rows = table.advance.len() == table.num_states as usize;
         let rebuilt = (|| {
             let action_row = build_merged_action_row(
                 table,
@@ -6130,11 +6267,32 @@ fn refresh_merged_states_depending_on(
             Ok::<_, ()>((action_row, goto_row))
         })();
 
-        if let Ok((action_row, goto_row)) = rebuilt {
-            table.action[state] = action_row;
-            table.goto[state] = goto_row;
-            if table.advance.len() == table.num_states as usize {
-                table.advance[state] = union_advance_rows(table, &subset);
+        match rebuilt {
+            Ok((action_row, goto_row)) => {
+                table.action[state] = action_row;
+                table.goto[state] = goto_row;
+                if table.advance.len() == table.num_states as usize {
+                    table.advance[state] = union_advance_rows(table, &subset);
+                }
+            }
+            Err(()) => {
+                // The original row is still committed because assignment is
+                // deferred until both rebuilt rows succeed. Undo every fresh
+                // child state and mapping created by this failed refresh.
+                subset_to_state.retain(|_, mapped| *mapped < synthetic_savepoint);
+                table.action.truncate(synthetic_savepoint as usize);
+                table.goto.truncate(synthetic_savepoint as usize);
+                if had_advance_rows {
+                    table.advance.truncate(synthetic_savepoint as usize);
+                }
+                table.num_states = synthetic_savepoint;
+                constituent_sets.truncate(synthetic_savepoint as usize);
+                // The original state rows have already changed. Retaining an
+                // old synthetic row here would expose a stale merged action
+                // or goto language, even though fresh child IDs were cleaned.
+                // The caller's UnitInlineUndo restores original table cells.
+                budget.abort(ABORT_REFRESH_REBUILD);
+                return;
             }
         }
 
@@ -6153,14 +6311,13 @@ fn unit_reduce_destination(
         return None;
     }
 
-    let relevant_preds: Vec<u32> = preds
-        .iter()
-        .copied()
-        .filter(|&pred| table.goto[pred as usize].contains_key(&lhs))
-        .collect();
-    if relevant_preds.is_empty() {
+    // The fallback's unguarded specialization is sound only if every possible
+    // origin has the required goto. Mixed present/missing gotos need guarded
+    // effects (or a declined inline), not silent elimination of dead origins.
+    if preds.iter().any(|&pred| !table.goto[pred as usize].contains_key(&lhs)) {
         return None;
     }
+    let relevant_preds: Vec<u32> = preds.iter().copied().collect();
 
     let mut reduce_dst: Option<u32> = None;
     for pred in relevant_preds {
@@ -9000,6 +9157,38 @@ fn try_inline_unit_reductions_for_cell_inner(
                     changed = true;
                     continue;
                 };
+
+                // The runtime interprets a raw replace-flagged Shift as
+                // APPEND when its (state,terminal) is forwarded. Copying the
+                // same action into a different cell with different forwarding
+                // metadata changes the stack effect. Retain the reduction
+                // instead of silently changing append to replace (or reverse).
+                let raw_replace_shift = match &resolved_inline {
+                    Action::Shift(_, replace) => *replace,
+                    Action::Split { shift: Some((_, replace)), .. } => *replace,
+                    _ => false,
+                };
+                // Copying an APPEND across a unit reduction can leave the
+                // wrong state underneath the pushed state. Original:
+                // [P,R] --reduce+goto D--> [P,D] --append E--> [P,D,E].
+                // Copied action: [P,R] --append E--> [P,R,E]. Goto-row
+                // equality of D and R does not prove these stacks equivalent.
+                // Only copy a plain REPLACE shift without forwarded semantics.
+                let forwarded_source = table.forwarded_shifts.contains(&(reduce_dst, tid));
+                let forwarded_destination = table.forwarded_shifts.contains(&(state, tid));
+                if !raw_replace_shift || forwarded_source || forwarded_destination {
+                    // Only Shift or shift-bearing Split cases are governed by
+                    // this conservative extra rule. Other action kinds retain
+                    // their preexisting reduction/inlining behavior.
+                    let has_shift = matches!(
+                        &resolved_inline,
+                        Action::Shift(..) | Action::Split { shift: Some(_), .. }
+                    );
+                    if has_shift {
+                        pending.push_reduce(lhs, pop_len);
+                        continue;
+                    }
+                }
 
                 merge_action_into_pending(
                     &mut pending,

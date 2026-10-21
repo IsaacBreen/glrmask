@@ -434,6 +434,11 @@ pub fn eliminate_right_recursion(
         }
     }
 
+    // Indirect substitution can introduce X -> X after earlier unit cleanup.
+    // Removing these rules preserves finite terminal languages. Do so before
+    // selecting helpers, so stripping a sole X cannot create an empty RHS.
+    rules.retain(|rule| !is_reflexive_unit_rule(rule));
+
     // Resolve direct right recursion for all nonterminals in a single pass.
 
     let rr_nts: BTreeMap<NonterminalID, NonterminalID> = rules
@@ -2724,6 +2729,7 @@ pub fn merge_identical_nonterminals(
 /// `start` is used only for unreachable-production pruning and is never
 /// changed.
 pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
+    if !rules.iter().any(|rule| rule.lhs == start) { rules.clear(); return; }
     use std::cell::Cell;
 
     let profiling = compile_profile_enabled();
@@ -2760,6 +2766,8 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         // expose it, and rewriting it as right recursion would manufacture a
         // fresh nullable self-cycle on every subsequent iteration.
         rules.retain(|rule| !is_reflexive_unit_rule(rule));
+        // Reflexive-unit cleanup can remove the last start production.
+        if !rules.iter().any(|rule| rule.lhs == start) { rules.clear(); return; }
         let inline_unchanged = *rules == snap;
         if let Some(started_at) = inline_started_at {
             emit_normalize_profile(
@@ -2777,6 +2785,8 @@ pub fn normalize_grammar(rules: &mut Vec<Rule>, start: NonterminalID) {
         let right_recursion_completed = with_resynced_next_nonterminal(rules, &next_nt, |rules| {
             eliminate_right_recursion(rules, &mut fresh_nt)
         });
+        // RR can also remove all start productions. Stop before HLR allocates helpers.
+        if !rules.iter().any(|rule| rule.lhs == start) { rules.clear(); return; }
         if let Some(started_at) = rr_started_at {
             emit_normalize_profile(
                 "eliminate_right_recursion",

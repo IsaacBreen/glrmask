@@ -610,6 +610,11 @@ fn resolve_direct_right_recursion(
     edit: &mut Edit,
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) {
+    // Indirect substitution can introduce X -> X after earlier unit cleanup.
+    // Removing these rules preserves finite terminal languages. Do so before
+    // selecting helpers, so stripping a sole X cannot create an empty RHS.
+    edit.retain_non_reflexive_units();
+
     let recursive_nonterminals = edit
         .view()
         .iter()
@@ -1250,6 +1255,13 @@ fn remove_unreachable_owned(rules: &mut Vec<Rule>, start: NonterminalID) {
 }
 
 fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
+    // Without a start production there is no finite nonempty start derivation.
+    // In particular, epsilon elimination can remove an epsilon-only start.
+    // Do not let a later recursion helper reuse its now-absent numeric ID.
+    if !rules.iter().any(|rule| rule.lhs == start) {
+        rules.clear();
+        return;
+    }
     let profiling = profile_enabled();
     let next_nt = Cell::new(View::plain(rules).max_nt() + 1);
     let mut fresh_nt = || {
@@ -1278,6 +1290,12 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
         // Resynchronize BEFORE reflexive-unit removal, as d751 does.
         next_nt.set(edit.view().max_nt() + 1);
         edit.retain_non_reflexive_units();
+        // Reflexive-unit cleanup can remove the last start production.
+        if !edit.view().iter().any(|rule| rule.lhs == start) {
+            // The caller tracks source nullability independently.
+            rules.clear();
+            return;
+        }
         profile(
             "inline_null_productions",
             iteration,
@@ -1290,6 +1308,11 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
         let rr_started = profiling.then(Instant::now);
         let right_recursion_completed =
             eliminate_right_recursion_edit(&mut edit, &mut fresh_nt);
+        // RR can also remove all start productions. Stop before HLR allocates helpers.
+        if !edit.view().iter().any(|rule| rule.lhs == start) {
+            rules.clear();
+            return;
+        }
         next_nt.set(edit.view().max_nt() + 1);
         profile(
             "eliminate_right_recursion",

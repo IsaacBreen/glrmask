@@ -2419,3 +2419,6 @@ mod forcing_semantics;
 
 #[path = "forcing_semantics_oracle.rs"]
 mod forcing_semantics_oracle;
+
+#[path = "historical_public_nonstall_regressions.rs"]
+mod historical_public_nonstall_regressions;
