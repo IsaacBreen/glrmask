@@ -372,7 +372,7 @@ pub(crate) fn compile_classed(
     assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
     let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
     compile_shared_classed(templates,None,controls,depth,lexical,classes,None)
-        .ok_or_else(|| "shared template constructor declined: resource budget exceeded".to_string())
+        .ok_or_else(|| format!("{} resource budget exceeded", crate::compiler::template_boundary::TEMPLATE_DECLINE_PREFIX))
 }
 
 pub(crate) fn compile_classed_with_admissions(
@@ -385,7 +385,7 @@ pub(crate) fn compile_classed_with_admissions(
     assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
     let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
     compile_shared_classed_prepared(templates,Some(admissions),controls,depth,lexical,classes,read_context,prepared)
-        .ok_or_else(|| "shared template constructor declined: resource budget exceeded".to_string())
+        .ok_or_else(|| format!("{} resource budget exceeded", crate::compiler::template_boundary::TEMPLATE_DECLINE_PREFIX))
 }
 
 #[cfg(test)]

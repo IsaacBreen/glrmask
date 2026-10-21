@@ -12,7 +12,13 @@ use rustc_hash::{FxHashMap,FxHashSet};
 use crate::ds::weight::{Weight,SharedTokenSet};
 
 const MAX_SOURCES:usize=2048;
-const MAX_POINTS:usize=32_768;
+/// Bounds the per-point classification work in `new`: every explicit
+/// `(row, token)` point is compared against every finite source.
+const MAX_POINT_SOURCE_PRODUCT:usize=32_000_000;
+/// Bounds the side tables built per explicit point (point list, signature row,
+/// atom id, roughly 40 bytes each) independently of the source count, so a
+/// domain with few finite sources stays bounded in memory.
+const MAX_EXPLICIT_POINTS:usize=1_000_000;
 const MAX_ATOMS:usize=4096;
 const MAX_ROW_EVENTS:usize=1_000_000;
 const MAX_TOKEN_EVENTS:usize=16_000_000;
@@ -134,13 +140,18 @@ impl FaithfulWeightQuotient {
         if unique.len()>MAX_SOURCES{return None;}
         let finite=unique.iter().filter(|w|!w.is_empty()&&!w.is_full()).collect::<Vec<_>>();
         let words=finite.len().div_ceil(64);
+        // Each point is classified against every finite source, so the domain
+        // may grow to the product budget divided by the source count. The
+        // absolute ceiling keeps the per-point side tables bounded when there
+        // are few (or no) finite sources to divide by.
+        let point_budget=MAX_EXPLICIT_POINTS.min(MAX_POINT_SOURCE_PRODUCT/finite.len().max(1));
         let mut points=Vec::new();
         for (lo,hi,tokens) in domain.range_entries() {
             let count=(u128::from(hi)-u128::from(lo)+1)*tokens.len() as u128;
-            if count>(MAX_POINTS-points.len()) as u128{return None;}
+            if count>(point_budget-points.len()) as u128{return None;}
             for row in lo..=hi{for token in tokens.iter(){points.push((row,token));}}
         }
-        if points.len().checked_mul(finite.len())?>32_000_000{return None;}
+        if points.len().checked_mul(finite.len())?>MAX_POINT_SOURCE_PRODUCT{return None;}
         // Classify only output-observable points explicitly; all other global
         // membership classes are found symbolically below and remain ghosts.
         let mut point_signatures=vec![vec![0u64;words];points.len()];

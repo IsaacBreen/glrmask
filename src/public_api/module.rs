@@ -667,7 +667,19 @@ impl Module {
                 crate::error::catch_internal_invariant(|| compose_named_children(parent, &children, vocab, SegmentedBoundaryBackend::Dynamic))??
             };
             if parent.has_template_parser() && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto) {
-                crate::compiler::template_boundary::install(&mut parent, vocab)?;
+                match crate::compiler::template_boundary::install(&mut parent, vocab) {
+                    Ok(()) => {}
+                    // The static backend is chosen heuristically for this shape.
+                    // A resource-budget decline from the exact template
+                    // constructor leaves the exact segmented dynamic boundary
+                    // installed by `compose_owned` in place, so keep it.
+                    Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
+                        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                            eprintln!("[glrmask/profile][static_template_boundary] fallback=dynamic reason=budget_decline");
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
             apply_final_boundary_trigger(&mut parent, target_b)?;

@@ -2020,7 +2020,19 @@ fn compose_named_children(
     if parent.has_template_parser() {
         let mut linked = crate::runtime::parser_backend::link::compose(parent, children, vocab)?;
         if matches!(boundary_backend, SegmentedBoundaryBackend::StaticParserDwa) {
-            crate::compiler::template_boundary::install(&mut linked, vocab)?;
+            match crate::compiler::template_boundary::install(&mut linked, vocab) {
+                Ok(()) => {}
+                // The backend was selected heuristically. When the exact static
+                // constructor declines a shard for a resource budget, the
+                // segmented dynamic boundary that `compose` already installed
+                // is the exact fallback; it supports the same nested shape.
+                Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
+                    if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
+                        eprintln!("[glrmask/profile][static_template_boundary] fallback=dynamic reason=budget_decline");
+                    }
+                }
+                Err(error) => return Err(error),
+            }
         }
         return Ok(linked);
     }

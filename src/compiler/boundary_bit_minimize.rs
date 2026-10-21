@@ -931,6 +931,10 @@ fn minimize_prepared_with_observations(
 /// The existing guard-preserving proof/minimization body is shared unchanged.
 /// Checked, finite disjoint atom decoding. Pair enumeration is budgeted and
 /// performed once; unchecked overlapping images cannot enter this API.
+/// Bounds the explicit point list used to prove decoded atoms are disjoint
+/// (~8 bytes per `(row, token)` pair). It is not a language limit.
+const MAX_DECODED_POINTS: usize = 1_000_000;
+
 pub struct FiniteAtomDecoder {
     atoms: Vec<Weight>,
 }
@@ -943,7 +947,7 @@ impl FiniteAtomDecoder {
             if atom.is_full() { return None; }
             for (low, high, tokens) in atom.range_entries() {
                 let count = (u128::from(high) - u128::from(low) + 1) * tokens.len() as u128;
-                if count > (32_768 - points.len()) as u128 { return None; }
+                if count > (MAX_DECODED_POINTS - points.len()) as u128 { return None; }
                 for row in low..=high { for token in tokens.iter() { points.push((row, token)); } }
             }
         }
@@ -1384,8 +1388,9 @@ fn decoder_rejects_overlap_and_unbounded_universe() {
 #[cfg(test)]
 #[test]
 fn native_decoder_retains_bounded_large_output_and_declines_above_cap() {
-    let first=Weight::from_token_set_for_tsid(11,(0..16384).collect());
-    let second=Weight::from_token_set_for_tsid(29,(0..16384).collect());
+    let half = MAX_DECODED_POINTS / 2;
+    let first=Weight::from_token_set_for_tsid(11,(0..half as u32).collect());
+    let second=Weight::from_token_set_for_tsid(29,(0..half as u32).collect());
     assert!(FiniteAtomDecoder::new_checked(vec![first.clone(),second.clone()]).is_some());
     let extra=Weight::from_token_set_for_tsid(37,[0].into_iter().collect());
     assert!(FiniteAtomDecoder::new_checked(vec![first,second,extra]).is_none());

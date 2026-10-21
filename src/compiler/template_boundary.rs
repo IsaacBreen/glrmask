@@ -17,6 +17,18 @@ use crate::runtime::{ConstraintRuntimeBackend, SegmentedBoundaryShard, Segmented
 
 fn fail(message: impl Into<String>) -> Error { Error::Compilation(message.into()) }
 
+/// Prefix shared by the exact template constructor's resource declines. A
+/// decline means the shard's domain exceeds a representation guard, not that
+/// the input is malformed.
+pub(crate) const TEMPLATE_DECLINE_PREFIX: &str = "shared template constructor declined:";
+
+/// True when an error is the exact template constructor declining a shard for
+/// a resource budget. Callers that selected the static backend heuristically
+/// may keep the exact segmented dynamic boundary instead of failing.
+pub(crate) fn is_template_budget_decline(error: &Error) -> bool {
+    matches!(error, Error::Compilation(message) if message.starts_with(TEMPLATE_DECLINE_PREFIX))
+}
+
 /// PM deliberately leaves tokens/states with no delayed-terminal matches
 /// unmapped. Static boundary outputs still need those coordinates: complete
 /// each dimension with one exact empty-PM class, keeping absent vocabulary IDs
@@ -103,8 +115,7 @@ fn prepared_root_call_candidates(constraint:&Constraint)->Option<Arc<[u32]>> {
     shard.candidate_tokens.as_ref().map(Arc::clone)
 }
 
-pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> {
-    if !constraint.uses_compact_segmented_parser_runtime() { return Ok(()); }
+pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> {    if !constraint.uses_compact_segmented_parser_runtime() { return Ok(()); }
     if !constraint.has_template_parser() { return Err(fail("static template boundary requires a table-free parser")); }
     if !needs_static_boundaries(constraint) { return Ok(()); }
     // A nested reusable component keeps its literal structure. Upgrade only
@@ -361,7 +372,7 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
     let prepared=if walks.is_empty() {None} else {
         Some(super::boundary_transfer::template_program::prepare_classed_programs(
             &templates,Some(&admissions),&classes)
-            .ok_or_else(|| fail("shared template constructor declined: prepared classed program budget exceeded"))?)
+            .ok_or_else(|| fail(format!("{} prepared classed program budget exceeded", TEMPLATE_DECLINE_PREFIX)))?)
     };
     let mut published = Vec::with_capacity(walks.len());
     for walk in walks {
