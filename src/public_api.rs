@@ -545,7 +545,9 @@ impl<'a> Grammar<'a> {
 
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn exact(tokens: ExactTokens) -> Self {
+    pub fn exact(tokens: ExactTokens) -> Self { Self::from_exact_tokens(tokens) }
+
+    pub(crate) fn from_exact_tokens(tokens: ExactTokens) -> Self {
         let exprs=tokens.range_pairs().iter().map(|&(a,b)|if a==b {
             glrmask_grammar::GrammarExpr::SpecialToken(a)
         } else {glrmask_grammar::GrammarExpr::SpecialTokenRange(a,b)}).collect::<Vec<_>>();
@@ -638,7 +640,7 @@ impl<'a> Grammar<'a> {
         if declared.kinds[name]==ExternalKind::Grammar {
             value=match value {
                 GrammarValue::Token(token)=>GrammarValue::Source(Arc::new(Self::exact_token(token))),
-                GrammarValue::ExactTokens(tokens)=>GrammarValue::Source(Arc::new(Self::exact(tokens))),
+                GrammarValue::ExactTokens(tokens)=>GrammarValue::Source(Arc::new(Self::from_exact_tokens(tokens))),
                 other=>other,
             };
         }
@@ -751,6 +753,12 @@ impl<'a> Grammar<'a> {
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn prepare_with(&self, vocab: &Vocab, options: BuildOptions) -> Result<PreparedGrammar> {
+        self.prepare_unlinked(vocab, options)
+    }
+
+    // The public preparation entry points are internal-api only, but composition
+    // and artifact loading prepare children in every build.
+    pub(crate) fn prepare_unlinked(&self, vocab: &Vocab, options: BuildOptions) -> Result<PreparedGrammar> {
         with_deep_stack(|| {
             let _ = graph::source_first(self)?;
             let module = self.prepare_cached(vocab, options, &mut SourcePreparation::default(), 0)?;
@@ -1815,7 +1823,7 @@ impl GrammarBinding<'_> {
                             )));
                         }
                     }
-                    let module = grammar.prepare(vocab)?;
+                    let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
                     Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {
@@ -1857,7 +1865,7 @@ impl GrammarBinding<'_> {
                             "external {name:?} is unbound in source child; use prepare() to retain open external slots",
                         )));
                     }
-                    let module = grammar.prepare(vocab)?;
+                    let module = grammar.prepare_unlinked(vocab, BuildOptions::default())?;
                     Ok(CompiledChild::StaticOwned(Box::new(module.materialize_template_components(MaskStrategy::Auto)?)))
                 }
                 ChildCompileMode::Dynamic => {

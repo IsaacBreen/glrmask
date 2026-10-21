@@ -558,7 +558,7 @@ impl Module {
                 }
             },
             MaskStrategy::Auto | MaskStrategy::ParserDwa => {
-                let mut p = source.prepare(vocab)?;
+                let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
                 inner.install_template_parser_from_compile()?;

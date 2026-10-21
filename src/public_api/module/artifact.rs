@@ -219,7 +219,7 @@ fn decode_source(value: Source, vocabs: &[Vocab]) -> Result<Grammar<'static>> {
             return Ok(grammar);
         }
         Source::Token(id) => return Ok(Grammar::exact_token(Token::new(id))),
-        Source::Exact(e) => return Ok(Grammar::exact(decode_exact(e, vocabs)?)),
+        Source::Exact(e) => return Ok(Grammar::from_exact_tokens(decode_exact(e, vocabs)?)),
     };
     Ok(Grammar::new(source))
 }
