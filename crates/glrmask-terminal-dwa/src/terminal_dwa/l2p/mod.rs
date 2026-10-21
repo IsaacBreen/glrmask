@@ -1126,10 +1126,17 @@ pub fn build_l2p_id_map_and_terminal_dwa_mode(
                     let mut transport_witness_rounds = Vec::new();
                     let mut round_count = 0usize;
                     let mut first_round_class_count = None;
+                    // Read the candidate groups through an explicit match. The equivalent
+                    // `shard_options.and_then(|options| options.ti_candidate_groups)` was
+                    // miscompiled by rustc 1.91.0-nightly (2025-08-25, LLVM 21.1) on
+                    // aarch64-apple-darwin into an unconditional load through the null
+                    // `None`; 1.95.0 and stable 1.99.1 are unaffected.
+                    let ti_candidate_groups = match shard_options {
+                        Some(options) => options.ti_candidate_groups,
+                        None => None,
+                    };
                     loop {
-                        let round = if let Some(permitted_groups) =
-                            shard_options.and_then(|options| options.ti_candidate_groups)
-                        {
+                        let round = if let Some(permitted_groups) = ti_candidate_groups {
                             discover_one_round_with_transport_witnesses_in_context_permitted(
                                 tokenizer,
                                 &active,
