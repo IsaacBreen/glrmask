@@ -154,6 +154,8 @@ pub(crate) fn isolate_environment_test(ignored: bool) -> bool {
 #[cfg(test)]
 mod grammar_cross_tests;
 #[cfg(test)]
+mod right_recursion_regression;
+#[cfg(test)]
 mod terminal_dwa_cross_tests;
 #[cfg(test)]
 mod tokentrie_nullable_ambiguity_tests;

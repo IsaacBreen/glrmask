@@ -20,6 +20,17 @@ use super::normalization_reference as reference;
 
 const NO_COMPONENT: usize = usize::MAX;
 const MAX_INDIRECT_ROUNDS: usize = 200;
+/// Extra rules the indirect right-recursion inliner may create before it is
+/// treated as non-converging. Right recursion is eliminated by substituting
+/// rule bodies along right boundaries; on a cycle made of unit productions
+/// every substitution just renames the unit edge, so the rule set grows
+/// without bound instead of breaking the cycle. Keeping the allowance
+/// relative to the input size means ordinary grammars are unaffected.
+const MAX_INDIRECT_RULE_GROWTH: usize = 4_096;
+/// Total right-hand-side symbols the indirect inliner may add. A cycle can
+/// keep the rule count flat while every substitution lengthens the affected
+/// rules, so counting rules alone does not bound memory.
+const MAX_INDIRECT_SYMBOL_GROWTH: usize = 1_000_000;
 const MAX_FLATTENED_RHS_LEN: usize = 4096;
 
 fn env_enabled(name: &str) -> bool {
@@ -698,35 +709,247 @@ fn resolve_direct_right_recursion(
     edit.order = order;
 }
 
-fn eliminate_right_recursion_edit(
-    edit: &mut Edit,
-    fresh_nt: &mut impl FnMut() -> NonterminalID,
-) -> bool {
+struct IndirectRightRecursion {
+    completed: bool,
+    exceeded_budget: bool,
+}
+
+/// Inline indirect right-recursion cycles until none remain.
+///
+/// Returns `exceeded_budget` instead of growing without bound when the rule
+/// set crosses the allowance. The caller can then retry from the original
+/// rules with a different strategy (see `expand_unit_sccs`).
+fn resolve_indirect_right_recursion(edit: &mut Edit) -> IndirectRightRecursion {
+    let rule_budget = edit.len().saturating_add(MAX_INDIRECT_RULE_GROWTH);
+    let symbols = |edit: &Edit| {
+        edit.view().iter().map(|rule| rule.rhs.len()).sum::<usize>()
+    };
+    let symbol_budget = symbols(edit).saturating_add(MAX_INDIRECT_SYMBOL_GROWTH);
     let mut nullable = Nullable::compute(edit.view());
     let mut graph = BoundaryGraph::build(edit.view(), &nullable, Boundary::Right);
-    let mut completed = !graph.has_indirect_cycle();
+    if !graph.has_indirect_cycle() {
+        return IndirectRightRecursion {
+            completed: true,
+            exceeded_budget: false,
+        };
+    }
 
-    if !completed {
-        for round in 0..MAX_INDIRECT_ROUNDS {
-            // Round zero can reuse the exact facts used by the precheck.
-            if round != 0 {
-                nullable = Nullable::compute(edit.view());
-                graph = BoundaryGraph::build(edit.view(), &nullable, Boundary::Right);
+    for round in 0..MAX_INDIRECT_ROUNDS {
+        // Round zero can reuse the exact facts used by the precheck.
+        if round != 0 {
+            nullable = Nullable::compute(edit.view());
+            graph = BoundaryGraph::build(edit.view(), &nullable, Boundary::Right);
+        }
+        match graph.first_indirect_cycle() {
+            Some(cycle) => {
+                inline_right_end(edit, cycle[0], cycle[1], &nullable);
+                if edit.len() > rule_budget || symbols(edit) > symbol_budget {
+                    return IndirectRightRecursion {
+                        completed: false,
+                        exceeded_budget: true,
+                    };
+                }
             }
-            match graph.first_indirect_cycle() {
-                Some(cycle) => {
-                    inline_right_end(edit, cycle[0], cycle[1], &nullable);
-                }
-                None => {
-                    completed = true;
-                    break;
-                }
+            None => {
+                return IndirectRightRecursion {
+                    completed: true,
+                    exceeded_budget: false,
+                };
             }
         }
     }
 
+    // The round cap is the historic reference behaviour: stop inlining but
+    // keep the (bounded) rule set. Only a rule-count overrun is treated as a
+    // budget failure that needs a different rewrite.
+    IndirectRightRecursion {
+        completed: false,
+        exceeded_budget: false,
+    }
+}
+
+/// Expand nonterminals that are mutually reachable through unit productions.
+///
+/// Every member of a unit SCC derives every other member through unit rules,
+/// so all members share one language: the union of the component's non-unit
+/// alternatives. Redistributing that union to every member and redirecting
+/// references to the representative is language preserving. This removes unit
+/// cycles, which otherwise make right-boundary substitution alternate between
+/// the same unit edges forever.
+fn expand_unit_sccs(edit: &mut Edit) -> bool {
+    let view = edit.view();
+    let n = view.nt_count();
+    let mut edges = vec![Vec::<usize>::new(); n];
+    for rule in view.iter() {
+        if let [Symbol::Nonterminal(target)] = rule.rhs.as_slice() {
+            edges[rule.lhs as usize].push(*target as usize);
+        }
+    }
+
+    let membership = BoundaryGraph {
+        edges,
+        ordered: false,
+    }
+    .nontrivial_components();
+    if membership.iter().all(|&component| component == NO_COMPONENT) {
+        return false;
+    }
+
+    let mut component_members = BTreeMap::<usize, Vec<NonterminalID>>::new();
+    for (node, &component) in membership.iter().enumerate() {
+        if component != NO_COMPONENT {
+            component_members
+                .entry(component)
+                .or_default()
+                .push(node as NonterminalID);
+        }
+    }
+    let components = component_members.into_values().collect::<Vec<_>>();
+
+    let mut representative = vec![None; n];
+    let mut component_of = vec![NO_COMPONENT; n];
+    for (index, members) in components.iter().enumerate() {
+        let rep = members[0];
+        for &member in members {
+            representative[member as usize] = Some(rep);
+            component_of[member as usize] = index;
+        }
+    }
+    let map = |nonterminal: NonterminalID| {
+        representative
+            .get(nonterminal as usize)
+            .copied()
+            .flatten()
+            .unwrap_or(nonterminal)
+    };
+
+    let mut alternatives = Vec::<Vec<Vec<Symbol>>>::with_capacity(components.len());
+    for members in &components {
+        let mut unique = FxHashSet::<Vec<Symbol>>::default();
+        let mut rhs_list = Vec::new();
+        for rule in view.iter() {
+            if !members.contains(&rule.lhs) {
+                continue;
+            }
+            if matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(_)]) {
+                continue;
+            }
+            let rhs = rule
+                .rhs
+                .iter()
+                .map(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => {
+                        Symbol::Nonterminal(map(*nonterminal))
+                    }
+                    Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+                })
+                .collect::<Vec<_>>();
+            if unique.insert(rhs.clone()) {
+                rhs_list.push(rhs);
+            }
+        }
+        alternatives.push(rhs_list);
+    }
+
+    let estimated_rules = components
+        .iter()
+        .zip(&alternatives)
+        .map(|(members, rhs)| members.len().saturating_mul(rhs.len()))
+        .fold(view.len(), usize::saturating_add);
+    let estimated_symbols = components
+        .iter()
+        .zip(&alternatives)
+        .flat_map(|(members, rhs)| {
+            rhs.iter()
+                .map(move |rhs| members.len().saturating_mul(rhs.len()))
+        })
+        .fold(0usize, usize::saturating_add);
+    if estimated_rules > view.len().saturating_add(1_024)
+        || estimated_symbols > MAX_INDIRECT_SYMBOL_GROWTH
+    {
+        return false;
+    }
+
+    let mut emitted = vec![false; components.len()];
+    let mut seen = FxHashSet::<(NonterminalID, Vec<Symbol>)>::default();
+    let mut expanded = Vec::with_capacity(view.len());
+    for rule in view.iter() {
+        let component = component_of[rule.lhs as usize];
+        if component != NO_COMPONENT {
+            if emitted[component] {
+                continue;
+            }
+            emitted[component] = true;
+            for &member in &components[component] {
+                for rhs in &alternatives[component] {
+                    if seen.insert((member, rhs.clone())) {
+                        expanded.push(Rule {
+                            lhs: member,
+                            rhs: rhs.clone(),
+                        });
+                    }
+                }
+            }
+            continue;
+        }
+
+        let lhs = map(rule.lhs);
+        let rhs = rule
+            .rhs
+            .iter()
+            .map(|symbol| match symbol {
+                Symbol::Nonterminal(nonterminal) => {
+                    Symbol::Nonterminal(map(*nonterminal))
+                }
+                Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+            })
+            .collect::<Vec<_>>();
+        let candidate = Rule { lhs, rhs };
+        if !is_reflexive_unit_rule(&candidate)
+            && seen.insert((candidate.lhs, candidate.rhs.clone()))
+        {
+            expanded.push(candidate);
+        }
+    }
+
+    edit.replace_with_owned(expanded);
+    true
+}
+
+fn eliminate_right_recursion_edit(
+    edit: &mut Edit,
+    fresh_nt: &mut impl FnMut() -> NonterminalID,
+    budget_exhausted: &mut bool,
+) -> bool {
+    if *budget_exhausted {
+        // A previous iteration already hit the rule budget. Re-attempting the
+        // same exponential expansion cannot make progress; leave the grammar
+        // for the normal-form check to report.
+        return false;
+    }
+    let original = edit.view().iter().cloned().collect::<Vec<_>>();
+    let mut outcome = resolve_indirect_right_recursion(edit);
+    if outcome.exceeded_budget {
+        // A branching right-recursion cycle cannot be broken by substituting
+        // one right boundary at a time. Restore the pre-inlining grammar and
+        // fall back to ordered substitution, which processes each pair once.
+        edit.replace_with_owned(original.clone());
+        let original_len = original.len();
+        if expand_unit_sccs(edit) && edit.len() <= original_len + 1_024 {
+            outcome = resolve_indirect_right_recursion(edit);
+        }
+        if outcome.exceeded_budget {
+            // No further sound rewrite is available. Keep the original
+            // grammar rather than materialising an unbounded rule set; the
+            // table-build normal-form check reports the remaining cycle.
+            edit.replace_with_owned(original);
+            outcome.completed = false;
+            *budget_exhausted = true;
+        }
+    }
+
     resolve_direct_right_recursion(edit, fresh_nt);
-    completed
+    outcome.completed
 }
 
 /// Compatible public entry point. The caller still owns fresh-ID allocation.
@@ -735,7 +958,9 @@ pub fn eliminate_right_recursion(
     fresh_nt: &mut impl FnMut() -> NonterminalID,
 ) -> bool {
     let mut edit = Edit::new(std::mem::take(rules));
-    let completed = eliminate_right_recursion_edit(&mut edit, fresh_nt);
+    let mut budget_exhausted = false;
+    let completed =
+        eliminate_right_recursion_edit(&mut edit, fresh_nt, &mut budget_exhausted);
     *rules = edit.publish();
     completed
 }
@@ -1272,6 +1497,7 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
 
     let mut iteration = 0usize;
     let mut nullable_eliminated_before_exit = false;
+    let mut right_recursion_budget_exhausted = false;
 
     loop {
         iteration += 1;
@@ -1306,8 +1532,11 @@ fn normalize_impl(rules: &mut Vec<Rule>, start: NonterminalID) {
 
         let rr_before = edit.len();
         let rr_started = profiling.then(Instant::now);
-        let right_recursion_completed =
-            eliminate_right_recursion_edit(&mut edit, &mut fresh_nt);
+        let right_recursion_completed = eliminate_right_recursion_edit(
+            &mut edit,
+            &mut fresh_nt,
+            &mut right_recursion_budget_exhausted,
+        );
         // RR can also remove all start productions. Stop before HLR allocates helpers.
         if !edit.view().iter().any(|rule| rule.lhs == start) {
             rules.clear();
