@@ -4440,30 +4440,69 @@ fn action_predecessor_signature(action: &Action) -> Option<&Action> {
     }
 }
 
+/// Reusable buffers for [`states_at_predecessor_depth`]. `seen` has one bit per
+/// state and is all-zero between calls, so a call costs time proportional to
+/// the predecessor rows it visits rather than to the number of states.
+struct PredecessorWalkScratch {
+    seen: Vec<u64>,
+    current: PredecessorSet,
+    next: PredecessorSet,
+}
+
+impl PredecessorWalkScratch {
+    fn new(num_states: usize) -> Self {
+        Self {
+            seen: vec![0; num_states.div_ceil(64)],
+            current: PredecessorSet::new(),
+            next: PredecessorSet::new(),
+        }
+    }
+}
+
+/// States that reach `src` in exactly `depth` predecessor steps.
+///
+/// Depth 0 is `{src}`. For depth >= 2 the result is sorted and deduplicated;
+/// depth 1 returns the stored row as-is, exactly like the original walk, which
+/// never entered its level loop. `scratch` only deduplicates one level at a
+/// time and is left all-zero, so the walk reads the live predecessor rows and
+/// allocates nothing proportional to the number of states.
 fn states_at_predecessor_depth(
     src: u32,
     depth: u32,
     predecessors: &[PredecessorSet],
+    scratch: &mut PredecessorWalkScratch,
 ) -> PredecessorSet {
     if depth == 0 {
         return smallvec![src];
     }
-    let mut current = predecessors[src as usize].clone();
+    scratch.current = predecessors[src as usize].clone();
     for _ in 1..depth {
-        if current.is_empty() {
+        if scratch.current.is_empty() {
             break;
         }
-        let mut next: PredecessorSet = SmallVec::new();
-        for &st in &current {
+        scratch.next.clear();
+        for &st in &scratch.current {
             if let Some(preds) = predecessors.get(st as usize) {
-                next.extend_from_slice(preds);
+                for &pred in preds {
+                    let word = pred as usize / 64;
+                    let bit = 1u64 << (pred % 64);
+                    if scratch.seen[word] & bit == 0 {
+                        scratch.seen[word] |= bit;
+                        scratch.next.push(pred);
+                    }
+                }
             }
         }
-        next.sort_unstable();
-        next.dedup();
-        current = next;
+        // Clear exactly the bits this level set so the next call starts clean.
+        for &pred in &scratch.next {
+            scratch.seen[pred as usize / 64] &= !(1u64 << (pred % 64));
+        }
+        std::mem::swap(&mut scratch.current, &mut scratch.next);
     }
-    current
+    if depth > 1 {
+        scratch.current.sort_unstable();
+    }
+    std::mem::take(&mut scratch.current)
 }
 
 fn build_runtime_state_predecessors(
@@ -4486,6 +4525,9 @@ fn build_runtime_state_predecessors(
     };
 
     // Phase 1: Collect direct (pop == 0 and internal push pairs) edges first.
+    // A deep shift (pop > 1) is the only reason the phase-2 walk needs depth-k
+    // predecessor sets, so track that while the rows are already being scanned.
+    let mut has_deep_shifts = false;
     for src in 0..table.num_states as usize {
         for (tid, action) in table.action[src].iter() {
             match action {
@@ -4503,6 +4545,7 @@ fn build_runtime_state_predecessors(
                 }
                 Action::StackShifts(shifts) => {
                     for shift in shifts {
+                        has_deep_shifts |= shift.pop > 1;
                         for i in 0..shift.pushes.len().saturating_sub(1) {
                             add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
                         }
@@ -4513,6 +4556,7 @@ fn build_runtime_state_predecessors(
                 }
                 Action::GuardedStackShifts(shifts) => {
                     for shift in shifts {
+                        has_deep_shifts |= shift.pop > 1;
                         for i in 0..shift.pushes.len().saturating_sub(1) {
                             add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
                         }
@@ -4548,6 +4592,12 @@ fn build_runtime_state_predecessors(
         destination_preds.len() != before
     };
 
+    // Phase 2 walks depth-k predecessor sets straight from the live rows. The
+    // scratch is one bit per state, so it stays O(states); allocate it only
+    // when phase 1 saw a deep shift.
+    let mut walk_scratch =
+        has_deep_shifts.then(|| PredecessorWalkScratch::new(table.num_states as usize));
+
     let mut changed = true;
     while changed {
         changed = false;
@@ -4580,7 +4630,18 @@ fn build_runtime_state_predecessors(
                                 if shift.pop == 1 {
                                     changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
                                 } else if shift.pop > 1 {
-                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
+                                    // shift, so the scratch exists for exactly the calls
+                                    // that need it.
+                                    let scratch = walk_scratch
+                                        .as_mut()
+                                        .expect("deep shifts allocate the walk scratch in phase 1");
+                                    let at_depth = states_at_predecessor_depth(
+                                        src as u32,
+                                        shift.pop,
+                                        &predecessors,
+                                        scratch,
+                                    );
                                     changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
                                 }
                             }
@@ -4592,7 +4653,18 @@ fn build_runtime_state_predecessors(
                                 if shift.pop == 1 {
                                     changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
                                 } else if shift.pop > 1 {
-                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
+                                    // shift, so the scratch exists for exactly the calls
+                                    // that need it.
+                                    let scratch = walk_scratch
+                                        .as_mut()
+                                        .expect("deep shifts allocate the walk scratch in phase 1");
+                                    let at_depth = states_at_predecessor_depth(
+                                        src as u32,
+                                        shift.pop,
+                                        &predecessors,
+                                        scratch,
+                                    );
                                     changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
                                 }
                             }
