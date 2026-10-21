@@ -4369,6 +4369,7 @@ fn advance_nondeterministically_profiled(
     use std::time::Instant;
 
     let mut shifted = ParserGSS::empty();
+    let mut visited: SmallVec<[ParserGSS; 4]> = SmallVec::new();
     loop {
         profile.n_nondet_waves += 1;
         let frontier_states = closure.peek_values();
@@ -4659,15 +4660,20 @@ fn advance_nondeterministically_profiled(
         if next.is_empty() {
             return shifted;
         }
-        if next == closure {
-            // The reduce closure has reached a fixed point: applying the same
-            // reductions to the same frontier can only reproduce it. Nullable
-            // recursive rules (for example `S -> "a" | S S | ""`) make epsilon
-            // reductions regenerate an identical frontier forever; every shift
-            // exposed by this frontier was already merged into `shifted`, so
-            // returning is exact rather than a truncation.
+        // The wave map is deterministic, so a frontier that has already been
+        // processed in this call can only replay the same shifts and the same
+        // successors. Nullable recursive rules (for example
+        // `S -> "a" | S S | ""`) can regenerate a frontier forever; that cycle
+        // may have period 1 or a longer period, so compare against every
+        // frontier seen so far, not just the immediately preceding one. Every
+        // shift exposed by a revisited frontier is already merged into
+        // `shifted`, so returning here is exact rather than a truncation. This
+        // is normally a handful of Arc clones in a SmallVec, so the common
+        // one- and two-wave walks do not allocate.
+        if next == closure || visited.iter().any(|frontier| *frontier == next) {
             return shifted;
         }
+        visited.push(closure);
         closure = next;
     }
 }
@@ -5383,6 +5389,7 @@ fn advance_nondeterministically(
     token: TerminalID,
 ) -> ParserGSS {
     let mut shifted = ParserGSS::empty();
+    let mut visited: SmallVec<[ParserGSS; 4]> = SmallVec::new();
 
     loop {
         if let Some(shifted_wave) =
@@ -5526,15 +5533,20 @@ fn advance_nondeterministically(
         if next.is_empty() {
             return shifted;
         }
-        if next == closure {
-            // The reduce closure has reached a fixed point: applying the same
-            // reductions to the same frontier can only reproduce it. Nullable
-            // recursive rules (for example `S -> "a" | S S | ""`) make epsilon
-            // reductions regenerate an identical frontier forever; every shift
-            // exposed by this frontier was already merged into `shifted`, so
-            // returning is exact rather than a truncation.
+        // The wave map is deterministic, so a frontier that has already been
+        // processed in this call can only replay the same shifts and the same
+        // successors. Nullable recursive rules (for example
+        // `S -> "a" | S S | ""`) can regenerate a frontier forever; that cycle
+        // may have period 1 or a longer period, so compare against every
+        // frontier seen so far, not just the immediately preceding one. Every
+        // shift exposed by a revisited frontier is already merged into
+        // `shifted`, so returning here is exact rather than a truncation. This
+        // is normally a handful of Arc clones in a SmallVec, so the common
+        // one- and two-wave walks do not allocate.
+        if next == closure || visited.iter().any(|frontier| *frontier == next) {
             return shifted;
         }
+        visited.push(closure);
         closure = next;
     }
 }
