@@ -203,6 +203,10 @@ fn ordered_set_reference(initial:&[u32],effects:&[Effect],alphabet:u32)->Result<
         assert!(c.domain.accepts(&[3]));assert!(!c.domain.accepts(&[0,0]));
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~18s); run with --features slow-tests"
+    )]
     fn exhaustive_small_effect_closure_checks_widening_soundness(){
         let mut seed=41u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as usize};
         for case in 0..128{

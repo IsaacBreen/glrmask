@@ -481,6 +481,10 @@ fn indirect_cycle_with_proper_subcycle_preserves_its_language() {
 
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~16s); run with --features slow-tests"
+)]
 fn every_three_node_terminal_edge_graph_preserves_all_bounded_words() {
     // All 512 directed graphs, including self-loops and overlapping proper
     // subcycles. Distinguishable edge and exit terminals expose both lost

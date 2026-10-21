@@ -1,6 +1,10 @@
 use crate::grammar::ast::lower;
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~20s); run with --features slow-tests"
+)]
 fn hash_collision_merge_keeps_exact_masks_commits_and_loaded_language() {
     use std::collections::{BTreeSet, HashSet};
     use crate::compiler::glr::analysis::merge_identical_nonterminals;

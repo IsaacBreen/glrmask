@@ -243,6 +243,10 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~21s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_1313() {
     // Historical baseline mismatch modes: balanced, fastruntime.
     let lark = r####"start: n2
@@ -254,6 +258,10 @@ n2: "a" | n0 "c" "a" | "b" n2 n1
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~14s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_1730() {
     // Historical baseline mismatch modes: fastbuild.
     let lark = r####"start: n2
@@ -265,6 +273,10 @@ n2: "b" |  | n0 n0 "c" | "b"
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~16s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_2009() {
     // Historical baseline mismatch modes: balanced, fastbuild, fastruntime.
     let lark = r####"start: n3
@@ -277,6 +289,10 @@ n3: "c" | n0 "b" | "a" n3 "a"
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~13s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_2374() {
     // Historical baseline mismatch modes: balanced, fastbuild, fastruntime.
     let lark = r####"start: n0
@@ -289,6 +305,10 @@ n3: "c" |  | "a" n0
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~14s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_2556() {
     // Historical baseline mismatch modes: balanced, fastruntime.
     let lark = r####"start: n2
@@ -301,6 +321,10 @@ n3: "a" | n2 n1 | n0
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~14s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_3204() {
     // Historical baseline mismatch modes: balanced, fastruntime.
     let lark = r####"start: n1
@@ -312,6 +336,10 @@ n2: "c" | "b" "a" | "b" "a"
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~13s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_3274() {
     // Historical baseline mismatch modes: balanced, fastbuild, fastruntime.
     let lark = r####"start: n1
@@ -322,6 +350,10 @@ n1: "a" | "a" "b" | n0 n0 | "a" n1 "c"
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~17s); run with --features slow-tests"
+)]
 fn archived_public_acceptance_seed_3810() {
     // Historical baseline mismatch modes: balanced, fastbuild, fastruntime.
     let lark = r####"start: n0

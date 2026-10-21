@@ -258,6 +258,10 @@ fn strict_static_table_free_nested_composition_uses_no_dynamic_boundary() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~24s); run with --features slow-tests"
+)]
 fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
     const CHILD: &str = "GLRMASK_TEMPLATE_NULLABLE_STATIC_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -328,6 +332,10 @@ fn nullable_nested_table_free_children_keep_every_repetition_count() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~80s); run with --features slow-tests"
+)]
 fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
     let mut tokens = (0..128).map(|id| (id, vec![id as u8])).collect::<Vec<_>>();
     for bytes in ["X[a]!", "X[]!", "X[ab]!", "[a]", "a]!", "[]!", "X!",
@@ -583,6 +591,10 @@ fn nullable_child_controls_preserve_empty_body_and_parent_suffix() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~50s); run with --features slow-tests"
+)]
 fn nested_artifact_loads_preserve_exact_language_on_default_rayon_stacks() {
     use rayon::prelude::*;
 

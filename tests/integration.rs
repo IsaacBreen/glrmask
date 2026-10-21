@@ -1836,6 +1836,10 @@ fn assert_partitioned_runtime_matches_dynamic(
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~16s); run with --features slow-tests"
+)]
 fn partitioned_runtime_matches_dynamic_across_lexer_shapes() {
     let vocab = vocab(&[
         "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",
@@ -1953,6 +1957,10 @@ fn monolithic_runtime_matches_dynamic_for_ignore_and_repeated_terminals() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~14s); run with --features slow-tests"
+)]
 fn monolithic_runtime_matches_dynamic_for_overlapping_residual_terminals() {
     let vocab = vocab(&[
         "a", "b", "c", "aa", "bb", "cc", "ab", "ac", "ba", "bc", "abc",

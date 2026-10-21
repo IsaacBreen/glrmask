@@ -151,6 +151,10 @@ mod tests{
         result
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~12s); run with --features slow-tests"
+    )]
     fn generated_necessary_support_preserves_all_admitted_small_words(){
         let mut seed=1021u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as usize};
         let mut removed=0;

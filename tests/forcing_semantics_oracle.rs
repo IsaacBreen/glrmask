@@ -173,6 +173,10 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
 
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~11s); run with --features slow-tests"
+)]
 fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
     let entries=vec![
         Entry{id:0,bytes:Some(b"(".to_vec())}, Entry{id:1,bytes:Some(b")".to_vec())},

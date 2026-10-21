@@ -285,6 +285,10 @@ fn virtual_repeat_observations_preserve_literal_lower_and_upper_bounds() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~15s); run with --features slow-tests"
+)]
 fn unsupported_general_virtual_projection_fails_without_changing_dynamic_language() {
     if isolated("unsupported_general_virtual_projection_fails_without_changing_dynamic_language") { return; }
     // This non-prefix-free general residual has no certified finite projector.

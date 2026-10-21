@@ -9,6 +9,8 @@ repository = "https://github.com/IsaacBreen/glrmask"
 [features]
 default = []
 internal-api = []
+# Runs tests that take over ~10 s; they are ignored by default.
+slow-tests = []
 
 [dependencies]
 bincode = "1"

@@ -166,6 +166,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~20s); run with --features slow-tests"
+    )]
     fn observation_atoms_extend_past_the_runtime_inline_domain() {
         let domain = Weight::from_token_set_for_tsid(9, (0..2048u32).collect());
         let mut sources = vec![Weight::all(), Weight::empty()];

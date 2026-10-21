@@ -10829,6 +10829,10 @@ nt start ::= item item? item?;
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~28s); run with --features slow-tests"
+    )]
     fn initial_prune_matches_top_local_reference_on_generated_small_languages() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
         let vocab = Vocab::new(
@@ -11132,6 +11136,10 @@ nt start ::= item item? item?;
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~11s); run with --features slow-tests"
+    )]
     fn monolithic_commit_fast_paths_match_general_queue_on_small_language_space() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
         let vocab = Vocab::new(
@@ -11279,6 +11287,10 @@ nt start ::= item item? item?;
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~15s); run with --features slow-tests"
+    )]
     fn epsilon_commit_fast_paths_match_no_fast_path_reference() {
         let vocab = Vocab::new(
             vec![

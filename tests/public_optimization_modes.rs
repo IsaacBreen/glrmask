@@ -162,6 +162,10 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~10s); run with --features slow-tests"
+)]
 fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
     for n in [29,30,63] {
         let mut source=String::from("start: r0\n");

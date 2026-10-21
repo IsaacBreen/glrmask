@@ -1159,6 +1159,10 @@ mod tests {
         accepted
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~27s); run with --features slow-tests"
+    )]
     fn generated_finite_dags_preserve_all_prefix_masks() {
         let mut seed=149u64;
         let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as usize};
@@ -1207,6 +1211,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~13s); run with --features slow-tests"
+    )]
     fn multirow_dags_match_exhaustive_symbolic_prefix_language() {
         let mut seed=472u64;
         let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);seed>>32};

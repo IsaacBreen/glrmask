@@ -9,6 +9,8 @@ repository = "https://github.com/IsaacBreen/glrmask"
 [features]
 default = []
 internal-api = []
+# Runs tests that take over ~10 s; they are ignored by default.
+slow-tests = []
 
 [dependencies]
 glrmask-artifact = { version = "=0.2.0", path = "../glrmask-artifact", features = ["internal-api"] }

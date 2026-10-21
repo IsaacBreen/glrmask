@@ -17615,6 +17615,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~240s); run with --features slow-tests"
+    )]
     fn sparse_virtual_repeat_finite_product_does_not_flatten_repeat_state_ids() {
         const LONG: usize = 65_536;
         let mut base_dfa = DFA::new(LONG + 1);

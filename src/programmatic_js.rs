@@ -392,6 +392,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~45s); run with --features slow-tests"
+    )]
     fn dynamic_expression_grammar_excludes_bare_literals() {
         let vocab = vocab();
         let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();
@@ -842,6 +846,10 @@ mod tests {
     /// explicit `StaticParserDwa` and `Dynamic` schema compositions both retain
     /// the reserved-prefix token and agree; `None` is diagnostic only.
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~45s); run with --features slow-tests"
+    )]
     fn programmatic_schema_explicit_backends_retain_reserved_prefix() {
         let vocab = vocab();
         let compiler = ProgrammaticJsCompiler::new(&vocab).unwrap();

@@ -605,16 +605,28 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~35s); run with --features slow-tests"
+)]
 fn permuted_phase_graphs_and_completion_match_literal_oracle_in_all_formats() {
     verify_phase_programs(0, 32, 80);
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~50s); run with --features slow-tests"
+)]
 fn ambiguous_literal_segmentation_matches_oracle_after_model_token_commits() {
     verify_overlapping_programs(0, 32, false);
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~27s); run with --features slow-tests"
+)]
 fn greedy_regex_lexemes_match_oracle_across_model_token_boundaries() {
     verify_overlapping_programs(0, 16, true);
 }

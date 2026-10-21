@@ -212,6 +212,10 @@ fn archived_normalization_case_d9b06aad8ef45a25() {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~23s); run with --features slow-tests"
+)]
 fn archived_normalization_case_96bf5e9599705ccc() {
     // Saved mismatch seed 23190; historical ID 96bf5e9599705ccc, bound 6.
     let input = vec![

@@ -195,6 +195,10 @@ mod tests {
         output
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~11s); run with --features slow-tests"
+    )]
     fn correlated_top_support_matches_independent_signed_execution() {
         let mut seed=9877u64;let mut next=||{seed=seed.wrapping_mul(6364136223846793005).wrapping_add(1);(seed>>32) as usize};
         let mut inputs=vec![vec![]];let mut layer=vec![vec![]];

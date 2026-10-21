@@ -1373,6 +1373,10 @@ mod tests {
         assert!(accepted >= 100);
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~75s); run with --features slow-tests"
+    )]
     fn wide_layered_nwas_match_original_constructor() {
         let mut seed = 672955;
         let mut eligible = 0;

@@ -26153,6 +26153,10 @@ table: &child_table,
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~21s); run with --features slow-tests"
+    )]
     fn scoped_ignore_oracle_survives_reload_and_nested_recomposition() {
         let vocab = Vocab::new(vec![
             (0, b"<".to_vec()),
@@ -26563,6 +26567,10 @@ table: &child_table,
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~22s); run with --features slow-tests"
+    )]
     fn integration_finite_exclusion_boundary_masks() {
         // Parent `X SUB !` (no ignores); child `OPEN ::= [ab]+ - "ab"`.
         // Tests exclusion-operator composition compatibility (static vs

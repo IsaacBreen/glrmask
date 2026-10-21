@@ -732,6 +732,10 @@ mod differential_tests {
         }
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~15s); run with --features slow-tests"
+    )]
     fn bounded_masks_and_strict_forcing_match_normal_masks_across_all_modes() {
         let v=Vocab::new_with_exact_token_ids(vec![
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"abc".to_vec()),
@@ -763,6 +767,10 @@ mod differential_tests {
         }
     }
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~11s); run with --features slow-tests"
+    )]
     fn bounded_exact_events_aliases_empty_spelling_and_root_controls() {
         let v=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec()),
             (4,b"a".to_vec()),(5,b"ab".to_vec()),(7,Vec::new())],[99,130]);

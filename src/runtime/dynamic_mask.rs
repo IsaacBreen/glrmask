@@ -12260,6 +12260,10 @@ nt start ::= item item? item?;
     }
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~65s); run with --features slow-tests"
+    )]
     fn dynamic_mask_generated_small_language_sweep() {
         const WORDS: [&str; 4] = ["a", "b", "ab", "ba"];
         let vocab = Vocab::new(

@@ -11243,6 +11243,10 @@ mod tests {
     };
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~13s); run with --features slow-tests"
+    )]
     fn extended_boundary_weight_rows_preserve_exact_finite_algebra() {
         for rows in [1usize, 16, 17, 64] {
             let mut interner = super::FastBoundaryWeightInterner::new(rows, 64).unwrap();
@@ -11862,6 +11866,10 @@ mod checked_topology_reuse_tests {
 
 #[cfg(test)]
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~20s); run with --features slow-tests"
+)]
 fn exact_guard_class_union_preserves_empty_rows_full_explicit_and_wildcards(){
     fn observe(v:&FastPossibleOutgoingIds,n:u32)->(bool,bool,usize,Vec<u32>){
         let mut out=Vec::new();v.for_each(n,|q|out.push(q));
@@ -11907,6 +11915,10 @@ mod empty_stack_domain_tests;
 
 #[cfg(test)]
 #[test]
+#[cfg_attr(
+    not(feature = "slow-tests"),
+    ignore = "slow (~80s); run with --features slow-tests"
+)]
 fn consecutive_pop_derivative_reuse_matches_predecessor_rows_and_budgets() {
     use crate::pop_classes::PopLabelClasses;
     use range_set_blaze::RangeSetBlaze;

@@ -2047,6 +2047,10 @@ mod tests {
     };
 
     #[test]
+    #[cfg_attr(
+        not(feature = "slow-tests"),
+        ignore = "slow (~35s); run with --features slow-tests"
+    )]
     fn default_free_specialization_preserves_exact_graphs_and_corruption_witnesses() {
         fn random(seed: &mut u64) -> u64 {
             *seed ^= *seed << 13;

@@ -28,6 +28,13 @@ exclude = [
 [features]
 default = []
 internal-api = []
+# Runs tests that take over ~10 s; they are ignored by default.
+slow-tests = [
+    "glrmask-glr/slow-tests",
+    "glrmask-lexer/slow-tests",
+    "glrmask-parser-dwa/slow-tests",
+    "glrmask-terminal-dwa/slow-tests",
+]
 
 [[example]]
 name = "composition_component_candidates"
