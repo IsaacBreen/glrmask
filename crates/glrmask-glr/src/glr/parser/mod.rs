@@ -12,7 +12,9 @@ use super::table::{
 };
 use super::table::row::{ActionRow, GotoRow};
 use crate::ds::bitset::BitSet;
-use crate::ds::leveled_gss::{GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack};
+use crate::ds::leveled_gss::{
+    GssFrontierKeyInterner, GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack,
+};
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -4027,6 +4029,22 @@ fn advance_deterministically_from_vstack_raw(
     mut stack: VirtualStack<u32, TerminalsDisallowed>,
     token: TerminalID,
 ) -> (AdvancedBranch, bool) {
+    // A stack-length-preserving reduce step is exactly the pure `replace_top`
+    // path below: every other continuing path pops at least one state (or
+    // ends the loop by shifting/returning), so the stack below the top is
+    // unchanged only across a run of consecutive `replace_top` steps. The
+    // lane is deterministic, so if a top state repeats within such a run the
+    // entire configuration repeats and the loop can never reach a shift for
+    // this token. Track the top states seen since the last non-`replace_top`
+    // step and declare the branch dead at the first repeat.
+    let mut replace_top_states: SmallVec<[u32; 8]> = SmallVec::new();
+    // A `rhs_len == stack.len()` reduce crosses the virtual-stack floor: it
+    // pops the visible values and remaps the exposed floor top. That path is
+    // length-preserving too, but the base below the new top is not guaranteed
+    // to be pointer-identical, so compare the full semantic GSS language. A
+    // repeated language replays the deterministic lane exactly.
+    let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
+    let mut floor_keys: FxHashSet<_> = FxHashSet::default();
     loop {
         let Some(&state) = stack.top() else {
             break;
@@ -4042,13 +4060,23 @@ fn advance_deterministically_from_vstack_raw(
                     if rhs_len == 1 {
                         if let Some(goto_from) = stack.parent_of_top() {
                             match table.goto_target(goto_from, *nt) {
-                                Some((target, false)) if stack.replace_top(target) => continue,
+                                Some((target, false)) => {
+                                    if replace_top_states.contains(&state) {
+                                        return (AdvancedBranch::Gss(ParserGSS::empty()), false);
+                                    }
+                                    if !stack.replace_top(target) {
+                                        return (AdvancedBranch::Gss(ParserGSS::empty()), false);
+                                    }
+                                    replace_top_states.push(state);
+                                    continue;
+                                }
                                 Some((target, true)) => {
                                     stack.pop(2);
                                     stack.push(target);
+                                    replace_top_states.clear();
                                     continue;
                                 }
-                                Some(_) | None => {
+                                None => {
                                     return (AdvancedBranch::Gss(ParserGSS::empty()), false);
                                 }
                             }
@@ -4056,6 +4084,10 @@ fn advance_deterministically_from_vstack_raw(
                     }
 
                     stack.pop(rhs_len);
+                    // The preceding pop changes the stack length, so this
+                    // step starts a fresh run even when the goto replaces the
+                    // new top.
+                    replace_top_states.clear();
                     let goto_from = *stack.top().unwrap();
                     match table.goto_target(goto_from, *nt) {
                         Some((target, false)) => stack.push(target),
@@ -4078,7 +4110,16 @@ fn advance_deterministically_from_vstack_raw(
                       let Some(next_stack) = rebuilt.try_virtual_stack() else {
                           return (AdvancedBranch::Gss(rebuilt), false);
                       };
+                    // Crossing the virtual-stack floor is another reduce path
+                    // that can revisit the same semantic frontier. Compare the
+                    // whole language: a repeated language replays the
+                    // deterministic lane exactly and can never shift.
+                    let next_gss = next_stack.clone().into_gss();
+                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                        return (AdvancedBranch::Gss(ParserGSS::empty()), false);
+                    }
                     stack = next_stack;
+                    replace_top_states.clear();
                 }
             }
             Some(Action::Shift(target, is_replace)) => {
@@ -4219,6 +4260,17 @@ fn advance_deterministically_profiled(
     profile.deterministic_entered = true;
     profile.vstack_len = stack.len() as u32;
 
+    // See `advance_deterministically_from_vstack_raw`: a run of consecutive
+    // pure `replace_top` steps keeps the stack below the top fixed, so a
+    // repeated top state means the whole configuration (and therefore the
+    // deterministic lane) has looped and can never shift this token.
+    let mut replace_top_states: SmallVec<[u32; 8]> = SmallVec::new();
+    // See `advance_deterministically_from_vstack_raw`: floor crossings are a
+    // second length-preserving path, so guard them with the exact semantic
+    // frontier key rather than assuming the base below the top is unchanged.
+    let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
+    let mut floor_keys: FxHashSet<_> = FxHashSet::default();
+
     loop {
         let Some(&state) = stack.top() else {
             profile.det_exit_reason = 5;
@@ -4246,13 +4298,27 @@ fn advance_deterministically_profiled(
                         if let Some(goto_from) = stack.parent_of_top() {
                             profile.n_det_goto_lookups += 1;
                             match table.goto_target(goto_from, *nt) {
-                                Some((target, false)) if stack.replace_top(target) => continue,
+                                Some((target, false)) => {
+                                    if replace_top_states.contains(&state) {
+                                        *gss = ParserGSS::empty();
+                                        profile.det_exit_reason = 4;
+                                        return false;
+                                    }
+                                    if !stack.replace_top(target) {
+                                        *gss = ParserGSS::empty();
+                                        profile.det_exit_reason = 4;
+                                        return false;
+                                    }
+                                    replace_top_states.push(state);
+                                    continue;
+                                }
                                 Some((target, true)) => {
                                     stack.pop(2);
                                     stack.push(target);
+                                    replace_top_states.clear();
                                     continue;
                                 }
-                                Some(_) | None => {
+                                None => {
                                     *gss = ParserGSS::empty();
                                     profile.det_exit_reason = 4;
                                     return false;
@@ -4262,6 +4328,7 @@ fn advance_deterministically_profiled(
                     }
 
                     stack.pop(rhs_len);
+                    replace_top_states.clear();
                     let goto_from = *stack.top().unwrap();
                     profile.n_det_goto_lookups += 1;
                     match table.goto_target(goto_from, *nt) {
@@ -4294,7 +4361,14 @@ fn advance_deterministically_profiled(
                         profile.det_exit_reason = 7;
                         return false;
                     };
+                    let next_gss = next_stack.clone().into_gss();
+                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                        *gss = ParserGSS::empty();
+                        profile.det_exit_reason = 4;
+                        return false;
+                    }
                     stack = next_stack;
+                    replace_top_states.clear();
                 }
             }
             Some(Action::Shift(target, is_replace)) => {
@@ -4369,7 +4443,9 @@ fn advance_nondeterministically_profiled(
     use std::time::Instant;
 
     let mut shifted = ParserGSS::empty();
-    let mut visited: SmallVec<[ParserGSS; 4]> = SmallVec::new();
+    let mut key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
+    let mut visited: FxHashSet<_> = FxHashSet::default();
+    visited.insert(key_interner.key(&closure));
     loop {
         profile.n_nondet_waves += 1;
         let frontier_states = closure.peek_values();
@@ -4667,13 +4743,21 @@ fn advance_nondeterministically_profiled(
         // may have period 1 or a longer period, so compare against every
         // frontier seen so far, not just the immediately preceding one. Every
         // shift exposed by a revisited frontier is already merged into
-        // `shifted`, so returning here is exact rather than a truncation. This
-        // is normally a handful of Arc clones in a SmallVec, so the common
-        // one- and two-wave walks do not allocate.
-        if next == closure || visited.iter().any(|frontier| *frontier == next) {
+        // `shifted`, so returning here is exact rather than a truncation.
+        //
+        // Frontiers are compared by canonical semantic key rather than
+        // structural GSS equality: each wave rebuilds the DAG, so equivalent
+        // frontiers routinely differ in Interface/Branch layout and sharing.
+        // The key includes the accumulator attached at each stack bottom, so
+        // two frontiers collide only when they denote exactly the same set of
+        // (stack, accumulator) pairs. Termination follows because the table is
+        // epsilon-free, so a reduce wave never makes stacks deeper; with a
+        // finite state set and finite accumulator lattice only finitely many
+        // semantic frontiers exist.
+        let next_key = key_interner.key(&next);
+        if !visited.insert(next_key) {
             return shifted;
         }
-        visited.push(closure);
         closure = next;
     }
 }
@@ -5389,7 +5473,9 @@ fn advance_nondeterministically(
     token: TerminalID,
 ) -> ParserGSS {
     let mut shifted = ParserGSS::empty();
-    let mut visited: SmallVec<[ParserGSS; 4]> = SmallVec::new();
+    let mut key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
+    let mut visited: FxHashSet<_> = FxHashSet::default();
+    visited.insert(key_interner.key(&closure));
 
     loop {
         if let Some(shifted_wave) =
@@ -5540,13 +5626,21 @@ fn advance_nondeterministically(
         // may have period 1 or a longer period, so compare against every
         // frontier seen so far, not just the immediately preceding one. Every
         // shift exposed by a revisited frontier is already merged into
-        // `shifted`, so returning here is exact rather than a truncation. This
-        // is normally a handful of Arc clones in a SmallVec, so the common
-        // one- and two-wave walks do not allocate.
-        if next == closure || visited.iter().any(|frontier| *frontier == next) {
+        // `shifted`, so returning here is exact rather than a truncation.
+        //
+        // Frontiers are compared by canonical semantic key rather than
+        // structural GSS equality: each wave rebuilds the DAG, so equivalent
+        // frontiers routinely differ in Interface/Branch layout and sharing.
+        // The key includes the accumulator attached at each stack bottom, so
+        // two frontiers collide only when they denote exactly the same set of
+        // (stack, accumulator) pairs. Termination follows because the table is
+        // epsilon-free, so a reduce wave never makes stacks deeper; with a
+        // finite state set and finite accumulator lattice only finitely many
+        // semantic frontiers exist.
+        let next_key = key_interner.key(&next);
+        if !visited.insert(next_key) {
             return shifted;
         }
-        visited.push(closure);
         closure = next;
     }
 }
@@ -5575,6 +5669,19 @@ fn advance_deterministically(
         return false;
     };
 
+    // See `advance_deterministically_from_vstack_raw`: only the pure
+    // `replace_top` reduce path preserves the stack length, so tracking the
+    // top states in a run of those steps detects a whole-configuration repeat
+    // without falsely treating a shrinking configuration as a cycle.
+    let mut replace_top_states: SmallVec<[u32; 8]> = SmallVec::new();
+    // The floor-cross path is a second length-preserving reduce step: it pops
+    // the visible values and remaps the exposed floor top, which can revisit
+    // the same top states without the base below them being pointer-identical.
+    // Guard it with the exact semantic frontier key; a repeated language means
+    // the deterministic lane can never reach a shift for this token.
+    let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
+    let mut floor_keys: FxHashSet<_> = FxHashSet::default();
+
     loop {
         let Some(&state) = stack.top() else {
             break;
@@ -5591,13 +5698,25 @@ fn advance_deterministically(
                     if rhs_len == 1 {
                         if let Some(goto_from) = stack.parent_of_top() {
                             match table.goto_target(goto_from, *nt) {
-                                Some((target, false)) if stack.replace_top(target) => continue,
+                                Some((target, false)) => {
+                                    if replace_top_states.contains(&state) {
+                                        *gss = ParserGSS::empty();
+                                        return false;
+                                    }
+                                    if !stack.replace_top(target) {
+                                        *gss = ParserGSS::empty();
+                                        return false;
+                                    }
+                                    replace_top_states.push(state);
+                                    continue;
+                                }
                                 Some((target, true)) => {
                                     stack.pop(2);
                                     stack.push(target);
+                                    replace_top_states.clear();
                                     continue;
                                 }
-                                Some(_) | None => {
+                                None => {
                                     *gss = ParserGSS::empty();
                                     return false;
                                 }
@@ -5606,6 +5725,7 @@ fn advance_deterministically(
                     }
 
                     stack.pop(rhs_len);
+                    replace_top_states.clear();
                     let goto_from = *stack.top().unwrap();
                     match table.goto_target(goto_from, *nt) {
                         Some((target, false)) => stack.push(target),
@@ -5630,7 +5750,13 @@ fn advance_deterministically(
                         *gss = rebuilt;
                         return false;
                     };
+                    let next_gss = next_stack.clone().into_gss();
+                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                        *gss = ParserGSS::empty();
+                        return false;
+                    }
                     stack = next_stack;
+                    replace_top_states.clear();
                 }
             }
             Some(Action::Shift(target, is_replace)) => {
@@ -6294,6 +6420,81 @@ mod tests {
         for value in ["0", "false", "", "invalid"] {
             assert!(!super::provider_light_start_policy(Some(value)));
         }
+    }
+
+    #[test]
+    fn deterministic_replace_top_cycle_reports_a_dead_branch() {
+        // State 0 is the fixed stack bottom. Each top state reduces one symbol
+        // through a distinct nonterminal back into another top state, so a run
+        // of pure replace_top steps visits 10 -> 11 -> 12 -> 10 while the
+        // stack length stays at two. Without repeat detection every
+        // deterministic loop below spins forever.
+        let empty_actions: &[(TerminalID, Action)] = &[];
+        let reduce_10 = [(0, Action::Reduce(0, 1))];
+        let reduce_11 = [(0, Action::Reduce(1, 1))];
+        let reduce_12 = [(0, Action::Reduce(2, 1))];
+        let actions: Vec<&[(TerminalID, Action)]> = vec![
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            empty_actions,
+            &reduce_10,
+            &reduce_11,
+            &reduce_12,
+        ];
+
+        let empty_gotos: &[(u32, (u32, bool))] = &[];
+        let bottom_gotos = [
+            (0, (11, false)),
+            (1, (12, false)),
+            (2, (10, false)),
+        ];
+        let gotos: Vec<&[(u32, (u32, bool))]> = vec![
+            &bottom_gotos[..],
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+            empty_gotos,
+        ];
+        let table = build_test_table(13, 1, &actions, &gotos);
+        let token = 0;
+
+        let start = ParserGSS::from_single_stack(vec![0, 10], TerminalsDisallowed::new());
+        let stack = start
+            .try_virtual_stack()
+            .expect("the fixture is one concrete stack");
+        let (advanced, ok) =
+            super::advance_deterministically_from_vstack_raw(&table, stack, token);
+        assert!(!ok);
+        assert!(advanced.into_gss().is_empty());
+
+        let mut gss = start.clone();
+        assert!(!super::advance_deterministically(&table, &mut gss, token));
+        assert!(gss.is_empty());
+
+        let mut gss = start;
+        let mut profile = super::AdvanceProfile::default();
+        assert!(!super::advance_deterministically_profiled(
+            &table,
+            &mut gss,
+            token,
+            &mut profile,
+        ));
+        assert!(gss.is_empty());
     }
 
     #[test]

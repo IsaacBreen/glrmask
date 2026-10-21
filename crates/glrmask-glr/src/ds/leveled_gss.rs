@@ -2252,6 +2252,191 @@ impl<T: Clone + Eq + Hash + Ord, A: Merge + Clone + Eq + Hash>
     }
 }
 
+/// One canonical semantic node of a GSS frontier.
+///
+/// `Bottom` is the end of a concrete stack and carries the accumulator that
+/// belongs there. `Cons` is one concrete LR state with the sorted, deduplicated
+/// set of canonical node ids that may follow it toward the bottom. Interning
+/// these nodes makes structural equality of ids exactly language equality for
+/// the represented stack paths and their bottom accumulators.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FrontierKeyNode<T, A> {
+    Bottom(A),
+    Cons(T, SmallVec<[u32; 8]>),
+}
+
+/// Canonical identity of a GSS's complete stack/accumulator language.
+///
+/// Keys are meaningful only within the [`GssFrontierKeyInterner`] that produced
+/// them: ids are assigned by that interner. Two keys from the same interner are
+/// equal exactly when the two GSSes denote the same set of concrete stacks
+/// (top-to-bottom state paths) with the same accumulator attached at the bottom
+/// of each stack.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct GssFrontierKey(SmallVec<[u32; 8]>);
+
+impl GssFrontierKey {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Bottom-up hash-consing canonicalizer for GSS frontiers, including
+/// accumulator payloads.
+///
+/// Unlike [`GssSemanticKeyInterner`], which deliberately ignores accumulator
+/// values for exact-admission queries, this interner distinguishes paths whose
+/// bottom accumulators differ. `Upper::Interface` wrappers are transparent:
+/// the wrapped payload-free `Lower` language is canonicalized with the
+/// interface accumulator attached at every bottom, and an `Upper::Branch`
+/// bottom payload is canonicalized the same way. Memoization is keyed by node
+/// identity (and, for lower nodes, the attached accumulator), so the work is
+/// linear in the reachable DAG rather than in the number of represented stacks.
+pub struct GssFrontierKeyInterner<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> {
+    interned: FxHashMap<FrontierKeyNode<T, A>, u32>,
+    next_id: u32,
+    // Keep the `Arc`s alive so pointer-keyed memo entries can never be reused
+    // by a later allocation for a different node.
+    upper_memo: FxHashMap<usize, (Arc<Upper<T, A>>, SmallVec<[u32; 8]>)>,
+    lower_memo: FxHashMap<(usize, A), (Arc<Lower<T>>, SmallVec<[u32; 8]>)>,
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> GssFrontierKeyInterner<T, A> {
+    pub fn new() -> Self {
+        Self {
+            interned: FxHashMap::default(),
+            next_id: 0,
+            upper_memo: FxHashMap::default(),
+            lower_memo: FxHashMap::default(),
+        }
+    }
+
+    #[inline]
+    fn intern(&mut self, node: FrontierKeyNode<T, A>) -> u32 {
+        if let Some(&id) = self.interned.get(&node) {
+            return id;
+        }
+        let id = self
+            .next_id
+            .checked_add(1)
+            .expect("frontier key interner exceeded u32 node ids");
+        let assigned = self.next_id;
+        self.next_id = id;
+        self.interned.insert(node, assigned);
+        assigned
+    }
+
+    #[inline]
+    fn intern_bottom(&mut self, accumulator: &A) -> u32 {
+        self.intern(FrontierKeyNode::Bottom(accumulator.clone()))
+    }
+
+    fn intern_cons(&mut self, state: &T, mut children: SmallVec<[u32; 8]>) -> u32 {
+        children.sort_unstable();
+        children.dedup();
+        self.intern(FrontierKeyNode::Cons(state.clone(), children))
+    }
+
+    fn lower_elems(
+        &mut self,
+        node: &Arc<Lower<T>>,
+        accumulator: &A,
+    ) -> SmallVec<[u32; 8]> {
+        let memo_key = (lower_node_id(node), accumulator.clone());
+        if let Some((_, ids)) = self.lower_memo.get(&memo_key) {
+            return ids.clone();
+        }
+
+        let result = match &**node {
+            Lower::Segment(segment) => {
+                // `values` is bottom-to-top. Build from the top: each value
+                // has exactly one continuation, so the element set stays a
+                // singleton and a segment boundary stays invisible.
+                let mut current = self.lower_elems(&segment.next, accumulator);
+                for value in segment.values.iter() {
+                    let id = self.intern_cons(value, current);
+                    current = smallvec![id];
+                }
+                current
+            }
+            Lower::General { children, empty, .. } => {
+                let mut elems = SmallVec::<[u32; 8]>::new();
+                if *empty {
+                    elems.push(self.intern_bottom(accumulator));
+                }
+                for (value, kids) in children.iter() {
+                    let mut child_ids = SmallVec::<[u32; 8]>::new();
+                    for child in kids.values() {
+                        child_ids.extend(self.lower_elems(child, accumulator));
+                    }
+                    elems.push(self.intern_cons(value, child_ids));
+                }
+                elems.sort_unstable();
+                elems.dedup();
+                elems
+            }
+        };
+
+        self.lower_memo
+            .insert(memo_key, (node.clone(), result.clone()));
+        result
+    }
+
+    fn upper_elems(&mut self, node: &Arc<Upper<T, A>>) -> SmallVec<[u32; 8]> {
+        let ptr = Arc::as_ptr(node) as usize;
+        if let Some((_, ids)) = self.upper_memo.get(&ptr) {
+            return ids.clone();
+        }
+
+        let result = match &**node {
+            // Interface wrappers are transparent: the payload is the bottom
+            // accumulator of every path in the wrapped lower language.
+            Upper::Interface(interface) => {
+                self.lower_elems(&interface.inner, &interface.acc)
+            }
+            Upper::Branch(branch) => {
+                let mut elems = SmallVec::<[u32; 8]>::new();
+                if let Some(accumulator) = &branch.empty {
+                    elems.push(self.intern_bottom(accumulator));
+                }
+                for (value, kids) in branch.children.iter() {
+                    let mut child_ids = SmallVec::<[u32; 8]>::new();
+                    for child in kids.values() {
+                        child_ids.extend(self.upper_elems(child));
+                    }
+                    elems.push(self.intern_cons(value, child_ids));
+                }
+                elems.sort_unstable();
+                elems.dedup();
+                elems
+            }
+        };
+
+        self.upper_memo.insert(ptr, (node.clone(), result.clone()));
+        result
+    }
+
+    /// Canonical frontier key: the sorted, deduplicated ids of the top nodes.
+    pub fn key(&mut self, gss: &LeveledGSS<T, A>) -> GssFrontierKey {
+        let mut elems = self.upper_elems(&gss.inner);
+        elems.sort_unstable();
+        elems.dedup();
+        GssFrontierKey(elems)
+    }
+}
+
+impl<T: Clone + Eq + Hash, A: Merge + Clone + Eq + Hash> Default
+    for GssFrontierKeyInterner<T, A>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct IndexedLowerIdentity<T: Clone + Eq + Hash> {
     ptr: usize,
     _keepalive: Arc<Lower<T>>,
@@ -7214,8 +7399,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        CompactMap, CompactOrdMap, GssSemanticKeyInterner, IndexedLeveledGss,
-        IndexedLeveledGssNode, LeveledGSS, Lower, Merge, new_interface,
+        CompactMap, CompactOrdMap, GssFrontierKeyInterner, GssSemanticKeyInterner,
+        IndexedLeveledGss, IndexedLeveledGssNode, LeveledGSS, Lower, Merge, new_interface,
     };
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -7554,6 +7739,54 @@ mod tests {
 
         let different = LeveledGSS::from_single_stack(vec![0_u32, 2], TestAcc(1));
         assert_ne!(interner.key(&segment), interner.key(&different));
+    }
+
+    #[test]
+    fn frontier_key_unifies_structural_variants_and_separates_languages() {
+        let mut interner = GssFrontierKeyInterner::<u32, TestAcc>::new();
+
+        // The same concrete stack with the same bottom accumulator, built as a
+        // Segment chain versus a chain of one-child General nodes.
+        let segment = LeveledGSS::from_single_stack(vec![0_u32, 1], TestAcc(7));
+        let floor = LeveledGSS::from_single_stack(Vec::<u32>::new(), TestAcc(7));
+        let general_chain = floor.push(0).push(1);
+        assert_eq!(
+            segment.to_stacks(1),
+            general_chain.to_stacks(1),
+            "fixture must denote the same stack"
+        );
+        assert_eq!(interner.key(&segment), interner.key(&general_chain));
+
+        // The same language built as a top-level Branch instead of an
+        // Interface is canonicalized through the wrapper.
+        let branch_form = LeveledGSS::from_stacks(&[(vec![0_u32, 1], TestAcc(7))]);
+        assert_eq!(interner.key(&segment), interner.key(&branch_form));
+
+        // A different stack path must not collide.
+        let different_stack = LeveledGSS::from_single_stack(vec![0_u32, 2], TestAcc(7));
+        assert_ne!(interner.key(&segment), interner.key(&different_stack));
+
+        // The same path with a different bottom accumulator must not collide:
+        // the frontier key carries payload values, unlike the stack-language
+        // key used by exact admission.
+        let different_acc = LeveledGSS::from_single_stack(vec![0_u32, 1], TestAcc(8));
+        assert_ne!(interner.key(&segment), interner.key(&different_acc));
+
+        // Shared suffixes must compare by language, not node multiplicity.
+        let shared = LeveledGSS::merge_many([
+            LeveledGSS::from_single_stack(vec![0_u32, 1, 2], TestAcc(3)),
+            LeveledGSS::from_single_stack(vec![0_u32, 1, 3], TestAcc(3)),
+        ]);
+        let rebuilt = LeveledGSS::from_stacks(&[
+            (vec![0_u32, 1, 2], TestAcc(3)),
+            (vec![0_u32, 1, 3], TestAcc(3)),
+        ]);
+        let mut shared_stacks = shared.to_stacks(8).expect("bounded fixture");
+        shared_stacks.sort();
+        let mut rebuilt_stacks = rebuilt.to_stacks(8).expect("bounded fixture");
+        rebuilt_stacks.sort();
+        assert_eq!(shared_stacks, rebuilt_stacks);
+        assert_eq!(interner.key(&shared), interner.key(&rebuilt));
     }
 
     #[test]
