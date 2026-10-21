@@ -788,11 +788,13 @@ impl<'a> Grammar<'a> {
         match attempt {
             Ok(constraint) => Ok(constraint),
             Err(error) if error.is_strategy_decline() => {
-                eprintln!(
-                    "[glrmask/profile][template_fallback] strategy={:?} stage={} reason={error}",
-                    options.optimization,
-                    error.decline_stage(),
-                );
+                if crate::compiler::compile::compile_profile_enabled() {
+                    eprintln!(
+                        "[glrmask/profile][template_fallback] strategy={:?} stage={} reason={error}",
+                        options.optimization,
+                        error.decline_stage(),
+                    );
+                }
                 self.compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?
                     .with_end_tokens(options.end_token_ids())
             }

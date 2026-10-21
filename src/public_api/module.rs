@@ -648,11 +648,13 @@ impl Module {
         match attempt {
             Ok(constraint) => Ok(constraint),
             Err(error) if error.is_strategy_decline() => {
-                let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
-                eprintln!(
-                    "[glrmask/profile][template_fallback] strategy={engine:?} stage={} reason={error}",
-                    error.decline_stage(),
-                );
+                if crate::compiler::compile::compile_profile_enabled() {
+                    let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
+                    eprintln!(
+                        "[glrmask/profile][template_fallback] strategy={engine:?} stage={} reason={error}",
+                        error.decline_stage(),
+                    );
+                }
                 let grammar = match self.flatten_source() {
                     Ok(grammar) => grammar,
                     Err(_) => return Err(error),

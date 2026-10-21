@@ -7136,15 +7136,7 @@ fn compile_dynamic_owned_impl(
         // This avoids a serial factoring barrier for large pattern grammars
         // without changing either compiled artifact or cloning the grammar.
         // Tiny grammars retain their prefactored expressions and serial lane.
-        if direct_regular_automaton.is_none() {
-            let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
-            if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
-                return Err(crate::Error::StrategyUnsupported(format!(
-                    "grammar precondition violations:\n{message}"
-                )));
-            }
-        }
-        let ((tokenizer_result, factor_ms), ((table, table_ms, analysis_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
+        let ((tokenizer_result, factor_ms), (table_result, (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
             parallel_dynamic_core,
             "dynamic_tokenizer_and_table_vocab",
             || {
@@ -7173,7 +7165,9 @@ fn compile_dynamic_owned_impl(
                     let analyzed_grammar = if direct_regular_automaton.is_none() {
                         let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                         if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
-                            panic!("[glrmask] grammar precondition violations:\n{}", message);
+                            return Err(crate::Error::StrategyUnsupported(format!(
+                                "grammar precondition violations:\n{message}"
+                            )));
                         }
                         Some(analyzed)
                     } else {
@@ -7203,7 +7197,7 @@ fn compile_dynamic_owned_impl(
                             "temporary_grammar_analysis.destroy", remainder_parent);
                         drop(analyzed_grammar);
                     }
-                    (table, table_ms, analysis_ms)
+                    Ok((table, table_ms, analysis_ms))
                 },
                 || {
                     let started_at = Instant::now();
@@ -7216,6 +7210,7 @@ fn compile_dynamic_owned_impl(
                 },
             ),
         );
+        let (table, table_ms, analysis_ms) = table_result?;
         let ((tokenizer, mask_tokenizer_quotient, prebuilt_virtual_residual_projection), tokenizer_ms) =
             tokenizer_result?;
         if profile && defer_factoring {
