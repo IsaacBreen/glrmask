@@ -768,14 +768,13 @@ fn resolve_indirect_right_recursion(edit: &mut Edit) -> IndirectRightRecursion {
     }
 }
 
-/// Expand nonterminals that are mutually reachable through unit productions.
+/// Collapse nonterminals that are mutually reachable through unit productions.
 ///
 /// Every member of a unit SCC derives every other member through unit rules,
 /// so all members share one language: the union of the component's non-unit
-/// alternatives. Redistributing that union to every member and redirecting
-/// references to the representative is language preserving. This removes unit
-/// cycles, which otherwise make right-boundary substitution alternate between
-/// the same unit edges forever.
+/// alternatives. Move that union onto the representative and keep one unit
+/// link from every other member to it. This removes unit cycles in linear
+/// space; duplicating the union on every member produces a cross product.
 fn expand_unit_sccs(edit: &mut Edit) -> bool {
     let view = edit.view();
     let n = view.nt_count();
@@ -785,27 +784,17 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
             edges[rule.lhs as usize].push(*target as usize);
         }
     }
-
-    let membership = BoundaryGraph {
-        edges,
-        ordered: false,
-    }
-    .nontrivial_components();
+    let membership = BoundaryGraph { edges, ordered: false }.nontrivial_components();
     if membership.iter().all(|&component| component == NO_COMPONENT) {
         return false;
     }
-
     let mut component_members = BTreeMap::<usize, Vec<NonterminalID>>::new();
     for (node, &component) in membership.iter().enumerate() {
         if component != NO_COMPONENT {
-            component_members
-                .entry(component)
-                .or_default()
-                .push(node as NonterminalID);
+            component_members.entry(component).or_default().push(node as NonterminalID);
         }
     }
     let components = component_members.into_values().collect::<Vec<_>>();
-
     let mut representative = vec![None; n];
     let mut component_of = vec![NO_COMPONENT; n];
     for (index, members) in components.iter().enumerate() {
@@ -816,102 +805,55 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
         }
     }
     let map = |nonterminal: NonterminalID| {
-        representative
-            .get(nonterminal as usize)
-            .copied()
-            .flatten()
-            .unwrap_or(nonterminal)
+        representative.get(nonterminal as usize).copied().flatten().unwrap_or(nonterminal)
     };
-
     let mut alternatives = Vec::<Vec<Vec<Symbol>>>::with_capacity(components.len());
     for members in &components {
         let mut unique = FxHashSet::<Vec<Symbol>>::default();
         let mut rhs_list = Vec::new();
         for rule in view.iter() {
-            if !members.contains(&rule.lhs) {
+            if !members.contains(&rule.lhs) || matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(_)]) {
                 continue;
             }
-            if matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(_)]) {
-                continue;
-            }
-            let rhs = rule
-                .rhs
-                .iter()
-                .map(|symbol| match symbol {
-                    Symbol::Nonterminal(nonterminal) => {
-                        Symbol::Nonterminal(map(*nonterminal))
-                    }
-                    Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
-                })
-                .collect::<Vec<_>>();
-            if unique.insert(rhs.clone()) {
-                rhs_list.push(rhs);
-            }
+            let rhs = rule.rhs.iter().map(|symbol| match symbol {
+                Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(map(*nonterminal)),
+                Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+            }).collect::<Vec<_>>();
+            if unique.insert(rhs.clone()) { rhs_list.push(rhs); }
         }
         alternatives.push(rhs_list);
     }
-
-    let estimated_rules = components
-        .iter()
-        .zip(&alternatives)
-        .map(|(members, rhs)| members.len().saturating_mul(rhs.len()))
-        .fold(view.len(), usize::saturating_add);
-    let estimated_symbols = components
-        .iter()
-        .zip(&alternatives)
-        .flat_map(|(members, rhs)| {
-            rhs.iter()
-                .map(move |rhs| members.len().saturating_mul(rhs.len()))
-        })
-        .fold(0usize, usize::saturating_add);
-    if estimated_rules > view.len().saturating_add(1_024)
-        || estimated_symbols > MAX_INDIRECT_SYMBOL_GROWTH
-    {
-        return false;
-    }
-
     let mut emitted = vec![false; components.len()];
     let mut seen = FxHashSet::<(NonterminalID, Vec<Symbol>)>::default();
     let mut expanded = Vec::with_capacity(view.len());
     for rule in view.iter() {
         let component = component_of[rule.lhs as usize];
         if component != NO_COMPONENT {
-            if emitted[component] {
-                continue;
-            }
+            if emitted[component] { continue; }
             emitted[component] = true;
+            let rep = components[component][0];
+            for rhs in &alternatives[component] {
+                if seen.insert((rep, rhs.clone())) {
+                    expanded.push(Rule { lhs: rep, rhs: rhs.clone() });
+                }
+            }
             for &member in &components[component] {
-                for rhs in &alternatives[component] {
-                    if seen.insert((member, rhs.clone())) {
-                        expanded.push(Rule {
-                            lhs: member,
-                            rhs: rhs.clone(),
-                        });
-                    }
+                if member != rep {
+                    expanded.push(Rule { lhs: member, rhs: vec![Symbol::Nonterminal(rep)] });
                 }
             }
             continue;
         }
-
         let lhs = map(rule.lhs);
-        let rhs = rule
-            .rhs
-            .iter()
-            .map(|symbol| match symbol {
-                Symbol::Nonterminal(nonterminal) => {
-                    Symbol::Nonterminal(map(*nonterminal))
-                }
-                Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
-            })
-            .collect::<Vec<_>>();
+        let rhs = rule.rhs.iter().map(|symbol| match symbol {
+            Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(map(*nonterminal)),
+            Symbol::Terminal(terminal) => Symbol::Terminal(*terminal),
+        }).collect::<Vec<_>>();
         let candidate = Rule { lhs, rhs };
-        if !is_reflexive_unit_rule(&candidate)
-            && seen.insert((candidate.lhs, candidate.rhs.clone()))
-        {
+        if !is_reflexive_unit_rule(&candidate) && seen.insert((candidate.lhs, candidate.rhs.clone())) {
             expanded.push(candidate);
         }
     }
-
     edit.replace_with_owned(expanded);
     true
 }
@@ -934,11 +876,10 @@ fn eliminate_right_recursion_edit(
         // one right boundary at a time. Restore the pre-inlining grammar and
         // fall back to ordered substitution, which processes each pair once.
         edit.replace_with_owned(original.clone());
-        let original_len = original.len();
-        if expand_unit_sccs(edit) && edit.len() <= original_len + 1_024 {
+        if expand_unit_sccs(edit) {
             outcome = resolve_indirect_right_recursion(edit);
         }
-        if outcome.exceeded_budget {
+        if outcome.exceeded_budget || !outcome.completed {
             // No further sound rewrite is available. Keep the original
             // grammar rather than materialising an unbounded rule set; the
             // table-build normal-form check reports the remaining cycle.

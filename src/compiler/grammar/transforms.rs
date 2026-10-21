@@ -1515,13 +1515,15 @@ fn prepare_grammar_transforms_impl(
         next_nt += 1;
         id
     };
-    eliminate_right_recursion(&mut normalized.rules, &mut fresh_nt);
-    // Inlining and identical-nonterminal merging can recreate indirect left
-    // recursion after the initial normalization pass. Most grammars do not,
-    // so pay for the full fixed-point normalization only when the cheap
-    // left-reachability check finds such a cycle.
-    if has_indirect_left_recursion(&normalized.rules) {
-        normalize_grammar(&mut normalized.rules, normalized.start);
+    // Inlining and identical-nonterminal merging can recreate both right and
+    // indirect left recursion after the initial pass. Eliminate right
+    // recursion again after each left-normalization round; the prechecks make
+    // this free for grammars that are already in normal form.
+    for _ in 0..2 {
+        eliminate_right_recursion(&mut normalized.rules, &mut fresh_nt);
+        if has_indirect_left_recursion(&normalized.rules) {
+            normalize_grammar(&mut normalized.rules, normalized.start);
+        }
     }
     if let Some(started_at) = post_merge_rr_started_at {
         emit_grammar_transform_profile(

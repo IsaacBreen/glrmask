@@ -45,6 +45,24 @@ pub(super) fn repair(rules: &[Rule], components: &[BTreeSet<NonterminalID>],
         return Some(rewritten);
     }
     selected.sort_unstable_by_key(|component| *component.first().expect("nonempty SCC"));
+    // Large SCCs can blow up before the result is available for the size
+    // check below, so start with the small-rule-set order directly.
+    let force_by_size = selected.iter().any(|component| component.len() > 8);
+    let result = repair_pass(rules, &selected, &mut next, force_by_size);
+    // Ordered substitution multiplies the alternatives of every head in the
+    // SCC. A head order that starts with the largest rule sets can therefore
+    // create a cross product even though another order stays small. Keep the
+    // historic order for ordinary grammars and retry with the smallest rule
+    // sets first only when it would expand the inventory substantially.
+    if !force_by_size && result.len() > rules.len().saturating_mul(4).saturating_add(64) {
+        let mut retry_next = next;
+        return Some(repair_pass(rules, &selected, &mut retry_next, true));
+    }
+    Some(result)
+}
+
+fn repair_pass(rules: &[Rule], selected: &[&BTreeSet<NonterminalID>],
+    next: &mut u32, by_size: bool) -> Vec<Rule> {
     let mut result = rules.to_vec();
     for component in selected {
         let mut rows = BTreeMap::<u32, Vec<Vec<Symbol>>>::new();
@@ -52,11 +70,17 @@ pub(super) fn repair(rules: &[Rule], components: &[BTreeSet<NonterminalID>],
             rows.entry(rule.lhs).or_default().push(rule.rhs.clone());
         }
         for rhs in rows.values_mut() { rhs.sort_unstable(); rhs.dedup(); }
+        let mut order = component.iter().copied().collect::<Vec<_>>();
+        if by_size {
+            order.sort_unstable_by_key(|&nt| {
+                (result.iter().filter(|rule| rule.lhs == nt).count(), nt)
+            });
+        }
         let mut closures = BTreeMap::<u32, u32>::new();
         let mut helpers = BTreeMap::<u32, Vec<Vec<Symbol>>>::new();
-        for &lhs in component {
+        for (position, &lhs) in order.iter().enumerate() {
             let mut current = rows.remove(&lhs).unwrap_or_default();
-            for &head in component.range(..lhs) {
+            for &head in &order[..position] {
                 if !current.iter().any(|rhs| rhs.first() == Some(&Symbol::Nonterminal(head))) {
                     continue;
                 }
@@ -67,8 +91,8 @@ pub(super) fn repair(rules: &[Rule], components: &[BTreeSet<NonterminalID>],
                     .filter(|tail| !tail.is_empty()).collect::<Vec<_>>();
                 let closure = if loops.is_empty() || exits.is_empty() { None } else {
                     let id = *closures.entry(head).or_insert_with(|| {
-                        let id = next;
-                        next = next.checked_add(1).expect("nonterminal coordinate exhausted");
+                        let id = *next;
+                        *next = next.checked_add(1).expect("nonterminal coordinate exhausted");
                         let mut generated = Vec::with_capacity(loops.len() * 2);
                         for tail in &loops {
                             generated.push(tail.to_vec());
@@ -107,5 +131,5 @@ pub(super) fn repair(rules: &[Rule], components: &[BTreeSet<NonterminalID>],
             result.extend(alternatives.into_iter().map(|rhs| Rule { lhs, rhs }));
         }
     }
-    Some(result)
+    result
 }
