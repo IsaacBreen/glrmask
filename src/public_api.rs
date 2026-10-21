@@ -439,7 +439,9 @@ impl<'a> Grammar<'a> {
     }
 
 
-    /// Accepts JSON text. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened. Validate generated values separately when full schema conformance matters.
+    /// Accepts JSON text. Unsupported keywords are rejected with an error, except that
+    /// `format` is treated as an annotation only (as in JSON Schema 2020-12) and
+    /// unrecognised keywords are ignored.
     pub fn from_json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source.into())) }
 
     /// GLRM supports typed external slots; bind them before compiling a runnable root.

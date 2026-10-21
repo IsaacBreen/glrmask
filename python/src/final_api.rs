@@ -199,7 +199,9 @@ impl PyGrammar {
         Self::new(source, SourceKind::Glrm)
     }
 
-    /// Accepts JSON text or a JSON-serializable object. The importer implements a subset of JSON Schema: unsupported assertions may be silently weakened.
+    /// Accepts JSON text or a JSON-serializable object. Unsupported keywords are rejected with an error, except that
+    /// `format` is treated as an annotation only (as in JSON Schema 2020-12) and
+    /// unrecognised keywords are ignored.
     #[staticmethod]
     fn from_json_schema(schema: &Bound<'_, PyAny>) -> PyResult<Self> {
         let source = match schema.extract::<String>() {
