@@ -371,8 +371,8 @@ pub(crate) fn compile_classed(
 ) -> Result<SignedShardOutput, String> {
     assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
     let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
-    Ok(compile_shared_classed(templates,None,controls,depth,lexical,classes,None)
-        .expect("shared template constructor refused its checked contract; redundant expanded-builder fallback is disabled"))
+    compile_shared_classed(templates,None,controls,depth,lexical,classes,None)
+        .ok_or_else(|| "shared template constructor declined: resource budget exceeded".to_string())
 }
 
 pub(crate) fn compile_classed_with_admissions(
@@ -384,8 +384,29 @@ pub(crate) fn compile_classed_with_admissions(
 )->Result<SignedShardOutput,String> {
     assert!(lexical.is_acyclic(),"shared template constructor requires an acyclic lexical query");
     let depth=certificate.map(|c|c.max_controls_per_gap).or_else(||controls.is_empty().then_some(0));
-    Ok(compile_shared_classed_prepared(templates,Some(admissions),controls,depth,lexical,classes,read_context,prepared)
-        .expect("shared template constructor refused its checked contract; redundant expanded-builder fallback is disabled"))
+    compile_shared_classed_prepared(templates,Some(admissions),controls,depth,lexical,classes,read_context,prepared)
+        .ok_or_else(|| "shared template constructor declined: resource budget exceeded".to_string())
+}
+
+#[cfg(test)]
+mod budget_decline_tests {
+    use super::*;
+    use glrmask_parser_dwa::__private::pop_classes::PopLabelClasses;
+
+    #[test]
+    fn declined_shared_constructor_returns_err_instead_of_panicking() {
+        // The bounded-control constructor declines before inspecting any
+        // template when the certificate asks for more than its 16-port cap.
+        let mut lexical = DWA::new(1, 1);
+        lexical.set_final_weight(0, Weight::all());
+        let classes = PopLabelClasses::new(1).unwrap();
+        let certificate = ClosureCertificate { max_controls_per_gap: 16, max_nesting_depth: 1 };
+        let error = match compile_classed(&BTreeMap::new(), &[0], Some(&certificate), &lexical, &classes) {
+            Ok(_) => panic!("a declined constructor must surface as an error"),
+            Err(error) => error,
+        };
+        assert!(error.contains("declined"), "unexpected error: {error}");
+    }
 }
 
 #[cfg(test)]

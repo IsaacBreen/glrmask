@@ -358,8 +358,11 @@ pub(crate) fn install(constraint: &mut Constraint, vocab: &Vocab) -> Result<()> 
         .filter(|_|std::env::var_os("GLRMASK_PROFILE_BOUNDARY_NO_READ_SUPPORT").is_none());
     if profile { eprintln!("[glrmask/profile][static_template_boundary] phase=programs_ready templates={} admissions={} pop_classes={} predecessor={} elapsed_ms={:.3}",
         templates.len(),admissions.len(), classes.len(),read_context.is_some(), started.elapsed().as_secs_f64() * 1000.0); }
-    let prepared=(!walks.is_empty()).then(|| super::boundary_transfer::template_program::prepare_classed_programs(
-        &templates,Some(&admissions),&classes).expect("shared template constructor refused its checked contract; redundant expanded-builder fallback is disabled"));
+    let prepared=if walks.is_empty() {None} else {
+        Some(super::boundary_transfer::template_program::prepare_classed_programs(
+            &templates,Some(&admissions),&classes)
+            .ok_or_else(|| fail("shared template constructor declined: prepared classed program budget exceeded"))?)
+    };
     let mut published = Vec::with_capacity(walks.len());
     for walk in walks {
         let mut output = super::boundary_transfer::template_program::compile_classed_with_admissions(
