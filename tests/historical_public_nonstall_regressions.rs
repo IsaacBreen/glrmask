@@ -5,16 +5,19 @@
 //! feed styles: whole bytes, individual bytes, tokens, and paired tokens.
 //! Frozen archive SHA256 1c3d4ba6453af11d0f39ea16029105a0a4d159d05e20956ef97153489deee9e3.
 
-use glrmask::{BuildOptions, Grammar, Optimization, Vocab};
+use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
 
 fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
     let vocab = Vocab::new(vec![
         (0, vec![b'a']), (1, vec![b'b']), (2, vec![b'c']),
         (3, b"ab".to_vec()), (4, b"bc".to_vec()), (5, b"ca".to_vec()),
     ]);
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
-        let c = Grammar::from_lark(lark)
-            .compile_with(&vocab, BuildOptions::default().optimization(mode))
+    let grammar = Grammar::from_lark(lark);
+    for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie] {
+        let mut module = Module::new(&grammar);
+        module.set_mask_strategy(mode).unwrap();
+        let c = module
+            .compile(&vocab)
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: {e:?}"));
         let mut state = c.start();
         assert!(state.commit_bytes(bytes).is_ok(), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
@@ -197,8 +200,10 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             // With an explicitly configured EOS token that is absent from
             // the vocabulary, stop admission must agree with the ORIGINAL
             // source grammar's acceptance (not merely with the fast parser).
-            let with_eos = Grammar::from_lark(lark)
-                .compile_with(&vocab, BuildOptions::default().optimization(mode).end_tokens([99]))
+            let mut eos_module = Module::new(&grammar);
+            eos_module.set_mask_strategy(mode).unwrap();
+            let with_eos = eos_module
+                .compile_with(&vocab, CompileOptions::default().end_tokens([99]))
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
             let reloaded_eos = glrmask::Constraint::load(with_eos.save())
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));
