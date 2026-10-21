@@ -297,15 +297,15 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, Optimization, Vocab};
+    use crate::{BuildOptions, Grammar, MaskStrategy, Vocab};
 
     #[test]
     fn union_forcing_returns_common_prefix_not_equal_whole_vectors() {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
-        for mode in [Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
+        for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
-            let first=Grammar::from_ebnf("start ::= \"ab\"").compile_with(&vocab,options.clone()).unwrap();
-            let second=Grammar::from_ebnf("start ::= \"abc\"").compile_with(&vocab,options).unwrap();
+            let first=Grammar::from_ebnf("start ::= \"ab\"").compile_with_build_options(&vocab,options.clone()).unwrap();
+            let second=Grammar::from_ebnf("start ::= \"abc\"").compile_with_build_options(&vocab,options).unwrap();
             let states=[first.start(),second.start()];
             assert_eq!(force(&states,None),[0,1],"{mode:?}");
         }
@@ -336,11 +336,11 @@ mod tests {
         let guarded=Grammar::from_glrm(
             "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"")
             .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap();
-        for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
+        for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
-            let baseline=ordinary.compile_with(&vocab,options.clone()).unwrap();
+            let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
             assert_eq!(baseline.start().forced_tokens().unwrap(),[1],"{mode:?}");
-            let event=guarded.compile_with(&vocab,options).unwrap();
+            let event=guarded.compile_with_build_options(&vocab,options).unwrap();
             assert!(event.start().forced_tokens().unwrap().is_empty(),"{mode:?}");
         }
     }
@@ -354,8 +354,8 @@ mod tests {
             "glrm 1; start root; t W=/[ \\t]+/; ignore W; nt root=\"a\" \"b\";",
             "glrm 1; start root; nt root = \"\u{e9}\u{e9}\";",
         ] {
-            for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
-                let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+            for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
+                let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 let seed=[c.start()];
                 let fast=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),true);
                 let full=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),false);

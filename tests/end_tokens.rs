@@ -23,7 +23,7 @@ fn termination_is_caller_policy_after_acceptance() {
 
 #[test]
 fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle_across_modes() {
-    use glrmask::{BuildOptions, Optimization};
+    use glrmask::{BuildOptions, MaskStrategy};
 
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let grammar = Grammar::ebnf(r#"start ::= "a" "b"?"#);
@@ -34,16 +34,16 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
     };
 
     let modes = [
-        Optimization::Auto,
-        Optimization::FastBuild,
-        Optimization::Balanced,
-        Optimization::FastRuntime,
+        MaskStrategy::Auto,
+        MaskStrategy::TokenTrie,
+        MaskStrategy::TokenClassTrie,
+        MaskStrategy::ParserDwa,
     ];
 
     for mode in modes {
         let constraint = grammar
             .clone()
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
                 BuildOptions::default()
                     .optimization(mode)

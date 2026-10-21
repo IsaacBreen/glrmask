@@ -1,6 +1,6 @@
 //! Independent final-API semantic review. No benchmarks or internal engine APIs.
 //! All reference languages are compiled directly from fully bound descriptions.
-use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, PreparedGrammar, MaskStrategy, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -278,7 +278,7 @@ fn review_optimization_choices_preserve_semantics_with_exact_bindings() {
         .prepare(&v).unwrap().bind_snapshot("child", &child).unwrap();
     let baseline = Grammar::from_glrm(BOTH).bind_snapshot("MARK", v.tokens([7, 63]).unwrap()).unwrap()
         .bind_snapshot("child", Grammar::from_ebnf(r#"start ::= "b""#)).unwrap().compile(&v).unwrap();
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
+    for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let actual = desc.link_with(BuildOptions::default().optimization(mode)).unwrap();
         compare_prefixes(&actual, &baseline, &[0, 1, 2, 3, 5, 7, 63], 4);
     }
@@ -344,17 +344,17 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
     use glrmask::BoundaryTriggerDetail;
     let v = vocab();
     let grammar = Grammar::from_ebnf(r#"start ::= "a" "b"?"#);
-    for mode in [Optimization::Auto, Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
+    for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let options = BuildOptions::default().optimization(mode);
-        let plain = grammar.compile_with(&v, options.clone()).unwrap();
-        let none = grammar.compile_with(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        let plain = grammar.compile_with_build_options(&v, options.clone()).unwrap();
+        let none = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert_eq!(plain.save(), none.save());
         for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
-            if mode == Optimization::FastBuild && detail == BoundaryTriggerDetail::Exact {
-                assert!(grammar.compile_with(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
+            if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
+                assert!(grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
                 continue;
             }
-            let requested = grammar.compile_with(&v, options.clone().boundary_trigger(detail)).unwrap();
+            let requested = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap();
             // Inspect persistence before start/first mask: trigger construction is eager.
             let bytes = requested.save();
             assert_ne!(bytes, plain.save());

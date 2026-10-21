@@ -4,7 +4,7 @@ The C++/C guide is [cpp/README.md](cpp/README.md); the native Node.js JavaScript
 
 `core` is a private Rust ownership/validation helper, not another parser. It retains each compiled constraint with a safe owner/dependent `self_cell`, implements independent state snapshots, validates foreign inputs, and contains unwinding panics. C ABI code and Node-API code add only their language boundary and error/ownership conventions. The existing core algorithms, build defaults and public Rust/Python semantics are unchanged.
 
-The current public lifecycle is source `Grammar` -> `PreparedGrammar` -> runnable `Constraint` -> per-sequence `ConstraintState`. Source/prepared binding mutates an independent snapshot handle transactionally. Bindings mirror the current Rust contract, not a separate proposed naming or composition redesign.
+The public lifecycle is source `Grammar` -> `Module` (with settings, occurrence bindings and precompilation) -> runnable `Constraint` -> per-sequence `ConstraintState`. `Expr` provides compositional union and concatenation. Bindings mirror the Rust v1 contract.
 
 ## Maintainer verification
 

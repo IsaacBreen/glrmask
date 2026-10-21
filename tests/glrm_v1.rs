@@ -1,5 +1,5 @@
 use glrmask::{
-    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, Optimization, PreparedGrammar,
+    BuildOptions, Constraint, ConstraintSpec, DynamicConstraint, Grammar, MaskStrategy, PreparedGrammar,
     Vocab,
 };
 
@@ -166,9 +166,9 @@ nt start = CONTROL payload;
     let mut widened = Grammar::from_glrm(source);
     widened.bind("CONTROL", glrmask::Token::new(7)).unwrap();
     widened.bind("payload", glrmask::Token::new(7)).unwrap();
-    for mode in [glrmask::Optimization::Auto, glrmask::Optimization::FastBuild,
-                 glrmask::Optimization::Balanced, glrmask::Optimization::FastRuntime] {
-        let constraint = widened.compile_with(
+    for mode in [glrmask::MaskStrategy::Auto, glrmask::MaskStrategy::TokenTrie,
+                 glrmask::MaskStrategy::TokenClassTrie, glrmask::MaskStrategy::ParserDwa] {
+        let constraint = widened.compile_with_build_options(
             &vocab, glrmask::BuildOptions::default().optimization(mode)).unwrap();
         let mut state = constraint.start();
         for _ in 0..2 {
@@ -356,7 +356,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     let loaded_dynamic_bound = loaded_dynamic_parent
         .bind_snapshot("child", &prepared_child)
         .unwrap()
-        .link_with(BuildOptions::default().optimization(Optimization::Balanced))
+        .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie))
         .unwrap();
     assert_static_xy_matches(&reference, &loaded_dynamic_bound);
 
@@ -643,7 +643,7 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
         Constraint::compile(parent.clone(), &vocab).unwrap();
     assert_lr_composition_rejected(DynamicConstraint::compile(parent.clone(), &vocab));
     let dynamic_constraint =
-        parent.compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        parent.compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
 
     for token in [0, 1] {
         let mut static_state = static_constraint.start();
@@ -678,7 +678,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
     let constraint = parent.bind_snapshot("MARK", glrmask::Token::new(7)).unwrap()
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();
     state.commit_token(8).unwrap();
@@ -765,7 +765,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     let dynamic_fully_bound = open
         .bind_snapshot("child::nested", &leaf)
         .unwrap()
-        .link_with(BuildOptions::default().optimization(Optimization::Balanced))
+        .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie))
         .unwrap();
     let mut state = dynamic_fully_bound.start();
     state.commit_token(0).unwrap();
@@ -826,7 +826,7 @@ nt start = WORD;
 }
 
 #[test]
-fn nested_external_tokens_use_qualified_names() {
+fn nested_external_tokens_are_rejected() {
     let vocab = Vocab::new(vec![(123, Vec::new())]);
     let source = r#"
 glrm 1;
@@ -838,17 +838,8 @@ grammar inner {
 };
 nt document = inner;
 "#;
-    let constraint = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
-        .unwrap()
-        .bind_token("inner::END", [123])
-        .unwrap()
-        .build()
-        .unwrap()
-        .compile()
-        .unwrap();
-    let mut state = constraint.start();
-    state.commit_token(123).unwrap();
-    assert!(state.is_accepting());
+    let err = ConstraintSpec::builder(Grammar::glrm(source), &vocab).unwrap_err().to_string();
+    assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
 }
 
 #[test]

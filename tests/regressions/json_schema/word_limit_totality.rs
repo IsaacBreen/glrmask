@@ -1,6 +1,6 @@
 //! A slice certificate must cover every input atom, not only surviving edges.
 //! These public-API regressions run with ordinary defaults (no environment setup).
-use glrmask::{BuildOptions, Constraint, Grammar, UnlinkedConstraint, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, UnlinkedConstraint, MaskStrategy, Vocab};
 
 fn allowed(mask: &[u32], id: u32) -> bool {
     mask.get(id as usize / 32)
@@ -65,9 +65,9 @@ fn word_limit_totality_default_and_loaded_public_constraints() {
     let vocab = vocabulary();
     for words in 1..=4 {
         let source = schema(words);
-        for mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
+        for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let constraint = Grammar::from_json_schema(&source)
-                .compile_with(&vocab, BuildOptions::default().optimization(mode))
+                .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode))
                 .unwrap();
             assert_last_word_masks(&constraint, words);
             let loaded = Constraint::load(constraint.save()).unwrap();
@@ -81,7 +81,7 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
     let vocab = vocabulary();
     let source = schema(2);
     let child = Grammar::from_json_schema(&source)
-        .compile_with(&vocab, BuildOptions::default().optimization(Optimization::Balanced))
+        .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie))
         .unwrap();
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,

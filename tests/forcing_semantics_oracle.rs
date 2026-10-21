@@ -1,7 +1,7 @@
 //! Independent finite byte/event trace model. No GLRMask parser, tokenizer,
 //! regular-expression engine or grammar normalization decides the expected set.
 use std::collections::{BTreeSet, VecDeque};
-use glrmask::{BuildOptions, Constraint, ConstraintState, Grammar, Optimization, Vocab};
+use glrmask::{BuildOptions, Constraint, ConstraintState, Grammar, MaskStrategy, Vocab};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Cell { Byte(u8), Event(u32) }
@@ -158,8 +158,8 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
         let (source,events)=grammar_source(words);
         let mut grammar=Grammar::from_glrm(&source);
         for id in events { grammar=grammar.bind_snapshot(format!("EVENT_{id}"),vocab.tokens([id]).unwrap()).unwrap(); }
-        for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
-            let compiled=grammar.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+        for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
+            let compiled=grammar.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             let label=format!("case={case},mode={mode:?}");
             count+=check_states(&compiled,words,&entries,&label);
             if case%7==0 {
@@ -209,10 +209,10 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
         let expected=leaf_language.iter().map(|word| {
             let mut wrapped=vec![B(b'(')];wrapped.extend_from_slice(word);wrapped.push(B(b')'));wrapped
         }).collect::<Residuals>();
-        for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
+        for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let opts=BuildOptions::default().optimization(mode);
             let prepared=assembly.link_with(opts.clone()).unwrap();
-            let source=source_assembly.compile_with(&vocab,opts).unwrap();
+            let source=source_assembly.compile_with_build_options(&vocab,opts).unwrap();
             count+=check_states(&prepared,&expected,&entries,&format!("prepared:{case}:{mode:?}"));
             count+=check_states(&source,&expected,&entries,&format!("source:{case}:{mode:?}"));
             let loaded=Constraint::load(&prepared.save()).unwrap();
@@ -230,8 +230,8 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
             (highest,b"unused".to_vec())], [highest-1]);
         let g=Grammar::from_glrm("extern token MARK start root nt root=\"a\" \"b\" | MARK \"b\"")
             .bind_snapshot("MARK",vocab.tokens([3]).unwrap()).unwrap();
-        for mode in [Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
-            let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
+        for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
+            let c=g.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             for c in [c.clone(),Constraint::load(&c.save()).unwrap()] {
                 let mut s=c.start();
                 assert!(s.mask().len() >= (highest as usize + 1).div_ceil(32));

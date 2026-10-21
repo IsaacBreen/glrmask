@@ -441,8 +441,8 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
     let source = crate::Grammar::glrm(
         r#"start root; ignore WS; t WS ::= " "+; nt root ::= "a" root "b" | "";"#
     );
-    for optimization in [crate::Optimization::Balanced, crate::Optimization::FastRuntime] {
-        let fresh = source.compile_with(
+    for optimization in [crate::MaskStrategy::TokenClassTrie, crate::MaskStrategy::ParserDwa] {
+        let fresh = source.compile_with_build_options(
             &vocab,
             crate::BuildOptions::default().optimization(optimization),
         ).unwrap().with_end_tokens(&[64]).unwrap();

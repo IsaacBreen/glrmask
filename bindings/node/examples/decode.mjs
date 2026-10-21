@@ -1,7 +1,7 @@
-import { Vocab, Grammar, Optimization } from '@glrmask/node';
+import { Vocab, Grammar, MaskStrategy } from '@glrmask/node';
 const vocab = new Vocab([[0,Buffer.from('hello')],[1,Buffer.from(' ')],[2,Buffer.from('world')]]);
 const grammar = Grammar.fromEbnf('start ::= "hello" " " "world"');
-const constraint = await grammar.compile(vocab, {optimization:Optimization.FastRuntime});
+const constraint = await grammar.compile(vocab, {maskStrategy: MaskStrategy.ParserDwa});
 const state = constraint.start();
 const mask = new Uint32Array(constraint.maskLength);
 for (const id of [0,1,2]) {

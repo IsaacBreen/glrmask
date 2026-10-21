@@ -21,10 +21,6 @@
 //! - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 //! - `ConstraintState`: the mutable state for a single generated sequence.
 //!
-//! **Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages
-//! use `PreparedGrammar` for reusable preparation. The decoding quickstarts below
-//! work with that release; the new assembly APIs require a matching source build.
-//!
 //! Use direct `Grammar.compile` for a closed source, or a `Module` when local
 //! settings, late-bound children, or retained work are needed. `Expr.choice` and
 //! `Expr.sequence` group grammar leaves without adding an extra lexer scope at each
@@ -86,16 +82,21 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{BuildOptions, Grammar, Optimization, PreparedGrammar, LarkOptions, Module, ModuleOptions, CompileOptions, ModuleValue, IntoModuleValue, Expr, IntoExpr, UnboundExtern};
-#[cfg(any(test,feature="internal-api"))]
-#[doc(hidden)]
-pub use public_api::{UnlinkedConstraint, Requirement};
-pub use glrmask_grammar::SourceSpan;
-pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
-pub use glrmask_grammar::LarkProfile;
+pub use public_api::{Grammar, LarkOptions, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
-pub use public_api::ParserBackend;
+pub use public_api::{
+    BuildOptions, PreparedGrammar, UnlinkedConstraint, ParserBackend, Requirement,
+};
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use runtime::BoundaryTriggerDetail;
+pub use glrmask_grammar::SourceSpan;
+pub use glrmask_grammar::__private::grammar::glrm::ExternalKind as ExternKind;
+#[cfg(any(test, feature = "internal-api"))]
+#[doc(hidden)]
+pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
+pub use glrmask_grammar::LarkProfile;
 
 /// Model token identifier.
 pub type TokenId = u32;
@@ -105,7 +106,6 @@ pub type TokenId = u32;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use dynamic_constraint::{DynamicConstraint, DynamicConstraintState};
-pub use runtime::BoundaryTriggerDetail;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{

@@ -1,24 +1,41 @@
 # Changelog
 
-## Unreleased (0.4.0 candidate) — configured modules and source expressions
+## Unreleased (0.4.0 candidate) — v1 API: modules, expressions and mask strategies
 
-- Add an owned `Module` graph with independently stored local compilation
-  settings, snapshot-safe mutable binding, optional open-graph `precompile`,
-  and final `compile`. Source `Grammar` values never retain settings.
-- Add instance `with_options` for configured snapshots and atomic `set_options`
-  updates. Locally retained work freezes incompatible settings; independently
-  configured children remain independent. Python supports options objects or
-  keyword updates with explicit conflict checking.
-- Preserve cold, open, partly compiled and mixed module graphs across save/load,
-  including exact vocabulary identity, occurrence bindings and retained work.
-  Deduplicate local work and use the caller's bounded parallel execution context;
-  reject incompatible retained representations rather than silently rebuilding.
-- Add scope-preserving `Expr.choice` and `Expr.sequence`. Grouping operators do
-  not add namespaces; raw and configured leaves retain independent scopes and
-  deterministic external paths. Original model-token spellings may cross leaves.
-- Expose `UnboundExtern`, unresolved/all-extern introspection, and matching
-  Python, C/C++ and JavaScript/TypeScript module/expression APIs. Existing
-  preparation-stage spellings remain a migration surface, not the primary API.
+- The public pipeline is `Grammar` → `Module` → `Constraint`, plus `Expr` for
+  composition. `Grammar` is immutable source without settings or bindings;
+  `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a
+  default `Module`.
+- `Module` holds per-module settings, bindings and retained work.
+  `Module::bind` mutates in place and is atomic; each extern is bound once on
+  its declaring module, and qualified `::` paths are rejected. A bound child
+  must have no unbound externs. `precompile` retains local work while externs
+  are still open; `compile` requires every extern to be bound.
+- `MaskStrategy` (`Auto`, `ParserDwa`, `TokenTrie`, `TokenClassTrie`, with
+  aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`) replaces
+  `Optimization`; `Balanced` is removed. Explicit strategies error instead of
+  silently falling back. `TokenTrie` parts cannot be combined with `ParserDwa`
+  or `TokenClassTrie` parts in one composition.
+- `BoundaryMaskStrategy` (`FastBuild`, the default, and `FastRuntime`) replaces
+  `BoundaryTriggerDetail`. The level is a minimum: retained work at a higher
+  level is reused, never downgraded.
+- `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
+  externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
+  applied only to the root.
+- Saved modules preserve cold, open, partly compiled and mixed graphs,
+  including exact vocabulary identity, bindings and retained work.
+- `Expr.choice`, `Expr.sequence` and `Expr.literal` compose grammars without
+  adding a namespace per operator; model-token spellings may cross leaves.
+- Python: `Module(grammar, *, mask_strategy=..., boundary_mask_strategy=...)`
+  with assignable properties, `bind(name, value)` and atomic `bind(**bindings)`,
+  an `externs` `Mapping` with `.unbound`, and `copy()` replacing `clone()`.
+  C/C++ and Node.js bindings expose the same model.
+- Grammar language: `extern` declarations are only allowed at the top level,
+  inline grammars cannot refer to outer names, `use`, `export`, `import` and
+  `super` are reserved, and `::` is invalid in extern names.
+- Removed: `PreparedGrammar`, `link`, `requirements`, `Grammar::bind`,
+  `Grammar::exact`, `Optimization`, `BoundaryTriggerDetail`, `UnboundExtern`,
+  `with_options`/`set_options`, and Python `clone()`.
 - Remove native GLRM `shortest { ... }` syntax. Preserve internal prefix-minimal
   regular languages and Lark `[lazy]`, and emit reparsable byte-correct regular
   subtraction from the formatter.

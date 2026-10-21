@@ -1,61 +1,59 @@
 # Reusable modules and expressions
 
-This API is an unreleased main-branch feature. Use a build of the matching
-source revision until it is included in a published package.
+The GLRMask v1 API structures grammar processing into three stages:
+`Grammar` → `Module` → `Constraint`, plus `Expr` for composing pieces.
 
-`Grammar` describes a language. It does not own compilation options. Use
-`grammar.compile(vocab)` for a closed source grammar and `Module` when a grammar
-needs independently configured children, late binding, or reusable compilation
-work. A `Constraint` is always fully runnable: starting a state, calculating a
-mask, or committing a token never compiles deferred grammar definitions.
+`Grammar` describes an immutable source language without compilation settings
+or bindings. Use `grammar.compile(vocab)` for a closed source grammar and
+`Module` when a grammar needs independently configured settings, late binding,
+or reusable precompilation work. A `Constraint` is always fully runnable:
+starting a state, calculating a mask, or committing a token never compiles
+deferred grammar definitions.
 
 ## Construction and local settings
 
-Rust uses one default constructor and an instance method for configured copies:
+Rust wraps a source grammar with `Module::new` and configures settings via
+methods on the module:
 
 ```rust
-use glrmask::{Grammar, Module, ModuleOptions, Optimization};
+use glrmask::{Grammar, MaskStrategy, Module};
 
 fn configured(source: &Grammar<'_>) -> glrmask::Result<Module> {
-    let original = Module::new(source);
-    let configured = original.with_options(
-        ModuleOptions::default().optimization(Optimization::FastRuntime),
-    )?;
-    // The source and original module are unchanged.
-    Ok(configured)
+    let mut module = Module::new(source);
+    module.set_mask_strategy(MaskStrategy::FAST_RUNTIME)?;
+    // The source grammar is unchanged.
+    Ok(module)
 }
 ```
 
 Creating a module does not require a vocabulary or perform grammar compilation.
-It captures an owned source snapshot. `Grammar::module()` is the equivalent
-default convenience. `with_options` returns an independent configured snapshot;
-`set_options` changes the receiving module in place. Both preserve existing
-bindings and independently configured descendants. An incompatible change to
-options already used for retained local work is an error, not an implicit
-discard-and-rebuild operation. The original value survives a failed update.
+It captures an owned source snapshot. Settings belong to the module, never to the
+source `Grammar`. Setters (`set_mask_strategy`, `set_boundary_mask_strategy`)
+update the receiving module in place and return a `Result<()>`.
 
-Python uses its constructor and keyword arguments rather than copying Rust's
-associated-function syntax:
+Python uses constructor keywords and properties:
 
 ```python
-from glrmask import Grammar, Module, Optimization
+from glrmask import Grammar, MaskStrategy, Module
 
 source = Grammar.from_glrm('start root nt root = /[0-9]+/')
-module = Module(source, optimization=Optimization.FAST_RUNTIME)
+module = Module(source, mask_strategy=MaskStrategy.FAST_RUNTIME)
 ```
 
-Options on a module apply to its own compilation unit. Attaching that module to
-a different parent does not change its settings. A raw source attached directly
-uses its own default configuration, not the parent's configuration. Create an
-explicit configured child when its options should differ. Final root controls,
-such as end tokens, are supplied to the final compilation call and are not
-inherited by children.
+Settings on a module apply to its own compilation unit. Attaching that module to
+a parent does not change its settings. An attached child must have all of its
+own externs resolved before attachment. Implicit modules (a bare `Grammar` or
+`Expr` passed as a binding) use default settings, not the parent's settings.
+Final root controls, such as end tokens, are supplied to the root compilation
+call via `CompileOptions` (Python: `end_tokens` keyword) and apply only to that
+root compilation.
 
 ## Open preparation and late binding
 
 Binding and precompilation update a module in place. Binding captures the child
-at that moment; later changes to the original child do not rewrite a previously
-bound parent. Clone or copy a module to specialize independent branches.
+as an independent snapshot at that moment; later changes to the original child
+do not rewrite a previously bound parent. In Rust, use `clone()` to specialize
+an independent snapshot; in Python, use `copy()`.
 
 This complete Rust example retains useful work before its child is known:
 
@@ -71,13 +69,13 @@ fn main() -> glrmask::Result<()> {
         r#"extern grammar ITEM start root nt root = "[" ITEM "]""#,
     );
     let mut parent = Module::new(&source);
-    assert_eq!(parent.unbound()?.len(), 1);
+    assert_eq!(parent.externs().unbound().len(), 1);
     parent.precompile(&vocab)?;
 
     let saved = parent.save();
-    let mut loaded = Module::load_with_vocab(&saved, &vocab)?;
+    let mut loaded = Module::load(&saved, Some(&vocab))?;
     loaded.bind("ITEM", Grammar::from_glrm("start root nt root = /[0-9]+/"))?;
-    assert!(loaded.unbound()?.is_empty());
+    assert!(loaded.externs().unbound().is_empty());
 
     let constraint = loaded.compile(&vocab)?;
     let mut state = constraint.start();
@@ -92,12 +90,11 @@ The corresponding Python workflow is:
 ```python
 from glrmask import Grammar, Module, Vocab
 
-vocab = Vocab.from_dict({"[": 0, "7": 1, "]": 2, "[7]": 3})
+vocab = Vocab.from_id_to_bytes({0: b"[", 1: b"7", 2: b"]", 3: b"[7]"})
 source = Grammar.from_glrm('extern grammar ITEM start root nt root = "[" ITEM "]"')
 parent = Module(source)
 parent.precompile(vocab)             # Real work; an open extern is allowed.
 saved = parent.save()                # Bytes, including retained work.
-
 loaded = Module.load(saved, vocab=vocab)
 loaded.bind("ITEM", Grammar.from_glrm('start root nt root = /[0-9]+/'))
 constraint = loaded.compile(vocab)   # Performs any remaining required work.
@@ -106,108 +103,102 @@ state.commit_token(3)
 assert state.is_accepting()
 ```
 
-`precompile` is optional. Final `compile` accepts a wholly cold module and a
-module containing already prepared children. It rejects unresolved externs and
-incompatible vocabulary or compilation representations explicitly. Passing a
-vocabulary once to a root operation supplies it to the whole graph; callers do
-not pass one to every constructor. A loaded file may retain a target identity
-and compiled data, while a newly bound raw child still needs the full vocabulary
-for compilation, so final compilation takes the vocabulary explicitly.
+`precompile` is optional. Final `compile` accepts a wholly cold module or a
+module containing already prepared children. It rejects unresolved externs
+explicitly. Passing a vocabulary once to a root operation supplies it to the
+whole graph; callers do not pass one to every constructor.
 
-### Representation compatibility
+### Mask strategy and composition
 
-Local options are real requests, not suggestions silently replaced by the
-parent's mode. Auto, Balanced and FastRuntime modules use native template
-representations and can be combined with one another. FastBuild keeps the
-ordinary Dynamic representation. Retained Dynamic/LR and native-template
-components cannot be mixed across an attachment edge; this is rejected before
-compilation rather than converting or discarding the supplied work.
+`MaskStrategy` replaces `Optimization` and controls mask generation:
+- `Auto` (default): reuses retained `ParserDwa` work, else retained `TokenClassTrie` work, else builds `ParserDwa`. It never selects `TokenTrie`.
+- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest masks).
+- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
+- `TokenClassTrie`: token-trie walk over token equivalence classes.
 
-Homogeneous Dynamic composition uses the existing retained-component linker.
-Its unsupported nullable or global-ignore boundaries still produce explicit
-capability errors. A FastBuild Lark unit combining inline schema expansion with
-open imports also has a capability error. These constraints apply to reusable
-component composition, not a claim that a source language is invalid: direct
-whole-source `Grammar.compile` retains its existing compilation route. Choosing
-native-compatible local options before precompilation provides the general
-reusable graph path. There is no new public parser-backend switch.
+`TokenTrie` compiles the whole composition as one grammar: bound children are inlined at source level, so `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; an explicit `ParserDwa` or `TokenClassTrie` part cannot be combined with a `TokenTrie` part, and compilation reports an error.
 
-The environment used during later loading cannot silently change the
-representation of an existing artifact. Resource or target errors do not alter
-the receiving module.
+`BoundaryMaskStrategy` replaces `BoundaryTriggerDetail`:
+- `FastBuild`: conservative token-set boundary trigger (faster build, default).
+- `FastRuntime`: full exact proper-prefix boundary trigger (lower latency).
 
-The serialized module may be open, cold, or mixed. Loading restores its stored
-state; it does not compile the source or silently replace invalid retained
-machinery with newly compiled data. Use `Module::load_with_vocab` in Rust or the
-`vocab` argument to `Module.load` in Python to check the intended target.
+Explicit strategy requests never fall back silently. If an engine cannot build
+a part or cannot be linked with neighbouring parts, compilation errors
+explicitly naming the strategy. Precompilation retains work without discarding
+existing work, so preparation can only accelerate compilation.
 
 ## Expressions and independently scoped leaves
 
-`Expr.choice` describes unordered language alternatives, and `Expr.sequence`
-describes concatenation. They are not prioritized parsing or separate decoding
-calls. A single original model token can cross a grammar-leaf boundary.
+`Expr.choice` describes context-free alternation, and `Expr.sequence`
+describes concatenation. `Expr.literal` matches exact bytes without whitespace
+or ignore rules inserted between parts.
+
+In Python:
 
 ```python
-from glrmask import Expr, Grammar, Module
+from glrmask import Expr, Grammar, Module, Vocab
 
+vocab = Vocab.from_id_to_bytes({0: b"a", 1: b"b", 2: b"c", 3: b"!"})
 a = Grammar.from_glrm('start root nt root = "a"')
 b = Grammar.from_glrm('start root nt root = "b"')
 c = Grammar.from_glrm('start root nt root = "c"')
-expression = Expr.sequence([Expr.choice([a, b]), c])
-module = Module(expression)
+lit = Expr.literal("!")
+expression = Expr.sequence(Expr.choice(a, b), c, lit)
+
+parent = Module(Grammar.from_glrm('extern grammar SUB start root nt root = SUB'))
+parent.bind(SUB=expression)
+constraint = parent.compile(vocab)
 ```
 
-In Rust, mixed operand types require an explicit common `Expr` conversion:
+In Rust:
 
 ```rust
-use glrmask::{Expr, Grammar, IntoExpr, Module};
+use glrmask::{Expr, Grammar, Module, Vocab};
 
-fn alternatives() -> glrmask::Result<Module> {
+fn alternatives(vocab: &Vocab) -> glrmask::Result<glrmask::Constraint> {
     let a = Grammar::from_glrm(r#"start root nt root = "a""#);
     let b = Grammar::from_glrm(r#"start root nt root = "b""#);
     let c = Grammar::from_glrm(r#"start root nt root = "c""#);
     let expression = Expr::sequence([
-        Expr::choice([(&a).into_expr(), (&b).into_expr()]),
-        (&c).into_expr(),
+        Expr::choice([&a, &b]),
+        Expr::from(&c),
+        Expr::literal("!"),
     ]);
-    Module::from_expr(&expression)
+
+    let mut parent = Module::new(&Grammar::from_glrm(
+        "extern grammar SUB start root nt root = SUB",
+    ));
+    parent.bind("SUB", expression)?;
+    parent.compile(vocab)
 }
 ```
 
-Whole imported grammars retain their own lexer and ignore rules. Nested
-expression operators add no extra namespace. Leaves are addressed in their
-stable traversal order as `leaf0`, `leaf1`, and so on; reassociating the same
-ordered leaves does not add path segments. Two appearances of an open source
-are independent occurrences, even when their definitions or compiled local work
-are shared. `unbound()` / Python `.unbound` reports the actual qualified paths
-to use for late binding. `externs()` / `.externs` also includes bound declarations.
+Whole grammar leaves retain their own lexer and ignore rules. Nested expression
+operators add no extra namespace. Leaves can be `Grammar`, `Module`, `Expr`,
+`Token`, or `ExactTokens`. In Python, passing a plain string raises `TypeError`;
+use `Expr.literal`. A part with unbound externs is an error: Python's
+`Expr.choice` and `Expr.sequence` raise `ValueError` immediately, and Rust
+reports it when the expression is bound or compiled.
 
-Configured or precompiled `Module` values are valid expression leaves and retain
-their options and compiled work. `Grammar::from_expr` and `Grammar.from_expr`
-are source-only conversions: they reject expressions that would lose nondefault
-configuration or retained work. Use the module conversion for those expressions.
-Source-only expressions can bind directly into a `Grammar`; module binding also
-accepts configured expressions. No explicit wrapper is needed for normal binding.
-
-An empty sequence denotes epsilon. An empty choice is rejected when materialized
-rather than silently assigned another language. The initial expression API has
-no named-operand requirement or general rule-building DSL.
+An empty sequence denotes epsilon. An empty choice matches nothing.
 
 ## Exact token events and errors
 
-`Token` and `ExactTokens` still denote exact original-ID events, not their decoded
-text. A grammar-valued extern may accept such an event through the existing
-exact-event adaptation. A token-valued extern cannot accept arbitrary text or a
-general grammar. Vocabulary-bound token sets must match the target mapping,
-including exact-only entries.
+`Token` and `ExactTokens` denote exact original-ID events, not their decoded
+text. A grammar-valued extern accepts `Module`, `Grammar`, `Expr`, `Token`, or
+`ExactTokens` directly without requiring a separate grammar conversion. A
+token-valued extern accepts `Token` or `ExactTokens`.
 
-Unknown, repeated, wrong-kind and incompatible-target bindings leave the module
-unchanged. A failed option update or failed precompilation likewise preserves
-the receiver. `UnboundExtern` exposes each outstanding declaration's kind,
-qualified path and source span. State predicates remain `is_accepting` and
-`is_rejected`; an accepting prefix can still have continuations, and an empty
-token mask does not itself mean rejection.
+Binding is atomic and mutates in place: unknown extern names, repeated bindings,
+wrong value kinds, or children with open externs leave the module unchanged.
+Each extern is bound once on the module that declared it; qualified `::` paths
+are not supported.
 
-The old `PreparedGrammar` API is a migration surface, not the canonical name for
-the new flexible object. It should not be substituted for `Module` in new examples:
-its historical construction phase and accepted child types are different.
+Introspection is provided by `m.externs()` (Python: `m.externs`), which returns
+an `Externs` view of all declared externs on the module in declaration order,
+and `m.externs().unbound()` (Python: `m.externs.unbound`), which reports only
+unresolved externs. Each `Extern` exposes `name()`, `kind()`, and `span()`.
+
+`PreparedGrammar`, `link()`, `requirements`, `Grammar.bind`, `Grammar.exact`,
+`BoundaryTriggerDetail`, and `Optimization` are removed from the public API.
+In Python, `clone()` is replaced by `copy()`.

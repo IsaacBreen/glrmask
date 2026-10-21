@@ -42,22 +42,25 @@ extern "C" {
 typedef int32_t glrmask_status;
 enum { GLRMASK_OK=0, GLRMASK_INVALID_ARGUMENT=1, GLRMASK_ENGINE_ERROR=2,
        GLRMASK_PANIC=3, GLRMASK_BUFFER_TOO_SMALL=4, GLRMASK_CLOSED=5 };
-enum { GLRMASK_AUTO=0, GLRMASK_FAST_BUILD=1, GLRMASK_BALANCED=2, GLRMASK_FAST_RUNTIME=3 };
-enum { GLRMASK_BOUNDARY_NONE=0, GLRMASK_BOUNDARY_TOKENS=1, GLRMASK_BOUNDARY_EXACT=2 };
-#define GLRMASK_BOUNDARY_DEFAULT UINT32_MAX
+enum { GLRMASK_MASK_STRATEGY_AUTO=0, GLRMASK_MASK_STRATEGY_PARSER_DWA=1,
+       GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2, GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE=3 };
+#define GLRMASK_MASK_STRATEGY_FAST_BUILD GLRMASK_MASK_STRATEGY_TOKEN_TRIE
+#define GLRMASK_MASK_STRATEGY_FAST_RUNTIME GLRMASK_MASK_STRATEGY_PARSER_DWA
+enum { GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD=0, GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME=1 };
 enum { GLRMASK_EBNF=0, GLRMASK_GLRM=1, GLRMASK_JSON_SCHEMA=2, GLRMASK_LARK=3 };
 enum { GLRMASK_LARK_RECOGNITION=0, GLRMASK_LARK_LLM=1 };
-enum { GLRMASK_TOKEN_REQUIREMENT=0, GLRMASK_GRAMMAR_REQUIREMENT=1, GLRMASK_LEGACY_REQUIREMENT=2 };
+enum { GLRMASK_EXTERN_TOKEN=0, GLRMASK_EXTERN_GRAMMAR=1 };
 
 typedef struct glrmask_vocab glrmask_vocab;
 typedef struct glrmask_exact_tokens glrmask_exact_tokens;
 typedef struct glrmask_grammar glrmask_grammar;
-typedef struct glrmask_prepared glrmask_prepared;
+typedef struct glrmask_module glrmask_module;
+typedef struct glrmask_expr glrmask_expr;
 typedef struct glrmask_constraint glrmask_constraint;
 typedef struct glrmask_state glrmask_state;
 typedef struct glrmask_bytes glrmask_bytes;
 typedef struct glrmask_u32s glrmask_u32s;
-typedef struct glrmask_requirements glrmask_requirements;
+typedef struct glrmask_externs glrmask_externs;
 typedef struct glrmask_events glrmask_events;
 
 typedef struct { uint32_t id; const uint8_t *bytes; size_t bytes_len; } glrmask_vocab_entry;
@@ -65,23 +68,23 @@ typedef struct { uint32_t id; const uint8_t *bytes; size_t bytes_len; } glrmask_
 typedef struct { uint32_t first; uint32_t last; } glrmask_token_range;
 typedef struct {
     size_t struct_size;
-    uint32_t optimization;
-    uint32_t boundary_trigger;
     const uint32_t *end_tokens;
     size_t end_tokens_len;
-} glrmask_build_options;
+} glrmask_compile_options;
 typedef struct { const char *name; size_t name_len; const uint32_t *ids; size_t ids_len; } glrmask_lark_token;
 typedef struct { size_t struct_size; uint32_t profile; const glrmask_lark_token *tokens; size_t tokens_len; } glrmask_lark_options;
 typedef struct {
     const char *name; size_t name_len; uint32_t kind; uint32_t has_source_span;
     uint64_t start_byte, end_byte, line, column;
-} glrmask_requirement;
+} glrmask_extern;
 typedef struct { uint32_t id; uint64_t byte_offset; } glrmask_marker_event;
+/* kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 ExactTokens */
+typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
 
 GLRMASK_API uint32_t glrmask_abi_version(void);
 GLRMASK_API const char *glrmask_version(void);
 GLRMASK_API const char *glrmask_error_message(void);
-GLRMASK_API glrmask_build_options glrmask_default_build_options(void);
+GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
 GLRMASK_API glrmask_lark_options glrmask_default_lark_options(void);
 
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry*,size_t,const uint32_t*,size_t,glrmask_vocab**);
@@ -90,6 +93,7 @@ GLRMASK_API void glrmask_vocab_free(glrmask_vocab*);
 GLRMASK_API glrmask_status glrmask_vocab_len(const glrmask_vocab*,size_t*);
 GLRMASK_API glrmask_status glrmask_vocab_tokens(const glrmask_vocab*,const uint32_t*,size_t,glrmask_exact_tokens**);
 GLRMASK_API glrmask_status glrmask_vocab_token_ranges(const glrmask_vocab*,const glrmask_token_range*,size_t,glrmask_exact_tokens**);
+
 GLRMASK_API glrmask_status glrmask_exact_tokens_clone(const glrmask_exact_tokens*,glrmask_exact_tokens**);
 GLRMASK_API void glrmask_exact_tokens_free(glrmask_exact_tokens*);
 GLRMASK_API glrmask_status glrmask_exact_tokens_len(const glrmask_exact_tokens*,size_t*);
@@ -98,27 +102,34 @@ GLRMASK_API glrmask_status glrmask_exact_tokens_ids(const glrmask_exact_tokens*,
 GLRMASK_API glrmask_status glrmask_exact_tokens_ranges(const glrmask_exact_tokens*,glrmask_token_range*,size_t,size_t*);
 
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t,const char*,size_t,const glrmask_lark_options*,glrmask_grammar**);
-GLRMASK_API glrmask_status glrmask_grammar_exact(const glrmask_exact_tokens*,glrmask_grammar**);
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar*,glrmask_grammar**);
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar*);
-GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar*,const char*,size_t,const glrmask_grammar*);
-GLRMASK_API glrmask_status glrmask_grammar_bind_token(glrmask_grammar*,const char*,size_t,uint32_t);
-GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar*,const char*,size_t,const glrmask_exact_tokens*);
-GLRMASK_API glrmask_status glrmask_grammar_requirements(const glrmask_grammar*,glrmask_requirements**);
-/* Preparation retains only a boundary metadata request; final build options
- * and root end tokens belong to compile/link, not prepare. */
-GLRMASK_API glrmask_status glrmask_grammar_prepare(const glrmask_grammar*,const glrmask_vocab*,uint32_t,glrmask_prepared**);
-GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar*,const glrmask_vocab*,const glrmask_build_options*,glrmask_constraint**);
+GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
 
-GLRMASK_API glrmask_status glrmask_prepared_clone(const glrmask_prepared*,glrmask_prepared**);
-GLRMASK_API void glrmask_prepared_free(glrmask_prepared*);
-GLRMASK_API glrmask_status glrmask_prepared_bind_prepared(glrmask_prepared*,const char*,size_t,const glrmask_prepared*);
-GLRMASK_API glrmask_status glrmask_prepared_bind_token(glrmask_prepared*,const char*,size_t,uint32_t);
-GLRMASK_API glrmask_status glrmask_prepared_bind_tokens(glrmask_prepared*,const char*,size_t,const glrmask_exact_tokens*);
-GLRMASK_API glrmask_status glrmask_prepared_requirements(const glrmask_prepared*,glrmask_requirements**);
-GLRMASK_API glrmask_status glrmask_prepared_link(const glrmask_prepared*,const glrmask_build_options*,glrmask_constraint**);
-GLRMASK_API glrmask_status glrmask_prepared_save(const glrmask_prepared*,glrmask_bytes**);
-GLRMASK_API glrmask_status glrmask_prepared_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_prepared**);
+GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar*,glrmask_module**);
+GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module*,glrmask_module**);
+GLRMASK_API void glrmask_module_free(glrmask_module*);
+GLRMASK_API glrmask_status glrmask_module_get_mask_strategy(const glrmask_module*,uint32_t*);
+GLRMASK_API glrmask_status glrmask_module_set_mask_strategy(glrmask_module*,uint32_t);
+GLRMASK_API glrmask_status glrmask_module_get_boundary_mask_strategy(const glrmask_module*,uint32_t*);
+GLRMASK_API glrmask_status glrmask_module_set_boundary_mask_strategy(glrmask_module*,uint32_t);
+GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module*,const char*,size_t,const glrmask_grammar*);
+GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module*,const char*,size_t,const glrmask_module*);
+GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module*,const char*,size_t,const glrmask_expr*);
+GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module*,const char*,size_t,uint32_t);
+GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_exact_tokens*);
+GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*);
+GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
+GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module*,glrmask_externs**);
+GLRMASK_API glrmask_status glrmask_module_unbound_externs(const glrmask_module*,glrmask_externs**);
+GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module*,glrmask_bytes**);
+GLRMASK_API glrmask_status glrmask_module_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_module**);
+
+GLRMASK_API glrmask_status glrmask_expr_choice(const glrmask_expr_operand*,size_t,glrmask_expr**);
+GLRMASK_API glrmask_status glrmask_expr_sequence(const glrmask_expr_operand*,size_t,glrmask_expr**);
+GLRMASK_API glrmask_status glrmask_expr_literal(const uint8_t*,size_t,glrmask_expr**);
+GLRMASK_API glrmask_status glrmask_expr_clone(const glrmask_expr*,glrmask_expr**);
+GLRMASK_API void glrmask_expr_free(glrmask_expr*);
 
 GLRMASK_API glrmask_status glrmask_constraint_clone(const glrmask_constraint*,glrmask_constraint**);
 GLRMASK_API void glrmask_constraint_free(glrmask_constraint*);
@@ -145,53 +156,12 @@ GLRMASK_API glrmask_status glrmask_bytes_data(const glrmask_bytes*,const uint8_t
 GLRMASK_API void glrmask_bytes_free(glrmask_bytes*);
 GLRMASK_API glrmask_status glrmask_u32s_data(const glrmask_u32s*,const uint32_t**,size_t*);
 GLRMASK_API void glrmask_u32s_free(glrmask_u32s*);
-GLRMASK_API glrmask_status glrmask_requirements_len(const glrmask_requirements*,size_t*);
-GLRMASK_API glrmask_status glrmask_requirements_get(const glrmask_requirements*,size_t,glrmask_requirement*);
-GLRMASK_API void glrmask_requirements_free(glrmask_requirements*);
 GLRMASK_API glrmask_status glrmask_events_data(const glrmask_events*,const glrmask_marker_event**,size_t*);
 GLRMASK_API void glrmask_events_free(glrmask_events*);
 
-/* Canonical owned assembly lifecycle. Options are local to each node. */
-typedef struct glrmask_module glrmask_module;
-typedef struct glrmask_expr glrmask_expr;
-typedef glrmask_requirement glrmask_unbound_extern;
-typedef struct { size_t struct_size; uint32_t optimization, boundary_trigger; } glrmask_module_options;
-typedef struct { size_t struct_size; const uint32_t* end_tokens; size_t end_tokens_len; } glrmask_compile_options;
-/* kind 0=Grammar, 1=Module, 2=Expr. All operands are snapshotted. */
-typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
-GLRMASK_API glrmask_module_options glrmask_default_module_options(void);
-GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
-GLRMASK_API void glrmask_module_free(glrmask_module*);
-GLRMASK_API void glrmask_expr_free(glrmask_expr*);
-GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module*,glrmask_module**);
-GLRMASK_API glrmask_status glrmask_expr_clone(const glrmask_expr*,glrmask_expr**);
-GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar*,const glrmask_module_options*,glrmask_module**);
-GLRMASK_API glrmask_status glrmask_module_from_expr(const glrmask_expr*,const glrmask_module_options*,glrmask_module**);
-GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr*,glrmask_grammar**);
-/* operator 0=choice, 1=sequence. Empty choice fails at materialization; empty sequence is epsilon. */
-GLRMASK_API glrmask_status glrmask_expr_new(uint32_t,const glrmask_expr_operand*,size_t,glrmask_expr**);
-GLRMASK_API glrmask_status glrmask_module_get_options(const glrmask_module*,glrmask_module_options*);
-GLRMASK_API glrmask_status glrmask_module_with_options(const glrmask_module*,const glrmask_module_options*,glrmask_module**);
-GLRMASK_API glrmask_status glrmask_module_set_options(glrmask_module*,const glrmask_module_options*);
-GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module*,const char*,size_t,const glrmask_grammar*);
-GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module*,const char*,size_t,const glrmask_module*);
-GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module*,const char*,size_t,const glrmask_expr*);
-GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module*,const char*,size_t,uint32_t);
-GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_exact_tokens*);
-GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar*,const char*,size_t,const glrmask_expr*);
-/* Mutates atomically using stored options, returning a status only. */
-GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*);
-GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
-GLRMASK_API glrmask_status glrmask_module_unbound(const glrmask_module*,glrmask_requirements**);
-GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module*,glrmask_requirements**);
-GLRMASK_API glrmask_status glrmask_grammar_unbound(const glrmask_grammar*,glrmask_requirements**);
-GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar*,glrmask_requirements**);
-GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module*,glrmask_bytes**);
-/* Loading never compiles. Optional vocabulary validates saved target identity. */
-GLRMASK_API glrmask_status glrmask_module_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_module**);
-/* Borrowed path views live as long as the owning requirements result. */
-GLRMASK_API glrmask_status glrmask_requirements_path_len(const glrmask_requirements*,size_t,size_t*);
-GLRMASK_API glrmask_status glrmask_requirements_path(const glrmask_requirements*,size_t,size_t,const char**,size_t*);
+GLRMASK_API glrmask_status glrmask_externs_len(const glrmask_externs*,size_t*);
+GLRMASK_API glrmask_status glrmask_externs_get(const glrmask_externs*,size_t,glrmask_extern*);
+GLRMASK_API void glrmask_externs_free(glrmask_externs*);
 
 #ifdef __cplusplus
 }

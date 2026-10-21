@@ -256,7 +256,7 @@ pub fn to_glrm_v1(grammar: &NamedGrammar) -> Result<String, GlrMaskError> {
     let lexer_groups = lexer_groups_for_dump(grammar, DumpFlavor::V1);
     let mut out = format!("start {}\n", source_identifier(&grammar.start));
     if let Some(ignore) = &grammar.ignore {
-        out.push_str(&format!("ignore {ignore}\n"));
+        out.push_str(&format!("ignore {}\n", source_identifier(ignore)));
     }
     if !lexer_groups.is_empty() {
         out.push_str("pragma glrmask {\n");
@@ -320,8 +320,21 @@ fn validate_scope_for_v1_format(
     scope_symbol_kinds(scope, scope_label)?;
     validate_scope_ignores(scope,scope_label)?;
     for subgrammar in &scope.subgrammars {
+        if matches!(subgrammar.body, ParsedSubgrammarBody::External(_)) && subgrammar.name.contains("::") {
+            return Err(err("'::' is not valid in extern names"));
+        }
         if let ParsedSubgrammarBody::Inline(child) = &subgrammar.body {
+            if !child.external_terminals.is_empty()
+                || child.subgrammars.iter().any(|s| matches!(s.body, ParsedSubgrammarBody::External(_)))
+            {
+                return Err(err("extern declarations are only allowed at the top level"));
+            }
             validate_scope_for_v1_format(child, &format!("{scope_label}::{}", subgrammar.name))?;
+        }
+    }
+    for terminal in &scope.external_terminals {
+        if terminal.name.contains("::") {
+            return Err(err("'::' is not valid in extern names"));
         }
     }
     Ok(())
@@ -797,8 +810,12 @@ fn format_literal(bytes: &[u8], flavor: DumpFlavor) -> String {
     else {format!("{prefix}\"{double}\"")}
 }
 
+fn is_reserved_keyword(name: &str) -> bool {
+    matches!(name, "use" | "export" | "import" | "super")
+}
+
 fn source_identifier(name: &str) -> String {
-    if is_declaration_keyword(name) || matches!(name,"eps"|"fa"|"token") {
+    if is_declaration_keyword(name) || is_reserved_keyword(name) || matches!(name,"eps"|"fa"|"token") {
         format!("`{name}`")
     } else {name.to_owned()}
 }
@@ -1702,6 +1719,9 @@ fn bind_external_terminals(
     }
     let mut supplied = BTreeMap::<String, Vec<(u32, u32)>>::new();
     for &(name, token_ids) in bindings {
+        if name.contains("::") {
+            return Err(err("'::' is not valid in extern names"));
+        }
         if supplied.contains_key(name) {
             return Err(err(&format!(
                 "external terminal binding {name:?} was supplied more than once"
@@ -2006,6 +2026,22 @@ impl GlrmParser {
         }
     }
 
+    fn expect_ident_token(&mut self) -> Result<(String, bool), GlrMaskError> {
+        let position = self.pos;
+        match self.advance().clone() {
+            Tok::Ident(s) => Ok((s, false)),
+            Tok::EscapedIdent(s) => Ok((s, true)),
+            other => Err(self.locate(err(&format!("expected identifier, got {:?}", other)), position)),
+        }
+    }
+
+    fn check_declared_name(&self, name: &str, is_escaped: bool) -> Result<(), GlrMaskError> {
+        if !is_escaped && self.version == GlrmVersion::V1 && is_reserved_keyword(name) {
+            return Err(err(&format!("'{name}' is a reserved keyword")));
+        }
+        Ok(())
+    }
+
     fn expect_int(&mut self) -> Result<usize, GlrMaskError> {
         let position=self.pos;
         match self.advance().clone() {
@@ -2079,7 +2115,8 @@ impl GlrmParser {
                         let modern = kw=="grammar";
                         if self.strict_native && !modern {return Err(err("inline components use 'grammar NAME { ... }'"));}
                         self.advance();
-                        let name = self.expect_ident()?;
+                        let (name, is_escaped) = self.expect_ident_token()?;
+                        self.check_declared_name(&name, is_escaped)?;
                         let source_span=self.spans.get(self.pos.saturating_sub(1)).copied();
                         if !modern {self.consume_decl_eq()?;}
                         self.consume(&Tok::LBrace)?;
@@ -2092,14 +2129,36 @@ impl GlrmParser {
                         });
                     }
                     "extern" => {
+                        if stop_at_rbrace {
+                            return Err(err("extern declarations are only allowed at the top level"));
+                        }
                         self.advance();
-                        let first = self.expect_ident()?;
-                        let (kind,name) = match first.as_str() {
-                            "token" => (ExternalKind::Token,self.expect_ident()?),
-                            "grammar" => (ExternalKind::Grammar,self.expect_ident()?),
+                        if matches!(self.peek(), Tok::Colon) {
+                            return Err(err("'::' is not valid in extern names"));
+                        }
+                        let (first, first_escaped) = self.expect_ident_token()?;
+                        let (kind, name, is_escaped) = match first.as_str() {
+                            "token" if !first_escaped => {
+                                if matches!(self.peek(), Tok::Colon) {
+                                    return Err(err("'::' is not valid in extern names"));
+                                }
+                                let (name, is_escaped) = self.expect_ident_token()?;
+                                (ExternalKind::Token, name, is_escaped)
+                            }
+                            "grammar" if !first_escaped => {
+                                if matches!(self.peek(), Tok::Colon) {
+                                    return Err(err("'::' is not valid in extern names"));
+                                }
+                                let (name, is_escaped) = self.expect_ident_token()?;
+                                (ExternalKind::Grammar, name, is_escaped)
+                            }
                             _ if self.strict_native => return Err(err("external declarations require 'extern token NAME' or 'extern grammar NAME'")),
-                            _ => (ExternalKind::LegacyGeneric,first),
+                            _ => (ExternalKind::LegacyGeneric, first, first_escaped),
                         };
+                        self.check_declared_name(&name, is_escaped)?;
+                        if matches!(self.peek(), Tok::Colon) || name.contains("::") {
+                            return Err(err("'::' is not valid in extern names"));
+                        }
                         let source_span=self.spans.get(self.pos.saturating_sub(1)).copied();
                         self.consume(&Tok::Semi)?;
                         subgrammars.push(ParsedSubgrammar {
@@ -2282,7 +2341,8 @@ impl GlrmParser {
     }
 
     fn parse_rule(&mut self, is_terminal: bool, is_internal: bool) -> Result<NamedRule, GlrMaskError> {
-        let name = self.expect_ident()?;
+        let (name, is_escaped) = self.expect_ident_token()?;
+        self.check_declared_name(&name, is_escaped)?;
         self.consume_decl_eq()?;
         let expr = if self.version == GlrmVersion::V1
             && matches!(self.peek(), Tok::Ident(keyword) if keyword == "fa")
@@ -2403,7 +2463,8 @@ impl GlrmParser {
     }
 
     fn parse_expr_nfa_rule(&mut self) -> Result<NamedRule, GlrMaskError> {
-        let name = self.expect_ident()?;
+        let (name, is_escaped) = self.expect_ident_token()?;
+        self.check_declared_name(&name, is_escaped)?;
         self.consume_decl_eq()?;
         let expr_nfa = self.parse_legacy_expr_nfa_body(false)?;
         self.consume(&Tok::Semi)?;
@@ -2663,7 +2724,7 @@ impl GlrmParser {
     fn can_start_nt_atom(&self) -> bool {
         if self.version==GlrmVersion::V1 && matches!(self.token_at(1),Tok::ThinArrow) {return false;}
         match self.peek() {
-            Tok::Ident(s) if self.version==GlrmVersion::V1 && is_declaration_keyword(s) => false,
+            Tok::Ident(s) if self.version==GlrmVersion::V1 && (is_declaration_keyword(s) || is_reserved_keyword(s)) => false,
             Tok::Ident(_) | Tok::EscapedIdent(_) | Tok::StringLit(_) | Tok::RegexLit(_)
             | Tok::CharClass(_, _) | Tok::Dot | Tok::LParen | Tok::At => true,
             _ => false,
@@ -4071,8 +4132,8 @@ mod tests {
         let open = from_glrm_with_external_subgrammars(&formatted, 100, []).unwrap();
         assert_eq!(open.placeholders[0].binding_name, "item");
         let nested = "glrm 1; start s; g child = { start x; extern item; nt x = item; }; nt s = child;";
-        assert_eq!(external_declarations(nested).unwrap().names, ["child::item"]);
-        assert!(from_glrm_with_external_terminals(nested, &[("child::item", &[7])]).is_ok());
+        assert!(external_declarations(nested).unwrap_err().to_string().contains("extern declarations are only allowed at the top level"));
+        assert!(from_glrm_with_external_terminals(nested, &[("child::item", &[7])]).is_err());
         for (typed,kind) in [("extern token item;",ExternalKind::Token),("extern grammar item;",ExternalKind::Grammar)] {
             let source = format!("glrm 1; start s; {typed} nt s = item;");
             assert_eq!(external_declarations(&source).unwrap().kinds["item"],kind);
@@ -4681,13 +4742,13 @@ nt document ::= "<" payload ">";
             r#"
 start document;
 extern payload;
+extern leaf;
 g wrapper ::= {
     start value;
-    extern leaf;
-    nt value ::= "[" leaf "]";
+    nt value ::= "[" "x" "]";
 };
 t END ::= @token(52);
-nt document ::= "<" payload wrapper ">" END?;
+nt document ::= "<" payload leaf wrapper ">" END?;
 "#,
             52,
             [50, 51],
@@ -4700,7 +4761,7 @@ nt document ::= "<" payload wrapper ">" END?;
                 .iter()
                 .map(|placeholder| placeholder.binding_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["payload", "wrapper::leaf"],
+            vec!["payload", "leaf"],
         );
         assert_eq!(
             parsed
@@ -4953,18 +5014,18 @@ pragma glrmask {
     lexer group words = WORD;
 }
 extern END_TURN;
-g inner = {
+extern BEGIN_ASSISTANT;
+grammar inner {
     start value;
-    extern BEGIN_ASSISTANT;
-    nt value = BEGIN_ASSISTANT "x";
+    nt value = "x";
 };
 t WORD = /[a-z]+/;
-nt message = inner WORD END_TURN;
+nt message = inner WORD BEGIN_ASSISTANT END_TURN;
 "#;
         let begin_ids = [41];
         let end_ids = [42, 43];
         let bindings = [
-            ("inner::BEGIN_ASSISTANT", begin_ids.as_slice()),
+            ("BEGIN_ASSISTANT", begin_ids.as_slice()),
             ("END_TURN", end_ids.as_slice()),
         ];
         let before = from_glrm_with_external_terminals(source, &bindings).unwrap();
@@ -5134,37 +5195,232 @@ mod inline_subgrammar_tests {
     }
 
     #[test]
-    fn nested_external_child_and_grandchild_are_bound() {
-        let actual = from_glrm_with_inline_subgrammars(
-            "start document; extern SUB; nt document ::= \"X\" SUB \"!\";",
-            &[
-                (
-                    "SUB",
-                    "start child; extern GRAND; nt child ::= \"a\" GRAND;",
-                ),
-                ("SUB::GRAND", "start grand; nt grand ::= \"b\";"),
-            ],
+    fn extern_declarations_only_allowed_at_top_level() {
+        let err_grammar_sub = from_glrm(
+            "glrm 1; start s; grammar sub { start x; extern item; nt x = item; }; nt s = sub;",
         )
-        .unwrap();
-        let expected = from_glrm(
-            "start document; g SUB ::= { start child; g GRAND ::= { start grand; nt grand ::= \"b\"; }; nt child ::= \"a\" GRAND; }; nt document ::= \"X\" SUB \"!\";",
+        .unwrap_err()
+        .to_string();
+        assert!(err_grammar_sub.contains("extern declarations are only allowed at the top level"), "{err_grammar_sub}");
+
+        let err_grammar_token = from_glrm(
+            "glrm 1; start s; grammar sub { start x; extern token item; nt x = item; }; nt s = sub;",
         )
-        .unwrap();
-        assert_same_grammar(&actual, &expected);
+        .unwrap_err()
+        .to_string();
+        assert!(err_grammar_token.contains("extern declarations are only allowed at the top level"), "{err_grammar_token}");
+
+        let err_grammar_gram = from_glrm(
+            "glrm 1; start s; grammar sub { start x; extern grammar item; nt x = item; }; nt s = sub;",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err_grammar_gram.contains("extern declarations are only allowed at the top level"), "{err_grammar_gram}");
+
+        let err_legacy_g = from_glrm(
+            "start s; g sub = { start x; extern item; nt x = item; }; nt s = sub;",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err_legacy_g.contains("extern declarations are only allowed at the top level"), "{err_legacy_g}");
+
+        let err_legacy_g_typed = from_glrm(
+            "start s; g sub = { start x; extern token item; nt x = item; }; nt s = sub;",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err_legacy_g_typed.contains("extern declarations are only allowed at the top level"), "{err_legacy_g_typed}");
+
+        // Top level succeeds:
+        let ok = from_glrm_with_external_subgrammars(
+            "glrm 1; start s; extern item; nt s = item;",
+            100,
+            [],
+        );
+        assert!(ok.is_ok());
     }
 
     #[test]
-    fn existing_inline_subgrammar_containing_external_is_bound() {
-        let actual = from_glrm_with_inline_subgrammars(
-            "start document; g OUTER ::= { start outer; extern INNER; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
-            &[("OUTER::INNER", "start inner; nt inner ::= \"b\";")],
+    fn inline_grammars_cannot_refer_to_outer_names() {
+        // Outer nonterminal rule cannot be referenced by inline grammar:
+        let err_nt = from_glrm(
+            r#"
+glrm 1;
+start main;
+nt outer_rule = "hello";
+grammar sub {
+    start x;
+    nt x = outer_rule;
+};
+nt main = sub;
+"#,
         )
-        .unwrap();
-        let expected = from_glrm(
-            "start document; g OUTER ::= { start outer; g INNER ::= { start inner; nt inner ::= \"b\"; }; nt outer ::= \"a\" INNER; }; nt document ::= OUTER \"!\";",
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err_nt.contains("definition 'outer_rule' is not visible in grammar::sub; definitions are scope-local"),
+            "got: {err_nt}"
+        );
+
+        // Outer terminal rule cannot be referenced by inline grammar:
+        let err_t = from_glrm(
+            r#"
+glrm 1;
+start main;
+t OUTER_TERM = "hello";
+grammar sub {
+    start x;
+    nt x = OUTER_TERM;
+};
+nt main = sub;
+"#,
         )
-        .unwrap();
-        assert_same_grammar(&actual, &expected);
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err_t.contains("definition 'OUTER_TERM' is not visible in grammar::sub; definitions are scope-local"),
+            "got: {err_t}"
+        );
+
+        // Outer extern cannot be referenced by inline grammar:
+        let err_ext = from_glrm_with_external_subgrammars(
+            r#"
+glrm 1;
+start main;
+extern OUTER_EXT;
+grammar sub {
+    start x;
+    nt x = OUTER_EXT;
+};
+nt main = sub;
+"#,
+            100,
+            [],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err_ext.contains("definition 'OUTER_EXT' is not visible in grammar::sub; definitions are scope-local"),
+            "got: {err_ext}"
+        );
+    }
+
+    #[test]
+    fn reserved_keywords_rejected_as_declared_names_in_glrm_v1() {
+        for kw in ["use", "export", "import", "super"] {
+            let expected = format!("'{kw}' is a reserved keyword");
+
+            // Nonterminal rule
+            let src = format!("glrm 1; start s; nt {kw} = \"a\"; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for nt {kw}: {err}");
+
+            // Terminal rule
+            let src = format!("glrm 1; start s; t {kw} = \"a\"; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for t {kw}: {err}");
+
+            // Internal terminal rule
+            let src = format!("glrm 1; start s; internal t {kw} = \"a\"; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for internal t {kw}: {err}");
+
+            // Inline grammar
+            let src = format!("glrm 1; start s; grammar {kw} {{ start x; nt x = \"a\"; }}; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for grammar {kw}: {err}");
+
+            // Extern token
+            let src = format!("glrm 1; start s; extern token {kw}; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for extern token {kw}: {err}");
+
+            // Extern grammar
+            let src = format!("glrm 1; start s; extern grammar {kw}; nt s = {kw};");
+            let err = from_glrm(&src).unwrap_err().to_string();
+            assert!(err.contains(&expected), "failed for extern grammar {kw}: {err}");
+
+            // Backtick escaped is allowed as a declared name and reference
+            let src = format!("glrm 1; start s; nt `{kw}` = \"a\"; nt s = `{kw}`;");
+            assert!(from_glrm(&src).is_ok(), "backtick-escaped {kw} should be allowed");
+
+            // Legacy dialect does NOT reject as declared names:
+            let legacy_src = format!("start s; nt {kw} ::= \"a\"; nt s ::= {kw};");
+            assert!(from_glrm(&legacy_src).is_ok(), "legacy should allow {kw}");
+        }
+    }
+
+    #[test]
+    fn dump_and_reparse_rule_named_import() {
+        let grammar = NamedGrammar {
+            rules: vec![
+                NamedRule {
+                    name: "main".to_string(),
+                    expr: GrammarExpr::Ref("import".to_string()),
+                    is_terminal: false,
+                    is_internal: false,
+                },
+                NamedRule {
+                    name: "import".to_string(),
+                    expr: GrammarExpr::Literal(b"hello".to_vec()),
+                    is_terminal: true,
+                    is_internal: false,
+                },
+            ],
+            start: "main".to_string(),
+            ignore: None,
+            lexer_partitions: BTreeMap::new(),
+            lexer_literal_partitions: BTreeMap::new(),
+            default_lexer_partition: None,
+        };
+        let dumped = to_glrm_v1(&grammar).expect("dumping grammar with rule named import must succeed");
+        assert!(dumped.contains("t `import` = \"hello\""), "{dumped}");
+        assert!(dumped.contains("nt main = `import`"), "{dumped}");
+        let reparsed = from_glrm(&dumped).expect("reparsing dumped grammar with rule named import must succeed");
+        assert_eq!(reparsed.rules, grammar.rules);
+        assert_eq!(reparsed.start, grammar.start);
+    }
+
+    #[test]
+    fn colons_invalid_in_extern_names() {
+        let err1 = from_glrm("glrm 1; start s; extern a::b; nt s = \"a\";")
+            .unwrap_err()
+            .to_string();
+        assert!(err1.contains("'::' is not valid in extern names"), "{err1}");
+
+        let err2 = from_glrm("glrm 1; start s; extern token a::b; nt s = \"a\";")
+            .unwrap_err()
+            .to_string();
+        assert!(err2.contains("'::' is not valid in extern names"), "{err2}");
+
+        let err3 = from_glrm("glrm 1; start s; extern grammar a::b; nt s = \"a\";")
+            .unwrap_err()
+            .to_string();
+        assert!(err3.contains("'::' is not valid in extern names"), "{err3}");
+
+        let err4 = from_glrm("glrm 1; start s; extern ::a; nt s = \"a\";")
+            .unwrap_err()
+            .to_string();
+        assert!(err4.contains("'::' is not valid in extern names"), "{err4}");
+
+        let err5 = from_glrm("glrm 1; start s; extern token ::a; nt s = \"a\";")
+            .unwrap_err()
+            .to_string();
+        assert!(err5.contains("'::' is not valid in extern names"), "{err5}");
+
+        let g = from_glrm("glrm 1; start s; nt s = \"a\";").unwrap();
+        let err_comp = ParsedComponent::from_named(g, &[("a::b".to_string(), ExternalKind::Token)])
+            .unwrap_err()
+            .to_string();
+        assert!(err_comp.contains("'::' is not valid in extern names"), "{err_comp}");
+
+        let err_bind = from_glrm_with_external_terminals(
+            "glrm 1; start s; extern a; nt s = a;",
+            &[("a::b", &[1])],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err_bind.contains("'::' is not valid in extern names"), "{err_bind}");
     }
 
     #[test]

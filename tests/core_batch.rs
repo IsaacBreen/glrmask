@@ -1,5 +1,5 @@
-use glrmask::{BuildOptions, Grammar, Optimization, PreparedGrammar, Token, Vocab};
-fn options()->BuildOptions {BuildOptions::default().optimization(Optimization::FastBuild)}
+use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, Token, Vocab};
+fn options()->BuildOptions {BuildOptions::default().optimization(MaskStrategy::TokenTrie)}
 fn vocab()->Vocab {Vocab::new_with_exact_token_ids(vec![(0,b"x".to_vec()),(1,b"y".to_vec())],[17,29])}
 
 #[test]
@@ -9,7 +9,7 @@ fn single_binding_mutates_returns_unit_and_failure_is_atomic() {
     let result:()=g.bind("MARK",Token::new(17)).unwrap();assert_eq!(result,());
     assert!(g.requirements().unwrap().is_empty());assert_eq!(untouched.requirements().unwrap().len(),1);
     assert!(g.bind("MARK",Token::new(29)).is_err());
-    let c=g.compile_with(&vocab(),options()).unwrap();let mask=c.start().mask();
+    let c=g.compile_with_build_options(&vocab(),options()).unwrap();let mask=c.start().mask();
     assert_ne!(mask[0]&(1<<17),0);assert_eq!(mask[0]&(1<<29),0);
 }
 #[test]
@@ -34,13 +34,13 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
 #[test]
 fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
     let v=vocab();
-    for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
+    for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
         let opt=BuildOptions::default().optimization(mode);
         let mut a=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE");
         a.bind("VALUE",v.tokens([17,29]).unwrap()).unwrap();
         let mut b=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE").prepare(&v).unwrap();
         b.bind("VALUE",v.tokens([17,29]).unwrap()).unwrap();
-        let x=a.compile_with(&v,opt.clone()).unwrap();let y=b.link_with(opt).unwrap();
+        let x=a.compile_with_build_options(&v,opt.clone()).unwrap();let y=b.link_with(opt).unwrap();
         assert_eq!(x.start().mask(),y.start().mask(),"{mode:?}");
         for c in [&x,&y] {
             let mut s=c.start();assert!(s.commit_bytes(b"x").is_err());
@@ -52,7 +52,7 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
     assert_eq!(t.requirements().unwrap().len(),1);
     let mut g=Grammar::from_glrm("extern grammar VALUE start root nt root=VALUE");
     g.bind("VALUE",Token::new(12345)).unwrap();
-    assert!(g.compile_with(&v,options()).is_err());
+    assert!(g.compile_with_build_options(&v,options()).is_err());
 }
 #[test]
 fn independent_concurrent_specializations_do_not_share_mutations() {

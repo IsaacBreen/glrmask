@@ -1,19 +1,9 @@
-"""Target public API contract tests; run after the Python facade is migrated.
+"""Target public API contract tests for v1 API.
 
-These exercise semantics rather than prescribing property-versus-method
-spelling for state status (the existing binding and preview differ there).
 No live tokenizer/model, network, or large vocabulary is required.
 """
 
-
-def _bound_snapshot(grammar, name, value):
-    """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
-
 import gc
-
 import numpy as np
 import pytest
 import glrmask
@@ -33,11 +23,22 @@ def accepting(state):
     return bool(value() if callable(value) else value)
 
 
+def _bound_snapshot(source, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    m = glrmask.Module(source) if isinstance(source, glrmask.Grammar) else source.copy()
+    assert m.bind(name, value) is None
+    return m
+
+
 def test_public_types_exist_without_exposing_backend_selection():
-    for name in ["Grammar", "PreparedGrammar", "Constraint", "ConstraintState", "Vocab", "Token", "ExactTokens", "Optimization"]:
+    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "Token", "ExactTokens", "MaskStrategy", "BoundaryMaskStrategy"]:
         assert hasattr(glrmask, name), name
-    for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME"]:
-        assert hasattr(glrmask.Optimization, name), name
+    for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "TOKEN_TRIE", "TOKEN_CLASS_TRIE"]:
+        assert hasattr(glrmask.MaskStrategy, name), name
+    assert glrmask.MaskStrategy.FAST_BUILD is glrmask.MaskStrategy.TOKEN_TRIE
+    assert glrmask.MaskStrategy.FAST_RUNTIME is glrmask.MaskStrategy.PARSER_DWA
+    for name in ["FAST_BUILD", "FAST_RUNTIME"]:
+        assert hasattr(glrmask.BoundaryMaskStrategy, name), name
 
 
 def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
@@ -57,18 +58,19 @@ def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
         _bound_snapshot(parent, "child", child.compile(v))
 
 
-def test_unlinked_constraint_save_load_remains_open_and_immutable():
+def test_module_save_load_remains_open_and_immutable():
     v = vocab()
-    host = glrmask.Grammar.from_glrm(HOST).prepare(v)
+    host = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
+    host.precompile(v)
     artifact = host.save()
     assert isinstance(artifact, bytes)
-    loaded = glrmask.PreparedGrammar.load(artifact)
-    child = glrmask.Grammar.from_ebnf('start ::= "a"').prepare(v)
-    bound = _bound_snapshot(loaded, "child", child).link()
+    loaded = glrmask.Module.load(artifact)
+    child = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    bound = _bound_snapshot(loaded, "child", child).compile(v)
     assert bound.start().mask()[4]
-    for open_unlinked in [host, loaded]:
+    for open_mod in [host, loaded]:
         with pytest.raises((ValueError, RuntimeError)):
-            open_unlinked.link()
+            open_mod.compile(v)
     with pytest.raises((ValueError, RuntimeError)):
         glrmask.Constraint.load(artifact)
 
@@ -86,10 +88,11 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.Token(126)).compile(v)
     empty = v.tokens([])
     assert len(empty) == 0 and empty.ids == [] and empty.ranges == []
-    for mode in [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
-                 glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]:
-        impossible = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty).compile(
-            v, optimization=mode, end_tokens=[127])
+    for mode in [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
+                 glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]:
+        m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
+        m.mask_strategy = mode
+        impossible = m.compile(v, end_tokens=[127])
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.forced_tokens() == [] and state.forced_tokens() == []
@@ -97,14 +100,17 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         v.tokens([7, 7])
 
 
-def test_source_nested_open_token_survives_unlinked_save_and_late_binding():
+def test_nested_path_and_open_child_are_rejected():
     v = vocab()
-    child = glrmask.Grammar.from_glrm(MARK)
-    parent = _bound_snapshot(glrmask.Grammar.from_glrm(HOST), "child", child)
-    nested = glrmask.PreparedGrammar.load(parent.prepare(v).save())
-    with pytest.raises((ValueError, RuntimeError)):
-        nested.link()
-    c = _bound_snapshot(nested, "child::MARK", glrmask.Token(7)).link()
+    child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
+    parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
+    with pytest.raises(ValueError, match="unbound externs"):
+        parent.bind("child", child)
+    with pytest.raises(ValueError, match="qualified paths"):
+        parent.bind("child::MARK", glrmask.Token(7))
+    child.bind("MARK", glrmask.Token(7))
+    parent.bind("child", child)
+    c = parent.compile(v)
     state = c.start()
     assert not state.mask()[4]
     state.commit_token(0)
@@ -114,20 +120,19 @@ def test_source_nested_open_token_survives_unlinked_save_and_late_binding():
     assert accepting(state)
 
 
-def test_prepared_constraint_accepts_prepared_child_without_linking_it():
+def test_precompiled_module_with_precompiled_child():
     v = vocab()
-    child = glrmask.Grammar.from_glrm(MARK).prepare(v)
-    parent = glrmask.Grammar.from_glrm(HOST).prepare(v)
-    open_parent = _bound_snapshot(parent, "child", child)
-    assert [r.name for r in open_parent.requirements] == ["child::MARK"]
-    with pytest.raises(ValueError):
-        open_parent.link()
-    state = _bound_snapshot(open_parent, "child::MARK", glrmask.Token(7)).link().start()
+    child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
+    child.bind("MARK", glrmask.Token(7))
+    child.precompile(v)
+    parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
+    parent.precompile(v)
+    parent.bind("child", child)
+    state = parent.compile(v).start()
     for token in [0, 7, 3]:
         assert state.mask()[token]
         state.commit_token(token)
     assert accepting(state)
-    assert [r.name for r in child.requirements] == ["MARK"]
 
 
 def test_state_retains_constraint_after_python_owner_is_collected():
@@ -155,9 +160,9 @@ def test_token_membership_is_checked_against_target_without_identity_guarantees(
 
 def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
     v = vocab()
-    c = _bound_snapshot(glrmask.Grammar.from_glrm(MARK).prepare(v), "MARK", v.tokens([7, 63, 127])).link()
+    c = _bound_snapshot(glrmask.Module(glrmask.Grammar.from_glrm(MARK)), "MARK", v.tokens([7, 63, 127])).compile(v)
     state = c.start()
-    words = np.full(6, -1, dtype=np.int32)  # Extra words must be cleared.
+    words = np.full(6, -1, dtype=np.int32)
     state.fill_mask(words)
     actual = words.view(np.uint32)
     assert actual.tolist() == [1 << 7, 1 << 31, 0, 1 << 31, 0, 0]
@@ -167,19 +172,19 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
 @pytest.mark.parametrize("mode_name", ["AUTO", "FAST_BUILD", "FAST_RUNTIME"])
 def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
-    mode = getattr(glrmask.Optimization, mode_name)
-    prepared = glrmask.Grammar.from_ebnf('start ::= "a"').prepare(v)
-    child = prepared.link(end_tokens=[127], optimization=mode)
+    mode = getattr(glrmask.MaskStrategy, mode_name)
+    child_mod = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'), mask_strategy=mode)
+    child = child_mod.compile(v, end_tokens=[127])
     child = glrmask.Constraint.load(child.save())
     own_state = child.start()
     assert not own_state.mask()[127]
     own_state.commit_token(1)
     assert accepting(own_state) and own_state.mask()[127]
-    c = _bound_snapshot(glrmask.Grammar.from_glrm(HOST).prepare(v), "child", prepared).link(
-        end_tokens=[63], optimization=mode
-    )
+    parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST), mask_strategy=mode)
+    parent_mod.bind("child", child_mod)
+    c = parent_mod.compile(v, end_tokens=[63])
     state = c.start()
-    assert state.mask()[4]  # Child EOS must not be embedded into its body.
+    assert state.mask()[4]
     state.commit_token(4)
     assert accepting(state)
     assert state.mask()[63] and not state.mask()[127]

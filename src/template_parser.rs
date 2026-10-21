@@ -196,19 +196,19 @@ impl LexerDefinition {
 #[derive(Debug, Clone)]
 pub struct TemplateBuildOptions {
     end_tokens: Vec<u32>,
-    optimization: crate::Optimization,
+    optimization: crate::MaskStrategy,
 }
 
 impl Default for TemplateBuildOptions {
     fn default() -> Self {
-        Self { end_tokens: Vec::new(), optimization: crate::Optimization::Balanced }
+        Self { end_tokens: Vec::new(), optimization: crate::MaskStrategy::TokenClassTrie }
     }
 }
 
 impl TemplateBuildOptions {
-    /// Select eager static masking with FastRuntime, or the shared dynamic
-    /// mask engine with Balanced/Auto. Default is Balanced.
-    pub fn optimization(mut self, optimization: crate::Optimization) -> Self {
+    /// Select eager static masking with ParserDwa, or the shared dynamic
+    /// mask engine with TokenClassTrie/Auto. Default is TokenClassTrie.
+    pub fn optimization(mut self, optimization: crate::MaskStrategy) -> Self {
         self.optimization = optimization;
         self
     }
@@ -337,9 +337,9 @@ impl ParserProgram {
         names: Vec<String>, ignore: Option<u32>, specials: Vec<crate::runtime::SpecialTokenTerminal>,
         vocab: &Vocab, options: TemplateBuildOptions) -> Result<Constraint> {
         let mut constraint = match options.optimization {
-            crate::Optimization::FastBuild => return Err(crate::Error::Compilation(
-                "FastBuild ordinary Dynamic does not accept a custom native parser; use Balanced".into())),
-            crate::Optimization::Auto | crate::Optimization::Balanced => {
+            crate::MaskStrategy::TokenTrie => return Err(crate::Error::Compilation(
+                "mask strategy TOKEN_TRIE ordinary Dynamic does not accept a custom native parser; use TOKEN_CLASS_TRIE".into())),
+            crate::MaskStrategy::Auto | crate::MaskStrategy::TokenClassTrie => {
                 let dynamic_vocab = crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
                 let mut inner = crate::dynamic_constraint::DynamicConstraint::from_template_runtime_parts_unfinalized(
                     tokenizer, names.clone(), ignore, self.templates.to_vec(), self.parser.clone(), vocab, dynamic_vocab,
@@ -348,7 +348,7 @@ impl ParserProgram {
                 inner.rebuild_dynamic_runtime_caches();
                 inner
             }
-            crate::Optimization::FastRuntime => {
+            crate::MaskStrategy::ParserDwa => {
                 crate::error::catch_internal_invariant(|| {
                     static_compile::compile(self, tokenizer, ignore, vocab, &specials)
                 })??

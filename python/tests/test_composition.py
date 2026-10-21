@@ -1,8 +1,8 @@
 
 
-def _bound_snapshot(grammar, name, value):
+def _bound_snapshot(module, name, value):
     """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
+    result = module.copy()
     assert result.bind(name, value) is None
     return result
 
@@ -10,19 +10,21 @@ import glrmask
 
 
 def _prepare_glrm(source, vocab, *, subgrammars=None):
-    parent = glrmask.Grammar.from_glrm(source).prepare(vocab)
+    parent = glrmask.Module(glrmask.Grammar.from_glrm(source))
     for name, child in (subgrammars or {}).items():
-        parent = _bound_snapshot(parent, name, child)
+        parent.bind(name, child)
+    parent.precompile(vocab)
     return parent
 
 
-def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, optimization=None):
+def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, mask_strategy=None):
     kwargs = {}
     if end_tokens is not None:
         kwargs["end_tokens"] = end_tokens
-    if optimization is not None:
-        kwargs["optimization"] = optimization
-    return _prepare_glrm(source, vocab, subgrammars=subgrammars).link(**kwargs)
+    m = _prepare_glrm(source, vocab, subgrammars=subgrammars)
+    if mask_strategy is not None:
+        m.mask_strategy = mask_strategy
+    return m.compile(vocab, **kwargs)
 
 
 def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
@@ -183,7 +185,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         vocab,
         subgrammars={"leaf": leaf},
     )
-    middle = glrmask.PreparedGrammar.load(middle.save(), vocab)
+    middle = glrmask.Module.load(middle.save(), vocab)
     composed = _glrm(
         '''
         glrm 1;
@@ -374,14 +376,15 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         3: b"b",
         4: b"x",
     })
-    parent = glrmask.Grammar.from_glrm(
+    parent = glrmask.Module(glrmask.Grammar.from_glrm(
         """
         glrm 1;
         extern grammar payload;
         start document;
         nt document = "x" | "<" payload ">";
         """
-    ).prepare(vocab)
+    ))
+    parent.precompile(vocab)
     child_a = _prepare_glrm(
         'glrm 1; start value; nt value = "a";',
         vocab,
@@ -391,8 +394,8 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
         vocab,
     )
 
-    with_a = _bound_snapshot(parent, "payload", child_a).link()
-    with_b = _bound_snapshot(parent, "payload", child_b).link()
+    with_a = _bound_snapshot(parent, "payload", child_a).compile(vocab)
+    with_b = _bound_snapshot(parent, "payload", child_b).compile(vocab)
 
     state = with_a.start()
     state.commit_token(0)
@@ -406,8 +409,8 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     state.commit_token(1)
     assert state.is_accepting()
 
-    loaded_parent = glrmask.PreparedGrammar.load(parent.save(), vocab=vocab)
-    loaded_with_a = _bound_snapshot(loaded_parent, "payload", child_a).link()
+    loaded_parent = glrmask.Module.load(parent.save(), vocab=vocab)
+    loaded_with_a = _bound_snapshot(loaded_parent, "payload", child_a).compile(vocab)
     state = loaded_with_a.start()
     state.commit_token(0)
     state.commit_token(2)

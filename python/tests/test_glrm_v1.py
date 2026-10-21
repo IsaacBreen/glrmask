@@ -1,10 +1,10 @@
 
 
-def _bound_snapshot(grammar, name, value):
+def _bound_snapshot(source, name, value):
     """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
+    m = glrmask.Module(source) if isinstance(source, glrmask.Grammar) else source.copy()
+    assert m.bind(name, value) is None
+    return m
 
 import pytest
 import glrmask
@@ -67,10 +67,11 @@ def test_named_external_terminal_binding_errors(bad_bindings):
 
 def test_empty_event_binding_recognizes_no_output():
     vocab = _vocab()
-    for mode in (glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
-                 glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME):
+    for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
+                 glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME):
         grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([]))
-        constraint = grammar.compile(vocab, optimization=mode)
+        grammar.mask_strategy = mode
+        constraint = grammar.compile(vocab)
         state = constraint.start()
         assert not state.is_accepting()
         # The preceding literal can be a locally viable parser prefix. Empty

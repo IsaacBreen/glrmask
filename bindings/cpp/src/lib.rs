@@ -4,94 +4,100 @@
 // impossible. Null/alignment/length checks supplement, not replace, its contract.
 #![allow(clippy::missing_safety_doc)]
 use glrmask_binding_core::{self as core, glrmask as g, Error, ErrorKind, Result};
-use std::{cell::RefCell, ffi::{CString,c_char}, mem::{align_of,size_of}, ptr, slice, sync::Arc};
+use std::{cell::RefCell, ffi::{CString, c_char}, mem::{align_of, size_of}, ptr, slice, sync::Arc};
 
 pub struct glrmask_vocab(g::Vocab);
 pub struct glrmask_exact_tokens(g::ExactTokens);
 pub struct glrmask_grammar(g::Grammar<'static>);
-pub struct glrmask_prepared(g::PreparedGrammar);
 pub struct glrmask_constraint(Arc<g::Constraint>);
 pub struct glrmask_state(core::State);
 pub struct glrmask_bytes(Vec<u8>);
 pub struct glrmask_u32s(Vec<u32>);
-pub struct glrmask_requirements(Vec<(String,g::UnboundExtern)>);
 pub struct glrmask_events(Vec<glrmask_marker_event>);
 
-#[repr(C)] pub struct glrmask_vocab_entry { pub id:u32, pub bytes:*const u8, pub bytes_len:usize }
-#[repr(C)] #[derive(Clone,Copy)] pub struct glrmask_token_range { pub first:u32, pub last:u32 }
-#[repr(C)] pub struct glrmask_build_options { pub struct_size:usize, pub optimization:u32, pub boundary_trigger:u32, pub end_tokens:*const u32, pub end_tokens_len:usize }
-#[repr(C)] pub struct glrmask_lark_token { pub name:*const c_char, pub name_len:usize, pub ids:*const u32, pub ids_len:usize }
-#[repr(C)] pub struct glrmask_lark_options { pub struct_size:usize, pub profile:u32, pub tokens:*const glrmask_lark_token, pub tokens_len:usize }
-#[repr(C)] pub struct glrmask_requirement { pub name:*const c_char, pub name_len:usize, pub kind:u32, pub has_source_span:u32, pub start_byte:u64, pub end_byte:u64, pub line:u64, pub column:u64 }
-#[repr(C)] pub struct glrmask_marker_event { pub id:u32, pub byte_offset:u64 }
+pub struct glrmask_extern_item {
+    pub name: String,
+    pub kind: g::ExternKind,
+    pub span: Option<g::SourceSpan>,
+}
+pub struct glrmask_externs(Vec<glrmask_extern_item>);
+
+#[repr(C)] pub struct glrmask_vocab_entry { pub id: u32, pub bytes: *const u8, pub bytes_len: usize }
+#[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_range { pub first: u32, pub last: u32 }
+#[repr(C)] pub struct glrmask_lark_token { pub name: *const c_char, pub name_len: usize, pub ids: *const u32, pub ids_len: usize }
+#[repr(C)] pub struct glrmask_lark_options { pub struct_size: usize, pub profile: u32, pub tokens: *const glrmask_lark_token, pub tokens_len: usize }
+#[repr(C)] pub struct glrmask_extern {
+    pub name: *const c_char,
+    pub name_len: usize,
+    pub kind: u32,
+    pub has_source_span: u32,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub line: u64,
+    pub column: u64,
+}
+#[repr(C)] pub struct glrmask_marker_event { pub id: u32, pub byte_offset: u64 }
 
 thread_local! { static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) }; }
-fn ffi(f:impl FnOnce()->Result<()>) -> i32 {
+fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
     match core::guarded(f) {
         Ok(()) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
         Err(e) => {
-            LAST_ERROR.with(|s| *s.borrow_mut()=Some(CString::new(e.message.replace('\0',"\\0")).unwrap_or_default()));
+            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
             e.kind as i32
         }
     }
 }
-fn valid<T>(p:*const T)->Result<()> {
+fn valid<T>(p: *const T) -> Result<()> {
     if p.is_null() { return Err(Error::invalid("null pointer")); }
-    if p.addr()%align_of::<T>()!=0 { return Err(Error::invalid("misaligned pointer")); }
+    if p.addr() % align_of::<T>() != 0 { return Err(Error::invalid("misaligned pointer")); }
     Ok(())
 }
-unsafe fn read<'a,T>(p:*const T)->Result<&'a T> { valid(p)?; Ok(unsafe { &*p }) }
-unsafe fn write<'a,T>(p:*mut T)->Result<&'a mut T> { valid(p)?; Ok(unsafe { &mut *p }) }
-unsafe fn input<'a,T>(p:*const T,n:usize)->Result<&'a [T]> {
-    if n==0 { return Ok(&[]); }
+unsafe fn read<'a, T>(p: *const T) -> Result<&'a T> { valid(p)?; Ok(unsafe { &*p }) }
+unsafe fn write<'a, T>(p: *mut T) -> Result<&'a mut T> { valid(p)?; Ok(unsafe { &mut *p }) }
+unsafe fn input<'a, T>(p: *const T, n: usize) -> Result<&'a [T]> {
+    if n == 0 { return Ok(&[]); }
     valid(p)?;
-    if n>isize::MAX as usize/size_of::<T>() { return Err(Error::invalid("array length overflows address space")); }
-    Ok(unsafe { slice::from_raw_parts(p,n) })
+    if n > isize::MAX as usize / size_of::<T>() { return Err(Error::invalid("array length overflows address space")); }
+    Ok(unsafe { slice::from_raw_parts(p, n) })
 }
-unsafe fn output<'a,T>(p:*mut T,n:usize)->Result<&'a mut [T]> {
-    if n==0 { return Ok(&mut []); }
+unsafe fn output<'a, T>(p: *mut T, n: usize) -> Result<&'a mut [T]> {
+    if n == 0 { return Ok(&mut []); }
     valid(p)?;
-    if n>isize::MAX as usize/size_of::<T>() { return Err(Error::invalid("array length overflows address space")); }
-    Ok(unsafe { slice::from_raw_parts_mut(p,n) })
+    if n > isize::MAX as usize / size_of::<T>() { return Err(Error::invalid("array length overflows address space")); }
+    Ok(unsafe { slice::from_raw_parts_mut(p, n) })
 }
-unsafe fn text<'a>(p:*const c_char,n:usize)->Result<&'a str> {
-    std::str::from_utf8(unsafe {input(p.cast(),n)?}).map_err(|_|Error::invalid("text must be valid UTF-8"))
+unsafe fn text<'a>(p: *const c_char, n: usize) -> Result<&'a str> {
+    std::str::from_utf8(unsafe { input(p.cast(), n)? }).map_err(|_| Error::invalid("text must be valid UTF-8"))
 }
-unsafe fn produce<T>(out:*mut *mut T,f:impl FnOnce()->Result<T>)->Result<()> {
-    let out=unsafe {write(out)?}; *out=ptr::null_mut();
-    *out=Box::into_raw(Box::new(f()?)); Ok(())
+unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<()> {
+    let out = unsafe { write(out)? }; *out = ptr::null_mut();
+    *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
-unsafe fn options(p:*const glrmask_build_options)->Result<g::BuildOptions> {
-    if p.is_null() { return Ok(g::BuildOptions::default()); }
-    let o=unsafe {read(p)?};
-    if o.struct_size!=size_of::<glrmask_build_options>() {return Err(Error::invalid("build-options struct_size does not match ABI"));}
-    core::build_options(o.optimization,unsafe{input(o.end_tokens,o.end_tokens_len)?}.to_vec(),(o.boundary_trigger!=u32::MAX).then_some(o.boundary_trigger))
-}
-unsafe fn lark_options(p:*const glrmask_lark_options)->Result<g::LarkOptions> {
+
+unsafe fn lark_options(p: *const glrmask_lark_options) -> Result<g::LarkOptions> {
     if p.is_null() { return Ok(g::LarkOptions::default()); }
-    let o=unsafe{read(p)?};
-    if o.struct_size!=size_of::<glrmask_lark_options>() {return Err(Error::invalid("lark-options struct_size does not match ABI"));}
-    let mut result=match o.profile {0=>g::LarkOptions::default(),1=>g::LarkOptions::llm(),_=>return Err(Error::invalid("unknown Lark profile"))};
-    let mut names=std::collections::BTreeSet::new();
-    for t in unsafe{input(o.tokens,o.tokens_len)?} {
-        let name=unsafe{text(t.name,t.name_len)?}.to_owned();
-        if !names.insert(name.clone()) {return Err(Error::invalid("duplicate named Lark token"));}
-        result=result.token(name,unsafe{input(t.ids,t.ids_len)?}.iter().copied());
+    let o = unsafe { read(p)? };
+    if o.struct_size != size_of::<glrmask_lark_options>() { return Err(Error::invalid("lark-options struct_size does not match ABI")); }
+    let mut result = match o.profile {
+        0 => g::LarkOptions::default(),
+        1 => g::LarkOptions::llm(),
+        _ => return Err(Error::invalid("unknown Lark profile")),
+    };
+    let mut names = std::collections::BTreeSet::new();
+    for t in unsafe { input(o.tokens, o.tokens_len)? } {
+        let name = unsafe { text(t.name, t.name_len)? }.to_owned();
+        if !names.insert(name.clone()) { return Err(Error::invalid("duplicate named Lark token")); }
+        result = result.token(name, unsafe { input(t.ids, t.ids_len)? }.iter().copied());
     }
     Ok(result)
 }
-fn requirements(values:Vec<g::UnboundExtern>)->glrmask_requirements {
-    glrmask_requirements(values.into_iter().map(|r|(r.name(),r)).collect())
-}
 
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version()->u32 {1}
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_version()->*const c_char {concat!(env!("CARGO_PKG_VERSION"),"\0").as_ptr().cast()}
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message()->*const c_char {LAST_ERROR.with(|s|s.borrow().as_ref().map_or(c"".as_ptr(),|s|s.as_ptr()))}
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_default_build_options()->glrmask_build_options {
-    glrmask_build_options{struct_size:size_of::<glrmask_build_options>(),optimization:0,boundary_trigger:u32::MAX,end_tokens:ptr::null(),end_tokens_len:0}
-}
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_default_lark_options()->glrmask_lark_options {
-    glrmask_lark_options{struct_size:size_of::<glrmask_lark_options>(),profile:0,tokens:ptr::null(),tokens_len:0}
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 1 }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
+#[unsafe(no_mangle)] pub extern "C" fn glrmask_default_lark_options() -> glrmask_lark_options {
+    glrmask_lark_options { struct_size: size_of::<glrmask_lark_options>(), profile: 0, tokens: ptr::null(), tokens_len: 0 }
 }
 
 macro_rules! free {($name:ident,$ty:ty)=>{
@@ -104,117 +110,125 @@ macro_rules! clone_handle {($name:ident,$ty:ident)=>{
         ffi(||unsafe{produce(out,||Ok($ty(read(p)?.0.clone())))})
     }
 };}
+
 mod module_api;
 pub use module_api::*;
-free!(glrmask_vocab_free,glrmask_vocab); free!(glrmask_exact_tokens_free,glrmask_exact_tokens);
-free!(glrmask_grammar_free,glrmask_grammar); free!(glrmask_prepared_free,glrmask_prepared);
-free!(glrmask_constraint_free,glrmask_constraint); free!(glrmask_state_free,glrmask_state);
-free!(glrmask_bytes_free,glrmask_bytes); free!(glrmask_u32s_free,glrmask_u32s);
-free!(glrmask_requirements_free,glrmask_requirements); free!(glrmask_events_free,glrmask_events);
-clone_handle!(glrmask_vocab_clone,glrmask_vocab); clone_handle!(glrmask_exact_tokens_clone,glrmask_exact_tokens);
-clone_handle!(glrmask_grammar_clone,glrmask_grammar); clone_handle!(glrmask_prepared_clone,glrmask_prepared);
-clone_handle!(glrmask_constraint_clone,glrmask_constraint);
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_new(entries:*const glrmask_vocab_entry,n:usize,exact:*const u32,exact_n:usize,out:*mut *mut glrmask_vocab)->i32 {
-    ffi(||unsafe{produce(out,||{
-        let entries=input(entries,n)?.iter().map(|e|Ok((e.id,input(e.bytes,e.bytes_len)?.to_vec()))).collect::<Result<Vec<_>>>()?;
-        Ok(glrmask_vocab(core::vocab(entries,input(exact,exact_n)?.to_vec())?))
-    })})
+free!(glrmask_vocab_free, glrmask_vocab);
+free!(glrmask_exact_tokens_free, glrmask_exact_tokens);
+free!(glrmask_grammar_free, glrmask_grammar);
+free!(glrmask_constraint_free, glrmask_constraint);
+free!(glrmask_state_free, glrmask_state);
+free!(glrmask_bytes_free, glrmask_bytes);
+free!(glrmask_u32s_free, glrmask_u32s);
+free!(glrmask_externs_free, glrmask_externs);
+free!(glrmask_events_free, glrmask_events);
+
+clone_handle!(glrmask_vocab_clone, glrmask_vocab);
+clone_handle!(glrmask_exact_tokens_clone, glrmask_exact_tokens);
+clone_handle!(glrmask_grammar_clone, glrmask_grammar);
+clone_handle!(glrmask_constraint_clone, glrmask_constraint);
+
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_new(entries: *const glrmask_vocab_entry, n: usize, exact: *const u32, exact_n: usize, out: *mut *mut glrmask_vocab) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let entries = input(entries, n)?.iter().map(|e| Ok((e.id, input(e.bytes, e.bytes_len)?.to_vec()))).collect::<Result<Vec<_>>>()?;
+        Ok(glrmask_vocab(core::vocab(entries, input(exact, exact_n)?.to_vec())?))
+    }) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_len(p:*const glrmask_vocab,out:*mut usize)->i32 {ffi(||unsafe{*write(out)?=read(p)?.0.len();Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_tokens(p:*const glrmask_vocab,ids:*const u32,n:usize,out:*mut *mut glrmask_exact_tokens)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_exact_tokens(read(p)?.0.tokens(input(ids,n)?.iter().copied()).map_err(Error::engine)?)))})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_len(p: *const glrmask_vocab, out: *mut usize) -> i32 {
+    ffi(|| unsafe { *write(out)? = read(p)?.0.len(); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_token_ranges(p:*const glrmask_vocab,r:*const glrmask_token_range,n:usize,out:*mut *mut glrmask_exact_tokens)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_exact_tokens(read(p)?.0.token_ranges(input(r,n)?.iter().map(|r|r.first..=r.last)).map_err(Error::engine)?)))})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_tokens(p: *const glrmask_vocab, ids: *const u32, n: usize, out: *mut *mut glrmask_exact_tokens) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_exact_tokens(read(p)?.0.tokens(input(ids, n)?.iter().copied()).map_err(Error::engine)?))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_len(p:*const glrmask_exact_tokens,out:*mut usize)->i32 {ffi(||unsafe{*write(out)?=read(p)?.0.len();Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_ids(p:*const glrmask_exact_tokens,out:*mut *mut glrmask_u32s)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_u32s(read(p)?.0.ids().to_vec())))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_ranges(p:*const glrmask_exact_tokens,out:*mut glrmask_token_range,capacity:usize,n:*mut usize)->i32 {
-    ffi(||unsafe{
-        let tokens=&read(p)?.0; let needed=tokens.ranges().len(); *write(n)?=needed;
-        if out.is_null() && capacity==0{return Ok(());}
-        if capacity<needed{return Err(Error::new(ErrorKind::BufferTooSmall,"range output is too small"));}
-        for (dest,r) in output(out,capacity)?.iter_mut().zip(tokens.ranges()) { *dest=glrmask_token_range{first:*r.start(),last:*r.end()}; }
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_vocab_token_ranges(p: *const glrmask_vocab, r: *const glrmask_token_range, n: usize, out: *mut *mut glrmask_exact_tokens) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_exact_tokens(read(p)?.0.token_ranges(input(r, n)?.iter().map(|r| r.first..=r.last)).map_err(Error::engine)?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_len(p: *const glrmask_exact_tokens, out: *mut usize) -> i32 {
+    ffi(|| unsafe { *write(out)? = read(p)?.0.len(); Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_ids(p: *const glrmask_exact_tokens, out: *mut *mut glrmask_u32s) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.ids().to_vec()))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_exact_tokens_ranges(p: *const glrmask_exact_tokens, out: *mut glrmask_token_range, capacity: usize, n: *mut usize) -> i32 {
+    ffi(|| unsafe {
+        let tokens = &read(p)?.0; let needed = tokens.ranges().len(); *write(n)? = needed;
+        if out.is_null() && capacity == 0 { return Ok(()); }
+        if capacity < needed { return Err(Error::new(ErrorKind::BufferTooSmall, "range output is too small")); }
+        for (dest, r) in output(out, capacity)?.iter_mut().zip(tokens.ranges()) { *dest = glrmask_token_range { first: *r.start(), last: *r.end() }; }
         Ok(())
     })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format:u32,source:*const c_char,n:usize,lark:*const glrmask_lark_options,out:*mut *mut glrmask_grammar)->i32 {
-    ffi(||unsafe{produce(out,||{
-        let source=text(source,n)?.to_owned();
-        let grammar=match format {
-            0=>g::Grammar::from_ebnf_owned(source),1=>g::Grammar::from_glrm_owned(source),
-            2=>g::Grammar::from_json_schema_owned(source),3=>g::Grammar::from_lark_owned(source,lark_options(lark)?),
-            _=>return Err(Error::invalid("unknown source format")),
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format: u32, source: *const c_char, n: usize, lark: *const glrmask_lark_options, out: *mut *mut glrmask_grammar) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let source = text(source, n)?.to_owned();
+        let grammar = match format {
+            0 => g::Grammar::from_ebnf_owned(source),
+            1 => g::Grammar::from_glrm_owned(source),
+            2 => g::Grammar::from_json_schema_owned(source),
+            3 => g::Grammar::from_lark_owned(source, lark_options(lark)?),
+            _ => return Err(Error::invalid("unknown source format")),
         }; Ok(glrmask_grammar(grammar))
-    })})
+    }) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_exact(p:*const glrmask_exact_tokens,out:*mut *mut glrmask_grammar)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_grammar(g::Grammar::exact(read(p)?.0.clone()))))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_grammar(p:*mut glrmask_grammar,name:*const c_char,n:usize,child:*const glrmask_grammar)->i32 {
-    ffi(||unsafe{let child=read(child)?.0.clone(); let name=text(name,n)?.to_owned();write(p)?.0.bind(name,child)?;Ok(())})
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_token(p:*mut glrmask_grammar,name:*const c_char,n:usize,id:u32)->i32 {
-    ffi(||unsafe{let name=text(name,n)?.to_owned();write(p)?.0.bind(name,g::Token::new(id))?;Ok(())})
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_tokens(p:*mut glrmask_grammar,name:*const c_char,n:usize,tokens:*const glrmask_exact_tokens)->i32 {
-    ffi(||unsafe{let tokens=read(tokens)?.0.clone();let name=text(name,n)?.to_owned();write(p)?.0.bind(name,tokens)?;Ok(())})
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_requirements(p:*const glrmask_grammar,out:*mut *mut glrmask_requirements)->i32 {ffi(||unsafe{produce(out,||Ok(requirements(read(p)?.0.requirements()?)))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_prepare(p:*const glrmask_grammar,v:*const glrmask_vocab,boundary:u32,out:*mut *mut glrmask_prepared)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_prepared(read(p)?.0.prepare_with(&read(v)?.0,core::build_options(0,vec![],(boundary!=u32::MAX).then_some(boundary))?)?)))})
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_compile(p:*const glrmask_grammar,v:*const glrmask_vocab,o:*const glrmask_build_options,out:*mut *mut glrmask_constraint)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_constraint(Arc::new(read(p)?.0.compile_with(&read(v)?.0,options(o)?)?))))})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_compile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let grammar = &read(p)?.0;
+        let vocab = &read(v)?.0;
+        let options = root_options(o)?;
+        Ok(glrmask_constraint(Arc::new(grammar.compile_with(vocab, options)?)))
+    }) })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_bind_prepared(p:*mut glrmask_prepared,name:*const c_char,n:usize,child:*const glrmask_prepared)->i32 {
-    ffi(||unsafe{let child=read(child)?.0.clone();let name=text(name,n)?.to_owned();write(p)?.0.bind(name,child)?;Ok(())})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_start(p: *const glrmask_constraint, out: *mut *mut glrmask_state) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_state(core::State::start(read(p)?.0.clone())?))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_bind_token(p:*mut glrmask_prepared,name:*const c_char,n:usize,id:u32)->i32 {
-    ffi(||unsafe{let name=text(name,n)?.to_owned();write(p)?.0.bind(name,g::Token::new(id))?;Ok(())})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_mask_len(p: *const glrmask_constraint, out: *mut usize) -> i32 {
+    ffi(|| unsafe { *write(out)? = read(p)?.0.mask_len(); Ok(()) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_bind_tokens(p:*mut glrmask_prepared,name:*const c_char,n:usize,tokens:*const glrmask_exact_tokens)->i32 {
-    ffi(||unsafe{let tokens=read(tokens)?.0.clone();let name=text(name,n)?.to_owned();write(p)?.0.bind(name,tokens)?;Ok(())})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_marker_ids(p: *const glrmask_constraint, out: *mut *mut glrmask_u32s) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.marker_ids().to_vec()))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_requirements(p:*const glrmask_prepared,out:*mut *mut glrmask_requirements)->i32 {ffi(||unsafe{produce(out,||Ok(requirements(read(p)?.0.requirements()?)))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_link(p:*const glrmask_prepared,o:*const glrmask_build_options,out:*mut *mut glrmask_constraint)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_constraint(Arc::new(read(p)?.0.link_with(options(o)?)?))))})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p: *const glrmask_constraint, external: u32, out: *mut *mut glrmask_bytes) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let c = &read(p)?.0;
+        Ok(glrmask_bytes(match external { 0 => c.save(), 1 => c.save_without_vocab()?, _ => return Err(Error::invalid("external_vocab must be 0 or 1")) }))
+    }) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_save(p:*const glrmask_prepared,out:*mut *mut glrmask_bytes)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_bytes(read(p)?.0.save())))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_prepared_load(bytes:*const u8,n:usize,v:*const glrmask_vocab,out:*mut *mut glrmask_prepared)->i32 {
-    ffi(||unsafe{produce(out,||{
-        let bytes=input(bytes,n)?.to_vec();
-        Ok(glrmask_prepared(if v.is_null(){g::PreparedGrammar::load(bytes)?}else{g::PreparedGrammar::load_with_vocab(bytes,&read(v)?.0)?}))
-    })})
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_start(p:*const glrmask_constraint,out:*mut *mut glrmask_state)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_state(core::State::start(read(p)?.0.clone())?)))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_mask_len(p:*const glrmask_constraint,out:*mut usize)->i32 {ffi(||unsafe{*write(out)?=read(p)?.0.mask_len();Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_marker_ids(p:*const glrmask_constraint,out:*mut *mut glrmask_u32s)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_u32s(read(p)?.0.marker_ids().to_vec())))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p:*const glrmask_constraint,external:u32,out:*mut *mut glrmask_bytes)->i32 {
-    ffi(||unsafe{produce(out,||{
-        let c=&read(p)?.0;
-        Ok(glrmask_bytes(match external {0=>c.save(),1=>c.save_without_vocab()?,_=>return Err(Error::invalid("external_vocab must be 0 or 1"))}))
-    })})
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_load(bytes:*const u8,n:usize,v:*const glrmask_vocab,out:*mut *mut glrmask_constraint)->i32 {
-    ffi(||unsafe{produce(out,||{
-        let bytes=input(bytes,n)?.to_vec();
-        Ok(glrmask_constraint(Arc::new(if v.is_null(){g::Constraint::load(bytes)?}else{g::Constraint::load_with_vocab(bytes,&read(v)?.0)?})))
-    })})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_load(bytes: *const u8, n: usize, v: *const glrmask_vocab, out: *mut *mut glrmask_constraint) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let bytes = input(bytes, n)?.to_vec();
+        Ok(glrmask_constraint(Arc::new(if v.is_null() { g::Constraint::load(bytes)? } else { g::Constraint::load_with_vocab(bytes, &read(v)?.0)? })))
+    }) })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_clone(p:*const glrmask_state,out:*mut *mut glrmask_state)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_state(read(p)?.0.try_clone()?)))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_mask_len(p:*const glrmask_state,out:*mut usize)->i32 {ffi(||unsafe{*write(out)?=read(p)?.0.mask_len();Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_fill_mask(p:*const glrmask_state,out:*mut u32,n:usize)->i32 {ffi(||unsafe{read(p)?.0.fill_mask(output(out,n)?)})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p:*mut glrmask_state,id:u32)->i32 {ffi(||unsafe{write(p)?.0.commit_token(id)})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p:*mut glrmask_state,bytes:*const u8,n:usize)->i32 {ffi(||unsafe{write(p)?.0.commit_bytes(input(bytes,n)?)})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p:*const glrmask_state,out:*mut u32)->i32 {ffi(||unsafe{*write(out)?=u32::from(read(p)?.0.is_accepting()?);Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_rejected(p:*const glrmask_state,out:*mut u32)->i32 {ffi(||unsafe{*write(out)?=u32::from(read(p)?.0.is_rejected()?);Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_tokens(p:*const glrmask_state,out:*mut *mut glrmask_u32s)->i32 {ffi(||unsafe{produce(out,||Ok(glrmask_u32s(read(p)?.0.forced_tokens()?)))})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_marker_events(p:*const glrmask_state,out:*mut *mut glrmask_events)->i32 {
-    ffi(||unsafe{produce(out,||Ok(glrmask_events(read(p)?.0.marker_events()?.into_iter().map(|e|glrmask_marker_event{id:e.id,byte_offset:e.byte_offset}).collect())))})
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_clone(p: *const glrmask_state, out: *mut *mut glrmask_state) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_state(read(p)?.0.try_clone()?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_mask_len(p: *const glrmask_state, out: *mut usize) -> i32 {
+    ffi(|| unsafe { *write(out)? = read(p)?.0.mask_len(); Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_fill_mask(p: *const glrmask_state, out: *mut u32, n: usize) -> i32 {
+    ffi(|| unsafe { read(p)?.0.fill_mask(output(out, n)?) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> i32 {
+    ffi(|| unsafe { write(p)?.0.commit_token(id) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> i32 {
+    ffi(|| unsafe { write(p)?.0.commit_bytes(input(bytes, n)?) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
+    ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_accepting()?); Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_rejected(p: *const glrmask_state, out: *mut u32) -> i32 {
+    ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_rejected()?); Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_tokens(p: *const glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.forced_tokens()?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_marker_events(p: *const glrmask_state, out: *mut *mut glrmask_events) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_events(read(p)?.0.marker_events()?.into_iter().map(|e| glrmask_marker_event { id: e.id, byte_offset: e.byte_offset }).collect()))) })
 }
 
 macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
@@ -222,14 +236,38 @@ macro_rules! data {($fn:ident,$handle:ident,$ty:ty)=>{
         ffi(||unsafe{let out=write(out)?;let n=write(n)?;let data=&read(p)?.0;*out=data.as_ptr();*n=data.len();Ok(())})
     }
 };}
-data!(glrmask_bytes_data,glrmask_bytes,u8); data!(glrmask_u32s_data,glrmask_u32s,u32); data!(glrmask_events_data,glrmask_events,glrmask_marker_event);
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_requirements_len(p:*const glrmask_requirements,out:*mut usize)->i32 {ffi(||unsafe{*write(out)?=read(p)?.0.len();Ok(())})}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_requirements_get(p:*const glrmask_requirements,index:usize,out:*mut glrmask_requirement)->i32 {
-    ffi(||unsafe{
-        let (name,r)=read(p)?.0.get(index).ok_or_else(||Error::invalid("requirement index out of range"))?;
-        let mut value=glrmask_requirement{name:name.as_ptr().cast(),name_len:name.len(),kind:match r.kind{g::ExternalKind::Token=>0,g::ExternalKind::Grammar=>1,g::ExternalKind::LegacyGeneric=>2},has_source_span:0,start_byte:0,end_byte:0,line:0,column:0};
-        if let Some(span)=r.source_span {value.has_source_span=1;value.start_byte=span.start as u64;value.end_byte=span.end as u64;value.line=span.line as u64;value.column=span.column as u64;}
-        *write(out)?=value;Ok(())
+data!(glrmask_bytes_data, glrmask_bytes, u8);
+data!(glrmask_u32s_data, glrmask_u32s, u32);
+data!(glrmask_events_data, glrmask_events, glrmask_marker_event);
+
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_len(p: *const glrmask_externs, out: *mut usize) -> i32 {
+    ffi(|| unsafe { *write(out)? = read(p)?.0.len(); Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_get(p: *const glrmask_externs, index: usize, out: *mut glrmask_extern) -> i32 {
+    ffi(|| unsafe {
+        let item = read(p)?.0.get(index).ok_or_else(|| Error::invalid("extern index out of range"))?;
+        let mut value = glrmask_extern {
+            name: item.name.as_ptr().cast(),
+            name_len: item.name.len(),
+            kind: match item.kind {
+                g::ExternKind::Token => 0,
+                g::ExternKind::Grammar => 1,
+                _ => 1,
+            },
+            has_source_span: 0,
+            start_byte: 0,
+            end_byte: 0,
+            line: 0,
+            column: 0,
+        };
+        if let Some(span) = item.span {
+            value.has_source_span = 1;
+            value.start_byte = span.start as u64;
+            value.end_byte = span.end as u64;
+            value.line = span.line as u64;
+            value.column = span.column as u64;
+        }
+        *write(out)? = value; Ok(())
     })
 }
 

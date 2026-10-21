@@ -21,27 +21,29 @@ Time between masks. Lower is better.
 
 **TBM (µs)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 3.0 | 31.5 | 12.7 | 25.9 |
-| p50 | 2.6 | 9.1 | 6.9 | 10.6 |
-| p90 | 5.1 | 86.4 | 30.3 | 40.7 |
-| p99 | 12.2 | 239.5 | 74.8 | 289.9 |
-| p99.9 | 24.9 | 754.2 | 206.1 | 1,092.6 |
-| Max | 283.1 | 3,647.8 | 2,140.9 | 6,931.5 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 3.0 | 31.5 | 25.9 |
+| p50 | 2.6 | 9.1 | 10.6 |
+| p90 | 5.1 | 86.4 | 40.7 |
+| p99 | 12.2 | 239.5 | 289.9 |
+| p99.9 | 24.9 | 754.2 | 1,092.6 |
+| Max | 283.1 | 3,647.8 | 6,931.5 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 33.7 | 3.9 | 12.3 | 1.2 |
-| p50 | 12.6 | 2.3 | 6.2 | 0.8 |
-| p90 | 78.9 | 6.5 | 19.0 | 1.8 |
-| p99 | 302.3 | 35.9 | 125.5 | 11.1 |
-| p99.9 | 854.3 | 88.8 | 445.0 | 17.9 |
-| Max | 1,293.4 | 274.6 | 631.1 | 231.0 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 33.7 | 3.9 | 1.2 |
+| p50 | 12.6 | 2.3 | 0.8 |
+| p90 | 78.9 | 6.5 | 1.8 |
+| p99 | 302.3 | 35.9 | 11.1 |
+| p99.9 | 854.3 | 88.8 | 17.9 |
+| Max | 1,293.4 | 274.6 | 231.0 |
 
-14 October 2026 · 11,277 complete valid trajectories accepted by all four engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
+Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+
+14 October 2026 · 11,277 complete valid trajectories accepted by all measured engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
 ### JavaScript
 
@@ -56,27 +58,29 @@ Time between masks. Lower is better.
 
 **TBM (µs)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 16.9 | 1,392.4 | 389.0 | 1,052.2 |
-| p50 | 18.2 | 145.5 | 69.9 | 856.6 |
-| p90 | 30.4 | 3,626.1 | 1,088.8 | 2,521.7 |
-| p99 | 47.9 | 4,091.7 | 1,509.6 | 3,097.0 |
-| p99.9 | 71.1 | 4,656.9 | 2,016.8 | 3,597.1 |
-| Max | 77.4 | 5,517.4 | 2,139.0 | 3,867.9 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 16.9 | 1,392.4 | 1,052.2 |
+| p50 | 18.2 | 145.5 | 856.6 |
+| p90 | 30.4 | 3,626.1 | 2,521.7 |
+| p99 | 47.9 | 4,091.7 | 3,097.0 |
+| p99.9 | 71.1 | 4,656.9 | 3,597.1 |
+| Max | 77.4 | 5,517.4 | 3,867.9 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 5,089.4 | 113.3 | 458.4 | 8.0 |
-| p50 | 5,099.6 | 113.0 | 457.8 | 8.0 |
-| p90 | 5,152.7 | 116.9 | 464.3 | 8.1 |
-| p99 | 5,223.0 | 120.7 | 470.4 | 8.2 |
-| p99.9 | 5,225.9 | 121.7 | 472.3 | 8.2 |
-| Max | 5,226.2 | 121.8 | 472.5 | 8.2 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 5,089.4 | 113.3 | 8.0 |
+| p50 | 5,099.6 | 113.0 | 8.0 |
+| p90 | 5,152.7 | 116.9 | 8.1 |
+| p99 | 5,223.0 | 120.7 | 8.2 |
+| p99.9 | 5,225.9 | 121.7 | 8.2 |
+| Max | 5,226.2 | 121.8 | 8.2 |
 
-14 October 2026 · 28 complete valid trajectories accepted by all four engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
+Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+
+14 October 2026 · 28 complete valid trajectories accepted by all measured engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
 #### Dynamic mode
 
@@ -91,7 +95,7 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 [Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).
 
-There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Balanced 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
+There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
 
 [Native AWS benchmark details](docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.
 
@@ -121,10 +125,6 @@ GLRMask has four core types:
 - `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
-
-**Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages
-use `PreparedGrammar` for reusable preparation. The decoding quickstarts below
-work with that release; the new assembly APIs require a matching source build.
 
 Use direct `Grammar.compile` for a closed source, or a `Module` when local
 settings, late-bound children, or retained work are needed. `Expr.choice` and
@@ -195,15 +195,16 @@ scoped grammar, which can contain bytes, exact events, or epsilon. Binding a val
 of the wrong kind is an error; an exact ID is never replaced by its decoded text.
 
 ```rust
-use glrmask::{Grammar, Result, Vocab};
+use glrmask::{Grammar, Module, Result, Vocab};
 
 # fn demo(vocab: &Vocab, end_id: u32) -> Result<()> {
-let mut parent = Grammar::from_glrm(r#"
+let grammar = Grammar::from_glrm(r#"
     extern grammar PAYLOAD
     extern token END
     start response
     nt response = PAYLOAD END
 "#);
+let mut parent = Module::new(&grammar);
 let child = Grammar::from_json_schema(r#"{"type":"null"}"#);
 parent.bind("PAYLOAD", &child)?;
 parent.bind("END", glrmask::Token::new(end_id))?;
@@ -219,24 +220,25 @@ not a sequence. Sparse vocabulary holes and incompatible vocabulary identities
 are errors. IDs with the same spelling remain distinct, and spelling-less IDs
 are not epsilon. See [exact-token ranges](docs/exact-token-ranges.md).
 
-A grammar-valued parameter also accepts `Token` or `ExactTokens` directly: this
+A grammar-valued extern also accepts `Token` or `ExactTokens` directly: this
 widens an exact event into a general fragment without changing its meaning.
-`Grammar::exact(vocab.tokens([id])?)` (Rust) and
-`glrmask.Grammar.exact(vocab.tokens([id]))` (Python) remain available for creating
-a standalone event-aware grammar. Neither conversion uses decoded token spelling.
-An arbitrary grammar cannot bind a token-valued parameter.
+Neither conversion uses decoded token spelling.
+An arbitrary grammar cannot bind a token-valued extern.
 
 ### Configure, precompile, attach and execute
 
 `Module` is a reusable, independently configured grammar snapshot. Constructing
 one from a `Grammar` needs no vocabulary and does no grammar compilation.
 Compilation settings belong to the module, never to the source `Grammar`.
-The parent and its children may both have unresolved parameters.
+The parent may have unresolved externs while precompiling.
 `bind(name, value)` mutates the receiving handle and returns `Result<()>` in Rust
-or `None` in Python.
+or `None` in Python. In Python, `bind` also supports atomic keyword arguments
+(`m.bind(**bindings)`).
 Each successful bind publishes a new shared snapshot; an error leaves the previous
 configuration intact. Attaching a child captures its current configuration, not
-a live reference to later edits. Use `clone()` to specialize independently:
+a live reference to later edits. Every child must have all of its externs bound
+before it is attached. In Rust, use `clone()` to specialize an independent
+snapshot; in Python, use `copy()`.
 
 ```python
 import glrmask
@@ -244,12 +246,22 @@ import glrmask
 vocab = glrmask.Vocab.from_id_to_bytes({
     0: b"x", 1: b"|", 2: b"x", 4: b"", 5: b"",
 })
-leaf = glrmask.Module(glrmask.Grammar.from_glrm('''
+leaf1 = glrmask.Module(glrmask.Grammar.from_glrm('''
     extern token MARK
     start body
     nt body = "x" MARK
 '''))
-leaf.precompile(vocab)
+leaf1.bind("MARK", vocab.tokens([4]))
+leaf1.precompile(vocab)
+
+leaf2 = glrmask.Module(glrmask.Grammar.from_glrm('''
+    extern token MARK
+    start body
+    nt body = "x" MARK
+'''))
+leaf2.bind("MARK", vocab.tokens([5]))
+leaf2.precompile(vocab)
+
 parent = glrmask.Module(glrmask.Grammar.from_glrm('''
     extern grammar LEFT
     extern grammar RIGHT
@@ -258,46 +270,39 @@ parent = glrmask.Module(glrmask.Grammar.from_glrm('''
 '''))
 parent.precompile(vocab)
 
-package = parent.clone()
-package.bind("LEFT", leaf)
-package.bind("RIGHT", leaf)
-assert [r.name for r in package.unbound] == ["LEFT::MARK", "RIGHT::MARK"]
-complete = package.clone()
-complete.bind("LEFT::MARK", vocab.tokens([4]))
-complete.bind("RIGHT::MARK", vocab.tokens([5]))
-constraint = complete.compile(vocab)
+package = parent.copy()
+assert list(package.externs.unbound) == ["LEFT", "RIGHT"]
+package.bind(LEFT=leaf1, RIGHT=leaf2)
+assert len(package.externs.unbound) == 0
+
+constraint = package.compile(vocab)
 state = constraint.start()
 for token_id in [0, 4, 1, 2, 5]:
     assert state.mask()[token_id]
     state.commit_token(token_id)
 assert state.is_accepting()
-assert [r.name for r in leaf.unbound] == ["MARK"]
 ```
 
-Rust uses `Module::new(&grammar)` or `grammar.module()`, `precompile(&vocab)?`,
+Rust uses `Module::new(&grammar)`, `precompile(&vocab)?`,
 `bind(name, &child)?`, and `compile(&vocab)?` or `compile_with(&vocab, options)?`.
-The instance `with_options` method returns a configured snapshot; `set_options`
-updates local settings in place. Both reject changes incompatible with retained
-local work. Each explicitly configured child keeps its own settings; a raw
-grammar child receives default local settings, not an inherited parent override.
-Source `Grammar` objects also support open
-attachment and later `CHILD::PARAM` binding. A descendant can be bound only after
-its attachment exists. Unknown names and attempts to rebind a filled parameter
-are rejected.
+Module settings are configured via `set_mask_strategy` and
+`set_boundary_mask_strategy` (in Python: constructor keywords or properties
+`m.mask_strategy = ...`). Each explicitly configured child keeps its own
+settings; a raw grammar child receives default local settings, not an inherited
+parent override. Every child must be closed (have no unbound externs) before
+attachment. Each extern is bound once on the module that declared it; qualified
+`::` paths are rejected.
 
-Each inline `grammar NAME { ... }` has an isolated interface, start rule, terminals,
-and ignore policy. It does not inherit enclosing externs. Two references to the
-same named inline grammar share that definition's bindings. Attaching the same
-module at two different names creates independently bindable occurrences.
+Inline grammars (`g name = { ... }`) cannot refer to anything outside
+themselves, including outer rules, terminals, or externs. An outer reference
+is an undefined-name error. The keywords `use`, `export`, `import`, and `super`
+are reserved.
 
-Rust `unbound()` (Python `.unbound`) reports unresolved structured paths,
-expected kinds, and available original source spans. Rust `externs()` (Python
-`.externs`) also includes bound declarations. Records use
-the descriptive `UnboundExtern` metadata rather than the old `Requirement` name.
-Advance compilation is allowed while slots remain open; final `compile()` requires every declared
-parameter to be bound, including declarations whose uses are unreachable.
-Introspection has finite traversal limits rather than expanding arbitrary shared
-graphs without a bound.
+Rust `m.externs().unbound()` (Python: `m.externs.unbound`) reports unresolved
+externs. Rust `m.externs()` (Python: `m.externs`) reports all declared externs
+in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`,
+`span()`). Precompilation is allowed while externs remain open; final
+`compile()` requires every declared extern to be bound.
 
 ### Persistence and root policy
 
@@ -307,7 +312,7 @@ children. Retained work, settings and source identities survive the round-trip:
 ```python
 saved = package.save()
 restored = glrmask.Module.load(saved, vocab=vocab)
-assert [r.name for r in restored.unbound] == ["LEFT::MARK", "RIGHT::MARK"]
+assert len(restored.externs.unbound) == 0
 ```
 
 Runnable constraints separately support `save()` and `Constraint.load(...)`.
@@ -327,20 +332,16 @@ supply the enclosing generation's root termination policy.
 
 ### Lightweight expressions
 
-`Expr.choice([a, b])` is unordered context-free alternation, and
-`Expr.sequence([a, b])` is language concatenation. Whole grammar and module
-leaves keep their own lexical scopes, bindings and settings. Intermediate
-expression operators add neither scope nor public path segments; anonymous
-leaves use deterministic positional names such as `leaf0` and `leaf1`.
-A model-token spelling may cross leaf boundaries.
-
-An expression can be bound directly into a grammar-valued slot. Source-only
-expressions also support `Grammar.from_expr(expr)`. Expressions with configured
-or precompiled module leaves require `Module(expr)` in Python or
-`Module::from_expr(&expr)` in Rust; converting them to source-only `Grammar`
-fails rather than silently dropping options or retained work. Rust's `IntoExpr`
-conversion makes heterogeneous operand collections explicit.
-See [module lifecycle and examples](docs/module-lifecycle.md).
+`Expr.choice` is unordered context-free alternation, and `Expr.sequence` is
+language concatenation. In Python, both accept positional parts:
+`Expr.choice(*parts)` and `Expr.sequence(*parts)`. `Expr.literal` matches exact
+bytes without whitespace or ignore inserted between parts. Leaves can be
+`Grammar`, `Module`, `Expr`, `Token`, or `ExactTokens`. In Python, passing a
+plain string raises `TypeError` (use `Expr.literal`). Parts with open externs
+raise an error immediately. An expression can be bound directly into a
+module extern (`m.bind("name", expr)`). Whole grammar and module leaves keep
+their own lexical scopes, bindings and settings. Intermediate expression
+operators add neither scope nor public path segments.
 
 ### Determined output
 
@@ -371,19 +372,24 @@ composition, persistence, and the Rust/Python APIs.
 
 GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).
 
-`Optimization` expresses intent rather than exposing internal engine names:
+`MaskStrategy` trades off compilation time against per-token masking latency:
 
-- `AUTO` / `Auto`: let GLRMask choose.
-- `FAST_BUILD` / `FastBuild`: ordinary Dynamic compilation and masking (O1).
-- `BALANCED` / `Balanced`: bounded native parser with vocabulary partitioning (O2).
-- `FAST_RUNTIME` / `FastRuntime`: spend more build work to favor lower mask latency where supported.
+- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest runtime masks).
+- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
+- `TokenClassTrie`: token-trie walk over token equivalence classes.
+- `Auto`: library chooses the strategy (default).
 
-All four modes preserve accepted-language semantics and produce the same public `Constraint` type.
+`BoundaryMaskStrategy` sets the minimum metadata detail to build for composition boundaries:
+
+- `FastBuild`: conservative token-set boundary trigger (faster build, default).
+- `FastRuntime`: full exact proper-prefix boundary trigger (lower latency).
+
+All modes preserve accepted-language semantics and produce the same public `Constraint` type.
 
 ### Native template parser backend
 
 Public final-constraint APIs select their parser representation internally.
-Callers choose `Optimization`; there is no public parser backend selector or
+Callers choose `MaskStrategy`; there is no public parser backend selector or
 accessor. Parser-provider construction remains internal repository tooling.
 
 The native runtime and its artifact contain the template relations, not an
@@ -406,12 +412,12 @@ The [September 30 validation report](docs/template-parser-validation-2026-09-30.
 records historical measurements at its pinned revision. Those measurements do
 not qualify the current native replacement.
 
-### Ordinary Dynamic development backend
+### TokenTrie backend
 
-Ordinary Dynamic (O1) defaults to the retained LR runtime. Its grammar, lexer,
+`MaskStrategy::TokenTrie` uses the retained LR runtime. Its grammar, lexer,
 vocabulary, masking and commit code share the existing compiler/runtime pipeline;
 it skips native parser characterization, template construction and native runtime
-metadata. O2/Balanced continues to build templates, and Static is unchanged.
+metadata. `TokenClassTrie` continues to build templates, and `ParserDwa` is unchanged.
 
 For internal development only, `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects native
 parser templates for an ordinary Dynamic compilation (`true`, `yes` and `on`

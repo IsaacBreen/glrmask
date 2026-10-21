@@ -1,12 +1,5 @@
 """Additional lifecycle, validation and ownership regressions for the final API."""
 
-
-def _bound_snapshot(grammar, name, value):
-    """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
-
 import gc
 import numpy as np
 import pytest
@@ -14,28 +7,40 @@ import glrmask
 
 
 def vocab():
-    return glrmask.Vocab.from_id_to_bytes({0: b'a', 1: b'b', 7: b'a', 8: b'', 63: b''})
+    return glrmask.Vocab.from_id_to_bytes({0: b'a', 1: b'b', 2: b'a', 3: b'x', 7: b'a', 8: b'', 63: b''})
+
+
+def _bound_snapshot(source, name, value):
+    """Preserve fixture snapshots while exercising public single-item mutation."""
+    m = glrmask.Module(source) if isinstance(source, glrmask.Grammar) else source.copy()
+    assert m.bind(name, value) is None
+    return m
 
 
 def test_top_level_surface_hides_engine_and_experimental_policy_types():
     for name in [
         "Grammar",
         "Module",
-        "ModuleOptions",
-        "CompileOptions",
         "Expr",
-        "UnboundExtern",
-        "PreparedGrammar",
-        "Requirement",
+        "Extern",
+        "Externs",
         "Token",
         "ExactTokens",
-        "Optimization",
+        "MaskStrategy",
+        "BoundaryMaskStrategy",
         "Vocab",
         "Constraint",
         "ConstraintState",
     ]:
         assert hasattr(glrmask, name), name
     for name in [
+        "ModuleOptions",
+        "CompileOptions",
+        "UnboundExtern",
+        "PreparedGrammar",
+        "Requirement",
+        "Optimization",
+        "BoundaryTriggerDetail",
         "ExactToken",
         "DynamicConstraint",
         "DynamicConstraintState",
@@ -71,18 +76,21 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
         _bound_snapshot(g, 'T', 7)
     with pytest.raises(ValueError):
         _bound_snapshot(g, 'T', child)
-    widened = _bound_snapshot(g, 'C', glrmask.Token(7))
-    assert [r.name for r in widened.requirements] == ['T']
+    open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
+    with pytest.raises(ValueError, match="unbound externs"):
+        _bound_snapshot(g, 'C', open_child)
     bound = _bound_snapshot(g, 'T', glrmask.Token(7))
-    with pytest.raises(ValueError):
+    assert list(bound.externs.unbound) == ['C']
+    assert set(bound.externs) == {'T', 'C'}
+    with pytest.raises(ValueError, match="already bound"):
         _bound_snapshot(bound, 'T', glrmask.Token(8))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="no external"):
         _bound_snapshot(bound, 'missing', child)
-    m = g.prepare(v)
-    with pytest.raises(TypeError):
-        _bound_snapshot(m, 'C', child)
-    with pytest.raises(TypeError):
-        _bound_snapshot(g, 'C', child.compile(v))
+    with pytest.raises(ValueError, match="qualified paths"):
+        _bound_snapshot(bound, 'C::sub', child)
+    complete = _bound_snapshot(bound, 'C', child)
+    assert list(complete.externs.unbound) == []
+    assert complete.compile(v).start().mask()[7]
 
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
@@ -150,19 +158,19 @@ def test_token_constructor_and_sparse_membership_validation():
         token.id = 8
     v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
     g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
-    m = glrmask.PreparedGrammar.load(g.prepare(v).save())
+    m = glrmask.Module.load(glrmask.Module(g).save())
     for id in [0, 3, 62, 64, 2**32-1]:
         value = glrmask.Token(id)
         bound = _bound_snapshot(g, "item", value)
-        with pytest.raises(ValueError, match="not present"):
+        with pytest.raises(ValueError, match="unknown exact token ID|not present"):
             bound.compile(v)
-        with pytest.raises(ValueError, match="not present"):
-            _bound_snapshot(m, "item", value)
+        with pytest.raises(ValueError, match="unknown exact token ID|not present"):
+            _bound_snapshot(m, "item", value).compile(v)
     for id in [7, 63]:
-        c = _bound_snapshot(m, "item", glrmask.Token(id)).link()
+        c = _bound_snapshot(m, "item", glrmask.Token(id)).compile(v)
         assert np.flatnonzero(c.start().mask()).tolist() == [id]
     text = glrmask.Grammar.from_ebnf('s ::= "a"')
     with pytest.raises(ValueError):
         _bound_snapshot(g, "item", text)
-    general = glrmask.Grammar.from_glrm("extern grammar item start s nt s = item")
+    general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
     assert np.flatnonzero(_bound_snapshot(general, "item", text).compile(v).start().mask()).tolist() == [2, 7]

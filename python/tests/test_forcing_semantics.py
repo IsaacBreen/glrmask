@@ -1,18 +1,18 @@
 """Canonical forcing, aliases, exact events and acceptance barriers."""
 
 
-def _bound_snapshot(grammar, name, value):
+def _bound_snapshot(source, name, value):
     """Preserve fixture snapshots while exercising public single-item mutation."""
-    result = grammar.clone()
-    assert result.bind(name, value) is None
-    return result
+    m = glrmask.Module(source) if isinstance(source, glrmask.Grammar) else source.copy()
+    assert m.bind(name, value) is None
+    return m
 
 import numpy as np
 import pytest
 import glrmask
 
-MODES = [glrmask.Optimization.AUTO, glrmask.Optimization.FAST_BUILD,
-         glrmask.Optimization.BALANCED, glrmask.Optimization.FAST_RUNTIME]
+MODES = [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
+         glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]
 
 
 def assert_read_only_and_replay(state, method):
@@ -33,7 +33,7 @@ def assert_read_only_and_replay(state, method):
 @pytest.mark.parametrize("mode", MODES)
 def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"ab", 3:b"ab"})
-    compiled = glrmask.Grammar.from_ebnf('start ::= "ab"').compile(vocab, optimization=mode)
+    compiled = glrmask.Grammar.from_ebnf('start ::= "ab"').compile(vocab, mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert not hasattr(state, "forced")
@@ -47,7 +47,7 @@ def test_forcing_uses_longest_spelling_then_lowest_alias_id(mode):
 def test_incomplete_vocabulary_does_not_hide_byte_language_ambiguity(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"ab"})
     for source, expected in [('start ::= "ab"', [1]), ('start ::= "ab" | "ac"', [])]:
-        compiled = glrmask.Grammar.from_ebnf(source).compile(vocab, optimization=mode)
+        compiled = glrmask.Grammar.from_ebnf(source).compile(vocab, mask_strategy=mode)
         for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
             state = constraint.start()
             assert np.flatnonzero(state.mask()).tolist() == [0, 1]
@@ -60,7 +60,8 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | MARK;'
     ), "MARK", vocab.tokens([9]))
-    state = grammar.compile(vocab, optimization=mode).start()
+    grammar.mask_strategy = mode
+    state = grammar.compile(vocab).start()
     assert state.mask()[9]
     assert not hasattr(state, "forced")
     assert assert_read_only_and_replay(state,"forced_tokens") == []
@@ -69,7 +70,7 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
 @pytest.mark.parametrize("mode", MODES)
 def test_force_stops_at_acceptance_not_optional_continuation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0:b"a", 1:b"b", 2:b"c"})
-    state = glrmask.Grammar.from_ebnf('start ::= "ab" "c"?').compile(vocab,optimization=mode).start()
+    state = glrmask.Grammar.from_ebnf('start ::= "ab" "c"?').compile(vocab,mask_strategy=mode).start()
     assert not hasattr(state, "forced")
     assert assert_read_only_and_replay(state,"forced_tokens") == [0,1]
 
@@ -82,7 +83,8 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
     ), "MARK", vocab.tokens([9]))
-    compiled = grammar.compile(vocab, optimization=mode)
+    grammar.mask_strategy = mode
+    compiled = grammar.compile(vocab)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert state.mask()[0] and state.mask()[2]
@@ -99,7 +101,7 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(
         {0:b"a", 1:b"b", 2:b"ab", 3:b"abc", 9:b""})
     compiled = glrmask.Grammar.from_ebnf('start ::= "a" | "ab"').compile(
-        vocab, optimization=mode, end_tokens=[9])
+        vocab, mask_strategy=mode, end_tokens=[9])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert assert_read_only_and_replay(state, "forced_tokens") == []
@@ -115,7 +117,8 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
     ), "MARK", vocab.tokens([1]))
-    compiled = grammar.compile(vocab, optimization=mode, end_tokens=[9])
+    grammar.mask_strategy = mode
+    compiled = grammar.compile(vocab, end_tokens=[9])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert assert_read_only_and_replay(state, "forced_tokens") == []

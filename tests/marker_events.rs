@@ -1,10 +1,10 @@
 //! Public marker integration gates. The engine reports observations, not captures.
-use glrmask::{BuildOptions, Constraint, Grammar, Optimization, PreparedGrammar, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, PreparedGrammar, Vocab};
 
-fn modes() -> [Optimization; 4] {
-    [Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime, Optimization::Auto]
+fn modes() -> [MaskStrategy; 4] {
+    [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto]
 }
-fn options(mode: Optimization) -> BuildOptions { BuildOptions::default().optimization(mode) }
+fn options(mode: MaskStrategy) -> BuildOptions { BuildOptions::default().optimization(mode) }
 fn vocabulary() -> Vocab {
     Vocab::new(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (2,b"ab".to_vec()),
         (3,b"x".to_vec()), (4,b"y".to_vec()), (5,b"xab y".to_vec()),
@@ -32,7 +32,7 @@ fn equivalent_replay(a: &Constraint, b: &Constraint, tokens: &[u32]) {
 fn marker_inventory_roundtrips_every_public_mode_and_vocabulary_form() {
     let vocab = vocabulary();
     for mode in modes() {
-        let fresh = annotated().compile_with(&vocab, options(mode)).unwrap();
+        let fresh = annotated().compile_with_build_options(&vocab, options(mode)).unwrap();
         assert_eq!(fresh.marker_ids().len(), 3, "{mode:?}");
         assert_eq!(fresh.marker_ids(), &[10, 20, 30]);
         assert_eq!(batch(&fresh.start()), vec![(10, 0)]);
@@ -50,7 +50,7 @@ fn marker_inventory_roundtrips_every_public_mode_and_vocabulary_form() {
             let twice = Constraint::load(loaded.save()).unwrap();
             assert_eq!(fresh.marker_ids(), twice.marker_ids());
         }
-        let plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).compile_with(&vocab, options(mode)).unwrap();
+        let plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).compile_with_build_options(&vocab, options(mode)).unwrap();
         assert!(plain.marker_ids().is_empty());
         assert!(!plain.save().starts_with(b"GLRMARK1"));
         equivalent_replay(&plain, &fresh, &[0,1]);
@@ -65,12 +65,12 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
         .prepare(&vocab).unwrap();
     let host = PreparedGrammar::load(host.save()).unwrap();
     for child_mode in modes() {
-        let child = annotated().compile_with(&vocab, options(child_mode)).unwrap();
+        let child = annotated().compile_with_build_options(&vocab, options(child_mode)).unwrap();
         let child = Constraint::load(child.save()).unwrap();
         let mut bound = host.clone();
         bound.bind("child", &child).unwrap();
         let bound = PreparedGrammar::load(bound.save()).unwrap();
-        for mode in [Optimization::Balanced, Optimization::FastRuntime, Optimization::Auto] {
+        for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
             let linked = bound.link_with(options(mode)).unwrap();
             assert_eq!(linked.marker_ids().len(), 5, "child={child_mode:?} link={mode:?}");
             let loaded = Constraint::load(linked.save()).unwrap();
@@ -98,7 +98,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
 #[test]
 fn malformed_marker_envelopes_fail_without_panics() {
     let vocab=vocabulary();
-    let bytes=annotated().compile_with(&vocab,options(Optimization::Balanced)).unwrap().save();
+    let bytes=annotated().compile_with_build_options(&vocab,options(MaskStrategy::TokenClassTrie)).unwrap().save();
     let mut malformed=Vec::new();
     for length in [0,1,7,8,12,19,20,27,28,bytes.len()-1] {malformed.push(bytes[..length].to_vec());}
     for count in [0,u32::MAX] {let mut v=bytes.clone();v[8..12].copy_from_slice(&count.to_le_bytes());malformed.push(v);}
@@ -126,7 +126,7 @@ fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
         (2,b"b".to_vec()),(3,b"a  b".to_vec())]);
     let grammar = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS=" "; nt root="a" @mark(1) "b";"#);
     for mode in modes() {
-        let constraint = grammar.compile_with(&vocab,options(mode)).unwrap();
+        let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
         for tokens in [&[0,1,1,2][..], &[3][..]] {
             let mut state = constraint.start();
             let mut events = batch(&state);
@@ -142,12 +142,12 @@ fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec())]);
     for mode in modes() {
         let empty = Grammar::from_glrm("glrm 1; start root; nt root=@mark(7);")
-            .compile_with(&vocab,options(mode)).unwrap();
+            .compile_with_build_options(&vocab,options(mode)).unwrap();
         let state = empty.start();
         assert!(state.is_accepting());
         assert_eq!(batch(&state), vec![(7,0)]);
         let repeat = Grammar::from_glrm(r#"glrm 1; start root; nt root=@mark(7)* "a";"#)
-            .compile_with(&vocab,options(mode)).unwrap();
+            .compile_with_build_options(&vocab,options(mode)).unwrap();
         let repeat = Constraint::load(repeat.save()).unwrap();
         let mut state = repeat.start();
         assert_eq!(batch(&state), vec![(7,0)]);
@@ -162,7 +162,7 @@ fn recursive_and_repeated_components_keep_positions_without_capture_pairing() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aabb".to_vec())]);
     let grammar = Grammar::from_glrm(r#"glrm 1; start root; nt root="a" @mark(1) root? "b" @mark(2);"#);
     for mode in modes() {
-        let constraint = grammar.compile_with(&vocab,options(mode)).unwrap();
+        let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
         for tokens in [&[0,0,1,1][..], &[2][..]] {
             let mut state = constraint.start(); let mut events=batch(&state);
             for &token in tokens { state.commit_token(token).unwrap(); events.extend(batch(&state)); }

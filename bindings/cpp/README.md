@@ -6,49 +6,30 @@ Bring the exact token-ID-to-byte mapping from your inference backend. GLRMask co
 
 ## Owned assemblies and expressions
 
-The Module/Expr interfaces in this section are unreleased and require a matching
-source build. Published 0.3.1 packages retain the PreparedGrammar lifecycle.
+The public lifecycle is source `Grammar` -> `Module` (with per-module settings, occurrence bindings and precompiled work) -> runnable `Constraint` -> per-sequence `ConstraintState`. `Expr` composes whole Grammar, Module, Expr, Token and ExactTokens pieces without merging their lexical scopes.
 
-`Grammar` retains source and source bindings. `Module` owns an independent mutable
-snapshot, local `ModuleOptions`, and any reusable work. `Expr` composes whole
-Grammar, Module and Expr values without merging their lexical scopes.
+`Grammar` is immutable authored source. `Module` owns an independent mutable snapshot, local settings (`MaskStrategy` and `BoundaryMaskStrategy`), and any precompiled work.
 
 ```cpp
 auto vocab = glrmask::Vocab({{0,"xay"},{1,"xby"}});
-auto child = glrmask::Module(glrmask::Grammar::from_ebnf("start ::= \"a\""),
-    {glrmask::Optimization::Balanced,glrmask::BoundaryTriggerDetail::None});
+auto child = glrmask::Module(glrmask::Grammar::from_ebnf("start ::= \"a\""));
+child.set_mask_strategy(glrmask::MaskStrategy::TokenClassTrie);
+child.set_boundary_mask_strategy(glrmask::BoundaryMaskStrategy::FastBuild);
 child.precompile(vocab);
-auto parent = glrmask::Grammar::from_glrm(
-    "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";").module();
-parent.bind("child",child); // Also accepts cold Grammar, Expr, Token and ExactTokens.
-auto restored = glrmask::Module::load(parent.save(),&vocab);
+
+auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
+    "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";"));
+parent.bind("child", child); // Also accepts cold Grammar, Expr, Token and ExactTokens.
+auto restored = glrmask::Module::load(parent.save(), &vocab);
 auto constraint = restored.compile(vocab);
-auto expression = glrmask::Expr::choice({child,glrmask::Grammar::from_ebnf("start ::= \"b\"")});
+auto expression = glrmask::Expr::choice({child, glrmask::Grammar::from_ebnf("start ::= \"b\"")});
 ```
 
-`bind` and `precompile` mutate the receiver and return `void`; failure preserves
-its prior snapshot. Copies and `clone()` have independent bindings and share
-immutable work. `options()` returns a value; `with_options()` creates an
-independent configured copy and `set_options()` mutates atomically. Incompatible
-options cannot replace retained local preparation. Children keep their own local
-settings. Final `CompileOptions` contains only root `end_tokens`.
+`bind` and `precompile` mutate the receiver and return `void`; failure preserves its prior snapshot. Ordinary C++ copy construction creates independent binding snapshots and shares immutable work. `mask_strategy()` and `boundary_mask_strategy()` return values; `set_mask_strategy()` and `set_boundary_mask_strategy()` mutate atomically. Changing settings never invalidates or discards retained work. Children keep their own local settings. Final `CompileOptions` contains root `end_tokens`.
 
-`unbound()` and `externs()` return `UnboundExtern` values, including name, exact
-path segments, kind and optional source span. Expression leaves use `leaf0`,
-`leaf1`, and so on; grouping adds no path segments. Empty sequence is epsilon;
-empty choice fails on materialization. `Grammar::from_expr()` and source
-`Grammar::bind(..., expr)` reject configured or prepared leaves.
+`externs()` returns an `Externs` snapshot containing `Extern` records with `name`, `kind` (`ExternKind::Token` or `ExternKind::Grammar`) and an optional `source_span`. `externs().unbound()` returns only unresolved externs. Qualified descendant paths with `::` are not supported. Rebinding is an error. A child module with unbound externs cannot be attached.
 
-`Module::load` never compiles. Optional vocabulary validation checks the exact
-saved target identity. Standalone FastBuild modules retain LR work; explicit
-composition edges require native components and report unsupported LR edges
-without conversion. C callers use the equivalent owning `glrmask_module` and
-`glrmask_expr` handles, separate local/root option structs, and status-returning
-functions declared in `glrmask.h`. All input handles are snapshotted as needed;
-states independently keep their compiled owners alive.
-
-`PreparedGrammar` and `Requirement` remain migration spellings in the older
-examples below. New assembly code should use Module and UnboundExtern.
+`Module::load` deserializes saved assemblies and verifies an optional target vocabulary identity without compiling. C callers use the equivalent owning `glrmask_module` and `glrmask_expr` handles and status-returning functions declared in `glrmask.h`. All input handles are snapshotted as needed; states independently keep their compiled owners alive.
 
 ## Build and install
 
@@ -140,26 +121,25 @@ Masks are packed **original-ID** bitsets. Bit `id % 32` in word `id / 32` is one
 | `Grammar::from_glrm(source)` | Native GLRM text |
 | `Grammar::from_json_schema(source)` | JSON Schema encoded as JSON text |
 | `Grammar::from_lark(source, options)` | Lark text and an explicit optional profile |
-| `Grammar::exact(tokens)` | One exact-token event from a vocabulary-qualified set |
 
 The constructors own their source text; temporary C++ strings need not outlive the returned grammar. Importer capabilities, supported JSON Schema keywords, Lark profiles and language limitations are the same as the core library. See the [GLRM reference](../../docs/glrm-format.md) and [Lark dialect](../../docs/lark-dialect.md). These bindings do not add a full JSON Schema validator or parse-tree/capture API.
 
 ```cpp
-glrmask::BuildOptions options;
-options.optimization = glrmask::Optimization::FastRuntime;
-options.end_tokens = {99};
-options.boundary_trigger = glrmask::BoundaryTriggerDetail::Tokens;
-auto constraint = grammar.compile(vocab, options);
+glrmask::Module module(grammar);
+module.set_mask_strategy(glrmask::MaskStrategy::ParserDwa);
+module.set_boundary_mask_strategy(glrmask::BoundaryMaskStrategy::FastBuild);
+glrmask::CompileOptions options({99});
+auto constraint = module.compile(vocab, options);
 ```
 
-| `Optimization` | Intent |
-| --- | --- |
-| `Auto` | Let the core choose its default trade-off. |
-| `FastBuild` | Use the ordinary Dynamic compiler/runtime. |
-| `Balanced` | Use the core's balanced/O2 path. |
-| `FastRuntime` | Prefer low per-token runtime cost, accepting more build work. |
+| `MaskStrategy` | Value | Intent |
+| --- | --- | --- |
+| `Auto` | `0` | Let the core choose its default trade-off. |
+| `ParserDwa` | `1` | Static parser-DWA masks (slowest build, lowest runtime latency). Alias: `kFastRuntime`. |
+| `TokenTrie` | `2` | Dynamic token-trie walk (fastest build). Alias: `kFastBuild`. |
+| `TokenClassTrie` | `3` | Token-trie walk over token equivalence classes. |
 
-`BuildOptions` applies to the final `compile` or `link`. Preparation accepts only the optional boundary-metadata request: `grammar.prepare(vocab, BoundaryTriggerDetail::Tokens)`. End tokens and final optimization are not silently retained at preparation. An omitted boundary request differs from explicitly selecting `None`, which clears a retained request at final link. Unsupported combinations produce the same error as the Rust core; the binding does not substitute a hidden fallback.
+`CompileOptions` applies to `compile` and configures root `end_tokens`. Changing mask strategy or boundary strategy applies at compile time and never discards precompiled work. Unsupported combinations produce the same error as the Rust core; the binding does not substitute a hidden fallback.
 
 Recognition is the default Lark profile. Selected LLM extensions and named exact-token resolution must be enabled explicitly:
 
@@ -172,34 +152,36 @@ auto event_grammar = glrmask::Grammar::from_lark("start: <|begin|>", lark);
 
 ## Source composition and reusable preparation
 
-Bindings mutate the receiving `Grammar` or `PreparedGrammar` **transactionally**. Successful `bind` returns `void`; invalid bindings leave the receiver unchanged. `clone()` and ordinary C++ copy construction create independent binding snapshots. Binding a child also snapshots it: later edits to the original child do not change an already attached occurrence.
+Bindings mutate the receiving `Module` **atomically**. Successful `bind` returns `void`; invalid bindings leave the receiver unchanged. Ordinary C++ copy construction creates independent binding snapshots. Binding a child also snapshots it: later edits to the original child do not change an already attached occurrence.
 
 ```cpp
 glrmask::Vocab composed_vocab({{0, "["}, {1, "hello"}, {2, "]"}, {3, "[hello]"}});
-auto parent = glrmask::Grammar::from_glrm(
+auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
     R"(glrm 1; start root; extern grammar payload;
-        nt root = "[" payload "]";)");
+        nt root = "[" payload "]";)"));
 auto child = glrmask::Grammar::from_ebnf(R"(start ::= "hello")");
 parent.bind("payload", child);
 auto runnable = parent.compile(composed_vocab);
 ```
 
-For reusable compiled machinery, prepare the unbound parent and child separately, bind the prepared child, and link a runnable root:
+For reusable compiled machinery, precompile the unbound parent and child separately, bind the precompiled child, and compile a runnable root:
 
 ```cpp
-auto parent_module = glrmask::Grammar::from_glrm(
+auto parent_module = glrmask::Module(glrmask::Grammar::from_glrm(
     R"(glrm 1; start root; extern grammar payload;
-        nt root = "[" payload "]";)").prepare(composed_vocab);
-auto child_module = child.prepare(composed_vocab);
+        nt root = "[" payload "]";)"));
+parent_module.precompile(composed_vocab);
+auto child_module = glrmask::Module(child);
+child_module.precompile(composed_vocab);
 parent_module.bind("payload", child_module);
-auto runnable = parent_module.link();
+auto runnable = parent_module.compile(composed_vocab);
 ```
 
-Preparation can retain open slots, whereas compilation and final linking require a closed runnable root. Binding does not itself perform a hidden final compilation/link.
+`precompile` retains vocabulary-specific compilation artifacts without discarding previously built work. Binding precompiled parts into a precompiled parent is a fast linking operation.
 
-`requirements()` returns owned `Requirement` records with `name`, component `path`, `kind`, and an optional `source_span`. Qualified descendant names use `::`, for example `payload::TOOL`. A span has a half-open source byte range plus one-based line and Unicode-scalar column. Inspect actual requirements instead of inventing generated paths.
+`externs()` returns owned `Externs` snapshots with `name`, `kind` (`ExternKind::Token` or `ExternKind::Grammar`), and an optional `source_span`. `externs().unbound()` returns only unresolved externs. Each extern is bound once; rebinding is an error. Attaching an open child module with unbound externs produces an error.
 
-Source-stage bindings accept `Grammar`, `Token`, or `ExactTokens`. Prepared-stage bindings accept `PreparedGrammar`, `Token`, or `ExactTokens`. A runnable `Constraint` is not a public prepared-stage binding argument in this interface.
+Bindings accept `Module`, `Grammar`, `Expr`, `Token`, or `ExactTokens`. A runnable `Constraint` is not a binding operand.
 
 ## Exact tokens and ranges
 
@@ -207,13 +189,12 @@ Source-stage bindings accept `Grammar`, `Token`, or `ExactTokens`. Prepared-stag
 
 ```cpp
 auto selected = vocab.tokens({31});
-auto event = glrmask::Grammar::exact(selected);
-auto control = glrmask::Grammar::from_glrm(
-    R"(glrm 1; start root; extern token CONTROL; nt root = CONTROL;)");
-control.bind("CONTROL", glrmask::Token(99));
+auto control = glrmask::Module(glrmask::Grammar::from_glrm(
+    R"(glrm 1; start root; extern token CONTROL; nt root = CONTROL;)"));
+control.bind("CONTROL", selected);
 ```
 
-`vocab.token_ranges({{first, last}, ...})` uses **inclusive endpoints** in C and C++. Overlapping or adjacent ranges normalize without expanding all IDs. A reversed interval is rejected. `ExactTokens::ranges()` stays compact; `ids()` intentionally materializes IDs. `size()`, `empty()` and `clone()` are also available. An empty exact-token set denotes an empty event language, not epsilon. Each match consumes one chosen token event, not a sequence of the set's IDs.
+`vocab.token_ranges({{first, last}, ...})` uses **inclusive endpoints** in C and C++. Overlapping or adjacent ranges normalize without expanding all IDs. A reversed interval is rejected. `ExactTokens::ranges()` stays compact; `ids()` intentionally materializes IDs. `size()` and `empty()` are also available. An empty exact-token set denotes an empty event language, not epsilon. Each match consumes one chosen token event, not a sequence of the set's IDs.
 
 Exact-token events cannot be simulated by committing their decoded bytes. Use `commit_token` for exact controls and end tokens. `commit_bytes` advances ordinary byte input only.
 
@@ -239,7 +220,7 @@ auto external = constraint.save(true);  // Omit vocabulary storage.
 auto rebound = glrmask::Constraint::load(external, &vocab);
 
 auto module_bytes = parent_module.save();
-auto module = glrmask::PreparedGrammar::load(module_bytes, &vocab);
+auto module = glrmask::Module::load(module_bytes, &vocab);
 ```
 
 These use the Rust core's artifact formats, not C++ object serialization. With the same compatible GLRMask build, artifacts can be exchanged with Rust, Python and the Node binding. Exact vocabulary identity is validated when a vocabulary is supplied; an external-vocabulary artifact cannot load without it. Equal vocabulary size alone is insufficient.
@@ -252,7 +233,7 @@ Fallible C++ operations throw `glrmask::Error`, whose `status()` is the underlyi
 
 A Rust unwinding panic is contained at the boundary and reported as `GLRMASK_PANIC`. A state affected by such a panic is unusable and must be discarded. A process abort, allocation failure, stack overflow or invalid foreign memory is not recoverable by this mechanism.
 
-Immutable compiled constraints can be shared between threads, with independent states. Do not concurrently mutate a grammar, prepared module or sequence state, or destroy a handle while another thread uses it. The C++ wrapper does not add synchronization to mutable handles.
+Immutable compiled constraints can be shared between threads, with independent states. Do not concurrently mutate a grammar, module or sequence state, or destroy a handle while another thread uses it. The C++ wrapper does not add synchronization to mutable handles.
 
 ## C interface reference
 
@@ -260,18 +241,19 @@ The complete signatures and ABI memory contract are in [include/glrmask.h](inclu
 
 | Family | Operations |
 | --- | --- |
-| Library | `glrmask_abi_version`, `glrmask_version`, `glrmask_error_message`, default build/Lark options |
+| Library | `glrmask_abi_version`, `glrmask_version`, `glrmask_error_message`, default compile/Lark options |
 | Vocabulary | `glrmask_vocab_new`, clone, length, tokens, token ranges, free |
 | Exact token sets | Clone, length, materialized IDs, compact inclusive ranges, free |
-| Source grammars | Create from source/exact set, clone, bind grammar/token/set, requirements, prepare, compile, free |
-| Prepared grammars | Clone, bind prepared/token/set, requirements, link, save/load, free |
+| Source grammars | Create from source, clone, compile, free |
+| Modules | New from grammar, clone, get/set mask/boundary strategy, bind grammar/module/expr/token/tokens, precompile, compile, externs, unbound externs, save/load, free |
+| Expressions | Choice, sequence, literal, clone, free |
 | Constraints | Clone, start, mask length, marker inventory, save/load, free |
 | Sequence states | Clone, mask length, fill mask, commit token/bytes, acceptance/rejection, forcing, marker events, free |
-| Result objects | Bytes/u32/event data views; requirement count/indexed views; matching frees |
+| Result objects | Bytes/u32/event data views; extern count/indexed views; matching frees |
 
 All text is UTF-8 with an explicit byte length and does not need a terminating NUL. Vocabulary and committed bytes are arbitrary binary data. Lengths are element counts unless named as byte lengths. Input pointers are borrowed for the duration of a call; returned handles own their data. State handles independently retain their constraints.
 
-Free each owning C handle exactly once using its matching `_free` function; freeing `NULL` is allowed. A result's `_data`/`_get` view is borrowed until that result handle is freed. Do not free the view, and do not use a C++ allocator on Rust-owned memory. Build and Lark option structs must have the `struct_size` returned by their default constructors. A null build-options pointer selects defaults.
+Free each owning C handle exactly once using its matching `_free` function; freeing `NULL` is allowed. A result's `_data`/`_get` view is borrowed until that result handle is freed. Do not free the view, and do not use a C++ allocator on Rust-owned memory. Compile and Lark option structs must have the `struct_size` returned by their default constructors. A null compile-options pointer selects defaults.
 
 | Status | Meaning |
 | --- | --- |
@@ -290,4 +272,4 @@ The boundary checks nulls, alignment and overflowing lengths, but cannot validat
 
 The repository contains direct Rust-versus-C mask/commit tests, pure C ABI checks, C++ state/composition/persistence/marker/error/thread tests, and C++/Node artifact exchange tests. CMake installation and an external relocated consumer are part of the native validation workflow. The same C++ tests run for static and shared builds in the platform matrix.
 
-This interface covers the current public grammar/constraint lifecycle. It does not expose private parser tables, benchmark internals, a Python-only tokenizer adapter, model inference, or browser WebAssembly. The C ABI revision is currently 1; use the matching package's headers and library rather than assuming that future pre-1.0 interfaces or artifact formats are frozen.
+This interface covers the public grammar/constraint lifecycle. It does not expose private parser tables, benchmark internals, a Python-only tokenizer adapter, model inference, or browser WebAssembly. The C ABI revision is currently 1; use the matching package's headers and library rather than assuming that future pre-1.0 interfaces or artifact formats are frozen.

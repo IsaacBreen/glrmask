@@ -17,10 +17,10 @@ function run(args) {
 }
 const vocab=new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')],[31,Buffer.from('ab')],[32,Buffer.from('a')],[65,Buffer.from('z')]]);
 const grammar=api.Grammar.fromEbnf('start ::= "a" "b"');
-const modes=Object.values(api.Optimization);
+const modes=[...new Set(Object.values(api.MaskStrategy))];
 const expected=JSON.parse(run(['--parity']));
-const actual=modes.map((optimization,mode)=>{
-  const c=grammar.compileSync(vocab,{optimization}),s=c.start(),states=[];
+const actual=modes.map((maskStrategy,mode)=>{
+  const c=grammar.compileSync(vocab,{maskStrategy}),s=c.start(),states=[];
   for (let step=0;step<3;++step) {
     if(step) s.commitToken(step-1);
     states.push({mask:Array.from(s.mask()),accepting:s.isAccepting(),rejected:s.isRejected()});
@@ -29,8 +29,8 @@ const actual=modes.map((optimization,mode)=>{
 });
 assert.deepEqual(actual,expected,'C++ and Node mask/commit/state results differ');
 run(['--save',output]);
-for (const [mode,optimization] of modes.entries()) {
-  const reference=grammar.compileSync(vocab,{optimization});
+for (const [mode,maskStrategy] of modes.entries()) {
+  const reference=grammar.compileSync(vocab,{maskStrategy});
   for (const externalVocab of [false,true]) {
     const stem=(externalVocab?'external-':'mode-')+mode+'.glr';
     const cppBytes=fs.readFileSync(path.join(output,'cpp-'+stem));

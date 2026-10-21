@@ -177,7 +177,7 @@ fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
     let grammar=Grammar::from_glrm(r#"start root; nt root = "a" "b"?;"#);
     let ordinary=grammar.compile(&v).unwrap();
     let ordinary_bytes=ordinary.save();
-    let explicit=grammar.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
+    let explicit=grammar.compile_with_build_options(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     for compiled in [&ordinary,&explicit] {
         for form in native_representations(compiled,&v) {
             assert_finite_language(&form,&v,&[b"a",b"ab"]);
@@ -220,7 +220,7 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
 
 #[test]
 fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
-    use glrmask::Optimization;
+    use glrmask::MaskStrategy;
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),
         (3,b"\"".to_vec()),(4,b"\"ab\"".to_vec()),(5,b"x".to_vec())]);
     let schema=r#"{"enum":["a","ab"]}"#;
@@ -231,10 +231,10 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
         (Grammar::from_json_schema(schema),"\"ab\""),
     ];
     for (source,word) in sources {
-        let c=source.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)
+        let c=source.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         assert_eq!(c.parser_backend(),ParserBackend::TemplateDfa);
-        let ordinary=source.compile_with(&v,BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+        let ordinary=source.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
         let language: &[&[u8]]=if word.starts_with('"') {&[b"\"a\"",b"\"ab\""]} else {&[b"a",b"ab"]};
         for parser in native_representations(&c,&v).into_iter().chain(native_representations(&ordinary,&v)) {
             assert_finite_language(&parser,&v,language);
@@ -255,7 +255,7 @@ fn source_and_precompiled_composition_use_native_defaults() {
     let child=Grammar::from_glrm(r#"start root; nt root = "a";"#);
     let parent=Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#);
     let bound=parent.clone().bind_snapshot("child",&child).unwrap();
-    let template=bound.compile_with(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
+    let template=bound.compile_with_build_options(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
     let mut state=template.start();state.commit_bytes(b"xa").unwrap();assert!(state.is_accepting());
     let ordinary=bound.compile(&v).unwrap();
@@ -273,14 +273,14 @@ fn source_and_precompiled_composition_use_native_defaults() {
 fn native_parents_bind_fresh_and_loaded_children_in_all_optimization_modes() {
     let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"xa".to_vec()), (2, b"x".to_vec())]);
     let child = Grammar::from_glrm(r#"start root; nt root = "a";"#)
-        .compile_with(&v, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa))
+        .compile_with_build_options(&v, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa))
         .unwrap();
     let module = Grammar::from_glrm(
         r#"glrm 1; start root; extern grammar child; nt root = "x" child;"#,
     ).prepare(&v).unwrap();
     for child in native_representations(&child,&v) {
         let child_bytes=child.save();
-        for optimization in [glrmask::Optimization::Auto, glrmask::Optimization::FastRuntime, glrmask::Optimization::Balanced] {
+        for optimization in [glrmask::MaskStrategy::Auto, glrmask::MaskStrategy::ParserDwa, glrmask::MaskStrategy::TokenClassTrie] {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 module.bind_snapshot("child", &child).and_then(|bound| bound.link_with(
                     BuildOptions::default().optimization(optimization)))
@@ -302,7 +302,7 @@ fn explicit_lr_compile_and_link_requests_panic_loudly() {
     for link in [false,true] {
         let rejected=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let options=BuildOptions::default().parser_backend(ParserBackend::LrTable);
-            if link {module.link_with(options)} else {grammar.compile_with(&vocab,options)}
+            if link {module.link_with(options)} else {grammar.compile_with_build_options(&vocab,options)}
         }));
         let panic=rejected.expect_err("explicit LR materialization must panic");
         let message=panic.downcast_ref::<String>().map(String::as_str)
@@ -402,8 +402,8 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         .enumerate().map(|(i,byte)|(i as u32,vec![byte])).collect());
     let compiled = glrmask::Grammar::from_json_schema(
         r#"{"type":"object","properties":{"key":{"type":"string"},"value":{"type":"string"}},"required":["key","value"]}"#)
-        .compile_with(&vocab, glrmask::BuildOptions::default()
-            .optimization(glrmask::Optimization::Balanced)
+        .compile_with_build_options(&vocab, glrmask::BuildOptions::default()
+            .optimization(glrmask::MaskStrategy::TokenClassTrie)
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
     let loaded = glrmask::Constraint::load(compiled.save()).unwrap();
     for constraint in [&compiled,&loaded] {
@@ -425,12 +425,12 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
 #[test]
 fn table_free_metadata_queries_preserve_counts_across_reloads() {
     use glrmask::__private::{ConstraintExt, parser_backend_report};
-    use glrmask::{BuildOptions, Constraint, Grammar, Optimization, ParserBackend, Vocab};
+    use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
     let vocab = Vocab::new(vec![(0, b"true".to_vec()), (1, b"false".to_vec()),
         (2, b"t".to_vec()), (3, b"rue".to_vec())]);
-    for mode in [Optimization::Balanced, Optimization::FastRuntime] {
+    for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#)
-            .compile_with(&vocab, BuildOptions::default().optimization(mode)
+            .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
         let loaded = Constraint::load(compiled.save()).unwrap();
         let external = Constraint::load_with_vocab(

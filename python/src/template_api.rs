@@ -1,7 +1,7 @@
 //! Data-only parser programs. Python objects are converted to owned Rust data
 //! before validation/compilation; no Python callback is retained at runtime.
 use super::{PyConstraint, PyVocab};
-use super::final_api::{api_error, constraint, PyOptimization};
+use super::final_api::{api_error, constraint, PyMaskStrategy};
 use glrmask::template_parser::{
     LexerDefinition, ParserDefinition, ParserProgram, TemplateBuildOptions, TerminalPattern,
 };
@@ -55,7 +55,7 @@ impl PyParserProgram {
     /// parser definition. FAST_RUNTIME selects static masks; FAST_BUILD, AUTO
     /// and the default select the dynamic mask engine. All choices remain
     /// physically LR-table-free. Ignored terminals must have identity actions.
-    #[pyo3(signature = (vocab, terminal_patterns, *, ignore_terminal=None, end_tokens=None, optimization=None))]
+    #[pyo3(signature = (vocab, terminal_patterns, *, ignore_terminal=None, end_tokens=None, mask_strategy=None, optimization=None))]
     fn compile(
         &self,
         py: Python<'_>,
@@ -63,7 +63,8 @@ impl PyParserProgram {
         terminal_patterns: &Bound<'_, PyAny>,
         ignore_terminal: Option<u32>,
         end_tokens: Option<Vec<u32>>,
-        optimization: Option<PyRef<'_, PyOptimization>>,
+        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
+        optimization: Option<PyRef<'_, PyMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
         let mut terminals = Vec::with_capacity(self.terminal_count);
         for value in terminal_patterns.try_iter()? {
@@ -82,8 +83,9 @@ impl PyParserProgram {
         let mut lexer = LexerDefinition::new(terminals);
         if let Some(terminal) = ignore_terminal { lexer = lexer.ignoring(terminal); }
         let mut options = TemplateBuildOptions::default().end_tokens(end_tokens.unwrap_or_default());
-        if let Some(value) = optimization {
-            options = options.optimization(super::final_api::optimization(*value));
+        let strategy = mask_strategy.or(optimization);
+        if let Some(value) = strategy {
+            options = options.optimization((*value).into());
         }
         let vocab = vocab.inner.clone();
         py.detach(|| self.inner.compile_with(&lexer, &vocab, options))

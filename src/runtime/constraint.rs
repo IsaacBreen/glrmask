@@ -1139,6 +1139,9 @@ impl Constraint {
     /// when a proper prefix can complete a terminal that may either finish the
     /// component or immediately precede one of its unresolved grammar slots.
     pub(crate) fn build_boundary_token_trigger(&mut self) -> Result<(), String> {
+        if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
+            return Ok(());
+        }
         self.materialize_composition_link_metadata_for_compilation()?;
 
         let mut relevant = BitSet::new(self.parser_terminal_count() as usize);

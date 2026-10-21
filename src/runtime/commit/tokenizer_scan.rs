@@ -503,7 +503,7 @@ pub(super) fn execute_tokenizer_from_state_small_into(
 #[cfg(test)]
 mod reset_projection_tests {
     use super::*;
-    use crate::{BuildOptions, Constraint, Grammar, Optimization, Vocab};
+    use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
 
     #[test]
     fn medium_and_large_reset_projections_match_generic_lexer_execution() {
@@ -513,8 +513,8 @@ mod reset_projection_tests {
             let source = format!("start root nt root = {}", std::iter::once("\"a\"+".to_owned())
                 .chain((0..width).map(|id| format!("\"x{id}:\" @mark({id}) \"b\"")))
                 .collect::<Vec<_>>().join(" | "));
-            for mode in [Optimization::FastBuild, Optimization::Balanced, Optimization::FastRuntime] {
-                let fresh = Grammar::from_glrm(&source).compile_with(&vocab,
+            for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+                let fresh = Grammar::from_glrm(&source).compile_with_build_options(&vocab,
                     BuildOptions::default().optimization(mode)).unwrap();
                 let loaded = Constraint::load(fresh.save()).unwrap();
                 for constraint in [&fresh, &loaded] {
@@ -558,7 +558,7 @@ mod reset_projection_tests {
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
         for cached in [false,true] {
             let mut constraint = Grammar::from_glrm("start root; t A=/ab*/; nt root=A;")
-                .compile_with(&vocab,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+                .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
             // The public analysis union retains distinct states but shares
             // terminal IDs, exactly the overlapping-lane case under test.
             let tokenizer = Tokenizer::disjoint_union_for_analysis(

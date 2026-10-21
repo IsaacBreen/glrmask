@@ -294,7 +294,7 @@ pub(crate) fn compose_owned(mut parent: Constraint, children: Vec<(String, Arc<C
 #[cfg(test)]
 mod candidate_tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, Optimization, ParserBackend};
+    use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend};
 
     #[test]
     fn direct_table_free_link_carries_persisted_candidate_sets_through_reload() {
@@ -308,7 +308,7 @@ mod candidate_tests {
             (6, b"xaby".to_vec()),
         ]);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#)
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
                 BuildOptions::default().parser_backend(ParserBackend::TemplateDfa),
             )
@@ -332,7 +332,7 @@ mod candidate_tests {
             .unwrap()
             .link_with(
                 BuildOptions::default()
-                    .optimization(Optimization::Balanced)
+                    .optimization(MaskStrategy::TokenClassTrie)
                     .parser_backend(ParserBackend::TemplateDfa),
             )
             .unwrap();
@@ -372,9 +372,9 @@ mod candidate_tests {
         ] {
             for child in [r#"glrm 1; start value; nt value = "a";"#,
                 r#"glrm 1; start value; nt value = "a"?;"#] {
-                let options = BuildOptions::default().optimization(Optimization::Balanced)
+                let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
                     .parser_backend(ParserBackend::TemplateDfa);
-                let child = Grammar::from_glrm(child).compile_with(&vocab, options.clone()).unwrap();
+                let child = Grammar::from_glrm(child).compile_with_build_options(&vocab, options.clone()).unwrap();
                 let linked = Grammar::from_glrm(parent).prepare(&vocab).unwrap()
                     .bind_snapshot("child", &child).unwrap().link_with(options).unwrap();
                 assert!(linked.boundary_candidate_summary.get().is_none());
@@ -416,7 +416,7 @@ mod candidate_tests {
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
             nt root = "x" child "y";"#)
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
-            .link_with(BuildOptions::default().optimization(Optimization::Balanced)).unwrap();
+            .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
         let disabled = linked.clone();
         disabled.boundary_candidate_summary.set(crate::runtime::BoundaryCandidateSummary::Unknown {
             reason: crate::runtime::SummaryUnavailable::Disabled }).unwrap();

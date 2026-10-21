@@ -92,10 +92,10 @@ fn runtime_section_length_corruption_remains_an_error() {
 fn ordinary_composition_metadata_unwrap_has_identical_bytes() {
     let vocab = crate::Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
     let constraint = crate::Grammar::glrm("start root; nt root ::= 'a' 'b'?;")
-        .compile_with(
+        .compile_with_build_options(
             &vocab,
             crate::BuildOptions::default()
-                .optimization(crate::Optimization::Balanced),
+                .optimization(crate::MaskStrategy::TokenClassTrie),
         )
         .unwrap();
 

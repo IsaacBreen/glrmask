@@ -3,7 +3,7 @@
 //! FIXTURE_DIR contains schema-00.json through schema-09.json, vocab_dump.bin, traces.json.
 //! All masks are compared in memory; only measurements and hashes are saved.
 use std::{fs, path::Path, io::{BufWriter, Write}, time::Instant};
-use glrmask::{BuildOptions,Grammar,Optimization,Constraint,ParserBackend,Vocab};
+use glrmask::{BuildOptions,Grammar,MaskStrategy,Constraint,ParserBackend,Vocab};
 use glrmask::__private::parser_backend_report;
 use serde::Deserialize;
 use glrmask_grammar::__private::grammar::ast::{GrammarExpr, NamedGrammar, NamedRule};
@@ -159,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     eprintln!("LOAD canonical selected10, traces={} positions=11767", traces.len());
     let options = BuildOptions::default()
-        .optimization(if args[3] == "static" { Optimization::FastRuntime } else { Optimization::Balanced })
+        .optimization(if args[3] == "static" { MaskStrategy::ParserDwa } else { MaskStrategy::TokenClassTrie })
         .parser_backend(ParserBackend::TemplateDfa);
     // Prepare the complete native child before starting the link timer. Schema
     // lowering and child compilation are reported separately, never hidden.
@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let named = glrmask_grammar::__private::grammar::glrm::from_glrm_with_inline_subgrammars(&dispatch, &bindings)?;
     let child_source = source_for_reparse(named);
     fs::write(output.join("child-source.glrm"), &child_source)?;
-    let child = Grammar::glrm(&child_source).compile_with(&vocab, options.clone())?;
+    let child = Grammar::glrm(&child_source).compile_with_build_options(&vocab, options.clone())?;
     let child_compile_ns = started.elapsed().as_nanos();
     let child_report = parser_backend_report(&child); assert_table_free(&child_report);
     fs::write(output.join("child-backend.json"),serde_json::to_vec_pretty(&child_report)?)?;
@@ -216,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let named = glrmask_grammar::__private::grammar::glrm::from_glrm_with_inline_subgrammars(&source, &bindings)?;
     let inline_source = source_for_reparse(named);
     fs::write(output.join("inline-reference-source.glrm"), &inline_source)?;
-    let reference = Grammar::from_glrm(&inline_source).compile_with(&vocab, options.clone())?;
+    let reference = Grammar::from_glrm(&inline_source).compile_with_build_options(&vocab, options.clone())?;
     let reference_compile_ns = started.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&reference));
     eprintln!("INLINE_REFERENCE source_prepare_compile_ns={reference_compile_ns}");

@@ -531,9 +531,9 @@ pub(crate) fn mask_for_states_at_most(states:&[ConstraintState<'_>],max_allowed:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions,Grammar,Optimization,Vocab};
+    use crate::{BuildOptions,Grammar,MaskStrategy,Vocab};
 
-    const MODES:[Optimization;4]=[Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime];
+    const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
     fn ids(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(wi,&word)| (0..32).filter_map(move |bit|
             (word&(1<<bit)!=0).then_some((wi*32+bit) as u32))).collect()
@@ -578,7 +578,7 @@ mod tests {
         for body in ["\"ab\"","\"a\" | \"ab\" | \"aba\"","eps | \"ab\"","/a+/ \"b\"","/a|ab/ \"a\"?","/a*/ \"b\"","(/a+/ & /aa*/ ) \"b\"","(/a+/ - /aaa+/) \"b\""] {
             let source=format!("start root nt root = {body}");
             for mode in MODES {
-                let c=Grammar::from_glrm(&source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 explore(&c,&format!("{mode:?} {body}"));
                 let loaded=Constraint::load(c.save()).unwrap();explore(&loaded,&format!("loaded {mode:?} {body}"));
             }
@@ -593,7 +593,7 @@ mod tests {
             for tokens in [vec![0],vec![17],vec![29],vec![29,30,31],vec![0,17,29,4096]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source);g.bind("M",v.tokens(tokens.clone()).unwrap()).unwrap();
-                    let c=g.compile_with(&v,BuildOptions::default().optimization(mode).end_tokens([4096])).unwrap();
+                    let c=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([4096])).unwrap();
                     explore(&c,&format!("{mode:?} {body} {tokens:?}"));
                 }
             }
@@ -610,7 +610,7 @@ mod tests {
         p.bind("C",child.prepare(&v).unwrap()).unwrap();
         for mode in MODES {
             explore(&p.link_with(BuildOptions::default().optimization(mode)).unwrap(),&format!("composed {mode:?}"));
-            let c=Grammar::from_glrm("start root nt root=\"\\u{e9}x\"").compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+            let c=Grammar::from_glrm("start root nt root=\"\\u{e9}x\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
             explore(&c,&format!("unicode {mode:?}"));
         }
     }
@@ -618,8 +618,8 @@ mod tests {
     fn union_counts_distinct_original_ids_not_owner_occurrences() {
         let v=Vocab::new(vec![(17,b"a".to_vec()),(29,b"b".to_vec()),(33,b"c".to_vec())]);
         for mode in MODES {
-            let a=Grammar::from_glrm("start r nt r=\"ab\"").compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
-            let b=Grammar::from_glrm("start r nt r=\"ac\"").compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+            let a=Grammar::from_glrm("start r nt r=\"ab\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+            let b=Grammar::from_glrm("start r nt r=\"ac\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
             let states=[a.start(),b.start()];
             assert_eq!(one(states.iter().map(View::of)).unwrap(),AtMostOne::One(17));
             assert_eq!(forced_tokens(&states).unwrap(),[17]);
@@ -630,7 +630,7 @@ mod tests {
     #[test]
     fn ambiguous_query_stops_after_two_final_witnesses_without_filling_cache() {
         let v=Vocab::new((0..4096u32).map(|i|(i,format!("a{i:04}").into_bytes())).collect());
-        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").compile_with(&v,BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
+        let c=Grammar::from_glrm("start r nt r=/a[0-9]{4}/").compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
         let s=c.start();let before=s.mask_cache.lock().unwrap().is_some();
         BYTE_PROOFS.with(|n|n.set(0));assert_eq!(s.probe_one_token().unwrap(),AtMostOne::MoreThanOne);
         let examined=BYTE_PROOFS.with(|n|n.get());assert!(examined<40,"performed {examined} byte proofs for a two-witness query");
@@ -647,7 +647,7 @@ mod tests {
             ("start root nt root=\"!!!!!!!!!!!!!!!!!!!!!!!!\"",vec![33;24]),
         ] {
             for mode in MODES {
-                let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 for loaded in [false,true] {
                     let c=if loaded{Constraint::load(c.save()).unwrap()}else{c.clone()};
                     let state=c.start();
@@ -675,7 +675,7 @@ mod tests {
             "grammar C { start r nt r=\"(\" r \")\" | eps } start r nt r=C \"Z\"",
         ] {
             for mode in MODES {
-                let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 explore(&c,&format!("alphabet boundary {mode:?}, {source}"));
                 let loaded=Constraint::load(c.save()).unwrap();
                 explore(&loaded,&format!("loaded alphabet boundary {mode:?}, {source}"));
@@ -688,8 +688,8 @@ mod tests {
 #[cfg(test)]
 mod differential_tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, Optimization, Token, Vocab};
-    const MODES:[Optimization;4]=[Optimization::Auto,Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime];
+    use crate::{BuildOptions, Grammar, MaskStrategy, Token, Vocab};
+    const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
     fn allowed(mask:&[u32])->Vec<u32> {
         mask.iter().enumerate().flat_map(|(word,&bits)| (0..32).filter_map(move |bit|
             (bits&(1u32<<bit)!=0).then_some((word*32+bit) as u32))).collect()
@@ -753,7 +753,7 @@ mod differential_tests {
         ] {
             for mode in MODES {
                 for eos in [Vec::new(),vec![130],vec![4]] {
-                    let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode).end_tokens(eos.clone())).unwrap();
+                    let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens(eos.clone())).unwrap();
                     let tag=format!("{source:?}, {mode:?}, end={eos:?}");
                     walk(&c,&tag,2);
                     let loaded=Constraint::load(&c.save()).unwrap();
@@ -771,7 +771,7 @@ mod differential_tests {
             for set in [vec![],vec![0],vec![4],vec![7],vec![99],vec![99,130],vec![0,4,7,99]] {
                 for mode in MODES {
                     let mut g=Grammar::from_glrm(&source);g.bind("MARK",v.tokens(set.iter().copied()).unwrap()).unwrap();
-                    let c=g.compile_with(&v,BuildOptions::default().optimization(mode).end_tokens([130])).unwrap();
+                    let c=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([130])).unwrap();
                     walk(&c,&format!("{body}, set={set:?}, {mode:?}"),2);
                 }
             }
@@ -839,7 +839,7 @@ mod differential_tests {
             ("regular-difference",Grammar::from_glrm(regular),list),
         ] {
             for mode in MODES {
-                let c=grammar.compile_with(&v,BuildOptions::default().optimization(mode).end_tokens([2000])).unwrap();
+                let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([2000])).unwrap();
                 for loaded in [false,true] {
                     let c=if loaded{Constraint::load(c.save()).unwrap()}else{c.clone()};
                     let mut state=c.start();let mut remaining=text.as_bytes();let mut step=0;

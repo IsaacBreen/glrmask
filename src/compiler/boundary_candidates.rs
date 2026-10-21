@@ -1262,13 +1262,13 @@ mod tests {
 
     #[test]
     fn composite_fingerprint_uses_only_matching_fresh_component_queries() {
-        use crate::{BuildOptions, Grammar, Optimization, ParserBackend};
+        use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend};
         let vocabulary = crate::Vocab::new(vec![(0, b"acatb".to_vec()), (4, b"cat".to_vec()),
             (19, b"ac".to_vec()), (999, b"z".to_vec())]);
-        let options = || BuildOptions::default().optimization(Optimization::Balanced)
+        let options = || BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
             .parser_backend(ParserBackend::TemplateDfa);
         let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "cat";"#)
-            .compile_with(&vocabulary, options()).unwrap();
+            .compile_with_build_options(&vocabulary, options()).unwrap();
         let parent = Grammar::from_glrm(r#"glrm 1; start doc; extern grammar child; nt doc = "a" child "b";"#)
             .prepare(&vocabulary).unwrap();
         let linked = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
@@ -1703,11 +1703,11 @@ mod preparation_tests {
             (3, b"b".to_vec()),
             (4, b"ba".to_vec()),
         ]);
-        for optimization in [crate::Optimization::FastRuntime, crate::Optimization::Balanced] {
+        for optimization in [crate::MaskStrategy::ParserDwa, crate::MaskStrategy::TokenClassTrie] {
             let source = crate::Grammar::from_glrm(
                 r#"glrm 1; start document; nt document = "a";"#,
             )
-            .compile_with(
+            .compile_with_build_options(
                 &vocab,
                 crate::BuildOptions::default()
                     .optimization(optimization)
@@ -1737,10 +1737,10 @@ mod preparation_tests {
     fn persisted_pre_nullable_fix_proof_is_rejected_before_composition() {
         let vocab = crate::Vocab::new(vec![(0, b"X[a]!".to_vec()),
             (1, b"a]!".to_vec()), (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
-        let options = crate::BuildOptions::default().optimization(crate::Optimization::Balanced)
+        let options = crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenClassTrie)
             .parser_backend(crate::ParserBackend::TemplateDfa);
         let leaf = crate::Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
-            .compile_with(&vocab, options.clone()).unwrap();
+            .compile_with_build_options(&vocab, options.clone()).unwrap();
         let mut middle = crate::Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
             .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
             .link_with(options.clone()).unwrap();

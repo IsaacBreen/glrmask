@@ -23,27 +23,29 @@ Time between masks. Lower is better.
 
 **TBM (µs)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 3.0 | 31.5 | 12.7 | 25.9 |
-| p50 | 2.6 | 9.1 | 6.9 | 10.6 |
-| p90 | 5.1 | 86.4 | 30.3 | 40.7 |
-| p99 | 12.2 | 239.5 | 74.8 | 289.9 |
-| p99.9 | 24.9 | 754.2 | 206.1 | 1,092.6 |
-| Max | 283.1 | 3,647.8 | 2,140.9 | 6,931.5 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 3.0 | 31.5 | 25.9 |
+| p50 | 2.6 | 9.1 | 10.6 |
+| p90 | 5.1 | 86.4 | 40.7 |
+| p99 | 12.2 | 239.5 | 289.9 |
+| p99.9 | 24.9 | 754.2 | 1,092.6 |
+| Max | 283.1 | 3,647.8 | 6,931.5 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 33.7 | 3.9 | 12.3 | 1.2 |
-| p50 | 12.6 | 2.3 | 6.2 | 0.8 |
-| p90 | 78.9 | 6.5 | 19.0 | 1.8 |
-| p99 | 302.3 | 35.9 | 125.5 | 11.1 |
-| p99.9 | 854.3 | 88.8 | 445.0 | 17.9 |
-| Max | 1,293.4 | 274.6 | 631.1 | 231.0 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 33.7 | 3.9 | 1.2 |
+| p50 | 12.6 | 2.3 | 0.8 |
+| p90 | 78.9 | 6.5 | 1.8 |
+| p99 | 302.3 | 35.9 | 11.1 |
+| p99.9 | 854.3 | 88.8 | 17.9 |
+| Max | 1,293.4 | 274.6 | 231.0 |
 
-14 October 2026 · 11,277 complete valid trajectories accepted by all four engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
+Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+
+14 October 2026 · 11,277 complete valid trajectories accepted by all measured engines · 1,734,930 TBM positions per engine · 8,326 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
 ### JavaScript
 
@@ -58,27 +60,29 @@ Time between masks. Lower is better.
 
 **TBM (µs)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 16.9 | 1,392.4 | 389.0 | 1,052.2 |
-| p50 | 18.2 | 145.5 | 69.9 | 856.6 |
-| p90 | 30.4 | 3,626.1 | 1,088.8 | 2,521.7 |
-| p99 | 47.9 | 4,091.7 | 1,509.6 | 3,097.0 |
-| p99.9 | 71.1 | 4,656.9 | 2,016.8 | 3,597.1 |
-| Max | 77.4 | 5,517.4 | 2,139.0 | 3,867.9 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 16.9 | 1,392.4 | 1,052.2 |
+| p50 | 18.2 | 145.5 | 856.6 |
+| p90 | 30.4 | 3,626.1 | 2,521.7 |
+| p99 | 47.9 | 4,091.7 | 3,097.0 |
+| p99.9 | 71.1 | 4,656.9 | 3,597.1 |
+| Max | 77.4 | 5,517.4 | 3,867.9 |
 
 **Time to first mask (ms)**
 
-| Statistic | Static / FastRuntime | Dynamic / FastBuild | Balanced / O2 | llguidance |
-|---|---:|---:|---:|---:|
-| Mean | 5,089.4 | 113.3 | 458.4 | 8.0 |
-| p50 | 5,099.6 | 113.0 | 457.8 | 8.0 |
-| p90 | 5,152.7 | 116.9 | 464.3 | 8.1 |
-| p99 | 5,223.0 | 120.7 | 470.4 | 8.2 |
-| p99.9 | 5,225.9 | 121.7 | 472.3 | 8.2 |
-| Max | 5,226.2 | 121.8 | 472.5 | 8.2 |
+| Statistic | Static | Dynamic | llguidance |
+|---|---:|---:|---:|
+| Mean | 5,089.4 | 113.3 | 8.0 |
+| p50 | 5,099.6 | 113.0 | 8.0 |
+| p90 | 5,152.7 | 116.9 | 8.1 |
+| p99 | 5,223.0 | 120.7 | 8.2 |
+| p99.9 | 5,225.9 | 121.7 | 8.2 |
+| Max | 5,226.2 | 121.8 | 8.2 |
 
-14 October 2026 · 28 complete valid trajectories accepted by all four engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
+Static is `MaskStrategy.FAST_RUNTIME`; Dynamic is `MaskStrategy.FAST_BUILD`.
+
+14 October 2026 · 28 complete valid trajectories accepted by all measured engines · 3,805 TBM positions per engine · 55 common-built cases for TTFM. One unpinned native wall-clock timing run on AWS c8i.8xlarge (Intel Xeon 6975P-C, 32 available CPUs). Vocabulary preparation is excluded.
 
 #### Dynamic mode
 
@@ -93,7 +97,7 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 [Explore Dynamic JSON results](https://glrmask.com/?dataset=json&mode=dynamic#benchmarks).
 
-There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Balanced 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
+There was no CPU pinning or SMT sibling reservation, and checkpoint publication overlapped the benchmark. Saved telemetry cannot isolate scheduling effects; latency stabilization is not certified. Successful builds do not establish semantic correctness. All 9,558 JSON schemas were attempted: build errors are Dynamic 232, Static 233 and llguidance 1,226. Incorrect examples are 460 for each GLRMask mode and 100 for llguidance; runtime-error examples are 0 and 6 respectively. JavaScript attempts all 55 fixtures: all builds succeed, with 1 incorrect example per GLRMask mode and 4 for llguidance. Headline TBM excludes incomplete or nonaccepted valid trajectories; all outcomes remain in the raw records. This finite corpus does not establish full-language equivalence or whole-corpus dominance.
 
 [Native AWS benchmark details](docs/benchmark-aws-2026-10-14.md). Historical [October 8 Mac JSON](docs/benchmark-cfa-2026-10-08.md) and [October 9 Mac JavaScript](docs/benchmark-javascript-2026-10-09.md) reports are retained with their original measurement protocols. These are source builds, not measurements of the published 0.2 packages.
 
@@ -125,10 +129,6 @@ GLRMask has four core types:
 - `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
-
-**Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages
-use `PreparedGrammar` for reusable preparation. The decoding quickstarts below
-work with that release; the new assembly APIs require a matching source build.
 
 Use direct `Grammar.compile` for a closed source, or a `Module` when local
 settings, late-bound children, or retained work are needed. `Expr.choice` and
@@ -194,10 +194,10 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 ### Composition and reusable grammars
 
 Use `extern token NAME` for a one-event exact-token contract and
-`extern grammar NAME` for a general byte/event grammar fragment. Bind source
-children to `Grammar`, or cold and independently precompiled children to `Module`.
-Neither child needs to be complete before attachment. Modules keep their own
-local compilation settings; `Grammar` does not store those settings:
+`extern grammar NAME` for a general byte/event grammar fragment. Bind
+children to a `Module`. A child must have every extern bound before it is
+attached. Modules keep their own local compilation settings; `Grammar` does not
+store those settings:
 
 ```rust
 use glrmask::{Grammar, Module, Result, Vocab};
@@ -206,58 +206,67 @@ use glrmask::{Grammar, Module, Result, Vocab};
 let mut child = Module::new(&Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
 ));
+child.bind("MARK", glrmask::Token::new(marker))?;
 child.precompile(vocab)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
 ));
-parent.precompile(vocab)?;
 parent.bind("ITEM", &child)?;
-parent.bind("ITEM::MARK", glrmask::Token::new(marker))?;
+parent.precompile(vocab)?;
 let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
 # }
 ```
 
-Binding mutates the receiving handle atomically. `clone()` makes an independently
-editable handle sharing immutable internals. Children are captured as snapshots;
-editing the original child later does not change existing parents. Repeated
-references to one inline grammar share bindings, while separately attached
-occurrences can be specialized independently.
-`unbound()` exposes outstanding typed paths such as `ITEM::MARK`; `externs()` also
-includes bound declarations. Final compilation requires every declared parameter
-to be resolved. `Module.save()` and `Module.load()` preserve source, settings,
-open bindings and retained work with the same vocabulary identity. Vocabulary
-is supplied to root compilation operations, not every cold child constructor.
+Binding mutates the receiving handle atomically. In Rust, `clone()` produces an
+independent snapshot sharing immutable internals; in Python, use `copy()`.
+Children are captured as snapshots; editing the original child later does not
+change existing parents. Repeated references to one inline grammar share
+bindings, while separately attached occurrences can be specialized
+independently.
+`m.externs().unbound()` (Python: `m.externs.unbound`) reports outstanding
+unresolved externs; `m.externs()` (Python: `m.externs`) also includes bound
+declarations. Qualified `::` paths are not supported; each extern is bound once
+on the module that declared it. Final compilation requires every declared
+extern to be resolved. `Module.save()` and `Module.load()` preserve source,
+settings, bindings and retained work with the same vocabulary identity.
+Vocabulary is supplied to root compilation operations, not every cold child
+constructor.
 
 Exact token sets and compact ranges consume one original ID, never its decoded
 spelling. A JSON Schema is an ordinary grammar-valued child. Exact event values
-can also bind directly to grammar slots; `Grammar::exact` constructs a standalone
-event-set grammar when needed. See the [full guide](GUIDE.md),
+can also bind directly to grammar externs. See the [full guide](GUIDE.md),
 [native syntax](docs/glrm-format.md), and [exact-token ranges](docs/exact-token-ranges.md).
 
-`Expr.choice` and `Expr.sequence` combine whole grammar or module leaves without
-adding scopes at intermediate grouping operators. The leaves retain independent
-bindings, options and any retained work. Use `Grammar.from_expr` for source-only
-expressions, and `Module::from_expr` (Rust) or `Module(expr)` (Python) for
-configured expressions. See [module lifecycle](docs/module-lifecycle.md).
+`Expr.choice` and `Expr.sequence` combine whole grammar, module, or token leaves
+without adding scopes at intermediate grouping operators. `Expr.literal` matches
+exact bytes. The pieces retain independent bindings and any retained work.
+Expressions can be bound directly to module externs.
 
-### Choosing an optimization mode
+### Choosing a mask strategy
 
-`FastBuild` favors short cold starts using ordinary Dynamic, `Balanced` uses the
-native middle-ground configuration, and `FastRuntime` favors mask-generation speed.
-`Auto` is the default. Python exposes the corresponding uppercase names. These are
-implementation trade-offs, not different language semantics.
-Each Module captures its own `ModuleOptions`. A raw child uses default options,
-not its parent's overrides. Unsupported combinations of retained representations
-produce an error instead of silently rebuilding or discarding supplied work.
+`MaskStrategy` trades off compilation time against per-token masking latency:
+
+- `ParserDwa` (alias `FAST_RUNTIME`): static parser-DWA masks (slowest build, fastest runtime masks).
+- `TokenTrie` (alias `FAST_BUILD`): dynamic token-trie walk (fastest build).
+- `TokenClassTrie`: token-trie walk over token equivalence classes.
+- `Auto`: library chooses the strategy (the default).
+
+`BoundaryMaskStrategy` configures the minimum metadata to build for composition
+boundaries: `FastBuild` (conservative token-set boundary trigger, default) and
+`FastRuntime` (full exact proper-prefix boundary trigger).
+
+Each Module captures its own settings via `set_mask_strategy` and
+`set_boundary_mask_strategy` (in Python: constructor keywords or properties).
+Compile options apply to the root compile call only:
 
 ```rust
-# use glrmask::{BuildOptions, Grammar, Optimization, Result, Vocab};
+# use glrmask::{CompileOptions, Grammar, Result, Vocab};
 # fn demo(grammar: &Grammar<'_>, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
-    BuildOptions::default().optimization(Optimization::FastBuild),
+    CompileOptions::default(),
 )?;
 # let _ = constraint;
 # Ok(())

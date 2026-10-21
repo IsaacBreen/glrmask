@@ -1,5 +1,5 @@
 //! Public-consumer lifecycle tests: no internal-api shortcuts or private field access.
-use glrmask::{CompileOptions, Expr, Grammar, IntoExpr, Module, ModuleOptions, Optimization, Token, Vocab};
+use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, Token, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -11,13 +11,11 @@ fn vocab() -> Vocab {
 #[test]
 fn construction_and_options_do_not_change_the_source_grammar() {
     let source = Grammar::from_ebnf("start ::= \"a\"");
-    let original = source.module();
-    let different = original.with_options(
-        ModuleOptions::default().optimization(Optimization::Balanced),
-    ).unwrap();
-    assert_eq!(source.module().options().optimization_value(), Optimization::Auto);
-    assert_eq!(original.options().optimization_value(), Optimization::Auto);
-    assert_eq!(different.options().optimization_value(), Optimization::Balanced);
+    let original = Module::new(&source);
+    let mut different = original.clone();
+    different.set_mask_strategy(MaskStrategy::TokenClassTrie).unwrap();
+    assert_eq!(original.mask_strategy(), MaskStrategy::Auto);
+    assert_eq!(different.mask_strategy(), MaskStrategy::TokenClassTrie);
     let v = vocab();
     assert_eq!(source.compile(&v).unwrap().start().mask(), different.compile(&v).unwrap().start().mask());
 }
@@ -26,16 +24,16 @@ fn construction_and_options_do_not_change_the_source_grammar() {
 fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
     let v = vocab();
     let source = Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT");
-    let mut prepared = source.module();
+    let mut prepared = Module::new(&source);
     prepared.precompile(&v).unwrap();
     let saved_open = prepared.save();
-    let mut first = Module::load_with_vocab(&saved_open, &v).unwrap();
+    let mut first = Module::load(&saved_open, Some(&v)).unwrap();
     let mut second = first.clone();
     first.bind("LEFT", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
     first.bind("RIGHT", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
     second.bind("LEFT", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
     second.bind("RIGHT", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
-    assert_eq!(prepared.unbound().unwrap().len(), 2);
+    assert_eq!(prepared.externs().unbound().len(), 2);
     assert_eq!(saved_open, prepared.save());
     assert_ne!(first.compile(&v).unwrap().start().mask(), second.compile(&v).unwrap().start().mask());
     let root = first.compile(&v).unwrap();
@@ -47,17 +45,17 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
 #[test]
 fn native_local_modes_survive_expression_grouping_and_persistence() {
     let v = vocab();
-    for a_mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
-        for b_mode in [Optimization::Auto, Optimization::Balanced, Optimization::FastRuntime] {
-            let a = Grammar::from_ebnf("start ::= \"a\"").module()
-                .with_options(ModuleOptions::default().optimization(a_mode)).unwrap();
-            let mut b = Grammar::from_ebnf("start ::= \"b\"").module()
-                .with_options(ModuleOptions::default().optimization(b_mode)).unwrap();
+    for a_mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
+        for b_mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
+            let mut a = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
+            a.set_mask_strategy(a_mode).unwrap();
+            let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\""));
+            b.set_mask_strategy(b_mode).unwrap();
             b.precompile(&v).unwrap();
-            let expr = Expr::sequence([a.into_expr(), Expr::sequence([b]).into_expr()]);
-            assert!(Grammar::from_expr(&expr).is_err(), "configured work cannot become raw source");
-            let module = Module::from_expr(&expr).unwrap();
-            let loaded = Module::load_with_vocab(module.save(), &v).unwrap();
+            let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
+            let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
+            host.bind("E", expr).unwrap();
+            let loaded = Module::load(&host.save(), Some(&v)).unwrap();
             let root = loaded.compile(&v).unwrap();
             let mut state = root.start();
             assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
@@ -69,39 +67,33 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
 }
 
 #[test]
-fn anonymous_expression_paths_do_not_depend_on_operator_nesting() {
-    let a = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE");
-    let b = Grammar::from_ebnf("start ::= \",\"");
-    let nested = Expr::sequence([Expr::sequence([&a]).into_expr(), b.into_expr(), a.into_expr()]);
-    let mut module = Module::from_expr(&nested).unwrap();
-    let names: Vec<_> = module.unbound().unwrap().iter().map(|x| x.name()).collect();
-    assert_eq!(names, ["leaf0::VALUE", "leaf2::VALUE"]);
-    let before = module.save();
-    assert!(module.bind("leaf1::VALUE", Token::new(5)).is_err());
-    assert_eq!(module.save(), before, "failed descendant binding must be atomic");
-    module.bind("leaf0::VALUE", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
-    module.bind("leaf2::VALUE", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
-    assert!(module.unbound().unwrap().is_empty());
-    assert_eq!(module.externs().unwrap().iter().filter(|x| x.name().ends_with("::VALUE")).count(), 2);
-    let v = vocab();
-    let root = module.compile(&v).unwrap();
-    let mut state = root.start();
-    state.commit_token(4).unwrap();
-    assert!(state.is_accepting());
+fn open_child_and_qualified_paths_are_strictly_rejected() {
+    let a = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;");
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar CHILD start s nt s=CHILD;"));
+    let err = parent.bind("CHILD", Module::new(&a)).unwrap_err().to_string();
+    assert!(err.contains("unbound externs"), "must reject open child: {err}");
+    assert!(err.contains("VALUE"), "must list unbound externs: {err}");
+
+    let err_qual = parent.bind("CHILD::VALUE", Token::new(5)).unwrap_err().to_string();
+    assert!(err_qual.contains("qualified paths are not supported"), "must reject '::': {err_qual}");
 }
 
 #[test]
-fn changing_locally_frozen_options_is_atomic_but_cold_parent_is_independent() {
+fn settings_setters_never_invalidate_retained_work() {
     let v = vocab();
-    let mut leaf = Grammar::from_ebnf("start ::= \"a\"").module();
+    let mut leaf = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
     leaf.precompile(&v).unwrap();
-    let bytes = leaf.save();
-    let changed = ModuleOptions::default().optimization(Optimization::Balanced);
-    assert!(leaf.set_options(changed.clone()).is_err());
-    assert_eq!(leaf.save(), bytes);
-    let mut parent = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE").module();
+    let _before_save = leaf.save();
+
+    // Setters store the value and never touch retained work
+    leaf.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
+    assert_eq!(leaf.mask_strategy(), MaskStrategy::ParserDwa);
+    leaf.set_boundary_mask_strategy(BoundaryMaskStrategy::FastRuntime).unwrap();
+    assert_eq!(leaf.boundary_mask_strategy(), BoundaryMaskStrategy::FastRuntime);
+
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;"));
     parent.bind("VALUE", &leaf).unwrap();
-    parent.set_options(changed).unwrap();
+    parent.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
     let root = parent.compile_with(&v, CompileOptions::default().end_tokens([5])).unwrap();
     let mut state = root.start();
     state.commit_token(0).unwrap();

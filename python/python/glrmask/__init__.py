@@ -17,10 +17,6 @@ GLRMask has four core types:
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
-**Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages
-use `PreparedGrammar` for reusable preparation. The decoding quickstarts below
-work with that release; the new assembly APIs require a matching source build.
-
 Use direct `Grammar.compile` for a closed source, or a `Module` when local
 settings, late-bound children, or retained work are needed. `Expr.choice` and
 `Expr.sequence` group grammar leaves without adding an extra lexer scope at each
@@ -63,5 +59,37 @@ published package availability.
 
 [Full guide](https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md) · [API reference](https://glrmask.com/api/python/)
 """
+from collections.abc import Mapping
+from ._glrmask import (
+    BoundaryMaskStrategy,
+    Constraint,
+    ConstraintState,
+    ExactTokens,
+    Expr,
+    Extern,
+    Externs,
+    Grammar,
+    MaskStrategy,
+    Module,
+    Token,
+    Vocab,
+    _internal,
+)
 
-from ._glrmask import *
+Mapping.register(Externs)
+
+__all__ = [
+    "BoundaryMaskStrategy",
+    "Constraint",
+    "ConstraintState",
+    "ExactTokens",
+    "Expr",
+    "Extern",
+    "Externs",
+    "Grammar",
+    "MaskStrategy",
+    "Module",
+    "Token",
+    "Vocab",
+    "_internal",
+]

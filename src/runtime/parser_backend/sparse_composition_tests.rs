@@ -1,5 +1,5 @@
 use super::*;
-use crate::{BuildOptions, Grammar, Optimization, ParserBackend, Vocab};
+use crate::{BuildOptions, Grammar, MaskStrategy, ParserBackend, Vocab};
 use crate::grammar::flat::{DirectRegularState, GrammarDef, Rule, Symbol, Terminal};
 
 fn fixture(nullable: bool, vocab: &Vocab) -> Constraint {
@@ -72,7 +72,7 @@ fn sparse_builtin_frames_link_and_return_without_table_reconstruction() {
             .prepare(&vocab).unwrap().bind_snapshot("C", &child).unwrap();
         let mut words = vec![b"xay".to_vec(), b"xby".to_vec(), b"xaby".to_vec()];
         if nullable { words.push(b"xy".to_vec()); }
-        for mode in [Optimization::Balanced, Optimization::FastRuntime] {
+        for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let linked = host.link_with(options(mode)).unwrap();
             let loaded = Constraint::load(linked.save()).unwrap();
             let external = Constraint::load_with_vocab(linked.save_without_vocab().unwrap(), &vocab).unwrap();

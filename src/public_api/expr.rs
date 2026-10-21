@@ -3,73 +3,177 @@ use super::*;
 
 /// Immutable unordered union or concatenation of independently scoped grammars.
 #[derive(Debug, Clone)]
-pub struct Expr(Arc<ExprNode>);
-#[derive(Debug)]
-enum ExprNode { Leaf(Module), Choice(Vec<Expr>), Sequence(Vec<Expr>) }
-/// Convert a whole grammar or configured module into one expression leaf.
-pub trait IntoExpr { fn into_expr(self)->Expr; }
-impl IntoExpr for Expr { fn into_expr(self)->Expr {self} }
-impl IntoExpr for &Expr { fn into_expr(self)->Expr {self.clone()} }
-impl IntoExpr for Module { fn into_expr(self)->Expr {Expr(Arc::new(ExprNode::Leaf(self)))} }
-impl IntoExpr for &Module { fn into_expr(self)->Expr {self.clone().into_expr()} }
-impl IntoExpr for Grammar<'_> {fn into_expr(self)->Expr {self.module().into_expr()} }
-impl IntoExpr for &Grammar<'_> {fn into_expr(self)->Expr {self.module().into_expr()} }
+pub struct Expr(pub(crate) Arc<ExprNode>);
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExprLeaf {
+    Module(Module),
+    Token(Token),
+    ExactTokens(ExactTokens),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExprNode {
+    Leaf(ExprLeaf),
+    Literal(Vec<u8>),
+    Choice(Vec<Expr>),
+    Sequence(Vec<Expr>),
+}
+
+impl From<&Expr> for Expr {
+    fn from(e: &Expr) -> Self { e.clone() }
+}
+impl From<Module> for Expr {
+    fn from(m: Module) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Module(m))))
+    }
+}
+impl From<&Module> for Expr {
+    fn from(m: &Module) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Module(m.clone()))))
+    }
+}
+impl From<Grammar<'_>> for Expr {
+    fn from(g: Grammar<'_>) -> Self {
+        Expr::from(Module::new(&g))
+    }
+}
+impl From<&Grammar<'_>> for Expr {
+    fn from(g: &Grammar<'_>) -> Self {
+        Expr::from(Module::new(g))
+    }
+}
+impl From<Token> for Expr {
+    fn from(t: Token) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Token(t))))
+    }
+}
+impl From<&Token> for Expr {
+    fn from(t: &Token) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Token(*t))))
+    }
+}
+impl From<ExactTokens> for Expr {
+    fn from(t: ExactTokens) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::ExactTokens(t))))
+    }
+}
+impl From<&ExactTokens> for Expr {
+    fn from(t: &ExactTokens) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::ExactTokens(t.clone()))))
+    }
+}
 
 impl Expr {
-    /// Union without ordered-choice priority. Empty choice is rejected on conversion to source/module.
-    pub fn choice<T:IntoExpr>(items:impl IntoIterator<Item=T>)->Self {
-        Self(Arc::new(ExprNode::Choice(items.into_iter().map(IntoExpr::into_expr).collect())))
+    /// Union without ordered-choice priority. Empty choice matches nothing. One-part choice is that part.
+    pub fn choice(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
+        let list: Vec<Expr> = items.into_iter().map(Into::into).collect();
+        if list.len() == 1 {
+            list.into_iter().next().unwrap()
+        } else {
+            Self(Arc::new(ExprNode::Choice(list)))
+        }
     }
+
     /// Concatenation; a model token may cross any number of operand boundaries. Empty sequence is epsilon.
-    pub fn sequence<T:IntoExpr>(items:impl IntoIterator<Item=T>)->Self {
-        Self(Arc::new(ExprNode::Sequence(items.into_iter().map(IntoExpr::into_expr).collect())))
+    pub fn sequence(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
+        Self(Arc::new(ExprNode::Sequence(items.into_iter().map(Into::into).collect())))
     }
-    fn skeleton(&self)->Result<(Grammar<'static>,Vec<Module>)> {
-        fn walk(expr:&Expr,leaves:&mut Vec<Module>,depth:usize,count:&mut usize)->Result<crate::grammar::ast::GrammarExpr> {
-            *count+=1;
-            if depth>graph::MAX_DEPTH || *count>graph::MAX_NODES {
+
+    /// Match exact bytes (no whitespace or ignore inserted).
+    pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
+        Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
+    }
+
+    pub(crate) fn skeleton(&self) -> Result<(Grammar<'static>, Vec<(String, Binding)>)> {
+        fn walk(
+            expr: &Expr,
+            leaves: &mut Vec<(String, Binding)>,
+            externs: &mut Vec<(String, ExternalKind)>,
+            depth: usize,
+            count: &mut usize,
+        ) -> Result<crate::grammar::ast::GrammarExpr> {
+            *count += 1;
+            if depth > graph::MAX_DEPTH || *count > graph::MAX_NODES {
                 return Err(Error::Compilation("expression graph exceeds depth/node limits".into()));
             }
             Ok(match expr.0.as_ref() {
-                ExprNode::Leaf(module)=>{let name=format!("leaf{}",leaves.len());leaves.push(module.clone());crate::grammar::ast::GrammarExpr::Ref(name)},
-                ExprNode::Choice(parts)=>{
-                    if parts.is_empty(){return Err(Error::Compilation("empty Expr::choice is unsupported; use a nonempty choice".into()));}
-                    let parts=parts.iter().map(|p|walk(p,leaves,depth+1,count)).collect::<Result<Vec<_>>>()?;
-                    crate::grammar::ast::GrammarExpr::Choice(parts)
-                },
-                ExprNode::Sequence(parts)=>{
-                    let parts=parts.iter().map(|p|walk(p,leaves,depth+1,count)).collect::<Result<Vec<_>>>()?;
-                    crate::grammar::ast::GrammarExpr::Sequence(parts)
-                },
+                ExprNode::Leaf(leaf) => {
+                    let name = format!("leaf{}", leaves.len());
+                    let (kind, binding) = match leaf {
+                        ExprLeaf::Module(m) => (ExternalKind::Grammar, Binding::from(m.clone())),
+                        ExprLeaf::Token(t) => (ExternalKind::Token, Binding::from(*t)),
+                        ExprLeaf::ExactTokens(t) => (ExternalKind::Token, Binding::from(t.clone())),
+                    };
+                    externs.push((name.clone(), kind));
+                    leaves.push((name.clone(), binding));
+                    crate::grammar::ast::GrammarExpr::Ref(name)
+                }
+                ExprNode::Literal(bytes) => {
+                    crate::grammar::ast::GrammarExpr::Literal(bytes.clone())
+                }
+                ExprNode::Choice(parts) => {
+                    if parts.is_empty() {
+                        crate::grammar::ast::GrammarExpr::Choice(Vec::new())
+                    } else if parts.len() == 1 {
+                        walk(&parts[0], leaves, externs, depth + 1, count)?
+                    } else {
+                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count)).collect::<Result<Vec<_>>>()?;
+                        crate::grammar::ast::GrammarExpr::Choice(walked)
+                    }
+                }
+                ExprNode::Sequence(parts) => {
+                    if parts.is_empty() {
+                        crate::grammar::ast::GrammarExpr::Epsilon
+                    } else if parts.len() == 1 {
+                        walk(&parts[0], leaves, externs, depth + 1, count)?
+                    } else {
+                        let walked = parts.iter().map(|p| walk(p, leaves, externs, depth + 1, count)).collect::<Result<Vec<_>>>()?;
+                        crate::grammar::ast::GrammarExpr::Sequence(walked)
+                    }
+                }
             })
         }
-        let mut leaves=Vec::new();let body=walk(self,&mut leaves,0,&mut 0)?;
-        let externs=(0..leaves.len()).map(|i|(format!("leaf{i}"),ExternalKind::Grammar)).collect::<Vec<_>>();
-        let named=crate::grammar::ast::NamedGrammar {
-            start:"expr_root".into(),
-            rules:vec![crate::grammar::ast::NamedRule {name:"expr_root".into(),expr:body,is_terminal:false,is_internal:false}],
-            ignore:None,lexer_partitions:BTreeMap::new(),lexer_literal_partitions:BTreeMap::new(),default_lexer_partition:None,
+        let mut leaves = Vec::new();
+        let mut externs = Vec::new();
+        let body = walk(self, &mut leaves, &mut externs, 0, &mut 0)?;
+        let named = crate::grammar::ast::NamedGrammar {
+            start: "expr_root".into(),
+            rules: vec![crate::grammar::ast::NamedRule {
+                name: "expr_root".into(),
+                expr: body,
+                is_terminal: false,
+                is_internal: false,
+            }],
+            ignore: None,
+            lexer_partitions: BTreeMap::new(),
+            lexer_literal_partitions: BTreeMap::new(),
+            default_lexer_partition: None,
         };
-        let grammar=Grammar::new(GrammarSource::Constructed);
-        let _=grammar.parsed_component.set(ParsedComponent::from_named(named,&externs).map_err(Into::into));
-        grammar.component()?;Ok((grammar,leaves))
+        let grammar = Grammar::new(GrammarSource::Constructed);
+        let _ = grammar.parsed_component.set(ParsedComponent::from_named(named, &externs).map_err(Into::into));
+        grammar.component()?;
+        Ok((grammar, leaves))
     }
 }
-impl Module {
-    /// Preserve configured and prepared leaves. Positional paths are `leaf0`, `leaf1`, ...;
-    /// grouping operators add no path components.
-    pub fn from_expr(expr:&Expr)->Result<Self> {
-        let (grammar,leaves)=expr.skeleton()?;
-        let mut module=Module::new(&grammar);
-        for (i,leaf) in leaves.into_iter().enumerate(){module.bind(format!("leaf{i}"),leaf)?;}
-        Ok(module)
+
+pub(crate) fn check_expr_unbound(expr: &Expr) -> Vec<String> {
+    let mut unbound = Vec::new();
+    fn walk(e: &Expr, out: &mut Vec<String>) {
+        match e.0.as_ref() {
+            ExprNode::Leaf(ExprLeaf::Module(m)) => {
+                for u in m.externs().unbound().iter() {
+                    out.push(u.name().to_string());
+                }
+            }
+            ExprNode::Choice(parts) | ExprNode::Sequence(parts) => {
+                for p in parts {
+                    walk(p, out);
+                }
+            }
+            _ => {}
+        }
     }
-}
-impl Grammar<'static> {
-    /// Only source operands are accepted. Configured or prepared modules require [`Module::from_expr`].
-    pub fn from_expr(expr:&Expr)->Result<Self> {
-        let (mut grammar,leaves)=expr.skeleton()?;
-        for (i,leaf) in leaves.into_iter().enumerate(){grammar.bind(format!("leaf{i}"),leaf.to_source()?)?;}
-        Ok(grammar)
-    }
+    walk(expr, &mut unbound);
+    unbound
 }
