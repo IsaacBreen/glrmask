@@ -808,12 +808,19 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
         representative.get(nonterminal as usize).copied().flatten().unwrap_or(nonterminal)
     };
     let mut alternatives = Vec::<Vec<Vec<Symbol>>>::with_capacity(components.len());
-    for members in &components {
+    for (index, members) in components.iter().enumerate() {
         let mut unique = FxHashSet::<Vec<Symbol>>::default();
         let mut rhs_list = Vec::new();
         for rule in view.iter() {
-            if !members.contains(&rule.lhs) || matches!(rule.rhs.as_slice(), [Symbol::Nonterminal(_)]) {
+            if !members.contains(&rule.lhs) {
                 continue;
+            }
+            // Only unit edges inside the component are redundant. A unit rule
+            // that leaves the component contributes its target's language.
+            if let [Symbol::Nonterminal(target)] = rule.rhs.as_slice() {
+                if component_of[*target as usize] == index {
+                    continue;
+                }
             }
             let rhs = rule.rhs.iter().map(|symbol| match symbol {
                 Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(map(*nonterminal)),

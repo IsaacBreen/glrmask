@@ -542,3 +542,24 @@ fn interior_loop_closure_is_not_a_finite_unrolling() {
 
 #[path = "normalization_archived_mismatches_tests.rs"]
 mod archived_mismatch_tests;
+
+#[test]
+fn unit_scc_collapse_keeps_unit_exits_from_the_component() {
+    // 0 <-> 1 is a unit cycle; 0 -> 2 leaves it and is 0's only way to a word.
+    let rules = vec![
+        rule(0, vec![nt(1)]),
+        rule(1, vec![nt(0)]),
+        rule(0, vec![nt(2)]),
+        rule(1, vec![t(1), nt(0)]),
+        rule(2, vec![t(0)]),
+    ];
+    let mut edit = Edit::new(rules.clone());
+    assert!(expand_unit_sccs(&mut edit));
+    let collapsed = edit.view().iter().cloned().collect::<Vec<_>>();
+    for start in [0, 1] {
+        assert_eq!(
+            bounded_language(&collapsed, start, 4),
+            bounded_language(&rules, start, 4),
+        );
+    }
+}
