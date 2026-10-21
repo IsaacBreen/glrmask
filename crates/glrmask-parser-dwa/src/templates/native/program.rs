@@ -13,6 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use crate::automata::unweighted_u32::{
     dfa::{DFA, DFAState},
     determinize::determinize,
+    determinize_minimal_defaults,
     minimize_acyclic::minimize_acyclic,
     nfa::NFA,
 };
@@ -31,6 +32,21 @@ pub struct ProgramCompiler {
     validate: bool,
     minimize: bool,
 }
+
+fn fallback_specialization(nfa: &NFA, minimize: bool) -> Result<DFA, String> {
+    let raw = determinize(nfa);
+    let raw = if minimize { minimize_acyclic(&raw) } else { raw };
+    Ok(specialize_template_dfa_defaults_for_commit_split_input(&raw))
+}
+
+/// Below this NFA size the default-aware canonical product is cheap and
+/// replaces the speculative default-union subset attempt entirely.
+const CANONICAL_ONLY_NFA_STATES: usize = 1_024;
+
+/// Upper bound on canonical default-aware automaton states before using the
+/// established subset specialization instead. Keeps memory bounded for
+/// grammars whose minimal template automaton is genuinely very large.
+const CANONICAL_DFA_STATE_BUDGET: usize = 200_000;
 
 impl Default for ProgramCompiler {
     fn default() -> Self {
@@ -61,28 +77,47 @@ impl ProgramCompiler {
         let budget = nfa.states.len().saturating_add(input_edges)
             .saturating_mul(32).max(4_096);
 
-        let specialized = match determinize_union(&nfa, budget) {
-            Ok(dfa) => {
-                if self.minimize {
-                    let reduced = reduce_fallback_acyclic(&dfa)?;
-                    if self.validate {
-                        assert_eq!(
-                            fallback_mismatch(&dfa, &reduced), None,
-                            "fallback-aware acyclic reduction changed the action language"
-                        );
-                    }
-                    reduced
-                } else {
-                    dfa
-                }
+        // Wide template NFAs can enumerate enormous numbers of reachable
+        // default subsets that share one residual language, while their
+        // minimal DEFAULT-aware automaton is small. Build that automaton
+        // directly instead of specializing the redundant union product.
+        // Return `None` when the canonical build exceeds its budget so the
+        // established exact subset specialization remains the fallback.
+        let canonical = |this: &Self| -> Option<DFA> {
+            if !this.minimize {
+                return None;
             }
-            Err(AttemptError::Budget) => {
-                // A bounded speculative optimization, not an acceptance bound.
-                // Reuse the same compact NFA and synchronously run the exact
-                // staged automata algorithm. No LR runtime or truncation exists.
-                let raw = determinize(&nfa);
-                let raw = if self.minimize { minimize_acyclic(&raw) } else { raw };
-                specialize_template_dfa_defaults_for_commit_split_input(&raw)
+            determinize_minimal_defaults::try_determinize_minimal_defaults(
+                &nfa, DEFAULT_LABEL,
+            )
+            .filter(|dfa| dfa.states.len() <= CANONICAL_DFA_STATE_BUDGET)
+        };
+
+        let specialized = if self.minimize && nfa.states.len() > CANONICAL_ONLY_NFA_STATES {
+            match canonical(self) {
+                Some(dfa) => dfa,
+                None => fallback_specialization(&nfa, self.minimize)?,
+            }
+        } else {
+            match determinize_union(&nfa, budget) {
+                Ok(dfa) => {
+                    if self.minimize {
+                        let reduced = reduce_fallback_acyclic(&dfa)?;
+                        if self.validate {
+                            assert_eq!(
+                                fallback_mismatch(&dfa, &reduced), None,
+                                "fallback-aware acyclic reduction changed the action language"
+                            );
+                        }
+                        reduced
+                    } else {
+                        dfa
+                    }
+                }
+                Err(AttemptError::Budget) => match canonical(self) {
+                    Some(dfa) => dfa,
+                    None => fallback_specialization(&nfa, self.minimize)?,
+                },
             }
         };
 

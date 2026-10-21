@@ -6514,3 +6514,221 @@ mod static_whole_token_regression_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod tiny_cfg_compile_blowup_tests {
+    use super::*;
+
+    // Random tiny CFGs reduced from the compile-time blow-up repro. Symbols
+    // >= 0 are nonterminals; symbol < 0 is byte b'a' + (-symbol - 1).
+    struct Case {
+        start: usize,
+        bound: usize,
+        rules: &'static [(usize, &'static [isize])],
+    }
+
+    // Minimised from case 296 by deleting rules and symbols while the
+    // compile stayed above the timeout. It keeps the nullable left-recursive
+    // core that produced the template blow-up.
+    const COMPACT: Case = Case {
+        start: 1,
+        bound: 3,
+        rules: &[
+            (1, &[-3]),
+            (0, &[1, -2]),
+            (1, &[1, 0, 1]),
+            (1, &[]),
+        ],
+    };
+
+    fn lark(case: &Case) -> String {
+        let mut by_lhs: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        let mut defined = BTreeSet::new();
+        for (lhs, rhs) in case.rules {
+            defined.insert(*lhs);
+            let mut alternatives = Vec::new();
+            let mut text = String::new();
+            for symbol in *rhs {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                if *symbol >= 0 {
+                    text.push_str(&format!("n{symbol}"));
+                } else {
+                    let byte = (b'a' + ((-*symbol - 1) as u8)) as char;
+                    text.push('"');
+                    text.push(byte);
+                    text.push('"');
+                }
+            }
+            if text.is_empty() {
+                text.push_str("\"\"");
+            }
+            alternatives.push(text);
+            by_lhs.entry(*lhs).or_default().extend(alternatives);
+        }
+        for (lhs, rhs) in case.rules {
+            for symbol in *rhs {
+                assert!(
+                    *symbol < 0 || defined.contains(&(*symbol as usize)),
+                    "referenced nonterminal must have a production",
+                );
+            }
+        }
+        let mut source = String::new();
+        source.push_str(&format!("start: n{}\n", case.start));
+        for (lhs, alternatives) in &by_lhs {
+            source.push_str(&format!("n{lhs}: {}\n", alternatives.join(" | ")));
+        }
+        source
+    }
+
+    fn vocabulary() -> Vocab {
+        Vocab::new(vec![(0, vec![b'a']), (1, vec![b'b']), (2, vec![b'c'])])
+    }
+
+    fn bounded_language(case: &Case) -> BTreeSet<Vec<u8>> {
+        // Prefix validity is a property of the unbounded language: e.g. the
+        // prefix "bcc" is witnessed only by the four-byte word "bccb". Derive
+        // a generous margin beyond the checked word length so every prefix of
+        // a checked word has a witness; membership of the short words
+        // themselves is unaffected.
+        let limit = case.bound + 2;
+        let mut sets: BTreeMap<usize, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        for (lhs, _) in case.rules {
+            sets.entry(*lhs).or_default();
+        }
+        loop {
+            let mut changed = false;
+            for (lhs, rhs) in case.rules {
+                let mut words: BTreeSet<Vec<u8>> = std::iter::once(Vec::new()).collect();
+                for symbol in *rhs {
+                    let next = if *symbol >= 0 {
+                        sets.get(&(*symbol as usize)).cloned().unwrap_or_default()
+                    } else {
+                        std::iter::once(vec![b'a' + ((-*symbol - 1) as u8)]).collect()
+                    };
+                    let mut product = BTreeSet::new();
+                    for prefix in &words {
+                        for suffix in &next {
+                            if prefix.len() + suffix.len() <= limit {
+                                let mut word = prefix.clone();
+                                word.extend_from_slice(suffix);
+                                product.insert(word);
+                            }
+                        }
+                    }
+                    words = product;
+                }
+                let target = sets.get_mut(lhs).expect("defined above");
+                for word in words {
+                    changed |= target.insert(word);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        sets.remove(&case.start).unwrap_or_default()
+    }
+
+    fn all_words(case: &Case) -> Vec<Vec<u8>> {
+        let mut words = vec![Vec::new()];
+        let mut level = vec![Vec::new()];
+        for _ in 0..case.bound {
+            let mut next = Vec::new();
+            for word in &level {
+                for byte in [b'a', b'b', b'c'] {
+                    let mut extended = word.clone();
+                    extended.push(byte);
+                    next.push(extended);
+                }
+            }
+            words.extend(next.iter().cloned());
+            level = next;
+        }
+        words
+    }
+
+    fn assert_exact(constraint: &RuntimeConstraint, case: &Case) {
+        let language = bounded_language(case);
+        let words = all_words(case);
+        for word in &words {
+            let mut state = constraint.start();
+            let mut alive = true;
+            for (position, byte) in word.iter().enumerate() {
+                let mask = state.mask();
+                for candidate in 0..3u8 {
+                    let mut prefix = word[..position].to_vec();
+                    prefix.push(b'a' + candidate);
+                    let expected = language
+                        .iter()
+                        .any(|word| word.starts_with(&prefix));
+                    let id = candidate as usize;
+                    let allowed = mask[id / 32] & (1 << (id % 32)) != 0;
+                    assert_eq!(
+                        allowed, expected,
+                        "mask mismatch at {:?}[{position}] for token {candidate}",
+                        String::from_utf8_lossy(word),
+                    );
+                }
+                for id in 3..(mask.len() * 32) {
+                    assert_eq!(
+                        mask[id / 32] & (1 << (id % 32)),
+                        0,
+                        "unexpected token id {id} at {:?}[{position}]",
+                        String::from_utf8_lossy(word),
+                    );
+                }
+                let id = (byte - b'a') as usize;
+                if mask[id / 32] & (1 << (id % 32)) == 0 {
+                    // The prefix is already outside the language; the exact
+                    // mask assertion above is the check for this word.
+                    alive = false;
+                    break;
+                }
+                state
+                    .commit_token((byte - b'a') as u32)
+                    .unwrap_or_else(|error| panic!(
+                        "commit rejected {:?}[{position}]: {error}",
+                        String::from_utf8_lossy(word),
+                    ));
+            }
+            if alive {
+                assert_eq!(
+                    state.is_accepting(),
+                    language.contains(word),
+                    "acceptance mismatch for {:?}",
+                    String::from_utf8_lossy(word),
+                );
+            } else {
+                assert!(
+                    !language.contains(word),
+                    "mask rejected an in-language word {:?}",
+                    String::from_utf8_lossy(word),
+                );
+            }
+        }
+    }
+
+    fn compile(case: &Case, strategy: MaskStrategy) -> RuntimeConstraint {
+        let source = lark(case);
+        let grammar = Grammar::from_lark(&source);
+        let mut module = Module::new(&grammar);
+        module.set_mask_strategy(strategy).unwrap();
+        module.compile(&vocabulary()).unwrap()
+    }
+
+    #[test]
+    fn compact_nullable_left_recursive_grammar_builds_minimal_templates() {
+        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+            let constraint = compile(&COMPACT, strategy);
+            assert!(
+                !constraint.table.is_present(),
+                "the compact grammar must keep its finite templates",
+            );
+            assert!(constraint.template_parser.is_some());
+            assert_exact(&constraint, &COMPACT);
+        }
+    }
+}
