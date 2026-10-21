@@ -1854,6 +1854,47 @@ impl GLRTable {
             .and_then(|by_nt| by_nt.get(&nt).copied())
     }
 
+    /// Executable certificate for a terminal-ended grammar.
+    ///
+    /// In an ordinary LR table for a grammar whose productions all end in a
+    /// terminal, every kernel item of a state reached by a nonterminal goto has
+    /// that nonterminal immediately before the dot. Such an item can never be
+    /// complete, and closure cannot add a complete item because there are no
+    /// epsilon productions. A nonterminal goto target therefore offers no
+    /// ordinary reduction on any lookahead.
+    ///
+    /// This checks that local invariant directly. It is stronger and easier to
+    /// diagnose than a cycle in an NT projection, and a table that satisfies it
+    /// cannot begin a second ordinary non-consuming reduction.
+    ///
+    /// Returns the first offending `(source_state, nonterminal, target_state,
+    /// terminal, reduced_nonterminal)`.
+    pub fn certify_no_ordinary_goto_target_reduces(&self) -> Result<(), String> {
+        for (source, row) in self.goto.iter().enumerate() {
+            for (&nonterminal, &(target, _replace)) in row.iter() {
+                let Some(action_row) = self.action.get(target as usize) else {
+                    return Err(format!(
+                        "goto target {target} from state {source} is out of range"
+                    ));
+                };
+                for (terminal, action) in action_row.iter() {
+                    let mut offender = None;
+                    action.for_each_reduce(|reduced, _len| {
+                        offender.get_or_insert(reduced);
+                    });
+                    if let Some(reduced) = offender {
+                        return Err(format!(
+                            "state {source} goto on nonterminal {nonterminal} reaches \
+                             {target}, which has an ordinary reduce of nonterminal \
+                             {reduced} on terminal {terminal}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn validate_structure(&self, context: &str) {
         let expected_len = self.num_states as usize;
         if self.action.len() != expected_len {

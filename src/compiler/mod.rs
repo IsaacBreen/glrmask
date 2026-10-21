@@ -34,6 +34,10 @@ pub mod stages;
 
 pub(crate) use compile::compile_owned;
 
+#[cfg(test)]
+#[path = "terminal_ended_characterization_tests.rs"]
+mod terminal_ended_characterization_tests;
+
 pub(crate) fn macro_parallelism_disabled() -> bool {
     std::env::var("GLRMASK_DISABLE_MACRO_PARALLELISM")
         .map(|value| {

@@ -52,6 +52,9 @@ pub mod __private {
         pub mod parser {
             pub use crate::glr::parser::*;
         }
+        pub mod terminal_ended {
+            pub use crate::glr::terminal_ended::*;
+        }
         pub mod table {
             pub use crate::glr::table::*;
             pub mod action {
