@@ -155,6 +155,8 @@ pub(crate) fn isolate_environment_test(ignored: bool) -> bool {
 mod grammar_cross_tests;
 #[cfg(test)]
 mod terminal_dwa_cross_tests;
+#[cfg(test)]
+mod tokentrie_nullable_ambiguity_tests;
 
 pub(crate) use error::GlrMaskError;
 

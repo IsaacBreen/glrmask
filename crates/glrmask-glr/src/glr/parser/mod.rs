@@ -4659,6 +4659,15 @@ fn advance_nondeterministically_profiled(
         if next.is_empty() {
             return shifted;
         }
+        if next == closure {
+            // The reduce closure has reached a fixed point: applying the same
+            // reductions to the same frontier can only reproduce it. Nullable
+            // recursive rules (for example `S -> "a" | S S | ""`) make epsilon
+            // reductions regenerate an identical frontier forever; every shift
+            // exposed by this frontier was already merged into `shifted`, so
+            // returning is exact rather than a truncation.
+            return shifted;
+        }
         closure = next;
     }
 }
@@ -5515,6 +5524,15 @@ fn advance_nondeterministically(
         }
 
         if next.is_empty() {
+            return shifted;
+        }
+        if next == closure {
+            // The reduce closure has reached a fixed point: applying the same
+            // reductions to the same frontier can only reproduce it. Nullable
+            // recursive rules (for example `S -> "a" | S S | ""`) make epsilon
+            // reductions regenerate an identical frontier forever; every shift
+            // exposed by this frontier was already merged into `shifted`, so
+            // returning is exact rather than a truncation.
             return shifted;
         }
         closure = next;
