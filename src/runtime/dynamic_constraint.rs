@@ -726,7 +726,7 @@ impl DynamicConstraint {
         ignore_terminal: Option<TerminalID>,
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let dynamic_mask_vocab =
             crate::compiler::constraint_possible_matches::runtime_dynamic_vocab_for_vocab(vocab);
         Self::from_parts_with_dynamic_vocab(
@@ -750,12 +750,12 @@ impl DynamicConstraint {
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
         dynamic_mask_vocab: DynamicMaskVocab,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let mut result = Self::from_parts_with_dynamic_vocab_unfinalized(
             table, terminal_display_names, tokenizer, direct_regular_automaton,
-            ignore_terminal, special_token_terminals, vocab, dynamic_mask_vocab);
+            ignore_terminal, special_token_terminals, vocab, dynamic_mask_vocab)?;
         result.inner.rebuild_dynamic_runtime_caches();
-        result
+        Ok(result)
     }
 
     pub(crate) fn from_parts_with_dynamic_vocab_unfinalized(
@@ -767,7 +767,7 @@ impl DynamicConstraint {
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
         dynamic_mask_vocab: DynamicMaskVocab,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         Self::from_parts_with_dynamic_vocab_backend_unfinalized(
             crate::runtime::parser_backend::DynamicParserBackend::Native,
             table,
@@ -798,12 +798,12 @@ impl DynamicConstraint {
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
         dynamic_mask_vocab: DynamicMaskVocab,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         match backend {
             crate::runtime::parser_backend::DynamicParserBackend::Native => {
                 let prepared = crate::runtime::parser_backend::PreparedTemplateParser::from_compiler_parts(
                     &table, direct_regular_automaton.as_ref(), &[], ignore_terminal, true, false,
-                ).expect("compiler must prepare a complete native parser before Constraint materialization");
+                )?;
                 drop(table);
                 let mut inner = Self::from_template_runtime_parts_unfinalized_with_views(
                     tokenizer, terminal_display_names, ignore_terminal, prepared.templates,
@@ -812,8 +812,8 @@ impl DynamicConstraint {
                 );
                 inner.special_token_terminals = special_token_terminals;
                 inner.direct_regular_automaton = direct_regular_automaton;
-                Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
-                    external_vocab_artifact_cache: None }
+                Ok(Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
+                    external_vocab_artifact_cache: None })
             }
             crate::runtime::parser_backend::DynamicParserBackend::LrTable => {
                 let ignore_expr = ignore_terminal
@@ -839,8 +839,8 @@ impl DynamicConstraint {
                 let _ = inner.late_bind_vocab.set(vocab.clone());
                 assert!(inner.table.is_present(), "retained LR constructor must retain its LR table");
                 assert!(inner.template_parser.is_none(), "retained LR constructor must not install a template parser");
-                Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
-                    external_vocab_artifact_cache: None }
+                Ok(Self { inner, alternatives: Vec::new(), composition_grammars: vec![None],
+                    external_vocab_artifact_cache: None })
             }
         }
     }
@@ -853,7 +853,7 @@ impl DynamicConstraint {
         special_token_terminals: Vec<SpecialTokenTerminal>,
         vocab: &Vocab,
         computation: ConstraintPossibleMatchesComputation,
-    ) -> Self {
+    ) -> crate::Result<Self> {
         let ConstraintPossibleMatchesComputation {
             mapped_possible_matches,
             runtime_dynamic_vocab,
@@ -865,14 +865,14 @@ impl DynamicConstraint {
         let mut result = Self::from_parts_with_dynamic_vocab(
             table, terminal_display_names, tokenizer, None, ignore_terminal,
             special_token_terminals, vocab, runtime_dynamic_vocab.vocab,
-        );
+        )?;
         result.inner.possible_matches = possible_matches;
         result.inner.possible_matches_complete = complete;
         result.inner.state_to_internal_tsid = id_map.tokenizer_states.original_to_internal;
         result.inner.internal_tsid_to_states = id_map.tokenizer_states.internal_to_originals;
         result.inner.original_token_to_internal = id_map.vocab_tokens.original_to_internal;
         result.inner.internal_token_to_tokens = id_map.vocab_tokens.internal_to_originals;
-        result
+        Ok(result)
     }
 
     fn migrate_legacy_v1(

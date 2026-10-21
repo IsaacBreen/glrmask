@@ -3598,6 +3598,7 @@ pub(crate) fn runtime_dynamic_vocab_for_partition(
     let classes_ms = classes_started.map_or(0.0, elapsed_ms);
     let groups_started = profile.then(Instant::now);
 
+    crate::compiler::build_budget::charge("o2_quotient_materialize", classes.len() as u64);
     let mut groups = internal_to_originals
         .into_iter()
         .map(Some)

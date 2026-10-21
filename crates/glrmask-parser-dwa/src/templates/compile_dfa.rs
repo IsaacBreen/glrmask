@@ -12,6 +12,7 @@ use crate::automata::unweighted_u32::determinize::determinize;
 use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::nwa::{NWA, NWAState};
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL,
     encode_negative_label,
@@ -646,6 +647,7 @@ fn specialize_scalar_template_dfa(dfa: &UnweightedDfa) -> Option<UnweightedDfa> 
     ids[dfa.start_state as usize] = Some(specialized.start_state);
     let mut pending = VecDeque::from([dfa.start_state]);
     while let Some(old) = pending.pop_front() {
+        charge_build_budget("template_specialization", 1);
         let from = ids[old as usize].expect("reachable source state has a BFS id");
         specialized.states[from as usize].is_accepting = dfa.states[old as usize].is_accepting;
         for (&label, &target) in &dfa.states[old as usize].transitions {
@@ -673,6 +675,7 @@ fn specialize_template_dfa_defaults_with_subsets(dfa: &UnweightedDfa) -> Unweigh
     let mut pending = VecDeque::from([start_subset]);
 
     while let Some(subset) = pending.pop_front() {
+        charge_build_budget("template_specialization", 4);
         let from = ids[&subset];
         let mut explicit: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
         let mut defaults = BTreeSet::new();

@@ -152,6 +152,8 @@ pub(crate) fn isolate_environment_test(ignored: bool) -> bool {
 }
 
 #[cfg(test)]
+mod budget_fallback_tests;
+#[cfg(test)]
 mod grammar_cross_tests;
 #[cfg(test)]
 mod right_recursion_regression;

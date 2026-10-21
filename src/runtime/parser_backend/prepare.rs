@@ -508,7 +508,9 @@ pub(super) fn from_compiler_parts(
                     }
                 }
                 if let Some(error) = failure {
-                    return Err(crate::Error::Compilation(error.to_string()));
+                    return Err(crate::Error::classify_template_compile_message(
+                        error.to_string(),
+                    ));
                 }
                 let selected_result =
                     selected_result.unwrap_or_else(|_| unreachable!("checked failures"));
@@ -534,7 +536,7 @@ pub(super) fn from_compiler_parts(
         // Explicit precedence: terminal errors, completion errors, metadata
         // errors. Within terminal errors choose the smallest terminal ID.
         let (ordinary, signature_groups, exact_groups) = ordinary?;
-        let completion = completion.map_err(crate::Error::Compilation)?;
+        let completion = completion.map_err(crate::Error::classify_template_compile_message)?;
         let metadata = metadata?;
         let (mut parser, templates, runtime) = assemble(
             table.num_states, table.num_terminals, table.skip_terminals.clone(),

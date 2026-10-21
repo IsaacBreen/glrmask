@@ -601,6 +601,7 @@ dependencies = [
 name = "glrmask-finite-automata"
 version = "0.1.1"
 dependencies = [
+ "glrmask-invariant",
  "rustc-hash 1.1.0",
  "serde",
 ]
@@ -690,6 +691,7 @@ dependencies = [
  "glrmask-finite-automata",
  "glrmask-glr",
  "glrmask-grammar",
+ "glrmask-invariant",
  "glrmask-lexer",
  "glrmask-vocab",
  "glrmask-weight",

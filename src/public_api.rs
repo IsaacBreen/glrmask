@@ -697,51 +697,107 @@ impl<'a> Grammar<'a> {
         }
         if options.parser_backend == ParserBackend::TemplateDfa {
             if options.optimization == MaskStrategy::TokenClassTrie && self.bindings.is_empty() {
-                // Use the existing O2 runtime with the bounded grammar normal
-                // form required by finite templates. Ordinary dynamic grammar
-                // preparation intentionally allows recursive action closures.
-                let dynamic = match &self.source {
-                    GrammarSource::Glrm(_) | GrammarSource::Constructed => crate::import::compile_bounded_template_from_named(self.resolve_dynamic_source(vocab,false)?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None),
-                    GrammarSource::Ebnf(source) => DynamicConstraint::from_ebnf_with_bounded_template_parser(source, vocab),
-                    GrammarSource::Lark(source) => DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab),
-                    GrammarSource::JsonSchema(source) => DynamicConstraint::from_json_schema_with_bounded_template_parser(source, vocab),
-                }?;
-                let mut components = dynamic.into_constraints();
-                if components.len() != 1 {
-                    return Err(Error::Compilation("a template-parser Constraint currently requires one compiled component; union composition is not implemented".into()));
-                }
-                let mut constraint = components.pop().unwrap();
-                ensure_runnable_constraint(&constraint)?;
-                apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
-                return constraint.with_end_tokens(options.end_token_ids());
+                let attempt = {
+                    let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+                    // A partial template build must not leave prepared caches on
+                    // the source used by the fallback.
+                    let attempt_grammar = self.clone();
+                    let attempt_options = options.clone();
+                    budget.install(move || {
+                        crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
+                            // Use the existing O2 runtime with the bounded grammar normal
+                            // form required by finite templates. Ordinary dynamic grammar
+                            // preparation intentionally allows recursive action closures.
+                            let dynamic = match &attempt_grammar.source {
+                                GrammarSource::Glrm(_) | GrammarSource::Constructed => crate::import::compile_bounded_template_from_named(attempt_grammar.resolve_dynamic_source(vocab,false)?,vocab,crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,None),
+                                GrammarSource::Ebnf(source) => DynamicConstraint::from_ebnf_with_bounded_template_parser(source, vocab),
+                                GrammarSource::Lark(source) => DynamicConstraint::from_lark_with_bounded_template_parser(source, vocab),
+                                GrammarSource::JsonSchema(source) => DynamicConstraint::from_json_schema_with_bounded_template_parser(source, vocab),
+                            }?;
+                            let mut components = dynamic.into_constraints();
+                            if components.len() != 1 {
+                                return Err(Error::Compilation("a template-parser Constraint currently requires one compiled component; union composition is not implemented".into()));
+                            }
+                            let mut constraint = components.pop().unwrap();
+                            ensure_runnable_constraint(&constraint)?;
+                            apply_final_boundary_trigger(&mut constraint, attempt_options.boundary_trigger.unwrap_or_default())?;
+                            constraint.with_end_tokens(attempt_options.end_token_ids())
+                        })
+                    })
+                };
+                return self.finish_template_attempt(vocab, &options, attempt);
             }
         }
         if !self.bindings.is_empty() {
-            return self.prepare(vocab)?.link_with(options);
+            let attempt = {
+                let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+                let attempt_grammar = self.clone();
+                let attempt_options = options.clone();
+                budget.install(move || {
+                    crate::error::catch_template_attempt(move || {
+                        attempt_grammar.prepare(vocab)?.link_with(attempt_options)
+                    })
+                })
+            };
+            return self.finish_template_attempt(vocab, &options, attempt);
         }
-        let mut spec = ConstraintSpec::builder(self.clone(), vocab)?.build()?;
-        spec.automatic_boundary_selection = true;
-        if let Some(name) = spec.unbound_grammar_names.first() {
-            return Err(Error::Compilation(format!(
-                "external {name:?} is unbound; prepare() if a reusable pre-link artifact is intended",
-            )));
+        let attempt = {
+            let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+            let attempt_grammar = self.clone();
+            let attempt_options = options.clone();
+            budget.install(move || {
+                crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
+                    let mut spec = ConstraintSpec::builder(attempt_grammar.clone(), vocab)?.build()?;
+                    spec.automatic_boundary_selection = true;
+                    if let Some(name) = spec.unbound_grammar_names.first() {
+                        return Err(Error::Compilation(format!(
+                            "external {name:?} is unbound; prepare() if a reusable pre-link artifact is intended",
+                        )));
+                    }
+                    let mut constraint = spec.compile_final(attempt_options.optimization_value())?;
+                    ensure_runnable_constraint(&constraint)?;
+                    if attempt_options.parser_backend == ParserBackend::TemplateDfa {
+                        // Preserve the component-only proper-prefix certificate while the
+                        // LR/rule metadata still exists. A table-free constraint can be
+                        // bound later as a compiled child and must not widen that boundary
+                        // query back to the full model vocabulary merely because its table
+                        // was intentionally removed.
+                        crate::compiler::boundary_candidates::persist_boundary_candidate_summary(
+                            &mut constraint,
+                            vocab,
+                        );
+                        constraint.install_template_parser_from_compile()?;
+                    }
+                    apply_final_boundary_trigger(&mut constraint, attempt_options.boundary_trigger.unwrap_or_default())?;
+                    constraint.with_end_tokens(attempt_options.end_token_ids())
+                })
+            })
+        };
+        self.finish_template_attempt(vocab, &options, attempt)
+    }
+
+    /// Keep a template-strategy decline local to the public boundary: retry the
+    /// original source with the exact TokenTrie strategy. Other failures are
+    /// returned unchanged.
+    fn finish_template_attempt(
+        &self,
+        vocab: &Vocab,
+        options: &BuildOptions,
+        attempt: Result<RuntimeConstraint>,
+    ) -> Result<RuntimeConstraint> {
+        match attempt {
+            Ok(constraint) => Ok(constraint),
+            Err(error) if error.is_strategy_decline() => {
+                eprintln!(
+                    "[glrmask/profile][template_fallback] strategy={:?} stage={} reason={error}",
+                    options.optimization,
+                    error.decline_stage(),
+                );
+                self.compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?
+                    .with_end_tokens(options.end_token_ids())
+            }
+            Err(error) => Err(error),
         }
-        let mut constraint = spec.compile_final(options.optimization_value())?;
-        ensure_runnable_constraint(&constraint)?;
-        if options.parser_backend == ParserBackend::TemplateDfa {
-            // Preserve the component-only proper-prefix certificate while the
-            // LR/rule metadata still exists. A table-free constraint can be
-            // bound later as a compiled child and must not widen that boundary
-            // query back to the full model vocabulary merely because its table
-            // was intentionally removed.
-            crate::compiler::boundary_candidates::persist_boundary_candidate_summary(
-                &mut constraint,
-                vocab,
-            );
-            constraint.install_template_parser_from_compile()?;
-        }
-        apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
-        constraint.with_end_tokens(options.end_token_ids())
     }
 
     #[cfg(any(test, feature = "internal-api"))]

@@ -20,6 +20,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use rustc_hash::FxHashMap;
 
 use super::dfa::{DFA, Label};
@@ -261,6 +262,7 @@ pub fn try_determinize_minimal_defaults_with_budget(
     let mut builder = Builder::new(node_budget, depth_budget);
     let mut canonical = vec![0u32; nfa.states.len()];
     for state in order {
+        charge_build_budget("template_determinization", 1);
         let data = &nfa.states[state as usize];
         let mut default_targets = Vec::new();
         let mut explicit: Vec<(Label, Vec<u32>)> = Vec::new();

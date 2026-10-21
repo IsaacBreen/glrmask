@@ -6,6 +6,7 @@ use rustc_hash::FxHashSet;
 
 use crate::ds::bitset::BitSet;
 use crate::grammar::flat::{GrammarDef, NonterminalID, Rule, Symbol, Terminal, TerminalID};
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 
 pub const EOF: TerminalID = u32::MAX;
 
@@ -421,6 +422,7 @@ pub fn eliminate_right_recursion(
     let mut completed = !has_indirect_right_recursion_fast(rules, &nullable, num_nt);
     if !completed {
         for _ in 0..MAX_INDIRECT_ROUNDS {
+            charge_build_budget("grammar_normalization", rules.len() as u64);
             let num_nt = max_nt_id(rules) + 1;
             let nullable = compute_nullable(rules, num_nt);
             let graph = build_right_reachability_graph(rules, &nullable);
@@ -1630,6 +1632,7 @@ pub fn inline_null_productions(rules: &[Rule], num_nt: u32) -> Vec<Rule> {
     let profile_enabled = compile_profile_enabled();
     let total_started_at = profile_enabled.then(Instant::now);
     let rules_before = rules.len();
+    charge_build_budget("grammar_normalization", rules.len() as u64);
     let preprocessed = compress_nullable_runs_with_optional_tree(rules, num_nt);
     let result = inline_null_productions_exhaustive(&preprocessed, max_nt_id(&preprocessed) + 1);
     if let Some(started_at) = total_started_at {

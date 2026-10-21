@@ -1,8 +1,8 @@
 pub(crate) use super::pipeline::{
     compile_owned,
     compile_owned_profiled_with_table_construction,
-    compile_owned_with_table_construction,
-    compile_owned_with_table_construction_and_protected_shift_terminal_names,
+    try_compile_owned_with_table_construction,
+    try_compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
     emit_compile_profile_summary,

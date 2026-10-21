@@ -11937,7 +11937,8 @@ nt start ::= A | B | A A | A B | B A | B B;
             None,
             Vec::new(),
             &vocab,
-        );
+        )
+        .unwrap();
         assert!(dynamic.inner.tokenizer.has_epsilon_transitions());
         // Production may prepare a dense deterministic execution coordinate
         // when it fits. Disable that representation here so this regression
