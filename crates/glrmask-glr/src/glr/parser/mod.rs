@@ -13,7 +13,8 @@ use super::table::{
 use super::table::row::{ActionRow, GotoRow};
 use crate::ds::bitset::BitSet;
 use crate::ds::leveled_gss::{
-    GssFrontierKeyInterner, GssSemanticKeyInterner, LeveledGSS, Merge, VirtualStack,
+    GssFrontierKey, GssFrontierKeyInterner, GssSemanticKeyInterner, LeveledGSS, Merge,
+    VirtualStack,
 };
 use crate::grammar::flat::TerminalID;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -4024,6 +4025,61 @@ fn merge_into(dst: &mut ParserGSS, branch: ParserGSS) {
     }
 }
 
+/// Reduce walks this long switch to canonical semantic repeat detection.
+const SEMANTIC_REPEAT_AFTER: u32 = 32;
+
+/// Exact repeat detection for the reduce frontiers of one token.
+///
+/// The first `SEMANTIC_REPEAT_AFTER` frontiers are compared structurally,
+/// which costs a few `Arc` comparisons and catches the common short cycles. A
+/// walk still running after that switches to canonical semantic keys
+/// ([`GssFrontierKeyInterner`]). Each wave rebuilds the DAG, so equivalent
+/// frontiers can differ in Interface/Branch layout and sharing; only semantic
+/// keys catch those. The key includes the accumulator at each stack bottom, so
+/// two frontiers collide only when they denote the same set of
+/// (stack, accumulator) pairs.
+///
+/// Structural equality implies semantic equality, so both phases report only
+/// real repeats, and every shift a repeated frontier exposes is already merged.
+/// The semantic phase guarantees termination: the table is epsilon-free, so a
+/// reduce wave never makes stacks deeper, and with a finite state set and a
+/// finite accumulator lattice only finitely many semantic frontiers exist.
+struct FrontierRepeatGuard {
+    seen: u32,
+    structural: SmallVec<[ParserGSS; 4]>,
+    interner: GssFrontierKeyInterner<u32, TerminalsDisallowed>,
+    keys: FxHashSet<GssFrontierKey>,
+}
+
+impl FrontierRepeatGuard {
+    fn new(start: &ParserGSS) -> Self {
+        let mut guard = Self {
+            seen: 0,
+            structural: SmallVec::new(),
+            interner: GssFrontierKeyInterner::new(),
+            keys: FxHashSet::default(),
+        };
+        guard.repeats(start);
+        guard
+    }
+
+    /// Records `frontier` and reports whether an earlier frontier was equal.
+    fn repeats(&mut self, frontier: &ParserGSS) -> bool {
+        self.seen += 1;
+        if self.seen <= SEMANTIC_REPEAT_AFTER {
+            if self.structural.iter().any(|seen| seen == frontier) {
+                return true;
+            }
+            self.structural.push(frontier.clone());
+            return false;
+        }
+        if self.seen == SEMANTIC_REPEAT_AFTER + 1 {
+            self.structural = SmallVec::new();
+        }
+        !self.keys.insert(self.interner.key(frontier))
+    }
+}
+
 fn advance_deterministically_from_vstack_raw(
     table: &GLRTable,
     mut stack: VirtualStack<u32, TerminalsDisallowed>,
@@ -4045,6 +4101,7 @@ fn advance_deterministically_from_vstack_raw(
     // repeated language replays the deterministic lane exactly.
     let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
     let mut floor_keys: FxHashSet<_> = FxHashSet::default();
+    let mut floor_crossings = 0u32;
     loop {
         let Some(&state) = stack.top() else {
             break;
@@ -4114,8 +4171,13 @@ fn advance_deterministically_from_vstack_raw(
                     // that can revisit the same semantic frontier. Compare the
                     // whole language: a repeated language replays the
                     // deterministic lane exactly and can never shift.
-                    let next_gss = next_stack.clone().into_gss();
-                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                    // Keying walks the whole GSS, so only walks that are still
+                    // crossing the floor after `SEMANTIC_REPEAT_AFTER` steps pay
+                    // for it. Delaying detection never changes the result.
+                    floor_crossings += 1;
+                    if floor_crossings > SEMANTIC_REPEAT_AFTER
+                        && !floor_keys.insert(floor_key_interner.key(&next_stack.clone().into_gss()))
+                    {
                         return (AdvancedBranch::Gss(ParserGSS::empty()), false);
                     }
                     stack = next_stack;
@@ -4270,6 +4332,7 @@ fn advance_deterministically_profiled(
     // frontier key rather than assuming the base below the top is unchanged.
     let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
     let mut floor_keys: FxHashSet<_> = FxHashSet::default();
+    let mut floor_crossings = 0u32;
 
     loop {
         let Some(&state) = stack.top() else {
@@ -4361,8 +4424,13 @@ fn advance_deterministically_profiled(
                         profile.det_exit_reason = 7;
                         return false;
                     };
-                    let next_gss = next_stack.clone().into_gss();
-                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                    // Keying walks the whole GSS, so only walks that are still
+                    // crossing the floor after `SEMANTIC_REPEAT_AFTER` steps pay
+                    // for it. Delaying detection never changes the result.
+                    floor_crossings += 1;
+                    if floor_crossings > SEMANTIC_REPEAT_AFTER
+                        && !floor_keys.insert(floor_key_interner.key(&next_stack.clone().into_gss()))
+                    {
                         *gss = ParserGSS::empty();
                         profile.det_exit_reason = 4;
                         return false;
@@ -4443,9 +4511,7 @@ fn advance_nondeterministically_profiled(
     use std::time::Instant;
 
     let mut shifted = ParserGSS::empty();
-    let mut key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
-    let mut visited: FxHashSet<_> = FxHashSet::default();
-    visited.insert(key_interner.key(&closure));
+    let mut visited = FrontierRepeatGuard::new(&closure);
     loop {
         profile.n_nondet_waves += 1;
         let frontier_states = closure.peek_values();
@@ -4745,17 +4811,9 @@ fn advance_nondeterministically_profiled(
         // shift exposed by a revisited frontier is already merged into
         // `shifted`, so returning here is exact rather than a truncation.
         //
-        // Frontiers are compared by canonical semantic key rather than
-        // structural GSS equality: each wave rebuilds the DAG, so equivalent
-        // frontiers routinely differ in Interface/Branch layout and sharing.
-        // The key includes the accumulator attached at each stack bottom, so
-        // two frontiers collide only when they denote exactly the same set of
-        // (stack, accumulator) pairs. Termination follows because the table is
-        // epsilon-free, so a reduce wave never makes stacks deeper; with a
-        // finite state set and finite accumulator lattice only finitely many
-        // semantic frontiers exist.
-        let next_key = key_interner.key(&next);
-        if !visited.insert(next_key) {
+        // See `FrontierRepeatGuard` for why the comparison is exact and why
+        // the walk terminates.
+        if visited.repeats(&next) {
             return shifted;
         }
         closure = next;
@@ -5473,9 +5531,7 @@ fn advance_nondeterministically(
     token: TerminalID,
 ) -> ParserGSS {
     let mut shifted = ParserGSS::empty();
-    let mut key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
-    let mut visited: FxHashSet<_> = FxHashSet::default();
-    visited.insert(key_interner.key(&closure));
+    let mut visited = FrontierRepeatGuard::new(&closure);
 
     loop {
         if let Some(shifted_wave) =
@@ -5628,17 +5684,9 @@ fn advance_nondeterministically(
         // shift exposed by a revisited frontier is already merged into
         // `shifted`, so returning here is exact rather than a truncation.
         //
-        // Frontiers are compared by canonical semantic key rather than
-        // structural GSS equality: each wave rebuilds the DAG, so equivalent
-        // frontiers routinely differ in Interface/Branch layout and sharing.
-        // The key includes the accumulator attached at each stack bottom, so
-        // two frontiers collide only when they denote exactly the same set of
-        // (stack, accumulator) pairs. Termination follows because the table is
-        // epsilon-free, so a reduce wave never makes stacks deeper; with a
-        // finite state set and finite accumulator lattice only finitely many
-        // semantic frontiers exist.
-        let next_key = key_interner.key(&next);
-        if !visited.insert(next_key) {
+        // See `FrontierRepeatGuard` for why the comparison is exact and why
+        // the walk terminates.
+        if visited.repeats(&next) {
             return shifted;
         }
         closure = next;
@@ -5681,6 +5729,7 @@ fn advance_deterministically(
     // the deterministic lane can never reach a shift for this token.
     let mut floor_key_interner = GssFrontierKeyInterner::<u32, TerminalsDisallowed>::new();
     let mut floor_keys: FxHashSet<_> = FxHashSet::default();
+    let mut floor_crossings = 0u32;
 
     loop {
         let Some(&state) = stack.top() else {
@@ -5750,8 +5799,13 @@ fn advance_deterministically(
                         *gss = rebuilt;
                         return false;
                     };
-                    let next_gss = next_stack.clone().into_gss();
-                    if !floor_keys.insert(floor_key_interner.key(&next_gss)) {
+                    // Keying walks the whole GSS, so only walks that are still
+                    // crossing the floor after `SEMANTIC_REPEAT_AFTER` steps pay
+                    // for it. Delaying detection never changes the result.
+                    floor_crossings += 1;
+                    if floor_crossings > SEMANTIC_REPEAT_AFTER
+                        && !floor_keys.insert(floor_key_interner.key(&next_stack.clone().into_gss()))
+                    {
                         *gss = ParserGSS::empty();
                         return false;
                     }

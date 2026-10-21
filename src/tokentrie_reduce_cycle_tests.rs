@@ -3,9 +3,9 @@
 //! nondeterministic reduce wave whose frontiers are semantically equal but
 //! structurally different (seed 360).
 //!
-//! The expected language comes from an independent Earley recognizer over the
-//! source CFG, not from any glrmask parser. Every mask is checked against the
-//! bounded set of words of length at most four, for byte feeds and token feeds.
+//! The expected masks come from an exact CFG/prefix-DFA intersection over the
+//! source CFG, not from any glrmask parser. Masks are checked at every prefix
+//! of length at most four, for byte feeds and token feeds.
 
 use crate::{Grammar, MaskStrategy, Module, Vocab};
 
