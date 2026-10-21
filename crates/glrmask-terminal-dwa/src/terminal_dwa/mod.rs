@@ -5,6 +5,7 @@
 //! all partitions in parallel, then merges the two family DWAs.
 
 use crate::automata::lexer::Lexer;
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use crate::automata::lexer::compile::{
     compile_further_synthesized_tokenizer_with_structural_map,
     compile_partitioned_expression_pair_with_structural_map,
@@ -2615,6 +2616,7 @@ pub fn build_terminal_dwa_families_with_precomputed_global_max_length_filtered(
     };
     let serial_profile_partition_schedule = compile_profile_uses_serial_partition_schedule();
     let partition_build_started_at = Instant::now();
+    charge_build_budget("split_terminal_dwa_wall", sub_vocabs.len() as u64);
     let partition_results: Vec<(Option<(types::PartitionTerminalDwas, f64)>, usize)> =
         if serial_profile_partition_schedule {
             sub_vocabs

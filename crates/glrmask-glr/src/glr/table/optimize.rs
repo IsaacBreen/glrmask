@@ -1,5 +1,6 @@
 use super::*;
 use crate::ds::bitset::BitSet;
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use rayon::prelude::*;
 use smallvec::{smallvec, SmallVec};
 use rustc_hash::FxHasher;
@@ -415,6 +416,7 @@ impl UnitInlineBudget {
     }
 
     fn record_iteration(&self) -> bool {
+        charge_build_budget("glr_table_collapse", 1_000);
         let value = self.iterations.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if value > self.max_iterations {
             self.abort(ABORT_ITERATIONS);
@@ -424,6 +426,7 @@ impl UnitInlineBudget {
     }
 
     fn record_cell(&self) -> bool {
+        charge_build_budget("glr_table_collapse", 1);
         let value = self.cells.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if value > self.max_cells {
             self.abort(ABORT_CELLS);
@@ -442,6 +445,7 @@ impl UnitInlineBudget {
     }
 
     fn record_stack_effect_visit(&self) -> bool {
+        charge_build_budget("glr_table_collapse", 8);
         let value = self.stack_effect_visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         if value > self.max_stack_effect_visits {
             self.abort(ABORT_STACK_EFFECT_VISITS);

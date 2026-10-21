@@ -4,8 +4,15 @@ pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
         glrmask_invariant::__private::catch_internal_invariant_message(f)
     })
-    .map_err(|message| Error::Compilation(format!("resource limit exceeded: {message}")))?
+    .map_err(Error::ResourceLimit)?
     .map_err(Error::InternalInvariant)
+}
+
+/// Run a fallible template attempt while letting a deterministic resource-limit
+/// unwind become a typed decline. Public entry points use this so the original
+/// source can be retried with the TokenTrie strategy.
+pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    catch_internal_invariant(f).and_then(|result| result)
 }
 
 /// Parse, build, artifact or sequence-state failure. Source coordinates are included when the frontend can locate the error.
@@ -19,6 +26,15 @@ pub enum Error {
 
     #[error("Internal compiler invariant violated: {0}")]
     InternalInvariant(String),
+
+    #[error("Resource limit exceeded: {0}")]
+    ResourceLimit(String),
+
+    /// The requested template strategy cannot represent this grammar exactly.
+    /// Callers at the public boundary may recompile the original source with
+    /// the TokenTrie strategy.
+    #[error("Strategy unsupported: {0}")]
+    StrategyUnsupported(String),
 
     #[error("Serialization error: {0}")]
     Serialization(String),
@@ -38,6 +54,44 @@ impl Error {
     pub(crate) fn with_source_span(self, span: Option<glrmask_grammar::SourceSpan>) -> Self {
         if self.source_span().is_some() { return self; }
         match span { Some(span) => Self::SourceAt { error: Box::new(self), span }, None => self }
+    }
+
+    /// A template strategy declined deterministically. Public entry points may
+    /// retry the original source with the TokenTrie strategy.
+    pub(crate) fn is_strategy_decline(&self) -> bool {
+        match self {
+            Self::ResourceLimit(_) | Self::StrategyUnsupported(_) => true,
+            Self::SourceAt { error, .. } => error.is_strategy_decline(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn decline_stage(&self) -> &'static str {
+        match self {
+            Self::ResourceLimit(message) if message.starts_with("glr_table_lr1") => "glr_table_lr1",
+            Self::ResourceLimit(message) if message.starts_with("glr_table_collapse") => "glr_table_collapse",
+            Self::ResourceLimit(message) if message.starts_with("glr_table") => "glr_table",
+            Self::ResourceLimit(message) if message.starts_with("o2_quotient_materialize") => "o2_quotient_materialize",
+            Self::ResourceLimit(message) if message.starts_with("runtime_tokenizer_join") => "runtime_tokenizer_join",
+            Self::ResourceLimit(message) if message.starts_with("split_terminal_dwa_wall") => "split_terminal_dwa_wall",
+            Self::ResourceLimit(message) if message.starts_with("template_determinization") => "template_determinization",
+            Self::ResourceLimit(message) if message.starts_with("template_specialization") => "template_specialization",
+            Self::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
+            Self::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
+            Self::ResourceLimit(_) => "template",
+            Self::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",
+            Self::StrategyUnsupported(_) => "template",
+            Self::SourceAt { error, .. } => error.decline_stage(),
+            _ => "template",
+        }
+    }
+
+    pub(crate) fn classify_template_compile_message(message: String) -> Self {
+        if message.contains("right-recursive cycle") || message.contains("reduction cycle") {
+            Self::StrategyUnsupported(message)
+        } else {
+            Self::Compilation(message)
+        }
     }
 }
 
@@ -114,8 +168,8 @@ mod resource_limit_tests {
                 || 1,
             );
         }).expect_err("resource-limit signal must cross the Rayon boundary");
-        assert!(matches!(error, Error::Compilation(_)));
-        assert_eq!(error.to_string(), "Compilation error: resource limit exceeded: projected L1 state budget");
+        assert!(matches!(error, Error::ResourceLimit(_)));
+        assert_eq!(error.to_string(), "Resource limit exceeded: projected L1 state budget");
         assert_eq!(catch_internal_invariant(|| 42).unwrap(), 42);
     }
 }

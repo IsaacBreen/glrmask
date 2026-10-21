@@ -633,10 +633,36 @@ impl Module {
             return constraint.with_end_tokens(&options.end_tokens);
         }
         let mut prepared = self.clone();
-        prepared.precompile(vocab)?;
-        let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
-        ensure_runnable_constraint(&constraint)?;
-        constraint.with_end_tokens(&options.end_tokens)
+        let attempt = {
+            let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+            let end_tokens = options.end_tokens.clone();
+            budget.install(move || {
+                crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
+                    prepared.precompile(vocab)?;
+                    let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
+                    ensure_runnable_constraint(&constraint)?;
+                    constraint.with_end_tokens(&end_tokens)
+                })
+            })
+        };
+        match attempt {
+            Ok(constraint) => Ok(constraint),
+            Err(error) if error.is_strategy_decline() => {
+                let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
+                eprintln!(
+                    "[glrmask/profile][template_fallback] strategy={engine:?} stage={} reason={error}",
+                    error.decline_stage(),
+                );
+                let grammar = match self.flatten_source() {
+                    Ok(grammar) => grammar,
+                    Err(_) => return Err(error),
+                };
+                grammar
+                    .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
+                    .with_end_tokens(&options.end_tokens)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     fn materialize(&self, vocab: &Vocab, cache: &mut HashMap<usize, RuntimeConstraint>) -> Result<RuntimeConstraint> {

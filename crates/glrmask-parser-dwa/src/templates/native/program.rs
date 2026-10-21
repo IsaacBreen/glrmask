@@ -20,6 +20,7 @@ use crate::automata::unweighted_u32::{
 use crate::compiler::glr::labels::{
     DEFAULT_LABEL, encode_negative_label, is_negative_label,
 };
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use crate::runtime::CommitTemplateDfas;
 
 use super::super::characterize::{StackMatcher, TerminalCharacterization};
@@ -76,6 +77,10 @@ impl ProgramCompiler {
         }).sum::<usize>();
         let budget = nfa.states.len().saturating_add(input_edges)
             .saturating_mul(32).max(4_096);
+        charge_build_budget(
+            "template_determinization",
+            nfa.states.len().saturating_add(input_edges) as u64,
+        );
 
         // Wide template NFAs can enumerate enormous numbers of reachable
         // default subsets that share one residual language, while their
@@ -148,6 +153,7 @@ impl ProgramCompiler {
     /// reachable renumbering. The splitter's deterministic discovery order is
     /// invariant under that renumbering, so no specialized graph is needed.
     pub fn compile_raw(&self, raw: &DFA) -> Result<CommitTemplateDfas, String> {
+        charge_build_budget("template_specialization", raw.states.len() as u64);
         topological(raw)?;
         let scalar = raw.states.iter().all(|state| {
             state.transitions.get(&DEFAULT_LABEL).is_none_or(|default| {
@@ -430,6 +436,7 @@ fn determinize_union(nfa: &NFA, mut budget: usize) -> Result<DFA, AttemptError> 
     let mut defaults = Vec::new();
     let mut head = 0;
     while head < subsets.len() {
+        charge_build_budget("template_determinization", 1);
         let subset = Arc::clone(&subsets[head]);
         let source = head as u32;
         dfa.states[head].is_accepting =
@@ -666,6 +673,7 @@ fn dense_split(dfa: &DFA) -> Result<CommitTemplateDfas, String> {
     let mut dead_pop = None;
 
     while let Some((old_id, phase)) = queue.pop_front() {
+        charge_build_budget("template_specialization", 1);
         let old = &dfa.states[old_id as usize];
         if phase == 0 {
             let source = ensure(old_id, dfa, &mut result.pop, &mut pop, true);

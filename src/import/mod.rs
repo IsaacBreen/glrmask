@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::automata::lexer::Lexer;
 use crate::compiler::compile::{
     compile_owned_profiled_with_table_construction,
-    compile_owned_with_table_construction,
-    compile_owned_with_table_construction_and_protected_shift_terminal_names,
     compile_profile_enabled,
     compile_top_profile_enabled,
     emit_compile_profile_summary,
+    try_compile_owned_with_table_construction,
+    try_compile_owned_with_table_construction_and_protected_shift_terminal_names,
 };
 use crate::compiler::pipeline::{
     compile_dynamic_owned_unfinalized_with_backend,
@@ -244,7 +244,7 @@ fn compile_from_source(
                 vocab,
                 default_table_construction,
             )
-        })?;
+        })??;
         constraint.set_composition_end_token_ids(end_token_ids);
         emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
         emit_import_phase_end("compile_from_source", compile_from_source_started_at);
@@ -253,8 +253,8 @@ fn compile_from_source(
 
     let grammar = lower_factored_named_grammar(source, parse, transform, end_token_ids)?;
     let mut constraint = crate::error::catch_internal_invariant(|| {
-        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
-    })?;
+        try_compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+    })??;
     constraint.set_composition_end_token_ids(end_token_ids);
     emit_import_phase_end("compile_from_source", compile_from_source_started_at);
     Ok(constraint)
@@ -280,15 +280,15 @@ pub(crate) fn compile_from_named_grammar(
                 vocab,
                 default_table_construction,
             )
-        })?;
+        })??;
         constraint.set_composition_end_token_ids(end_token_ids);
         emit_compile_profile_summary(Some(source_kind), Some(import_ms), &profile);
         return Ok(constraint);
     }
 
     let mut constraint = crate::error::catch_internal_invariant(|| {
-        compile_owned_with_table_construction(grammar, vocab, default_table_construction)
-    })?;
+        try_compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+    })??;
     constraint.set_composition_end_token_ids(end_token_ids);
     Ok(constraint)
 }
@@ -307,13 +307,13 @@ pub(crate) fn compile_glrm_with_protected_shift_terminals(
             .map(|name| (*name).to_string())
             .collect::<Vec<_>>();
         crate::error::catch_internal_invariant(|| {
-            compile_owned_with_table_construction_and_protected_shift_terminal_names(
+            try_compile_owned_with_table_construction_and_protected_shift_terminal_names(
                 grammar,
                 vocab,
                 GlrTableConstruction::ExperimentalCoreMerged,
                 protected,
             )
-        })
+        })?
     })
 }
 

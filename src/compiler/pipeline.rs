@@ -335,7 +335,7 @@ fn explicit_parallel_compile_budget() -> bool {
     })
 }
 
-fn compile_thread_count() -> Option<usize> {
+pub(crate) fn compile_thread_count() -> Option<usize> {
     if let Some(value) = std::env::var("GLRMASK_COMPILE_THREADS")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -370,7 +370,7 @@ fn compile_thread_count() -> Option<usize> {
 }
 
 // Compilation recurses deeply in unoptimised builds; rayon's 2 MiB default is too small.
-const COMPILE_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
+pub(crate) const COMPILE_WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 static COMPILE_THREAD_POOL: Lazy<Option<rayon::ThreadPool>> = Lazy::new(|| {
     let thread_count = compile_thread_count()?;
@@ -2253,7 +2253,8 @@ mod lexer_partition_plan_tests {
             grammar,
             &vocab,
             GlrTableConstruction::ExperimentalCoreMerged,
-        );
+        )
+        .expect("synthetic planning test must not decline");
 
         assert!(
             profile.synthetic_certified || profile.synthetic_token_quotient_certified,
@@ -4790,7 +4791,7 @@ fn launch_classify_dag_if_ready<'scope>(
 fn compile_prepared_with_profile(
     prepared_grammar: GrammarDef,
     vocab: &Vocab,
-) -> (Constraint, CompilePhaseProfile) {
+) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
         vocab,
@@ -4806,7 +4807,7 @@ fn compile_prepared_with_profile_and_table_construction(
     default_table_construction: GlrTableConstruction,
     lexer_adaptive_override: Option<bool>,
     protected_shift_terminals: Option<Arc<Vec<u32>>>,
-) -> (Constraint, CompilePhaseProfile) {
+) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     // Synthetic lexer planning may certify a smaller exact tokenizer against
     // the vocabulary. Install the cross-crate certifier before planning on
     // every static compilation path, including profiled and explicit table
@@ -4867,6 +4868,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let compile_dag_result = Mutex::new(None);
         let runtime_tokenizer_result = Mutex::new(None);
         let cpm_result = Mutex::new(None);
+        let table_build_error = Mutex::new(None);
 
         rayon::scope(|scope| {
             let terminal_state_ref = &terminal_state;
@@ -4874,6 +4876,7 @@ fn compile_prepared_with_profile_and_table_construction(
             let compile_dag_result_ref = &compile_dag_result;
             let runtime_tokenizer_result_ref = &runtime_tokenizer_result;
             let cpm_result_ref = &cpm_result;
+            let table_build_error_ref = &table_build_error;
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_ref = synthetic_tokenizer_plan.as_ref();
             let partition_local_synthesis_plan_ref = partition_local_synthesis_plan.as_ref();
@@ -5341,7 +5344,13 @@ fn compile_prepared_with_profile_and_table_construction(
                 });
                 let analyze_grammar_ms = elapsed_ms(analyze_grammar_started_at);
                 if let Err(message) = analyzed_grammar.check_table_build_normal_form() {
-                    panic!("[glrmask] grammar precondition violations:\n{}", message);
+                    *table_build_error_ref
+                        .lock()
+                        .expect("table-build error slot poisoned") =
+                        Some(crate::Error::StrategyUnsupported(format!(
+                            "grammar precondition violations:\n{message}"
+                        )));
+                    return;
                 }
 
                 let glr_analyzed_grammar = Arc::clone(&analyzed_grammar);
@@ -5484,6 +5493,13 @@ fn compile_prepared_with_profile_and_table_construction(
                 );
             });
         });
+
+        if let Some(error) = table_build_error
+            .into_inner()
+            .expect("table-build error slot poisoned")
+        {
+            return Err(error);
+        }
 
         let (
             mut cpm_result,
@@ -5874,6 +5890,10 @@ fn compile_prepared_with_profile_and_table_construction(
                 let mut singleton_states = 0usize;
                 let mut multi_tsid_states = 0usize;
                 let mut max_distinct_tsids = 0usize;
+                crate::compiler::build_budget::charge(
+                    "runtime_tokenizer_join",
+                    candidate.source_subsets.len() as u64,
+                );
                 let source_subset_memberships = candidate
                     .source_subsets
                     .iter()
@@ -6308,17 +6328,19 @@ fn compile_prepared_with_profile_and_table_construction(
         // the worker. Moving this large tuple through that machinery exhausted
         // musl-created Python thread stacks. Transfer only a pointer; construction
         // still runs in the original compile pool and retains the same timers.
-        Box::new((constraint, profile))
+        Ok(Box::new((constraint, profile)))
     });
     // Keep the output constraint alive while the final sweep removes only dead
     // weak entries from the compile-time interners.
     interner_cleanup.finish();
-    *result
+    Ok(*result?)
 }
 
 pub(crate) fn compile_prepared(prepared_grammar: GrammarDef, vocab: &Vocab) -> Constraint {
     let start_nullable = prepared_grammar.start_is_nullable();
-    let mut constraint = compile_prepared_with_profile(prepared_grammar, vocab).0;
+    let mut constraint = compile_prepared_with_profile(prepared_grammar, vocab)
+        .expect("compile_prepared must not decline")
+        .0;
     constraint.set_composition_start_nullable(start_nullable);
     constraint
 }
@@ -6766,7 +6788,9 @@ fn compile_dynamic_owned_early_overlap(
                 let analysis_started = profile.then(Instant::now);
                 let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
                 if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
-                    panic!("[glrmask] grammar precondition violations:\n{}", message);
+                    return Err(crate::Error::StrategyUnsupported(format!(
+                        "grammar precondition violations:\n{message}"
+                    )));
                 }
                 let analysis_ms = analysis_started.map_or(0.0, elapsed_ms);
                 let table_started = Instant::now();
@@ -6844,7 +6868,7 @@ fn compile_dynamic_owned_early_overlap(
             collect_special_token_terminals(&prepared_grammar),
             vocab,
             dynamic_mask_vocab,
-        );
+        )?;
         constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
@@ -7112,6 +7136,14 @@ fn compile_dynamic_owned_impl(
         // This avoids a serial factoring barrier for large pattern grammars
         // without changing either compiled artifact or cloning the grammar.
         // Tiny grammars retain their prefactored expressions and serial lane.
+        if direct_regular_automaton.is_none() {
+            let analyzed = AnalyzedGrammar::from_grammar_def(&prepared_grammar);
+            if let Err(message) = analyzed.check_dynamic_table_build_normal_form() {
+                return Err(crate::Error::StrategyUnsupported(format!(
+                    "grammar precondition violations:\n{message}"
+                )));
+            }
+        }
         let ((tokenizer_result, factor_ms), ((table, table_ms, analysis_ms), (dynamic_mask_vocab, dynamic_vocab_ms))) = macro_join_if(
             parallel_dynamic_core,
             "dynamic_tokenizer_and_table_vocab",
@@ -7206,7 +7238,7 @@ fn compile_dynamic_owned_impl(
             collect_special_token_terminals(&prepared_grammar),
             vocab,
             dynamic_mask_vocab,
-        );
+        )?;
         constraint.inner.install_grammar_markers(&prepared_grammar).map_err(crate::Error::Compilation)?;
         if let Some((mask_tokenizer, full_to_mask_state)) = mask_tokenizer_quotient {
             constraint
@@ -7257,20 +7289,29 @@ pub(crate) fn compile_owned_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
+    try_compile_owned_with_table_construction(grammar, vocab, default_table_construction)
+        .expect("compile_owned_with_table_construction must not decline")
+}
+
+pub(crate) fn try_compile_owned_with_table_construction(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> crate::Result<Constraint> {
     let start_nullable = grammar.start_is_nullable();
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         let (mut constraint, profile) =
-            compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction);
+            compile_owned_profiled_with_table_construction(grammar, vocab, default_table_construction)?;
         constraint.set_composition_start_nullable(start_nullable);
         emit_compile_profile_summary(None, None, &profile);
-        return constraint;
+        return Ok(constraint);
     }
 
     let prepared_grammar = prepare_grammar(grammar);
     let mut constraint =
-        compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction);
+        try_compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction)?;
     constraint.set_composition_start_nullable(start_nullable);
-    constraint
+    Ok(constraint)
 }
 
 pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal_names(
@@ -7279,6 +7320,21 @@ pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal
     default_table_construction: GlrTableConstruction,
     protected_shift_terminal_names: Vec<String>,
 ) -> Constraint {
+    try_compile_owned_with_table_construction_and_protected_shift_terminal_names(
+        grammar,
+        vocab,
+        default_table_construction,
+        protected_shift_terminal_names,
+    )
+    .expect("protected-shift compile must not decline")
+}
+
+pub(crate) fn try_compile_owned_with_table_construction_and_protected_shift_terminal_names(
+    grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+    protected_shift_terminal_names: Vec<String>,
+) -> crate::Result<Constraint> {
     let start_nullable = grammar.start_is_nullable();
     let prepared_grammar = prepare_grammar(grammar);
     let protected_shift_terminals = protected_shift_terminal_names
@@ -7301,12 +7357,12 @@ pub(crate) fn compile_owned_with_table_construction_and_protected_shift_terminal
         default_table_construction,
         None,
         Some(Arc::new(protected_shift_terminals)),
-    );
+    )?;
     constraint.set_composition_start_nullable(start_nullable);
     if compile_profile_summary_enabled() || compile_top_profile_enabled() {
         emit_compile_profile_summary(None, None, &profile);
     }
-    constraint
+    Ok(constraint)
 }
 
 pub(crate) fn compile_prepared_with_table_construction(
@@ -7314,6 +7370,15 @@ pub(crate) fn compile_prepared_with_table_construction(
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
 ) -> Constraint {
+    try_compile_prepared_with_table_construction(prepared_grammar, vocab, default_table_construction)
+        .expect("compile_prepared_with_table_construction must not decline")
+}
+
+pub(crate) fn try_compile_prepared_with_table_construction(
+    prepared_grammar: GrammarDef,
+    vocab: &Vocab,
+    default_table_construction: GlrTableConstruction,
+) -> crate::Result<Constraint> {
     let start_nullable = prepared_grammar.start_is_nullable();
     let mut constraint = compile_prepared_with_profile_and_table_construction(
         prepared_grammar,
@@ -7321,10 +7386,10 @@ pub(crate) fn compile_prepared_with_table_construction(
         default_table_construction,
         None,
         None,
-    )
+    )?
     .0;
     constraint.set_composition_start_nullable(start_nullable);
-    constraint
+    Ok(constraint)
 }
 
 #[cfg(test)]
@@ -7342,6 +7407,7 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
         Some(adaptive),
         None,
     )
+    .expect("adaptive compile must not decline")
     .0;
     constraint.set_composition_start_nullable(start_nullable);
     constraint
@@ -7350,7 +7416,7 @@ pub(crate) fn compile_owned_with_lexer_adaptive(
 pub(crate) fn compile_owned_profiled(
     grammar: GrammarDef,
     vocab: &Vocab,
-) -> (Constraint, CompilePhaseProfile) {
+) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     compile_owned_profiled_with_table_construction(
         grammar,
         vocab,
@@ -7362,7 +7428,7 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
     grammar: GrammarDef,
     vocab: &Vocab,
     default_table_construction: GlrTableConstruction,
-) -> (Constraint, CompilePhaseProfile) {
+) -> crate::Result<(Constraint, CompilePhaseProfile)> {
     let start_nullable = grammar.start_is_nullable();
     let total_started_at = Instant::now();
     let prepare_started_at = Instant::now();
@@ -7375,11 +7441,11 @@ pub(crate) fn compile_owned_profiled_with_table_construction(
         default_table_construction,
         None,
         None,
-    );
+    )?;
     constraint.set_composition_start_nullable(start_nullable);
     profile.prepare_ms = prepare_ms;
     profile.total_ms = elapsed_ms(total_started_at);
-    (constraint, profile)
+    Ok((constraint, profile))
 }
 #[cfg(test)]
 mod compact_special_range_tests {

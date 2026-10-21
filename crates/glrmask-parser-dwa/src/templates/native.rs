@@ -27,6 +27,7 @@ use rustc_hash::{FxHashMap, FxHashSet, FxHasher};
 use crate::compiler::glr::analysis::EOF;
 use crate::compiler::glr::table::{Action, GLRTable, StackShiftGuard};
 use crate::grammar::flat::{NonterminalID, Symbol, TerminalID};
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 
 use super::characterize::{
     FinishEndpointPolicy, FinishTransfer, InitialEscape, InitialReduce,
@@ -954,6 +955,7 @@ impl Context<'_, '_> {
         pending: &mut VecDeque<Config>,
     ) {
         while let Some(config) = pending.pop_front() {
+            charge_build_budget("parser_dwa", 1);
             let Some(&top) = config.segment.last() else { continue; };
             self.process(
                 source, &config, self.action(top), 0, output, seen, pending,
@@ -999,6 +1001,7 @@ impl Context<'_, '_> {
         let mut trail = Vec::new();
         let mut current = top;
         let result = loop {
+            charge_build_budget("parser_dwa", 1);
             match cache.get(&(revealed, current)).copied() {
                 Some(UnitResolution::Resolved(result)) => break result,
                 Some(UnitResolution::Pending) => break None,

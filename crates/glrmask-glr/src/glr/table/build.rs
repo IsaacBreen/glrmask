@@ -3,6 +3,7 @@ use super::row::SparseRow;
 use std::sync::Arc;
 
 use crate::ds::bitset::BitSet;
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use rayon::prelude::*;
 use rustc_hash::FxHasher;
 use std::hash::{Hash, Hasher};
@@ -1938,6 +1939,7 @@ fn lr0_closure(grammar: &AnalyzedGrammar, kernel: &[Item]) -> Vec<Item> {
     let mut queue: VecDeque<Item> = kernel.iter().copied().collect();
 
     while let Some(item) = queue.pop_front() {
+        charge_build_budget("glr_table_lr1", 1);
         let Some(Symbol::Nonterminal(nonterminal)) = item_next_symbol(&item, &grammar.rules) else {
             continue;
         };
@@ -2771,6 +2773,7 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
         .collect();
 
     while let Some((item, lookahead_delta)) = queue.pop_front() {
+        charge_build_budget("glr_table_lr1", 1);
         // Transferred items do not participate in closure.
         if item.transferred {
             continue;
@@ -3157,6 +3160,7 @@ fn build_lr1_item_sets_impl<const CACHE_EMISSIONS: bool>(
         let mut next_frontier = Vec::new();
         for (state_id, successors) in expanded {
             for successor in successors {
+                charge_build_budget("glr_table_lr1", 1);
                 successor_count += 1;
                 let target_id = if let Some(target_id) = successor.preclosed_target {
                     preclosure_reuse_count += 1;

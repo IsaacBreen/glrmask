@@ -20190,7 +20190,7 @@ pub(crate) fn compose_constraints(
             special_token_terminals,
             vocab,
             runtime_dynamic_vocab_for_vocab(vocab),
-        );
+        ).map_err(|error| error.to_string())?;
         let finalize_started_at = Instant::now();
         dynamic.inner.rebuild_dynamic_runtime_caches();
         let finalize_ms = finalize_started_at.elapsed().as_secs_f64() * 1000.0;

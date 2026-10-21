@@ -18,6 +18,7 @@ glrmask-dwa-merge = { version = "=0.2.0", path = "../glrmask-dwa-merge", feature
 glrmask-finite-automata = { version = "=0.1.1", path = "../glrmask-finite-automata" }
 glrmask-glr = { version = "=0.2.0", path = "../glrmask-glr", features = ["internal-api"] }
 glrmask-grammar = { version = "=0.2.0", path = "../glrmask-grammar", features = ["internal-api"] }
+glrmask-invariant = { version = "=0.1.1", path = "../glrmask-invariant", features = ["internal-api"] }
 glrmask-lexer = { version = "=0.2.0", path = "../glrmask-lexer", features = ["internal-api"] }
 glrmask-vocab = { version = "=0.2.0", path = "../glrmask-vocab", features = ["internal-api"] }
 glrmask-weight = { version = "=0.1.1", path = "../glrmask-weight", features = ["internal-api"] }

@@ -31,6 +31,7 @@ pub(crate) mod vocab_partition;
 pub(crate) mod pm_profile;
 pub(crate) use glrmask_lexer::__private::possible_matches;
 pub mod stages;
+pub(crate) mod build_budget;
 
 pub(crate) use compile::compile_owned;
 

@@ -400,6 +400,7 @@ pub(crate) fn build_partition_id_map_and_terminal_dwa(
     terminal_filter: Option<&[bool]>,
     boundary_scope: Option<&super::scope::BoundaryAnalysisScope>,
 ) -> Option<PartitionTerminalDwas> {
+    glrmask_invariant::__private::charge_template_build_budget("split_terminal_dwa_wall", 1);
     let speculative = partition_label == "p2"
         && std::env::var_os("GLRMASK_SPECULATIVE_P2_L2P").is_some();
     if !speculative {
