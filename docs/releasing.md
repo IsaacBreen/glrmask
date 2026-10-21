@@ -38,26 +38,84 @@ dependencies separately before tagging a new root version. If automating all wor
 crates, each named crate needs its own trusted-publisher registration and dependency-
 order-aware release path; do not assume `cargo publish --workspace` is suitable here.
 
+## Coordinated Rust internal-crate staging for 0.4.0
+
+The root `glrmask@0.4.0` uses APIs not included in published `glrmask-vocab@0.2.0`
+and `glrmask-grammar@0.2.0`, so workspace-local tests **do not** establish
+publishability. Nine internal source crates are now pinned to **0.3.0** in both
+`Cargo.toml` dependencies and `Cargo.lock`; the unchanged four foundational
+crates remain at published **0.1.1**. These are distinct immutable crates.io
+versions, not repackaged 0.2.0 tarballs.
+
+Run `python3 scripts/check-internal-crate-release.py` to check exact dependency
+pins and the acyclic internal publication graph without contacting a registry;
+`--require-published` additionally requires every internal crate version to be
+visible and non-yanked on crates.io. **A published 0.3.0 version is not guaranteed
+to have the required API merely because the version exists.** Once internal
+packages are public, `cargo package --locked -p glrmask` must successfully
+compile the root crate *against the actual published versions* before a release.
+GitHub's release verifier runs both checks **before** npm, PyPI, crates.io or
+C++ publication jobs can start.
+
+Publish the nine internal 0.3.0 crates in this dependency order (within each
+wave the crates may be published independently):
+
+1. `glrmask-vocab`, `glrmask-artifact` (the unchanged 0.1.1 foundations exist).
+2. `glrmask-lexer` (depends on the new vocab).
+3. `glrmask-grammar` (depends on the new lexer).
+4. `glrmask-glr`, `glrmask-json-schema` (depend on the new grammar/lexer).
+5. `glrmask-dwa-merge` (depends on the new artifact and GLR).
+6. `glrmask-parser-dwa`, `glrmask-terminal-dwa` (depend on those predecessors).
+
+The opt-in-only workflow `.github/workflows/internal-crate-publish.yml` can
+publish **one** explicitly selected internal crate per manually approved
+workflow dispatch using crates.io's short-lived GitHub OIDC credential. The
+owner must first configure **each of those nine crates'** crates.io **Trusted
+Publishing → GitHub Actions** settings for owner `IsaacBreen`, repo `glrmask`,
+workflow filename `internal-crate-publish.yml`, and environment `release`.
+The release environment must allow the selected release-family tag; trusted
+publishing is distinct for each crate. Do not store crates.io tokens in secrets.
+
+Once the reviewed changes have merged to `main`, the owner may create a
+**staging Git tag** such as `v0.4.0-staging-crates` pointing to that merged
+commit; a tag **without a published GitHub Release** does not run the consumer
+release. Dispatch the internal workflow **on that tag**, selecting one crate
+and exact version `0.3.0` per run in the above dependency order. The workflow
+refuses a non-tag ref, a tag unrelated to root `0.4.0`, an unmerged source
+revision, a mismatched crate version, a version already on crates.io, or a
+failed `cargo publish --dry-run`. It publishes only after the owner has
+registered the correct trusted-publisher identity and GitHub Actions
+`release` environment approves the run. Confirm each crate is public and
+its downstream dependency resolution works before advancing to the next.
+
+**Do not publish the GitHub `v0.4.0` Release yet** if any of these packages,
+all eight npm platform identities/trusted publishers, PyPI root trust or
+crates.io root trust is not ready. A partial multi-registry release is not
+atomic and cannot be rolled back by deleting already published versions.
+
 ## One-time registry registration
 
 GitHub repository **`IsaacBreen/glrmask`**, trusted workflow filename **`release.yml`**,
 GitHub Actions environment **`release`** for all three OIDC services.
 
-1. **npm**: first approve the initial staged `@glrmask/node@0.3.0` release so the
-   actual package version is public. Repeat the same trusted-publisher setup
-   for each of the eight `@glrmask/node-<platform>` packages: npm trust is
-   per package, so every platform package needs its own **Settings → Trusted
-   Publisher** entry before its first OIDC publish. Then open each package's npm **Settings → Trusted
-   Publisher** and choose **GitHub Actions**. Use owner `IsaacBreen`, repository
-   `glrmask`, workflow **`release.yml`**, environment **`release`**, and enable
-   **Allow npm publish** (not stage-only, which would require 2FA every time).
-   The account owner must complete an interactive 2FA challenge. npm documentation
-   says a newly added trust configuration must be used for a successful first publish
-   within two days, or it will expire: register this near the **next version release**.
-   A successful trusted publish enables provenance for this public package.
-   The release workflow publishes the eight platform packages first (with
-   per-package existence checks and retries) and the thin root last, so a
-   fresh install always resolves every optional dependency.
+1. **npm**: the root `@glrmask/node@0.3.1` is already public; **do not**
+   attempt to republish the old `0.3.0` release. The eight separate
+   `@glrmask/node-<platform>` package identities may not yet be public.
+   The account owner must establish each previously unpublished package using
+   npm's permitted first-publication/2FA process, then configure **each**
+   package's **Settings → Trusted publishing → GitHub Actions** separately.
+   Use owner `IsaacBreen`, repository `glrmask`, workflow filename
+   `release.yml`, environment `release`, and enable **Allow npm publish**.
+   Do the same for the existing thin-root package, if not already configured.
+   npm's trusted-publisher configuration must successfully publish within two
+   days of creation or the configuration expires; register this near the release.
+   The account owner must complete any interactive 2FA required for the initial
+   package identities/settings. Never store npm publishing tokens in Actions.
+   The workflow publishes all eight platforms **before** the thin root and
+   checks the exact prebuilt platform tarball integrity of any version already
+   published; do not use a mismatched bootstrap tarball at the intended final
+   release version. No `v0.4.0` GitHub Release should be published until all
+   package identities/trusted publishers are ready.
    [Official npm instructions](https://docs.npmjs.com/trusted-publishers/).
 2. **PyPI**: sign in to PyPI, manage existing project **`glrmask`**, open
    **Publishing → Add a trusted publisher → GitHub Actions**. Enter owner

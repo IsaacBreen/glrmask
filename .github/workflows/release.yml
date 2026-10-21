@@ -25,10 +25,16 @@ on:
   pull_request:
     paths:
       - '.github/workflows/release.yml'
+      - '.github/workflows/internal-crate-publish.yml'
       - '.github/workflows/native-bindings.yml'
       - '.github/workflows/python-wheels.yml'
       - 'scripts/check-release-version.py'
+      - 'scripts/check-internal-crate-release.py'
+      - 'scripts/tests/test_internal_crate_release.py'
       - 'scripts/check-cpp-release-archives.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**/Cargo.toml'
       - 'docs/releasing.md'
   release:
     types: [published]
@@ -63,6 +69,8 @@ jobs:
           set -euo pipefail
           VERSION="$(python -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["package"]["version"])')"
           python scripts/check-release-version.py --tag "v$VERSION" --skip-ancestry
+          python -m unittest discover -s scripts/tests -p 'test_internal_crate_release.py'
+          python scripts/check-internal-crate-release.py
           if python scripts/check-release-version.py --tag v999.0.0 --skip-ancestry; then
             echo 'Mismatched release version was erroneously accepted' >&2
             exit 1
@@ -77,6 +85,21 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: python scripts/check-release-version.py --tag "$RELEASE_TAG" --github-output
+      # All four publishing channels depend on this verify job. Fail here,
+      # BEFORE npm/PyPI/C++ work starts, if any Rust internal crate is missing
+      # or the actual published sources cannot build the root crate tarball.
+      - name: Require public internal Rust crate versions (no publishing)
+        if: github.event_name == 'release'
+        run: python scripts/check-internal-crate-release.py --require-published
+      - name: Verify root Rust package with real crates.io dependencies
+        if: github.event_name == 'release'
+        timeout-minutes: 45
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          cargo package --locked -p glrmask
 
   native-build:
     name: Build and test all native C++/Node targets

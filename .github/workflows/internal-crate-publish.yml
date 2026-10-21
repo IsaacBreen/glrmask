@@ -1,0 +1,111 @@
+name: Publish internal Rust crates (manual, trusted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: 'Internal crate to publish, in documented dependency order'
+        required: true
+        type: choice
+        options:
+          - glrmask-artifact
+          - glrmask-dwa-merge
+          - glrmask-glr
+          - glrmask-grammar
+          - glrmask-json-schema
+          - glrmask-lexer
+          - glrmask-parser-dwa
+          - glrmask-terminal-dwa
+          - glrmask-vocab
+      version:
+        description: 'Exact manifest version (for this batch: 0.3.0)'
+        required: true
+        type: string
+        default: '0.3.0'
+
+# Dispatch requires a release-family Git tag pointing at a merged main commit.
+# Pushing a tag alone never publishes. No long-lived registry tokens are stored.
+permissions:
+  contents: read
+
+concurrency:
+  group: glrmask-internal-${{ inputs.crate }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 70
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      INTERNAL_CRATE: ${{ inputs.crate }}
+      INTERNAL_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate merged source, release-family tag and exact crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          python scripts/check-internal-crate-release.py
+          python - <<'PY'
+          import os, pathlib, re, tomllib
+          crate=os.environ['INTERNAL_CRATE']
+          version=os.environ['INTERNAL_VERSION']
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',version), 'stable version only'
+          root=tomllib.loads(pathlib.Path('Cargo.toml').read_text())
+          expected_tag='v'+root['package']['version']
+          ref=os.environ['GITHUB_REF_NAME']
+          assert ref==expected_tag or ref.startswith(expected_tag+'-'), 'tag must match root release family'
+          manifest=tomllib.loads((pathlib.Path('crates')/crate/'Cargo.toml').read_text())
+          assert manifest['package']['name']==crate and manifest['package']['version']==version
+          print('Approved internal crate staging source:',crate,version,os.environ['GITHUB_SHA'])
+          PY
+      - name: Refuse to overwrite a previously published version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os,urllib.error,urllib.request
+          name=os.environ['INTERNAL_CRATE'];version=os.environ['INTERNAL_VERSION']
+          req=urllib.request.Request(f'https://crates.io/api/v1/crates/{name}/{version}',headers={'User-Agent':'GLRMask internal release preflight'})
+          try:
+              urllib.request.urlopen(req,timeout=20).close()
+          except urllib.error.HTTPError as exc:
+              if exc.code==404:
+                  print('Version unclaimed:',name,version)
+              else:
+                  raise
+          else:
+              raise SystemExit(f'{name}@{version} already published; immutable registry versions cannot be overwritten')
+          PY
+      - name: Install stable Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Verify crate tarball with previously published dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo publish --locked --dry-run -p "$INTERNAL_CRATE"
+      - name: Exchange GitHub OIDC for a short-lived crate-specific credential
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish one reviewed internal crate
+        shell: bash
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          cargo publish --locked -p "$INTERNAL_CRATE"
