@@ -405,3 +405,7 @@ path = "tests/module_lifecycle_contract.rs"
 [[test]]
 name = "public_thread_safety"
 path = "tests/public_thread_safety.rs"
+
+[[test]]
+name = "seed3229_token_commit_stall"
+path = "tests/seed3229_token_commit_stall.rs"

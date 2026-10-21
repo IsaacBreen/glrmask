@@ -1189,6 +1189,10 @@ fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalize
     } else {
         normalize_grammar(&mut normalized.rules, normalized.start);
     }
+    // Epsilon elimination can turn `X -> N X` with nullable N into `X -> X`.
+    // That identity rule derives nothing new, but the GLR runtime would
+    // reduce it back into the same state forever.
+    discard_reflexive_unit_rules(&mut normalized.rules);
     if let Some(started) = started {
         emit_grammar_transform_profile(
             if use_lr_normalizer { "normalize_dynamic_glr_grammar" } else { "normalize_grammar" },
@@ -1212,6 +1216,8 @@ fn prepare_dynamic_glr_transforms_impl(mut grammar: GrammarDef, use_lr_normalize
         max_reduction_len,
         normalized.start,
     );
+    // Inlining can also produce identity rules.
+    discard_reflexive_unit_rules(&mut normalized.rules);
     compact_unused_terminals(&mut normalized);
     normalized
 }
@@ -1254,6 +1260,10 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
     } else {
         normalize_grammar(&mut normalized.rules, normalized.start);
     }
+    // Epsilon elimination can turn `X -> N X` with nullable N into `X -> X`.
+    // That identity rule derives nothing new, but the GLR runtime would
+    // reduce it back into the same state forever.
+    discard_reflexive_unit_rules(&mut normalized.rules);
     let protected_nonterminals = collect_protected_nonterminals(&normalized);
     inline_single_use_nonterminals(&mut normalized.rules, &protected_nonterminals, normalized.start);
     let max_reduction_len = std::env::var("GLRMASK_MAX_RUNTIME_REDUCTION_LEN")
@@ -1267,6 +1277,8 @@ fn prepare_dynamic_parser_after_terminal_domain_impl(
         max_reduction_len,
         normalized.start,
     );
+    // Inlining can also produce identity rules.
+    discard_reflexive_unit_rules(&mut normalized.rules);
     let terminal_domain_changed = compact_unused_terminals(&mut normalized);
     (normalized, terminal_domain_changed)
 }
