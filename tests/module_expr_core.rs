@@ -315,3 +315,25 @@ fn token_trie_nullable_child_compiles_as_one_grammar() {
     assert!(accepts(&c, &[0, 3]));
     assert!(accepts(&c, &[0, 1, 3]));
 }
+
+#[test]
+fn compile_succeeds_on_threads_with_small_stacks() {
+    // musl gives new threads 128 KiB stacks by default.
+    let worker = std::thread::Builder::new()
+        .stack_size(128 * 1024)
+        .spawn(|| {
+            let vocab = Vocab::new_with_exact_token_ids(
+                vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())],
+                [],
+            );
+            let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M"));
+            template.precompile(&vocab).unwrap();
+            let mut request = template.clone();
+            request.bind("M", Token::new(17)).unwrap();
+            request.compile(&vocab).unwrap()
+        })
+        .unwrap();
+    let constraint = worker.join().unwrap();
+    assert!(allowed(&constraint.start().mask(), 17));
+    assert!(accepts(&constraint, &[17]));
+}

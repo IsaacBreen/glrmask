@@ -64,6 +64,7 @@ regex-syntax = "0.8"
 derivre = { version = "=0.3.8", default-features = false, features = ["compress"] }
 
 rayon = "1"
+stacker = "0.1"
 dashmap = "6"
 rand = "0.8"
 thiserror = "1"

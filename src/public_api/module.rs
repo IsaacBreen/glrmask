@@ -6,6 +6,16 @@ mod artifact;
 #[cfg(test)]
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
+/// Stack headroom compilation needs before it starts. Threads created by host
+/// runtimes can have small stacks (musl defaults to 128 KiB), so compilation
+/// moves to a fresh stack when less than this remains on the calling thread.
+const COMPILE_STACK_RED_ZONE: usize = 4 * 1024 * 1024;
+const COMPILE_STACK_SIZE: usize = 16 * 1024 * 1024;
+
+fn with_compile_stack<T>(compile: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(COMPILE_STACK_RED_ZONE, COMPILE_STACK_SIZE, compile)
+}
+
 /// Root generation policy; never inherited by embedded modules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
@@ -424,6 +434,10 @@ impl Module {
     ///
     /// Modules using `TOKEN_TRIE` retain no work and are compiled from source by `compile`.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
+        with_compile_stack(|| self.precompile_on_stack(vocab))
+    }
+
+    fn precompile_on_stack(&mut self, vocab: &Vocab) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         let modules = self.index()?;
 
@@ -590,6 +604,10 @@ impl Module {
 
     /// Compiles the assembly against a target vocabulary with root compile options.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
+        with_compile_stack(|| self.compile_with_on_stack(vocab, options))
+    }
+
+    fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
         if let Some(slot) = self.externs().unbound().iter().next() {
             return Err(error(format!("extern {:?} is unbound", slot.name())));
         }
