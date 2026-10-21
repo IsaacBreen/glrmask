@@ -4440,30 +4440,97 @@ fn action_predecessor_signature(action: &Action) -> Option<&Action> {
     }
 }
 
+/// Dense predecessor bitsets that accelerate [`states_at_predecessor_depth`].
+///
+/// State ids are dense, so one predecessor row fits in a handful of `u64`
+/// words. A depth level then costs one word-OR per reachable state rather than
+/// extending a vector with every predecessor row and sorting/deduplicating the
+/// result. On o9896 the walk is called 340 times per fixed-point pass (2,380
+/// calls over 7 passes) with depths 2..=10 and sets of up to 60 states, so the
+/// repeated sort/dedup dominated the rebuild.
+struct PredecessorDepthBits {
+    state_words: usize,
+    rows: Vec<u64>,
+    current: Vec<u64>,
+    next: Vec<u64>,
+}
+
+impl PredecessorDepthBits {
+    fn new(num_states: usize) -> Self {
+        let state_words = num_states.div_ceil(64).max(1);
+        Self {
+            state_words,
+            rows: vec![0; num_states * state_words],
+            current: vec![0; state_words],
+            next: vec![0; state_words],
+        }
+    }
+
+    /// Rebuilds every row from the vector representation. Any predecessor set
+    /// may have grown since the previous fixed-point pass, so this runs once
+    /// per pass instead of once per depth query.
+    fn refresh(&mut self, predecessors: &[PredecessorSet]) {
+        self.rows.fill(0);
+        let state_words = self.state_words;
+        for (state, preds) in predecessors.iter().enumerate() {
+            let row = &mut self.rows[state * state_words..(state + 1) * state_words];
+            for &pred in preds {
+                let pred = pred as usize;
+                if pred < predecessors.len() {
+                    row[pred / 64] |= 1 << (pred % 64);
+                }
+            }
+        }
+    }
+
+    /// Same set as the reference walk, materialised in ascending id order so
+    /// callers observe the same sorted, deduplicated representation.
+    fn at_depth(&mut self, src: u32, depth: u32) -> PredecessorSet {
+        if depth == 0 {
+            return smallvec![src];
+        }
+        let state_words = self.state_words;
+        let rows = &self.rows;
+        self.current
+            .copy_from_slice(&rows[src as usize * state_words..][..state_words]);
+        for _ in 1..depth {
+            if self.current.iter().all(|word| *word == 0) {
+                return PredecessorSet::new();
+            }
+            self.next.fill(0);
+            for word_index in 0..state_words {
+                let mut bits = self.current[word_index];
+                while bits != 0 {
+                    let state = word_index * 64 + bits.trailing_zeros() as usize;
+                    bits &= bits - 1;
+                    let row = &rows[state * state_words..(state + 1) * state_words];
+                    for (slot, word) in self.next.iter_mut().zip(row) {
+                        *slot |= *word;
+                    }
+                }
+            }
+            std::mem::swap(&mut self.current, &mut self.next);
+        }
+        let mut result = PredecessorSet::new();
+        for (word_index, &word) in self.current.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                result.push((word_index * 64 + bits.trailing_zeros() as usize) as u32);
+                bits &= bits - 1;
+            }
+        }
+        result
+    }
+}
+
+/// States that reach `src` in exactly `depth` predecessor steps, as a sorted,
+/// deduplicated set.
 fn states_at_predecessor_depth(
     src: u32,
     depth: u32,
-    predecessors: &[PredecessorSet],
+    bits: &mut PredecessorDepthBits,
 ) -> PredecessorSet {
-    if depth == 0 {
-        return smallvec![src];
-    }
-    let mut current = predecessors[src as usize].clone();
-    for _ in 1..depth {
-        if current.is_empty() {
-            break;
-        }
-        let mut next: PredecessorSet = SmallVec::new();
-        for &st in &current {
-            if let Some(preds) = predecessors.get(st as usize) {
-                next.extend_from_slice(preds);
-            }
-        }
-        next.sort_unstable();
-        next.dedup();
-        current = next;
-    }
-    current
+    bits.at_depth(src, depth)
 }
 
 fn build_runtime_state_predecessors(
@@ -4486,6 +4553,9 @@ fn build_runtime_state_predecessors(
     };
 
     // Phase 1: Collect direct (pop == 0 and internal push pairs) edges first.
+    // A deep shift (pop > 1) is the only reason the phase-2 walk needs depth-k
+    // predecessor sets, so track that while the rows are already being scanned.
+    let mut has_deep_shifts = false;
     for src in 0..table.num_states as usize {
         for (tid, action) in table.action[src].iter() {
             match action {
@@ -4503,6 +4573,7 @@ fn build_runtime_state_predecessors(
                 }
                 Action::StackShifts(shifts) => {
                     for shift in shifts {
+                        has_deep_shifts |= shift.pop > 1;
                         for i in 0..shift.pushes.len().saturating_sub(1) {
                             add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
                         }
@@ -4513,6 +4584,7 @@ fn build_runtime_state_predecessors(
                 }
                 Action::GuardedStackShifts(shifts) => {
                     for shift in shifts {
+                        has_deep_shifts |= shift.pop > 1;
                         for i in 0..shift.pushes.len().saturating_sub(1) {
                             add_direct_edge(shift.pushes[i], shift.pushes[i + 1], &mut predecessors);
                         }
@@ -4548,9 +4620,19 @@ fn build_runtime_state_predecessors(
         destination_preds.len() != before
     };
 
+    // Phase 2 reads depth-k predecessor sets from a per-pass bit snapshot.
+    // The sets only grow, and growth inside a pass schedules another pass, so
+    // the loop still reaches the same least fixed point. Tables without deep
+    // shifts never allocate the bitsets.
+    let mut depth_bits =
+        has_deep_shifts.then(|| PredecessorDepthBits::new(table.num_states as usize));
+
     let mut changed = true;
     while changed {
         changed = false;
+        if let Some(bits) = depth_bits.as_mut() {
+            bits.refresh(&predecessors);
+        }
         for src in 0..table.num_states as usize {
             let src_preds = predecessors[src].clone();
 
@@ -4580,7 +4662,14 @@ fn build_runtime_state_predecessors(
                                 if shift.pop == 1 {
                                     changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
                                 } else if shift.pop > 1 {
-                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
+                                    // shift, so the bitset exists for exactly the calls
+                                    // that need it.
+                                    let bits = depth_bits
+                                        .as_mut()
+                                        .expect("deep shifts populate depth bitsets in phase 1");
+                                    let at_depth =
+                                        states_at_predecessor_depth(src as u32, shift.pop, bits);
                                     changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
                                 }
                             }
@@ -4592,7 +4681,14 @@ fn build_runtime_state_predecessors(
                                 if shift.pop == 1 {
                                     changed |= propagate_to_dst(dst, &src_preds, &mut predecessors);
                                 } else if shift.pop > 1 {
-                                    let at_depth = states_at_predecessor_depth(src as u32, shift.pop, &predecessors);
+                                    // Phase 1 sets `has_deep_shifts` for every pop > 1
+                                    // shift, so the bitset exists for exactly the calls
+                                    // that need it.
+                                    let bits = depth_bits
+                                        .as_mut()
+                                        .expect("deep shifts populate depth bitsets in phase 1");
+                                    let at_depth =
+                                        states_at_predecessor_depth(src as u32, shift.pop, bits);
                                     changed |= propagate_to_dst(dst, &at_depth, &mut predecessors);
                                 }
                             }
