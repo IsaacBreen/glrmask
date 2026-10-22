@@ -2433,6 +2433,12 @@ pub fn merge_identical_nonterminals(
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
+    // Partition refinement walks every nonterminal and every production on
+    // each pass, so charge the input size up front.
+    charge_build_budget(
+        "grammar_normalization",
+        2u64.saturating_mul(rules.len() as u64),
+    );
     // Build rhs_by_lhs: the set of productions for each nonterminal.
     let rhs_by_lhs = build_rhs_by_lhs(rules);
 

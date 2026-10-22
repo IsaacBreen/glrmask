@@ -67,7 +67,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-pub const DEFAULT_TEMPLATE_BUILD_BUDGET: u64 = 6_500_000;
+// 10x the largest measured real-grammar peak (671,896 units for o9838 with
+// ParserDwa) after the charges were calibrated to inner-loop work. The extra
+// headroom above the 10x floor leaves room for grammar-preparation charges on
+// the same real grammars.
+pub const DEFAULT_TEMPLATE_BUILD_BUDGET: u64 = 10_000_000;
 
 pub fn set_template_build_budget_handle(handle: std::sync::Arc<TemplateBuildBudget>) {
     TEMPLATE_BUILD_BUDGET_HANDLE.with(|slot| *slot.borrow_mut() = Some(handle));

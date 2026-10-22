@@ -590,6 +590,7 @@ version = "0.2.0"
 dependencies = [
  "glrmask-artifact",
  "glrmask-glr",
+ "glrmask-invariant",
  "glrmask-weight",
  "glrmask-weighted-automata",
  "range-set-blaze",
