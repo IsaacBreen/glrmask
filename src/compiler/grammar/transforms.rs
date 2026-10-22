@@ -14,6 +14,60 @@ use crate::grammar::flat::{Rule, Symbol, TerminalID};
 const MAX_RUNTIME_REDUCTION_LEN: usize = 5;
 const INLINE_PROTECTED_NONTERMINALS_ENV: &str = "GLRMASK_INLINE_PROTECTED_NONTERMINALS";
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of the epsilon-free prepass experiment.
+    static EPSFREE_PREPASS_OVERRIDE: std::cell::Cell<Option<bool>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Test-only override; `None` restores the environment-variable behaviour.
+#[cfg(test)]
+pub(crate) fn set_test_epsfree_prepass(value: Option<bool>) {
+    EPSFREE_PREPASS_OVERRIDE.with(|slot| slot.set(value));
+}
+
+#[cfg(test)]
+fn epsfree_prepass_override() -> Option<bool> {
+    EPSFREE_PREPASS_OVERRIDE.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+fn epsfree_prepass_override() -> Option<bool> {
+    None
+}
+
+fn epsfree_prepass_enabled() -> bool {
+    epsfree_prepass_override().unwrap_or_else(|| {
+        std::env::var_os("GLRMASK_EXPERIMENT_EPSFREE_PREPASS")
+            .is_some_and(|value| value.to_str() == Some("1"))
+    })
+}
+
+/// EXPERIMENT: run only the terminal-ended binary/epsilon-free preprocessing
+/// before the ordinary static rewrite pipeline. On decline the original
+/// grammar is returned unchanged so the experiment cannot turn a compile that
+/// would otherwise succeed into a failure.
+fn apply_epsfree_prepass(grammar: GrammarDef) -> GrammarDef {
+    let limits = crate::compiler::glr::terminal_ended::CompileLimits::default();
+    let mut budget = crate::compiler::glr::terminal_ended::CompileBudget::new();
+    match crate::compiler::glr::terminal_ended::preprocess_to_grammar_def(
+        &grammar,
+        &limits,
+        &mut budget,
+    ) {
+        Ok(preprocessed) => preprocessed,
+        Err(decline) => {
+            if compile_profile_enabled() {
+                eprintln!(
+                    "[glrmask-profile] epsfree_prepass stage=declined reason={decline:?}"
+                );
+            }
+            grammar
+        }
+    }
+}
+
 fn env_var_enabled(key: &str, default: bool) -> bool {
     std::env::var(key)
         .map(|v| {
@@ -1124,6 +1178,9 @@ fn discard_reflexive_unit_rules(rules: &mut Vec<Rule>) {
 /// Run only the grammar transforms without building the tokenizer.
 /// The caller is responsible for calling `build_tokenizer` on the result.
 pub(crate) fn prepare_grammar_transforms_only(mut grammar: GrammarDef) -> GrammarDef {
+    if epsfree_prepass_enabled() {
+        grammar = apply_epsfree_prepass(grammar);
+    }
     discard_reflexive_unit_rules(&mut grammar.rules);
     let profiling = compile_profile_enabled();
     let nullable_rules_before = grammar.rules.len();
