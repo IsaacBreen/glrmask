@@ -67,9 +67,9 @@ use crate::compiler::stages::parser_dwa::{
 use glrmask_parser_dwa::__private::resolve_negatives::resolve_negative_codes_in_nwa;
 use crate::compiler::stages::templates::characterize::{
     characterize_selected_terminals,
-    characterize_selected_terminals_for_terminal_count,
-    characterize_terminal_action_state_seeds_for_terminal_count,
-    characterize_terminal_nt_predecessor_seeds_for_terminal_count,
+    try_characterize_selected_terminals_for_terminal_count,
+    try_characterize_terminal_action_state_seeds_for_terminal_count,
+    try_characterize_terminal_nt_predecessor_seeds_for_terminal_count,
 };
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -2580,11 +2580,12 @@ pub(crate) fn publish_walk_boundary_shard_work(
         }
     }
     let templates_started_at = Instant::now();
-    let characterizations = characterize_selected_terminals_for_terminal_count(
+    let characterizations = try_characterize_selected_terminals_for_terminal_count(
         boundary_table,
         num_terminals,
         &selected,
-    );
+    )
+    .map_err(|error| error.to_string())?;
     let templates = Templates::from_characterizations(&characterizations);
     let templates_ms = templates_started_at.elapsed().as_secs_f64() * 1000.0;
     let parser_work = BoundaryParserWork::DeferredTerminalCount {
@@ -3479,11 +3480,12 @@ impl BoundaryParserWork {
                     };
                     *slot = true;
                 }
-                let characterizations = characterize_selected_terminals_for_terminal_count(
+                let characterizations = try_characterize_selected_terminals_for_terminal_count(
                     &table,
                     *num_terminals,
                     &selected,
-                );
+                )
+                .map_err(|error| error.to_string())?;
                 *templates = Templates::from_characterizations(&characterizations);
                 *parser_table_override = Some(table);
                 Ok(())
@@ -14030,11 +14032,12 @@ fn try_prepare_cached_composition_template_plan_for_terminal_count(
     }
     let action_seed_ms = action_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let action_characterize_started_at = Instant::now();
-    let action_deltas = characterize_terminal_action_state_seeds_for_terminal_count(
+    let action_deltas = try_characterize_terminal_action_state_seeds_for_terminal_count(
         &composed_table.table,
         num_terminals,
         &action_seeds,
-    );
+    )
+    .ok()?;
     let action_characterize_ms =
         action_characterize_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -14066,11 +14069,12 @@ fn try_prepare_cached_composition_template_plan_for_terminal_count(
     }
     let nt_seed_ms = nt_seed_started_at.elapsed().as_secs_f64() * 1000.0;
     let nt_characterize_started_at = Instant::now();
-    let nt_deltas = characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+    let nt_deltas = try_characterize_terminal_nt_predecessor_seeds_for_terminal_count(
         &composed_table.table,
         num_terminals,
         &nt_predecessor_seeds,
-    );
+    )
+    .ok()?;
     let nt_characterize_ms =
         nt_characterize_started_at.elapsed().as_secs_f64() * 1000.0;
 
@@ -34419,11 +34423,11 @@ table: &dispatch.table,
             let seed_count = action_seeds.iter().map(Vec::len).sum::<usize>();
             let seed_terminals = action_seeds.iter().filter(|states| !states.is_empty()).count();
             let seed_characterize_started = Instant::now();
-            let seeded_characterizations = crate::compiler::stages::templates::characterize::characterize_terminal_action_state_seeds(
+            let seeded_characterizations = crate::compiler::stages::templates::characterize::try_characterize_terminal_action_state_seeds(
                 &composed_table.table,
                 &concrete_grammar,
                 &action_seeds,
-            );
+            ).expect("seeded characterization is finite in this diagnostic path");
             let seed_characterize_ms =
                 seed_characterize_started.elapsed().as_secs_f64() * 1000.0;
             let seed_template_started = Instant::now();
@@ -34661,11 +34665,11 @@ table: &dispatch.table,
             }
             let nt_seed_count = nt_predecessor_seeds.iter().map(Vec::len).sum::<usize>();
             let nt_seed_characterizations = crate::compiler::stages::templates::characterize::
-                characterize_terminal_nt_predecessor_seeds(
+                try_characterize_terminal_nt_predecessor_seeds(
                     &composed_table.table,
                     &concrete_grammar,
                     &nt_predecessor_seeds,
-                );
+                ).expect("seeded characterization is finite in this diagnostic path");
             let mut direct_symbolic = BTreeMap::new();
             for terminal in 0..parent_terminal_end {
                 if !tight_selected[terminal as usize] {

@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn actual_retained_raw_static_input_bypasses_missing_characterization() {
         use glrmask_parser_dwa::__private::templates::{
-            characterize::characterize_selected_terminals_for_terminal_count,
+            characterize::try_characterize_selected_terminals_for_terminal_count,
             compile_dfa::Templates,
         };
         let table = build_test_table(
@@ -632,10 +632,10 @@ mod tests {
               &[(EOF, Action::Accept)]],
             &[&[], &[]],
         );
-        let chars = characterize_selected_terminals_for_terminal_count(
+        let chars = try_characterize_selected_terminals_for_terminal_count(
             &table, 2, &[true, true],
-        );
-        let mut raw = Templates::dfas_from_characterizations(&chars);
+        ).unwrap();
+        let mut raw = Templates::try_dfas_from_characterizations(&chars).unwrap();
         let retained = vec![raw.remove(&0), None];
         let rebuilt = from_compiler_parts(&table, None, &[], None, false, true).unwrap();
         let reused = from_compiler_parts(&table, None, &retained, None, false, true).unwrap();

@@ -229,6 +229,7 @@ fn fallible_selected_characterization_rejects_cycles_without_panicking_or_fallba
         try_characterize_selected_terminals_for_terminal_count(&cyclic, 1, &[true])));
     let error = result.expect("unsupported reduction cycles must return an error")
         .expect_err("a cyclic relation must not be truncated or accepted");
+    let error = error.to_string();
     assert!(error.contains("terminal 0") && error.contains("reduction cycle"), "{error}");
     assert!(try_characterize_selected_terminals_for_terminal_count(&cyclic, 1, &[false])
         .unwrap().is_empty(), "an unselected relation requires no characterization");

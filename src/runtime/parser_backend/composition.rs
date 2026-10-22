@@ -299,9 +299,10 @@ fn compile_table_relations(table: &GLRTable) -> crate::Result<TemplateDfasByTerm
         specialize_template_dfa_defaults_for_commit_split_input, try_split_commit_template_dfas};
     let characterizations = try_characterize_selected_terminals_for_terminal_count(
         table, table.num_terminals, &vec![true; table.num_terminals as usize])
-        .map_err(crate::Error::Compilation)?;
+        .map_err(|error| crate::Error::Compilation(error.to_string()))?;
     let mut programs = vec![None; table.num_terminals as usize];
-    for (terminal, raw) in Templates::from_characterizations(&characterizations).by_terminal {
+    for (terminal, raw) in Templates::try_from_characterizations(&characterizations)
+        .map_err(crate::Error::Compilation)?.by_terminal {
         let raw = specialize_template_dfa_defaults_for_commit_split_input(&raw);
         let split = try_split_commit_template_dfas(&raw).ok_or_else(|| crate::Error::Compilation(
             format!("composition relation {terminal} is not a finite POP/READ/PUSH program")))?;

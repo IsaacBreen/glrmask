@@ -516,7 +516,7 @@ impl<'a> NativeTableIndex<'a> {
             let reference =
                 super::characterize::try_characterize_selected_terminals_for_terminal_count(
                     self.table, self.table.num_terminals, &self.selected,
-                ).map_err(|message| NativeCompileError { terminal: 0, message })?;
+                ).map_err(|error| NativeCompileError { terminal: 0, message: error.to_string() })?;
             for row in &rows {
                 for &terminal in &row.terminals {
                     assert_eq!(

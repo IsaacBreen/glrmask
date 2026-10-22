@@ -362,11 +362,15 @@ fn fuzz_seeds_return_typed_decline_under_tiny_budget() {
         // template strategy now declines them under the tiny budget.
         let reference = compile_case(case, MaskStrategy::TokenTrie);
         check_exact_oracle(&reference, case);
-        for strategy in [
-            MaskStrategy::TokenClassTrie,
-            MaskStrategy::ParserDwa,
-            MaskStrategy::Auto,
-        ] {
+        // Auto alone may fall back to the exact TokenTrie strategy; its masks
+        // must still match the oracle.
+        {
+            let _limit = TestBudgetLimit::set(1_000);
+            let auto = try_compile_case(case, MaskStrategy::Auto)
+                .unwrap_or_else(|error| panic!("start={} Auto must fall back: {error}", case.start));
+            check_exact_oracle(&auto, case);
+        }
+        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let _ = {
                 let _limit = TestBudgetLimit::set(1_000);
                 expect_strategy_decline(

@@ -5817,7 +5817,7 @@ mod tests {
             StateInjection, diagnose_transfer, instantiate_entry, instantiate_finish,
             scope_characterization, validate_slot_entry_shape,
         };
-        use crate::compiler::stages::templates::characterize::characterize_selected_terminals_for_terminal_count;
+        use crate::compiler::stages::templates::characterize::try_characterize_selected_terminals_for_terminal_count;
 
         let core_table = compiler_table_fixture(&fixture.core);
         let dispatch_table = compiler_table_fixture(&fixture.dispatch);
@@ -5830,11 +5830,11 @@ mod tests {
         // Ordinary local transfer for core terminal 3 (the row-918 terminal).
         let mut selected = vec![false; core_table.num_terminals as usize];
         selected[3] = true;
-        let characterized = characterize_selected_terminals_for_terminal_count(
+        let characterized = try_characterize_selected_terminals_for_terminal_count(
             &core_table,
             core_table.num_terminals,
             &selected,
-        );
+        ).unwrap();
         let local_t3 = characterized.get(&3).expect("core terminal 3 characterizes");
         let scoped_t3 =
             scope_characterization(local_t3, &parent_injection).expect("scope core terminal 3");
@@ -5859,11 +5859,11 @@ mod tests {
             .expect("outer slot supports static Entry");
         let mut slot_selected = vec![false; core_table.num_terminals as usize];
         slot_selected[link.slot_terminal as usize] = true;
-        let slot_characterized = characterize_selected_terminals_for_terminal_count(
+        let slot_characterized = try_characterize_selected_terminals_for_terminal_count(
             &core_table,
             core_table.num_terminals,
             &slot_selected,
-        );
+        ).unwrap();
         let local_slot = slot_characterized
             .get(&link.slot_terminal)
             .expect("slot terminal characterizes");

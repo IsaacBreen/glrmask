@@ -14,7 +14,7 @@ use crate::automata::unweighted_u32::{
     dfa::{DFA, DFAState},
     determinize::determinize,
     determinize_minimal_defaults,
-    minimize_acyclic::minimize_acyclic,
+    minimize_acyclic::try_minimize_acyclic,
     nfa::NFA,
 };
 use crate::compiler::glr::labels::{
@@ -36,7 +36,11 @@ pub struct ProgramCompiler {
 
 fn fallback_specialization(nfa: &NFA, minimize: bool) -> Result<DFA, String> {
     let raw = determinize(nfa);
-    let raw = if minimize { minimize_acyclic(&raw) } else { raw };
+    let raw = if minimize {
+        try_minimize_acyclic(&raw).map_err(|error| error.to_string())?
+    } else {
+        raw
+    };
     Ok(specialize_template_dfa_defaults_for_commit_split_input(&raw))
 }
 
@@ -927,7 +931,7 @@ mod tests {
         assert_eq!(determinize_union(&nfa, 0), Err(AttemptError::Budget));
         let direct = determinize_union(&nfa, 100_000).unwrap();
         let staged = specialize_template_dfa_defaults_for_commit_split_input(
-            &minimize_acyclic(&determinize(&nfa))
+            &try_minimize_acyclic(&determinize(&nfa)).unwrap()
         );
         assert_eq!(fallback_mismatch(&direct, &staged), None);
     }

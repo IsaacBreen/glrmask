@@ -702,8 +702,15 @@ impl Module {
                         error.decline_stage(),
                     );
                 }
-                // The requested strategy is never silently replaced: return
-                // the typed decline.
+                // Only Auto may pick a different exact strategy; an explicit
+                // strategy request is never silently replaced.
+                if self.node.mask_strategy == MaskStrategy::Auto {
+                    if let Ok(grammar) = self.flatten_source() {
+                        return grammar
+                            .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
+                            .with_end_tokens(&options.end_tokens);
+                    }
+                }
                 Err(error)
             }
             Err(error) => Err(error),
