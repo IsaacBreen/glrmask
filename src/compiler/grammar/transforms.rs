@@ -2319,3 +2319,425 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod normal_route_inflation_probe {
+    //! TEMPORARY investigation instrumentation. Measures the normal static
+    //! rewrite pipeline pass by pass against terminal-ended preparation.
+    use super::*;
+    use crate::compiler::build_budget::TestBudgetLimit;
+    use crate::compiler::glr::analysis::AnalyzedGrammar;
+    use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
+    use crate::compiler::glr::terminal_ended::{
+        prepare_terminal_ended, CompileBudget, CompileLimits,
+    };
+    use crate::{BuildOptions, Grammar, MaskStrategy};
+    use std::time::Instant;
+
+    fn nt_count(grammar: &GrammarDef) -> usize {
+        grammar
+            .rules
+            .iter()
+            .flat_map(|rule| {
+                std::iter::once(rule.lhs).chain(rule.rhs.iter().filter_map(|symbol| match symbol {
+                    Symbol::Nonterminal(id) => Some(*id),
+                    Symbol::Terminal(_) => None,
+                }))
+            })
+            .collect::<BTreeSet<_>>()
+            .len()
+    }
+
+    fn rhs_symbols(grammar: &GrammarDef) -> usize {
+        grammar.rules.iter().map(|rule| rule.rhs.len()).sum()
+    }
+
+    fn state_count(grammar: &GrammarDef) -> u32 {
+        let analyzed = AnalyzedGrammar::from_grammar_def(grammar);
+        GLRTable::build_with_default_construction(
+            &analyzed,
+            GlrTableConstruction::ExperimentalCoreMerged,
+        )
+        .num_states
+    }
+
+    fn symbol_name(grammar: &GrammarDef, symbol: &Symbol) -> String {
+        match symbol {
+            Symbol::Nonterminal(id) => grammar
+                .nonterminal_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("n{id}")),
+            Symbol::Terminal(id) => grammar
+                .terminal_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| format!("t{id}")),
+        }
+    }
+
+    fn rule_text(grammar: &GrammarDef, rule: &Rule) -> String {
+        let lhs = grammar
+            .nonterminal_names
+            .get(&rule.lhs)
+            .cloned()
+            .unwrap_or_else(|| format!("n{}", rule.lhs));
+        let rhs = rule
+            .rhs
+            .iter()
+            .map(|symbol| symbol_name(grammar, symbol))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{lhs} -> {rhs}")
+    }
+
+    struct Probe {
+        name: &'static str,
+        stage: &'static str,
+        started: Instant,
+        last_rules: usize,
+        last_rhs: usize,
+        last_states: u32,
+    }
+
+    impl Probe {
+        fn new(name: &'static str) -> Self {
+            Self {
+                name,
+                stage: "lowering",
+                started: Instant::now(),
+                last_rules: 0,
+                last_rhs: 0,
+                last_states: 0,
+            }
+        }
+
+        fn record(&mut self, stage: &'static str, grammar: &GrammarDef, states: bool) {
+            let elapsed = self.started.elapsed().as_secs_f64() * 1000.0;
+            let states = if states { state_count(grammar) } else { 0 };
+            eprintln!(
+                "PROBE gram={} stage={} rules={} nts={} rhs={} states={} ms={:.3}",
+                self.name,
+                stage,
+                grammar.rules.len(),
+                nt_count(grammar),
+                rhs_symbols(grammar),
+                states,
+                elapsed,
+            );
+            self.stage = stage;
+            self.last_rules = grammar.rules.len();
+            self.last_rhs = rhs_symbols(grammar);
+            self.last_states = states;
+            self.started = Instant::now();
+        }
+
+        fn examples(&self, stage: &str, before: &GrammarDef, after: &GrammarDef) {
+            let before_rhs = rhs_symbols(before);
+            let after_rhs = rhs_symbols(after);
+            if after_rhs <= before_rhs.saturating_mul(2) && after.rules.len() <= before.rules.len() {
+                return;
+            }
+            eprintln!(
+                "PROBE_EXAMPLE gram={} stage={} before_rules={} after_rules={} before_rhs={} after_rhs={}",
+                self.name,
+                stage,
+                before.rules.len(),
+                after.rules.len(),
+                before_rhs,
+                after_rhs,
+            );
+            for rule in before.rules.iter().take(4) {
+                eprintln!("PROBE_EXAMPLE BEFORE {}", rule_text(before, rule));
+            }
+            for rule in after.rules.iter().take(8) {
+                eprintln!("PROBE_EXAMPLE AFTER {}", rule_text(after, rule));
+            }
+        }
+    }
+
+    fn probe_normal(name: &'static str, lowering: GrammarDef) {
+        let mut probe = Probe::new(name);
+        probe.record("lowering", &lowering, true);
+
+        let mut grammar = lowering;
+        discard_reflexive_unit_rules(&mut grammar.rules);
+        probe.record("discard_reflexive_unit_rules", &grammar, true);
+
+        let nullable_terminals = nullable_terminals_for_grammar(&grammar);
+        probe.record("nullable_terminals_for_grammar", &grammar, true);
+
+        let before = grammar.clone();
+        expand_nullable_terminals(&mut grammar.rules, grammar.start, &nullable_terminals);
+        probe.record("expand_nullable_terminals", &grammar, true);
+        probe.examples("expand_nullable_terminals", &before, &grammar);
+
+        let before = grammar.clone();
+        normalize_grammar(&mut grammar.rules, grammar.start);
+        probe.record("normalize_grammar", &grammar, true);
+        probe.examples("normalize_grammar", &before, &grammar);
+
+        let protected_nonterminals = collect_protected_nonterminals(&grammar);
+        probe.record("collect_protected_nonterminals", &grammar, true);
+
+        let before = grammar.clone();
+        inline_single_use_nonterminals(
+            &mut grammar.rules,
+            &protected_nonterminals,
+            grammar.start,
+        );
+        probe.record("inline_single_use_nonterminals", &grammar, true);
+        probe.examples("inline_single_use_nonterminals", &before, &grammar);
+
+        let mut merge_iteration = 0usize;
+        loop {
+            merge_iteration += 1;
+            let prev = grammar.rules.len();
+            let before = grammar.clone();
+            grammar.rules = merge_identical_nonterminals(&grammar.rules, grammar.start);
+            probe.record("merge_identical_nonterminals_pre", &grammar, true);
+            probe.examples("merge_identical_nonterminals_pre", &before, &grammar);
+            if grammar.rules.len() == prev {
+                break;
+            }
+            if merge_iteration > 32 {
+                break;
+            }
+        }
+
+        let max_reduction_len = MAX_RUNTIME_REDUCTION_LEN;
+        let before = grammar.clone();
+        bound_runtime_reduction_length(&mut grammar, max_reduction_len);
+        probe.record("bound_runtime_reduction_length", &grammar, true);
+        probe.examples("bound_runtime_reduction_length", &before, &grammar);
+
+        let before = grammar.clone();
+        inline_post_bound_single_use_nonterminals(
+            &mut grammar.rules,
+            &protected_nonterminals,
+            max_reduction_len,
+            grammar.start,
+        );
+        probe.record("inline_post_bound_single_use_nonterminals", &grammar, true);
+        probe.examples(
+            "inline_post_bound_single_use_nonterminals",
+            &before,
+            &grammar,
+        );
+
+        loop {
+            let prev = grammar.rules.len();
+            let before = grammar.clone();
+            grammar.rules = merge_identical_nonterminals(&grammar.rules, grammar.start);
+            probe.record("merge_identical_nonterminals_post", &grammar, true);
+            probe.examples("merge_identical_nonterminals_post", &before, &grammar);
+            if grammar.rules.len() == prev {
+                break;
+            }
+        }
+
+        let mut next_nt = grammar.num_nonterminals();
+        let mut fresh_nt = || {
+            let id = next_nt;
+            next_nt += 1;
+            id
+        };
+        for round in 0..2 {
+            let before = grammar.clone();
+            eliminate_right_recursion(&mut grammar.rules, &mut fresh_nt);
+            if has_indirect_left_recursion(&grammar.rules) {
+                normalize_grammar(&mut grammar.rules, grammar.start);
+            }
+            let stage = if round == 0 {
+                "post_merge_normalize_1"
+            } else {
+                "post_merge_normalize_2"
+            };
+            probe.record(stage, &grammar, true);
+            probe.examples(stage, &before, &grammar);
+        }
+
+        let before = grammar.clone();
+        compact_unused_terminals(&mut grammar);
+        probe.record("compact_unused_terminals", &grammar, true);
+        probe.examples("compact_unused_terminals", &before, &grammar);
+    }
+
+    fn probe_terminal_ended(name: &'static str, source: &GrammarDef) {
+        let limits = CompileLimits::default();
+        let mut budget = CompileBudget::new();
+        let started = Instant::now();
+        let prepared = prepare_terminal_ended(source, &limits, &mut budget)
+            .unwrap_or_else(|error| panic!("{name}: terminal-ended preparation failed: {error:?}"));
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "PROBE gram={} stage=prepare_terminal_ended rules={} nts={} rhs={} states={} ms={:.3}",
+            name,
+            prepared.rules.len(),
+            nt_count(&GrammarDef {
+                rules: prepared.rules.clone(),
+                start: prepared.start,
+                ..source.clone()
+            }),
+            prepared.rules.iter().map(|rule| rule.rhs.len()).sum::<usize>(),
+            state_count(&GrammarDef {
+                rules: prepared.rules.clone(),
+                start: prepared.start,
+                ..source.clone()
+            }),
+            elapsed,
+        );
+        let te = prepare_terminal_ended_grammar(source.clone(), prepared);
+        eprintln!(
+            "PROBE gram={} stage=terminal_ended_final rules={} nts={} rhs={} states={} ms={:.3}",
+            name,
+            te.rules.len(),
+            nt_count(&te),
+            rhs_symbols(&te),
+            state_count(&te),
+            0.0,
+        );
+    }
+
+    fn probe_case(name: &'static str, lowering: GrammarDef, budget: u64) {
+        eprintln!("PROBE_BEGIN gram={name} budget={budget}");
+        probe_terminal_ended(name, &lowering);
+        let _limit = TestBudgetLimit::set(budget);
+        let normal = super::prepare_grammar_transforms_only(lowering.clone());
+        eprintln!(
+            "PROBE gram={} stage=public_prepare_grammar rules={} nts={} rhs={} states={} ms={:.3}",
+            name,
+            normal.rules.len(),
+            nt_count(&normal),
+            rhs_symbols(&normal),
+            state_count(&normal),
+            0.0,
+        );
+        probe_normal(name, lowering);
+        eprintln!("PROBE_END gram={name}");
+    }
+
+    fn real_vocab() -> crate::Vocab {
+        crate::Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect())
+    }
+
+    fn probe_compile(name: &'static str, grammar: Grammar<'static>, budget: u64) {
+        let _limit = TestBudgetLimit::set(budget);
+        let started = Instant::now();
+        let result = grammar.compile_with_build_options(
+            &real_vocab(),
+            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+        );
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        match result {
+            Ok(constraint) => eprintln!(
+                "PROBE_COMPILE gram={} declined=false backend={:?} ms={:.3}",
+                name,
+                constraint.parser_backend(),
+                elapsed,
+            ),
+            Err(error) => eprintln!(
+                "PROBE_COMPILE gram={} declined={} error={} ms={:.3}",
+                name,
+                error.is_strategy_decline(),
+                error,
+                elapsed,
+            ),
+        }
+    }
+
+    #[test]
+    #[ignore = "temporary normal-route inflation instrumentation"]
+    fn fuzz_4754_normalize_subpasses() {
+        let source = "start: n0\nn0: \"b\" | \"b\" n2 | \"b\" | \"\"\nn1: \"c\" | n3 n1 n1 | \"b\" n2 n3 | \"\"\nn2: \"a\" | n0 | \"\" | n3 \"c\"\nn3: \"b\" | n2 n0 n3 | n2\n";
+        let lowering = crate::import::lower_static_lark(source).expect("fuzz_4754 lowering");
+        let prepared = super::prepare_grammar_transforms_only(lowering);
+        eprintln!(
+            "PROBE_SUBPASS_FINAL rules={} nts={} rhs={}",
+            prepared.rules.len(),
+            nt_count(&prepared),
+            rhs_symbols(&prepared),
+        );
+    }
+
+    #[test]
+    #[ignore = "temporary normal-route inflation instrumentation"]
+    fn fuzz_4754_rule_examples() {
+        let source = "start: n0\nn0: \"b\" | \"b\" n2 | \"b\" | \"\"\nn1: \"c\" | n3 n1 n1 | \"b\" n2 n3 | \"\"\nn2: \"a\" | n0 | \"\" | n3 \"c\"\nn3: \"b\" | n2 n0 n3 | n2\n";
+        let mut grammar = crate::import::lower_static_lark(source).expect("fuzz_4754 lowering");
+        eprintln!("PROBE_RULE BEFORE count={}", grammar.rules.len());
+        for rule in grammar.rules.iter().take(15) {
+            eprintln!("PROBE_RULE BEFORE {}", rule_text(&grammar, rule));
+        }
+        let nullable = nullable_terminals_for_grammar(&grammar);
+        expand_nullable_terminals(&mut grammar.rules, grammar.start, &nullable);
+        eprintln!("PROBE_RULE AFTER_EXPAND count={}", grammar.rules.len());
+        for rule in grammar.rules.iter().take(15) {
+            eprintln!("PROBE_RULE AFTER_EXPAND {}", rule_text(&grammar, rule));
+        }
+        normalize_grammar(&mut grammar.rules, grammar.start);
+        eprintln!("PROBE_RULE AFTER_NORMALIZE count={}", grammar.rules.len());
+        for rule in grammar
+            .rules
+            .iter()
+            .filter(|rule| rule.lhs <= 3)
+            .take(20)
+        {
+            eprintln!("PROBE_RULE AFTER_NORMALIZE {}", rule_text(&grammar, rule));
+        }
+    }
+
+    #[test]
+    #[ignore = "temporary normal-route inflation instrumentation"]
+    fn normal_route_inflation_probe() {
+        // The "4754" fixture is fuzz seed 4754 (fuzz-results-901205), not
+        // JSB corpus index 4754: that index is an unsupported-negation schema.
+        let fuzz_4754 = "start: n0\nn0: \"b\" | \"b\" n2 | \"b\" | \"\"\nn1: \"c\" | n3 n1 n1 | \"b\" n2 n3 | \"\"\nn2: \"a\" | n0 | \"\" | n3 \"c\"\nn3: \"b\" | n2 n0 n3 | n2\n";
+        probe_case(
+            "fuzz_4754",
+            crate::import::lower_static_lark(fuzz_4754).expect("fuzz_4754 lowering"),
+            1_000_000_000,
+        );
+        probe_compile(
+            "fuzz_4754",
+            Grammar::from_lark_owned(fuzz_4754, crate::LarkOptions::default()),
+            1_000_000_000,
+        );
+
+        let fuzz_594 = "start: n0\nn0: \"a\" | \"a\" \"c\" n1 | n1\nn1: \"c\" | n2 n1 | \"a\" | n1 n1 n2\nn2: \"c\" | n2 n1 \"b\" | n0 n2 | \"a\" \"c\"\n";
+        probe_case(
+            "fuzz_594",
+            crate::import::lower_static_lark(fuzz_594).expect("fuzz_594 lowering"),
+            10_000_000,
+        );
+        probe_compile(
+            "fuzz_594",
+            Grammar::from_lark_owned(fuzz_594, crate::LarkOptions::default()),
+            10_000_000,
+        );
+
+        let seed_2530 = "start: n3\nn0: \"c\" | n3 |\nn1: \"a\" |\nn2: | n0 n1 n2\nn3: \"b\" n2 n0 | n2 \"b\"\n";
+        probe_case(
+            "seed_2530_min",
+            crate::import::lower_static_lark(seed_2530).expect("seed_2530 lowering"),
+            10_000_000,
+        );
+        probe_compile(
+            "seed_2530_min",
+            Grammar::from_lark_owned(seed_2530, crate::LarkOptions::default()),
+            10_000_000,
+        );
+
+        let fuzz_780 = "start: n1\nn0: \"b\" | \"\" | n0 \"b\" n1 | n1 \"c\" n0\nn1: \"c\" | n1 n1 | n0 \"a\" | \"c\" \"b\" n0\n";
+        probe_case(
+            "fuzz_780",
+            crate::import::lower_static_lark(fuzz_780).expect("fuzz_780 lowering"),
+            10_000_000,
+        );
+        probe_compile(
+            "fuzz_780",
+            Grammar::from_lark_owned(fuzz_780, crate::LarkOptions::default()),
+            10_000_000,
+        );
+    }
+}
