@@ -79,6 +79,7 @@ impl Builder {
         default: u32,
         mut transitions: Vec<(Label, u32)>,
     ) -> Option<u32> {
+        charge_build_budget("template_determinization", transitions.len() as u64);
         transitions.sort_unstable_by_key(|&(label, _)| label);
         transitions.dedup_by(|a, b| a.0 == b.0);
         transitions.retain(|&(label, target)| {
@@ -118,6 +119,7 @@ impl Builder {
     }
 
     fn union(&mut self, ids: &mut Vec<u32>, depth: usize) -> Option<u32> {
+        charge_build_budget("template_determinization", ids.len() as u64);
         ids.sort_unstable();
         ids.dedup();
         ids.retain(|&id| id != 0);
@@ -214,6 +216,10 @@ fn materialize(builder: &Builder, start: u32, default_label: Label) -> DFA {
     while let Some(node) = queue.pop_front() {
         let state = id_of[&node];
         let data = &builder.nodes[node as usize];
+        charge_build_budget(
+            "template_determinization",
+            1u64.saturating_add(data.transitions.len() as u64),
+        );
         dfa.states[state as usize].is_accepting = data.accepting;
         let mut transitions: Vec<(Label, u32)> = Vec::with_capacity(data.transitions.len() + 1);
         if data.default != 0 {
@@ -262,8 +268,19 @@ pub fn try_determinize_minimal_defaults_with_budget(
     let mut builder = Builder::new(node_budget, depth_budget);
     let mut canonical = vec![0u32; nfa.states.len()];
     for state in order {
-        charge_build_budget("template_determinization", 1);
         let data = &nfa.states[state as usize];
+        // Every outgoing transition materializes one child vector, and every
+        // target in it is copied. Charge the whole row before those vectors
+        // are allocated.
+        let row_work = data
+            .transitions
+            .values()
+            .map(|targets| targets.len().saturating_add(1))
+            .sum::<usize>();
+        charge_build_budget(
+            "template_determinization",
+            1u64.saturating_add(row_work as u64),
+        );
         let mut default_targets = Vec::new();
         let mut explicit: Vec<(Label, Vec<u32>)> = Vec::new();
         for (&label, targets) in &data.transitions {

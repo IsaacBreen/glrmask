@@ -756,6 +756,12 @@ impl Context<'_, '_> {
         seen: &mut FxHashSet<Config>,
         pending: &mut VecDeque<Config>,
     ) {
+        charge_build_budget(
+            "parser_dwa",
+            1u64.saturating_add(len as u64)
+                .saturating_add(config.segment.len() as u64)
+                .saturating_add(config.input.len() as u64),
+        );
         if len >= config.segment.len() && len != 0 {
             let mut pop = config.input.clone();
             pop.extend(std::iter::repeat_n(
@@ -792,6 +798,15 @@ impl Context<'_, '_> {
     ) {
         let known = config.segment.len();
         let base = config.input.len();
+        // Each emit clones the input side and copies the guard/push tails into
+        // a fresh output transition.
+        charge_build_budget(
+            "parser_dwa",
+            1u64.saturating_add(base as u64)
+                .saturating_add(known as u64)
+                .saturating_add(pushes.len() as u64)
+                .saturating_add(guards.len() as u64),
+        );
         let mut input = config.input.clone();
         let mut previous = None;
         let mut revealed_guarded = false;
@@ -955,7 +970,10 @@ impl Context<'_, '_> {
         pending: &mut VecDeque<Config>,
     ) {
         while let Some(config) = pending.pop_front() {
-            charge_build_budget("parser_dwa", 1);
+            charge_build_budget(
+                "parser_dwa",
+                1u64.saturating_add(config.segment.len() as u64),
+            );
             let Some(&top) = config.segment.last() else { continue; };
             self.process(
                 source, &config, self.action(top), 0, output, seen, pending,
@@ -1032,6 +1050,10 @@ impl Context<'_, '_> {
         let mut unit_cache = FxHashMap::default();
         for &top in tops {
             let predecessors = &self.index.predecessors[top as usize];
+            charge_build_budget(
+                "parser_dwa",
+                1u64.saturating_add(predecessors.len() as u64),
+            );
             let action = self.action(top);
             let can_index = !matches!(self.mode, Mode::Finish(_))
                 && !matches!(

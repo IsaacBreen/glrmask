@@ -647,10 +647,17 @@ fn specialize_scalar_template_dfa(dfa: &UnweightedDfa) -> Option<UnweightedDfa> 
     ids[dfa.start_state as usize] = Some(specialized.start_state);
     let mut pending = VecDeque::from([dfa.start_state]);
     while let Some(old) = pending.pop_front() {
-        charge_build_budget("template_specialization", 1);
+        let old_row = &dfa.states[old as usize];
+        // One unit for the BFS node and one for every transition copied or
+        // materialized out of it. A single charge keeps the atomic hot path
+        // coarse while still scaling with the real per-node work.
+        charge_build_budget(
+            "template_specialization",
+            1u64.saturating_add(old_row.transitions.len() as u64),
+        );
         let from = ids[old as usize].expect("reachable source state has a BFS id");
-        specialized.states[from as usize].is_accepting = dfa.states[old as usize].is_accepting;
-        for (&label, &target) in &dfa.states[old as usize].transitions {
+        specialized.states[from as usize].is_accepting = old_row.is_accepting;
+        for (&label, &target) in &old_row.transitions {
             let to = if let Some(id) = ids[target as usize] { id } else {
                 let id = specialized.add_state();
                 ids[target as usize] = Some(id);
@@ -675,7 +682,20 @@ fn specialize_template_dfa_defaults_with_subsets(dfa: &UnweightedDfa) -> Unweigh
     let mut pending = VecDeque::from([start_subset]);
 
     while let Some(subset) = pending.pop_front() {
-        charge_build_budget("template_specialization", 4);
+        // Charge the whole subset visit up front: every member is scanned and
+        // every transition is inserted into the per-label successor sets.
+        // Compute the transition count without allocating so the charge still
+        // lands before the maps below are materialized.
+        let transition_count = subset
+            .iter()
+            .filter_map(|&state_id| dfa.states.get(state_id as usize))
+            .map(|state| state.transitions.len())
+            .sum::<usize>();
+        charge_build_budget(
+            "template_specialization",
+            1u64.saturating_add(subset.len() as u64)
+                .saturating_add(transition_count as u64),
+        );
         let from = ids[&subset];
         let mut explicit: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
         let mut defaults = BTreeSet::new();
@@ -698,12 +718,22 @@ fn specialize_template_dfa_defaults_with_subsets(dfa: &UnweightedDfa) -> Unweigh
         // encode PUSH, so they must never inherit wildcard POP transitions.
         for (&label, targets) in &mut explicit {
             if label >= 0 {
+                // The wildcard union copies every DEFAULT target into each
+                // explicit label's successor set.
+                charge_build_budget(
+                    "template_specialization",
+                    defaults.len() as u64,
+                );
                 targets.extend(defaults.iter().copied());
             }
         }
         if !defaults.is_empty() {
             explicit.insert(DEFAULT_LABEL, defaults);
         }
+        charge_build_budget(
+            "template_specialization",
+            explicit.len() as u64,
+        );
         for (label, targets) in explicit {
             let to = if let Some(&id) = ids.get(&targets) {
                 id
@@ -958,6 +988,12 @@ pub fn try_split_commit_template_dfas(
         let Some(old) = dfa.states.get(old_state as usize) else {
             continue;
         };
+        // Each visited (state, phase) pair copies or redirects every outgoing
+        // transition into one of the split phase graphs.
+        charge_build_budget(
+            "template_specialization",
+            1u64.saturating_add(old.transitions.len() as u64),
+        );
 
         match phase {
             CommitTemplatePhase::Pop => {
