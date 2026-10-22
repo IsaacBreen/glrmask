@@ -351,6 +351,7 @@ impl Closure {
         }
         self.work.clear();
         spend(budget, seeds.len())?;
+        charge_build_budget("template_determinization", seeds.len() as u64);
         for &state in seeds {
             if self.marks[state as usize] != self.epoch {
                 self.marks[state as usize] = self.epoch;
@@ -361,6 +362,10 @@ impl Closure {
         while head < self.work.len() {
             let state = self.work[head] as usize;
             spend(budget, 1 + nfa.states[state].epsilons.len())?;
+            charge_build_budget(
+                "template_determinization",
+                1u64.saturating_add(nfa.states[state].epsilons.len() as u64),
+            );
             for &target in &nfa.states[state].epsilons {
                 if self.marks[target as usize] != self.epoch {
                     self.marks[target as usize] = self.epoch;
@@ -378,6 +383,10 @@ fn union_sorted(
     left: &[u32], right: &[u32], budget: &mut usize,
 ) -> Result<Vec<u32>, AttemptError> {
     spend(budget, left.len().saturating_add(right.len()))?;
+    charge_build_budget(
+        "template_determinization",
+        left.len().saturating_add(right.len()) as u64,
+    );
     let mut out = Vec::with_capacity(left.len().saturating_add(right.len()));
     let (mut i, mut j) = (0, 0);
     while i < left.len() && j < right.len() {
@@ -410,6 +419,10 @@ fn intern_subset(
     budget: &mut usize,
 ) -> Result<u32, AttemptError> {
     spend(budget, key.len().saturating_add(1))?;
+    charge_build_budget(
+        "template_determinization",
+        key.len().saturating_add(1) as u64,
+    );
     if let Some(&id) = ids.get(key.as_slice()) {
         return Ok(id);
     }
@@ -436,8 +449,25 @@ fn determinize_union(nfa: &NFA, mut budget: usize) -> Result<DFA, AttemptError> 
     let mut defaults = Vec::new();
     let mut head = 0;
     while head < subsets.len() {
-        charge_build_budget("template_determinization", 1);
         let subset = Arc::clone(&subsets[head]);
+        // One unit for the subset visit plus every transition target that the
+        // loop below copies into its per-label buckets. The count is taken
+        // before the buckets and closures are materialized.
+        let transition_work = subset
+            .iter()
+            .map(|&state| {
+                nfa.states[state as usize]
+                    .transitions
+                    .values()
+                    .map(|targets| targets.len().saturating_add(1))
+                    .sum::<usize>()
+            })
+            .sum::<usize>();
+        charge_build_budget(
+            "template_determinization",
+            1u64.saturating_add(subset.len() as u64)
+                .saturating_add(transition_work as u64),
+        );
         let source = head as u32;
         dfa.states[head].is_accepting =
             subset.iter().any(|&state| nfa.states[state as usize].is_accepting);
@@ -557,6 +587,10 @@ fn reduce_fallback_acyclic(dfa: &DFA) -> Result<DFA, String> {
 
     for &source in order.iter().rev() {
         let row = &dfa.states[source];
+        charge_build_budget(
+            "template_determinization",
+            1u64.saturating_add(row.transitions.len() as u64),
+        );
         let default = row.transitions.get(&DEFAULT_LABEL)
             .map_or(0, |&target| classes[target as usize]);
         let edges = row.transitions.iter().filter_map(|(&label, &target)| {
@@ -673,8 +707,11 @@ fn dense_split(dfa: &DFA) -> Result<CommitTemplateDfas, String> {
     let mut dead_pop = None;
 
     while let Some((old_id, phase)) = queue.pop_front() {
-        charge_build_budget("template_specialization", 1);
         let old = &dfa.states[old_id as usize];
+        charge_build_budget(
+            "template_specialization",
+            1u64.saturating_add(old.transitions.len() as u64),
+        );
         if phase == 0 {
             let source = ensure(old_id, dfa, &mut result.pop, &mut pop, true);
             result.pop_to_read.resize(result.pop.states.len(), None);

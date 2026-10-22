@@ -385,6 +385,10 @@ fn compile_case(case: Case, strategy: MaskStrategy) -> Constraint {
 #[test]
 fn fuzz_seeds_fall_back_to_exact_token_trie_masks() {
     for case in [V2_233, V2_267, V2_296, V2_494, V2_1654] {
+        // Compile the exact reference once per case, then reuse it for every
+        // declined strategy. Recompiling it per strategy dominated this test's
+        // wall time without adding coverage.
+        let reference = compile_case(case, MaskStrategy::TokenTrie);
         for strategy in [
             MaskStrategy::TokenClassTrie,
             MaskStrategy::ParserDwa,
@@ -400,7 +404,6 @@ fn fuzz_seeds_fall_back_to_exact_token_trie_masks() {
                 "start={} {strategy:?} did not take the TokenTrie fallback",
                 case.start,
             );
-            let reference = compile_case(case, MaskStrategy::TokenTrie);
             check_fallback_matches_token_trie(&fallback, &reference, case);
             if strategy == MaskStrategy::TokenClassTrie {
                 check_exact_oracle(&fallback, case);
@@ -484,10 +487,41 @@ fn real_vocab() -> Vocab {
 }
 
 #[test]
+#[ignore]
+fn probe_seed_default_times() {
+    for (label, case) in [
+        ("233", V2_233),
+        ("267", V2_267),
+        ("296", V2_296),
+        ("494", V2_494),
+        ("1654", V2_1654),
+    ] {
+        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+            let started = std::time::Instant::now();
+            let constraint = {
+                let _limit = TestBudgetLimit::set(DEFAULT_LIMIT);
+                compile_case(case, strategy)
+            };
+            println!(
+                "SEED {label} {strategy:?} ms={:.1} backend={:?}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                constraint.parser_backend(),
+            );
+        }
+    }
+}
+
+#[test]
 fn real_grammars_compile_without_fallback_at_the_default_budget() {
     // The default must stay at least 10x the observed real-grammar maximum
-    // (643,126 units for o9838 with ParserDwa).
-    assert!(DEFAULT_LIMIT >= 6_500_000);
+    // (671,896 units for o9838 with ParserDwa) measured with the calibrated
+    // inner-loop charges.
+    const REAL_GRAMMAR_MAX_UNITS: u64 = 671_896;
+    assert!(
+        DEFAULT_LIMIT >= 10 * REAL_GRAMMAR_MAX_UNITS,
+        "default budget {DEFAULT_LIMIT} is below the 10x real-grammar floor {}",
+        10 * REAL_GRAMMAR_MAX_UNITS,
+    );
     for (name, source) in REAL_GRAMMARS {
         for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let grammar = if name.ends_with(".lark") {

@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
 use range_set_blaze::RangeSetBlaze;
 use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
@@ -1239,6 +1240,18 @@ pub fn merge_mapped_parser_dwas(
     if inputs.len() == 1 {
         return inputs.into_iter().next().unwrap();
     }
+
+    // Every merge reconciles and copies the complete input state/transition
+    // domains, and the two-family fallback union can expand it further. Charge
+    // the input size before any reconciliation allocation.
+    let input_work = inputs
+        .iter()
+        .map(|input| {
+            input.artifact().num_states() as u64
+                + input.artifact().num_transitions() as u64
+        })
+        .sum::<u64>();
+    charge_build_budget("template_determinization", input_work);
 
     if inputs.len() == 2 {
         let total_started_at = Instant::now();

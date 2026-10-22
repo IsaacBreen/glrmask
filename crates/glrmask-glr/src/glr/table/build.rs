@@ -2009,7 +2009,9 @@ fn lr0_closure_fast(
     }
 
     while let Some(nonterminal) = scratch.queue.pop_front() {
-        for &rule_id in &grammar.rules_by_lhs[nonterminal as usize] {
+        let rules = &grammar.rules_by_lhs[nonterminal as usize];
+        charge_build_budget("glr_table_lr1", 1u64.saturating_add(rules.len() as u64));
+        for &rule_id in rules {
             let rule = &grammar.rules[rule_id as usize];
             let item = Item::new(rule_id, 0, rule.rhs.len() as u32);
             result.push(item);
@@ -2779,6 +2781,14 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
             continue;
         }
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
+            let emissions = &grammar.rules_by_lhs[*nt as usize];
+            // Each emission unions a lookahead bitset into the target core.
+            // Charge one unit per word of that bitset per emitted production.
+            let lookahead_words = (grammar.num_terminals as usize + 1).div_ceil(64) as u64;
+            charge_build_budget(
+                "glr_table_lr1",
+                (emissions.len() as u64).saturating_mul(1u64.saturating_add(lookahead_words)),
+            );
             let suffix = &suffix_first[item.rule as usize];
             let suffix_index = item.dot as usize + 1;
             let base_lookaheads = &suffix.first[suffix_index];
@@ -2967,6 +2977,8 @@ fn expand_lr1_state<const CACHE_EMISSIONS: bool>(
     preclosure_reuse_enabled: bool,
 ) -> Vec<LR1Successor> {
     let rules = &grammar.rules;
+    // Every source item is scanned and its successor kernel entry updated.
+    charge_build_budget("glr_table_lr1", source_items.len() as u64);
     // Accumulate by hash, then restore the existing canonical symbol order
     // before closure/interner traversal. This avoids tree maintenance in the
     // hot expansion path without changing successor or state numbering.
@@ -3049,6 +3061,8 @@ fn expand_lr1_state<const CACHE_EMISSIONS: bool>(
             if target_items.is_empty() {
                 None
             } else {
+                // Fingerprinting hashes every closed item and its lookahead set.
+                charge_build_budget("glr_table_lr1", target_items.len() as u64);
                 let fingerprint = lr1_item_set_fingerprint(&target_items);
                 Some(LR1Successor {
                     symbol,
