@@ -288,7 +288,7 @@ impl DenseIds {
 ///
 /// Nonterminal names are cleared because preprocessing renumbers nonterminals;
 /// the start symbol is still protected downstream. A frontend direct-regular
-/// automaton is dropped because the rule set has been rewritten.
+/// automaton is terminal-level and language-preserving, so it is retained.
 pub fn preprocess_to_grammar_def(
     source: &GrammarDef,
     limits: &CompileLimits,
@@ -329,7 +329,6 @@ pub fn preprocess_to_grammar_def(
     out.rules = rules;
     out.start = preprocessed.start;
     out.nonterminal_names.clear();
-    out.direct_regular_automaton = None;
     Ok(out)
 }
 
