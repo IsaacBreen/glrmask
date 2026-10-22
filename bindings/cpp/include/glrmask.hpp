@@ -519,14 +519,8 @@ inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& opt
     detail::check(glrmask_grammar_compile(native_handle(), vocab.native_handle(), &native, &p)); return Constraint(p);
 }
 inline Constraint Module::compile(const Vocab& vocab, const CompileOptions& options) const {
-    fprintf(stderr, "ENTER Module::compile\n");
     const auto native = options.native(); glrmask_constraint* p = nullptr;
-    fprintf(stderr, "Module::compile native: size=%zu, ptr=%p, len=%zu, m_handle=%p, v_handle=%p\n",
-            native.struct_size, (const void*)native.end_tokens, native.end_tokens_len,
-            (const void*)native_handle(), (const void*)vocab.native_handle());
-    int rc = glrmask_module_compile(native_handle(), vocab.native_handle(), &native, &p);
-    fprintf(stderr, "Module::compile rc=%d, p=%p\n", rc, (void*)p);
-    detail::check(rc); return Constraint(p);
+    detail::check(glrmask_module_compile(native_handle(), vocab.native_handle(), &native, &p)); return Constraint(p);
 }
 inline ConstraintState Constraint::start() const {
     glrmask_state* p = nullptr; detail::check(glrmask_constraint_start(native_handle(), &p)); return ConstraintState(p);
