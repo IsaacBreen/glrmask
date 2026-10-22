@@ -1132,12 +1132,109 @@ fn assemble(
     }
 
     prune_output(&mut rules, source.start);
+    merge_equivalent_nonterminals(&mut rules, source.start);
 
     Ok(PreparedGrammar {
         rules,
         start: source.start,
         accepts_empty,
     })
+}
+
+/// Quotient the output by the coarsest congruence under which equivalent
+/// nonterminals have identical rule sets. Equivalent nonterminals then derive
+/// the same language, so the quotient preserves every nonterminal's language;
+/// rule shapes are unchanged, so the terminal-ended invariant is preserved.
+/// The pair construction emits many such duplicates, and each one multiplies
+/// LR and template-automaton states downstream.
+fn merge_equivalent_nonterminals(rules: &mut Vec<Rule>, start: NonterminalID) {
+    type Signature = BTreeSet<Vec<(bool, u32)>>;
+    let mut ids = BTreeSet::new();
+    ids.insert(start);
+    ids.extend(rules.iter().map(|rule| rule.lhs));
+    let mut rules_of: BTreeMap<NonterminalID, Vec<usize>> = BTreeMap::new();
+    for (index, rule) in rules.iter().enumerate() {
+        rules_of.entry(rule.lhs).or_default().push(index);
+    }
+    let encode = |rule: &Rule, class: &BTreeMap<NonterminalID, u32>| -> Vec<(bool, u32)> {
+        rule.rhs
+            .iter()
+            .map(|symbol| match symbol {
+                Symbol::Terminal(terminal) => (true, *terminal),
+                Symbol::Nonterminal(nonterminal) => (false, class[nonterminal]),
+            })
+            .collect()
+    };
+
+    // Moore-style refinement from the single-block partition. Each round
+    // refines the previous one, so the block count is monotone and the loop
+    // ends once it stops growing.
+    let mut class: BTreeMap<NonterminalID, u32> = ids.iter().map(|&id| (id, 0)).collect();
+    let mut blocks = 1usize;
+    loop {
+        let mut block_of: BTreeMap<(u32, Signature), u32> = BTreeMap::new();
+        let mut next = BTreeMap::new();
+        for &id in &ids {
+            let signature: Signature = rules_of
+                .get(&id)
+                .into_iter()
+                .flatten()
+                .map(|&index| encode(&rules[index], &class))
+                .collect();
+            let fresh = block_of.len() as u32;
+            let block = *block_of.entry((class[&id], signature)).or_insert(fresh);
+            next.insert(id, block);
+        }
+        class = next;
+        if block_of.len() == blocks {
+            break;
+        }
+        blocks = block_of.len();
+    }
+    if blocks == ids.len() {
+        return;
+    }
+
+    // Representative: the start symbol for its block, else the smallest id.
+    let mut representative: BTreeMap<u32, NonterminalID> = BTreeMap::new();
+    representative.insert(class[&start], start);
+    for &id in &ids {
+        representative.entry(class[&id]).or_insert(id);
+    }
+    let rename = |id: NonterminalID| representative[&class[&id]];
+    let mut seen = BTreeSet::new();
+    let mut merged = Vec::with_capacity(rules.len());
+    for rule in rules.iter() {
+        if rename(rule.lhs) != rule.lhs {
+            continue;
+        }
+        let renamed = Rule {
+            lhs: rule.lhs,
+            rhs: rule
+                .rhs
+                .iter()
+                .map(|symbol| match symbol {
+                    Symbol::Nonterminal(nonterminal) => Symbol::Nonterminal(rename(*nonterminal)),
+                    terminal => terminal.clone(),
+                })
+                .collect(),
+        };
+        let key: (NonterminalID, Vec<(bool, u32)>) = (
+            renamed.lhs,
+            renamed
+                .rhs
+                .iter()
+                .map(|symbol| match symbol {
+                    Symbol::Terminal(terminal) => (true, *terminal),
+                    Symbol::Nonterminal(nonterminal) => (false, *nonterminal),
+                })
+                .collect(),
+        );
+        if seen.insert(key) {
+            merged.push(renamed);
+        }
+    }
+    *rules = merged;
 }
 
 /// Remove nonproductive and unreachable rules from the materialized output.
