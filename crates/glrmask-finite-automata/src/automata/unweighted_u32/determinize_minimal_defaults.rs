@@ -11,7 +11,7 @@
 //! tables that is exponential even when the resulting language has only a few
 //! thousand distinct residual languages. This module builds that minimal
 //! deterministic automaton directly, with the same canonical residual-language
-//! hashing used by [`super::determinize_minimal`].
+//! hashing used by the ordinary minimal determinizer.
 //!
 //! Canonical nodes carry `(accepting, default_target, explicit edges)`. A
 //! nonnegative explicit edge is redundant when it equals the default target,

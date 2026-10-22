@@ -1687,7 +1687,7 @@ pub fn build_global_max_length_state_map_with_initial(
 ///
 /// 1. Splits vocab into 3 partitions by leading-byte character type.
 /// 2. Builds each partition's L1/L2P DWA pieces in parallel via
-///    [`partition::build_partition_id_map_and_terminal_dwa`].
+///    `partition::build_partition_id_map_and_terminal_dwa`.
 /// 3. Merges every L1-style result and every L2P result in parallel.
 /// 4. Merges the two family results into the final terminal DWA.
 pub fn build_terminal_dwa_families_with_precomputed_global_max_length(

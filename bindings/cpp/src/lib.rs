@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! C ABI for GLRMask. See include/glrmask.h for the ownership contract.
 #![allow(non_camel_case_types)]
 // The entire C entry surface is unsafe: validating arbitrary foreign memory is

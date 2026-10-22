@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 //! Private ownership and validation support shared by the C and Node bindings.
 //! No language binding reimplements the grammar compiler or decoding engine.
 
