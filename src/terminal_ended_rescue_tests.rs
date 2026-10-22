@@ -759,3 +759,64 @@ fn tiny_budget_still_falls_back_to_exact_token_trie() {
         check_exact_oracle(&fallback, &case);
     }
 }
+
+/// Fuzz pass-A cases on 605da7551 that exhausted memory in grammar
+/// normalization or ParserDwa construction before the budget could decline.
+/// Each must publish exact masks within the time bound under both template
+/// strategies, whether through the rescue or the TokenTrie fallback.
+fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[isize])]) {
+    let case = case(start, bound, rules);
+    let reference = compile(&case, MaskStrategy::TokenTrie);
+    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        let started = Instant::now();
+        let compiled = compile(&case, strategy);
+        eprintln!(
+            "[terminal-ended-rescue] {label} strategy={strategy:?} compile_ms={:.1} backend={:?}",
+            started.elapsed().as_secs_f64() * 1000.0,
+            compiled.parser_backend(),
+        );
+        assert!(
+            started.elapsed().as_secs_f64() < 10.0,
+            "{label} {strategy:?} took {:?} before publishing",
+            started.elapsed(),
+        );
+        check_matches_token_trie(&compiled, &reference, &case);
+        check_exact_oracle(&compiled, &case);
+    }
+}
+
+#[test]
+fn fuzz_605_seed_581_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_581", 0, 3, &[(0, &[-3]), (1, &[-1]), (0, &[1]), (1, &[0]), (1, &[1, -3, 1]), (1, &[1, -2, 0])]);
+}
+
+#[test]
+fn fuzz_605_seed_780_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_780", 1, 4, &[(0, &[-2]), (1, &[-3]), (0, &[]), (0, &[0, -2, 1]), (0, &[1, -3, 0]), (1, &[1, 1]), (1, &[0, -1]), (1, &[-3, -2, 0])]);
+}
+
+#[test]
+fn fuzz_605_seed_3293_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_3293", 1, 3, &[(0, &[-2]), (1, &[-2]), (2, &[-1]), (0, &[0, 2]), (1, &[]), (1, &[]), (2, &[0, 2]), (2, &[]), (2, &[2])]);
+}
+
+#[test]
+fn fuzz_605_seed_336_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_336", 1, 3, &[(0, &[-3]), (1, &[-1]), (2, &[-1]), (0, &[-3]), (0, &[2, 2, 1]), (0, &[-2, 0, 0]), (1, &[2, -3, -1]), (1, &[-1]), (1, &[0, 2, 0]), (2, &[-2, 1, 1]), (2, &[])]);
+}
+
+#[test]
+fn fuzz_605_seed_594_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_594", 0, 3, &[(0, &[-1]), (1, &[-3]), (2, &[-3]), (0, &[-1, -3, 1]), (0, &[1]), (1, &[2, 1]), (1, &[-1]), (1, &[1, 1, 2]), (2, &[2, 1, -2]), (2, &[0, 2]), (2, &[-1, -3])]);
+}
+
+#[test]
+fn fuzz_605_seed_830_publishes_exact_masks_within_budget() {
+    let _serial = serial();
+    check_fuzz_case("fuzz_605_830", 2, 4, &[(0, &[-2]), (1, &[-3]), (2, &[-1]), (3, &[-1]), (0, &[0, 0, -2]), (0, &[-1]), (0, &[]), (1, &[2]), (2, &[]), (2, &[3, 1, 2]), (2, &[]), (3, &[-1, 3, 3]), (3, &[-2]), (3, &[-3, -3, 1])]);
+}

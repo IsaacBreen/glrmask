@@ -16,7 +16,17 @@ use rustc_hash::FxHashSet;
 
 use crate::grammar::flat::{NonterminalID, Rule, Symbol};
 
+use glrmask_invariant::__private::charge_template_build_budget;
+
 use super::normalization_reference as reference;
+
+/// Charge one unit per created rule plus its right-hand-side length. A
+/// rewrite that grows the grammar combinatorially is then stopped by the
+/// deterministic template budget instead of memory; outside a budgeted
+/// template attempt this is a no-op.
+fn charge_rule(rhs_len: usize) {
+    charge_template_build_budget("grammar_normalization", 1 + rhs_len as u64);
+}
 
 const NO_COMPONENT: usize = usize::MAX;
 const MAX_INDIRECT_ROUNDS: usize = 200;
@@ -139,6 +149,7 @@ struct Edit {
 impl Edit {
     fn new(rules: Vec<Rule>) -> Self {
         let original_len = rules.len();
+        charge_template_build_budget("grammar_normalization", 1 + original_len as u64);
         Self {
             arena: rules,
             order: (0..original_len).collect(),
@@ -158,12 +169,14 @@ impl Edit {
     }
 
     fn push(&mut self, rule: Rule) -> usize {
+        charge_rule(rule.rhs.len());
         let index = self.arena.len();
         self.arena.push(rule);
         index
     }
 
     fn replace_with_owned(&mut self, rules: Vec<Rule>) {
+        charge_template_build_budget("grammar_normalization", 1 + rules.len() as u64);
         let first = self.arena.len();
         self.arena.extend(rules);
         self.order.clear();
@@ -841,11 +854,13 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
             let rep = components[component][0];
             for rhs in &alternatives[component] {
                 if seen.insert((rep, rhs.clone())) {
+                    charge_rule(rhs.len());
                     expanded.push(Rule { lhs: rep, rhs: rhs.clone() });
                 }
             }
             for &member in &components[component] {
                 if member != rep {
+                    charge_rule(1);
                     expanded.push(Rule { lhs: member, rhs: vec![Symbol::Nonterminal(rep)] });
                 }
             }
@@ -858,6 +873,7 @@ fn expand_unit_sccs(edit: &mut Edit) -> bool {
         }).collect::<Vec<_>>();
         let candidate = Rule { lhs, rhs };
         if !is_reflexive_unit_rule(&candidate) && seen.insert((candidate.lhs, candidate.rhs.clone())) {
+            charge_rule(candidate.rhs.len());
             expanded.push(candidate);
         }
     }
@@ -949,6 +965,8 @@ fn expand_cycle_head_paths(
     on_path[current as usize] = true;
 
     while let Some(frame) = stack.last() {
+        // Head-path enumeration is the exponential inner loop.
+        charge_template_build_budget("grammar_normalization", 1);
         let node = frame.node;
         let next_alternative = frame.next_alternative;
         if next_alternative == rhs_by_nt[node].len() {
@@ -989,6 +1007,7 @@ fn expand_cycle_head_paths(
             expanded.extend_from_slice(frame.return_suffix);
         }
         expanded.extend_from_slice(final_suffix);
+        charge_rule(expanded.len());
         additions.push(Rule {
             lhs: goal,
             rhs: expanded,
@@ -1077,6 +1096,7 @@ fn eliminate_hidden_left_recursion(edit: &mut Edit, nullable: &Nullable) -> bool
                     let suffix = &rule.rhs[skip..];
                     if let Some(Symbol::Nonterminal(nonterminal)) = suffix.first() {
                         if membership[*nonterminal as usize] == component {
+                            charge_rule(suffix.len());
                             additions.push(Rule {
                                 lhs: rule.lhs,
                                 rhs: suffix.to_vec(),

@@ -2303,6 +2303,10 @@ fn determinize_with_supports_mode(
                 if let Some(started) = compute_started {
                     fast_component_compute_ms += elapsed_ms(started);
                 }
+                glrmask_invariant::__private::charge_template_build_budget(
+                    "parser_dwa_support",
+                    computed.iter().fold(0u64, |total, (_, row)| total.saturating_add(1 + row.len() as u64)),
+                );
                 if fast_support_profile {
                     fast_component_rows_computed += computed.len();
                     fast_component_row_edges += computed.iter().map(|(_, row)| row.len()).sum::<usize>();
@@ -2571,6 +2575,7 @@ fn determinize_with_supports_mode(
         }
 
         if let Some(cached) = prescanned_cached {
+            glrmask_invariant::__private::charge_template_build_budget("parser_dwa_support", 1 + cached.len() as u64);
             if fast_support_profile {
                 fast_labels += cached.len();
             }
@@ -2586,6 +2591,7 @@ fn determinize_with_supports_mode(
             }
 
             debug_assert!(contribs.iter().all(|(_, weight)| !weight.is_empty()));
+            glrmask_invariant::__private::charge_template_build_budget("parser_dwa_support", 1 + contribs.len() as u64);
             if fast_support_profile {
                 fast_labels += 1;
                 fast_label_contribs += contribs.len();
@@ -3313,6 +3319,8 @@ fn determinize_with_supports_mode(
             detail.union_cache_ms = union_cache.total_ms;
         }
     }
+
+    charge_dwa_size("parser_dwa_support", dwa.states());
 
     if fast_support_profile {
         eprintln!(
@@ -7221,6 +7229,12 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
 
         for (dwa_state_id, path_weight) in &subset_entries {
             let state = &dwa.states()[*dwa_state_id as usize];
+            // Subset determinization visits every member transition of every
+            // published subset; charge that work so a blow-up declines.
+            glrmask_invariant::__private::charge_template_build_budget(
+                "parser_dwa_fallback",
+                1 + state.transitions.len() as u64,
+            );
 
             for (&label, (target, transition_weight)) in &state.transitions {
                 if label == DEFAULT_LABEL {
@@ -7670,6 +7684,8 @@ fn determinize_parser_dwa_with_fallbacks_and_classes_publication(
         );
         eprintln!("[pop_class_row_publication] bulk={bulk_row_publication} staged_rows={staged_rows} staged_edges={staged_edges} max_staged_edges={max_staged_edges} max_staged_capacity_bytes={max_staged_capacity_bytes}");
     }
+
+    charge_dwa_size("parser_dwa_fallback", result.states());
 
     if let Some(started) = fallback_started {
         eprintln!(
@@ -12035,4 +12051,14 @@ mod partial_default_domain_regressions {
             assert!(candidate.states()[candidate.start_state() as usize].final_weight.is_none());
         }
     }
+}
+
+// Charge one unit per published state and transition, so an oversized parser
+// DWA stops at the deterministic template budget before the next stage
+// multiplies it again. No-op outside a budgeted template attempt.
+fn charge_dwa_size(stage: &'static str, states: &[DWAState]) {
+    let units = states.iter().fold(0u64, |total, state| {
+        total.saturating_add(1 + state.transitions.len() as u64)
+    });
+    glrmask_invariant::__private::charge_template_build_budget(stage, units);
 }
