@@ -571,7 +571,10 @@ impl Module {
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
                 inner.install_template_parser_from_compile()?;
-                inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
+                // The trigger is composition metadata, not part of the
+                // standalone constraint. Building it here scans the whole
+                // vocabulary even for a Module that is never linked; defer it
+                // to `materialize`, which applies it only when children exist.
                 p.boundary_trigger = target_b;
                 return Ok(p);
             }
@@ -814,6 +817,14 @@ impl Module {
             }
             let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
             apply_final_boundary_trigger(&mut parent, target_b)?;
+        } else {
+            // FastBuild is the default and is only an accelerator; a standalone
+            // constraint does not need it. Preserve an explicit FastRuntime
+            // request, which is observable in the compiled constraint.
+            let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
+            if target_b == crate::runtime::BoundaryTriggerDetail::Exact {
+                apply_final_boundary_trigger(&mut parent, target_b)?;
+            }
         }
         cache.insert(id, parent.clone());
         Ok(parent)

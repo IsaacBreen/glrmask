@@ -6935,3 +6935,92 @@ mod tiny_cfg_compile_blowup_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod module_build_overhead_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+    use std::time::Instant;
+
+    fn jsb_like_schema(properties: usize) -> String {
+        let props = (0..properties)
+            .map(|i| (format!("p{i}"), serde_json::json!({"type": "integer"})))
+            .collect::<serde_json::Map<_, _>>();
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": props,
+        })
+        .to_string()
+    }
+
+    fn jsb_like_vocab(tokens: u32) -> Vocab {
+        let vocab = Vocab::new((0..tokens).map(|id| (id, format!("t{id}").into_bytes())).collect());
+        vocab.prepare_for_compile();
+        vocab
+    }
+
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(|a, b| a.total_cmp(b));
+        values[values.len() / 2]
+    }
+
+    /// A standalone Module must not eagerly build the composition-only token
+    /// boundary trigger. Building it scans the entire model vocabulary and made
+    /// small JSB schemas ~8x slower than the direct Grammar build path.
+    #[test]
+    fn module_standalone_build_stays_close_to_grammar_build() {
+        let vocab = jsb_like_vocab(16_384);
+        let source = jsb_like_schema(80);
+
+        let grammar = Grammar::from_json_schema(&source);
+        grammar
+            .compile_with_build_options(
+                &vocab,
+                BuildOptions::default()
+                    .optimization(MaskStrategy::ParserDwa)
+                    .end_tokens([0u32]),
+            )
+            .expect("direct build");
+        let standalone = Module::new(&grammar)
+            .compile_with(&vocab, CompileOptions::default().end_tokens([0u32]))
+            .expect("module build");
+        assert!(
+            matches!(standalone.boundary_trigger, crate::runtime::BoundaryTrigger::None),
+            "standalone Module must not eagerly build a boundary trigger"
+        );
+
+        let mut grammar_ms = Vec::new();
+        let mut module_ms = Vec::new();
+        for _ in 0..5 {
+            let grammar = Grammar::from_json_schema(&source);
+            let started = Instant::now();
+            grammar
+                .compile_with_build_options(
+                    &vocab,
+                    BuildOptions::default()
+                        .optimization(MaskStrategy::ParserDwa)
+                        .end_tokens([0u32]),
+                )
+                .expect("direct build");
+            grammar_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+
+            let grammar = Grammar::from_json_schema(&source);
+            let started = Instant::now();
+            Module::new(&grammar)
+                .compile_with(&vocab, CompileOptions::default().end_tokens([0u32]))
+                .expect("module build");
+            module_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let grammar_median = median(grammar_ms);
+        let module_median = median(module_ms);
+        eprintln!(
+            "[module-build-overhead] grammar={grammar_median:.3}ms module={module_median:.3}ms ratio={:.2}",
+            module_median / grammar_median
+        );
+        assert!(
+            module_median <= grammar_median * 1.5,
+            "Module build {module_median:.3}ms is more than 1.5x the direct Grammar build {grammar_median:.3}ms",
+        );
+    }
+}
