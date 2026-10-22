@@ -348,7 +348,7 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
         let options = BuildOptions::default().optimization(mode);
         let plain = grammar.compile_with_build_options(&v, options.clone()).unwrap();
         let none = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
-        assert_eq!(plain.save(), none.save());
+        assert_ne!(plain.save(), none.save());
         for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
             if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
                 assert!(grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
@@ -357,7 +357,11 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
             let requested = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap();
             // Inspect persistence before start/first mask: trigger construction is eager.
             let bytes = requested.save();
-            assert_ne!(bytes, plain.save());
+            if detail == BoundaryTriggerDetail::TokenSet {
+                assert_eq!(bytes, plain.save(), "default TokenSet must match an explicit request");
+            } else {
+                assert_ne!(bytes, plain.save());
+            }
             compare_prefixes(&requested, &plain, &[1, 2, 5, 7, 33], 3);
             assert_eq!(requested.save(), bytes, "matching must not materialize trigger metadata");
             compare_prefixes(&Constraint::load(bytes).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);

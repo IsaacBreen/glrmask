@@ -5,9 +5,7 @@ use std::collections::{HashMap, BTreeMap, BTreeSet};
 mod artifact;
 #[cfg(test)]
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
-#[cfg(test)]
-static FORCE_BOUNDARY_DWA_DECLINE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+
 
 /// Root generation policy; never inherited by embedded modules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -67,6 +65,8 @@ pub(crate) struct Node {
     pub(crate) prepared: BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
+    #[cfg(test)]
+    pub(crate) force_boundary_dwa_decline: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) trait RetainedPreparation: Send + Sync + std::fmt::Debug {
@@ -207,6 +207,13 @@ impl Module {
         Arc::make_mut(&mut self.node).boundary_mask_strategy = strategy;
         Ok(())
     }
+
+    #[cfg(test)]
+    pub(crate) fn force_boundary_dwa_decline(&mut self) {
+        Arc::make_mut(&mut self.node)
+            .force_boundary_dwa_decline
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 impl Grammar<'_> {
@@ -237,6 +244,8 @@ impl Module {
                     prepared: BTreeMap::new(),
                     bindings,
                     certificate: Arc::new(OnceLock::new()),
+                    #[cfg(test)]
+                    force_boundary_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 }),
             };
             let _ = grammar.module_snapshot.set(module.clone());
@@ -837,7 +846,11 @@ impl Module {
                 && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
             {
                 #[cfg(test)]
-                if FORCE_BOUNDARY_DWA_DECLINE.load(std::sync::atomic::Ordering::Relaxed) {
+                if self
+                    .node
+                    .force_boundary_dwa_decline
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     return Err(Error::ResourceLimit(
                         "boundary_parser_dwa: forced test decline; use BoundaryMaskStrategy::FAST_BUILD (Dynamic)".into(),
                     ));
@@ -1221,11 +1234,10 @@ mod boundary_error_tests {
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
                 .unwrap();
             parent.set_boundary_mask_strategy(strategy).unwrap();
+            parent.force_boundary_dwa_decline();
             parent.compile_with(&vocab, CompileOptions::default())
         };
-        FORCE_BOUNDARY_DWA_DECLINE.store(true, std::sync::atomic::Ordering::Relaxed);
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
-        FORCE_BOUNDARY_DWA_DECLINE.store(false, std::sync::atomic::Ordering::Relaxed);
         match error {
             Error::ResourceLimit(message) => {
                 assert!(message.starts_with("boundary_parser_dwa:"));

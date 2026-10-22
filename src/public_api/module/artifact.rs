@@ -344,6 +344,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 prepared: retained_map,
                 bindings,
                 certificate: Arc::new(OnceLock::new()),
+                #[cfg(test)]
+                force_boundary_dwa_decline: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             }),
         };
         if !module.node.prepared.is_empty() || !module.node.bindings.is_empty() {

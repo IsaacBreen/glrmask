@@ -162,7 +162,7 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     module.precompile(&v).unwrap();
     let bytes = module.save();
     assert!(Constraint::load(bytes.clone()).is_err());
-    assert!(bytes.starts_with(b"GLRASM01"));
+    assert!(bytes.starts_with(b"GLRASM02"));
 
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
     assert!(Module::load(&constraint.save(), None).is_err());
@@ -379,7 +379,7 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
     assert_eq!(m.mask_strategy(), MaskStrategy::Auto);
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::Dynamic);
+    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
 
     m.precompile(&v).unwrap();
     let _saved_before = m.save();

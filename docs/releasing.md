@@ -79,6 +79,44 @@ stable release tags (`v*`). This restricts the OIDC job identity. We do *not* st
 npm, PyPI, crates.io, or GitHub personal publishing credentials in Actions secrets.
 A published GitHub Release is the human decision to publish.
 
+## Internal crates for this release
+
+The internal crates changed since their last crates.io releases. Publish them in
+dependency order before the root `glrmask` crate. `glrmask-weight 0.1.1` and
+`glrmask-weighted-automata 0.1.1` are unchanged and already published.
+
+```sh
+cargo publish --locked -p glrmask-invariant@0.1.2
+cargo publish --locked -p glrmask-finite-automata@0.1.2
+cargo publish --locked -p glrmask-artifact@0.2.1
+cargo publish --locked -p glrmask-vocab@0.2.1
+cargo publish --locked -p glrmask-lexer@0.2.1
+cargo publish --locked -p glrmask-grammar@0.2.1
+cargo publish --locked -p glrmask-glr@0.2.1
+cargo publish --locked -p glrmask-json-schema@0.2.1
+cargo publish --locked -p glrmask-dwa-merge@0.2.1
+cargo publish --locked -p glrmask-parser-dwa@0.2.1
+cargo publish --locked -p glrmask-terminal-dwa@0.2.1
+cargo publish --locked -p glrmask@0.4.0
+```
+
+Verify the complete set locally first with a recent Cargo that supports local
+workspace registries:
+
+```sh
+cargo package --workspace --allow-dirty \
+  --exclude glrmask-binding-core --exclude glrmask-c --exclude glrmask-node \
+  --exclude _glrmask
+```
+
+`_glrmask` is the PyO3 extension and is built by the Python wheel job; it is not
+published to crates.io. Its package can be assembled without verification:
+
+```sh
+cargo package --workspace --allow-dirty --no-verify \
+  --exclude glrmask-binding-core --exclude glrmask-c --exclude glrmask-node
+```
+
 ## Before publishing a new release
 
 1. Update all three versions (Rust, Python, npm), documentation and changelog on `main`.

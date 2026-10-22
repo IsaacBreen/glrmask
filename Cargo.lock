@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-artifact"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glrmask-finite-automata",
  "glrmask-weight",
@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-dwa-merge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glrmask-artifact",
  "glrmask-glr",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-finite-automata"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "glrmask-invariant",
  "rustc-hash 1.1.0",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-glr"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "glrmask-grammar",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-grammar"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glrmask-finite-automata",
  "glrmask-lexer",
@@ -639,11 +639,11 @@ dependencies = [
 
 [[package]]
 name = "glrmask-invariant"
-version = "0.1.1"
+version = "0.1.2"
 
 [[package]]
 name = "glrmask-json-schema"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "derivre",
@@ -659,7 +659,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-lexer"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bincode",
  "glrmask-finite-automata",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-parser-dwa"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "glrmask-artifact",
  "glrmask-dwa-merge",
@@ -706,7 +706,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-terminal-dwa"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ahash",
  "blake3",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "glrmask-vocab"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "range-set-blaze",
  "serde",
