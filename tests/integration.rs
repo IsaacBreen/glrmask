@@ -2078,7 +2078,7 @@ fn plan_style_mask_buffer_matches_mask() {
 }
 
 #[test]
-fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
+fn direct_glrm_ordered_suffix_model_has_single_stack_path_after_prepass() {
     let grammar = r#"
         start start;
         nt f0 ::= "a";
@@ -2100,7 +2100,9 @@ fn direct_glrm_ordered_suffix_model_has_stack_ambiguity() {
         Constraint::compile(glrmask::Grammar::glrm(grammar), &bytes_vocab()).unwrap()
     });
     let (max_paths, max_stacks) = max_paths_and_stacks(&constraint, "a,b,c,d,e,f,g,h");
-    assert_eq!((max_paths, max_stacks), (3, 3));
+    // The default epsilon-free prepass folds the duplicated ordered suffix
+    // variants into one parser stack path.
+    assert_eq!((max_paths, max_stacks), (1, 1));
 }
 
 
