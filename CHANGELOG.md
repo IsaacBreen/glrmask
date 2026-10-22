@@ -32,6 +32,9 @@
   with assignable properties, `bind(name, value)` and atomic `bind(**bindings)`,
   an `externs` `Mapping` with `.unbound`, and `copy()` replacing `clone()`.
   C/C++ and Node.js bindings expose the same model.
+- The epsilon-free grammar prepass is on by default; set
+  `GLRMASK_EPSFREE_PREPASS=0` to opt out. It fixes grammars that previously
+  declined at the build budget.
 - Grammar language: `extern` declarations are only allowed at the top level,
   inline grammars cannot refer to outer names, `use`, `export`, `import` and
   `super` are reserved, and `::` is invalid in extern names.
