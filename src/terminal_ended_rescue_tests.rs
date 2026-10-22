@@ -355,6 +355,10 @@ fn check_matches_token_trie(rescued: &Constraint, reference: &Constraint, case: 
 }
 
 fn check_rescued(case: &Case, label: &str) {
+    // This helper's contract is that the legacy attempt declines and the
+    // rescue publishes. Keep the old 10,000,000-unit default explicit; the
+    // production default is now sized for the real SQL/Go benchmarks.
+    let _limit = TestBudgetLimit::set(10_000_000);
     let reference = compile(case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let started = Instant::now();
@@ -437,6 +441,9 @@ fn compile_source(source: &str, strategy: MaskStrategy) -> Constraint {
 }
 
 fn check_source_case(case: &Case, source: &str, label: &str) {
+    // As `check_rescued`: the legacy attempt must decline under the old
+    // 10,000,000-unit default so the rescue is what publishes.
+    let _limit = TestBudgetLimit::set(10_000_000);
     let reference = compile_source(source, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let started = Instant::now();
@@ -648,15 +655,17 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
     check_witness(218);
 }
 
-/// The rescued 2633 template costs more than the default template budget
-/// (template_specialization alone charges ~8.4M of the 10M units, about 15x the
-/// largest real grammar), so the rescue declines within ~2 s and the public
+/// The rescued 2633 template costs more than the old 10,000,000-unit template
+/// budget (template_specialization alone charges ~8.4M units), so under an
+/// explicit small budget the rescue declines within ~2 s and the public
 /// boundary returns the original typed decline. This pins the decline and
 /// bounds the time spent before it is returned instead of recompiling with
-/// TokenTrie.
+/// TokenTrie. The production default is now sized for real SQL/Go benchmarks,
+/// so the old limit is set explicitly here.
 #[test]
 fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
     let _serial = serial();
+    let _limit = TestBudgetLimit::set(10_000_000);
     let (start, rules) = witness_rules(2633);
     let case = Case {
         start,
@@ -690,6 +699,9 @@ fn phase1_witness_385_takes_the_rescue_and_matches_the_exact_oracle() {
 #[test]
 fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
     let _serial = serial();
+    // The legacy attempt is supposed to decline; keep the old 10,000,000-unit
+    // default explicit now that the production default is larger.
+    let _limit = TestBudgetLimit::set(10_000_000);
     let case = case(2, 4, V2_267);
     let reference = compile(&case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
@@ -800,6 +812,11 @@ fn tiny_budget_returns_typed_decline() {
 /// strategies through the rescue; a rescue decline is returned as the original
 /// typed strategy error.
 fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[isize])]) {
+    // These pass-A witnesses are calibrated against the old 10,000,000-unit
+    // default: they must decline the legacy attempt quickly and publish via
+    // the rescue. Keep that explicit now that the production default is sized
+    // for the real SQL/Go benchmarks.
+    let _limit = TestBudgetLimit::set(10_000_000);
     let case = case(start, bound, rules);
     let reference = compile(&case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {

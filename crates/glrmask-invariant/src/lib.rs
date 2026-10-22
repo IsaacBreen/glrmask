@@ -67,11 +67,16 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-// 10x the largest measured real-grammar peak (671,896 units for o9838 with
-// ParserDwa) after the charges were calibrated to inner-loop work. The extra
-// headroom above the 10x floor leaves room for grammar-preparation charges on
-// the same real grammars.
-pub const DEFAULT_TEMPLATE_BUILD_BUDGET: u64 = 10_000_000;
+// Sized for the largest real static benchmarks, not the small regression
+// fixtures. An unlimited-budget probe of the real static benchmark suite
+// measured peak template-build units of 189,545,227 for SQL and 118,451,133
+// for Go. The previous 10,000,000 limit wrongly killed both. 1,000,000,000 is
+// about 5x the SQL peak and leaves headroom for grammar-preparation charges
+// and modest grammar growth without letting a pathological template build run
+// unbounded. The small calibration fixtures (for example 671,896 units for
+// o9838 with ParserDwa) are now far below the default; tests that need the old
+// behaviour must set an explicit small budget.
+pub const DEFAULT_TEMPLATE_BUILD_BUDGET: u64 = 1_000_000_000;
 
 pub fn set_template_build_budget_handle(handle: std::sync::Arc<TemplateBuildBudget>) {
     TEMPLATE_BUILD_BUDGET_HANDLE.with(|slot| *slot.borrow_mut() = Some(handle));
