@@ -1264,6 +1264,12 @@ impl Constraint {
             )))
         };
         let all_states = TokenizerStateSet::from_iter(0..self.tokenizer.num_states());
+        let matched_flags = (0..self.tokenizer.num_states())
+            .map(|state| {
+                let matched = self.tokenizer.matched_terminal_bitset(state);
+                (!matched.is_empty(), !matched.is_disjoint(relevant))
+            })
+            .collect::<Vec<_>>();
 
         fn advance_edge(
             tokenizer: &Tokenizer,
@@ -1272,7 +1278,7 @@ impl Constraint {
             mut depth: usize,
             edge: &[u8],
             child: &VocabPrefixTreeNode,
-            relevant: &BitSet,
+            matched_flags: &[(bool, bool)],
             out: &mut Vec<u32>,
         ) -> Option<(TokenizerStateSet, usize)> {
             for (edge_index, &byte) in edge.iter().enumerate() {
@@ -1284,10 +1290,9 @@ impl Constraint {
                 let mut matched_any = false;
                 let mut matched_relevant = false;
                 for state in states.iter().copied() {
-                    for terminal in tokenizer.matched_terminals_iter(state) {
-                        matched_any = true;
-                        matched_relevant |= relevant.contains(terminal as usize);
-                    }
+                    let (any, relevant) = matched_flags[state as usize];
+                    matched_any |= any;
+                    matched_relevant |= relevant;
                 }
                 if matched_relevant {
                     let at_child_end = edge_index + 1 == edge.len();
@@ -1321,7 +1326,7 @@ impl Constraint {
                     0,
                     edge,
                     child,
-                    relevant,
+                    matched_flags.as_slice(),
                     &mut out,
                 ) {
                     pending.push((*child, states, depth));
@@ -1335,7 +1340,7 @@ impl Constraint {
                             depth,
                             edge,
                             child,
-                            relevant,
+                            matched_flags.as_slice(),
                             &mut out,
                         ) {
                             pending.push((child, states, depth));
