@@ -142,13 +142,15 @@ fn first_final_max_location(
 #[test]
 fn direct_glrm_ordered_suffix_ambiguity_grows() {
     // This isolates duplicated ordered suffix variants directly in GLRM, without
-    // the JSON Schema importer or lowering pipeline.
+    // the JSON Schema importer or lowering pipeline. The default epsilon-free
+    // prepass collapses the duplicate variants, so these are its post-prepass
+    // maxima rather than the pre-prepass counts.
     let vocab = byte_vocab();
     let cases = [
         (2usize, 0b01usize, 1usize, 1usize),
-        (3usize, 0b011usize, 3usize, 3usize),
-        (5usize, 0b01111usize, 6usize, 6usize),
-        (8usize, 0b00110011usize, 9usize, 9usize),
+        (3usize, 0b011usize, 1usize, 1usize),
+        (5usize, 0b01111usize, 3usize, 3usize),
+        (8usize, 0b00110011usize, 3usize, 3usize),
     ];
 
     for (n_caps, mask, expected_max_paths, expected_max_stacks) in cases {
@@ -172,10 +174,10 @@ fn direct_glrm_ordered_suffix_ambiguity_grows() {
                 "first_max byte_index={byte_index} char={} max_paths={first_max_paths} max_stacks={first_max_stacks}",
                 byte as char
             );
-            assert_eq!(byte_index, 15);
+            assert_eq!(byte_index, 17);
             assert_eq!(byte, b',');
-            assert_eq!(first_max_paths, 6);
-            assert_eq!(first_max_stacks, 6);
+            assert_eq!(first_max_paths, 3);
+            assert_eq!(first_max_stacks, 3);
         }
     }
 }
