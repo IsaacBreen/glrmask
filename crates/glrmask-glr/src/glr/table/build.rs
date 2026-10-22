@@ -2781,13 +2781,11 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
             continue;
         }
         if let Some(Symbol::Nonterminal(nt)) = item.next_symbol(rules) {
-            let emissions = &grammar.rules_by_lhs[*nt as usize];
             // Each emission unions a lookahead bitset into the target core.
-            // Charge one unit per word of that bitset per emitted production.
-            let lookahead_words = (grammar.num_terminals as usize + 1).div_ceil(64) as u64;
-            charge_build_budget(
-                "glr_table_lr1",
-                (emissions.len() as u64).saturating_mul(1u64.saturating_add(lookahead_words)),
+            // Charge one unit per word of that bitset per emitted production,
+            // after the emission cache check: a cache hit does no such work.
+            let emission_work = (grammar.rules_by_lhs[*nt as usize].len() as u64).saturating_mul(
+                1u64.saturating_add((grammar.num_terminals as usize + 1).div_ceil(64) as u64),
             );
             let suffix = &suffix_first[item.rule as usize];
             let suffix_index = item.dot as usize + 1;
@@ -2800,6 +2798,7 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
                 {
                     continue;
                 }
+                charge_build_budget("glr_table_lr1", emission_work);
                 for &i in &grammar.rules_by_lhs[*nt as usize] {
                     let sd = grammar.rules[i as usize].rhs.len() as u32;
                     let new_item = LR1ItemCore::new(i, 0, sd);
@@ -2818,6 +2817,7 @@ fn lr1_closure<const CACHE_EMISSIONS: bool>(
                 {
                     continue;
                 }
+                charge_build_budget("glr_table_lr1", emission_work);
                 for &i in &grammar.rules_by_lhs[*nt as usize] {
                     let sd = grammar.rules[i as usize].rhs.len() as u32;
                     let new_item = LR1ItemCore::new(i, 0, sd);

@@ -487,31 +487,6 @@ fn real_vocab() -> Vocab {
 }
 
 #[test]
-#[ignore]
-fn probe_seed_default_times() {
-    for (label, case) in [
-        ("233", V2_233),
-        ("267", V2_267),
-        ("296", V2_296),
-        ("494", V2_494),
-        ("1654", V2_1654),
-    ] {
-        for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-            let started = std::time::Instant::now();
-            let constraint = {
-                let _limit = TestBudgetLimit::set(DEFAULT_LIMIT);
-                compile_case(case, strategy)
-            };
-            println!(
-                "SEED {label} {strategy:?} ms={:.1} backend={:?}",
-                started.elapsed().as_secs_f64() * 1000.0,
-                constraint.parser_backend(),
-            );
-        }
-    }
-}
-
-#[test]
 fn real_grammars_compile_without_fallback_at_the_default_budget() {
     // The default must stay at least 10x the observed real-grammar maximum
     // (671,896 units for o9838 with ParserDwa) measured with the calibrated

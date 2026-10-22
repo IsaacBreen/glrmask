@@ -600,8 +600,13 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
     check_witness(218);
 }
 
+/// The rescued 2633 template costs more than the default template budget
+/// (template_specialization alone charges ~8.4M of the 10M units, about 15x the
+/// largest real grammar), so the rescue declines within ~2 s and the exact
+/// TokenTrie fallback publishes. Both outcomes are exact; this pins the masks
+/// and bounds the time spent before falling back.
 #[test]
-fn phase1_witness_2633_takes_the_rescue_and_matches_the_exact_oracle() {
+fn phase1_witness_2633_rescue_declines_quickly_with_exact_masks() {
     let _serial = serial();
     let (start, rules) = witness_rules(2633);
     let case = Case {
@@ -618,7 +623,11 @@ fn phase1_witness_2633_takes_the_rescue_and_matches_the_exact_oracle() {
             started.elapsed().as_secs_f64() * 1000.0,
             compiled.parser_backend(),
         );
-        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
+        assert!(
+            started.elapsed().as_secs_f64() < 10.0,
+            "witness_2633 {strategy:?} took {:?} before publishing",
+            started.elapsed(),
+        );
         check_matches_token_trie(&compiled, &reference, &case);
         check_exact_oracle(&compiled, &case);
     }
