@@ -819,6 +819,13 @@ impl<'a> Grammar<'a> {
                         error.decline_stage(),
                     );
                 }
+                // Only Auto may pick a different exact strategy; an explicit
+                // strategy request is never silently replaced.
+                if options.optimization == MaskStrategy::Auto {
+                    return self
+                        .compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?
+                        .with_end_tokens(options.end_token_ids());
+                }
                 Err(error)
             }
             Err(error) => Err(error),
