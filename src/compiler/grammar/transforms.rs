@@ -49,6 +49,15 @@ fn emit_grammar_transform_profile(
     );
 }
 
+/// Charge one newly created rule to the active template-build budget.
+///
+/// Charges are no-ops outside a template attempt, so dynamic/TokenTrie
+/// compilation is unaffected. Weighting by RHS length makes rule-multiplying
+/// passes decline before a combinatorial expansion becomes expensive.
+fn charge_created_rule(stage: &'static str, rule: &Rule) {
+    crate::compiler::build_budget::charge(stage, 1 + rule.rhs.len() as u64);
+}
+
 // ── Nullable terminal expansion ─────────────────────────────────────────────
 
 /// Rewrite grammar rules so that nullable terminals (those matching the empty
@@ -499,6 +508,7 @@ pub(crate) fn inline_single_use_nonterminals(
     let inline_protected_nonterminals = env_var_enabled(INLINE_PROTECTED_NONTERMINALS_ENV, true);
 
     loop {
+        crate::compiler::build_budget::charge("single_use_inlining", rules.len() as u64);
         let indexes = SingleUseInlineIndexes::build(rules);
         let mut inline_candidates = BTreeMap::<NonterminalID, (usize, Vec<Symbol>)>::new();
 
@@ -570,10 +580,12 @@ pub(crate) fn inline_single_use_nonterminals(
                     }
                     new_rhs.push(symbol.clone());
                 }
-                rewritten.push(Rule {
+                let rewritten_rule = Rule {
                     lhs: rule.lhs,
                     rhs: new_rhs,
-                });
+                };
+                charge_created_rule("single_use_inlining", &rewritten_rule);
+                rewritten.push(rewritten_rule);
             } else {
                 rewritten.push(rule.clone());
             }
@@ -909,6 +921,7 @@ fn inline_post_bound_single_use_nonterminals(
     let mut changed = false;
 
     loop {
+        crate::compiler::build_budget::charge("single_use_inlining", rules.len() as u64);
         let indexes = SingleUseInlineIndexes::build(rules);
         let mut candidate = None;
 
@@ -971,10 +984,12 @@ fn inline_post_bound_single_use_nonterminals(
                 continue;
             }
             if index == user_index {
-                rewritten.push(Rule {
+                let rewritten_rule = Rule {
                     lhs: rule.lhs,
                     rhs: new_rhs.clone(),
-                });
+                };
+                charge_created_rule("single_use_inlining", &rewritten_rule);
+                rewritten.push(rewritten_rule);
             } else {
                 rewritten.push(rule.clone());
             }
@@ -1014,16 +1029,20 @@ pub(crate) fn bound_runtime_reduction_length(
             next_nt += 1;
             grammar.nonterminal_names.insert(tail_nt, format!("{lhs_name}__tail"));
 
-            rewritten.push(Rule {
+            let head_rule = Rule {
                 lhs,
                 rhs: vec![Symbol::Nonterminal(lhs), Symbol::Nonterminal(tail_nt)],
-            });
+            };
+            charge_created_rule("bound_reduction_length", &head_rule);
+            rewritten.push(head_rule);
 
             symbols = symbols[1..].to_vec();
             lhs = tail_nt;
 
             if symbols.len() <= max_rhs_len {
-                rewritten.push(Rule { lhs, rhs: symbols });
+                let tail_rule = Rule { lhs, rhs: symbols };
+                charge_created_rule("bound_reduction_length", &tail_rule);
+                rewritten.push(tail_rule);
                 continue;
             }
         }
@@ -1039,10 +1058,12 @@ pub(crate) fn bound_runtime_reduction_length(
             .nonterminal_names
             .entry(first_helper)
             .or_insert_with(|| format!("{lhs_name}__prefix_{stage}"));
-        rewritten.push(Rule {
+        let first_rule = Rule {
             lhs: first_helper,
             rhs: symbols[..first_chunk_len].to_vec(),
-        });
+        };
+        charge_created_rule("bound_reduction_length", &first_rule);
+        rewritten.push(first_rule);
 
         let mut prefix_nt = first_helper;
         while symbols.len() - consumed > max_rhs_len - 1 {
@@ -1058,7 +1079,9 @@ pub(crate) fn bound_runtime_reduction_length(
             let mut rhs = Vec::with_capacity(max_rhs_len);
             rhs.push(Symbol::Nonterminal(prefix_nt));
             rhs.extend(symbols[consumed..consumed + take].iter().cloned());
-            rewritten.push(Rule { lhs: helper, rhs });
+            let helper_rule = Rule { lhs: helper, rhs };
+            charge_created_rule("bound_reduction_length", &helper_rule);
+            rewritten.push(helper_rule);
             prefix_nt = helper;
             consumed += take;
         }
@@ -1066,10 +1089,12 @@ pub(crate) fn bound_runtime_reduction_length(
         let mut final_rhs = Vec::with_capacity(1 + symbols.len() - consumed);
         final_rhs.push(Symbol::Nonterminal(prefix_nt));
         final_rhs.extend(symbols[consumed..].iter().cloned());
-        rewritten.push(Rule {
+        let final_rule = Rule {
             lhs,
             rhs: final_rhs,
-        });
+        };
+        charge_created_rule("bound_reduction_length", &final_rule);
+        rewritten.push(final_rule);
     }
 
     grammar.rules = rewritten;
@@ -1313,6 +1338,27 @@ pub(crate) fn prepare_grammar_for_vocab_partition(grammar: GrammarDef) -> Gramma
     prepared.rules = prune_unreachable_rules(&prepared.rules, prepared.start);
     compact_unused_terminals(&mut prepared);
     prepared
+}
+
+/// Install a terminal-ended rewrite into the original grammar.
+///
+/// This is the preparation policy for the phase-2 template rescue. The
+/// terminal-ended construction already produces an epsilon-free, fully
+/// productive grammar, so only the safe structural passes run here:
+/// reachability pruning and terminal compaction. In particular it must not run
+/// the RR/HLR normalization fixed point, single-use inlining, reduction-length
+/// bounding, or the recursion-boundedness check: terminal-ended output
+/// deliberately contains indirect left recursion that GLR handles.
+pub(crate) fn prepare_terminal_ended_grammar(
+    source: GrammarDef,
+    prepared: crate::compiler::glr::terminal_ended::PreparedGrammar,
+) -> GrammarDef {
+    let mut grammar = source;
+    grammar.rules = prepared.rules;
+    grammar.start = prepared.start;
+    grammar.rules = prune_unreachable_rules(&grammar.rules, grammar.start);
+    compact_unused_terminals(&mut grammar);
+    grammar
 }
 
 fn prune_unreachable_rules(rules: &[Rule], start: NonterminalID) -> Vec<Rule> {

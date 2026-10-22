@@ -77,6 +77,8 @@ impl Error {
             Self::ResourceLimit(message) if message.starts_with("template_determinization") => "template_determinization",
             Self::ResourceLimit(message) if message.starts_with("template_specialization") => "template_specialization",
             Self::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
+            Self::ResourceLimit(message) if message.starts_with("single_use_inlining") => "single_use_inlining",
+            Self::ResourceLimit(message) if message.starts_with("bound_reduction_length") => "bound_reduction_length",
             Self::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
             Self::ResourceLimit(_) => "template",
             Self::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",

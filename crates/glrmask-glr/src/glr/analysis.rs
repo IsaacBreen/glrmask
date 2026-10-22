@@ -831,6 +831,7 @@ fn inline_right_end(
                 let mut rhs = rule.rhs[..pos].to_vec();
                 rhs.extend(to_rhs.iter().cloned());
                 rhs.extend(rule.rhs[pos + 1..].iter().cloned());
+                charge_build_budget("grammar_normalization", 1 + rhs.len() as u64);
                 new_rules.push(Rule { lhs: from_nt, rhs });
             }
         } else {
@@ -896,12 +897,14 @@ fn resolve_direct_rr_single_nt(
     for base in &non_recursive {
         let mut rhs = vec![Symbol::Nonterminal(new_nt)];
         rhs.extend(base.rhs.iter().cloned());
+        charge_build_budget("grammar_normalization", 1 + rhs.len() as u64);
         new_rules.push(Rule { lhs: nt, rhs });
     }
 
     // Add new_nt → α (body without trailing A) for each recursive rule
     for rec in &recursive {
         let body = rec.rhs[..rec.rhs.len() - 1].to_vec();
+        charge_build_budget("grammar_normalization", 1 + body.len() as u64);
         new_rules.push(Rule { lhs: new_nt, rhs: body });
     }
 
@@ -910,6 +913,7 @@ fn resolve_direct_rr_single_nt(
         let body = &rec.rhs[..rec.rhs.len() - 1];
         let mut rhs = vec![Symbol::Nonterminal(new_nt)];
         rhs.extend(body.iter().cloned());
+        charge_build_budget("grammar_normalization", 1 + rhs.len() as u64);
         new_rules.push(Rule { lhs: new_nt, rhs });
     }
 
@@ -958,12 +962,14 @@ fn resolve_direct_rr_batched(
         for base in &base_rules {
             let mut rhs = vec![Symbol::Nonterminal(new_nt)];
             rhs.extend(base.rhs.iter().cloned());
+            charge_build_budget("grammar_normalization", 1 + rhs.len() as u64);
             new_rules.push(Rule { lhs: nt, rhs });
         }
 
         // Add new_nt → α (body without trailing A) for each recursive rule
         for rec in &rec_rules {
             let body = rec.rhs[..rec.rhs.len() - 1].to_vec();
+            charge_build_budget("grammar_normalization", 1 + body.len() as u64);
             new_rules.push(Rule { lhs: new_nt, rhs: body });
         }
 
@@ -972,6 +978,7 @@ fn resolve_direct_rr_batched(
             let body = &rec.rhs[..rec.rhs.len() - 1];
             let mut rhs = vec![Symbol::Nonterminal(new_nt)];
             rhs.extend(body.iter().cloned());
+            charge_build_budget("grammar_normalization", 1 + rhs.len() as u64);
             new_rules.push(Rule { lhs: new_nt, rhs });
         }
     }
@@ -1084,6 +1091,10 @@ fn inline_null_productions_exhaustive(rules: &[Rule], num_nt: u32) -> Vec<Rule> 
                     rhs: new_rhs,
                 };
                 if seen.insert(candidate.clone()) {
+                    charge_build_budget(
+                        "grammar_normalization",
+                        1 + candidate.rhs.len() as u64,
+                    );
                     out.push(candidate);
                 }
             }
@@ -1170,6 +1181,10 @@ fn inline_null_productions_exhaustive(rules: &[Rule], num_nt: u32) -> Vec<Rule> 
                 rhs: new_rhs,
             };
             if seen.insert(candidate.clone()) {
+                charge_build_budget(
+                    "grammar_normalization",
+                    1 + candidate.rhs.len() as u64,
+                );
                 out.push(candidate);
             }
         }
@@ -1756,6 +1771,10 @@ fn eliminate_hidden_left_recursion(
                 let suffix = &rule.rhs[skip..];
                 if let Some(Symbol::Nonterminal(nt)) = suffix.first() {
                     if cycle_nodes.contains(nt) {
+                        charge_build_budget(
+                            "grammar_normalization",
+                            1 + suffix.len() as u64,
+                        );
                         additions.push(Rule {
                             lhs: rule.lhs,
                             rhs: suffix.to_vec(),
@@ -1773,6 +1792,10 @@ fn eliminate_hidden_left_recursion(
                     for expansion in expansions {
                         let mut rhs = expansion;
                         rhs.extend_from_slice(&rule.rhs[prefix_end + 1..]);
+                        charge_build_budget(
+                            "grammar_normalization",
+                            1 + rhs.len() as u64,
+                        );
                         additions.push(Rule { lhs: rule.lhs, rhs });
                         produced_replacement = true;
                     }
