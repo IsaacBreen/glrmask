@@ -359,12 +359,10 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 - `TokenClassTrie`: token-trie walk over token equivalence classes.
 - `Auto`: library chooses the strategy (default).
 
-`BoundaryMaskStrategy` selects the parser for crossings between composed grammars:
+`BoundaryMaskStrategy` sets the minimum metadata detail to build for composition boundaries:
 
-- `ParserDwa` (alias `FAST_RUNTIME`, default): install the static boundary parser DWA.
-- `Dynamic` (alias `FAST_BUILD`): keep the segmented dynamic boundary parser.
-
-The boundary token trigger is always the LLM token set and is independent of this setting.
+- `FastBuild`: conservative token-set boundary trigger (faster build, default).
+- `FastRuntime`: full exact proper-prefix boundary trigger (lower latency).
 
 All modes preserve accepted-language semantics and produce the same public `Constraint` type.
 

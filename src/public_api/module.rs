@@ -5,6 +5,9 @@ use std::collections::{HashMap, BTreeMap, BTreeSet};
 mod artifact;
 #[cfg(test)]
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[cfg(test)]
+static FORCE_BOUNDARY_DWA_DECLINE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// Root generation policy; never inherited by embedded modules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -833,7 +836,8 @@ impl Module {
                 && parent.has_template_parser()
                 && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
             {
-                if std::env::var_os("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE").is_some() {
+                #[cfg(test)]
+                if FORCE_BOUNDARY_DWA_DECLINE.load(std::sync::atomic::Ordering::Relaxed) {
                     return Err(Error::ResourceLimit(
                         "boundary_parser_dwa: forced test decline; use BoundaryMaskStrategy::FAST_BUILD (Dynamic)".into(),
                     ));
@@ -1219,9 +1223,9 @@ mod boundary_error_tests {
             parent.set_boundary_mask_strategy(strategy).unwrap();
             parent.compile_with(&vocab, CompileOptions::default())
         };
-        unsafe { std::env::set_var("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE", "1") };
+        FORCE_BOUNDARY_DWA_DECLINE.store(true, std::sync::atomic::Ordering::Relaxed);
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
-        unsafe { std::env::remove_var("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE") };
+        FORCE_BOUNDARY_DWA_DECLINE.store(false, std::sync::atomic::Ordering::Relaxed);
         match error {
             Error::ResourceLimit(message) => {
                 assert!(message.starts_with("boundary_parser_dwa:"));
