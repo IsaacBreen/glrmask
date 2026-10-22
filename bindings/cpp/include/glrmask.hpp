@@ -77,9 +77,22 @@ public:
 };
 
 /// An original model token ID without vocabulary identity.
-struct Token { TokenId id; explicit Token(TokenId value) : id(value) {} };
+struct Token {
+    /// The original model token ID.
+    TokenId id;
+    explicit Token(TokenId value) : id(value) {}
+};
 /// A half-open byte range in the original document, with a one-based line and column.
-struct SourceSpan { std::uint64_t start_byte, end_byte, line, column; };
+struct SourceSpan {
+    /// Inclusive start byte offset.
+    std::uint64_t start_byte;
+    /// Exclusive end byte offset.
+    std::uint64_t end_byte;
+    /// One-based line of `start_byte`.
+    std::uint64_t line;
+    /// One-based Unicode-scalar column of `start_byte`.
+    std::uint64_t column;
+};
 
 /// A declared extern slot.
 struct Extern {
@@ -137,30 +150,44 @@ public:
         return false;
     }
 
+    /// The same view restricted to unresolved externs.
     Externs unbound() const {
         if (!unbound_) return Externs{};
         return Externs(*unbound_, {});
     }
 };
 
+/// Root generation options.
 struct CompileOptions {
+    /// Accepted end-of-sequence token IDs, allowed only at acceptance.
     std::vector<TokenId> end_tokens;
+    /// No end tokens.
     CompileOptions() = default;
+    /// The given end tokens.
     CompileOptions(std::vector<TokenId> tokens) : end_tokens(std::move(tokens)) {}
+    /// The matching C options struct.
     glrmask_compile_options native() const noexcept {
         return {sizeof(glrmask_compile_options), end_tokens.data(), end_tokens.size()};
     }
 };
 
+/// One vocabulary entry: a model token ID and its exact bytes.
 struct VocabEntry {
+    /// The model token ID.
     TokenId id;
+    /// The exact token bytes.
     Bytes bytes;
+    /// Creates an entry from bytes.
     VocabEntry(TokenId id_, Bytes bytes_) : id(id_), bytes(std::move(bytes_)) {}
+    /// Creates an entry from a string view's bytes.
     VocabEntry(TokenId id_, std::string_view bytes_) : id(id_), bytes(bytes_.begin(), bytes_.end()) {}
 };
 
+/// Lark source options.
 struct LarkOptions {
+    /// Dialect: `Recognition` (default) or `Llm`.
     LarkProfile profile = LarkProfile::Recognition;
+    /// Named token atoms mapped to original model token IDs.
     std::map<std::string, std::vector<TokenId>> token_names;
 };
 
@@ -221,22 +248,28 @@ class Expr;
 class Constraint;
 class ConstraintState;
 
+/// One token event chosen from a vocabulary-bound set.
 class ExactTokens : public detail::Owned<glrmask_exact_tokens, glrmask_exact_tokens_free, glrmask_exact_tokens_clone> {
     using Base = detail::Owned<glrmask_exact_tokens, glrmask_exact_tokens_free, glrmask_exact_tokens_clone>;
     explicit ExactTokens(glrmask_exact_tokens* p) : Base(p) {}
     friend class Vocab;
 public:
+    /// Number of allowed token IDs.
     std::size_t size() const { std::size_t n = 0; detail::check(glrmask_exact_tokens_len(native_handle(), &n)); return n; }
+    /// Whether the set contains no token IDs.
     bool empty() const { return size() == 0; }
+    /// The exact model token IDs, sorted in ascending order.
     std::vector<TokenId> ids() const {
         glrmask_u32s* p = nullptr; detail::check(glrmask_exact_tokens_ids(native_handle(), &p)); return detail::take_ids(p);
     }
+    /// The normalized, disjoint inclusive token-ID ranges.
     std::vector<TokenRange> ranges() const {
         std::size_t n = 0; detail::check(glrmask_exact_tokens_ranges(native_handle(), nullptr, 0, &n));
         std::vector<TokenRange> out(n); detail::check(glrmask_exact_tokens_ranges(native_handle(), out.data(), out.size(), &n)); return out;
     }
 };
 
+/// The model vocabulary a constraint is compiled against.
 class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone> {
     using Base = detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone>;
     static glrmask_vocab* create(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& exact_only) {
@@ -246,16 +279,21 @@ class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vo
         detail::check(glrmask_vocab_new(native.data(), native.size(), exact_only.data(), exact_only.size(), &p)); return p;
     }
 public:
+    /// Creates a vocabulary from byte entries plus exact-only token IDs.
     explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& exact_only = {}) : Base(create(entries, exact_only)) {}
+    /// Number of byte-backed entries; exact-only IDs are not counted.
     std::size_t size() const { std::size_t n = 0; detail::check(glrmask_vocab_len(native_handle(), &n)); return n; }
+    /// Creates a vocabulary-bound token event matching `ids`.
     ExactTokens tokens(const std::vector<TokenId>& ids) const {
         glrmask_exact_tokens* p = nullptr; detail::check(glrmask_vocab_tokens(native_handle(), ids.data(), ids.size(), &p)); return ExactTokens(p);
     }
+    /// Creates a vocabulary-bound token event matching inclusive `ranges`.
     ExactTokens token_ranges(const std::vector<TokenRange>& ranges) const {
         glrmask_exact_tokens* p = nullptr; detail::check(glrmask_vocab_token_ranges(native_handle(), ranges.data(), ranges.size(), &p)); return ExactTokens(p);
     }
 };
 
+/// The source-language definition, without compilation settings.
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
@@ -263,52 +301,70 @@ class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrm
         glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), options, &p)); return Grammar(p);
     }
 public:
+    /// Creates a grammar from EBNF source text.
     static Grammar from_ebnf(std::string_view text) { return source(GLRMASK_EBNF, text); }
+    /// Creates a grammar from GLRM source.
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
+    /// Creates a grammar from a JSON Schema document.
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
+    /// Creates a grammar from Lark source with explicit options.
     static Grammar from_lark(std::string_view text, const LarkOptions& options = {}) {
         std::vector<glrmask_lark_token> names;
         for (const auto& entry : options.token_names) names.push_back({entry.first.data(), entry.first.size(), entry.second.data(), entry.second.size()});
         const glrmask_lark_options native{sizeof(glrmask_lark_options), static_cast<std::uint32_t>(options.profile), names.data(), names.size()};
         return source(GLRMASK_LARK, text, &native);
     }
+    /// Compiles the grammar against `vocab`.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
+/// One `Expr` operand: a grammar, module, expression, token or exact-token set.
 struct ExprOperand {
     glrmask_expr_operand value;
+    /// From a grammar.
     ExprOperand(const Grammar&);
+    /// From a module.
     ExprOperand(const Module&);
+    /// From an expression.
     ExprOperand(const Expr&);
+    /// From a token event.
     ExprOperand(Token);
+    /// From an exact-token set.
     ExprOperand(const ExactTokens&);
 };
 
+/// An immutable unordered union or concatenation of independently scoped grammars.
 class Expr : public detail::Owned<glrmask_expr, glrmask_expr_free, glrmask_expr_clone> {
     using Base = detail::Owned<glrmask_expr, glrmask_expr_free, glrmask_expr_clone>;
     explicit Expr(glrmask_expr* p) : Base(p) {}
 public:
+    /// Creates a union without ordered-choice priority; an empty choice matches nothing.
     static Expr choice(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
         for (const auto& value : values) items.push_back(value.value);
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_choice(items.data(), items.size(), &p)); return Expr(p);
     }
+    /// Creates a concatenation; a model token may cross any number of operand boundaries.
     static Expr sequence(const std::vector<ExprOperand>& values) {
         std::vector<glrmask_expr_operand> items; items.reserve(values.size());
         for (const auto& value : values) items.push_back(value.value);
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_sequence(items.data(), items.size(), &p)); return Expr(p);
     }
+    /// Matches exact bytes, with no whitespace or ignore inserted.
     static Expr literal(const std::uint8_t* data, std::size_t len) {
         glrmask_expr* p = nullptr; detail::check(glrmask_expr_literal(data, len, &p)); return Expr(p);
     }
+    /// Matches the bytes of a string view.
     static Expr literal(std::string_view bytes) {
         return literal(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
     }
+    /// Matches the bytes of an owning buffer.
     static Expr literal(const Bytes& bytes) {
         return literal(bytes.data(), bytes.size());
     }
 };
 
+/// A reusable, independently configured grammar with bindings and any retained compilation work.
 class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone> {
     using Base = detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone>;
     explicit Module(glrmask_module* p) : Base(p) {}
@@ -380,50 +436,76 @@ public:
         return Externs(std::move(all_items), std::move(unbound_items));
     }
 
+    /// Serializes the module assembly and any retained precompiled artifacts.
     Bytes save() const {
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
+    /// Deserializes a module assembly, verifying it against `vocab` when supplied.
     static Module load(const Bytes& bytes, const Vocab* vocab = nullptr) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes.data(), bytes.size(), vocab ? vocab->native_handle() : nullptr, &p)); return Module(p);
     }
 };
 
+/// From a grammar.
 inline ExprOperand::ExprOperand(const Grammar& value) : value{0, value.native_handle()} {}
+/// From a module.
 inline ExprOperand::ExprOperand(const Module& value) : value{1, value.native_handle()} {}
+/// From an expression.
 inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handle()} {}
+/// From a token event.
 inline ExprOperand::ExprOperand(Token value) : value{3, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value.id))} {}
+/// From an exact-token set.
 inline ExprOperand::ExprOperand(const ExactTokens& value) : value{4, value.native_handle()} {}
 
+/// A fully runnable grammar compiled against a specific vocabulary.
 class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone> {
     using Base = detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone>;
     explicit Constraint(glrmask_constraint* p) : Base(p) {}
     friend class Grammar; friend class Module;
 public:
+    /// Creates independent state for one generated sequence.
     ConstraintState start() const;
+    /// Number of packed `u32` words in a mask.
     std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_constraint_mask_len(native_handle(), &n)); return n; }
+    /// Sorted, distinct application marker IDs.
     std::vector<TokenId> marker_ids() const { glrmask_u32s* p = nullptr; detail::check(glrmask_constraint_marker_ids(native_handle(), &p)); return detail::take_ids(p); }
+    /// Serializes the constraint; `external_vocab` omits the vocabulary.
     Bytes save(bool external_vocab = false) const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), external_vocab ? 1u : 0u, &p)); return detail::take_bytes(p); }
+    /// Deserializes a constraint, optionally with the exact original vocabulary.
     static Constraint load(const Bytes& bytes, const Vocab* vocab = nullptr) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes.data(), bytes.size(), vocab ? vocab->native_handle() : nullptr, &p)); return Constraint(p);
     }
 };
 
+/// The mutable state for a single generated sequence.
 class ConstraintState : public detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone> {
     using Base = detail::Owned<glrmask_state, glrmask_state_free, glrmask_state_clone>;
     explicit ConstraintState(glrmask_state* p) : Base(p) {}
     friend class Constraint;
 public:
+    /// Number of packed `u32` words in a mask.
     std::size_t mask_len() const { std::size_t n = 0; detail::check(glrmask_state_mask_len(native_handle(), &n)); return n; }
+    /// Writes the current mask; extra words are cleared and `output` must hold `word_count` words.
     void fill_mask(TokenId* output, std::size_t word_count) const { detail::check(glrmask_state_fill_mask(native_handle(), output, word_count)); }
+    /// Writes the current mask into `output`, which must hold `mask_len()` words.
     void fill_mask(std::vector<TokenId>& output) const { fill_mask(output.data(), output.size()); }
+    /// The current allowed-token mask as packed original-token-ID words.
     std::vector<TokenId> mask() const { std::vector<TokenId> out(mask_len()); fill_mask(out); return out; }
+    /// Commits one model token event; unknown or forbidden IDs reject the state.
     void commit_token(TokenId id) { detail::check(glrmask_state_commit_token(native_handle(), id)); }
+    /// Commits raw bytes rather than a model token event.
     void commit_bytes(const std::uint8_t* bytes, std::size_t size) { detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size)); }
+    /// Commits the bytes of an owning buffer.
     void commit_bytes(const Bytes& bytes) { commit_bytes(bytes.data(), bytes.size()); }
+    /// Commits the bytes of a string view.
     void commit_bytes(std::string_view bytes) { commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
+    /// Whether the current prefix is a complete grammar match.
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
+    /// Whether the prefix cannot be extended to a valid match.
     bool is_rejected() const { std::uint32_t value = 0; detail::check(glrmask_state_is_rejected(native_handle(), &value)); return value != 0; }
+    /// A read-only prefix of library-canonical forced output.
     std::vector<TokenId> forced_tokens() const { glrmask_u32s* p = nullptr; detail::check(glrmask_state_forced_tokens(native_handle(), &p)); return detail::take_ids(p); }
+    /// Initial or most recent commit's marker observations, ordered by byte offset then ID.
     std::vector<MarkerEvent> marker_events() const {
         glrmask_events* raw = nullptr; detail::check(glrmask_state_marker_events(native_handle(), &raw));
         std::unique_ptr<glrmask_events, decltype(&glrmask_events_free)> owner(raw, glrmask_events_free);
@@ -449,6 +531,7 @@ inline Constraint Module::compile(const Vocab& vocab, const CompileOptions& opti
 inline ConstraintState Constraint::start() const {
     glrmask_state* p = nullptr; detail::check(glrmask_constraint_start(native_handle(), &p)); return ConstraintState(p);
 }
+/// The library version string.
 inline const char* version() noexcept { return glrmask_version(); }
 } // namespace glrmask
 #endif
