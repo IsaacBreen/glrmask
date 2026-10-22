@@ -160,8 +160,7 @@ operators add neither scope nor public path segments.
 forced ordinary text. It greedily chooses the longest admitted nonempty spelling,
 then the lowest original-ID alias. Exact-token events retain their IDs, and the
 query stops before root acceptance or an intermediate event opportunity that a
-greedy text token would cross. The correctness-first implementation may construct
-a full vocabulary mask. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
+greedy text token would cross. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
 and raises errors for typed proof/resource failures. The result is one canonical
 sequence, not an exhaustive tree of equivalent token histories. See
 [forcing contracts](docs/forcing.md).
