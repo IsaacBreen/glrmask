@@ -54,6 +54,8 @@ struct Preparation {
     source: u32,
     engine: u8,
     boundary: u8,
+    #[serde(default)]
+    token_set: Option<Vec<u32>>,
     bytes: Vec<u8>,
 }
 
@@ -161,6 +163,10 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
                     source: source_id,
                     engine: engine_u8,
                     boundary: p.prepared().boundary_trigger as u8,
+                    token_set: match &p.prepared().inner.boundary_trigger {
+                        crate::runtime::BoundaryTrigger::TokenSet(tokens) => Some(tokens.to_vec()),
+                        _ => None,
+                    },
                     bytes: p.prepared().save(),
                 });
                 id
@@ -301,7 +307,14 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
 
     let sources = manifest.sources.into_iter().map(|s| decode_source(s, &vocabs).map(Arc::new)).collect::<Result<Vec<_>>>()?;
     let prepared = manifest.prepared.into_iter().map(|p| {
-        prepared_artifact::load(&p.bytes, supplied).map(retain_local)
+        let mut prepared = prepared_artifact::load(&p.bytes, supplied)?;
+        if let Some(mut tokens) = p.token_set {
+            tokens.sort_unstable();
+            tokens.dedup();
+            Arc::make_mut(&mut prepared.inner).boundary_trigger =
+                crate::runtime::BoundaryTrigger::TokenSet(Arc::from(tokens.into_boxed_slice()));
+        }
+        Ok(retain_local(prepared))
     }).collect::<Result<Vec<_>>>()?;
 
     let mut instances = Vec::<Module>::new();

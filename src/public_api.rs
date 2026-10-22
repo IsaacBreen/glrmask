@@ -56,7 +56,9 @@ impl MaskStrategy {
 ///
 /// This is independent of the boundary token trigger, which is always the LLM
 /// token set. `ParserDwa` installs the static boundary parser; `Dynamic` keeps
-/// the segmented dynamic boundary built by composition.
+/// the segmented dynamic boundary built by composition. A `ParserDwa` budget
+/// decline is returned as [`Error::ResourceLimit`] with a `boundary_parser_dwa:`
+/// message; set `Dynamic` (`FAST_BUILD`) to keep the dynamic boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {

@@ -63,6 +63,7 @@ impl Error {
     /// rescue when it is explicitly enabled.
     pub(crate) fn is_strategy_decline(&self) -> bool {
         match self {
+            Self::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => false,
             Self::ResourceLimit(_) | Self::StrategyUnsupported(_) => true,
             Self::SourceAt { error, .. } => error.is_strategy_decline(),
             _ => false,
@@ -82,6 +83,7 @@ impl Error {
             Self::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
             Self::ResourceLimit(message) if message.starts_with("single_use_inlining") => "single_use_inlining",
             Self::ResourceLimit(message) if message.starts_with("bound_reduction_length") => "bound_reduction_length",
+            Self::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => "boundary_parser_dwa",
             Self::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
             Self::ResourceLimit(_) => "template",
             Self::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",

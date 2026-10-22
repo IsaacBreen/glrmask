@@ -193,9 +193,13 @@ impl Module {
         self.node.boundary_mask_strategy
     }
 
-    /// Sets the minimum boundary mask detail level for this module.
+    /// Sets the boundary parser for this module.
     ///
-    /// The returned `Result` reserves room for future strategy validation.
+    /// `ParserDwa` installs the static boundary parser. A build-budget decline
+    /// returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message;
+    /// choose `BoundaryMaskStrategy::Dynamic` (`FAST_BUILD`) to keep the
+    /// segmented dynamic boundary instead. The returned `Result` reserves room
+    /// for future strategy validation.
     pub fn set_boundary_mask_strategy(&mut self, strategy: BoundaryMaskStrategy) -> Result<()> {
         Arc::make_mut(&mut self.node).boundary_mask_strategy = strategy;
         Ok(())
@@ -829,11 +833,16 @@ impl Module {
                 && parent.has_template_parser()
                 && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
             {
+                if std::env::var_os("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE").is_some() {
+                    return Err(Error::ResourceLimit(
+                        "boundary_parser_dwa: forced test decline; use BoundaryMaskStrategy::FAST_BUILD (Dynamic)".into(),
+                    ));
+                }
                 match crate::compiler::template_boundary::install(&mut parent, vocab) {
                     Ok(()) => {}
                     Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
-                        return Err(Error::Compilation(
-                            "static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (Dynamic) to keep the segmented dynamic boundary".into(),
+                        return Err(Error::ResourceLimit(
+                            "boundary_parser_dwa: static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (Dynamic) to keep the segmented dynamic boundary".into(),
                         ));
                     }
                     Err(error) => return Err(error),
@@ -988,6 +997,30 @@ mod precompile_boundary_tests {
             .compile_with(&vocab, CompileOptions::default())
             .expect("plain compile");
         assert!(tokens(&plain).is_some(), "plain compile must build the default trigger");
+
+        let bytes = module.save();
+        let loaded = Module::load(&bytes, Some(&vocab)).expect("Module artifact round-trip");
+        let loaded_trigger = loaded
+            .node
+            .prepared
+            .values()
+            .next()
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
+            .expect("loaded Module must keep its TokenSet");
+        assert_eq!(loaded_trigger.as_ref(), prepared_trigger.as_ref());
+
+        let constraint_bytes = compiled.save();
+        let mut loaded_constraint = RuntimeConstraint::load(&constraint_bytes).expect("Constraint round-trip");
+        loaded_constraint
+            .materialize_composition_metadata_for_compilation()
+            .expect("materialize loaded metadata");
+        let loaded_constraint_trigger = tokens(&loaded_constraint).expect("loaded Constraint must keep its TokenSet");
+        assert_eq!(loaded_constraint_trigger.as_ref(), prepared_trigger.as_ref());
+
+        let mut old = b"GLRASM01".to_vec();
+        old.extend_from_slice(&bytes[8..]);
+        let error = Module::load(&old, Some(&vocab)).expect_err("old Module artifact must be rejected");
+        assert!(error.to_string().contains("unsupported Module artifact version"), "{error}");
     }
 }
 
@@ -1054,6 +1087,9 @@ mod boundary_gate_tests {
         walk(&mut gated_state, &mut ungated_state, 4);
     }
 
+    /// There is currently no runtime mask path that reads
+    /// `BoundaryTrigger::TokenSet`; it is retained composition metadata today.
+    /// This guard pins that future consumers never change observable masks.
     #[test]
     fn token_set_gate_never_changes_masks() {
         let vocab = vocab();
@@ -1158,5 +1194,41 @@ mod boundary_strategy_tests {
             }
             assert_eq!(a.mask(), b.mask(), "mask mismatch after {prefix:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_error_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+
+    #[test]
+    fn parser_dwa_budget_decline_is_typed_and_dynamic_succeeds() {
+        let vocab = {
+            let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+            vocab.prepare_for_compile();
+            vocab
+        };
+        let compile = |strategy| {
+            let mut parent = Module::new(&Grammar::from_glrm(
+                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            ));
+            parent
+                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
+                .unwrap();
+            parent.set_boundary_mask_strategy(strategy).unwrap();
+            parent.compile_with(&vocab, CompileOptions::default())
+        };
+        unsafe { std::env::set_var("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE", "1") };
+        let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
+        unsafe { std::env::remove_var("GLRMASK_TEST_FORCE_BOUNDARY_DWA_DECLINE") };
+        match error {
+            Error::ResourceLimit(message) => {
+                assert!(message.starts_with("boundary_parser_dwa:"));
+                assert!(message.contains("FAST_BUILD"));
+            }
+            other => panic!("expected ResourceLimit, got {other:?}"),
+        }
+        compile(BoundaryMaskStrategy::Dynamic).expect("Dynamic must bypass the static boundary parser");
     }
 }
