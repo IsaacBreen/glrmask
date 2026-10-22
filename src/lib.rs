@@ -21,12 +21,6 @@
 //! - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 //! - `ConstraintState`: the mutable state for a single generated sequence.
 //!
-//! Use direct `Grammar.compile` for a closed source, or a `Module` when local
-//! settings, late-bound children, or retained work are needed. `Expr.choice` and
-//! `Expr.sequence` group grammar leaves without adding an extra lexer scope at each
-//! operator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)
-//! for construction, open precompilation, and persistence examples.
-//!
 //! # Quickstart
 //!
 //! ```rust

@@ -137,6 +137,7 @@ def language_payload():
                'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
                'guide_url': REPO + '/blob/main/GUIDE.md',
                'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
+               'python_releases': json.loads((CONTENT / 'python-api-releases.json').read_text()),
                'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
     payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'

@@ -152,3 +152,13 @@ homepage-only or Python-only rewrite fails even if generated hashes are updated.
 rendered rustdoc are checked now; existing docs.rs/package artifacts retain their
 published text until the next normal release. Never bump a package solely to
 propagate prose.
+
+
+## Published API versions
+
+Shared introductions and quickstarts follow `docs/content`. The public website
+selects the API contracts for the installed release line from
+`python-api-releases.json`; a development API change must not replace the
+contracts of an already published wheel. The current source contracts remain in
+`python-api.json`. Both sets are included in the hashed language payload and
+checked against the installed wheel's actual public symbols.
