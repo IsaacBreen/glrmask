@@ -153,4 +153,3 @@ matching/generation, temperature, token or character/byte budgets, priorities, o
 special stop/suffix backtracking and capture-hiding controls. Unsupported semantic
 attributes are errors. A selected compatibility profile is not blanket permission
 to accept and ignore the rest of a foreign grammar dialect.
-
