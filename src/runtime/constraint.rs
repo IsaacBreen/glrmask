@@ -1145,12 +1145,13 @@ impl Constraint {
         ) {
             return Ok(());
         }
-        self.materialize_composition_link_metadata_for_compilation()?;
         // The grammar-aware boundary summary is a sound upper bound for the
         // same first-crossing event and costs ~0.1 ms on JSB schemas. Reuse it
         // when the compile pipeline already persisted it; the trie walk is only
-        // the Unknown-summary fallback.
-        if let Some(vocab) = self.late_bind_vocab.get()
+        // the Unknown-summary fallback. Query it before materializing deferred
+        // link metadata so linked artifacts keep their deferred wrapper.
+        if self.boundary_candidate_summary.get().is_some()
+            && let Some(vocab) = self.late_bind_vocab.get()
             && let Ok(Some(candidates)) =
                 crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(self, vocab)
         {
@@ -1160,6 +1161,7 @@ impl Constraint {
             self.serialized_artifact_cache = None;
             return Ok(());
         }
+        self.materialize_composition_link_metadata_for_compilation()?;
         if std::env::var_os("GLRMASK_REPORT_ROUTE").is_some() {
             eprintln!("[glrmask/route] boundary_token_set=fallback_trie reason=summary_unknown");
         }

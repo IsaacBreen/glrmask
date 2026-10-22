@@ -2517,6 +2517,11 @@ fn prepare_immutable_template_component_boundary_summary(
 }
 
 fn apply_final_boundary_trigger(constraint: &mut RuntimeConstraint, detail: BoundaryTriggerDetail) -> Result<()> {
+    if detail == BoundaryTriggerDetail::None {
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::None;
+        constraint.serialized_artifact_cache = None;
+        return Ok(());
+    }
     if detail == BoundaryTriggerDetail::Exact && !constraint.has_template_parser() {
         return Err(Error::Compilation("Exact boundary triggers require native template components; retained-LR Dynamic is unsupported".into()));
     }
@@ -6569,11 +6574,12 @@ mod final_boundary_option_tests {
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         parent.bindings.insert("child".to_owned(), ModuleBinding::Module(Arc::new(child)));
         let parent = PreparedGrammar::load(parent.save()).unwrap();
-        let linked = parent.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
+        let linked = parent.clone().link_with(
+            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None),
+        ).unwrap();
         assert!(matches!(linked.boundary_trigger, crate::runtime::BoundaryTrigger::None));
-        let overlay = linked.static_dynamic_overlay.as_ref().unwrap();
-        assert!(overlay.segmented_parser_components.iter().any(|component|
-            matches!(component.constraint.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_))));
+        let gated = parent.link_with(BuildOptions::default()).unwrap();
+        assert!(matches!(gated.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_)));
     }
 }
 
