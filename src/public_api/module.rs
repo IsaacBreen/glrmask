@@ -637,84 +637,132 @@ impl Module {
         if modules.iter().any(conflicting) {
             return Err(error("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"));
         }
+        // EXPERIMENT: one route report per top-level Module compile.
+        let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
+        let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
         if token_trie {
-            let constraint = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?;
-            return constraint.with_end_tokens(&options.end_tokens);
+            let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?;
+            let result = result.with_end_tokens(&options.end_tokens)?;
+            crate::compiler::terminal_ended_rescue::report_route(
+                experiment.report_route,
+                crate::compiler::terminal_ended_rescue::Route::Normal,
+                engine,
+                experiment,
+                &crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried,
+            );
+            return Ok(result);
         }
-        let mut prepared = self.clone();
-        let attempt = {
-            let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
-            let end_tokens = options.end_tokens.clone();
-            budget.install(move || {
-                crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
-                    prepared.precompile(vocab)?;
-                    let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
-                    ensure_runnable_constraint(&constraint)?;
-                    constraint.with_end_tokens(&end_tokens)
+        let te_first = experiment.terminal_ended_first
+            && self.node.bindings.is_empty()
+            && matches!(
+                engine,
+                MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie | MaskStrategy::Auto
+            );
+        let mut route = crate::compiler::terminal_ended_rescue::Route::Normal;
+        let mut outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::NotTried;
+        let result = (|| -> Result<RuntimeConstraint> {
+            let try_rescue = || -> Result<RuntimeConstraint> {
+                let grammar = self.flatten_source()?;
+                let source = grammar.rescue_source_grammar(vocab)?;
+                let mut constraint =
+                    crate::compiler::terminal_ended_rescue::rescue(&source, vocab)?;
+                apply_final_boundary_trigger(
+                    &mut constraint,
+                    target_boundary(engine, self.node.boundary_mask_strategy),
+                )?;
+                constraint.with_end_tokens(&options.end_tokens)
+            };
+            if te_first {
+                match try_rescue() {
+                    Ok(constraint) => {
+                        route = crate::compiler::terminal_ended_rescue::Route::TerminalEnded;
+                        outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::Ok;
+                        return Ok(constraint);
+                    }
+                    Err(rescue_error) => {
+                        outcome = crate::compiler::terminal_ended_rescue::RescueOutcome::Declined(
+                            rescue_error.to_string(),
+                        );
+                    }
+                }
+            }
+            let mut prepared = self.clone();
+            let attempt = {
+                let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
+                let end_tokens = options.end_tokens.clone();
+                budget.install(move || {
+                    crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
+                        prepared.precompile(vocab)?;
+                        let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
+                        ensure_runnable_constraint(&constraint)?;
+                        constraint.with_end_tokens(&end_tokens)
+                    })
                 })
-            })
-        };
-        match attempt {
-            Ok(constraint) => Ok(constraint),
-            Err(error) if error.is_strategy_decline() => {
-                let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
-                // Phase 2: one terminal-ended rescue attempt from the original
-                // flattened source, restricted to plain single modules. Any
-                // failure returns the original typed decline.
-                if self.node.bindings.is_empty() {
-                    match self.flatten_source() {
-                        Ok(grammar) => {
-                            let rescued = grammar
-                                .rescue_source_grammar(vocab)
-                                .and_then(|source| {
-                                    crate::compiler::terminal_ended_rescue::rescue(&source, vocab)
-                                });
-                            match rescued {
-                                Ok(mut constraint) => {
-                                    apply_final_boundary_trigger(
-                                        &mut constraint,
-                                        target_boundary(engine, self.node.boundary_mask_strategy),
-                                    )?;
-                                    let constraint =
-                                        constraint.with_end_tokens(&options.end_tokens)?;
-                                    if crate::compiler::compile::compile_profile_enabled() {
-                                        eprintln!(
-                                            "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=ok",
-                                        );
-                                    }
-                                    return Ok(constraint);
+            };
+            match attempt {
+                Ok(constraint) => Ok(constraint),
+                Err(error) if error.is_strategy_decline() => {
+                    // Phase 2: one terminal-ended rescue attempt from the original
+                    // flattened source, restricted to plain single modules. Any
+                    // failure returns the original typed decline.
+                    if self.node.bindings.is_empty() && !te_first {
+                        match try_rescue() {
+                            Ok(constraint) => {
+                                if crate::compiler::compile::compile_profile_enabled() {
+                                    eprintln!(
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=ok",
+                                    );
                                 }
-                                Err(rescue_error) => {
-                                    if crate::compiler::compile::compile_profile_enabled() {
-                                        eprintln!(
-                                            "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=declined reason={rescue_error}",
-                                        );
-                                    }
+                                route =
+                                    crate::compiler::terminal_ended_rescue::Route::TerminalEnded;
+                                outcome =
+                                    crate::compiler::terminal_ended_rescue::RescueOutcome::Ok;
+                                return Ok(constraint);
+                            }
+                            Err(rescue_error) => {
+                                if crate::compiler::compile::compile_profile_enabled() {
+                                    eprintln!(
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=declined reason={rescue_error}",
+                                    );
                                 }
+                                outcome =
+                                    crate::compiler::terminal_ended_rescue::RescueOutcome::Declined(
+                                        rescue_error.to_string(),
+                                    );
                             }
                         }
-                        Err(_) => {}
                     }
-                }
-                if crate::compiler::compile::compile_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][template_decline] strategy={engine:?} stage={} reason={error}",
-                        error.decline_stage(),
-                    );
-                }
-                // Only Auto may pick a different exact strategy; an explicit
-                // strategy request is never silently replaced.
-                if self.node.mask_strategy == MaskStrategy::Auto {
-                    if let Ok(grammar) = self.flatten_source() {
-                        return grammar
-                            .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
-                            .with_end_tokens(&options.end_tokens);
+                    if crate::compiler::compile::compile_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][template_decline] strategy={engine:?} stage={} reason={error}",
+                            error.decline_stage(),
+                        );
                     }
+                    // Only Auto may pick a different exact strategy; an explicit
+                    // strategy request is never silently replaced.
+                    if self.node.mask_strategy == MaskStrategy::Auto {
+                        if let Ok(grammar) = self.flatten_source() {
+                            let constraint = grammar
+                                .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
+                                .with_end_tokens(&options.end_tokens)?;
+                            route =
+                                crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
+                            return Ok(constraint);
+                        }
+                    }
+                    Err(error)
                 }
-                Err(error)
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        }
+        })();
+        crate::compiler::terminal_ended_rescue::report_route(
+            experiment.report_route,
+            route,
+            engine,
+            experiment,
+            &outcome,
+        );
+        result
     }
 
     fn materialize(&self, vocab: &Vocab, cache: &mut HashMap<usize, RuntimeConstraint>) -> Result<RuntimeConstraint> {

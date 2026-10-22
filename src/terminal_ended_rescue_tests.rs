@@ -14,8 +14,9 @@ use std::time::Instant;
 
 use crate::compiler::build_budget::TestBudgetLimit;
 use crate::compiler::terminal_ended_rescue::{
-    reset_test_rescue_entries, test_rescue_entries,
+    reset_test_rescue_entries, set_test_terminal_ended_first, test_rescue_entries,
 };
+use crate::import::static_route_recorded;
 use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
 
 // One single-byte token per terminal used by the witnesses. Keeping the
@@ -96,6 +97,19 @@ fn lark(case: &Case) -> String {
 /// Exact CFG/DFA intersection fixpoint. See the oracle in
 /// `budget_fallback_tests.rs`.
 fn derive_relation(case: &Case, target: &[u8], absorbing: bool) -> Vec<Vec<Vec<bool>>> {
+    derive_relation_with_tokens(case, target, absorbing, &TOKEN_BYTES)
+}
+
+/// As [`derive_relation`], with negative CFG symbols mapping into `tokens`
+/// (`-1` is the first token, `-2` the second, ...). This lets the same exact
+/// oracle cover frontends whose vocabularies are not the four single-byte
+/// witness tokens.
+fn derive_relation_with_tokens(
+    case: &Case,
+    target: &[u8],
+    absorbing: bool,
+    tokens: &[&[u8]],
+) -> Vec<Vec<Vec<bool>>> {
     let n = target.len();
     let states = n + 1;
     let nonterminals = case
@@ -124,11 +138,11 @@ fn derive_relation(case: &Case, target: &[u8], absorbing: bool) -> Vec<Vec<Vec<b
                 let step: Vec<Vec<bool>> = if *symbol >= 0 {
                     relation[*symbol as usize].clone()
                 } else {
-                    let byte = terminal_byte(*symbol);
+                    let token = tokens[(-symbol - 1) as usize];
                     let mut step = vec![vec![false; states]; states];
                     for from in 0..states {
                         let to = if from < n {
-                            (target[from] == byte).then_some(from + 1)
+                            target[from..].starts_with(token).then_some(from + token.len())
                         } else if absorbing {
                             Some(n)
                         } else {
@@ -171,11 +185,19 @@ fn derive_relation(case: &Case, target: &[u8], absorbing: bool) -> Vec<Vec<Vec<b
 }
 
 fn viable(case: &Case, prefix: &[u8]) -> bool {
-    derive_relation(case, prefix, true)[case.start][0][prefix.len()]
+    viable_with_tokens(case, prefix, &TOKEN_BYTES)
+}
+
+fn viable_with_tokens(case: &Case, prefix: &[u8], tokens: &[&[u8]]) -> bool {
+    derive_relation_with_tokens(case, prefix, true, tokens)[case.start][0][prefix.len()]
 }
 
 fn accepts(case: &Case, word: &[u8]) -> bool {
-    derive_relation(case, word, false)[case.start][0][word.len()]
+    accepts_with_tokens(case, word, &TOKEN_BYTES)
+}
+
+fn accepts_with_tokens(case: &Case, word: &[u8], tokens: &[&[u8]]) -> bool {
+    derive_relation_with_tokens(case, word, false, tokens)[case.start][0][word.len()]
 }
 
 fn allowed(mask: &[u32], token: usize) -> bool {
@@ -228,6 +250,10 @@ fn expect_strategy_decline(result: crate::Result<Constraint>, context: &str) -> 
 
 /// Exact oracle: templates must agree with prefix viability and membership.
 fn check_exact_oracle(constraint: &Constraint, case: &Case) {
+    check_exact_oracle_with_tokens(constraint, case, &TOKEN_BYTES);
+}
+
+fn check_exact_oracle_with_tokens(constraint: &Constraint, case: &Case, tokens: &[&[u8]]) {
     let mut queue = VecDeque::from([(constraint.start(), Vec::<u8>::new())]);
     let mut seen = BTreeSet::<Vec<u8>>::new();
     let mut viability = BTreeMap::<Vec<u8>, bool>::new();
@@ -239,12 +265,12 @@ fn check_exact_oracle(constraint: &Constraint, case: &Case) {
         }
         let mut mask = vec![0u32; constraint.mask_len()];
         state.fill_mask(&mut mask);
-        for (token, token_bytes) in TOKEN_BYTES.iter().enumerate() {
+        for (token, token_bytes) in tokens.iter().enumerate() {
             let mut candidate = prefix.clone();
             candidate.extend_from_slice(token_bytes);
             let expected = *viability
                 .entry(candidate.clone())
-                .or_insert_with(|| viable(case, &candidate));
+                .or_insert_with(|| viable_with_tokens(case, &candidate, tokens));
             assert_eq!(
                 allowed(&mask, token),
                 expected,
@@ -253,7 +279,7 @@ fn check_exact_oracle(constraint: &Constraint, case: &Case) {
                 String::from_utf8_lossy(&candidate),
             );
         }
-        for id in TOKEN_BYTES.len()..(mask.len() * 32) {
+        for id in tokens.len()..(mask.len() * 32) {
             assert!(
                 !allowed(&mask, id),
                 "unexpected token {id} at prefix {:?}",
@@ -262,14 +288,14 @@ fn check_exact_oracle(constraint: &Constraint, case: &Case) {
         }
         let expected_accept = *membership
             .entry(prefix.clone())
-            .or_insert_with(|| accepts(case, &prefix));
+            .or_insert_with(|| accepts_with_tokens(case, &prefix, tokens));
         assert_eq!(
             state.is_accepting(),
             expected_accept,
             "accept mismatch at {:?}",
             String::from_utf8_lossy(&prefix),
         );
-        for (token, token_bytes) in TOKEN_BYTES.iter().enumerate() {
+        for (token, token_bytes) in tokens.iter().enumerate() {
             if prefix.len() + token_bytes.len() > case.bound || !allowed(&mask, token) {
                 continue;
             }
@@ -836,4 +862,129 @@ fn fuzz_605_seed_830_publishes_exact_masks_within_budget() {
 fn fuzz_e86d_seed_4754_publishes_exact_masks_within_budget() {
     let _serial = serial();
     check_fuzz_case("fuzz_e86d_4754", 0, 3, &[(0, &[-2]), (1, &[-3]), (2, &[-1]), (3, &[-2]), (0, &[-2, 2]), (0, &[-2]), (0, &[]), (1, &[3, 1, 1]), (1, &[-2, 2, 3]), (1, &[]), (2, &[0]), (2, &[]), (2, &[3, -3]), (3, &[2, 0, 3]), (3, &[2])]);
+}
+
+// ---------------------------------------------------------------------------
+// Stage 1: one shared static lowering; JSON Schema and resolve_lark features
+// are no longer refused. EXPERIMENT: terminal-ended-first.
+// ---------------------------------------------------------------------------
+
+const JSON_TOKENS: [&[u8]; 3] = [b"\"", b"a", b"b"];
+
+fn json_vocab() -> Vocab {
+    Vocab::new(
+        JSON_TOKENS
+            .iter()
+            .enumerate()
+            .map(|(id, bytes)| (id as u32, bytes.to_vec()))
+            .collect(),
+    )
+}
+
+fn compile_with_te_first(
+    grammar: Grammar<'_>,
+    vocab: &Vocab,
+    strategy: MaskStrategy,
+) -> crate::Result<Constraint> {
+    set_test_terminal_ended_first(Some(true));
+    let result =
+        grammar.compile_with_build_options(vocab, BuildOptions::default().optimization(strategy));
+    set_test_terminal_ended_first(None);
+    result
+}
+
+#[test]
+fn terminal_ended_first_json_schema_matches_the_exact_oracle() {
+    let _serial = serial();
+    // `const` makes the language exactly the JSON string `"a"`; the extra
+    // token `b` must remain masked at every prefix.
+    const SCHEMA: &str = r#"{"type":"string","const":"a"}"#;
+    let case = case(0, 3, &[(0, &[-1, -2, -1])]);
+    reset_test_rescue_entries();
+    let constraint = compile_with_te_first(
+        Grammar::from_json_schema(SCHEMA),
+        &json_vocab(),
+        MaskStrategy::ParserDwa,
+    )
+    .unwrap_or_else(|error| panic!("TE-first JSON Schema compile failed: {error}"));
+    assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
+    assert!(
+        test_rescue_entries() > 0,
+        "the JSON Schema compile did not enter the rescue"
+    );
+    check_exact_oracle_with_tokens(&constraint, &case, &JSON_TOKENS);
+}
+
+#[test]
+fn terminal_ended_first_lark_event_matches_the_exact_oracle() {
+    let _serial = serial();
+    // `<[1]>` is a Lark event, so this only lowers through Grammar::resolve_lark.
+    // Token 1 is `b`, so the language is exactly "ab".
+    let case = case(0, 2, &[(0, &[-1, -2])]);
+    reset_test_rescue_entries();
+    let constraint = compile_with_te_first(
+        Grammar::from_lark_with(
+            "start: \"a\" <[1]>",
+            crate::LarkOptions::llm(),
+        ),
+        &vocab(),
+        MaskStrategy::ParserDwa,
+    )
+    .unwrap_or_else(|error| panic!("TE-first Lark event compile failed: {error}"));
+    assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
+    assert!(
+        test_rescue_entries() > 0,
+        "the Lark event compile did not enter the rescue"
+    );
+    check_exact_oracle(&constraint, &case);
+}
+
+/// The rescue lowering is the same `GrammarDef` the ordinary static route
+/// compiles, for every frontend.
+#[test]
+fn rescue_lowering_equals_the_normal_static_route() {
+    let _serial = serial();
+    set_test_terminal_ended_first(None);
+    let v = vocab();
+    let json = json_vocab();
+    let cases: Vec<(&str, Grammar<'_>, &Vocab)> = vec![
+        (
+            "ebnf",
+            Grammar::from_ebnf("start ::= \"a\" \"b\""),
+            &v,
+        ),
+        (
+            "lark-event",
+            Grammar::from_lark_with("start: \"a\" <[1]>", crate::LarkOptions::llm()),
+            &v,
+        ),
+        (
+            "glrm",
+            Grammar::from_glrm("start root nt root=\"a\" \"b\""),
+            &v,
+        ),
+        (
+            "json_schema",
+            Grammar::from_json_schema(r#"{"type":"string","const":"a"}"#),
+            &json,
+        ),
+    ];
+    for (label, grammar, target) in cases {
+        // Compute the rescue input first, then run the normal route. The
+        // process-global capture may also contain inputs from concurrent
+        // tests, so membership (not position) is the assertion.
+        let rescued = grammar
+            .lower_static_template_input(target)
+            .unwrap_or_else(|error| panic!("{label} rescue lowering failed: {error}"));
+        grammar
+            .compile_with_build_options(
+                target,
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            )
+            .unwrap_or_else(|error| panic!("{label} normal compile failed: {error}"));
+        assert!(
+            static_route_recorded(&rescued),
+            "{label}: the normal static route did not record the rescue's GrammarDef",
+        );
+    }
 }

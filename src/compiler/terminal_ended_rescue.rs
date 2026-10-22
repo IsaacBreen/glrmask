@@ -38,6 +38,127 @@ pub(crate) fn test_rescue_entries() -> u32 {
     RESCUE_ENTRIES.with(Cell::get)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of the TE-first experiment switch. Process
+    /// environment variables are unsuitable here because lib tests run in
+    /// parallel on shared threads.
+    static TE_FIRST_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Test-only override; `None` restores the environment-variable behaviour.
+#[cfg(test)]
+pub(crate) fn set_test_terminal_ended_first(value: Option<bool>) {
+    TE_FIRST_OVERRIDE.with(|slot| slot.set(value));
+}
+
+#[cfg(test)]
+fn terminal_ended_first_override() -> Option<bool> {
+    TE_FIRST_OVERRIDE.with(Cell::get)
+}
+
+#[cfg(not(test))]
+fn terminal_ended_first_override() -> Option<bool> {
+    None
+}
+
+/// Experiment controls read once per top-level compile.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RescueExperiment {
+    pub(crate) terminal_ended_first: bool,
+    pub(crate) report_route: bool,
+}
+
+impl RescueExperiment {
+    pub(crate) fn read() -> Self {
+        let terminal_ended_first = terminal_ended_first_override().unwrap_or_else(|| {
+            std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST")
+                .is_some_and(|value| value.to_str() == Some("1"))
+        });
+        let report_route = std::env::var_os("GLRMASK_REPORT_ROUTE").is_some();
+        Self {
+            terminal_ended_first,
+            report_route,
+        }
+    }
+}
+
+/// Which path produced the result reported by `GLRMASK_REPORT_ROUTE`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Route {
+    TerminalEnded,
+    Normal,
+    TokenTrieFallback,
+}
+
+impl Route {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::TerminalEnded => "terminal_ended",
+            Self::Normal => "normal",
+            Self::TokenTrieFallback => "token_trie_fallback",
+        }
+    }
+}
+
+/// Outcome of the TE-first attempt (or of the legacy post-decline rescue when
+/// TE-first is off).
+#[derive(Clone, Debug, Default)]
+pub(crate) enum RescueOutcome {
+    #[default]
+    NotTried,
+    Ok,
+    Declined(String),
+}
+
+impl RescueOutcome {
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotTried => "not_tried",
+            Self::Ok => "ok",
+            Self::Declined(_) => "declined",
+        }
+    }
+
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::Declined(reason) => short_reason(reason),
+            _ => "-".to_owned(),
+        }
+    }
+}
+
+fn short_reason(reason: &str) -> String {
+    let reason = reason.replace(['\n', '\r', ' ', '\t'], "_");
+    let reason = reason.trim_matches('_');
+    if reason.is_empty() {
+        "-".to_owned()
+    } else {
+        reason.chars().take(160).collect()
+    }
+}
+
+/// Emit exactly one route line for a top-level compile when requested.
+pub(crate) fn report_route(
+    enabled: bool,
+    route: Route,
+    strategy: impl std::fmt::Debug,
+    experiment: RescueExperiment,
+    outcome: &RescueOutcome,
+) {
+    if !enabled {
+        return;
+    }
+    eprintln!(
+        "[glrmask/route] route={} strategy={:?} te_first={} te_outcome={} te_reason={}",
+        route.as_str(),
+        strategy,
+        u8::from(experiment.terminal_ended_first),
+        outcome.as_str(),
+        outcome.reason(),
+    );
+}
+
 fn map_decline(decline: CompileDecline) -> Error {
     match decline {
         CompileDecline::ResourceLimit {

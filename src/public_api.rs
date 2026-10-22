@@ -697,7 +697,7 @@ impl<'a> Grammar<'a> {
         }
         if options.parser_backend == ParserBackend::TemplateDfa {
             if options.optimization == MaskStrategy::TokenClassTrie && self.bindings.is_empty() {
-                let attempt = {
+                return self.finish_template_attempt(vocab, &options, || {
                     let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                     // A partial template build must not leave prepared caches on
                     // the source reused by the rescue attempt.
@@ -724,12 +724,11 @@ impl<'a> Grammar<'a> {
                             constraint.with_end_tokens(attempt_options.end_token_ids())
                         })
                     })
-                };
-                return self.finish_template_attempt(vocab, &options, attempt);
+                });
             }
         }
         if !self.bindings.is_empty() {
-            let attempt = {
+            return self.finish_template_attempt(vocab, &options, || {
                 let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                 let attempt_grammar = self.clone();
                 let attempt_options = options.clone();
@@ -738,10 +737,9 @@ impl<'a> Grammar<'a> {
                         attempt_grammar.prepare(vocab)?.link_with(attempt_options)
                     })
                 })
-            };
-            return self.finish_template_attempt(vocab, &options, attempt);
+            });
         }
-        let attempt = {
+        self.finish_template_attempt(vocab, &options, || {
             let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
             let attempt_grammar = self.clone();
             let attempt_options = options.clone();
@@ -772,64 +770,110 @@ impl<'a> Grammar<'a> {
                     constraint.with_end_tokens(attempt_options.end_token_ids())
                 })
             })
-        };
-        self.finish_template_attempt(vocab, &options, attempt)
+        })
     }
 
     /// Give a template-strategy decline one terminal-ended rescue attempt with
     /// the same strategy. If that also fails, the original typed decline is
     /// returned; the requested strategy is never silently replaced.
-    fn finish_template_attempt(
+    ///
+    /// EXPERIMENT: `GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST=1` tries the rescue
+    /// before the ordinary template attempt. `GLRMASK_REPORT_ROUTE=1` emits one
+    /// route line for this top-level compile.
+    fn finish_template_attempt<F>(
         &self,
         vocab: &Vocab,
         options: &BuildOptions,
-        attempt: Result<RuntimeConstraint>,
-    ) -> Result<RuntimeConstraint> {
-        match attempt {
-            Ok(constraint) => Ok(constraint),
-            Err(error) if error.is_strategy_decline() => {
-                // Phase 2: give the original source one terminal-ended rescue
-                // attempt with the same strategy. The legacy attempt above is
-                // untouched; only a typed decline reaches here.
-                if options.parser_backend == ParserBackend::TemplateDfa {
-                    match self.try_terminal_ended_rescue(vocab, options) {
-                        Ok(constraint) => {
-                            if crate::compiler::compile::compile_profile_enabled() {
-                                eprintln!(
-                                    "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=ok",
-                                    options.optimization,
-                                );
+        attempt: F,
+    ) -> Result<RuntimeConstraint>
+    where
+        F: FnOnce() -> Result<RuntimeConstraint>,
+    {
+        use crate::compiler::terminal_ended_rescue::{
+            report_route, RescueExperiment, RescueOutcome, Route,
+        };
+        let experiment = RescueExperiment::read();
+        let strategy = options.optimization;
+        let template = options.parser_backend == ParserBackend::TemplateDfa;
+        let te_first = experiment.terminal_ended_first
+            && template
+            && self.bindings.is_empty()
+            && matches!(
+                strategy,
+                MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie | MaskStrategy::Auto
+            );
+        let mut route = Route::Normal;
+        let mut outcome = RescueOutcome::NotTried;
+        let result = (|| -> Result<RuntimeConstraint> {
+            // EXPERIMENT: terminal-ended first.
+            if te_first {
+                match self.try_terminal_ended_rescue(vocab, options) {
+                    Ok(constraint) => {
+                        route = Route::TerminalEnded;
+                        outcome = RescueOutcome::Ok;
+                        return Ok(constraint);
+                    }
+                    Err(rescue_error) => {
+                        outcome = RescueOutcome::Declined(rescue_error.to_string());
+                    }
+                }
+            }
+            match attempt() {
+                Ok(constraint) => Ok(constraint),
+                Err(error) if error.is_strategy_decline() => {
+                    // Phase 2: give the original source one terminal-ended rescue
+                    // attempt with the same strategy. The legacy attempt above is
+                    // untouched; only a typed decline reaches here.
+                    if template && !te_first {
+                        match self.try_terminal_ended_rescue(vocab, options) {
+                            Ok(constraint) => {
+                                if crate::compiler::compile::compile_profile_enabled() {
+                                    eprintln!(
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=ok",
+                                        options.optimization,
+                                    );
+                                }
+                                route = Route::TerminalEnded;
+                                outcome = RescueOutcome::Ok;
+                                return Ok(constraint);
                             }
-                            return Ok(constraint);
-                        }
-                        Err(rescue_error) => {
-                            if crate::compiler::compile::compile_profile_enabled() {
-                                eprintln!(
-                                    "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=declined reason={rescue_error}",
-                                    options.optimization,
-                                );
+                            Err(rescue_error) => {
+                                if crate::compiler::compile::compile_profile_enabled() {
+                                    eprintln!(
+                                        "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=declined reason={rescue_error}",
+                                        options.optimization,
+                                    );
+                                }
+                                outcome = RescueOutcome::Declined(rescue_error.to_string());
                             }
                         }
                     }
+                    if crate::compiler::compile::compile_profile_enabled() {
+                        eprintln!(
+                            "[glrmask/profile][template_decline] strategy={:?} stage={} reason={error}",
+                            options.optimization,
+                            error.decline_stage(),
+                        );
+                    }
+                    // Only Auto may pick a different exact strategy; an explicit
+                    // strategy request is never silently replaced.
+                    if options.optimization == MaskStrategy::Auto {
+                        let constraint = self
+                            .compile_token_trie(
+                                vocab,
+                                options.boundary_trigger.unwrap_or_default(),
+                            )?
+                            .with_end_tokens(options.end_token_ids())?;
+                        route = Route::TokenTrieFallback;
+                        return Ok(constraint);
+                    }
+                    Err(error)
                 }
-                if crate::compiler::compile::compile_profile_enabled() {
-                    eprintln!(
-                        "[glrmask/profile][template_decline] strategy={:?} stage={} reason={error}",
-                        options.optimization,
-                        error.decline_stage(),
-                    );
-                }
-                // Only Auto may pick a different exact strategy; an explicit
-                // strategy request is never silently replaced.
-                if options.optimization == MaskStrategy::Auto {
-                    return self
-                        .compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?
-                        .with_end_tokens(options.end_token_ids());
-                }
-                Err(error)
+                Err(error) => Err(error),
             }
-            Err(error) => Err(error),
-        }
+        })();
+        report_route(experiment.report_route, route, strategy, experiment, &outcome);
+        result
     }
 
     #[cfg(any(test, feature = "internal-api"))]
@@ -990,33 +1034,58 @@ impl<'a> Grammar<'a> {
         }
     }
 
+    /// Lower this source exactly as the ordinary static template route does,
+    /// stopping at the pre-normalization `GrammarDef`. The normal route and the
+    /// terminal-ended rescue share this function so their inputs cannot drift.
+    pub(crate) fn lower_static_template_input(
+        &self,
+        vocab: &Vocab,
+    ) -> Result<crate::grammar::flat::GrammarDef> {
+        match &self.source {
+            GrammarSource::Ebnf(source) => crate::import::lower_static_ebnf(source),
+            GrammarSource::Lark(_) => {
+                // The normal route resolves Lark into a Constructed component
+                // first; raw parse_lark_to_named cannot express events,
+                // imports or schemas.
+                let resolved = self.resolve_lark(vocab)?;
+                resolved.lower_static_template_input(vocab)
+            }
+            GrammarSource::JsonSchema(source) => crate::import::lower_static_json_schema(source),
+            GrammarSource::Glrm(_) | GrammarSource::Constructed => {
+                self.validate_exact_target(vocab)?;
+                let named = crate::import::lower_static_component(self.component()?, vocab)?;
+                crate::import::lower_static_named_grammar(named, &[])
+            }
+        }
+    }
+
     /// Lower the original source to the flat grammar consumed by the
-    /// terminal-ended construction. Phase 2 is restricted to plain single
-    /// grammars: bindings, extern declarations and JSON Schema decline the
-    /// rescue, so the original typed strategy decline is returned.
-    fn rescue_source_grammar(&self, _vocab: &Vocab) -> Result<crate::grammar::flat::GrammarDef> {
-        if !self.bindings.is_empty() {
+    /// terminal-ended construction. Stage 1 remains restricted to plain single
+    /// grammars: bindings and extern declarations decline the rescue. Lark is
+    /// resolved first so events (and, until composed-unit support lands, the
+    /// declarations produced by imports/schemas) take the normal route.
+    fn rescue_source_grammar(
+        &self,
+        vocab: &Vocab,
+    ) -> Result<crate::grammar::flat::GrammarDef> {
+        let resolved;
+        let source = if matches!(self.source, GrammarSource::Lark(_)) {
+            resolved = self.resolve_lark(vocab)?;
+            &resolved
+        } else {
+            self
+        };
+        if !source.bindings.is_empty() {
             return Err(Error::StrategyUnsupported(
                 "terminal-ended rescue is limited to plain single grammars".into(),
             ));
         }
-        if !self.declarations()?.names.is_empty() {
+        if !source.declarations()?.names.is_empty() {
             return Err(Error::StrategyUnsupported(
                 "terminal-ended rescue does not accept extern declarations".into(),
             ));
         }
-        let named = match &self.source {
-            GrammarSource::Glrm(_) | GrammarSource::Constructed => self.component()?.lower_closed()?,
-            GrammarSource::Ebnf(source) => crate::import::parse_ebnf_to_named(source)?,
-            GrammarSource::Lark(source) => crate::import::parse_lark_to_named(source)?,
-            GrammarSource::JsonSchema(_) => {
-                return Err(Error::StrategyUnsupported(
-                    "terminal-ended rescue is not implemented for JSON Schema sources".into(),
-                ));
-            }
-        };
-        let factored = crate::grammar::factoring::factor_named_grammar(named);
-        let grammar = crate::grammar::ast::lower(&factored)?;
+        let grammar = source.lower_static_template_input(vocab)?;
         crate::compiler::terminal_ended_rescue::check_rescue_scope(&grammar)?;
         Ok(grammar)
     }
