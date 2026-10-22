@@ -1,0 +1,151 @@
+## Vocabulary and exact tokens
+
+`new Vocab(entries, options?)` maps original token IDs to exact tokenizer bytes. Entries are `[id, bytes]`, with `id` an integer in `0..4294967295` and `bytes` a `Uint8Array` or `Buffer`. Inputs are copied. Partial UTF-8, embedded NUL, sparse IDs, and multiple IDs with identical bytes are valid; do not normalize bytes or reconstruct them from a display string. Duplicate IDs, duplicate exact-only IDs, and overlap between the domains are rejected. `vocab.size` counts byte-backed entries only.
+
+```js
+const vocab = new Vocab([
+  [0, Uint8Array.of(0xc3)],
+  [1, Uint8Array.of(0xa9)],
+  [31, Buffer.from('é')],
+], { exactOnlyIds: [99] });
+```
+
+`new Token(id)` is a raw original-ID event without vocabulary identity. `vocab.tokens(ids)` returns vocabulary-qualified `ExactTokens`; `vocab.tokenRanges([{start, end}])` uses half-open ranges, and `end` may be `4294967296`. Overlapping or adjacent ranges normalize without expanding every ID. `exact.ranges` stays compact and `exact.ids` materializes a `Uint32Array`. An empty set matches no event, and each match consumes one chosen token event. Exact and end-token events must be committed with `commitToken`; `commitBytes` advances ordinary byte input only.
+
+## Grammars
+
+| Factory | Input |
+| --- | --- |
+| `Grammar.fromEbnf(source)` | EBNF text |
+| `Grammar.fromGlrm(source)` | Native GLRM text |
+| `Grammar.fromJsonSchema(schema)` | JSON text or a JSON-serializable value |
+| `Grammar.fromLark(source, options?)` | Lark text and an optional profile |
+| `Grammar.exact(tokens)` | One vocabulary-qualified exact-token event |
+
+Factories copy and own their source text. Frontend semantics and limitations match the Rust core; see the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/v0.3.1/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/v0.3.1/docs/lark-dialect.md). The JSON Schema importer is not a complete validator, and the package does not expose parse trees.
+
+Recognition is the default Lark profile. LLM extensions and named atoms require an explicit map:
+
+```js
+const grammar = Grammar.fromLark('start: <|begin|>', {
+  profile: LarkProfile.Llm,
+  tokenNames: { begin: 99 },
+});
+```
+
+## Preparation and build choices
+
+A `Grammar` holds reusable source and mutable bindings. `bind` is transactional: a failed binding leaves the receiver unchanged, and attaching a child snapshots that occurrence. Source bindings accept `Grammar`, `Token`, or `ExactTokens`. Qualified descendant names use `::`, as in `payload::TOOL`; inspect `grammar.requirements` instead of guessing paths.
+
+```js
+const composedVocab = new Vocab([
+  [0, Buffer.from('[')], [1, Buffer.from('hello')],
+  [2, Buffer.from(']')], [3, Buffer.from('[hello]')],
+]);
+const parent = Grammar.fromGlrm(
+  'glrm 1; start root; extern grammar payload; nt root = "[" payload "]";'
+);
+parent.bind('payload', Grammar.fromEbnf('start ::= "hello"'));
+const constraint = await parent.compile(composedVocab);
+```
+
+`grammar.prepare(vocab, options?)` returns a `PreparedGrammar`, reusable vocabulary-specific machinery that may retain open slots. Prepared bindings accept `PreparedGrammar`, `Token`, or `ExactTokens`; a runnable `Constraint` is not a preparation-stage operand. `requirements` reports `{name, path, kind, sourceSpan}`; spans use a half-open byte range and one-based line and Unicode-scalar column.
+
+Preparation accepts only an optional boundary request. Final optimization and root end tokens belong to `compile` or `link`:
+
+```js
+const preparedVocab = new Vocab([
+  [0, Buffer.from('[')], [1, Buffer.from('hello')],
+  [2, Buffer.from(']')], [3, Buffer.from('[hello]')],
+], { exactOnlyIds: [99] });
+const openParent = Grammar.fromGlrm(
+  'glrm 1; start root; extern grammar payload; nt root = "[" payload "]";'
+);
+const preparedChild = Grammar.fromEbnf('start ::= "hello"');
+const prepared = await openParent.prepare(preparedVocab);
+prepared.bind('payload', await preparedChild.prepare(preparedVocab));
+const runnable = await prepared.link({
+  optimization: Optimization.FastRuntime,
+  endTokens: [99],
+});
+```
+
+| `Optimization` | String value | Intent |
+| --- | --- | --- |
+| `Optimization.Auto` | `auto` | Core default trade-off. |
+| `Optimization.FastBuild` | `fast-build` | Shorter compilation. |
+| `Optimization.Balanced` | `balanced` | Balance compilation and masking cost. |
+| `Optimization.FastRuntime` | `fast-runtime` | Lower per-token masking cost, accepting more compilation work. |
+
+`BoundaryTriggerDetail.None`, `Tokens`, and `Exact` select optional boundary metadata. An omitted request preserves a prepared request; explicit `None` clears it at final link. Unsupported combinations reject with the core's error rather than selecting a hidden fallback.
+
+`prepare`, `compile`, `link`, `save`, and `load` return promises and run their heavy work on native workers. `prepareSync`, `compileSync`, `linkSync`, `saveSync`, and `loadSync` block the calling thread. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not change scheduled work. The mask, commit, and state-query path is synchronous and native.
+
+## Decoding
+
+An immutable `Constraint` starts any number of independent states. `state.clone()` copies the parser snapshot without sharing mutable sequence state, and a state keeps its native constraint alive after the JavaScript owner is disposed. All decoding methods are synchronous native calls.
+
+```js
+const state = constraint.start();
+const mask = new Uint32Array(constraint.maskLength);
+const id = 0;
+state.fillMask(mask);
+const allowed = (mask[Math.floor(id / 32)] & (1 << (id % 32))) !== 0;
+if (allowed) state.commitToken(id);
+```
+
+Masks use original token IDs. Bit `id % 32` of word `Math.floor(id / 32)` is set when token `id` is allowed, and `maskLength` counts words rather than vocabulary entries or bytes. JavaScript bitwise intermediates are signed 32-bit values, so test a bit with `!== 0` rather than `> 0`. `fillMask(output)` writes into a caller-owned `Uint32Array` and zeros surplus words. An undersized buffer throws a `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` allocates a new array.
+
+`isRejected()` reports an irrecoverably rejected prefix. A failed grammar commit follows the core's state semantics, not a general rollback; clone before speculative commits. `forcedTokens()` performs read-only bounded lookahead. `markerIds()` and `markerEvents()` expose possible recognition observations from the initial or latest commit. A marker is `{id, byteOffset}` with a `bigint` offset; these are not final parse captures.
+
+## End tokens
+
+`isAccepting()` means the current prefix is a complete match, not that generation must stop. To stop on an explicit event, set root `endTokens` in the build options and stop when one is sampled and committed.
+
+An allowed end token leaves the state accepting and non-rejected, empties the next mask, and prevents further commits. End-token policy belongs to the root and is not inherited by attached children.
+
+## Persistence
+
+```js
+const bytes = await constraint.save();
+const restored = await Constraint.load(bytes);
+
+const external = await constraint.save({ externalVocab: true });
+const rebound = await Constraint.load(external, vocab);
+
+const preparedBytes = await prepared.save();
+const restoredPrepared = await PreparedGrammar.load(preparedBytes, vocab);
+```
+
+`saveSync` and `loadSync` provide the same formats without promises. These are the Rust core's artifact formats and can be exchanged between compatible Rust, Python, C++, and Node builds. Exact vocabulary identity is validated when a vocabulary is supplied; an external-vocabulary artifact cannot load without it, and equal size is insufficient. Compatibility is not promised across releases, architectures, or unrelated builds. Keep source and configuration for long-term regeneration, and treat untrusted artifacts according to the core loader's limitations.
+
+## Errors and ownership
+
+Wrong JavaScript types and option spellings raise `TypeError`; invalid numeric IDs raise `RangeError`. Native failures are `GlrMaskError` values with a `code`:
+
+| Code | Meaning |
+| --- | --- |
+| `GLRMASK_INVALID_ARGUMENT` | Invalid native argument or unsupported buffer backing. |
+| `GLRMASK_ENGINE_ERROR` | Core grammar, state, vocabulary-identity, or artifact error. |
+| `GLRMASK_PANIC` | A contained unwinding panic; discard affected state. |
+| `GLRMASK_BUFFER_TOO_SMALL` | Caller mask capacity is insufficient. |
+| `GLRMASK_CLOSED` | A disposed object was used. |
+
+Classes that own native memory support `dispose()` and `[Symbol.dispose]()`. Disposal is idempotent and does not invalidate already materialized arrays or independently owned states. Async methods reject their promises with these errors. A contained panic does not protect against process aborts, allocation failure, or stack overflow.
+
+## API reference
+
+The public surface is exported from `index.cjs` and declared in [index.d.cts](https://github.com/IsaacBreen/glrmask/blob/v0.3.1/bindings/node/index.d.cts). CommonJS and ESM share the same classes and declaration types. Runnable examples are in [bindings/node/examples](https://github.com/IsaacBreen/glrmask/tree/v0.3.1/bindings/node/examples).
+
+## Building from source
+
+Use Node.js 22 or newer, a current stable Rust toolchain, and the platform C/C++ compiler and linker. On Windows, use a Visual Studio Developer PowerShell with the MSVC build tools.
+
+```sh
+cd bindings/node
+npm ci
+npm run build
+npm pack
+```
+
+Then install the generated `.tgz` in the application. `npm ci` installs development tools; there are no JavaScript runtime dependencies. A package built for one platform does not run on another.

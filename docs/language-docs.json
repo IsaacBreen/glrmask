@@ -215,9 +215,15 @@
       }
     }
   },
+  "native_guides": {
+    "bindings/cpp/README.md": "22125fcbf28532c898e408230d8e548e117f50475ad949ab644e91cbae490e79",
+    "bindings/node/README.md": "4098edc7e1e634116f11c333b20e46937f83eb1642c2b6a35436809763b386ce",
+    "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
+    "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
+  },
   "api_reference": {
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "f9ee25bae3ca86780dc22fcb080740f21b88d790d40ebe1b56b941f76030c66c"
+  "content_sha256": "92be9a38a22e019fe8a489589efe7450c4a4b5a3b40afe6affeb237fec267a1e"
 }

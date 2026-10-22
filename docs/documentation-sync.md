@@ -162,3 +162,18 @@ selects the API contracts for the installed release line from
 contracts of an already published wheel. The current source contracts remain in
 `python-api.json`. Both sets are included in the hashed language payload and
 checked against the installed wheel's actual public symbols.
+
+
+## Native language guides
+
+`scripts/sync-guide.py` also runs `sync-native-guides.py`. C++ and Node.js
+share the Rust introduction, type descriptions, section order and equivalent
+quickstarts. Authored language-specific details stay in `docs/content`;
+the generated binding READMEs and released guides must not be edited directly.
+Published 0.3 guides use the matching PreparedGrammar API and are generated
+from `docs/content/releases/0.3` fragments. The website selects a release-line
+guide when available, otherwise the immutable package tag's binding README.
+API signatures continue to come from rustdoc, Python stubs and native headers
+or TypeScript declarations; generation copies reviewed prose without inventing it.
+
+The language payload includes hashes of the generated native guides. A native-only documentation correction therefore advances the website revision pin; unrelated core changes leave it unchanged.

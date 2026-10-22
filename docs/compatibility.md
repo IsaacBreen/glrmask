@@ -1,73 +1,28 @@
-# Supported platforms and installation
+# Supported platforms and requirements
 
-The compatibility changes in this branch target the **next release**. Published
-0.3.1 distributions retain their original five-platform, Python 3.9–3.13 layout.
-No existing package version is overwritten when this change is merged.
+These requirements apply to the current source tree. For prebuilt packages, use the platform list on the corresponding release page.
 
-## Binary matrix
+## Native platforms
 
-| Operating system / runtime | x86-64 | ARM64 |
-| --- | --- | --- |
-| Windows, MSVC | C/C++, Node.js, Python | C/C++, Node.js, Python |
-| macOS 11 or later | C/C++, Node.js, Python | C/C++, Node.js, Python |
-| Linux, glibc | C/C++, Node.js, Python | C/C++, Node.js, Python |
-| Linux, musl 1.2 / Alpine | C/C++, Node.js, Python | C/C++, Node.js, Python |
+- Windows x64 and arm64 with MSVC.
+- macOS 11 or newer on x64 and arm64.
+- Linux x64 and arm64 with glibc 2.28 or newer, built in `manylinux_2_28` containers.
+- Linux x64 and arm64 with musl 1.2 or newer, including Alpine.
 
-Native Linux Node/C++ libraries build and execute in `manylinux_2_28` containers,
-with an enforced **glibc 2.28** baseline. Python's manylinux wheels retain their
-manylinux2014 / glibc 2.17 baseline. musl artifacts are separately built and tested
-inside musl containers: they are not renamed glibc artifacts. All native targets
-run C/C++ static/shared relocated-consumer tests, Node runtime tests, and installed
-npm package tests on the matching architecture and C library.
+C and C++ consumers need C++17 for the C++ facade and only the C header for the C ABI. Building either from source requires a current stable Rust toolchain, CMake 3.20 or newer, and the platform C/C++ compiler. A native artifact built for one operating system, architecture, or C library does not run on another. Use matching headers and libraries from the same build.
 
-C/C++ produces **16** archives: static and shared installations for eight targets.
-Each archive contains matching headers, libraries, CMake configuration and checksums.
-Rust packages remain source distributions; applications compile for their own target.
+Node.js requires Node.js 22 or newer. The addon uses Node-API and targets the same operating systems, architectures, and Linux C libraries listed above. Building from source additionally requires a stable Rust toolchain and the platform native compiler and linker. The package's platform binary is version-matched to the JavaScript root and loaded through its platform-specific dependency; there is no fallback to a different runtime or binary.
 
-## Python ABI and runtime support
+## Python
 
-Ordinary, GIL-enabled CPython **3.9 through 3.15** uses one `cp39-abi3` wheel per
-platform. Eight platform wheels replace the previous per-interpreter build matrix;
-there is also one source distribution. CI installs the same wheel on Python 3.9,
-3.12, 3.14 and 3.15, including musl runtimes. Windows ARM64 is tested on 3.12, 3.14
-and 3.15 because older native interpreter/dependency distributions are unavailable.
+The extension supports ordinary GIL-enabled CPython 3.9 through 3.15. The wheel build produces one `cp39-abi3` wheel per platform. glibc wheels keep their manylinux2014 / glibc 2.17 baseline; Linux musl variants are built separately. A wheel installation needs no Rust toolchain; a source distribution requires Rust and the platform C compiler.
 
-PyO3 and rust-numpy have been upgraded together. Public masks remain NumPy arrays
-and the public grammar/constraint/state API is unchanged. The source distribution
-requires Rust and a native compiler; a supported wheel installation does not.
+Free-threaded CPython is not supported. `abi3` is not the free-threaded ABI, and the extension declares that it uses the GIL. `cp314t` and `abi3t` wheels are not part of this support statement.
 
-**Free-threaded CPython is not qualified by this change.** `abi3` is not the
-free-threaded ABI. The extension explicitly declares `gil_used = true`; neither
-`cp314t` nor `abi3t` wheels are published here. Advertising those requires a separate
-thread-safety audit and runtime stress tests. The ordinary Python 3.15 wheel remains
-supported without making a free-threading claim.
+## Rust
 
-## Node.js package size and loading
+The crate is distributed as source and is built with a current stable Rust toolchain for the application's target. Cargo selects `README.rust.md` as the package README.
 
-`@glrmask/node` becomes a small JS/TypeScript root package. npm selects one exactly
-version-pinned `@glrmask/node-<platform>` optional dependency using `os`, `cpu` and,
-on Linux, `libc`. Only that platform package carries a native `.node` binary.
+## Artifact compatibility
 
-Keep optional dependencies enabled. `--omit=optional` intentionally leaves out the
-binary and loading fails with an error naming the required package. There is no
-silent Python/WASM fallback, post-install download or local compiler invocation.
-CommonJS, ESM and TypeScript entry points are retained. Package/binary version
-mismatches are rejected. CI checks the root contains no native binary and validates
-all platform checksums before any publication.
-
-For local/offline tarball installs, install both the root and matching platform
-archive together. The CI `glrmask-node-npm-dist` artifact contains all nine tarballs.
-The published package name used by applications remains `@glrmask/node`.
-
-## First publication of split npm packages
-
-npm trusted publishing is configured **per package**. The eight new platform
-packages require an initial authorized publication and their own trusted-publisher
-registration, using the same `IsaacBreen/glrmask`, `release.yml`, `release` identity.
-The existing root's trust configuration does not authorize new package names.
-Bootstrap these once before releasing the new thin root; the release workflow
-publishes platforms before the root. Do not publish a root whose exact-version
-platform dependencies are absent. Subsequent versions use the same OIDC flow.
-
-The existing public 0.3.1 npm package is unaffected until a new version is released.
-Browser WebAssembly and independent language version numbers are separate projects.
+Saved constraints and prepared grammars use versioned Rust core formats, not a language-level interchange standard. They can be exchanged between compatible builds of Rust, Python, C++, and Node, but compatibility across releases, architectures, or unrelated builds is not guaranteed. Persist the source and configuration alongside an artifact when it must be regenerated later. Vocabulary identity is validated exactly when a vocabulary is supplied; equal size is not sufficient.
