@@ -1,7 +1,8 @@
 //! Expression operators have no source, lexical scope or path segment of their own.
 use super::*;
 
-/// Immutable unordered union or concatenation of independently scoped grammars.
+/// An immutable unordered union or concatenation of independently scoped
+/// grammars.
 #[derive(Debug, Clone)]
 pub struct Expr(pub(crate) Arc<ExprNode>);
 
@@ -65,7 +66,9 @@ impl From<&ExactTokens> for Expr {
 }
 
 impl Expr {
-    /// Union without ordered-choice priority. Empty choice matches nothing. One-part choice is that part.
+    /// Creates a union without ordered-choice priority.
+    ///
+    /// An empty choice matches nothing; a one-part choice is that part.
     pub fn choice(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
         let list: Vec<Expr> = items.into_iter().map(Into::into).collect();
         if list.len() == 1 {
@@ -75,12 +78,13 @@ impl Expr {
         }
     }
 
-    /// Concatenation; a model token may cross any number of operand boundaries. Empty sequence is epsilon.
+    /// Creates a concatenation; a model token may cross any number of operand
+    /// boundaries. An empty sequence is epsilon.
     pub fn sequence(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self {
         Self(Arc::new(ExprNode::Sequence(items.into_iter().map(Into::into).collect())))
     }
 
-    /// Match exact bytes (no whitespace or ignore inserted).
+    /// Matches exact bytes, with no whitespace or ignore inserted.
     pub fn literal(bytes: impl AsRef<[u8]>) -> Self {
         Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }

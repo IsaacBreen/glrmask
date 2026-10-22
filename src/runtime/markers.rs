@@ -13,12 +13,13 @@ use glrmask_parser_dwa::__private::templates::admissibility::{TemplateDomain, To
 use glrmask_parser_dwa::__private::templates::native::{NativeTableIndex, ProgramCompiler};
 use crate::compiler::glr::table::AdmissionPolicy;
 
-/// Application marker identity, independent of model token IDs.
+/// An application marker ID, independent of model token IDs.
 pub type MarkerId = u32;
 
 /// A possible boundary observation, not a selected parse node or capture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MarkerEvent {
+    /// The marker that was observed.
     pub id: MarkerId,
     /// Absolute offset in the byte stream supplied to this constraint state.
     pub byte_offset: u64,
@@ -424,7 +425,13 @@ impl super::ConstraintState<'_> {
         self.markers = Some(markers);
     }
 
-    /// Initial or most recent commit’s observations, ordered by `(byte_offset, id)` with duplicate pairs removed. Read or copy before the next commit replaces the batch. Failed commits clear it; mask and forcing queries leave it unchanged. Alternatives may later fail: no final-parse, nesting or matching-span guarantee is implied.
+    /// Initial or most recent commit's observations, ordered by
+    /// `(byte_offset, id)` with duplicate pairs removed.
+    ///
+    /// Read or copy before the next commit replaces the batch. A failed commit
+    /// clears it; mask and forcing queries leave it unchanged. Alternatives may
+    /// later fail, so no final-parse, nesting, or matching-span guarantee is
+    /// implied.
     pub fn marker_events(&self) -> &[MarkerEvent] {
         self.markers.as_deref().map_or(&[], |markers| markers.events.as_slice())
     }

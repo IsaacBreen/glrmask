@@ -8547,7 +8547,10 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
-    /// Packed `u32` mask indexed by original token ID: bit `id % 32` of word `id / 32`. Includes the root end-token policy.
+    /// The current allowed-token mask.
+    ///
+    /// Bit `token_id % 32` of word `token_id / 32` is set for each allowed
+    /// original model token ID, including any accepted root end tokens.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -8827,7 +8830,9 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
-    /// Same packed layout as [`Self::mask`]. Extra words are cleared.
+    /// Writes the current mask into `buf`.
+    ///
+    /// Uses the same packed layout as [`Self::mask`]; extra words are cleared.
     ///
     /// # Panics
     ///

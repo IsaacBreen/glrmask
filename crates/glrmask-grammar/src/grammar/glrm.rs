@@ -907,10 +907,15 @@ pub struct GlrmWithExternalSubgrammars {
     pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
-/// Declared slot contract: exact token events, or a grammar component. Token values can fill either kind; a general grammar cannot fill a token slot.
+/// The kind of an extern slot.
+///
+/// Token values can fill either kind; a general grammar cannot fill a token
+/// slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ExternalKind {
+    /// A token-level slot, bound to tokens or exact token sets.
     Token,
+    /// A grammar-level slot, bound to a grammar.
     Grammar,
     /// Historical source-only union port. New source should declare a kind.
     #[doc(hidden)]

@@ -7,7 +7,9 @@ mod artifact;
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 
-/// Root generation policy; never inherited by embedded modules.
+/// Root generation policy, applied only to the top-level sequence.
+///
+/// Never inherited by embedded modules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
@@ -15,7 +17,9 @@ pub struct CompileOptions {
 }
 
 impl CompileOptions {
-    /// Configures accepted end-of-sequence token IDs.
+    /// Sets the accepted end-of-sequence token IDs.
+    ///
+    /// They are allowed only at acceptance and must be committed before stopping.
     pub fn end_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         self.end_tokens = ids.into_iter().collect();
         self
@@ -51,7 +55,10 @@ pub(crate) enum BoundValue {
     ExactTokens(ExactTokens),
 }
 
-/// An owned grammar assembly with local settings, occurrence bindings, and optional retained precompilation.
+/// A reusable, independently configured grammar with bindings and any retained
+/// compilation work.
+///
+/// May still have unresolved externs.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) node: Arc<Node>,
@@ -176,14 +183,15 @@ pub(crate) fn target_boundary(_strategy: MaskStrategy, _boundary: BoundaryMaskSt
     BoundaryTriggerDetail::TokenSet
 }
 
-/// Settings are per-Module; `mask_strategy` is applied at compile time and `boundary_mask_strategy` defines a minimum detail level.
+/// Compilation settings are per-module: `mask_strategy` applies at compile time
+/// and `boundary_mask_strategy` selects the boundary parser.
 impl Module {
-    /// Returns the module's mask generation strategy.
+    /// The mask computation strategy.
     pub fn mask_strategy(&self) -> MaskStrategy {
         self.node.mask_strategy
     }
 
-    /// Sets the module's mask generation strategy, applied at compile time.
+    /// Sets the mask computation strategy, applied at compile time.
     ///
     /// The returned `Result` reserves room for future strategy validation.
     pub fn set_mask_strategy(&mut self, strategy: MaskStrategy) -> Result<()> {
@@ -191,18 +199,18 @@ impl Module {
         Ok(())
     }
 
-    /// Returns the minimum boundary mask detail level.
+    /// The boundary parser strategy.
     pub fn boundary_mask_strategy(&self) -> BoundaryMaskStrategy {
         self.node.boundary_mask_strategy
     }
 
-    /// Sets the boundary parser for this module.
+    /// Sets the boundary parser strategy for this module.
     ///
-    /// `ParserDwa` installs the static boundary parser. A build-budget decline
-    /// returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message;
-    /// choose `BoundaryMaskStrategy::Dynamic` (`FAST_BUILD`) to keep the
-    /// segmented dynamic boundary instead. The returned `Result` reserves room
-    /// for future strategy validation.
+    /// A [`BoundaryMaskStrategy::ParserDwa`] build that exceeds its budget
+    /// returns [`Error::ResourceLimit`] with a `boundary_parser_dwa:` message;
+    /// choose [`BoundaryMaskStrategy::Dynamic`] (`FAST_BUILD`) to keep the
+    /// dynamic boundary. The returned `Result` reserves room for future
+    /// strategy validation.
     pub fn set_boundary_mask_strategy(&mut self, strategy: BoundaryMaskStrategy) -> Result<()> {
         Arc::make_mut(&mut self.node).boundary_mask_strategy = strategy;
         Ok(())
@@ -221,7 +229,7 @@ impl Grammar<'_> {
 }
 
 impl Module {
-    /// Creates a new module wrapping a source grammar with default settings.
+    /// Wraps a source grammar with default settings.
     pub fn new(grammar: &Grammar<'_>) -> Self {
         fn convert(grammar: &Grammar<'_>, cache: &mut HashMap<usize, Module>) -> Module {
             if let Some(module) = grammar.module_snapshot.get() { return module.clone(); }
@@ -256,11 +264,11 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// Returns a view over the module's declared externs, in declaration order.
+    /// A view over the module's declared externs, in declaration order.
     ///
-    /// Sources are parsed lazily, so a source that fails to parse yields an
-    /// empty view; [`bind`](Self::bind), [`precompile`](Self::precompile) and
-    /// [`compile`](Self::compile) report the parse error.
+    /// A source that fails to parse yields an empty view; [`bind`](Self::bind),
+    /// [`precompile`](Self::precompile) and [`compile`](Self::compile) report
+    /// the parse error.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             module: self,
@@ -275,7 +283,10 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// Binds an unresolved extern by name to a module, expression, token, or exact token sequence.
+    /// Binds the extern `name` to a module, expression, token, or exact token
+    /// sequence.
+    ///
+    /// Fails if the extern is undeclared or already bound.
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
         let next = self.bound(name, value.into())?;
         *self = next;
@@ -435,9 +446,11 @@ impl Module {
         Ok(())
     }
 
-    /// Retains vocabulary-specific compilation artifacts across all modules in this assembly.
+    /// Retains vocabulary-specific compilation artifacts for every module in
+    /// this assembly.
     ///
-    /// Modules using `TOKEN_TRIE` retain no work and are compiled from source by `compile`.
+    /// Modules using [`MaskStrategy::TokenTrie`] retain no work and are compiled
+    /// from source by [`Self::compile`].
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         with_deep_stack(|| self.precompile_on_stack(vocab, true))
     }
@@ -634,12 +647,12 @@ impl Module {
         Ok(prepared)
     }
 
-    /// Compiles the assembly against a target vocabulary using default options.
+    /// Compiles the module assembly against `vocab` with default options.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
 
-    /// Compiles the assembly against a target vocabulary with root compile options.
+    /// Compiles the module assembly against `vocab` with root compile options.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
         with_deep_stack(|| self.compile_with_on_stack(vocab, options))
     }
@@ -913,9 +926,9 @@ impl Module {
         Ok(grammar)
     }
 
-    /// Serializes the module assembly and any retained precompiled artifacts to bytes.
+    /// Serializes the module assembly and any retained precompiled artifacts.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Deserializes a module assembly from bytes, verifying against an optional vocabulary.
+    /// Deserializes a module assembly, verifying it against `vocab` when supplied.
     pub fn load(bytes: &[u8], vocab: Option<&Vocab>) -> Result<Self> { with_deep_stack(|| artifact::load(bytes, vocab)) }
 }
 

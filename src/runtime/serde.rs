@@ -6060,7 +6060,11 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Versioned artifact including the vocabulary and root stopping policy. Compatibility across GLRMask releases is not guaranteed.
+    /// Serializes the constraint, including its vocabulary and root stopping
+    /// policy.
+    ///
+    /// See [`Self::save_without_vocab`] to omit the vocabulary. Artifact
+    /// compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
         crate::with_deep_stack(|| self.save_with_vocab_policy(false))
     }
@@ -6080,7 +6084,10 @@ impl Constraint {
         *digest.finalize().as_bytes()
     }
 
-    /// Omits the vocabulary. Loading requires [`Self::load_with_vocab`] with the exact original token-ID/byte mapping, not merely the same size.
+    /// Serializes the constraint without its vocabulary.
+    ///
+    /// Load with [`Self::load_with_vocab`] using the exact original
+    /// token-ID/byte mapping, not merely the same size.
     pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
         crate::with_deep_stack(|| {
             if !self.has_template_parser() && !self.table.is_present() {
@@ -7062,7 +7069,11 @@ impl Constraint {
         bytes
     }
 
-    /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>` transfers its allocation; borrowed input is copied once because runtime views retain the backing bytes.
+    /// Deserializes a vocabulary-bearing constraint.
+    ///
+    /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>`
+    /// transfers its allocation; borrowed input is copied once because runtime
+    /// views retain it.
     pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
         crate::with_deep_stack(|| Self::load_with_vocab_policy(bytes.into(), None))
     }
@@ -7242,7 +7253,11 @@ impl Constraint {
         Ok(constraint)
     }
 
-    /// The supplied vocabulary must match the original mapping. Shares its caches and retains the packed artifact backing storage; required for artifacts from [`Self::save_without_vocab`].
+    /// Deserializes a constraint saved without its vocabulary.
+    ///
+    /// `vocab` must match the original token-ID/byte mapping; its caches are
+    /// shared and the packed artifact backing is retained. Required for
+    /// artifacts from [`Self::save_without_vocab`].
     pub fn load_with_vocab<'a>(
         bytes: impl Into<Cow<'a, [u8]>>,
         vocab: &crate::Vocab,

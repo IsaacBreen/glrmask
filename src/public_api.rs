@@ -30,53 +30,53 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// Build-time versus per-token mask latency strategy.
+/// Mask computation strategy, trading build time against per-token latency.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
-    /// Library chooses the mask strategy (ParserDwa or retained TokenClassTrie).
+    /// Automatic selection: [`MaskStrategy::ParserDwa`], or the retained
+    /// [`MaskStrategy::TokenClassTrie`] when one is available.
     #[default]
     Auto,
-    /// Static parser-DWA masks (slowest build, fastest runtime masks).
+    /// Static masks: slowest build, fastest per-token masks.
     ParserDwa,
-    /// Dynamic token-trie walk (fastest build).
+    /// Trie walk per mask: fastest build.
     TokenTrie,
-    /// Token-trie walk over token equivalence classes.
+    /// Trie walk over token equivalence classes.
     TokenClassTrie,
 }
 
 impl MaskStrategy {
-    /// Alias for TokenTrie.
+    /// Alias for [`MaskStrategy::TokenTrie`].
     pub const FAST_BUILD: Self = Self::TokenTrie;
-    /// Alias for ParserDwa.
+    /// Alias for [`MaskStrategy::ParserDwa`].
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
 }
 
-/// Selects the parser used for crossings between composed grammars.
+/// Boundary parser selection for crossings between composed grammars.
 ///
-/// This is independent of the boundary token trigger, which is always the LLM
-/// token set. `ParserDwa` installs the static boundary parser; `Dynamic` keeps
-/// the segmented dynamic boundary built by composition. A `ParserDwa` budget
-/// decline is returned as [`Error::ResourceLimit`] with a `boundary_parser_dwa:`
-/// message; set `Dynamic` (`FAST_BUILD`) to keep the dynamic boundary.
+/// [`BoundaryMaskStrategy::ParserDwa`] installs the static boundary parser
+/// (faster crossings; an over-budget build returns [`Error::ResourceLimit`]
+/// with a `boundary_parser_dwa:` message). [`BoundaryMaskStrategy::Dynamic`]
+/// keeps the segmented dynamic boundary and builds faster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
-    /// Install the static boundary parser DWA (faster runtime crossings).
+    /// Static boundary parser; faster crossings.
     #[default]
     ParserDwa,
-    /// Keep the segmented dynamic boundary parser.
+    /// Segmented dynamic boundary parser; faster build.
     Dynamic,
 }
 
 impl BoundaryMaskStrategy {
-    /// Alias for ParserDwa.
+    /// Alias for [`BoundaryMaskStrategy::ParserDwa`].
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
-    /// Alias for Dynamic.
+    /// Alias for [`BoundaryMaskStrategy::Dynamic`].
     pub const FAST_BUILD: Self = Self::Dynamic;
 }
 
-/// One declared extern slot contract on a Module.
+/// A declared extern slot on a [`Module`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extern {
     pub(crate) name: String,
@@ -85,21 +85,21 @@ pub struct Extern {
 }
 
 impl Extern {
-    /// Returns the declared name of this extern.
+    /// The declared name.
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// Returns the declared kind (token or grammar) of this extern.
+    /// The declared kind: token or grammar.
     pub fn kind(&self) -> ExternalKind {
         self.kind
     }
-    /// Returns the source span of this extern declaration, if available.
+    /// Source span of the declaration, when the frontend can locate it.
     pub fn span(&self) -> Option<glrmask_grammar::SourceSpan> {
         self.span
     }
 }
 
-/// View over a Module's declared externs in declaration order.
+/// A view over a [`Module`]'s declared externs, in declaration order.
 #[derive(Debug, Clone)]
 pub struct Externs<'a> {
     pub(crate) module: &'a Module,
@@ -107,7 +107,7 @@ pub struct Externs<'a> {
 }
 
 impl<'a> Externs<'a> {
-    /// Looks up a declared extern by name.
+    /// The extern declared as `name`, if any.
     pub fn get(&self, name: &str) -> Option<Extern> {
         let declared = self.module.node.source.declarations().ok()?;
         if self.only_unbound && self.module.node.bindings.contains_key(name) {
@@ -121,7 +121,7 @@ impl<'a> Externs<'a> {
         })
     }
 
-    /// Returns the number of externs in this view.
+    /// Number of externs in this view.
     pub fn len(&self) -> usize {
         let Ok(declared) = self.module.node.source.declarations() else { return 0; };
         if self.only_unbound {
@@ -131,12 +131,12 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// Returns true if there are no externs in this view.
+    /// Whether this view contains no externs.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Filters this view to only unresolved externs.
+    /// The same view restricted to unresolved externs.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
             module: self.module,
@@ -144,7 +144,7 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// Iterates over the externs in this view in declaration order.
+    /// The externs in declaration order.
     pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
         let items: Vec<Extern> = match self.module.node.source.declarations() {
             Ok(declared) => declared
@@ -320,26 +320,31 @@ fn check_binding_kind(name:&str,kind:ExternalKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// Lark dialect and explicit named-token mappings. The default profile is recognition; names are never inferred from a tokenizer.
+/// Lark dialect and explicit named-token mappings.
+///
+/// Named token atoms must be mapped explicitly; tokenizer spellings are never
+/// inferred.
 #[derive(Debug,Clone,Default)]
 pub struct LarkOptions {
     profile: LarkProfile,
     token_names: BTreeMap<String,Vec<u32>>,
 }
 impl LarkOptions {
-    /// Use the LLM extension profile.
+    /// Options using the LLM extension profile.
     pub fn llm()->Self {Self {profile:LarkProfile::Llm,token_names:BTreeMap::new()}}
-    /// Select the recognition dialect or LLM extensions.
+    /// Sets the dialect: [`LarkProfile::Recognition`] or [`LarkProfile::Llm`].
     pub fn profile(mut self,profile:LarkProfile)->Self{self.profile=profile;self}
-    /// Map a named token atom to original vocabulary IDs; no tokenizer-name inference is performed.
+    /// Maps a named token atom to original model token IDs.
     pub fn token(mut self,name:impl Into<String>,ids:impl IntoIterator<Item=u32>)->Self {
         self.token_names.insert(name.into(),ids.into_iter().collect());self
     }
 }
 
-/// Reusable source grammar with mutable bindings.
+/// The source-language definition, without compilation settings.
 ///
-/// Binding changes this handle; clones and attached children retain independent snapshots. Parsing and vocabulary checks may be deferred until preparation or compilation.
+/// Binding changes this handle; clones and attached children retain independent
+/// snapshots. Source text is parsed lazily, so parse errors surface at
+/// preparation or compilation.
 #[derive(Debug, Clone)]
 pub struct Grammar<'a> {
     source: GrammarSource<'a>,
@@ -435,24 +440,30 @@ impl<'a> Grammar<'a> {
         grammar
     }
 
-    /// Parsing and compilation errors can be deferred until preparation or compilation.
+    /// Creates a grammar from EBNF source text.
     pub fn from_ebnf(source: &'a str) -> Self { Self::new(GrammarSource::Ebnf(source.into())) }
 
-    /// Uses the recognition profile. See [`Self::from_lark_with`] for LLM extensions and named-token mappings.
+    /// Creates a grammar from Lark source using the recognition profile.
+    ///
+    /// See [`Self::from_lark_with`] for LLM extensions and named-token mappings.
     pub fn from_lark(source: &'a str) -> Self { Self::new(GrammarSource::Lark(source.into())) }
 
-    /// Named token atoms require explicit mappings in `options`; tokenizer spellings are never inferred.
+    /// Creates a grammar from Lark source with explicit [`LarkOptions`].
     pub fn from_lark_with(source:&'a str,options:LarkOptions)->Self {
         let mut grammar=Self::new(GrammarSource::Lark(source.into()));grammar.lark_options=Arc::new(options);grammar
     }
 
 
-    /// Accepts JSON text. Unsupported keywords are rejected with an error, except that
-    /// `format` is treated as an annotation only (as in JSON Schema 2020-12) and
-    /// unrecognised keywords are ignored.
+    /// Creates a grammar from a JSON Schema document.
+    ///
+    /// `format` is an annotation only, as in JSON Schema 2020-12; unrecognised
+    /// keywords are ignored and unsupported keywords are rejected.
     pub fn from_json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source.into())) }
 
-    /// GLRM supports typed external slots; bind them before compiling a runnable root.
+    /// Creates a grammar from GLRM source.
+    ///
+    /// GLRM supports typed extern slots; bind them before compiling a runnable
+    /// root.
     pub fn from_glrm(source: &'a str) -> Self { Self::new(GrammarSource::Glrm(source.into())) }
 
     fn new(source: GrammarSource<'a>) -> Self {
@@ -666,12 +677,12 @@ impl<'a> Grammar<'a> {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// Compiles this grammar against the target vocabulary using default settings.
+    /// Compiles the grammar against `vocab`.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         Module::new(self).compile(vocab)
     }
 
-    /// Compiles this grammar against the target vocabulary using root compile options.
+    /// Compiles the grammar against `vocab` with root compile options.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
@@ -1158,20 +1169,20 @@ impl<'a> Grammar<'a> {
 }
 
 impl Grammar<'static> {
-    /// Owns the source text; see [`Self::from_glrm`] for the source format.
+    /// Creates a grammar from owned GLRM source; see [`Self::from_glrm`].
     pub fn from_glrm_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::Glrm(SourceText::Owned(Arc::from(source.into()))))
     }
-    /// Owns the source text; see [`Self::from_lark_with`] for the source format.
+    /// Creates a grammar from owned Lark source and options; see [`Self::from_lark_with`].
     pub fn from_lark_owned(source:impl Into<String>,options:LarkOptions)->Self {
         let mut grammar=Self::new(GrammarSource::Lark(SourceText::Owned(Arc::from(source.into()))));
         grammar.lark_options=Arc::new(options);grammar
     }
-    /// Owns the source text; see [`Self::from_ebnf`] for the source format.
+    /// Creates a grammar from owned EBNF source; see [`Self::from_ebnf`].
     pub fn from_ebnf_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::Ebnf(SourceText::Owned(Arc::from(source.into()))))
     }
-    /// Owns the source text; see [`Self::from_json_schema`] for the source format.
+    /// Creates a grammar from an owned JSON Schema document; see [`Self::from_json_schema`].
     pub fn from_json_schema_owned(source:impl Into<String>)->Self {
         Self::new(GrammarSource::JsonSchema(SourceText::Owned(Arc::from(source.into()))))
     }

@@ -514,7 +514,7 @@ impl CommitBuffers {
     }
 }
 
-/// Mutable state for one generated sequence.
+/// The mutable state for a single generated sequence.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
@@ -580,12 +580,15 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// The prefix cannot be extended to a valid match.
+    /// Whether the prefix cannot be extended to a valid match.
     pub fn is_rejected(&self) -> bool {
         self.state.is_empty()
     }
 
-    /// The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.
+    /// Whether the current prefix is a complete grammar match.
+    ///
+    /// Further tokens may still be allowed; this alone does not commit an end
+    /// token.
     pub fn is_accepting(&self) -> bool {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
@@ -629,13 +632,13 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// Return a read-only prefix of library-canonical forced output.
+    /// A read-only prefix of library-canonical forced output.
     ///
-    /// Genuinely forced ordinary text is encoded with the longest admitted
-    /// nonempty token spelling, then the lowest original ID. Exact-token events
-    /// retain their IDs. The query stops at root acceptance, byte/event
-    /// ambiguity, unstable canonical tokenization, or a proof limit. It may
-    /// construct full masks; the original state is unchanged.
+    /// Forced ordinary text uses the longest admitted nonempty token spelling,
+    /// then the lowest original token ID; exact-token events retain their IDs.
+    /// The query stops at root acceptance, byte/event ambiguity, unstable
+    /// canonical tokenization, or a proof limit. It may build full masks; the
+    /// state is unchanged.
     pub fn forced_tokens(&self) -> crate::Result<Vec<u32>> {
         super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
     }

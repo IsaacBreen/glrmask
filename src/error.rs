@@ -16,34 +16,40 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
     catch_internal_invariant(f).and_then(|result| result)
 }
 
-/// Parse, build, artifact or sequence-state failure. Source coordinates are included when the frontend can locate the error.
+/// A parse, build, artifact, or sequence-state failure.
+///
+/// Source coordinates are included when the frontend can locate them.
 #[derive(ThisError, Debug, Clone)]
 pub enum Error {
+    /// The grammar source could not be parsed.
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
 
+    /// The grammar could not be compiled.
     #[error("Compilation error: {0}")]
     Compilation(String),
 
+    /// An internal compiler invariant was violated, which indicates a bug.
     #[error("Internal compiler invariant violated: {0}")]
     InternalInvariant(String),
 
+    /// A build exceeded a resource budget.
     #[error("Resource limit exceeded: {0}")]
     ResourceLimit(String),
 
-    /// The requested template strategy cannot represent this grammar exactly.
-    /// Public entry points return this error unchanged unless the opt-in
-    /// terminal-ended rescue is enabled; if the rescue also declines, this
-    /// error is returned to the caller unchanged.
+    /// The requested strategy cannot represent this grammar exactly.
     #[error("Strategy unsupported: {0}")]
     StrategyUnsupported(String),
 
+    /// An artifact could not be serialized or loaded.
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    /// An error located in the original source.
     #[error("{error} at {span}")]
     SourceAt { error: Box<Error>, span: glrmask_grammar::SourceSpan },
 
+    /// A token or byte commit was rejected by the sequence state.
     #[error("Constraint state error: {0}")]
     State(String),
 }
@@ -104,7 +110,9 @@ impl Error {
 
 pub type GlrMaskError = Error;
 
-/// GLRMask operation result; [`Error::source_span`] exposes available source coordinates.
+/// A GLRMask operation result.
+///
+/// [`Error::source_span`] exposes available source coordinates.
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<glrmask_grammar::Error> for Error {

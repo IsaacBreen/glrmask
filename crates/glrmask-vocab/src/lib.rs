@@ -28,10 +28,10 @@ impl fmt::Display for ExactTokenError {
 
 impl std::error::Error for ExactTokenError {}
 
-/// Model vocabulary used when compiling a grammar constraint.
+/// The model vocabulary a constraint is compiled against.
 ///
-/// Entries map model token IDs to their exact byte sequences. Token IDs may be
-/// sparse; masks are indexed by the original model token IDs.
+/// Entries map model token IDs to exact byte sequences. Token IDs may be
+/// sparse; masks use the original model token IDs.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     /// Model token IDs which are valid for exact-token bindings but have no
@@ -45,20 +45,28 @@ pub struct Vocab {
     max_token_byte_len: OnceLock<usize>,
 }
 
-/// An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
+/// An original model token ID without vocabulary identity.
+///
+/// Only ID membership is checked against the target vocabulary, so the same ID
+/// can refer to different bytes. Use [`Vocab::tokens`] for a vocabulary-bound
+/// singleton.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Token {
     id: u32,
 }
 
 impl Token {
-    /// Membership is checked at compile/link binding.
+    /// Creates a token event for `id`; membership is checked at compile or link.
     pub const fn new(id: u32) -> Self { Self { id } }
 
+    /// The original model token ID.
     pub const fn id(&self) -> u32 { self.id }
 }
 
-/// One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
+/// One token event chosen from a vocabulary-bound set.
+///
+/// Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even
+/// for a singleton. An empty set matches nothing.
 #[derive(Debug, Clone)]
 pub struct ExactTokens {
     vocab: Vocab,
@@ -70,22 +78,23 @@ pub struct ExactTokens {
 impl ExactTokens {
     /// The exact model token IDs, sorted in ascending order.
     ///
-    /// This explicitly materializes the IDs. Compilation and linking use the
-    /// compact ranges instead; use [`Self::ranges`] to inspect large sets.
+    /// Materializes the IDs; compilation and linking use the compact ranges
+    /// instead. Use [`Self::ranges`] to inspect large sets.
     pub fn ids(&self) -> &[u32] {
         self.ids.get_or_init(|| self.ranges().flatten().collect())
     }
 
-    /// Iterate over normalized, disjoint inclusive token-ID ranges.
+    /// The normalized, disjoint inclusive token-ID ranges.
     pub fn ranges(&self) -> impl ExactSizeIterator<Item = std::ops::RangeInclusive<u32>> + '_ {
         self.ranges.iter().map(|&(start, end)| start..=end)
     }
 
-    /// Number of allowed token IDs (not the number of ranges).
+    /// Number of allowed token IDs, not the number of ranges.
     pub fn len(&self) -> usize {
         self.ranges.iter().map(|&(start, end)| (u64::from(end) - u64::from(start) + 1) as usize).sum()
     }
 
+    /// Whether the set contains no token IDs.
     pub fn is_empty(&self) -> bool { self.ranges.is_empty() }
 
     #[doc(hidden)]
@@ -169,16 +178,16 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Build a vocabulary from `(token_id, token_bytes)` pairs.
+    /// Creates a vocabulary from `(token_id, token_bytes)` pairs.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
         Self::new_with_exact_token_ids(entries, std::iter::empty())
     }
 
-    /// Build a vocabulary with additional model token IDs that have no byte
-    /// spelling but are valid for exact-token bindings.
+    /// Creates a vocabulary from byte-backed entries plus extra model token IDs
+    /// that have no byte spelling but are valid for exact-token bindings.
     ///
-    /// This is primarily used by model integrations which can distinguish
-    /// control/tool tokens from byte-backed text tokens.
+    /// This suits integrations that distinguish control or tool tokens from
+    /// text tokens.
     pub fn new_with_exact_token_ids(
         entries: Vec<(u32, Vec<u8>)>,
         exact_token_ids: impl IntoIterator<Item = u32>,
@@ -204,7 +213,10 @@ impl Vocab {
         }
     }
 
-    /// Match one of the supplied IDs, retaining vocabulary identity even for a singleton. Unknown or duplicate IDs are errors. Empty input matches nothing, not epsilon.
+    /// Creates a vocabulary-bound token event matching one of `token_ids`.
+    ///
+    /// Unknown or duplicate IDs are errors. Empty input matches nothing, not
+    /// epsilon.
     pub fn tokens(
         &self,
         token_ids: impl IntoIterator<Item = u32>,
@@ -233,7 +245,12 @@ impl Vocab {
         })
     }
 
-    /// Union of inclusive ranges, normalized without enumerating IDs. Overlapping or adjacent ranges merge. Reversed ranges or unknown IDs are errors; empty input matches nothing. A match consumes one token, not a sequence.
+    /// Creates a vocabulary-bound token event matching the union of inclusive
+    /// ID ranges.
+    ///
+    /// Overlapping or adjacent ranges merge. Reversed ranges and unknown IDs
+    /// are errors; empty input matches nothing. A match consumes one token, not
+    /// a sequence.
     pub fn token_ranges(
         &self,
         ranges: impl IntoIterator<Item = std::ops::RangeInclusive<u32>>,
@@ -279,6 +296,8 @@ impl Vocab {
         self.exact_token_ranges.iter().map(|&(start,end)|start..=end)
     }
 
+    /// Whether every ID in the inclusive range `start..=end` is defined,
+    /// including exact-only IDs.
     pub fn contains_exact_token_range(&self, start: u32, end: u32) -> bool {
         if start > end { return false; }
         let index = self.exact_token_ranges.partition_point(|&(lower, _)| lower <= start);
@@ -322,15 +341,12 @@ impl Vocab {
         bytes
     }
 
-    /// Return the number of byte-backed vocabulary entries.
-    ///
-    /// Exact-only model token IDs are not counted because they do not
-    /// participate in lexer/vocabulary-trie compilation.
+    /// Number of byte-backed entries; exact-only IDs are not counted.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Return whether the byte-backed vocabulary contains no entries.
+    /// Whether there are no byte-backed entries.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -380,7 +396,8 @@ impl Vocab {
         self.exact_only_token_ids.iter().copied()
     }
 
-    /// Highest byte-backed ID, or zero if none. Excludes exact-only controls; this is not an entry count.
+    /// The highest byte-backed token ID, or zero if none; excludes exact-only
+    /// IDs.
     pub fn max_token_id(&self) -> u32 {
         self.entries
             .last_key_value()
@@ -404,13 +421,14 @@ impl Vocab {
         }
     }
 
-    /// Exact byte spelling; returns `None` for unknown and exact-only IDs.
+    /// The exact byte spelling, or `None` for unknown and exact-only IDs.
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }
 
-    /// Iterate over byte-backed token IDs and their exact byte sequences in ID
-    /// order. Exact-only IDs are omitted.
+    /// Byte-backed token IDs and their exact byte sequences, in ID order.
+    ///
+    /// Exact-only IDs are omitted.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()

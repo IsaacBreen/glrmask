@@ -9080,7 +9080,13 @@ impl<'a> ConstraintState<'a> {
         true
     }
 
-    /// Unknown IDs return an error. Forbidden IDs reject the state and may also return an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits return an error.
+    /// Commits one model token event.
+    ///
+    /// # Errors
+    ///
+    /// Unknown IDs return an error. Forbidden IDs reject the state and may also
+    /// return an error, after which masks are zero. Committing after an end
+    /// token returns an error.
     pub fn commit_token(
         &mut self,
         token_id: u32,
@@ -9365,7 +9371,9 @@ impl<'a> ConstraintState<'a> {
         result
     }
 
-    /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
+    /// Commits raw bytes rather than a model token event.
+    ///
+    /// Does not substitute for committing exact-token or end-token events.
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
         self.commit_bytes_raw(bytes).map_err(crate::Error::State)
     }

@@ -1,13 +1,19 @@
 //! Original UTF-8 source coordinates, independent of transformed grammar nodes.
 use serde::{Deserialize, Serialize};
 
-/// Half-open byte range in the original document, with one-based line/column.
+/// A half-open byte range in the original document, with a one-based line and
+/// column.
+///
 /// Columns count Unicode scalars, not UTF-8 bytes; source is never normalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceSpan {
+    /// Inclusive start byte offset.
     pub start: usize,
+    /// Exclusive end byte offset.
     pub end: usize,
+    /// One-based line of `start`.
     pub line: usize,
+    /// One-based scalar column of `start`.
     pub column: usize,
 }
 impl std::fmt::Display for SourceSpan {

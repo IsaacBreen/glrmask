@@ -10385,7 +10385,10 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state.
+/// A fully runnable grammar compiled against a specific vocabulary.
+///
+/// Immutable and safe to share; each [`Constraint::start`] creates independent
+/// mutable state.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.

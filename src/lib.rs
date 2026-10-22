@@ -93,7 +93,7 @@ pub use glrmask_grammar::__private::grammar::glrm::ExternalKind as ExternKind;
 pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
 pub use glrmask_grammar::LarkProfile;
 
-/// Model token identifier.
+/// A model token ID.
 pub type TokenId = u32;
 
 /// Unstable compatibility surface for repository tooling and benchmark
