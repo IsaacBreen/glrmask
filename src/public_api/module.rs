@@ -673,7 +673,7 @@ impl Module {
                                 Ok(mut constraint) => {
                                     apply_final_boundary_trigger(
                                         &mut constraint,
-                                        BoundaryTriggerDetail::Tokens,
+                                        target_boundary(engine, self.node.boundary_mask_strategy),
                                     )?;
                                     let constraint =
                                         constraint.with_end_tokens(&options.end_tokens)?;
