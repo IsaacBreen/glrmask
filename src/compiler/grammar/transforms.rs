@@ -37,17 +37,37 @@ fn epsfree_prepass_override() -> Option<bool> {
     None
 }
 
+/// Test-only: snapshot the override on the caller thread.
+#[cfg(test)]
+pub(crate) fn epsfree_prepass_override_value() -> Option<bool> {
+    epsfree_prepass_override()
+}
+
+/// Test-only: install a snapshot on a compile-pool worker for one attempt.
+#[cfg(test)]
+pub(crate) fn with_epsfree_prepass_override<T>(
+    value: Option<bool>,
+    work: impl FnOnce() -> T,
+) -> T {
+    let previous = EPSFREE_PREPASS_OVERRIDE.with(|slot| slot.replace(value));
+    let result = work();
+    EPSFREE_PREPASS_OVERRIDE.with(|slot| slot.set(previous));
+    result
+}
+
+/// The epsilon-free prepass is on by default. `GLRMASK_EPSFREE_PREPASS=0`
+/// disables it; any other value (or no value) leaves it enabled.
 fn epsfree_prepass_enabled() -> bool {
     epsfree_prepass_override().unwrap_or_else(|| {
-        std::env::var_os("GLRMASK_EXPERIMENT_EPSFREE_PREPASS")
-            .is_some_and(|value| value.to_str() == Some("1"))
+        std::env::var_os("GLRMASK_EPSFREE_PREPASS")
+            .map_or(true, |value| value.to_str() != Some("0"))
     })
 }
 
-/// EXPERIMENT: run only the terminal-ended binary/epsilon-free preprocessing
-/// before the ordinary static rewrite pipeline. On decline the original
-/// grammar is returned unchanged so the experiment cannot turn a compile that
-/// would otherwise succeed into a failure.
+/// Run only the terminal-ended binary/epsilon-free preprocessing before the
+/// ordinary static rewrite pipeline. On decline the original grammar is
+/// returned unchanged so preprocessing cannot turn a compile that would
+/// otherwise succeed into a failure.
 fn apply_epsfree_prepass(grammar: GrammarDef) -> GrammarDef {
     let limits = crate::compiler::glr::terminal_ended::CompileLimits::default();
     let mut budget = crate::compiler::glr::terminal_ended::CompileBudget::new();
