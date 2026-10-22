@@ -12,7 +12,7 @@ function accept(module,v,ids){const s=module.compileSync(v).start();for(const id
 test('Module: properties, setters, copy and root-only final options',()=>{
   const v=vocab(),original=new Module(host());
   assert.equal(original.maskStrategy,MaskStrategy.Auto);
-  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.FastBuild);
+  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.FastRuntime);
 
   original.maskStrategy=MaskStrategy.TokenClassTrie;
   assert.equal(original.maskStrategy,MaskStrategy.TokenClassTrie);

@@ -264,7 +264,7 @@ impl PyGrammar {
         let boundary_mask_strategy: glrmask::BoundaryMaskStrategy = boundary_mask_strategy
             .as_deref()
             .copied()
-            .unwrap_or(PyBoundaryMaskStrategy::FAST_BUILD)
+            .unwrap_or(PyBoundaryMaskStrategy::FAST_RUNTIME)
             .into();
         let options = glrmask::CompileOptions::default()
             .end_tokens(end_tokens.unwrap_or_default());

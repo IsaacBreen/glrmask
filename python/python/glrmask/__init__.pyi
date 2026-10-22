@@ -189,7 +189,7 @@ class Module:
         /,
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_BUILD,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_RUNTIME,
     ) -> None:
         "Create a cold module from a Grammar with settings."
         ...
@@ -277,7 +277,7 @@ class Grammar:
         *,
         end_tokens: Optional[Sequence[int]] = None,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_BUILD,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_RUNTIME,
     ) -> Constraint:
         "Compile this grammar directly. Sugar for `Module(self, ...).compile(vocab, end_tokens=...)`."
         ...

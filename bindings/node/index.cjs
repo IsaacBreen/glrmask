@@ -91,7 +91,7 @@ function formatMaskStrategy(num) {
 }
 
 function parseBoundaryMaskStrategy(value) {
-  if (value === undefined) return 0;
+  if (value === undefined) return 1;
   if (typeof value !== 'string') throw new TypeError('boundaryMaskStrategy must be a string');
   switch (value.toLowerCase()) {
     case 'fast-build':
