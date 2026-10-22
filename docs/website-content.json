@@ -6,7 +6,7 @@
     "benchmarks",
     "getting_started"
   ],
-  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts GLRM (its native grammar format), JSON Schema, and Lark.",
+  "introduction": "GLRMask is a grammar-constrained decoding library for high-throughput LLM serving. It is optimized for fast mask computation with extremely low tail latency, even for complex grammars.\n\nGLRMask supports general context-free grammars, including ambiguous ones. It accepts JSON Schema, Lark, and GLRMask's native format: GLRM.",
   "links": "[GitHub](https://github.com/IsaacBreen/glrmask) · [Paper](https://doi.org/10.5281/zenodo.23273556)",
   "dynamic": "GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start latency. It is heavily based on [llguidance](https://github.com/guidance-ai/llguidance).",
   "usage": "GLRMask has four core types:\n\n- `Grammar`: the source-language definition, without compilation settings.\n- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.\n- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.\n- `ConstraintState`: the mutable state for a single generated sequence.\n\n**Source API status:** `Module` and `Expr` are unreleased. Published 0.3.1 packages\nuse `PreparedGrammar` for reusable preparation. The decoding quickstarts below\nwork with that release; the new assembly APIs require a matching source build.\n\nUse direct `Grammar.compile` for a closed source, or a `Module` when local\nsettings, late-bound children, or retained work are needed. `Expr.choice` and\n`Expr.sequence` group grammar leaves without adding an extra lexer scope at each\noperator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)\nfor construction, open precompilation, and persistence examples.",
@@ -83,5 +83,5 @@
     "json": "docs/benchmarks/json-schema-2026-10-14.json",
     "javascript": "docs/benchmarks/javascript-2026-10-14.json"
   },
-  "content_sha256": "5588c240757230ce7455407f15038a5ef0295ce94513cfabefb38d9f2af539a3"
+  "content_sha256": "abd923c3a20562ecb7072f326ba463b4f32b5592e6b63ecfd2f63b16f6b78798"
 }
