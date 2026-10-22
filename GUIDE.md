@@ -367,48 +367,6 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 
 All modes preserve accepted-language semantics and produce the same public `Constraint` type.
 
-### Native template parser backend
-
-Public final-constraint APIs select their parser representation internally.
-Callers choose `MaskStrategy`; there is no public parser backend selector or
-accessor. Parser-provider construction remains internal repository tooling.
-
-The native runtime and its artifact contain the template relations, not an
-LR table. Mask generation and token commitment use the existing shared engines;
-parser advancement and admissibility use those relations. Built-in grammar
-compilation can use temporary LR analysis to derive the program, then discards
-the table before constructing a `Constraint`. Native runtime table access and implicit LR fallback panic. Ordinary Dynamic
-(O1), selected by FastBuild, retains and executes its LR table.
-Data-only parser providers remain available through Rust's `internal-api`
-feature and Python's `_internal` namespace.
-
-Built-in compiled components with finite embedding transfers support nested
-and nullable [template composition](docs/template-parser-composition.md).
-Compiled components link directly through shared immutable template graphs and
-scoped views. Unsupported native requests return errors. Performance and load-time tradeoffs depend on the
-grammar and mode, so template selection is not an automatic speed guarantee.
-See [the template parser contract](docs/template-parser.md) for provider
-examples, exact POP/READ/PUSH semantics, validation, and persistence.
-The [September 30 validation report](docs/template-parser-validation-2026-09-30.md)
-records historical measurements at its pinned revision. Those measurements do
-not qualify the current native replacement.
-
-### TokenTrie backend
-
-`MaskStrategy::TokenTrie` uses the retained LR runtime. Its grammar, lexer,
-vocabulary, masking and commit code share the existing compiler/runtime pipeline;
-it skips native parser characterization, template construction and native runtime
-metadata. `TokenClassTrie` continues to build templates, and `ParserDwa` is unchanged.
-
-For internal development only, `GLRMASK_DYNAMIC_TEMPLATE_DFA=1` selects native
-parser templates for an ordinary Dynamic compilation (`true`, `yes` and `on`
-also enable it). An absent/disabled variable selects LR. This choice is resolved
-before compiler worker pools and does not affect O2, Static, existing objects or
-artifact loading. There is no new public backend configuration. Serialized
-artifacts preserve their built representation and external-vocabulary artifacts
-require the exact original mapping.
-
-
 ## Grammar formats
 
 **JSON Schema acceptance policy.**
@@ -433,9 +391,7 @@ nt value = INTEGER | "null"
 It retains `internal t`, unordered context-free alternatives, scoped grammars,
 regular intersection/subtraction, structural nonterminal-alternative subtraction,
 separated sequences, explicit finite automata and Unicode/byte expressions.
-Native `shortest { ... }` notation is removed; the internal prefix-minimal
-regular-language operation remains available to the Lark importer and can be
-expressed with native regular subtraction. See [the native format](docs/glrm-format.md).
+Use regular-language subtraction for prefix-minimal matching. See [the native format](docs/glrm-format.md).
 
 Lark is a recognition-focused frontend with an explicit optional LLM compatibility
 profile. That profile adds selected exact-token syntax, named token resolution,

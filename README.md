@@ -264,8 +264,7 @@ immediately if that is the application's policy.
 The read-only `forced_tokens()` query returns a safe library-canonical prefix of
 genuinely forced ordinary text. It uses the longest admitted nonempty spelling
 and lowest-ID alias, retains exact-event IDs, and stops at root acceptance or an
-event boundary that greedy text would cross. The correctness-first reference may
-construct full masks and reports typed resource failures as errors. This is one
+event boundary that greedy text would cross. Resource limits are reported as errors. This is one
 canonical sequence, not an exhaustive tree of equivalent original-ID histories.
 Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forcing.md).
 
@@ -273,8 +272,7 @@ Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forc
 
 Native GLRM has optional semicolons, `grammar NAME { ... }`, explicit `t`/`nt`
 declarations, typed externs, scoped ignore, Unicode/byte expressions and regular
-intersection/subtraction. Native `shortest { ... }` syntax is removed; the internal
-prefix-minimal operation and Lark's regular-body `[lazy]` remain. Native source contains no numeric-token, special-token-name or
+intersection/subtraction. Use regular subtraction for prefix-minimal matching, or Lark's regular-body `[lazy]` annotation. Native source contains no numeric-token, special-token-name or
 inline JSON literals. Lark accepts those selected compatibility forms only in its
 explicit `llm` profile. Unsupported priorities, capture/sampling annotations,
 substring generation and regex-internal lazy quantifiers are errors.
