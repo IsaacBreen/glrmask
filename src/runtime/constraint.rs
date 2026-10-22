@@ -1297,6 +1297,7 @@ impl Constraint {
             mut depth: usize,
             edge: &[u8],
             child: &VocabPrefixTreeNode,
+            relevant: &BitSet,
             matched_flags: &[(bool, bool)],
             out: &mut Vec<u32>,
         ) -> Option<(TokenizerStateSet, usize)> {
@@ -1309,9 +1310,15 @@ impl Constraint {
                 let mut matched_any = false;
                 let mut matched_relevant = false;
                 for state in states.iter().copied() {
-                    let (any, relevant) = matched_flags[state as usize];
+                    // Virtual/packed states can fall outside the base finalizer
+                    // table. Treat them conservatively: a possible match forces a
+                    // reset and the token is retained as a candidate.
+                    let (any, is_relevant) = matched_flags
+                        .get(state as usize)
+                        .copied()
+                        .unwrap_or((true, true));
                     matched_any |= any;
-                    matched_relevant |= relevant;
+                    matched_relevant |= is_relevant;
                 }
                 if matched_relevant {
                     let at_child_end = edge_index + 1 == edge.len();
@@ -1345,6 +1352,7 @@ impl Constraint {
                     0,
                     edge,
                     child,
+                    relevant,
                     matched_flags.as_slice(),
                     &mut out,
                 ) {
@@ -1359,6 +1367,7 @@ impl Constraint {
                             depth,
                             edge,
                             child,
+                            relevant,
                             matched_flags.as_slice(),
                             &mut out,
                         ) {
