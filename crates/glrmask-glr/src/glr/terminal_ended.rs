@@ -277,6 +277,62 @@ impl DenseIds {
 
 // ── Public entry points ─────────────────────────────────────────────────────
 
+/// Run only the terminal-ended preprocessing step and return it as an ordinary
+/// `GrammarDef`.
+///
+/// The result is the compact, binary, epsilon-free grammar consumed by the
+/// terminal-ended construction. It is not the right-spine normal form. Source
+/// epsilon membership is preserved as an explicit `start -> epsilon` rule
+/// because the ordinary grammar pipeline expects it in-band; the terminal-ended
+/// construction instead carries it out of band (`accepts_empty`).
+///
+/// Nonterminal names are cleared because preprocessing renumbers nonterminals;
+/// the start symbol is still protected downstream. A frontend direct-regular
+/// automaton is dropped because the rule set has been rewritten.
+pub fn preprocess_to_grammar_def(
+    source: &GrammarDef,
+    limits: &CompileLimits,
+    budget: &mut CompileBudget,
+) -> Result<GrammarDef, CompileDecline> {
+    let start_nullable = source.start_is_nullable();
+    let preprocessed = preprocess(source, limits, budget)?;
+    let grammar = &preprocessed.grammar;
+    let mut rules = Vec::with_capacity(
+        grammar.terminal_rules.len() + grammar.unit_rules.len() + grammar.binary_rules.len(),
+    );
+    for &(lhs, terminal) in &grammar.terminal_rules {
+        rules.push(Rule {
+            lhs,
+            rhs: vec![Symbol::Terminal(terminal)],
+        });
+    }
+    for &(lhs, right) in &grammar.unit_rules {
+        rules.push(Rule {
+            lhs,
+            rhs: vec![Symbol::Nonterminal(right)],
+        });
+    }
+    for &(lhs, left, right) in &grammar.binary_rules {
+        rules.push(Rule {
+            lhs,
+            rhs: vec![Symbol::Nonterminal(left), Symbol::Nonterminal(right)],
+        });
+    }
+    if start_nullable {
+        rules.push(Rule {
+            lhs: preprocessed.start,
+            rhs: Vec::new(),
+        });
+    }
+
+    let mut out = source.clone();
+    out.rules = rules;
+    out.start = preprocessed.start;
+    out.nonterminal_names.clear();
+    out.direct_regular_automaton = None;
+    Ok(out)
+}
+
 /// Prepare `source` into terminal-ended normal form.
 ///
 /// On failure no caller-visible rule vector is modified; the caller's `budget`
