@@ -125,15 +125,14 @@ grammar = glrmask.Grammar.from_lark(
     'start: "<" @payload ">"', profile="llm",
 )
 child = glrmask.Grammar.from_json_schema({"type": "null"})
-# Source binding; use prepare(vocab) on both sides for reusable prepared children.
-composed = grammar.clone()
+composed = glrmask.Module(grammar)
 composed.bind("payload", child)
 ```
 
 `@payload` declares a grammar-valued host requirement. A local rule named
 `payload` is a different symbol, so the two can coexist without an accidental
-collision. Open attachment, `::` descendant binding, immutable environments,
-requirements and persistence follow the same component contract as GLRM.
+collision. Bind it through a `Module`, as with a GLRM extern. A child must be
+fully bound before attachment, and qualified descendant binding is unsupported.
 
 Inline JSON Schema is an isolated child, not production text pasted into the
 parent's lexer scope:
@@ -155,5 +154,3 @@ special stop/suffix backtracking and capture-hiding controls. Unsupported semant
 attributes are errors. A selected compatibility profile is not blanket permission
 to accept and ignore the rest of a foreign grammar dialect.
 
-Useful implementation references are `tests/lark_compatibility.rs`,
-`tests/prepared_components.rs` and `python/tests/test_prepared_components.py`.

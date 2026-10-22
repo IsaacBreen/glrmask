@@ -145,32 +145,34 @@ present-but-empty distinctions when writing or transforming a grammar.
 
 ```glrm
 grammar child {
-    extern token MARK
     start value
-    nt value = "item" MARK
+    nt value = "item"
 }
 extern grammar PAYLOAD
 start response
 nt response = child PAYLOAD child
 ```
 
-Inline grammars own their names, externs, start and ignore settings. There is no
-ambient inheritance of parent declarations. Bind the inline parameter through
-`child::MARK`. The two uses of `child` above share its bindings.
+Inline grammars own their names, start and ignore settings. Parent declarations
+do not enter a child's lexical scope.
 
 `extern token MARK` consumes one original model-token ID selected by a host-bound
 `Token` or `ExactTokens` value. `extern grammar PAYLOAD` invokes an independent
-recognition fragment, including nullable or mixed byte/event fragments. Wrong-kind
-bindings fail. `Grammar::exact` explicitly adapts an exact-token set to a general
-grammar-valued parameter; token ports never accept decoded-text substitutes.
+recognition fragment. Bind externs through a `Module`:
 
-Both source and prepared components can be attached while incomplete. A qualified
-path through an externally supplied child becomes available after that attachment.
-Source `Grammar.bind` mutates the receiving handle. Attachments capture stable
-snapshots, so later mutations of the original definition do not change earlier
-attachments, and two attachments can have independent parameters. Complete all
-declared requirements before final compile/link. See [the guide](../GUIDE.md) for
-the host lifecycle.
+```python
+parent = glrmask.Module(glrmask.Grammar.from_glrm(source))
+parent.bind("PAYLOAD", glrmask.Grammar.from_ebnf('start ::= "data"'))
+constraint = parent.compile(vocab)
+```
+
+Bindings accept `Grammar`, `Module`, `Expr`, `Token`, or `ExactTokens`, subject to
+the extern's kind. A child must have all its own externs bound before attachment.
+Each extern binds once; qualified descendant paths such as `child::MARK` are
+unsupported. Attaching a module captures its bindings and settings, so later
+changes to the original module do not affect that occurrence. `module.externs`
+lists declared externs and `module.externs.unbound` lists those still unresolved.
+See [the guide](../GUIDE.md) for the host lifecycle.
 
 Numeric token literals (`<[123]>`), named special-token literals (`<|name|>`) and
 inline JSON Schema (`%json`) are deliberately absent from GLRM. Bind exact events
