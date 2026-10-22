@@ -3,9 +3,11 @@
 //! pipeline.
 //!
 //! The legacy template attempt always runs first and is unchanged. This module
-//! is reached only after that attempt returns a typed strategy decline. Any
-//! failure here is surfaced to the public boundary, which returns the original
-//! typed decline rather than recompiling with TokenTrie.
+//! is reached only when `GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE=1` opts in
+//! and that attempt returns a typed strategy decline. Any failure here is
+//! surfaced to the public boundary, which returns the original typed decline
+//! rather than recompiling with TokenTrie. Without the switch, compilation
+//! returns the normal route's decline unchanged.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -40,16 +42,33 @@ pub(crate) fn test_rescue_entries() -> u32 {
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only override of the TE-first experiment switch. Process
+    /// Test-only overrides of the rescue experiment switches. Process
     /// environment variables are unsuitable here because lib tests run in
     /// parallel on shared threads.
+    static RESCUE_ENABLED_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
     static TE_FIRST_OVERRIDE: Cell<Option<bool>> = const { Cell::new(None) };
+}
+
+/// Test-only override; `None` restores the environment-variable behaviour.
+#[cfg(test)]
+pub(crate) fn set_test_terminal_ended_rescue(value: Option<bool>) {
+    RESCUE_ENABLED_OVERRIDE.with(|slot| slot.set(value));
 }
 
 /// Test-only override; `None` restores the environment-variable behaviour.
 #[cfg(test)]
 pub(crate) fn set_test_terminal_ended_first(value: Option<bool>) {
     TE_FIRST_OVERRIDE.with(|slot| slot.set(value));
+}
+
+#[cfg(test)]
+fn terminal_ended_rescue_override() -> Option<bool> {
+    RESCUE_ENABLED_OVERRIDE.with(Cell::get)
+}
+
+#[cfg(not(test))]
+fn terminal_ended_rescue_override() -> Option<bool> {
+    None
 }
 
 #[cfg(test)]
@@ -63,20 +82,31 @@ fn terminal_ended_first_override() -> Option<bool> {
 }
 
 /// Experiment controls read once per top-level compile.
+///
+/// The terminal-ended rescue is opt-in: a normal template decline is returned
+/// unchanged unless `GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE=1` (or the
+/// test-only override) enables it.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct RescueExperiment {
+    pub(crate) terminal_ended_rescue: bool,
     pub(crate) terminal_ended_first: bool,
     pub(crate) report_route: bool,
 }
 
 impl RescueExperiment {
     pub(crate) fn read() -> Self {
-        let terminal_ended_first = terminal_ended_first_override().unwrap_or_else(|| {
-            std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST")
+        let terminal_ended_rescue = terminal_ended_rescue_override().unwrap_or_else(|| {
+            std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE")
                 .is_some_and(|value| value.to_str() == Some("1"))
         });
+        let terminal_ended_first = terminal_ended_rescue
+            && terminal_ended_first_override().unwrap_or_else(|| {
+                std::env::var_os("GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST")
+                    .is_some_and(|value| value.to_str() == Some("1"))
+            });
         let report_route = std::env::var_os("GLRMASK_REPORT_ROUTE").is_some();
         Self {
+            terminal_ended_rescue,
             terminal_ended_first,
             report_route,
         }

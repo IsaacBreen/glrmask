@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use crate::compiler::build_budget::TestBudgetLimit;
 use crate::compiler::terminal_ended_rescue::{
-    reset_test_rescue_entries, set_test_terminal_ended_first, test_rescue_entries,
+    reset_test_rescue_entries, set_test_terminal_ended_first, set_test_terminal_ended_rescue,
+    test_rescue_entries,
 };
 use crate::import::static_route_recorded;
 use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
@@ -31,6 +32,17 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     RESCUE_TEST_SERIAL
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The rescue is opt-in. Rescue tests enable it on their own thread; no test
+/// may depend on the process environment.
+fn enable_test_rescue() {
+    set_test_terminal_ended_rescue(Some(true));
+}
+
+fn disable_test_rescue() {
+    set_test_terminal_ended_rescue(Some(false));
+    set_test_terminal_ended_first(None);
 }
 
 const TOKEN_BYTES: [&[u8]; 4] = [b"a", b"b", b"c", b"d"];
@@ -358,6 +370,7 @@ fn check_rescued(case: &Case, label: &str) {
     // This helper's contract is that the legacy attempt declines and the
     // rescue publishes. Keep the old 10,000,000-unit default explicit; the
     // production default is now sized for the real SQL/Go benchmarks.
+    enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
     let reference = compile(case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
@@ -443,6 +456,7 @@ fn compile_source(source: &str, strategy: MaskStrategy) -> Constraint {
 fn check_source_case(case: &Case, source: &str, label: &str) {
     // As `check_rescued`: the legacy attempt must decline under the old
     // 10,000,000-unit default so the rescue is what publishes.
+    enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
     let reference = compile_source(source, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
@@ -665,6 +679,7 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
 #[test]
 fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
     let _serial = serial();
+    enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
     let (start, rules) = witness_rules(2633);
     let case = Case {
@@ -699,6 +714,7 @@ fn phase1_witness_385_takes_the_rescue_and_matches_the_exact_oracle() {
 #[test]
 fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
     let _serial = serial();
+    enable_test_rescue();
     // The legacy attempt is supposed to decline; keep the old 10,000,000-unit
     // default explicit now that the production default is larger.
     let _limit = TestBudgetLimit::set(10_000_000);
@@ -721,6 +737,7 @@ fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
 #[test]
 fn legacy_template_grammar_does_not_enter_the_rescue() {
     let _serial = serial();
+    disable_test_rescue();
     let case = case(0, 3, &[(0, &[-1]), (0, &[-2, -1])]);
     reset_test_rescue_entries();
     let reference = compile(&case, MaskStrategy::TokenTrie);
@@ -744,6 +761,7 @@ fn legacy_template_grammar_does_not_enter_the_rescue() {
 #[test]
 fn nullable_right_recursive_start_is_preserved_by_the_rescue() {
     let _serial = serial();
+    enable_test_rescue();
     // start -> a | epsilon ; a -> "a" a | "a"
     let case = case(0, 4, &[(0, &[1]), (0, &[]), (1, &[-1, 1]), (1, &[-1])]);
     let reference = compile(&case, MaskStrategy::TokenTrie);
@@ -769,6 +787,7 @@ fn nullable_right_recursive_start_is_preserved_by_the_rescue() {
 #[test]
 fn tiny_budget_returns_typed_decline() {
     let _serial = serial();
+    enable_test_rescue();
     let case = case(
         0,
         4,
@@ -806,6 +825,32 @@ fn tiny_budget_returns_typed_decline() {
     }
 }
 
+/// The rescue is opt-in. A grammar that previously published through it must
+/// return the normal route's typed decline when the switch is unset.
+#[test]
+fn rescue_disabled_returns_the_normal_typed_decline() {
+    let _serial = serial();
+    disable_test_rescue();
+    let case = case(0, 3, &[(0, &[-1]), (1, &[-3]), (2, &[-3]), (0, &[-1, -3, 1]), (0, &[1]), (1, &[2, 1]), (1, &[-1]), (1, &[1, 1, 2]), (2, &[2, 1, -2]), (2, &[0, 2]), (2, &[-1, -3])]);
+    // Under the old 10,000,000-unit budget the normal attempt declines and the
+    // rescue used to publish for this witness.
+    let _limit = TestBudgetLimit::set(10_000_000);
+    reset_test_rescue_entries();
+    let error = expect_strategy_decline(
+        try_compile(&case, MaskStrategy::ParserDwa),
+        "rescue_disabled",
+    );
+    assert!(
+        error.is_strategy_decline(),
+        "expected the normal typed decline, got: {error}",
+    );
+    assert_eq!(
+        test_rescue_entries(),
+        0,
+        "the terminal-ended rescue ran while the opt-in switch was unset",
+    );
+}
+
 /// Fuzz pass-A cases on 605da7551 that exhausted memory in grammar
 /// normalization or ParserDwa construction before the budget could decline.
 /// Each must publish exact masks within the time bound under both template
@@ -816,6 +861,7 @@ fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[i
     // default: they must decline the legacy attempt quickly and publish via
     // the rescue. Keep that explicit now that the production default is sized
     // for the real SQL/Go benchmarks.
+    enable_test_rescue();
     let _limit = TestBudgetLimit::set(10_000_000);
     let case = case(start, bound, rules);
     let reference = compile(&case, MaskStrategy::TokenTrie);
@@ -903,10 +949,12 @@ fn compile_with_te_first(
     vocab: &Vocab,
     strategy: MaskStrategy,
 ) -> crate::Result<Constraint> {
+    set_test_terminal_ended_rescue(Some(true));
     set_test_terminal_ended_first(Some(true));
     let result =
         grammar.compile_with_build_options(vocab, BuildOptions::default().optimization(strategy));
     set_test_terminal_ended_first(None);
+    set_test_terminal_ended_rescue(None);
     result
 }
 

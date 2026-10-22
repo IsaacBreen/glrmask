@@ -777,9 +777,11 @@ impl<'a> Grammar<'a> {
     /// the same strategy. If that also fails, the original typed decline is
     /// returned; the requested strategy is never silently replaced.
     ///
-    /// EXPERIMENT: `GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST=1` tries the rescue
-    /// before the ordinary template attempt. `GLRMASK_REPORT_ROUTE=1` emits one
-    /// route line for this top-level compile.
+    /// The terminal-ended rescue is opt-in:
+    /// `GLRMASK_EXPERIMENT_TERMINAL_ENDED_RESCUE=1` enables it after a typed
+    /// template decline. `GLRMASK_EXPERIMENT_TERMINAL_ENDED_FIRST=1`
+    /// additionally tries it before the ordinary template attempt.
+    /// `GLRMASK_REPORT_ROUTE=1` emits one route line for this top-level compile.
     fn finish_template_attempt<F>(
         &self,
         vocab: &Vocab,
@@ -795,7 +797,8 @@ impl<'a> Grammar<'a> {
         let experiment = RescueExperiment::read();
         let strategy = options.optimization;
         let template = options.parser_backend == ParserBackend::TemplateDfa;
-        let te_first = experiment.terminal_ended_first
+        let te_first = experiment.terminal_ended_rescue
+            && experiment.terminal_ended_first
             && template
             && self.bindings.is_empty()
             && matches!(
@@ -821,10 +824,11 @@ impl<'a> Grammar<'a> {
             match attempt() {
                 Ok(constraint) => Ok(constraint),
                 Err(error) if error.is_strategy_decline() => {
-                    // Phase 2: give the original source one terminal-ended rescue
-                    // attempt with the same strategy. The legacy attempt above is
-                    // untouched; only a typed decline reaches here.
-                    if template && !te_first {
+                    // Opt-in experiment: give the original source one
+                    // terminal-ended rescue attempt with the same strategy.
+                    // Without the switch, the typed decline above is returned
+                    // unchanged.
+                    if template && experiment.terminal_ended_rescue && !te_first {
                         match self.try_terminal_ended_rescue(vocab, options) {
                             Ok(constraint) => {
                                 if crate::compiler::compile::compile_profile_enabled() {

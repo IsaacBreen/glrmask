@@ -652,7 +652,8 @@ impl Module {
             );
             return Ok(result);
         }
-        let te_first = experiment.terminal_ended_first
+        let te_first = experiment.terminal_ended_rescue
+            && experiment.terminal_ended_first
             && self.node.bindings.is_empty()
             && matches!(
                 engine,
@@ -702,10 +703,14 @@ impl Module {
             match attempt {
                 Ok(constraint) => Ok(constraint),
                 Err(error) if error.is_strategy_decline() => {
-                    // Phase 2: one terminal-ended rescue attempt from the original
-                    // flattened source, restricted to plain single modules. Any
-                    // failure returns the original typed decline.
-                    if self.node.bindings.is_empty() && !te_first {
+                    // Opt-in experiment: one terminal-ended rescue attempt from
+                    // the original flattened source, restricted to plain single
+                    // modules. Without the switch, the typed decline is returned
+                    // unchanged.
+                    if experiment.terminal_ended_rescue
+                        && self.node.bindings.is_empty()
+                        && !te_first
+                    {
                         match try_rescue() {
                             Ok(constraint) => {
                                 if crate::compiler::compile::compile_profile_enabled() {

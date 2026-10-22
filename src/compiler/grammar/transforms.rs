@@ -1342,7 +1342,7 @@ pub(crate) fn prepare_grammar_for_vocab_partition(grammar: GrammarDef) -> Gramma
 
 /// Install a terminal-ended rewrite into the original grammar.
 ///
-/// This is the preparation policy for the phase-2 template rescue. The
+/// This is the preparation policy for the opt-in phase-2 template rescue. The
 /// terminal-ended construction already produces an epsilon-free, fully
 /// productive grammar, so only the safe structural passes run here:
 /// reachability pruning and terminal compaction. In particular it must not run

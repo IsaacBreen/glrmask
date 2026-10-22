@@ -14,7 +14,7 @@
 //! `GLRTable::set_embedded_start_nullable`).
 //!
 //! This file is deliberately phase-1 construction only. It is not wired into
-//! the compilation pipeline; phase 2 selects it as a rescue route.
+//! the compilation pipeline; phase 2 selects it as an opt-in rescue route.
 //!
 //! Construction sketch (see the design for the full proof):
 //!

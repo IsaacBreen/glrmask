@@ -10,7 +10,8 @@ pub(crate) fn catch_internal_invariant<T>(f: impl FnOnce() -> T) -> Result<T> {
 
 /// Run a fallible template attempt while letting a deterministic resource-limit
 /// unwind become a typed decline. Public entry points use this so a declined
-/// template strategy can attempt the terminal-ended rescue.
+/// template strategy can return that decline, or attempt the opt-in
+/// terminal-ended rescue when it is explicitly enabled.
 pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
     catch_internal_invariant(f).and_then(|result| result)
 }
@@ -31,8 +32,9 @@ pub enum Error {
     ResourceLimit(String),
 
     /// The requested template strategy cannot represent this grammar exactly.
-    /// Public entry points may attempt the terminal-ended rescue; if that also
-    /// declines, this error is returned to the caller unchanged.
+    /// Public entry points return this error unchanged unless the opt-in
+    /// terminal-ended rescue is enabled; if the rescue also declines, this
+    /// error is returned to the caller unchanged.
     #[error("Strategy unsupported: {0}")]
     StrategyUnsupported(String),
 
@@ -56,8 +58,9 @@ impl Error {
         match span { Some(span) => Self::SourceAt { error: Box::new(self), span }, None => self }
     }
 
-    /// A template strategy declined deterministically. Public entry points may
-    /// attempt the terminal-ended rescue and otherwise return this error.
+    /// A template strategy declined deterministically. Public entry points
+    /// return this error unchanged, or attempt the opt-in terminal-ended
+    /// rescue when it is explicitly enabled.
     pub(crate) fn is_strategy_decline(&self) -> bool {
         match self {
             Self::ResourceLimit(_) | Self::StrategyUnsupported(_) => true,
