@@ -648,8 +648,46 @@ impl Module {
         match attempt {
             Ok(constraint) => Ok(constraint),
             Err(error) if error.is_strategy_decline() => {
+                let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
+                // Phase 2: one terminal-ended rescue attempt from the original
+                // flattened source, restricted to plain single modules. Any
+                // failure falls through to the exact TokenTrie fallback.
+                if self.node.bindings.is_empty() {
+                    match self.flatten_source() {
+                        Ok(grammar) => {
+                            let rescued = grammar
+                                .rescue_source_grammar(vocab)
+                                .and_then(|source| {
+                                    crate::compiler::terminal_ended_rescue::rescue(&source, vocab)
+                                });
+                            match rescued {
+                                Ok(mut constraint) => {
+                                    apply_final_boundary_trigger(
+                                        &mut constraint,
+                                        BoundaryTriggerDetail::Tokens,
+                                    )?;
+                                    let constraint =
+                                        constraint.with_end_tokens(&options.end_tokens)?;
+                                    if crate::compiler::compile::compile_profile_enabled() {
+                                        eprintln!(
+                                            "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=ok",
+                                        );
+                                    }
+                                    return Ok(constraint);
+                                }
+                                Err(rescue_error) => {
+                                    if crate::compiler::compile::compile_profile_enabled() {
+                                        eprintln!(
+                                            "[glrmask/profile][terminal_ended_rescue] strategy={engine:?} outcome=declined reason={rescue_error}",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                }
                 if crate::compiler::compile::compile_profile_enabled() {
-                    let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
                     eprintln!(
                         "[glrmask/profile][template_fallback] strategy={engine:?} stage={} reason={error}",
                         error.decline_stage(),

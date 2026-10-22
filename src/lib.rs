@@ -162,6 +162,8 @@ mod terminal_dwa_cross_tests;
 #[cfg(test)]
 mod tokentrie_nullable_ambiguity_tests;
 #[cfg(test)]
+mod terminal_ended_rescue_tests;
+#[cfg(test)]
 mod tokentrie_reduce_cycle_tests;
 
 pub(crate) use error::GlrMaskError;

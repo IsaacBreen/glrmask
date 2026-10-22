@@ -788,6 +788,30 @@ impl<'a> Grammar<'a> {
         match attempt {
             Ok(constraint) => Ok(constraint),
             Err(error) if error.is_strategy_decline() => {
+                // Phase 2: give the original source one terminal-ended rescue
+                // attempt before the exact TokenTrie fallback. The legacy
+                // attempt above is untouched; only a typed decline reaches here.
+                if options.parser_backend == ParserBackend::TemplateDfa {
+                    match self.try_terminal_ended_rescue(vocab, options) {
+                        Ok(constraint) => {
+                            if crate::compiler::compile::compile_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=ok",
+                                    options.optimization,
+                                );
+                            }
+                            return Ok(constraint);
+                        }
+                        Err(rescue_error) => {
+                            if crate::compiler::compile::compile_profile_enabled() {
+                                eprintln!(
+                                    "[glrmask/profile][terminal_ended_rescue] strategy={:?} outcome=declined reason={rescue_error}",
+                                    options.optimization,
+                                );
+                            }
+                        }
+                    }
+                }
                 if crate::compiler::compile::compile_profile_enabled() {
                     eprintln!(
                         "[glrmask/profile][template_fallback] strategy={:?} stage={} reason={error}",
@@ -958,6 +982,48 @@ impl<'a> Grammar<'a> {
                 Ok(self.component()?.with_tokens(&token_refs)?.with_children(&children)?.lower_closed()?)
             }
         }
+    }
+
+    /// Lower the original source to the flat grammar consumed by the
+    /// terminal-ended construction. Phase 2 is restricted to plain single
+    /// grammars: bindings, extern declarations and JSON Schema decline to the
+    /// exact TokenTrie fallback.
+    fn rescue_source_grammar(&self, _vocab: &Vocab) -> Result<crate::grammar::flat::GrammarDef> {
+        if !self.bindings.is_empty() {
+            return Err(Error::StrategyUnsupported(
+                "terminal-ended rescue is limited to plain single grammars".into(),
+            ));
+        }
+        if !self.declarations()?.names.is_empty() {
+            return Err(Error::StrategyUnsupported(
+                "terminal-ended rescue does not accept extern declarations".into(),
+            ));
+        }
+        let named = match &self.source {
+            GrammarSource::Glrm(_) | GrammarSource::Constructed => self.component()?.lower_closed()?,
+            GrammarSource::Ebnf(source) => crate::import::parse_ebnf_to_named(source)?,
+            GrammarSource::Lark(source) => crate::import::parse_lark_to_named(source)?,
+            GrammarSource::JsonSchema(_) => {
+                return Err(Error::StrategyUnsupported(
+                    "terminal-ended rescue is not implemented for JSON Schema sources".into(),
+                ));
+            }
+        };
+        let factored = crate::grammar::factoring::factor_named_grammar(named);
+        let grammar = crate::grammar::ast::lower(&factored)?;
+        crate::compiler::terminal_ended_rescue::check_rescue_scope(&grammar)?;
+        Ok(grammar)
+    }
+
+    fn try_terminal_ended_rescue(
+        &self,
+        vocab: &Vocab,
+        options: &BuildOptions,
+    ) -> Result<RuntimeConstraint> {
+        let source = self.rescue_source_grammar(vocab)?;
+        let mut constraint = crate::compiler::terminal_ended_rescue::rescue(&source, vocab)?;
+        apply_final_boundary_trigger(&mut constraint, options.boundary_trigger.unwrap_or_default())?;
+        constraint.with_end_tokens(options.end_token_ids())
     }
 
     // Use the ordinary Dynamic compiler with one complete, unsplit source

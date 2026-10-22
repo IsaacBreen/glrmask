@@ -32,6 +32,7 @@ pub(crate) mod pm_profile;
 pub(crate) use glrmask_lexer::__private::possible_matches;
 pub mod stages;
 pub(crate) mod build_budget;
+pub(crate) mod terminal_ended_rescue;
 
 pub(crate) use compile::compile_owned;
 
