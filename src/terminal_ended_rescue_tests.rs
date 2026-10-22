@@ -4,9 +4,10 @@
 //! CYK-style fixpoint over `(nonterminal, from, to)` intersected with the
 //! prefix DFA. Bounded word enumeration is never used to decide masks.
 //!
-//! The same oracle and token vocabulary are used to compare the rescued
-//! template constraint against the exact TokenTrie compilation of the original
-//! source.
+//! The same oracle and token vocabulary are used to compare a rescued template
+//! constraint against the exact TokenTrie compilation of the original source.
+//! A rescue that declines is surfaced as the original typed strategy decline,
+//! never as a silent TokenTrie recompile.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
@@ -195,13 +196,34 @@ fn fill_mask(constraint: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
 }
 
 fn compile(case: &Case, strategy: MaskStrategy) -> Constraint {
+    try_compile(case, strategy)
+        .unwrap_or_else(|error| panic!("{strategy:?} compile failed: {error}"))
+}
+
+fn try_compile(case: &Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
     let source = lark(case);
-    Grammar::from_lark(&source)
-        .compile_with_build_options(
-            &vocab(),
-            BuildOptions::default().optimization(strategy),
-        )
-        .unwrap_or_else(|error| panic!("{strategy:?} compile failed for {source:?}: {error}"))
+    Grammar::from_lark(&source).compile_with_build_options(
+        &vocab(),
+        BuildOptions::default().optimization(strategy),
+    )
+}
+
+/// A declined rescue must surface the requested strategy's typed decline; a
+/// successful compile would mean it silently recompiled with TokenTrie.
+fn expect_strategy_decline(result: crate::Result<Constraint>, context: &str) -> crate::Error {
+    match result {
+        Ok(constraint) => panic!(
+            "{context}: compiled with {:?} instead of returning a typed decline",
+            constraint.parser_backend(),
+        ),
+        Err(error) => {
+            assert!(
+                error.is_strategy_decline(),
+                "{context}: returned a non-decline error: {error}",
+            );
+            error
+        }
+    }
 }
 
 /// Exact oracle: templates must agree with prefix viability and membership.
@@ -602,11 +624,12 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
 
 /// The rescued 2633 template costs more than the default template budget
 /// (template_specialization alone charges ~8.4M of the 10M units, about 15x the
-/// largest real grammar), so the rescue declines within ~2 s and the exact
-/// TokenTrie fallback publishes. Both outcomes are exact; this pins the masks
-/// and bounds the time spent before falling back.
+/// largest real grammar), so the rescue declines within ~2 s and the public
+/// boundary returns the original typed decline. This pins the decline and
+/// bounds the time spent before it is returned instead of recompiling with
+/// TokenTrie.
 #[test]
-fn phase1_witness_2633_rescue_declines_quickly_with_exact_masks() {
+fn phase1_witness_2633_rescue_declines_quickly_with_typed_decline() {
     let _serial = serial();
     let (start, rules) = witness_rules(2633);
     let case = Case {
@@ -614,22 +637,21 @@ fn phase1_witness_2633_rescue_declines_quickly_with_exact_masks() {
         bound: 3,
         rules,
     };
-    let reference = compile(&case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let started = Instant::now();
-        let compiled = compile(&case, strategy);
+        let error = expect_strategy_decline(
+            try_compile(&case, strategy),
+            &format!("witness_2633 {strategy:?}"),
+        );
         eprintln!(
-            "[terminal-ended-rescue] witness_2633 strategy={strategy:?} compile_ms={:.1} backend={:?}",
+            "[terminal-ended-rescue] witness_2633 strategy={strategy:?} decline_ms={:.1} error={error}",
             started.elapsed().as_secs_f64() * 1000.0,
-            compiled.parser_backend(),
         );
         assert!(
             started.elapsed().as_secs_f64() < 10.0,
-            "witness_2633 {strategy:?} took {:?} before publishing",
+            "witness_2633 {strategy:?} took {:?} before returning its decline",
             started.elapsed(),
         );
-        check_matches_token_trie(&compiled, &reference, &case);
-        check_exact_oracle(&compiled, &case);
     }
 }
 
@@ -703,8 +725,11 @@ fn nullable_right_recursive_start_is_preserved_by_the_rescue() {
     }
 }
 
+/// Under a budget of 1 unit even grammar normalization declines, so both
+/// template strategies must attempt the rescue and then return their original
+/// typed decline. Neither may recompile with TokenTrie.
 #[test]
-fn tiny_budget_still_falls_back_to_exact_token_trie() {
+fn tiny_budget_returns_typed_decline() {
     let _serial = serial();
     let case = case(
         0,
@@ -722,48 +747,32 @@ fn tiny_budget_still_falls_back_to_exact_token_trie() {
             (4, &[3, 1]),
         ],
     );
-    eprintln!("[tiny-budget] compiling TokenTrie reference");
-    let reference = compile(&case, MaskStrategy::TokenTrie);
     for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         reset_test_rescue_entries();
         eprintln!("[tiny-budget] compiling {strategy:?} under limit=1");
-        let fallback = {
+        let error = {
             let _limit = TestBudgetLimit::set(1);
-            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile(&case, strategy)))
-            {
-                Ok(constraint) => constraint,
-                Err(payload) => {
-                    eprintln!(
-                        "[tiny-budget] {strategy:?} panicked: {:?}",
-                        payload.downcast_ref::<String>().map(String::as_str),
-                    );
-                    std::panic::resume_unwind(payload);
-                }
-            }
+            expect_strategy_decline(
+                try_compile(&case, strategy),
+                &format!("tiny_budget {strategy:?}"),
+            )
         };
         eprintln!(
-            "[tiny-budget] {strategy:?} backend={:?} rescue_entries={}",
-            fallback.parser_backend(),
+            "[tiny-budget] {strategy:?} declined rescue_entries={} error={error}",
             test_rescue_entries(),
-        );
-        assert_eq!(
-            fallback.parser_backend(),
-            ParserBackend::LrTable,
-            "{strategy:?} did not take the exact TokenTrie fallback under a tiny budget",
         );
         assert!(
             test_rescue_entries() > 0,
-            "{strategy:?} did not attempt the rescue before falling back",
+            "{strategy:?} did not attempt the rescue before returning its decline",
         );
-        check_matches_token_trie(&fallback, &reference, &case);
-        check_exact_oracle(&fallback, &case);
     }
 }
 
 /// Fuzz pass-A cases on 605da7551 that exhausted memory in grammar
 /// normalization or ParserDwa construction before the budget could decline.
 /// Each must publish exact masks within the time bound under both template
-/// strategies, whether through the rescue or the TokenTrie fallback.
+/// strategies through the rescue; a rescue decline is returned as the original
+/// typed strategy error.
 fn check_fuzz_case(label: &str, start: usize, bound: usize, rules: &[(usize, &[isize])]) {
     let case = case(start, bound, rules);
     let reference = compile(&case, MaskStrategy::TokenTrie);

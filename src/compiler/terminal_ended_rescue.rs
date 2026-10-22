@@ -4,8 +4,8 @@
 //!
 //! The legacy template attempt always runs first and is unchanged. This module
 //! is reached only after that attempt returns a typed strategy decline. Any
-//! failure here is surfaced to the public boundary, which then runs the existing
-//! exact TokenTrie fallback.
+//! failure here is surfaced to the public boundary, which returns the original
+//! typed decline rather than recompiling with TokenTrie.
 
 #[cfg(test)]
 use std::cell::Cell;
@@ -96,8 +96,8 @@ pub(crate) fn rescue(source: &GrammarDef, vocab: &Vocab) -> Result<Constraint> {
         certify_terminal_ended(&prepared).map_err(map_decline)?;
         if prepared.rules.is_empty() {
             // The rewrite can prove an empty language (or an epsilon-only
-            // language). Both are better handled by the exact TokenTrie
-            // fallback than by a template with no ordinary productions.
+            // language). Both are better handled by returning a typed decline
+            // than by a template with no ordinary productions.
             return Err(Error::StrategyUnsupported(
                 "terminal-ended rescue has no ordinary productions".into(),
             ));

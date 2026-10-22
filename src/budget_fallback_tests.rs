@@ -1,13 +1,16 @@
-//! Public regression coverage for exact TokenTrie fallback after a template
-//! strategy declines, plus guards that real grammars stay on their template
-//! strategy at the default budget and that concurrent compiles keep separate
-//! budgets.
+//! Public regression coverage for the no-silent-fallback contract: a template
+//! strategy that declines under a tiny budget must return its typed decline
+//! instead of recompiling with TokenTrie. Also guards that real grammars stay
+//! on their template strategy at the default budget and that concurrent
+//! compiles keep separate budgets.
 //!
 //! The oracle is an exact prefix-viability check: it intersects the CFG with
 //! the prefix DFA (a CYK-style fixpoint over `(nonterminal, from, to)`), so a
 //! prefix is viable exactly when some accepted word has that prefix. A bounded
 //! word enumeration is not sufficient because the shortest completion may be
-//! longer than the enumeration bound.
+//! longer than the enumeration bound. It is applied to the exact TokenTrie
+//! reference of every fuzz seed so the seeds themselves stay exact even though
+//! the template strategies now decline them.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -164,18 +167,6 @@ fn allowed(mask: &[u32], token: usize) -> bool {
         .is_some_and(|word| word & (1 << (token % 32)) != 0)
 }
 
-fn fill_mask(constraint: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
-    let mut state = constraint.start();
-    for &token in prefix {
-        state
-            .commit_token(token)
-            .unwrap_or_else(|error| panic!("commit failed at {prefix:?}: {error}"));
-    }
-    let mut mask = vec![0u32; constraint.mask_len()];
-    state.fill_mask(&mut mask);
-    (mask, state.is_accepting())
-}
-
 /// Exact oracle: masks must be sound and complete against prefix viability,
 /// and acceptance must be exact membership.
 fn check_exact_oracle(constraint: &Constraint, case: Case) {
@@ -235,46 +226,6 @@ fn check_exact_oracle(constraint: &Constraint, case: Case) {
                 )
             });
             queue.push_back((committed, next));
-        }
-        checked += 1;
-    }
-    assert!(checked > 0);
-}
-
-/// The design guarantee: a template decline must recompile to exactly the
-/// masks and acceptance of the TokenTrie strategy.
-fn check_fallback_matches_token_trie(fallback: &Constraint, reference: &Constraint, case: Case) {
-    let bytes = token_bytes();
-    let mut queue = VecDeque::from([(Vec::<u32>::new(), Vec::<u8>::new())]);
-    let mut seen = BTreeSet::<Vec<u32>>::new();
-    let mut checked = 0usize;
-    while let Some((path, prefix)) = queue.pop_front() {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        let (mask, accepting) = fill_mask(fallback, &path);
-        let (reference_mask, reference_accepting) = fill_mask(reference, &path);
-        assert_eq!(
-            mask,
-            reference_mask,
-            "fallback mask differs from TokenTrie at prefix {:?}",
-            String::from_utf8_lossy(&prefix),
-        );
-        assert_eq!(
-            accepting,
-            reference_accepting,
-            "fallback acceptance differs from TokenTrie at {:?}",
-            String::from_utf8_lossy(&prefix),
-        );
-        for (token, token_bytes) in bytes.iter().enumerate() {
-            if prefix.len() + token_bytes.len() > case.bound || !allowed(&mask, token) {
-                continue;
-            }
-            let mut next_path = path.clone();
-            next_path.push(token as u32);
-            let mut next_prefix = prefix.clone();
-            next_prefix.extend_from_slice(token_bytes);
-            queue.push_back((next_path, next_prefix));
         }
         checked += 1;
     }
@@ -372,78 +323,95 @@ const V2_1654: Case = Case {
     ],
 };
 
-fn compile_case(case: Case, strategy: MaskStrategy) -> Constraint {
+fn try_compile_case(case: Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
     let source = lark(case);
-    Grammar::from_lark(&source)
-        .compile_with_build_options(
-            &fuzz_vocab(),
-            BuildOptions::default().optimization(strategy),
-        )
+    Grammar::from_lark(&source).compile_with_build_options(
+        &fuzz_vocab(),
+        BuildOptions::default().optimization(strategy),
+    )
+}
+
+fn compile_case(case: Case, strategy: MaskStrategy) -> Constraint {
+    try_compile_case(case, strategy)
         .unwrap_or_else(|error| panic!("{strategy:?} compile failed: {error}"))
 }
 
-#[test]
-fn fuzz_seeds_fall_back_to_exact_token_trie_masks() {
-    for case in [V2_233, V2_267, V2_296, V2_494, V2_1654] {
-        // Compile the exact reference once per case, then reuse it for every
-        // declined strategy. Recompiling it per strategy dominated this test's
-        // wall time without adding coverage.
-        let reference = compile_case(case, MaskStrategy::TokenTrie);
-        for strategy in [
-            MaskStrategy::TokenClassTrie,
-            MaskStrategy::ParserDwa,
-            MaskStrategy::Auto,
-        ] {
-            let fallback = {
-                let _limit = TestBudgetLimit::set(1_000);
-                compile_case(case, strategy)
-            };
-            assert_eq!(
-                fallback.parser_backend(),
-                ParserBackend::LrTable,
-                "start={} {strategy:?} did not take the TokenTrie fallback",
-                case.start,
+/// The requested template strategy must surface its own typed decline; a
+/// successful compile here would mean it silently recompiled with TokenTrie.
+fn expect_strategy_decline(result: crate::Result<Constraint>, context: &str) -> crate::Error {
+    match result {
+        Ok(constraint) => panic!(
+            "{context}: compiled with {:?} instead of returning a typed decline",
+            constraint.parser_backend(),
+        ),
+        Err(error) => {
+            assert!(
+                error.is_strategy_decline(),
+                "{context}: returned a non-decline error: {error}",
             );
-            check_fallback_matches_token_trie(&fallback, &reference, case);
-            if strategy == MaskStrategy::TokenClassTrie {
-                check_exact_oracle(&fallback, case);
-            }
+            error
         }
     }
 }
 
 #[test]
-fn forced_tiny_budget_still_yields_exact_masks() {
+fn fuzz_seeds_return_typed_decline_under_tiny_budget() {
+    for case in [V2_233, V2_267, V2_296, V2_494, V2_1654] {
+        // The exact TokenTrie reference stays the mask oracle for each seed, so
+        // the grammars themselves keep exact coverage even though every
+        // template strategy now declines them under the tiny budget.
+        let reference = compile_case(case, MaskStrategy::TokenTrie);
+        check_exact_oracle(&reference, case);
+        for strategy in [
+            MaskStrategy::TokenClassTrie,
+            MaskStrategy::ParserDwa,
+            MaskStrategy::Auto,
+        ] {
+            let _ = {
+                let _limit = TestBudgetLimit::set(1_000);
+                expect_strategy_decline(
+                    try_compile_case(case, strategy),
+                    &format!("start={} {strategy:?}", case.start),
+                )
+            };
+        }
+    }
+}
+
+#[test]
+fn forced_tiny_budget_returns_typed_decline() {
     const SMALL: Case = Case {
         start: 0,
         bound: 3,
         rules: &[(0, &[-1]), (0, &[-2, -3])],
     };
-    let fallback = {
-        let _limit = TestBudgetLimit::set(1);
-        compile_case(SMALL, MaskStrategy::TokenClassTrie)
-    };
-    assert_eq!(fallback.parser_backend(), ParserBackend::LrTable);
     let reference = compile_case(SMALL, MaskStrategy::TokenTrie);
-    check_fallback_matches_token_trie(&fallback, &reference, SMALL);
-    check_exact_oracle(&fallback, SMALL);
+    check_exact_oracle(&reference, SMALL);
+    for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
+        let _ = {
+            let _limit = TestBudgetLimit::set(1);
+            expect_strategy_decline(
+                try_compile_case(SMALL, strategy),
+                &format!("forced_tiny_budget {strategy:?}"),
+            )
+        };
+    }
 }
 
 #[test]
 fn concurrent_compiles_keep_separate_budgets() {
     // A real grammar that succeeds on its template strategy at the default
-    // budget but declines under a tiny one.
+    // budget but declines under a tiny one. The tiny compile must surface its
+    // own typed decline without disturbing the concurrent default compile.
     const SCHEMA: &str = include_str!("../benches/data/o9838_problem_schema.json");
     for _ in 0..3 {
         let tiny = std::thread::spawn(|| {
             let _limit = TestBudgetLimit::set(1_000);
-            Grammar::from_json_schema(SCHEMA)
-                .compile_with_build_options(
-                    &real_vocab(),
-                    BuildOptions::default().optimization(MaskStrategy::ParserDwa),
-                )
-                .expect("tiny-budget compile")
-                .parser_backend()
+            let result = Grammar::from_json_schema(SCHEMA).compile_with_build_options(
+                &real_vocab(),
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            );
+            let _ = expect_strategy_decline(result, "concurrent tiny-budget compile");
         });
         let default = std::thread::spawn(|| {
             Grammar::from_json_schema(SCHEMA)
@@ -454,7 +422,7 @@ fn concurrent_compiles_keep_separate_budgets() {
                 .expect("default-budget compile")
                 .parser_backend()
         });
-        assert_eq!(tiny.join().unwrap(), ParserBackend::LrTable);
+        tiny.join().unwrap();
         assert_eq!(default.join().unwrap(), ParserBackend::TemplateDfa);
     }
 }

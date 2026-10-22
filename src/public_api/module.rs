@@ -538,7 +538,7 @@ impl Module {
 
         let declared = source.declarations()?;
         // A typed template decline must survive so the public boundary can
-        // rescue or fall back to TokenTrie; only real failures are rewrapped.
+        // attempt the rescue; only real failures are rewrapped.
         let token_class_error = |e: Error| {
             if e.is_strategy_decline() {
                 e
@@ -660,7 +660,7 @@ impl Module {
                 let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
                 // Phase 2: one terminal-ended rescue attempt from the original
                 // flattened source, restricted to plain single modules. Any
-                // failure falls through to the exact TokenTrie fallback.
+                // failure returns the original typed decline.
                 if self.node.bindings.is_empty() {
                     match self.flatten_source() {
                         Ok(grammar) => {
@@ -698,17 +698,13 @@ impl Module {
                 }
                 if crate::compiler::compile::compile_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][template_fallback] strategy={engine:?} stage={} reason={error}",
+                        "[glrmask/profile][template_decline] strategy={engine:?} stage={} reason={error}",
                         error.decline_stage(),
                     );
                 }
-                let grammar = match self.flatten_source() {
-                    Ok(grammar) => grammar,
-                    Err(_) => return Err(error),
-                };
-                grammar
-                    .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
-                    .with_end_tokens(&options.end_tokens)
+                // The requested strategy is never silently replaced: return
+                // the typed decline.
+                Err(error)
             }
             Err(error) => Err(error),
         }

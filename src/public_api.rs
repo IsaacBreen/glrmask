@@ -700,7 +700,7 @@ impl<'a> Grammar<'a> {
                 let attempt = {
                     let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                     // A partial template build must not leave prepared caches on
-                    // the source used by the fallback.
+                    // the source reused by the rescue attempt.
                     let attempt_grammar = self.clone();
                     let attempt_options = options.clone();
                     budget.install(move || {
@@ -776,9 +776,9 @@ impl<'a> Grammar<'a> {
         self.finish_template_attempt(vocab, &options, attempt)
     }
 
-    /// Keep a template-strategy decline local to the public boundary: retry the
-    /// original source with the exact TokenTrie strategy. Other failures are
-    /// returned unchanged.
+    /// Give a template-strategy decline one terminal-ended rescue attempt with
+    /// the same strategy. If that also fails, the original typed decline is
+    /// returned; the requested strategy is never silently replaced.
     fn finish_template_attempt(
         &self,
         vocab: &Vocab,
@@ -789,8 +789,8 @@ impl<'a> Grammar<'a> {
             Ok(constraint) => Ok(constraint),
             Err(error) if error.is_strategy_decline() => {
                 // Phase 2: give the original source one terminal-ended rescue
-                // attempt before the exact TokenTrie fallback. The legacy
-                // attempt above is untouched; only a typed decline reaches here.
+                // attempt with the same strategy. The legacy attempt above is
+                // untouched; only a typed decline reaches here.
                 if options.parser_backend == ParserBackend::TemplateDfa {
                     match self.try_terminal_ended_rescue(vocab, options) {
                         Ok(constraint) => {
@@ -814,13 +814,12 @@ impl<'a> Grammar<'a> {
                 }
                 if crate::compiler::compile::compile_profile_enabled() {
                     eprintln!(
-                        "[glrmask/profile][template_fallback] strategy={:?} stage={} reason={error}",
+                        "[glrmask/profile][template_decline] strategy={:?} stage={} reason={error}",
                         options.optimization,
                         error.decline_stage(),
                     );
                 }
-                self.compile_token_trie(vocab, options.boundary_trigger.unwrap_or_default())?
-                    .with_end_tokens(options.end_token_ids())
+                Err(error)
             }
             Err(error) => Err(error),
         }
@@ -986,8 +985,8 @@ impl<'a> Grammar<'a> {
 
     /// Lower the original source to the flat grammar consumed by the
     /// terminal-ended construction. Phase 2 is restricted to plain single
-    /// grammars: bindings, extern declarations and JSON Schema decline to the
-    /// exact TokenTrie fallback.
+    /// grammars: bindings, extern declarations and JSON Schema decline the
+    /// rescue, so the original typed strategy decline is returned.
     fn rescue_source_grammar(&self, _vocab: &Vocab) -> Result<crate::grammar::flat::GrammarDef> {
         if !self.bindings.is_empty() {
             return Err(Error::StrategyUnsupported(
