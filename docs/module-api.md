@@ -118,9 +118,10 @@ whole graph; callers do not pass one to every constructor.
 
 `TokenTrie` compiles the whole composition as one grammar: bound children are inlined at source level, so `precompile` retains no work for `TokenTrie` modules. `Auto` parts join a `TokenTrie` composition; an explicit `ParserDwa` or `TokenClassTrie` part cannot be combined with a `TokenTrie` part, and compilation reports an error.
 
-`BoundaryMaskStrategy` replaces `BoundaryTriggerDetail`:
-- `FastBuild`: conservative token-set boundary trigger (faster build, default).
-- `FastRuntime`: full exact proper-prefix boundary trigger (lower latency).
+`BoundaryMaskStrategy` selects the boundary parser for crossings between composed
+grammars:
+- `ParserDwa` (default, alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build is a typed compile error.
+- `Dynamic` (alias `FAST_BUILD`): segmented dynamic boundary parser; faster build.
 
 Explicit strategy requests never fall back silently. If an engine cannot build
 a part or cannot be linked with neighbouring parts, compilation errors

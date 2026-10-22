@@ -30,14 +30,18 @@ def test_module_settings_properties_and_compile():
     module = g.Module(
         source(),
         mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE,
-        boundary_mask_strategy=g.BoundaryMaskStrategy.FAST_RUNTIME,
+        boundary_mask_strategy=g.BoundaryMaskStrategy.PARSER_DWA,
     )
     assert module.mask_strategy == g.MaskStrategy.TOKEN_CLASS_TRIE
+    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.PARSER_DWA
     assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.FAST_RUNTIME
 
     # Modifying settings properties
     module.mask_strategy = g.MaskStrategy.PARSER_DWA
     assert module.mask_strategy == g.MaskStrategy.PARSER_DWA
+    module.boundary_mask_strategy = g.BoundaryMaskStrategy.DYNAMIC
+    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.DYNAMIC
+    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.FAST_BUILD
 
     # Module options and compile options are removed from public API
     assert not hasattr(g, "ModuleOptions")

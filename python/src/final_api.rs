@@ -50,20 +50,24 @@ impl From<glrmask::MaskStrategy> for PyMaskStrategy {
     }
 }
 
-/// Boundary mask detail level: minimum metadata to build for composition boundaries.
+/// Boundary parser selection for crossings between composed grammars.
+///
+/// `PARSER_DWA` installs the static boundary parser (faster crossings; an
+/// over-budget build raises `ValueError`). `DYNAMIC` keeps the segmented dynamic
+/// boundary and builds faster.
 #[allow(non_camel_case_types)]
 #[pyclass(name = "BoundaryMaskStrategy", module = "glrmask", eq, eq_int, from_py_object)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum PyBoundaryMaskStrategy {
-    FAST_BUILD,
-    FAST_RUNTIME,
+    DYNAMIC,
+    PARSER_DWA,
 }
 
 impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
     fn from(value: PyBoundaryMaskStrategy) -> Self {
         match value {
-            PyBoundaryMaskStrategy::FAST_BUILD => Self::Dynamic,
-            PyBoundaryMaskStrategy::FAST_RUNTIME => Self::ParserDwa,
+            PyBoundaryMaskStrategy::DYNAMIC => Self::Dynamic,
+            PyBoundaryMaskStrategy::PARSER_DWA => Self::ParserDwa,
         }
     }
 }
@@ -71,9 +75,9 @@ impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
 impl From<glrmask::BoundaryMaskStrategy> for PyBoundaryMaskStrategy {
     fn from(value: glrmask::BoundaryMaskStrategy) -> Self {
         match value {
-            glrmask::BoundaryMaskStrategy::Dynamic => Self::FAST_BUILD,
-            glrmask::BoundaryMaskStrategy::ParserDwa => Self::FAST_RUNTIME,
-            _ => Self::FAST_BUILD,
+            glrmask::BoundaryMaskStrategy::Dynamic => Self::DYNAMIC,
+            glrmask::BoundaryMaskStrategy::ParserDwa => Self::PARSER_DWA,
+            _ => Self::DYNAMIC,
         }
     }
 }
@@ -264,7 +268,7 @@ impl PyGrammar {
         let boundary_mask_strategy: glrmask::BoundaryMaskStrategy = boundary_mask_strategy
             .as_deref()
             .copied()
-            .unwrap_or(PyBoundaryMaskStrategy::FAST_RUNTIME)
+            .unwrap_or(PyBoundaryMaskStrategy::PARSER_DWA)
             .into();
         let options = glrmask::CompileOptions::default()
             .end_tokens(end_tokens.unwrap_or_default());
@@ -307,6 +311,10 @@ pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     let mask_strat = module.getattr("MaskStrategy")?;
     mask_strat.setattr("FAST_BUILD", mask_strat.getattr("TOKEN_TRIE")?)?;
     mask_strat.setattr("FAST_RUNTIME", mask_strat.getattr("PARSER_DWA")?)?;
+
+    let boundary_strat = module.getattr("BoundaryMaskStrategy")?;
+    boundary_strat.setattr("FAST_BUILD", boundary_strat.getattr("DYNAMIC")?)?;
+    boundary_strat.setattr("FAST_RUNTIME", boundary_strat.getattr("PARSER_DWA")?)?;
 
     Ok(())
 }

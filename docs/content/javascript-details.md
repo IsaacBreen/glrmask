@@ -72,7 +72,7 @@ const sequence = Expr.sequence(Expr.literal('x'), expression, Expr.literal('y'))
 | `TokenTrie` | `token-trie` | Dynamic token-trie walk; fastest build. |
 | `TokenClassTrie` | `token-class-trie` | Token-trie walk over token equivalence classes. |
 
-`BoundaryMaskStrategy.FastBuild` (`fast-build`) and `BoundaryMaskStrategy.FastRuntime` (`fast-runtime`) select the boundary parser (`Dynamic` and `ParserDwa`). The boundary token trigger is always the LLM token set. A `ParserDwa` budget decline is a typed error; use `fast-build` instead.
+`BoundaryMaskStrategy.ParserDwa` (`parser-dwa`) and `BoundaryMaskStrategy.Dynamic` (`dynamic`) select the boundary parser for crossings between composed grammars. `ParserDwa` is the default and has faster crossings; an over-budget build raises `GlrMaskError`. `Dynamic` keeps the segmented dynamic boundary and builds faster. `FastRuntime` and `FastBuild` alias them, and the legacy `fast-runtime`/`fast-build` input strings remain accepted.
 
 ## Decoding
 

@@ -21,6 +21,10 @@
   `ParserDwa` and `Dynamic`. The boundary token trigger is always the LLM token
   set and no longer derives from this setting. A `ParserDwa` budget decline is a
   typed compile error; use `Dynamic` to keep the segmented dynamic boundary.
+- The bindings now expose the same strategy names: Python
+  `BoundaryMaskStrategy.PARSER_DWA`/`DYNAMIC`, Node.js `ParserDwa`/`Dynamic`,
+  and C/C++ `..._PARSER_DWA`/`..._DYNAMIC`, with the fast-build/fast-runtime
+  aliases retained.
 - `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
   externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
   applied only to the root.

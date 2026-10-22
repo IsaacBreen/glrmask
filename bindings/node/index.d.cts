@@ -13,10 +13,16 @@ export declare const MaskStrategy: Readonly<{
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
 
 export declare const BoundaryMaskStrategy: Readonly<{
-  FastBuild: 'fast-build';
-  FastRuntime: 'fast-runtime';
+  ParserDwa: 'parser-dwa';
+  Dynamic: 'dynamic';
+  FastRuntime: 'parser-dwa';
+  FastBuild: 'dynamic';
 }>;
-export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
+/** Canonical values, plus the legacy `fast-runtime`/`fast-build` input spellings. */
+export type BoundaryMaskStrategy =
+  | typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy]
+  | 'fast-runtime'
+  | 'fast-build';
 
 export declare const LarkProfile: Readonly<{Recognition: 'recognition'; Llm: 'llm'}>;
 export type LarkProfile = typeof LarkProfile[keyof typeof LarkProfile];

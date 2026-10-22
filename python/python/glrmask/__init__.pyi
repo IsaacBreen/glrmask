@@ -67,11 +67,15 @@ class MaskStrategy:
 
 @final
 class BoundaryMaskStrategy:
-    "Boundary mask detail level: minimum metadata to build for composition boundaries."
-    FAST_BUILD: ClassVar[BoundaryMaskStrategy]
-    "Conservative token-set boundary trigger (faster build)."
+    """Boundary parser selection for crossings between composed grammars."""
+    PARSER_DWA: ClassVar[BoundaryMaskStrategy]
+    """Static boundary parser; faster crossings. An over-budget build raises ValueError."""
+    DYNAMIC: ClassVar[BoundaryMaskStrategy]
+    """Segmented dynamic boundary parser; faster build."""
     FAST_RUNTIME: ClassVar[BoundaryMaskStrategy]
-    "Full exact proper-prefix boundary trigger (lower latency)."
+    """Alias for PARSER_DWA."""
+    FAST_BUILD: ClassVar[BoundaryMaskStrategy]
+    """Alias for DYNAMIC."""
 
 @final
 class Token:

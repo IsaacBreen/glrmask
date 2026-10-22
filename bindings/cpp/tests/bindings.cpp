@@ -286,7 +286,11 @@ void canonical_modules() {
 
     auto child = Module(Grammar::from_ebnf("start ::= \"a\""));
     child.set_mask_strategy(MaskStrategy::TokenClassTrie);
-    child.set_boundary_mask_strategy(BoundaryMaskStrategy::FastBuild);
+    child.set_boundary_mask_strategy(BoundaryMaskStrategy::Dynamic);
+    CHECK(BoundaryMaskStrategy::FastBuild == BoundaryMaskStrategy::Dynamic);
+    CHECK(BoundaryMaskStrategy::FastRuntime == BoundaryMaskStrategy::ParserDwa);
+    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::Dynamic) == GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC);
+    CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
     child.precompile(v); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save(), &v);
@@ -296,11 +300,11 @@ void canonical_modules() {
 
     // Round-trip settings
     CHECK(child.mask_strategy() == MaskStrategy::TokenClassTrie);
-    CHECK(child.boundary_mask_strategy() == BoundaryMaskStrategy::FastBuild);
+    CHECK(child.boundary_mask_strategy() == BoundaryMaskStrategy::Dynamic);
     auto child_bytes = child.save();
     auto child_loaded = Module::load(child_bytes, &v);
     CHECK(child_loaded.mask_strategy() == MaskStrategy::TokenClassTrie);
-    CHECK(child_loaded.boundary_mask_strategy() == BoundaryMaskStrategy::FastBuild);
+    CHECK(child_loaded.boundary_mask_strategy() == BoundaryMaskStrategy::Dynamic);
 
     auto state = loaded.compile(v).start(); loaded.dispose(); parent.dispose(); child.dispose();
     state.commit_token(3); CHECK(state.is_accepting());

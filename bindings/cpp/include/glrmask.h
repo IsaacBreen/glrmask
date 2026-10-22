@@ -39,17 +39,54 @@
 extern "C" {
 #endif
 
+/// Function status. GLRMASK_OK means success.
 typedef int32_t glrmask_status;
-enum { GLRMASK_OK=0, GLRMASK_INVALID_ARGUMENT=1, GLRMASK_ENGINE_ERROR=2,
-       GLRMASK_PANIC=3, GLRMASK_BUFFER_TOO_SMALL=4, GLRMASK_CLOSED=5 };
-enum { GLRMASK_MASK_STRATEGY_AUTO=0, GLRMASK_MASK_STRATEGY_PARSER_DWA=1,
-       GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2, GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE=3 };
+/// Status values. On failure an output handle is NULL.
+enum {
+    GLRMASK_OK=0,                 ///< Success.
+    GLRMASK_INVALID_ARGUMENT=1,   ///< A handle, argument or memory range is invalid.
+    GLRMASK_ENGINE_ERROR=2,       ///< Compilation, state or artifact failure.
+    GLRMASK_PANIC=3,              ///< A Rust panic was contained; discard the affected state.
+    GLRMASK_BUFFER_TOO_SMALL=4,   ///< The supplied buffer cannot hold the result.
+    GLRMASK_CLOSED=5              ///< The handle was already freed or moved.
+};
+/// Mask computation strategies.
+enum {
+    GLRMASK_MASK_STRATEGY_AUTO=0,              ///< Automatic selection.
+    GLRMASK_MASK_STRATEGY_PARSER_DWA=1,        ///< Static masks: slowest build, fastest per-token masks.
+    GLRMASK_MASK_STRATEGY_TOKEN_TRIE=2,        ///< Trie walk per mask: fastest build.
+    GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE=3   ///< Trie walk over token equivalence classes.
+};
+/// Alias for GLRMASK_MASK_STRATEGY_TOKEN_TRIE.
 #define GLRMASK_MASK_STRATEGY_FAST_BUILD GLRMASK_MASK_STRATEGY_TOKEN_TRIE
+/// Alias for GLRMASK_MASK_STRATEGY_PARSER_DWA.
 #define GLRMASK_MASK_STRATEGY_FAST_RUNTIME GLRMASK_MASK_STRATEGY_PARSER_DWA
-enum { GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD=0, GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME=1 };
-enum { GLRMASK_EBNF=0, GLRMASK_GLRM=1, GLRMASK_JSON_SCHEMA=2, GLRMASK_LARK=3 };
-enum { GLRMASK_LARK_RECOGNITION=0, GLRMASK_LARK_LLM=1 };
-enum { GLRMASK_EXTERN_TOKEN=0, GLRMASK_EXTERN_GRAMMAR=1 };
+/// Boundary parser selection for crossings between composed grammars.
+enum {
+    GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC=0,    ///< Segmented dynamic boundary parser; faster build.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1  ///< Static boundary parser; faster crossings.
+};
+/// Alias for GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC.
+#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC
+/// Alias for GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA.
+#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
+/// Source formats accepted by glrmask_grammar_from_source.
+enum {
+    GLRMASK_EBNF=0,         ///< EBNF source.
+    GLRMASK_GLRM=1,         ///< Native GLRM source.
+    GLRMASK_JSON_SCHEMA=2,  ///< JSON Schema document.
+    GLRMASK_LARK=3          ///< Lark source.
+};
+/// Lark dialects.
+enum {
+    GLRMASK_LARK_RECOGNITION=0,  ///< Standard Lark recognition.
+    GLRMASK_LARK_LLM=1           ///< Lark plus GLRMask's LLM extensions.
+};
+/// Extern slot kinds.
+enum {
+    GLRMASK_EXTERN_TOKEN=0,    ///< A token-level slot.
+    GLRMASK_EXTERN_GRAMMAR=1   ///< A grammar-level slot.
+};
 
 typedef struct glrmask_vocab glrmask_vocab;
 typedef struct glrmask_exact_tokens glrmask_exact_tokens;

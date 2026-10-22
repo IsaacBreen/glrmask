@@ -14,70 +14,122 @@
 #include <vector>
 
 namespace glrmask {
+/// An original model token ID.
 using TokenId = std::uint32_t;
+/// Inclusive token-ID interval.
 using TokenRange = glrmask_token_range; // inclusive first/last endpoints
+/// A possible boundary observation.
 using MarkerEvent = glrmask_marker_event;
+/// Owning byte buffer.
 using Bytes = std::vector<std::uint8_t>;
 
+/// Mask computation strategy, trading build time against per-token latency.
 enum class MaskStrategy : std::uint32_t {
+    /// Automatic selection.
     Auto = 0,
+    /// Static masks: slowest build, fastest per-token masks.
     ParserDwa = 1,
+    /// Trie walk per mask: fastest build.
     TokenTrie = 2,
+    /// Trie walk over token equivalence classes.
     TokenClassTrie = 3
 };
+/// Alias for `MaskStrategy::TokenTrie`.
 inline constexpr MaskStrategy kFastBuild = MaskStrategy::TokenTrie;
+/// Alias for `MaskStrategy::ParserDwa`.
 inline constexpr MaskStrategy kFastRuntime = MaskStrategy::ParserDwa;
 
+/// Boundary parser selection for crossings between composed grammars.
 enum class BoundaryMaskStrategy : std::uint32_t {
-    FastBuild = 0,
-    FastRuntime = 1
+    /// Segmented dynamic boundary parser; faster build.
+    Dynamic = 0,
+    /// Static boundary parser; faster crossings.
+    ParserDwa = 1,
+    /// Alias for `Dynamic`.
+    FastBuild = Dynamic,
+    /// Alias for `ParserDwa`.
+    FastRuntime = ParserDwa
 };
 
-enum class LarkProfile : std::uint32_t { Recognition = 0, Llm = 1 };
-enum class ExternKind { Token, Grammar };
+/// Lark dialect: recognition syntax or LLM extensions.
+enum class LarkProfile : std::uint32_t {
+    /// Standard Lark recognition.
+    Recognition = 0,
+    /// Lark plus GLRMask's LLM extensions.
+    Llm = 1
+};
+/// The kind of an extern slot.
+enum class ExternKind {
+    /// A token-level slot.
+    Token,
+    /// A grammar-level slot.
+    Grammar
+};
 
+/// A GLRMask failure carrying the C status.
 class Error : public std::runtime_error {
     glrmask_status status_;
 public:
+    /// Creates an error with a status and message.
     Error(glrmask_status status, const std::string& message) : std::runtime_error(message), status_(status) {}
+    /// The C status that caused the failure.
     glrmask_status status() const noexcept { return status_; }
 };
 
+/// An original model token ID without vocabulary identity.
 struct Token { TokenId id; explicit Token(TokenId value) : id(value) {} };
+/// A half-open byte range in the original document, with a one-based line and column.
 struct SourceSpan { std::uint64_t start_byte, end_byte, line, column; };
 
+/// A declared extern slot.
 struct Extern {
+    /// The declared name.
     std::string name;
+    /// The declared kind: token or grammar.
     ExternKind kind;
+    /// Source span of the declaration, when the frontend can locate it.
     std::optional<SourceSpan> span;
 };
 
+/// A snapshot view of declared externs, in declaration order.
 class Externs {
     std::vector<Extern> entries_;
     std::shared_ptr<std::vector<Extern>> unbound_;
 public:
+    /// Creates an empty view.
     Externs() : entries_{}, unbound_{std::make_shared<std::vector<Extern>>()} {}
+    /// Creates a view from entries and a separate unresolved snapshot.
     explicit Externs(std::vector<Extern> entries, std::vector<Extern> unbound = {})
         : entries_(std::move(entries)), unbound_(std::make_shared<std::vector<Extern>>(std::move(unbound))) {}
 
     using const_iterator = std::vector<Extern>::const_iterator;
+    /// First extern.
     const_iterator begin() const noexcept { return entries_.begin(); }
+    /// One past the last extern.
     const_iterator end() const noexcept { return entries_.end(); }
+    /// First extern.
     const_iterator cbegin() const noexcept { return entries_.cbegin(); }
+    /// One past the last extern.
     const_iterator cend() const noexcept { return entries_.cend(); }
 
+    /// Number of externs in this view.
     std::size_t size() const noexcept { return entries_.size(); }
+    /// Whether this view contains no externs.
     bool empty() const noexcept { return entries_.empty(); }
 
+    /// The extern at `index`.
     const Extern& operator[](std::size_t index) const { return entries_[index]; }
+    /// The extern at `index`; throws `std::out_of_range` if absent.
     const Extern& at(std::size_t index) const { return entries_.at(index); }
 
+    /// The extern declared as `name`, if any.
     std::optional<Extern> get(std::string_view name) const {
         for (const auto& item : entries_) {
             if (item.name == name) return item;
         }
         return std::nullopt;
     }
+    /// Whether an extern named `name` is declared.
     bool has(std::string_view name) const {
         for (const auto& item : entries_) {
             if (item.name == name) return true;
@@ -264,45 +316,58 @@ class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask
         glrmask_module* p = nullptr; detail::check(glrmask_module_new(grammar.native_handle(), &p)); return p;
     }
 public:
+    /// Creates a module from a source grammar with default settings.
     explicit Module(const Grammar& grammar) : Base(create(grammar)) {}
 
+    /// The mask computation strategy.
     MaskStrategy mask_strategy() const {
         std::uint32_t val = 0; detail::check(glrmask_module_get_mask_strategy(native_handle(), &val));
         return static_cast<MaskStrategy>(val);
     }
+    /// Sets the mask computation strategy.
     void set_mask_strategy(MaskStrategy strategy) {
         detail::check(glrmask_module_set_mask_strategy(native_handle(), static_cast<std::uint32_t>(strategy)));
     }
 
+    /// The boundary parser strategy.
     BoundaryMaskStrategy boundary_mask_strategy() const {
         std::uint32_t val = 0; detail::check(glrmask_module_get_boundary_mask_strategy(native_handle(), &val));
         return static_cast<BoundaryMaskStrategy>(val);
     }
+    /// Sets the boundary parser strategy.
     void set_boundary_mask_strategy(BoundaryMaskStrategy strategy) {
         detail::check(glrmask_module_set_boundary_mask_strategy(native_handle(), static_cast<std::uint32_t>(strategy)));
     }
 
+    /// Binds an extern to a module.
     void bind(std::string_view name, const Module& value) {
         detail::check(glrmask_module_bind_module(native_handle(), name.data(), name.size(), value.native_handle()));
     }
+    /// Binds an extern to a grammar.
     void bind(std::string_view name, const Grammar& value) {
         detail::check(glrmask_module_bind_grammar(native_handle(), name.data(), name.size(), value.native_handle()));
     }
+    /// Binds an extern to an expression.
     void bind(std::string_view name, const Expr& value) {
         detail::check(glrmask_module_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
     }
+    /// Binds an extern to one token event.
     void bind(std::string_view name, Token value) {
         detail::check(glrmask_module_bind_token(native_handle(), name.data(), name.size(), value.id));
     }
+    /// Binds an extern to an exact-token set.
     void bind(std::string_view name, const ExactTokens& value) {
         detail::check(glrmask_module_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
 
+    /// Retains vocabulary-specific compilation artifacts for this module.
     void precompile(const Vocab& vocab) {
         detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle()));
     }
+    /// Compiles the module assembly against `vocab`; every extern must be bound.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
 
+    /// A snapshot view of the module's declared externs, in declaration order.
     Externs externs() const {
         glrmask_externs* p_all = nullptr;
         detail::check(glrmask_module_externs(native_handle(), &p_all));
