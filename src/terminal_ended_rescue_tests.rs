@@ -600,14 +600,8 @@ fn phase1_witness_218_takes_the_rescue_and_matches_the_exact_oracle() {
     check_witness(218);
 }
 
-/// Slow lane. The 2633 rescue grammar is 1827 rules and its template DWA build
-/// takes roughly 18 seconds. The concurrent budget-calibration work may make
-/// this rescue decline instead of publishing; both outcomes are exact, so this
-/// test accepts either backend while still checking every mask and acceptance
-/// bit against TokenTrie and the exact oracle.
 #[test]
-#[ignore = "slow: ~18 s template DWA build on the 1827-rule rescued grammar"]
-fn phase1_witness_2633_takes_the_rescue_or_falls_back_with_exact_masks() {
+fn phase1_witness_2633_takes_the_rescue_and_matches_the_exact_oracle() {
     let _serial = serial();
     let (start, rules) = witness_rules(2633);
     let case = Case {
@@ -624,13 +618,7 @@ fn phase1_witness_2633_takes_the_rescue_or_falls_back_with_exact_masks() {
             started.elapsed().as_secs_f64() * 1000.0,
             compiled.parser_backend(),
         );
-        assert!(
-            matches!(
-                compiled.parser_backend(),
-                ParserBackend::TemplateDfa | ParserBackend::LrTable
-            ),
-            "unexpected backend",
-        );
+        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
         check_matches_token_trie(&compiled, &reference, &case);
         check_exact_oracle(&compiled, &case);
     }
@@ -655,13 +643,7 @@ fn v2_267_legacy_attempt_declines_quickly_with_exact_masks() {
             started.elapsed().as_secs_f64() * 1000.0,
             compiled.parser_backend(),
         );
-        assert!(
-            matches!(
-                compiled.parser_backend(),
-                ParserBackend::TemplateDfa | ParserBackend::LrTable
-            ),
-            "unexpected backend",
-        );
+        assert_eq!(compiled.parser_backend(), ParserBackend::TemplateDfa);
         check_matches_token_trie(&compiled, &reference, &case);
         check_exact_oracle(&compiled, &case);
     }
