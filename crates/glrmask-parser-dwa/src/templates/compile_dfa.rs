@@ -1132,6 +1132,12 @@ fn compile_template_dfa_with_profile(
     }
     let determinize_ms = elapsed_ms(determinize_started_at);
     let (premin_dfa_states, premin_dfa_transitions) = dfa_size(&determinized);
+    // Minimization and every later stage scale with the determinized size, so
+    // charge it before that work runs.
+    charge_build_budget(
+        "template_determinization",
+        (premin_dfa_states as u64).saturating_add(premin_dfa_transitions as u64),
+    );
 
     let minimize_started_at = Instant::now();
     let dfa = if skip_minimize {
