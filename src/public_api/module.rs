@@ -442,8 +442,9 @@ impl Module {
             let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             if let Some(p) = m.node.prepared.get(&engine) {
-                let current_b = p.prepared().inner.boundary_trigger.detail();
-                if current_b >= target_b {
+                // `boundary_trigger` records the requested detail; the trigger
+                // itself is built lazily in `materialize`.
+                if p.prepared().boundary_trigger >= target_b {
                     locals.insert(key, p.clone());
                 }
             }
@@ -498,7 +499,6 @@ impl Module {
     fn prepare_local_for(&self, vocab: &Vocab, engine: MaskStrategy, target_b: BoundaryTriggerDetail) -> Result<PreparedGrammar> {
         if let Some(existing) = self.node.prepared.get(&engine) {
             let mut upgraded = existing.prepared().clone();
-            Arc::make_mut(&mut upgraded.inner).build_boundary_trigger(target_b).map_err(Error::Compilation)?;
             upgraded.boundary_trigger = target_b;
             return Ok(upgraded);
         }
