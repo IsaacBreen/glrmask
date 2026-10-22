@@ -17,6 +17,7 @@ use crate::compiler::terminal_ended_rescue::{
     reset_test_rescue_entries, set_test_terminal_ended_first, set_test_terminal_ended_rescue,
     test_rescue_entries,
 };
+use crate::compiler::grammar::transforms::set_test_epsfree_prepass;
 use crate::import::static_route_recorded;
 use crate::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
 
@@ -1052,4 +1053,114 @@ fn rescue_lowering_equals_the_normal_static_route() {
             "{label}: the normal static route did not record the rescue's GrammarDef",
         );
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Epsilon-free prepass experiment: exactness and pathological-case coverage.
+// ---------------------------------------------------------------------------
+
+/// Compile one already-declining witness with the prepass forced on. Returns
+/// true when the normal route now compiles, false when it still returns its
+/// typed decline.
+fn check_prepass_case(case: &Case, label: &str, budget: u64) -> bool {
+    let _limit = TestBudgetLimit::set(budget);
+    set_test_epsfree_prepass(Some(true));
+    set_test_terminal_ended_rescue(Some(false));
+    let result = try_compile(case, MaskStrategy::ParserDwa);
+    let compiled = match result {
+        Ok(constraint) => {
+            assert_eq!(constraint.parser_backend(), ParserBackend::TemplateDfa);
+            let reference = compile(case, MaskStrategy::TokenTrie);
+            check_matches_token_trie(&constraint, &reference, case);
+            check_exact_oracle(&constraint, case);
+            true
+        }
+        Err(error) => {
+            assert!(
+                error.is_strategy_decline(),
+                "{label}: prepass returned a non-decline error: {error}",
+            );
+            eprintln!("[epsfree-prepass] {label} still declines: {error}");
+            false
+        }
+    };
+    set_test_epsfree_prepass(None);
+    set_test_terminal_ended_rescue(None);
+    compiled
+}
+
+#[test]
+fn epsfree_prepass_keeps_exact_masks_on_compiling_witnesses() {
+    let _serial = serial();
+    let witnesses = [
+        (
+            case(0, 3, &[(0, &[-1]), (0, &[-2, -1])]),
+            "simple",
+        ),
+        (
+            case(0, 4, &[(0, &[-1, -2]), (0, &[1]), (1, &[-3]), (1, &[])]),
+            "nullable_unit",
+        ),
+        (
+            case(0, 4, &[(0, &[-1, 0]), (0, &[-2]), (0, &[])]),
+            "left_recursive_nullable",
+        ),
+    ];
+    let mut compiled = 0usize;
+    for (case, label) in witnesses {
+        if check_prepass_case(&case, label, 10_000_000) {
+            compiled += 1;
+        }
+    }
+    assert!(
+        compiled > 0,
+        "the prepass did not produce an exactly checked compile",
+    );
+}
+
+/// The grammars from the inflation study, now with the real prepass applied.
+/// 4754, 594 and 2530 compile and match the exact oracle; fuzz 780 still
+/// declines at a later stage.
+#[test]
+fn epsfree_prepass_named_witnesses_match_oracles_or_decline_later() {
+    let _serial = serial();
+    let fuzz_4754 = case(0, 3, &[(0, &[-2]), (1, &[-3]), (2, &[-1]), (3, &[-2]), (0, &[-2, 2]), (0, &[-2]), (0, &[]), (1, &[3, 1, 1]), (1, &[-2, 2, 3]), (1, &[]), (2, &[0]), (2, &[]), (2, &[3, -3]), (3, &[2, 0, 3]), (3, &[2])]);
+    let fuzz_594 = case(0, 3, &[(0, &[-1]), (1, &[-3]), (2, &[-3]), (0, &[-1, -3, 1]), (0, &[1]), (1, &[2, 1]), (1, &[-1]), (1, &[1, 1, 2]), (2, &[2, 1, -2]), (2, &[0, 2]), (2, &[-1, -3])]);
+    let seed_2530 = seed_cfg(
+        &[
+            (0, &[4]),
+            (1, &[-3]),
+            (1, &[4]),
+            (1, &[]),
+            (2, &[-1]),
+            (2, &[]),
+            (3, &[]),
+            (3, &[1, 2, 3]),
+            (4, &[-2, 3, 1]),
+            (4, &[3, -2]),
+        ],
+        0,
+        4,
+    );
+    assert!(
+        check_prepass_case(&fuzz_4754, "fuzz_4754", 10_000_000),
+        "fuzz_4754 did not compile with the prepass",
+    );
+    assert!(
+        check_prepass_case(&fuzz_594, "fuzz_594", 1_000_000_000),
+        "fuzz_594 did not compile with the prepass at the default budget",
+    );
+    assert!(
+        check_prepass_case(&seed_2530, "seed_2530_min", 10_000_000),
+        "seed_2530_min did not compile with the prepass",
+    );
+    assert!(
+        !check_prepass_case(
+            &case(1, 3, &[(0, &[-2]), (1, &[-3]), (0, &[]), (0, &[0, -2, 1]), (0, &[1, -3, 0]), (1, &[1, 1]), (1, &[0, -1]), (1, &[-3, -2, 0])]),
+            "fuzz_780",
+            10_000_000,
+        ),
+        "fuzz_780 unexpectedly compiled with the prepass",
+    );
 }

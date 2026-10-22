@@ -32,6 +32,24 @@ fn epsfree_prepass_override() -> Option<bool> {
     EPSFREE_PREPASS_OVERRIDE.with(std::cell::Cell::get)
 }
 
+/// Test-only: snapshot the override on the caller thread.
+#[cfg(test)]
+pub(crate) fn epsfree_prepass_override_value() -> Option<bool> {
+    epsfree_prepass_override()
+}
+
+/// Test-only: install a snapshot on a compile-pool worker for one attempt.
+#[cfg(test)]
+pub(crate) fn with_epsfree_prepass_override<T>(
+    value: Option<bool>,
+    work: impl FnOnce() -> T,
+) -> T {
+    let previous = EPSFREE_PREPASS_OVERRIDE.with(|slot| slot.replace(value));
+    let result = work();
+    EPSFREE_PREPASS_OVERRIDE.with(|slot| slot.set(previous));
+    result
+}
+
 #[cfg(not(test))]
 fn epsfree_prepass_override() -> Option<bool> {
     None
@@ -2326,6 +2344,7 @@ mod normal_route_inflation_probe {
     //! rewrite pipeline pass by pass against terminal-ended preparation.
     use super::*;
     use crate::compiler::build_budget::TestBudgetLimit;
+    use crate::compiler::terminal_ended_rescue::set_test_terminal_ended_rescue;
     use crate::compiler::glr::analysis::AnalyzedGrammar;
     use crate::compiler::glr::table::{GLRTable, GlrTableConstruction};
     use crate::compiler::glr::terminal_ended::{
@@ -2456,29 +2475,37 @@ mod normal_route_inflation_probe {
         }
     }
 
-    fn probe_normal(name: &'static str, lowering: GrammarDef) {
+    fn probe_normal(
+        name: &'static str,
+        lowering: GrammarDef,
+        prepass: bool,
+        states_all: bool,
+    ) {
         let mut probe = Probe::new(name);
-        probe.record("lowering", &lowering, true);
-
-        let mut grammar = lowering;
+        let mut grammar = if prepass {
+            apply_epsfree_prepass(lowering)
+        } else {
+            lowering
+        };
+        probe.record(if prepass { "epsfree_prepass" } else { "lowering" }, &grammar, states_all);
         discard_reflexive_unit_rules(&mut grammar.rules);
-        probe.record("discard_reflexive_unit_rules", &grammar, true);
+        probe.record("discard_reflexive_unit_rules", &grammar, states_all);
 
         let nullable_terminals = nullable_terminals_for_grammar(&grammar);
-        probe.record("nullable_terminals_for_grammar", &grammar, true);
+        probe.record("nullable_terminals_for_grammar", &grammar, states_all);
 
         let before = grammar.clone();
         expand_nullable_terminals(&mut grammar.rules, grammar.start, &nullable_terminals);
-        probe.record("expand_nullable_terminals", &grammar, true);
+        probe.record("expand_nullable_terminals", &grammar, states_all);
         probe.examples("expand_nullable_terminals", &before, &grammar);
 
         let before = grammar.clone();
         normalize_grammar(&mut grammar.rules, grammar.start);
-        probe.record("normalize_grammar", &grammar, true);
+        probe.record("normalize_grammar", &grammar, states_all);
         probe.examples("normalize_grammar", &before, &grammar);
 
         let protected_nonterminals = collect_protected_nonterminals(&grammar);
-        probe.record("collect_protected_nonterminals", &grammar, true);
+        probe.record("collect_protected_nonterminals", &grammar, states_all);
 
         let before = grammar.clone();
         inline_single_use_nonterminals(
@@ -2486,7 +2513,7 @@ mod normal_route_inflation_probe {
             &protected_nonterminals,
             grammar.start,
         );
-        probe.record("inline_single_use_nonterminals", &grammar, true);
+        probe.record("inline_single_use_nonterminals", &grammar, states_all);
         probe.examples("inline_single_use_nonterminals", &before, &grammar);
 
         let mut merge_iteration = 0usize;
@@ -2495,7 +2522,7 @@ mod normal_route_inflation_probe {
             let prev = grammar.rules.len();
             let before = grammar.clone();
             grammar.rules = merge_identical_nonterminals(&grammar.rules, grammar.start);
-            probe.record("merge_identical_nonterminals_pre", &grammar, true);
+            probe.record("merge_identical_nonterminals_pre", &grammar, states_all);
             probe.examples("merge_identical_nonterminals_pre", &before, &grammar);
             if grammar.rules.len() == prev {
                 break;
@@ -2508,7 +2535,7 @@ mod normal_route_inflation_probe {
         let max_reduction_len = MAX_RUNTIME_REDUCTION_LEN;
         let before = grammar.clone();
         bound_runtime_reduction_length(&mut grammar, max_reduction_len);
-        probe.record("bound_runtime_reduction_length", &grammar, true);
+        probe.record("bound_runtime_reduction_length", &grammar, states_all);
         probe.examples("bound_runtime_reduction_length", &before, &grammar);
 
         let before = grammar.clone();
@@ -2518,7 +2545,7 @@ mod normal_route_inflation_probe {
             max_reduction_len,
             grammar.start,
         );
-        probe.record("inline_post_bound_single_use_nonterminals", &grammar, true);
+        probe.record("inline_post_bound_single_use_nonterminals", &grammar, states_all);
         probe.examples(
             "inline_post_bound_single_use_nonterminals",
             &before,
@@ -2529,7 +2556,7 @@ mod normal_route_inflation_probe {
             let prev = grammar.rules.len();
             let before = grammar.clone();
             grammar.rules = merge_identical_nonterminals(&grammar.rules, grammar.start);
-            probe.record("merge_identical_nonterminals_post", &grammar, true);
+            probe.record("merge_identical_nonterminals_post", &grammar, states_all);
             probe.examples("merge_identical_nonterminals_post", &before, &grammar);
             if grammar.rules.len() == prev {
                 break;
@@ -2553,7 +2580,7 @@ mod normal_route_inflation_probe {
             } else {
                 "post_merge_normalize_2"
             };
-            probe.record(stage, &grammar, true);
+            probe.record(stage, &grammar, states_all);
             probe.examples(stage, &before, &grammar);
         }
 
@@ -2599,21 +2626,30 @@ mod normal_route_inflation_probe {
         );
     }
 
-    fn probe_case(name: &'static str, lowering: GrammarDef, budget: u64) {
-        eprintln!("PROBE_BEGIN gram={name} budget={budget}");
+    fn probe_case(
+        name: &'static str,
+        lowering: GrammarDef,
+        budget: u64,
+        prepass: bool,
+        states_all: bool,
+    ) {
+        eprintln!("PROBE_BEGIN gram={name} budget={budget} prepass={prepass}");
         probe_terminal_ended(name, &lowering);
+        set_test_epsfree_prepass(Some(prepass));
         let _limit = TestBudgetLimit::set(budget);
         let normal = super::prepare_grammar_transforms_only(lowering.clone());
+        set_test_epsfree_prepass(None);
         eprintln!(
-            "PROBE gram={} stage=public_prepare_grammar rules={} nts={} rhs={} states={} ms={:.3}",
+            "PROBE gram={} stage=public_prepare_grammar prepass={} rules={} nts={} rhs={} states={} ms={:.3}",
             name,
+            prepass,
             normal.rules.len(),
             nt_count(&normal),
             rhs_symbols(&normal),
             state_count(&normal),
             0.0,
         );
-        probe_normal(name, lowering);
+        probe_normal(name, lowering, prepass, states_all);
         eprintln!("PROBE_END gram={name}");
     }
 
@@ -2621,7 +2657,14 @@ mod normal_route_inflation_probe {
         crate::Vocab::new((0..=255u32).map(|id| (id, vec![id as u8])).collect())
     }
 
-    fn probe_compile(name: &'static str, grammar: Grammar<'static>, budget: u64) {
+    fn probe_compile(
+        name: &'static str,
+        grammar: Grammar<'static>,
+        budget: u64,
+        prepass: bool,
+    ) {
+        set_test_terminal_ended_rescue(Some(false));
+        set_test_epsfree_prepass(Some(prepass));
         let _limit = TestBudgetLimit::set(budget);
         let started = Instant::now();
         let result = grammar.compile_with_build_options(
@@ -2631,19 +2674,25 @@ mod normal_route_inflation_probe {
         let elapsed = started.elapsed().as_secs_f64() * 1000.0;
         match result {
             Ok(constraint) => eprintln!(
-                "PROBE_COMPILE gram={} declined=false backend={:?} ms={:.3}",
+                "PROBE_COMPILE gram={} prepass={} budget={} declined=false backend={:?} ms={:.3}",
                 name,
+                prepass,
+                budget,
                 constraint.parser_backend(),
                 elapsed,
             ),
             Err(error) => eprintln!(
-                "PROBE_COMPILE gram={} declined={} error={} ms={:.3}",
+                "PROBE_COMPILE gram={} prepass={} budget={} declined={} error={} ms={:.3}",
                 name,
+                prepass,
+                budget,
                 error.is_strategy_decline(),
                 error,
                 elapsed,
             ),
         }
+        set_test_epsfree_prepass(None);
+        set_test_terminal_ended_rescue(None);
     }
 
     #[test]
@@ -2687,6 +2736,120 @@ mod normal_route_inflation_probe {
         }
     }
 
+    fn epsfree_cases() -> Vec<(&'static str, &'static str)> {
+        let cases = vec![
+            (
+                "fuzz_4754",
+                "start: n0\nn0: \"b\" | \"b\" n2 | \"b\" | \"\"\nn1: \"c\" | n3 n1 n1 | \"b\" n2 n3 | \"\"\nn2: \"a\" | n0 | \"\" | n3 \"c\"\nn3: \"b\" | n2 n0 n3 | n2\n",
+            ),
+            (
+                "fuzz_594",
+                "start: n0\nn0: \"a\" | \"a\" \"c\" n1 | n1\nn1: \"c\" | n2 n1 | \"a\" | n1 n1 n2\nn2: \"c\" | n2 n1 \"b\" | n0 n2 | \"a\" \"c\"\n",
+            ),
+            (
+                "seed_2530_min",
+                "start: n3\nn0: \"c\" | n3 |\nn1: \"a\" |\nn2: | n0 n1 n2\nn3: \"b\" n2 n0 | n2 \"b\"\n",
+            ),
+            (
+                "fuzz_780",
+                "start: n1\nn0: \"b\" | \"\" | n0 \"b\" n1 | n1 \"c\" n0\nn1: \"c\" | n1 n1 | n0 \"a\" | \"c\" \"b\" n0\n",
+            ),
+        ];
+        match std::env::var("EPSFREE_GRAM") {
+            Ok(filter) => cases
+                .into_iter()
+                .filter(|(name, _)| *name == filter)
+                .collect(),
+            Err(_) => cases,
+        }
+    }
+
+    #[test]
+    #[ignore = "temporary epsfree prepass instrumentation"]
+    fn epsfree_stats_only() {
+        for (name, source) in epsfree_cases() {
+            let lowering = crate::import::lower_static_lark(source).expect("lowering");
+            eprintln!("EPSFREE_BEGIN gram={name}");
+            probe_terminal_ended(name, &lowering);
+            let only_on = std::env::var("EPSFREE_ONLY").ok().as_deref() == Some("on");
+            if !only_on {
+                probe_normal(name, lowering.clone(), false, false);
+            }
+            probe_normal(name, lowering.clone(), true, false);
+            eprintln!("EPSFREE_END gram={name}");
+        }
+    }
+
+    #[test]
+    #[ignore = "temporary epsfree prepass instrumentation"]
+    fn epsfree_compile_matrix() {
+        for (name, source) in epsfree_cases() {
+            for budget in [1_000_000_000u64, 10_000_000u64] {
+                let skip_off = (name == "fuzz_4754" && budget == 1_000_000_000)
+                    || (name == "fuzz_780" && budget == 1_000_000_000);
+                if !skip_off {
+                    probe_compile(
+                        name,
+                        Grammar::from_lark_owned(source, crate::LarkOptions::default()),
+                        budget,
+                        false,
+                    );
+                }
+                probe_compile(
+                    name,
+                    Grammar::from_lark_owned(source, crate::LarkOptions::default()),
+                    budget,
+                    true,
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "temporary epsfree prepass instrumentation"]
+    fn epsfree_prepass_measure() {
+        let cases = [
+            (
+                "fuzz_4754",
+                "start: n0\nn0: \"b\" | \"b\" n2 | \"b\" | \"\"\nn1: \"c\" | n3 n1 n1 | \"b\" n2 n3 | \"\"\nn2: \"a\" | n0 | \"\" | n3 \"c\"\nn3: \"b\" | n2 n0 n3 | n2\n",
+            ),
+            (
+                "fuzz_594",
+                "start: n0\nn0: \"a\" | \"a\" \"c\" n1 | n1\nn1: \"c\" | n2 n1 | \"a\" | n1 n1 n2\nn2: \"c\" | n2 n1 \"b\" | n0 n2 | \"a\" \"c\"\n",
+            ),
+            (
+                "seed_2530_min",
+                "start: n3\nn0: \"c\" | n3 |\nn1: \"a\" |\nn2: | n0 n1 n2\nn3: \"b\" n2 n0 | n2 \"b\"\n",
+            ),
+            (
+                "fuzz_780",
+                "start: n1\nn0: \"b\" | \"\" | n0 \"b\" n1 | n1 \"c\" n0\nn1: \"c\" | n1 n1 | n0 \"a\" | \"c\" \"b\" n0\n",
+            ),
+        ];
+        for (name, source) in cases {
+            let lowering = crate::import::lower_static_lark(source).expect("lowering");
+            eprintln!("EPSFREE_BEGIN gram={name}");
+            probe_terminal_ended(name, &lowering);
+            probe_normal(name, lowering.clone(), false, false);
+            probe_normal(name, lowering.clone(), true, true);
+            for budget in [1_000_000_000u64, 10_000_000u64] {
+                probe_compile(
+                    name,
+                    Grammar::from_lark_owned(source, crate::LarkOptions::default()),
+                    budget,
+                    false,
+                );
+                probe_compile(
+                    name,
+                    Grammar::from_lark_owned(source, crate::LarkOptions::default()),
+                    budget,
+                    true,
+                );
+            }
+            eprintln!("EPSFREE_END gram={name}");
+        }
+    }
+
     #[test]
     #[ignore = "temporary normal-route inflation instrumentation"]
     fn normal_route_inflation_probe() {
@@ -2697,11 +2860,14 @@ mod normal_route_inflation_probe {
             "fuzz_4754",
             crate::import::lower_static_lark(fuzz_4754).expect("fuzz_4754 lowering"),
             1_000_000_000,
+            false,
+            false,
         );
         probe_compile(
             "fuzz_4754",
             Grammar::from_lark_owned(fuzz_4754, crate::LarkOptions::default()),
             1_000_000_000,
+            false,
         );
 
         let fuzz_594 = "start: n0\nn0: \"a\" | \"a\" \"c\" n1 | n1\nn1: \"c\" | n2 n1 | \"a\" | n1 n1 n2\nn2: \"c\" | n2 n1 \"b\" | n0 n2 | \"a\" \"c\"\n";
@@ -2709,11 +2875,14 @@ mod normal_route_inflation_probe {
             "fuzz_594",
             crate::import::lower_static_lark(fuzz_594).expect("fuzz_594 lowering"),
             10_000_000,
+            false,
+            false,
         );
         probe_compile(
             "fuzz_594",
             Grammar::from_lark_owned(fuzz_594, crate::LarkOptions::default()),
             10_000_000,
+            false,
         );
 
         let seed_2530 = "start: n3\nn0: \"c\" | n3 |\nn1: \"a\" |\nn2: | n0 n1 n2\nn3: \"b\" n2 n0 | n2 \"b\"\n";
@@ -2721,11 +2890,14 @@ mod normal_route_inflation_probe {
             "seed_2530_min",
             crate::import::lower_static_lark(seed_2530).expect("seed_2530 lowering"),
             10_000_000,
+            false,
+            false,
         );
         probe_compile(
             "seed_2530_min",
             Grammar::from_lark_owned(seed_2530, crate::LarkOptions::default()),
             10_000_000,
+            false,
         );
 
         let fuzz_780 = "start: n1\nn0: \"b\" | \"\" | n0 \"b\" n1 | n1 \"c\" n0\nn1: \"c\" | n1 n1 | n0 \"a\" | \"c\" \"b\" n0\n";
@@ -2733,11 +2905,14 @@ mod normal_route_inflation_probe {
             "fuzz_780",
             crate::import::lower_static_lark(fuzz_780).expect("fuzz_780 lowering"),
             10_000_000,
+            false,
+            false,
         );
         probe_compile(
             "fuzz_780",
             Grammar::from_lark_owned(fuzz_780, crate::LarkOptions::default()),
             10_000_000,
+            false,
         );
     }
 }

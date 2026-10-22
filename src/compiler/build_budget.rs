@@ -60,6 +60,10 @@ pub(crate) struct BuildBudgetScope {
     handle: Option<Arc<TemplateBuildBudget>>,
     pool: Option<rayon::ThreadPool>,
     owns_caller_handle: bool,
+    /// Test-only experiment override captured on the caller thread and
+    /// propagated to pool workers, whose thread-locals are separate.
+    #[cfg(test)]
+    epsfree_prepass_override: Option<bool>,
 }
 
 impl BuildBudgetScope {
@@ -74,6 +78,9 @@ impl BuildBudgetScope {
                 handle: None,
                 pool: None,
                 owns_caller_handle: false,
+                #[cfg(test)]
+                epsfree_prepass_override:
+                    crate::compiler::grammar::transforms::epsfree_prepass_override_value(),
             };
         }
         let handle = TemplateBuildBudget::new(limit);
@@ -101,6 +108,9 @@ impl BuildBudgetScope {
             handle: Some(handle),
             pool,
             owns_caller_handle: true,
+            #[cfg(test)]
+            epsfree_prepass_override:
+                crate::compiler::grammar::transforms::epsfree_prepass_override_value(),
         }
     }
 
@@ -112,7 +122,22 @@ impl BuildBudgetScope {
         R: Send,
     {
         match &self.pool {
-            Some(pool) => pool.install(f),
+            Some(pool) => {
+                #[cfg(test)]
+                {
+                    let override_value = self.epsfree_prepass_override;
+                    pool.install(move || {
+                        crate::compiler::grammar::transforms::with_epsfree_prepass_override(
+                            override_value,
+                            f,
+                        )
+                    })
+                }
+                #[cfg(not(test))]
+                {
+                    pool.install(f)
+                }
+            }
             None => f(),
         }
     }
@@ -125,6 +150,9 @@ impl BuildBudgetScope {
             handle: Some(handle),
             pool: None,
             owns_caller_handle: true,
+            #[cfg(test)]
+            epsfree_prepass_override:
+                crate::compiler::grammar::transforms::epsfree_prepass_override_value(),
         }
     }
 }
