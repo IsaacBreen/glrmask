@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import sys
+import subprocess
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +138,10 @@ def language_payload():
                'quickstarts': {language: read(language + '-quickstart') for language in ['python', 'rust']},
                'guide_url': REPO + '/blob/main/GUIDE.md',
                'python_symbols': json.loads((CONTENT / 'python-api.json').read_text()),
+               'python_releases': json.loads((CONTENT / 'python-api-releases.json').read_text()),
+               'native_guides': {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in sorted([ROOT / 'bindings/cpp/README.md', ROOT / 'bindings/node/README.md',
+                                                     *CONTENT.glob('releases/*/cpp.md'), *CONTENT.glob('releases/*/javascript.md')])},
                'api_reference': {'python': WEBSITE + '/api/python/', 'rust': 'https://docs.rs/glrmask/latest/glrmask/'}}
     payload['content_sha256'] = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     return json.dumps(payload, ensure_ascii=False, indent=2) + '\n'
@@ -197,6 +202,10 @@ def main():
     assert cargo['package']['readme'] == 'README.rust.md', 'Cargo must select the Rust README'
     assert python['project']['readme'] == 'PYTHON.md', 'Python must select python/PYTHON.md'
     check_python_symbol_docs()
+    native = [sys.executable, str(ROOT / 'scripts/sync-native-guides.py')]
+    if args.check:
+        native.append('--check')
+    subprocess.run(native, check=True)
     files = outputs()
     stale = [str(p.relative_to(ROOT)) for p, content in files.items() if not p.exists() or p.read_text(encoding="utf-8") != content]
     if args.check and stale:

@@ -130,12 +130,6 @@ GLRMask has four core types:
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
-Use direct `Grammar.compile` for a closed source, or a `Module` when local
-settings, late-bound children, or retained work are needed. `Expr.choice` and
-`Expr.sequence` group grammar leaves without adding an extra lexer scope at each
-operator. See [modules and expressions](https://github.com/IsaacBreen/glrmask/blob/main/docs/module-api.md)
-for construction, open precompilation, and persistence examples.
-
 ### Python quickstart
 
 ```python
@@ -154,19 +148,6 @@ assert state.is_accepting()
 ```
 
 Python masks are NumPy Boolean arrays indexed by original model token ID.
-
-The next compatibility release targets ordinary, GIL-enabled CPython 3.9
-through 3.15. Its `cp39-abi3` wheels use Python's stable extension ABI, so one
-wheel per operating-system/architecture combination can serve multiple Python
-versions. This does not imply support for free-threaded Python (`cp314t`,
-`cp315t` or `abi3t`): the extension explicitly retains the GIL requirement.
-
-The expanded build matrix covers Windows x64/ARM64, macOS Intel/Apple Silicon,
-and Linux x64/ARM64 with either glibc or musl. Linux glibc Python wheels retain
-the manylinux2014 baseline; native C++/Node binaries use glibc 2.28 or newer.
-See [the compatibility guide](https://github.com/IsaacBreen/glrmask/blob/main/docs/compatibility.md)
-for runtime requirements and the distinction between source support and
-published package availability.
 
 ### Rust quickstart
 
@@ -283,8 +264,7 @@ immediately if that is the application's policy.
 The read-only `forced_tokens()` query returns a safe library-canonical prefix of
 genuinely forced ordinary text. It uses the longest admitted nonempty spelling
 and lowest-ID alias, retains exact-event IDs, and stops at root acceptance or an
-event boundary that greedy text would cross. The correctness-first reference may
-construct full masks and reports typed resource failures as errors. This is one
+event boundary that greedy text would cross. Resource limits are reported as errors. This is one
 canonical sequence, not an exhaustive tree of equivalent original-ID histories.
 Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forcing.md).
 
@@ -292,8 +272,7 @@ Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forc
 
 Native GLRM has optional semicolons, `grammar NAME { ... }`, explicit `t`/`nt`
 declarations, typed externs, scoped ignore, Unicode/byte expressions and regular
-intersection/subtraction. Native `shortest { ... }` syntax is removed; the internal
-prefix-minimal operation and Lark's regular-body `[lazy]` remain. Native source contains no numeric-token, special-token-name or
+intersection/subtraction. Use regular subtraction for prefix-minimal matching, or Lark's regular-body `[lazy]` annotation. Native source contains no numeric-token, special-token-name or
 inline JSON literals. Lark accepts those selected compatibility forms only in its
 explicit `llm` profile. Unsupported priorities, capture/sampling annotations,
 substring generation and regex-internal lazy quantifiers are errors.

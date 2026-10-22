@@ -1,0 +1,153 @@
+## Vocabulary and exact tokens
+
+`Vocab` maps original `uint32_t` token IDs to the exact bytes that tokenizer produces. Bytes may be partial UTF-8 or contain NUL; do not normalize them or reconstruct them from a display spelling. The string-view constructor copies exactly the supplied range, so use `Bytes` or an explicitly sized `std::string_view` for embedded NUL. Different IDs may have identical bytes.
+
+```cpp
+glrmask::Vocab vocab({
+    {0, glrmask::Bytes{0xc3}},
+    {1, glrmask::Bytes{0xa9}},
+    {31, glrmask::Bytes{0xc3, 0xa9}},
+}, {99});  // 99 is an exact-only control with no byte spelling.
+```
+
+Duplicate byte-backed IDs, duplicate exact-only IDs, and overlap between those two domains are rejected. `vocab.size()` counts byte-backed entries, not exact-only controls.
+
+`Token(id)` is a raw original-ID event whose bytes are resolved by the eventual vocabulary. `vocab.tokens(ids)` produces vocabulary-qualified `ExactTokens`, preserving token identity even when another ID has the same bytes. `vocab.token_ranges({{first, last}, ...})` uses inclusive endpoints; overlapping or adjacent ranges normalize without expanding every ID. `ExactTokens::ranges()` stays compact and `ids()` materializes the IDs. An empty set denotes an empty event language, not epsilon. Each match consumes one chosen token event.
+
+Exact-token events cannot be reproduced by committing their decoded bytes. Use `commit_token` for exact controls and end tokens; `commit_bytes` advances ordinary byte input only.
+
+## Grammars
+
+| Factory | Input |
+| --- | --- |
+| `Grammar::from_ebnf(source)` | EBNF text |
+| `Grammar::from_glrm(source)` | Native GLRM text |
+| `Grammar::from_json_schema(source)` | JSON Schema encoded as JSON text |
+| `Grammar::from_lark(source, options)` | Lark text and an optional profile |
+
+The constructors own their source text, so temporary strings need not outlive the returned grammar. Import capabilities and limitations are the same as the Rust core. See the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md). The binding does not add a full JSON Schema validator or a parse-tree API.
+
+Recognition is the default Lark profile. LLM extensions and named token atoms must be requested explicitly:
+
+```cpp
+glrmask::LarkOptions lark;
+lark.profile = glrmask::LarkProfile::Llm;
+lark.token_names["begin"] = {99};
+auto grammar = glrmask::Grammar::from_lark("start: <|begin|>", lark);
+```
+
+## Modules and expressions
+
+The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots, local mask settings, and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging their lexical scopes.
+
+```cpp
+glrmask::Vocab module_vocab({{0, "x"}, {1, "a"}, {2, "y"}, {3, "b"}});
+auto child = glrmask::Module(glrmask::Grammar::from_ebnf(R"(start ::= "a")"));
+child.set_mask_strategy(glrmask::MaskStrategy::TokenClassTrie);
+child.precompile(module_vocab);
+
+auto parent = glrmask::Module(glrmask::Grammar::from_glrm(
+    R"(extern grammar child
+       start root
+       nt root = "x" child "y")"));
+parent.bind("child", child);
+auto constraint = parent.compile(module_vocab);
+```
+
+`bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
+
+`externs()` returns an `Externs` snapshot of `name`, `kind`, and optional `source_span`; `unbound()` contains only unresolved entries. `set_mask_strategy` and `set_boundary_mask_strategy` change future compilation without discarding retained work. Final `CompileOptions` carries root `end_tokens`:
+
+```cpp
+auto expression = glrmask::Expr::choice({
+    child, glrmask::Grammar::from_ebnf(R"(start ::= "b")")});
+auto sequence = glrmask::Expr::sequence({
+    glrmask::Expr::literal("x"), expression, glrmask::Expr::literal("y")});
+```
+
+| `MaskStrategy` | Value | Intent |
+| --- | --- | --- |
+| `Auto` | `0` | Core default trade-off. |
+| `ParserDwa` | `1` | Static parser-DWA masks; slowest build, lowest runtime latency. |
+| `TokenTrie` | `2` | Dynamic token-trie walk; fastest build. |
+| `TokenClassTrie` | `3` | Token-trie walk over token equivalence classes. |
+
+`BoundaryMaskStrategy::FastBuild` and `FastRuntime` select the boundary-mask build policy. The aliases `kFastBuild` and `kFastRuntime` name `TokenTrie` and `ParserDwa`. Unsupported combinations return the same error as the Rust core rather than selecting a hidden fallback.
+
+## Decoding
+
+A `Constraint` is immutable and reusable. `start()` creates an independent sequence state. Each state owns its parser snapshot and keeps the compiled constraint alive after the C++ owner is destroyed, moved from, or disposed. `clone()` on a state gives an independent speculative branch.
+
+```cpp
+auto constraint = grammar.compile(vocab);
+auto state = constraint.start();
+std::vector<glrmask::TokenId> mask(constraint.mask_len());
+state.fill_mask(mask);
+if ((mask[0] & 1) != 0) state.commit_token(0);
+// commit_bytes advances ordinary byte input; exact and end tokens use commit_token.
+```
+
+Masks are packed original-ID bitsets. Bit `id % 32` of word `id / 32` is set when token `id` is allowed. The word count is `constraint.mask_len()`, not `vocab.size()`; sparse or very large IDs still require a dense output buffer. `fill_mask(pointer, word_count)` and `fill_mask(vector)` zero extra words. An undersized buffer throws `glrmask::Error` with `status() == GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` is the allocating convenience form.
+
+`is_rejected()` reports a prefix that cannot be recovered. A failed grammar commit follows the core's state semantics rather than acting as a general rollback; retain a clone before speculative commits. `forced_tokens()` performs read-only bounded lookahead and does not advance the state. `marker_ids()` and `marker_events()` expose possible recognition observations from the initial or latest commit. A marker event carries an `id` and a `uint64_t` byte offset; these are not final parse captures.
+
+## End tokens
+
+`is_accepting()` means the current prefix is a complete match. It does not mean generation must stop, because the grammar may permit more input. To stop at an explicit event, configure root `end_tokens` in `CompileOptions` and stop when one is sampled and committed.
+
+An allowed end token leaves the state accepting and non-rejected, empties the next mask, and prevents further commits. End-token policy belongs to the root; embedded child modules do not inherit it.
+
+## Persistence
+
+```cpp
+auto bytes = constraint.save();
+auto restored = glrmask::Constraint::load(bytes);
+
+auto external = constraint.save(true);       // Do not store the vocabulary.
+auto rebound = glrmask::Constraint::load(external, &vocab);
+
+auto module_bytes = parent.save();
+auto module = glrmask::Module::load(module_bytes, &vocab);
+```
+
+These are the Rust core's artifact formats, not C++ object serialization. Compatible builds of Rust, Python, C++, and Node can exchange them. Exact vocabulary identity is checked when a vocabulary is supplied; an external-vocabulary artifact cannot load without it, and equal vocabulary size is insufficient. Artifact compatibility is not promised across releases, architectures, or unrelated builds, so keep the source and configuration when long-term regeneration matters. Treat untrusted artifacts according to the core loader's limitations.
+
+## Errors and ownership
+
+Fallible C++ operations throw `glrmask::Error`; `status()` returns the underlying C status and `what()` owns the diagnostic text. Copies clone a handle and moves transfer it. Using a moved-from or disposed object throws `GLRMASK_CLOSED`. `dispose()` and normal RAII destruction release ownership, and repeated C++ disposal is harmless.
+
+A Rust unwinding panic is contained at the boundary and reported as `GLRMASK_PANIC`; discard any state it affected. Process aborts, allocation failure, stack overflow, and invalid foreign memory are not recoverable this way. Immutable constraints may be shared between threads with independent states. Do not concurrently mutate a grammar, module, or state, and do not destroy a handle while another thread uses it.
+
+## C interface
+
+`glrmask.h` is the complete C ABI and is valid C. It exposes opaque owning handles, length-delimited text and bytes, borrowed result views, and status-returning functions. The header's ownership comment is part of the contract: free each handle exactly once with its matching `_free`, keep result views until their result handle is freed, and do not use a C++ allocator on Rust-owned memory.
+
+| Status | Meaning |
+| --- | --- |
+| `GLRMASK_OK` | Success. |
+| `GLRMASK_INVALID_ARGUMENT` | Invalid pointer, length, UTF-8, option, or vocabulary input. |
+| `GLRMASK_ENGINE_ERROR` | Grammar, state, vocabulary-identity, or artifact error from the core. |
+| `GLRMASK_PANIC` | A contained unwinding panic; discard affected state. |
+| `GLRMASK_BUFFER_TOO_SMALL` | Caller mask capacity is insufficient. |
+| `GLRMASK_CLOSED` | A disposed or moved-from high-level object was used. |
+
+Output handles are null on failure. `glrmask_error_message()` is thread-local and valid only until the next GLRMask call on that thread. Vocabulary and committed bytes are arbitrary binary data; all other lengths are element counts. Option structs must carry the `struct_size` returned by their default constructors, and a null compile-options pointer selects defaults. A state handle independently retains its constraint. The C++ facade adds RAII and exceptions; exceptions never cross the C ABI.
+
+## Building from source
+
+Building from source requires a current stable Rust toolchain, CMake 3.20 or newer, and the platform C/C++ compiler. C++ consumers need C++17. On Windows, run from a Visual Studio Developer PowerShell or Developer Command Prompt with the MSVC toolchain.
+
+```sh
+cmake -S bindings/cpp -B build/native -DCMAKE_BUILD_TYPE=Release
+cmake --build build/native --config Release
+cmake --install build/native --config Release --prefix /absolute/path/glrmask-install
+```
+
+The default is a static library; add `-DGLRMASK_SHARED=ON` for a shared build. The installed package exports `glrmask::glrmask` for C++17 and `glrmask::c` for C:
+
+```cmake
+find_package(glrmask 0.4 CONFIG REQUIRED)
+target_link_libraries(application PRIVATE glrmask::glrmask)
+```
+
+Configure the consuming project with `-DCMAKE_PREFIX_PATH=/absolute/path/glrmask-install`. A Windows shared deployment needs `glrmask_c.dll` beside the executable or on `PATH`; Unix shared deployments use the normal runtime library path. The macOS shared library uses `@rpath`. Use matching headers and binaries from the same build.

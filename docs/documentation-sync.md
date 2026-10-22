@@ -152,3 +152,28 @@ homepage-only or Python-only rewrite fails even if generated hashes are updated.
 rendered rustdoc are checked now; existing docs.rs/package artifacts retain their
 published text until the next normal release. Never bump a package solely to
 propagate prose.
+
+
+## Published API versions
+
+Shared introductions and quickstarts follow `docs/content`. The public website
+selects the API contracts for the installed release line from
+`python-api-releases.json`; a development API change must not replace the
+contracts of an already published wheel. The current source contracts remain in
+`python-api.json`. Both sets are included in the hashed language payload and
+checked against the installed wheel's actual public symbols.
+
+
+## Native language guides
+
+`scripts/sync-guide.py` also runs `sync-native-guides.py`. C++ and Node.js
+share the Rust introduction, type descriptions, section order and equivalent
+quickstarts. Authored language-specific details stay in `docs/content`;
+the generated binding READMEs and released guides must not be edited directly.
+Published 0.3 guides use the matching PreparedGrammar API and are generated
+from `docs/content/releases/0.3` fragments. The website selects a release-line
+guide when available, otherwise the immutable package tag's binding README.
+API signatures continue to come from rustdoc, Python stubs and native headers
+or TypeScript declarations; generation copies reviewed prose without inventing it.
+
+The language payload includes hashes of the generated native guides. A native-only documentation correction therefore advances the website revision pin; unrelated core changes leave it unchanged.
