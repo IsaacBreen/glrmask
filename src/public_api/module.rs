@@ -537,19 +537,28 @@ impl Module {
         }
 
         let declared = source.declarations()?;
+        // A typed template decline must survive so the public boundary can
+        // rescue or fall back to TokenTrie; only real failures are rewrapped.
+        let token_class_error = |e: Error| {
+            if e.is_strategy_decline() {
+                e
+            } else {
+                Error::Compilation(format!("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: {e}"))
+            }
+        };
         let mut inner = match engine {
             MaskStrategy::TokenTrie => unreachable!("TOKEN_TRIE modules are never precompiled"),
             MaskStrategy::TokenClassTrie => match source.source {
                 GrammarSource::Glrm(_) | GrammarSource::Constructed | GrammarSource::Ebnf(_) => {
                     crate::import::compile_component_shell_balanced(source.component()?, vocab, &[])
-                        .map_err(|e| Error::Compilation(format!("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: {e}")))?
+                        .map_err(token_class_error)?
                 }
                 _ => {
                     let dynamic = match &source.source {
                         GrammarSource::Lark(s) => DynamicConstraint::from_lark_with_bounded_template_parser(s, vocab),
                         GrammarSource::JsonSchema(s) => DynamicConstraint::from_json_schema_with_bounded_template_parser(s, vocab),
                         _ => unreachable!(),
-                    }.map_err(|e| Error::Compilation(format!("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: {e}")))?;
+                    }.map_err(token_class_error)?;
                     let mut components = dynamic.into_constraints();
                     if components.len() != 1 {
                         return Err(Error::Compilation("mask strategy TOKEN_CLASS_TRIE cannot compile this grammar: requires one compiled component".into()));
