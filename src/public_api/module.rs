@@ -226,7 +226,7 @@ impl Module {
                 node: Arc::new(Node {
                     source: Arc::new(own_local(grammar)),
                     mask_strategy: MaskStrategy::Auto,
-                    boundary_mask_strategy: BoundaryMaskStrategy::FastBuild,
+                    boundary_mask_strategy: BoundaryMaskStrategy::ParserDwa,
                     prepared: BTreeMap::new(),
                     bindings,
                     certificate: Arc::new(OnceLock::new()),
@@ -587,6 +587,7 @@ impl Module {
                 let mut p = source.prepare_unlinked(vocab, BuildOptions::default())?;
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
+                let _ = inner.late_bind_vocab.set(vocab.clone());
                 inner.install_template_parser_from_compile()?;
                 if build_boundary {
                     inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
@@ -824,17 +825,16 @@ impl Module {
             } else {
                 crate::error::catch_internal_invariant(|| compose_named_children(parent, &children, vocab, SegmentedBoundaryBackend::Dynamic))??
             };
-            if parent.has_template_parser() && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto) {
+            if self.node.boundary_mask_strategy == BoundaryMaskStrategy::ParserDwa
+                && parent.has_template_parser()
+                && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
+            {
                 match crate::compiler::template_boundary::install(&mut parent, vocab) {
                     Ok(()) => {}
-                    // The static backend is chosen heuristically for this shape.
-                    // A resource-budget decline from the exact template
-                    // constructor leaves the exact segmented dynamic boundary
-                    // installed by `compose_owned` in place, so keep it.
                     Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
-                        if std::env::var_os("GLRMASK_PROFILE_COMPILE_SUMMARY").is_some() {
-                            eprintln!("[glrmask/profile][static_template_boundary] fallback=dynamic reason=budget_decline");
-                        }
+                        return Err(Error::Compilation(
+                            "static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (Dynamic) to keep the segmented dynamic boundary".into(),
+                        ));
                     }
                     Err(error) => return Err(error),
                 }
@@ -988,5 +988,175 @@ mod precompile_boundary_tests {
             .compile_with(&vocab, CompileOptions::default())
             .expect("plain compile");
         assert!(tokens(&plain).is_some(), "plain compile must build the default trigger");
+    }
+}
+
+#[cfg(test)]
+mod boundary_gate_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+
+    fn vocab() -> Vocab {
+        let vocab = Vocab::new(
+            [b"x".as_slice(), b"y", b"z", b"x!", b"ab!", b"a", b"b", b" "]
+                .into_iter()
+                .enumerate()
+                .map(|(id, bytes)| (id as u32, bytes.to_vec()))
+                .collect(),
+        );
+        vocab.prepare_for_compile();
+        vocab
+    }
+
+    fn compile_linked(parent: &str, child: Module, vocab: &Vocab) -> RuntimeConstraint {
+        let mut module = Module::new(&Grammar::from_glrm(parent));
+        module.bind("child", child).expect("bind child");
+        module
+            .compile_with(vocab, CompileOptions::default())
+            .expect("compile linked")
+    }
+
+    fn walk(
+        gated: &mut crate::ConstraintState<'_>,
+        ungated: &mut crate::ConstraintState<'_>,
+        depth: usize,
+    ) {
+        assert_eq!(gated.mask(), ungated.mask(), "mask mismatch at depth {depth}");
+        if depth == 0 {
+            return;
+        }
+        let allowed = gated.mask();
+        for token in allowed {
+            if ungated.mask().binary_search(&token).is_err() {
+                continue;
+            }
+            let mut next_gated = gated.clone();
+            let mut next_ungated = ungated.clone();
+            if next_gated.commit_token(token).is_err() {
+                continue;
+            }
+            next_ungated
+                .commit_token(token)
+                .expect("ungated commit must accept a gated token");
+            walk(&mut next_gated, &mut next_ungated, depth - 1);
+        }
+    }
+
+    fn assert_gate_agrees(composed: &RuntimeConstraint, label: &str) {
+        assert!(
+            matches!(composed.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_)),
+            "{label}: expected a TokenSet gate"
+        );
+        let mut ungated = composed.clone();
+        ungated.boundary_trigger = crate::runtime::BoundaryTrigger::None;
+        let mut gated_state = composed.start();
+        let mut ungated_state = ungated.start();
+        walk(&mut gated_state, &mut ungated_state, 4);
+    }
+
+    #[test]
+    fn token_set_gate_never_changes_masks() {
+        let vocab = vocab();
+        let child = Module::new(&Grammar::from_lark("start: \"y\"?"));
+        let simple = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            child.clone(),
+            &vocab,
+        );
+        assert_gate_agrees(&simple, "nullable child");
+
+        let postamble = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = "x" child "y";"#,
+            child.clone(),
+            &vocab,
+        );
+        assert_gate_agrees(&postamble, "parent postamble");
+
+        let mid_token = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = child;"#,
+            Module::new(&Grammar::from_ebnf(r#"start ::= "x""#)),
+            &vocab,
+        );
+        assert_gate_agrees(&mid_token, "child ends mid-token");
+
+        let after_prefix = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = "a" child;"#,
+            Module::new(&Grammar::from_ebnf(r#"start ::= "b""#)),
+            &vocab,
+        );
+        assert_gate_agrees(&after_prefix, "bound slot after prefix");
+
+        let recursive = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = list; nt list = "x" child list | "z";"#,
+            child.clone(),
+            &vocab,
+        );
+        assert_gate_agrees(&recursive, "recursive parent");
+
+        let nested_child = {
+            let mut middle = Module::new(&Grammar::from_glrm(
+                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            ));
+            middle.bind("child", child).unwrap();
+            middle
+        };
+        let nested = compile_linked(
+            r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            nested_child,
+            &vocab,
+        );
+        assert_gate_agrees(&nested, "two-level nested");
+
+        let ignored = Grammar::from_lark("start: \"x\" \"y\"\n%ignore WS\nWS: /[ \\t]+/")
+            .compile_with_build_options(
+                &vocab,
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            )
+            .expect("ignore grammar");
+        assert_gate_agrees(&ignored, "ignore/whitespace");
+    }
+}
+
+#[cfg(test)]
+mod boundary_strategy_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+
+    fn vocab() -> Vocab {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"z".to_vec()),
+            (3, b"xy".to_vec()),
+        ]);
+        vocab.prepare_for_compile();
+        vocab
+    }
+
+    #[test]
+    fn dynamic_and_parser_dwa_boundaries_produce_identical_masks() {
+        let vocab = vocab();
+        let child = Module::new(&Grammar::from_ebnf(r#"start ::= "y" "z""#));
+        let compile = |strategy| {
+            let mut parent = Module::new(&Grammar::from_glrm(
+                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            ));
+            parent.bind("child", child.clone()).unwrap();
+            parent.set_boundary_mask_strategy(strategy).unwrap();
+            parent
+                .compile_with(&vocab, CompileOptions::default())
+                .unwrap()
+        };
+        let static_boundary = compile(BoundaryMaskStrategy::ParserDwa);
+        let dynamic = compile(BoundaryMaskStrategy::Dynamic);
+        for prefix in [&[0u32][..0], &[0][..], &[0, 1][..]] {
+            let mut a = static_boundary.start();
+            let mut b = dynamic.start();
+            for &token in prefix {
+                a.commit_token(token).unwrap();
+                b.commit_token(token).unwrap();
+            }
+            assert_eq!(a.mask(), b.mask(), "mask mismatch after {prefix:?}");
+        }
     }
 }

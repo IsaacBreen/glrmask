@@ -131,7 +131,7 @@ const sequence = Expr.sequence(Expr.literal('x'), expression, Expr.literal('y'))
 | `TokenTrie` | `token-trie` | Dynamic token-trie walk; fastest build. |
 | `TokenClassTrie` | `token-class-trie` | Token-trie walk over token equivalence classes. |
 
-`BoundaryMaskStrategy.FastBuild` (`fast-build`) and `BoundaryMaskStrategy.FastRuntime` (`fast-runtime`) select the boundary build policy. `FastBuild` and `FastRuntime` also alias the `TokenTrie` and `ParserDwa` mask strategies.
+`BoundaryMaskStrategy.FastBuild` (`fast-build`) and `BoundaryMaskStrategy.FastRuntime` (`fast-runtime`) select the boundary parser (`Dynamic` and `ParserDwa`). The boundary token trigger is always the LLM token set. A `ParserDwa` budget decline is a typed error; use `fast-build` instead.
 
 ## Decoding
 

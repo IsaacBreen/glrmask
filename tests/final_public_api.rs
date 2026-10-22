@@ -379,7 +379,7 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
     assert_eq!(m.mask_strategy(), MaskStrategy::Auto);
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::FastBuild);
+    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::Dynamic);
 
     m.precompile(&v).unwrap();
     let _saved_before = m.save();
@@ -387,8 +387,8 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
     // Change settings
     m.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
     assert_eq!(m.mask_strategy(), MaskStrategy::ParserDwa);
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::FastRuntime).unwrap();
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::FastRuntime);
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
+    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
 
     // Retained work is preserved and runnable without re-running precompile
     let c = m.compile(&v).unwrap();
@@ -400,15 +400,15 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
 fn focused_7_boundary_level_minimum() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::FastBuild).unwrap();
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::Dynamic).unwrap();
     m.precompile(&v).unwrap();
 
     // Raising to FastRuntime builds more (upgrades to Exact)
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::FastRuntime).unwrap();
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
     m.precompile(&v).unwrap();
 
     // Lowering back to FastBuild keeps the higher level (Exact)
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::FastBuild).unwrap();
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::Dynamic).unwrap();
     m.precompile(&v).unwrap();
 
     let c = m.compile(&v).unwrap();

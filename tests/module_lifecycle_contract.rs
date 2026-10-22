@@ -88,8 +88,8 @@ fn settings_setters_never_invalidate_retained_work() {
     // Setters store the value and never touch retained work
     leaf.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
     assert_eq!(leaf.mask_strategy(), MaskStrategy::ParserDwa);
-    leaf.set_boundary_mask_strategy(BoundaryMaskStrategy::FastRuntime).unwrap();
-    assert_eq!(leaf.boundary_mask_strategy(), BoundaryMaskStrategy::FastRuntime);
+    leaf.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
+    assert_eq!(leaf.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
 
     let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;"));
     parent.bind("VALUE", &leaf).unwrap();

@@ -23,8 +23,12 @@ impl MaskStrategy {
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
     #[default]
-    FastBuild,
-    FastRuntime,
+    ParserDwa,
+    Dynamic,
+}
+impl BoundaryMaskStrategy {
+    pub const FAST_RUNTIME: Self = Self::ParserDwa;
+    pub const FAST_BUILD: Self = Self::Dynamic;
 }
 
 // Root compile options

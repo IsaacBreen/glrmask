@@ -52,24 +52,26 @@ impl MaskStrategy {
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
 }
 
-/// Minimum boundary mask detail level required for composition.
+/// Selects the parser used for crossings between composed grammars.
+///
+/// This is independent of the boundary token trigger, which is always the LLM
+/// token set. `ParserDwa` installs the static boundary parser; `Dynamic` keeps
+/// the segmented dynamic boundary built by composition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
-    /// Token-set boundary trigger (faster build).
+    /// Install the static boundary parser DWA (faster runtime crossings).
     #[default]
-    FastBuild,
-    /// Full exact proper-prefix boundary trigger (lower runtime latency).
-    FastRuntime,
+    ParserDwa,
+    /// Keep the segmented dynamic boundary parser.
+    Dynamic,
 }
 
 impl BoundaryMaskStrategy {
-    pub(crate) fn to_detail(self) -> BoundaryTriggerDetail {
-        match self {
-            Self::FastBuild => BoundaryTriggerDetail::TokenSet,
-            Self::FastRuntime => BoundaryTriggerDetail::Exact,
-        }
-    }
+    /// Alias for ParserDwa.
+    pub const FAST_RUNTIME: Self = Self::ParserDwa;
+    /// Alias for Dynamic.
+    pub const FAST_BUILD: Self = Self::Dynamic;
 }
 
 /// One declared extern slot contract on a Module.
@@ -754,6 +756,7 @@ impl<'a> Grammar<'a> {
                     }
                     let mut constraint = spec.compile_final(attempt_options.optimization_value())?;
                     ensure_runnable_constraint(&constraint)?;
+                    let detail = attempt_options.boundary_trigger.unwrap_or_default();
                     if attempt_options.parser_backend == ParserBackend::TemplateDfa {
                         // Preserve the component-only proper-prefix certificate while the
                         // LR/rule metadata still exists. A table-free constraint can be
@@ -766,7 +769,8 @@ impl<'a> Grammar<'a> {
                         );
                         constraint.install_template_parser_from_compile()?;
                     }
-                    apply_final_boundary_trigger(&mut constraint, attempt_options.boundary_trigger.unwrap_or_default())?;
+                    let _ = constraint.late_bind_vocab.set(vocab.clone());
+                    apply_final_boundary_trigger(&mut constraint, detail)?;
                     constraint.with_end_tokens(attempt_options.end_token_ids())
                 })
             })

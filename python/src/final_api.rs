@@ -62,8 +62,8 @@ pub(super) enum PyBoundaryMaskStrategy {
 impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
     fn from(value: PyBoundaryMaskStrategy) -> Self {
         match value {
-            PyBoundaryMaskStrategy::FAST_BUILD => Self::FastBuild,
-            PyBoundaryMaskStrategy::FAST_RUNTIME => Self::FastRuntime,
+            PyBoundaryMaskStrategy::FAST_BUILD => Self::Dynamic,
+            PyBoundaryMaskStrategy::FAST_RUNTIME => Self::ParserDwa,
         }
     }
 }
@@ -71,8 +71,8 @@ impl From<PyBoundaryMaskStrategy> for glrmask::BoundaryMaskStrategy {
 impl From<glrmask::BoundaryMaskStrategy> for PyBoundaryMaskStrategy {
     fn from(value: glrmask::BoundaryMaskStrategy) -> Self {
         match value {
-            glrmask::BoundaryMaskStrategy::FastBuild => Self::FAST_BUILD,
-            glrmask::BoundaryMaskStrategy::FastRuntime => Self::FAST_RUNTIME,
+            glrmask::BoundaryMaskStrategy::Dynamic => Self::FAST_BUILD,
+            glrmask::BoundaryMaskStrategy::ParserDwa => Self::FAST_RUNTIME,
             _ => Self::FAST_BUILD,
         }
     }

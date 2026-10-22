@@ -3,7 +3,7 @@ use super::*;
 use bincode::Options;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-const MAGIC: &[u8; 8] = b"GLRASM01";
+const MAGIC: &[u8; 8] = b"GLRASM02";
 const MAX_BYTES: u64 = 1 << 30;
 
 #[derive(Serialize, Deserialize)]
@@ -92,15 +92,15 @@ fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
 
 fn boundary_to_u8(b: BoundaryMaskStrategy) -> u8 {
     match b {
-        BoundaryMaskStrategy::FastBuild => 0,
-        BoundaryMaskStrategy::FastRuntime => 1,
+        BoundaryMaskStrategy::Dynamic => 0,
+        BoundaryMaskStrategy::ParserDwa => 1,
     }
 }
 
 fn u8_to_boundary(n: u8) -> Result<BoundaryMaskStrategy> {
     match n {
-        0 => Ok(BoundaryMaskStrategy::FastBuild),
-        1 => Ok(BoundaryMaskStrategy::FastRuntime),
+        0 => Ok(BoundaryMaskStrategy::Dynamic),
+        1 => Ok(BoundaryMaskStrategy::ParserDwa),
         _ => Err(err("invalid boundary mask strategy tag")),
     }
 }

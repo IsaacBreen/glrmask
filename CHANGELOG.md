@@ -16,9 +16,11 @@
   `Optimization`; `Balanced` is removed. Explicit strategies error instead of
   silently falling back. `TokenTrie` parts cannot be combined with `ParserDwa`
   or `TokenClassTrie` parts in one composition.
-- `BoundaryMaskStrategy` (`FastBuild`, the default, and `FastRuntime`) replaces
-  `BoundaryTriggerDetail`. The level is a minimum: retained work at a higher
-  level is reused, never downgraded.
+- `BoundaryMaskStrategy` (`ParserDwa`, the default, and `Dynamic`) selects the
+  boundary parser for composed grammars; `FAST_RUNTIME` and `FAST_BUILD` alias
+  `ParserDwa` and `Dynamic`. The boundary token trigger is always the LLM token
+  set and no longer derives from this setting. A `ParserDwa` budget decline is a
+  typed compile error; use `Dynamic` to keep the segmented dynamic boundary.
 - `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
   externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
   applied only to the root.

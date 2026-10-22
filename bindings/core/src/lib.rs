@@ -72,16 +72,16 @@ pub fn mask_strategy_value(strategy: glrmask::MaskStrategy) -> u32 {
 
 pub fn boundary_mask_strategy(val: u32) -> Result<glrmask::BoundaryMaskStrategy> {
     match val {
-        0 => Ok(glrmask::BoundaryMaskStrategy::FastBuild),
-        1 => Ok(glrmask::BoundaryMaskStrategy::FastRuntime),
+        0 => Ok(glrmask::BoundaryMaskStrategy::Dynamic),
+        1 => Ok(glrmask::BoundaryMaskStrategy::ParserDwa),
         _ => Err(Error::invalid("unknown boundary mask strategy; expected 0..1")),
     }
 }
 
 pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> u32 {
     match strategy {
-        glrmask::BoundaryMaskStrategy::FastBuild => 0,
-        glrmask::BoundaryMaskStrategy::FastRuntime => 1,
+        glrmask::BoundaryMaskStrategy::Dynamic => 0,
+        glrmask::BoundaryMaskStrategy::ParserDwa => 1,
         _ => 0,
     }
 }
