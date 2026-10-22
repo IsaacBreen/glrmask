@@ -9,7 +9,9 @@ use std::time::Instant;
 
 use crate::automata::unweighted_u32::dfa::DFA as UnweightedDfa;
 use crate::automata::unweighted_u32::determinize::determinize;
-use crate::automata::unweighted_u32::minimize_acyclic::minimize_acyclic as minimize_dfa;
+use crate::automata::unweighted_u32::minimize_acyclic::{
+    minimize_acyclic as minimize_dfa, try_minimize_acyclic as try_minimize_dfa,
+};
 use crate::automata::unweighted_u32::nfa::NFA;
 use crate::automata::weighted::nwa::{NWA, NWAState};
 use glrmask_invariant::__private::charge_template_build_budget as charge_build_budget;
@@ -1109,15 +1111,16 @@ fn compile_template_with_profile_and_minimize(
     characterization: &TerminalCharacterization,
     skip_minimize: bool,
 ) -> (UnweightedDfa, NWA, TemplateCompilationSample) {
-    let (dfa, sample) = compile_template_dfa_with_profile(characterization, skip_minimize);
+    let (dfa, sample) = try_compile_template_dfa_with_profile(characterization, skip_minimize)
+        .unwrap_or_else(|error| panic!("{error}"));
     let skeleton = dfa_to_nwa_skeleton(&dfa);
     (dfa, skeleton, sample)
 }
 
-fn compile_template_dfa_with_profile(
+fn try_compile_template_dfa_with_profile(
     characterization: &TerminalCharacterization,
     skip_minimize: bool,
-) -> (UnweightedDfa, TemplateCompilationSample) {
+) -> Result<(UnweightedDfa, TemplateCompilationSample), String> {
     let build_nfa_started_at = Instant::now();
     let nfa = build_template_nfa(characterization);
     let build_nfa_ms = elapsed_ms(build_nfa_started_at);
@@ -1143,7 +1146,7 @@ fn compile_template_dfa_with_profile(
     let dfa = if skip_minimize {
         determinized.clone()
     } else {
-        minimize_dfa(&determinized)
+        try_minimize_dfa(&determinized).map_err(|error| error.to_string())?
     };
     if template_quotient_validation_enabled()
         && let Some(witness) = find_dfa_language_mismatch(&determinized, &dfa)
@@ -1157,7 +1160,7 @@ fn compile_template_dfa_with_profile(
     };
     let (dfa_states, dfa_transitions) = dfa_size(&dfa);
 
-    (
+    Ok((
         dfa,
         TemplateCompilationSample {
             build_nfa_ms,
@@ -1170,7 +1173,7 @@ fn compile_template_dfa_with_profile(
             premin_dfa_states,
             premin_dfa_transitions,
         },
-    )
+    ))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1189,10 +1192,10 @@ pub struct TemplateDfaGroup {
 
 type CompiledCharacterization = (Vec<TerminalID>, UnweightedDfa, Option<NWA>, TemplateCompilationSample);
 
-fn compile_characterization_groups<'a>(
+fn try_compile_characterization_groups<'a>(
     characterizations: &'a BTreeMap<TerminalID, TerminalCharacterization>,
     include_skeletons: bool,
-) -> (Vec<(&'a TerminalCharacterization, Vec<TerminalID>)>, Vec<CompiledCharacterization>, TemplateCompileProfile) {
+) -> Result<(Vec<(&'a TerminalCharacterization, Vec<TerminalID>)>, Vec<CompiledCharacterization>, TemplateCompileProfile), String> {
     use rayon::prelude::*;
     let skip_minimize = skip_template_minimization_enabled();
     let mut grouped = BTreeMap::<&TerminalCharacterization, Vec<TerminalID>>::new();
@@ -1201,15 +1204,36 @@ fn compile_characterization_groups<'a>(
     }
     let groups: Vec<_> = grouped.into_iter().collect();
     let build = |(characterization, terminals): &(&TerminalCharacterization, Vec<TerminalID>)| {
-        let (dfa, sample) = compile_template_dfa_with_profile(*characterization, skip_minimize);
-        let skeleton = include_skeletons.then(|| dfa_to_nwa_skeleton(&dfa));
-        (terminals.clone(), dfa, skeleton, sample)
+        let result = try_compile_template_dfa_with_profile(*characterization, skip_minimize)
+            .map(|(dfa, sample)| {
+                let skeleton = include_skeletons.then(|| dfa_to_nwa_skeleton(&dfa));
+                (terminals.clone(), dfa, skeleton, sample)
+            });
+        (terminals[0], result)
     };
-    let compiled: Vec<CompiledCharacterization> = if super::macro_parallelism_disabled() {
-        groups.iter().map(build).collect()
-    } else {
-        groups.par_iter().map(build).collect()
-    };
+    let results: Vec<(TerminalID, Result<CompiledCharacterization, String>)> =
+        if super::macro_parallelism_disabled() {
+            groups.iter().map(build).collect()
+        } else {
+            groups.par_iter().map(build).collect()
+        };
+    let mut failure: Option<(TerminalID, String)> = None;
+    for (terminal, result) in &results {
+        if let Err(message) = result
+            && failure
+                .as_ref()
+                .is_none_or(|(current, _)| terminal < current)
+        {
+            failure = Some((*terminal, message.clone()));
+        }
+    }
+    if let Some((_, message)) = failure {
+        return Err(message);
+    }
+    let compiled = results
+        .into_iter()
+        .map(|(_, result)| result.expect("template compile failures checked before unwrapping"))
+        .collect::<Vec<_>>();
     super::report_macro_item_timings(
         "template_compile_characterizations",
         &compiled.iter().map(|(_, _, _, sample)| sample.total_ms()).collect::<Vec<_>>(),
@@ -1221,7 +1245,7 @@ fn compile_characterization_groups<'a>(
         minimize_skipped: skip_minimize,
         ..TemplateCompileProfile::default()
     };
-    (groups, compiled, profile)
+    Ok((groups, compiled, profile))
 }
 
 impl Templates {
@@ -1321,7 +1345,22 @@ impl Templates {
     pub fn from_characterizations_profiled(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> (Self, TemplateCompileProfile) {
-        Self::from_characterizations_with_outputs(characterizations, true)
+        Self::try_from_characterizations_profiled(characterizations)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_from_characterizations(
+        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    ) -> Result<Self, String> {
+        Self::try_from_characterizations_profiled(characterizations).map(|output| output.0)
+    }
+
+    /// Fallible production template construction. A cyclic graph is an
+    /// unsupported template shape and must remain a typed compile decline.
+    pub fn try_from_characterizations_profiled(
+        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    ) -> Result<(Self, TemplateCompileProfile), String> {
+        Self::try_from_characterizations_with_outputs(characterizations, true)
     }
 
     /// Compile the same exact terminal DFAs without producing unused NWA
@@ -1330,7 +1369,15 @@ impl Templates {
     pub fn dfas_from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> BTreeMap<TerminalID, UnweightedDfa> {
-        Self::from_characterizations_with_outputs(characterizations, false).0.by_terminal
+        Self::try_dfas_from_characterizations(characterizations)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_dfas_from_characterizations(
+        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    ) -> Result<BTreeMap<TerminalID, UnweightedDfa>, String> {
+        Self::try_from_characterizations_with_outputs(characterizations, false)
+            .map(|output| output.0.by_terminal)
     }
 
     /// Preserve the existing exact quotient without cloning raw graphs for
@@ -1338,8 +1385,16 @@ impl Templates {
     pub fn grouped_dfas_from_characterizations(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
     ) -> (Vec<TemplateDfaGroup>, TemplateCompileProfile) {
+        Self::try_grouped_dfas_from_characterizations(characterizations)
+            .unwrap_or_else(|error| panic!("{error}"))
+    }
+
+    pub fn try_grouped_dfas_from_characterizations(
+        characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
+    ) -> Result<(Vec<TemplateDfaGroup>, TemplateCompileProfile), String> {
         let started_at = Instant::now();
-        let (groups, compiled, mut profile) = compile_characterization_groups(characterizations, false);
+        let (groups, compiled, mut profile) =
+            try_compile_characterization_groups(characterizations, false)?;
         let fanout_started_at = Instant::now();
         let output = compiled.into_iter().map(|(terminals, dfa, skeleton, sample)| {
             profile.observe_compilation(&sample, terminals.len());
@@ -1359,15 +1414,16 @@ impl Templates {
         profile.validation_ms = elapsed_ms(validation_started_at);
         profile.total_ms += profile.validation_ms;
         profile.wall_ms = elapsed_ms(started_at);
-        (output, profile)
+        Ok((output, profile))
     }
 
-    fn from_characterizations_with_outputs(
+    fn try_from_characterizations_with_outputs(
         characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
         include_skeletons: bool,
-    ) -> (Self, TemplateCompileProfile) {
+    ) -> Result<(Self, TemplateCompileProfile), String> {
         let total_started_at = Instant::now();
-        let (groups, compiled, mut profile) = compile_characterization_groups(characterizations, include_skeletons);
+        let (groups, compiled, mut profile) =
+            try_compile_characterization_groups(characterizations, include_skeletons)?;
 
         let mut by_terminal = BTreeMap::new();
         let mut by_terminal_nwa = BTreeMap::new();
@@ -1392,13 +1448,13 @@ impl Templates {
         profile.total_ms += profile.validation_ms;
         profile.wall_ms = elapsed_ms(total_started_at);
 
-        (
+        Ok((
             Self {
                 by_terminal,
                 by_terminal_nwa,
             },
             profile,
-        )
+        ))
     }
 }
 
@@ -2215,7 +2271,8 @@ mod tests {
                 (101, characterization),
             ]);
             let complete = Templates::from_characterizations(&input);
-            let (dfa_only, profile) = Templates::from_characterizations_with_outputs(&input, false);
+            let (dfa_only, profile) =
+                Templates::try_from_characterizations_with_outputs(&input, false).unwrap();
             assert!(dfa_only.by_terminal_nwa.is_empty());
             assert_eq!(complete.by_terminal, dfa_only.by_terminal);
             assert_eq!(Templates::dfas_from_characterizations(&input), complete.by_terminal);

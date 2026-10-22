@@ -39,6 +39,86 @@ use crate::grammar::flat::{NonterminalID, TerminalID};
 
 type NtAdjacency = BTreeMap<NonterminalID, BTreeSet<NonterminalID>>;
 
+/// A terminal characterization cannot certify the acyclic contract required by
+/// the current template artifact. These are anticipated capability declines,
+/// not compiler invariant violations, so callers propagate them as typed
+/// strategy errors instead of unwinding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CharacterizationError {
+    /// The ordinary terminal reduction relation contains a nonterminal
+    /// re-reduction cycle.
+    ReductionCycle {
+        terminal: TerminalID,
+        cycle: Vec<NonterminalID>,
+    },
+    /// A caller-seeded nonterminal continuation introduced a cycle.
+    SeededReductionCycle {
+        terminal: TerminalID,
+        cycle: Vec<NonterminalID>,
+    },
+    /// The requested characterization shape is outside the supported contract.
+    UnsupportedShape(String),
+    /// The request itself is malformed (for example, a mask that does not
+    /// cover the terminal domain).
+    InvalidRequest(String),
+}
+
+impl CharacterizationError {
+    /// Terminal whose failure a deterministic parallel selection must expose.
+    /// Only cycle errors carry a terminal; malformed requests sort first.
+    pub fn failed_terminal(&self) -> TerminalID {
+        match self {
+            Self::ReductionCycle { terminal, .. }
+            | Self::SeededReductionCycle { terminal, .. } => *terminal,
+            Self::UnsupportedShape(_) | Self::InvalidRequest(_) => 0,
+        }
+    }
+}
+
+impl std::fmt::Display for CharacterizationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReductionCycle { terminal, cycle } => write!(
+                f,
+                "terminal characterization for terminal {terminal} contains a reduction cycle: {cycle:?}",
+            ),
+            Self::SeededReductionCycle { terminal, cycle } => write!(
+                f,
+                "seeded nonterminal characterization for terminal {terminal} contains a reduction cycle: {cycle:?}",
+            ),
+            Self::UnsupportedShape(message) | Self::InvalidRequest(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+impl std::error::Error for CharacterizationError {}
+
+/// Select the failure for the lowest terminal index after a parallel
+/// characterization pass. Completion order is deliberately irrelevant.
+fn select_lowest_terminal_failure<T>(
+    results: Vec<(TerminalID, Result<T, CharacterizationError>)>,
+) -> Result<Vec<T>, CharacterizationError> {
+    let mut failure: Option<CharacterizationError> = None;
+    for (_, result) in &results {
+        if let Err(error) = result
+            && failure
+                .as_ref()
+                .is_none_or(|current| error.failed_terminal() < current.failed_terminal())
+        {
+            failure = Some(error.clone());
+        }
+    }
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(results
+        .into_iter()
+        .map(|(_, result)| result.expect("failures checked before unwrapping"))
+        .collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub enum StackMatcher {
     Any,
@@ -1270,6 +1350,103 @@ fn characterize_nt_continuations_for_terminal(
 mod seed_index_tests {
     use super::*;
 
+    fn two_terminal_grammar() -> AnalyzedGrammar {
+        let named = crate::grammar::glrm::from_glrm(
+            "start s; t A ::= \"a\"; t B ::= \"b\"; nt s ::= A | B;",
+        )
+        .expect("fixture grammar");
+        let flat = crate::grammar::ast::lower(&named).expect("lower fixture grammar");
+        AnalyzedGrammar::from_grammar_def(&flat)
+    }
+
+    fn cyclic_two_terminal_table() -> GLRTable {
+        // Each terminal crosses its pushed goto prefix and may repeat, so both
+        // relations contain a genuine NtRereduce cycle. Distinct reduction
+        // targets keep the two action signatures in separate quotient groups.
+        GLRTable {
+            action: vec![
+                std::iter::empty().collect(),
+                vec![(0, Action::Reduce(0, 2)), (1, Action::Reduce(1, 2))]
+                    .into_iter()
+                    .collect(),
+                std::iter::empty().collect(),
+                vec![(0, Action::Shift(4, false)), (1, Action::Shift(4, false))]
+                    .into_iter()
+                    .collect(),
+                std::iter::empty().collect(),
+            ],
+            goto: vec![
+                vec![(0, (1, false)), (1, (1, false))].into_iter().collect(),
+                std::iter::empty().collect(),
+                vec![(0, (3, false)), (1, (3, false))].into_iter().collect(),
+                std::iter::empty().collect(),
+                std::iter::empty().collect(),
+            ],
+            num_states: 5,
+            num_terminals: 2,
+            num_rules: 0,
+            rules: Vec::new(),
+            nonterminal_display_names: Vec::new(),
+            construction: Default::default(),
+            admission_policy: Default::default(),
+            advance: Vec::new(),
+            unconditional_advance: Vec::new(),
+            forwarded_shifts: FxHashSet::default(),
+            control_terminals: BTreeSet::new(),
+            skip_terminals: BTreeSet::new(),
+            guarded_shift_index: Vec::new(),
+            direct_regular_wide_frontiers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn profiled_characterization_returns_the_typed_cycle_error() {
+        let table = cyclic_two_terminal_table();
+        let grammar = two_terminal_grammar();
+        let error = try_characterize_terminals_profiled(&table, &grammar)
+            .expect_err("a cyclic relation must not produce an artifact relation");
+        match error {
+            CharacterizationError::ReductionCycle { terminal, ref cycle } => {
+                assert_eq!(terminal, 0);
+                assert!(!cycle.is_empty());
+            }
+            other => panic!("expected a structured reduction cycle, got {other:?}"),
+        }
+        assert!(
+            error
+                .to_string()
+                .contains("terminal characterization for terminal 0 contains a reduction cycle"),
+            "{error}",
+        );
+    }
+
+    #[test]
+    fn parallel_characterization_reports_the_lowest_failing_terminal() {
+        let table = cyclic_two_terminal_table();
+        for threads in [1, 2, 4] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("rayon test pool");
+            for _ in 0..8 {
+                let error = pool
+                    .install(|| {
+                        try_characterize_selected_terminals_for_terminal_count(
+                            &table,
+                            2,
+                            &[true, true],
+                        )
+                    })
+                    .expect_err("both terminals contain cycles");
+                assert_eq!(
+                    error.failed_terminal(),
+                    0,
+                    "threads={threads} must not expose completion order: {error}",
+                );
+            }
+        }
+    }
+
     #[test]
     fn exact_single_unit_seed_memo_preserves_chains_cycles_and_replacing_gotos() {
         for trial in 0..96u32 {
@@ -1531,7 +1708,7 @@ fn try_characterize_terminal(
     table: &GLRTable,
     index: &CharacterizationIndex,
     terminal: TerminalID,
-) -> Result<TerminalCharacterization, String> {
+) -> Result<TerminalCharacterization, CharacterizationError> {
     let mut output = CharacterizationOutput::default();
     characterize_initial_actions_for_terminal(table, index, terminal, &mut output);
     characterize_nt_continuations_for_terminal(table, index, terminal, &mut output);
@@ -1557,22 +1734,13 @@ fn try_characterize_terminal(
     };
 
     if let Some(cycle) = characterization.find_cycle() {
-        return Err(format!(
-            "terminal characterization for terminal {terminal} contains a reduction cycle: {cycle:?}",
-        ));
+        return Err(CharacterizationError::ReductionCycle {
+            terminal,
+            cycle,
+        });
     }
 
     Ok(characterization)
-}
-
-fn characterize_terminal(
-    table: &GLRTable,
-    index: &CharacterizationIndex,
-    terminal: TerminalID,
-) -> TerminalCharacterization {
-    // Keep the established compiler API while callers that accept arbitrary
-    // frontends can explicitly reject an unsupported finite relation.
-    try_characterize_terminal(table, index, terminal).unwrap_or_else(|error| panic!("{error}"))
 }
 
 pub fn characterize_terminals(
@@ -1616,9 +1784,11 @@ pub fn try_characterize_selected_terminals_for_terminal_count(
     table: &GLRTable,
     num_terminals: u32,
     selected: &[bool],
-) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, String> {
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
     if selected.len() != num_terminals as usize {
-        return Err("selected template mask must cover the terminal domain".to_owned());
+        return Err(CharacterizationError::InvalidRequest(
+            "selected template mask must cover the terminal domain".to_owned(),
+        ));
     }
     let profile = std::env::var_os("GLRMASK_PROFILE_COMPOSE").is_some();
     let total_started = profile.then(Instant::now);
@@ -1643,8 +1813,9 @@ pub fn try_characterize_selected_terminals_for_terminal_count(
     let signature_ms = signature_started.map_or(0.0, elapsed_ms);
     let characterize_started = profile.then(Instant::now);
     let characterize_group = |terminals: &Vec<TerminalID>| {
-        try_characterize_terminal(table, &index, terminals[0])
-            .map(|characterization| (terminals.clone(), characterization))
+        let result = try_characterize_terminal(table, &index, terminals[0])
+            .map(|characterization| (terminals.clone(), characterization));
+        (terminals[0], result)
     };
     let characterized = if super::macro_parallelism_disabled() {
         let mut timings = Vec::with_capacity(groups.len());
@@ -1656,11 +1827,15 @@ pub fn try_characterize_selected_terminals_for_terminal_count(
                 timings.push(elapsed_ms(started));
                 result
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Vec<_>>();
         super::report_macro_item_timings("selected_terminal_characterization", &timings);
-        characterized
+        select_lowest_terminal_failure(characterized)?
     } else {
-        groups.par_iter().map(characterize_group).collect::<Result<Vec<_>, String>>()?
+        let characterized = groups
+            .par_iter()
+            .map(characterize_group)
+            .collect::<Vec<_>>();
+        select_lowest_terminal_failure(characterized)?
     };
     let characterize_ms = characterize_started.map_or(0.0, elapsed_ms);
 
@@ -1689,7 +1864,20 @@ pub fn characterize_terminal_action_state_seeds(
     grammar: &AnalyzedGrammar,
     action_states_by_terminal: &[Vec<u32>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    characterize_terminal_action_state_seeds_for_terminal_count(
+    try_characterize_terminal_action_state_seeds(
+        table,
+        grammar,
+        action_states_by_terminal,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_characterize_terminal_action_state_seeds(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    action_states_by_terminal: &[Vec<u32>],
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
+    try_characterize_terminal_action_state_seeds_for_terminal_count(
         table,
         grammar.num_terminals,
         action_states_by_terminal,
@@ -1749,11 +1937,27 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
     num_terminals: u32,
     action_states_by_terminal: &[Vec<u32>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    assert_eq!(
-        action_states_by_terminal.len(),
-        num_terminals as usize,
-        "seeded template action-state rows must cover the terminal domain",
-    );
+    try_characterize_terminal_action_state_seeds_for_terminal_count(
+        table,
+        num_terminals,
+        action_states_by_terminal,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Fallible count-only seeded action characterization. Seeded composition can
+/// introduce a reduction cycle that the ordinary relation did not contain, so
+/// callers must be able to decline it without unwinding.
+pub fn try_characterize_terminal_action_state_seeds_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    action_states_by_terminal: &[Vec<u32>],
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
+    if action_states_by_terminal.len() != num_terminals as usize {
+        return Err(CharacterizationError::InvalidRequest(
+            "seeded template action-state rows must cover the terminal domain".to_owned(),
+        ));
+    }
     let sparse_seeded =
         std::env::var_os("GLRMASK_EXPERIMENT_SPARSE_SEEDED_CHARACTERIZATION_INDEX").is_some();
     let index = if sparse_seeded {
@@ -1768,12 +1972,14 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
         index
     };
     let characterize = |(terminal, _): (usize, &Vec<u32>)| {
-            let terminal = terminal as TerminalID;
-            (terminal, characterize_terminal(table, &index, terminal))
-        };
+        let terminal = terminal as TerminalID;
+        let result = try_characterize_terminal(table, &index, terminal)
+            .map(|characterization| (terminal, characterization));
+        (terminal, result)
+    };
     let result = if super::macro_parallelism_disabled() {
         let mut timings = Vec::new();
-        let result = action_states_by_terminal
+        let results = action_states_by_terminal
             .iter()
             .enumerate()
             .filter(|(_, states)| !states.is_empty())
@@ -1783,17 +1989,20 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
                 timings.push(elapsed_ms(started));
                 result
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Vec<_>>();
         super::report_macro_item_timings("seeded_action_state_characterization", &timings);
-        result
+        select_lowest_terminal_failure(results)?
     } else {
-        action_states_by_terminal
+        let results = action_states_by_terminal
             .par_iter()
             .enumerate()
             .filter(|(_, states)| !states.is_empty())
             .map(characterize)
-            .collect::<BTreeMap<_, _>>()
-    };
+            .collect::<Vec<_>>();
+        select_lowest_terminal_failure(results)?
+    }
+    .into_iter()
+    .collect::<BTreeMap<_, _>>();
     if sparse_seeded
         && std::env::var_os("GLRMASK_VALIDATE_SPARSE_SEEDED_CHARACTERIZATION_INDEX").is_some()
     {
@@ -1801,27 +2010,30 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
             build_characterization_index_for_terminal_count(table, num_terminals);
         reference_index.action_states_by_terminal = action_states_by_terminal.to_vec();
         let characterize_reference = |(terminal, _): (usize, &Vec<u32>)| {
-                let terminal = terminal as TerminalID;
-                (
-                    terminal,
-                    characterize_terminal(table, &reference_index, terminal),
-                )
-            };
+            let terminal = terminal as TerminalID;
+            let result =
+                try_characterize_terminal(table, &reference_index, terminal)
+                    .map(|characterization| (terminal, characterization));
+            (terminal, result)
+        };
         let reference = if super::macro_parallelism_disabled() {
             action_states_by_terminal
                 .iter()
                 .enumerate()
                 .filter(|(_, states)| !states.is_empty())
                 .map(characterize_reference)
-                .collect::<BTreeMap<_, _>>()
+                .collect::<Vec<_>>()
         } else {
             action_states_by_terminal
                 .par_iter()
                 .enumerate()
                 .filter(|(_, states)| !states.is_empty())
                 .map(characterize_reference)
-                .collect::<BTreeMap<_, _>>()
+                .collect::<Vec<_>>()
         };
+        let reference = select_lowest_terminal_failure(reference)?
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
         assert_eq!(
             result, reference,
             "sparse seeded characterization index differs from full index",
@@ -1831,7 +2043,7 @@ pub fn characterize_terminal_action_state_seeds_for_terminal_count(
             result.len(),
         );
     }
-    result
+    Ok(result)
 }
 
 /// Characterize terminal behavior introduced by caller-supplied goto
@@ -1847,7 +2059,20 @@ pub fn characterize_terminal_nt_predecessor_seeds(
     grammar: &AnalyzedGrammar,
     seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+    try_characterize_terminal_nt_predecessor_seeds(
+        table,
+        grammar,
+        seeds_by_terminal,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+pub fn try_characterize_terminal_nt_predecessor_seeds(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+    seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
+    try_characterize_terminal_nt_predecessor_seeds_for_terminal_count(
         table,
         grammar.num_terminals,
         seeds_by_terminal,
@@ -1862,59 +2087,75 @@ pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
     num_terminals: u32,
     seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
 ) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    assert_eq!(
-        seeds_by_terminal.len(),
-        num_terminals as usize,
-        "seeded template relation must cover the merged terminal domain",
-    );
+    try_characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+        table,
+        num_terminals,
+        seeds_by_terminal,
+    )
+    .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Fallible seeded nonterminal-continuation characterization. A newly grafted
+/// goto can make a previously acyclic relation cyclic, which is an unsupported
+/// shape rather than an internal invariant violation.
+pub fn try_characterize_terminal_nt_predecessor_seeds_for_terminal_count(
+    table: &GLRTable,
+    num_terminals: u32,
+    seeds_by_terminal: &[Vec<(u32, u32, NonterminalID, bool)>],
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
+    if seeds_by_terminal.len() != num_terminals as usize {
+        return Err(CharacterizationError::InvalidRequest(
+            "seeded template relation must cover the merged terminal domain".to_owned(),
+        ));
+    }
 
     let characterize = |(terminal, seeds): (usize, &Vec<(u32, u32, NonterminalID, bool)>)| {
-            let terminal = terminal as TerminalID;
-            let mut output = CharacterizationOutput::default();
-            for &(top_state, revealed_state, source_nonterminal, goto_replace) in seeds {
-                let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
-                let mut seen = FxHashSet::default();
-                seen.insert(config.clone());
-                let mut worklist = VecDeque::from([config]);
-                drain_nonconsuming_worklist(
-                    table,
-                    terminal,
-                    CharacterizationSource::Nonterminal(source_nonterminal),
-                    &mut output,
-                    &mut seen,
-                    &mut worklist,
-                );
-            }
+        let terminal = terminal as TerminalID;
+        let mut output = CharacterizationOutput::default();
+        for &(top_state, revealed_state, source_nonterminal, goto_replace) in seeds {
+            let config = start_relation_after_goto(revealed_state, top_state, goto_replace);
+            let mut seen = FxHashSet::default();
+            seen.insert(config.clone());
+            let mut worklist = VecDeque::from([config]);
+            drain_nonconsuming_worklist(
+                table,
+                terminal,
+                CharacterizationSource::Nonterminal(source_nonterminal),
+                &mut output,
+                &mut seen,
+                &mut worklist,
+            );
+        }
 
-            let mut referenced_nts = BTreeSet::new();
-            for reduce in &output.reduces {
-                referenced_nts.insert(reduce.nonterminal);
-            }
-            for nt_escape in &output.nt_escapes {
-                referenced_nts.insert(nt_escape.source_nonterminal);
-            }
-            for nt_rereduce in &output.nt_rereduces {
-                referenced_nts.insert(nt_rereduce.source_nonterminal);
-                referenced_nts.insert(nt_rereduce.target_nonterminal);
-            }
-            let characterization = TerminalCharacterization {
-                escapes: output.escapes.into_iter().collect(),
-                reduces: output.reduces.into_iter().collect(),
-                nt_escapes: output.nt_escapes.into_iter().collect(),
-                nt_rereduces: output.nt_rereduces.into_iter().collect(),
-                all_nts: referenced_nts,
-            };
-            if let Some(cycle) = characterization.find_cycle() {
-                panic!(
-                    "seeded nonterminal characterization for terminal {} contains a reduction cycle: {:?}",
-                    terminal, cycle
-                );
-            }
-            (terminal, characterization)
+        let mut referenced_nts = BTreeSet::new();
+        for reduce in &output.reduces {
+            referenced_nts.insert(reduce.nonterminal);
+        }
+        for nt_escape in &output.nt_escapes {
+            referenced_nts.insert(nt_escape.source_nonterminal);
+        }
+        for nt_rereduce in &output.nt_rereduces {
+            referenced_nts.insert(nt_rereduce.source_nonterminal);
+            referenced_nts.insert(nt_rereduce.target_nonterminal);
+        }
+        let characterization = TerminalCharacterization {
+            escapes: output.escapes.into_iter().collect(),
+            reduces: output.reduces.into_iter().collect(),
+            nt_escapes: output.nt_escapes.into_iter().collect(),
+            nt_rereduces: output.nt_rereduces.into_iter().collect(),
+            all_nts: referenced_nts,
         };
+        let result = characterization
+            .find_cycle()
+            .map_or(Ok(characterization), |cycle| {
+                Err(CharacterizationError::SeededReductionCycle { terminal, cycle })
+            })
+            .map(|characterization| (terminal, characterization));
+        (terminal, result)
+    };
     if super::macro_parallelism_disabled() {
         let mut timings = Vec::new();
-        let result = seeds_by_terminal
+        let results = seeds_by_terminal
             .iter()
             .enumerate()
             .filter(|(_, seeds)| !seeds.is_empty())
@@ -1924,16 +2165,21 @@ pub fn characterize_terminal_nt_predecessor_seeds_for_terminal_count(
                 timings.push(elapsed_ms(started));
                 result
             })
-            .collect();
+            .collect::<Vec<_>>();
         super::report_macro_item_timings("seeded_nonterminal_characterization", &timings);
-        result
+        Ok(select_lowest_terminal_failure(results)?
+            .into_iter()
+            .collect())
     } else {
-        seeds_by_terminal
+        let results = seeds_by_terminal
             .par_iter()
             .enumerate()
             .filter(|(_, seeds)| !seeds.is_empty())
             .map(characterize)
-            .collect()
+            .collect::<Vec<_>>();
+        Ok(select_lowest_terminal_failure(results)?
+            .into_iter()
+            .collect())
     }
 }
 
@@ -1941,13 +2187,17 @@ fn characterize_terminals_unquotiented(
     index: &CharacterizationIndex,
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
-) -> BTreeMap<TerminalID, TerminalCharacterization> {
-    (0..grammar.num_terminals)
+) -> Result<BTreeMap<TerminalID, TerminalCharacterization>, CharacterizationError> {
+    let results = (0..grammar.num_terminals)
         .map(|terminal| {
-            let characterization = characterize_terminal(table, index, terminal);
-            (terminal, characterization)
+            let result = try_characterize_terminal(table, index, terminal)
+                .map(|characterization| (terminal, characterization));
+            (terminal, result)
         })
-        .collect()
+        .collect::<Vec<_>>();
+    Ok(select_lowest_terminal_failure(results)?
+        .into_iter()
+        .collect())
 }
 
 fn validate_sparse_action_signatures(
@@ -1973,10 +2223,10 @@ fn validate_characterization_quotient(
     table: &GLRTable,
     groups: &[Vec<TerminalID>],
     characterizations: &BTreeMap<TerminalID, TerminalCharacterization>,
-) {
+) -> Result<(), CharacterizationError> {
     for terminals in groups.iter().filter(|terminals| terminals.len() > 1) {
         for &terminal in terminals {
-            let expected = characterize_terminal(table, index, terminal);
+            let expected = try_characterize_terminal(table, index, terminal)?;
             let actual = characterizations
                 .get(&terminal)
                 .unwrap_or_else(|| panic!("missing characterization for terminal {terminal}"));
@@ -1987,22 +2237,41 @@ fn validate_characterization_quotient(
             );
         }
     }
+    Ok(())
 }
 
 pub fn characterize_terminals_profiled(
     table: &GLRTable,
     grammar: &AnalyzedGrammar,
 ) -> (BTreeMap<TerminalID, TerminalCharacterization>, TerminalCharacterizationProfile) {
+    try_characterize_terminals_profiled(table, grammar)
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// Fallible production characterization entry point. A reduction cycle is an
+/// anticipated unsupported shape for the acyclic template artifact, so it must
+/// reach the public compile boundary as a typed strategy decline rather than a
+/// panic payload.
+pub fn try_characterize_terminals_profiled(
+    table: &GLRTable,
+    grammar: &AnalyzedGrammar,
+) -> Result<
+    (
+        BTreeMap<TerminalID, TerminalCharacterization>,
+        TerminalCharacterizationProfile,
+    ),
+    CharacterizationError,
+> {
     let total_started_at = Instant::now();
     let terminal_count = grammar.num_terminals as usize;
     let index = build_characterization_index(table, grammar);
 
     if characterization_quotient_disabled() {
         let characterize_started_at = Instant::now();
-        let characterizations = characterize_terminals_unquotiented(&index, table, grammar);
+        let characterizations = characterize_terminals_unquotiented(&index, table, grammar)?;
         let characterize_ms = elapsed_ms(characterize_started_at);
         let total_ms = elapsed_ms(total_started_at);
-        return (
+        return Ok((
             characterizations,
             TerminalCharacterizationProfile {
                 terminals: terminal_count,
@@ -2013,7 +2282,7 @@ pub fn characterize_terminals_profiled(
                 quotient_disabled: true,
                 ..TerminalCharacterizationProfile::default()
             },
-        );
+        ));
     }
 
     let (groups, signature_ms) = group_terminals_by_action_signature(table, &index, grammar);
@@ -2022,16 +2291,15 @@ pub fn characterize_terminals_profiled(
 
     let characterize_started_at = Instant::now();
     let characterize_group = |terminals: &Vec<TerminalID>| {
-            let representative = terminals[0];
-            (
-                terminals.clone(),
-                characterize_terminal(table, &index, representative),
-            )
-        };
+        let representative = terminals[0];
+        let result = try_characterize_terminal(table, &index, representative)
+            .map(|characterization| (terminals.clone(), characterization));
+        (representative, result)
+    };
     let characterized_groups: Vec<(Vec<TerminalID>, TerminalCharacterization)> =
         if super::macro_parallelism_disabled() {
             let mut timings = Vec::with_capacity(groups.len());
-            let result = groups
+            let results = groups
                 .iter()
                 .map(|group| {
                     let started = Instant::now();
@@ -2039,11 +2307,15 @@ pub fn characterize_terminals_profiled(
                     timings.push(elapsed_ms(started));
                     result
                 })
-                .collect();
+                .collect::<Vec<_>>();
             super::report_macro_item_timings("terminal_characterization_groups", &timings);
-            result
+            select_lowest_terminal_failure(results)?
         } else {
-            groups.par_iter().map(characterize_group).collect()
+            let results = groups
+                .par_iter()
+                .map(characterize_group)
+                .collect::<Vec<_>>();
+            select_lowest_terminal_failure(results)?
         };
     let characterize_ms = elapsed_ms(characterize_started_at);
 
@@ -2061,12 +2333,12 @@ pub fn characterize_terminals_profiled(
         validate_sparse_action_signatures(&index, table, &groups);
     }
     if characterization_quotient_validation_enabled() {
-        validate_characterization_quotient(&index, table, &groups, &characterizations);
+        validate_characterization_quotient(&index, table, &groups, &characterizations)?;
     }
     let validation_ms = elapsed_ms(validation_started_at);
 
     let total_ms = elapsed_ms(total_started_at);
-    (
+    Ok((
         characterizations,
         TerminalCharacterizationProfile {
             terminals: terminal_count,
@@ -2080,5 +2352,5 @@ pub fn characterize_terminals_profiled(
             total_ms,
             quotient_disabled: false,
         },
-    )
+    ))
 }

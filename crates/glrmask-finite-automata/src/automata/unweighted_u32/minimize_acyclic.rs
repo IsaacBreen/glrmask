@@ -185,16 +185,50 @@ pub fn reindex_minimized_acyclic_dfa(dfa: &DFA) -> DFA {
     reindexed
 }
 
+/// A DFA passed to an acyclic-only algorithm contains a reachable cycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CyclicAcyclicInput {
+    pub states: usize,
+}
+
+impl std::fmt::Display for CyclicAcyclicInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "acyclic DFA minimization requires an acyclic input, but the reachable graph has a cycle ({} states)",
+            self.states,
+        )
+    }
+}
+
+impl std::error::Error for CyclicAcyclicInput {}
+
 /// Minimize an acyclic unweighted DFA by merging states with identical
 /// signatures (acceptance + transition map modulo equivalence class).
 ///
-/// Panics (debug) if the input is cyclic.
+/// Panics if the input is cyclic, in every profile. Use
+/// [`try_minimize_acyclic`] at a boundary that can return a typed decline.
 pub fn minimize_acyclic(dfa: &DFA) -> DFA {
-    debug_assert!(
+    assert!(
         dfa.compute_is_acyclic(),
         "minimize_acyclic: input DFA is cyclic"
     );
+    minimize_acyclic_unchecked(dfa)
+}
 
+/// Fallible form of [`minimize_acyclic`]. A cyclic template graph is an
+/// unsupported shape, not an invariant violation, so callers that can return
+/// an error must not depend on a debug-only assertion.
+pub fn try_minimize_acyclic(dfa: &DFA) -> Result<DFA, CyclicAcyclicInput> {
+    if !dfa.compute_is_acyclic() {
+        return Err(CyclicAcyclicInput {
+            states: dfa.states.len(),
+        });
+    }
+    Ok(minimize_acyclic_unchecked(dfa))
+}
+
+fn minimize_acyclic_unchecked(dfa: &DFA) -> DFA {
     if dfa.states.is_empty() {
         return dfa.clone();
     }
@@ -266,8 +300,26 @@ pub fn minimize_acyclic(dfa: &DFA) -> DFA {
 
 #[cfg(test)]
 mod tests {
-    use super::minimize_acyclic;
+    use super::{CyclicAcyclicInput, minimize_acyclic, try_minimize_acyclic};
     use crate::automata::unweighted_u32::dfa::DFA;
+
+    #[test]
+    fn checked_minimization_rejects_cycles_without_relying_on_debug_assertions() {
+        let mut dfa = DFA::new();
+        let state = dfa.add_state();
+        dfa.set_accepting(state, true);
+        dfa.add_transition(state, 1, state);
+
+        assert_eq!(
+            try_minimize_acyclic(&dfa),
+            Err(CyclicAcyclicInput { states: 2 }),
+            "the checked API must reject a cyclic graph in optimized profiles",
+        );
+        let unwind = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            minimize_acyclic(&dfa)
+        }));
+        assert!(unwind.is_err(), "the infallible API must fail loudly, not mis-minimize");
+    }
 
     #[test]
     fn merges_equal_accepting_leaves_in_class_id_order() {

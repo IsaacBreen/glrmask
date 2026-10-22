@@ -69,7 +69,7 @@ use crate::compiler::stages::templates::Templates;
 use crate::compiler::stages::templates::characterize::{
     FinishEndpointPolicy, FinishTransfer, InitialEscape, InitialReduce, NtEscape, NtRereduce,
     StackMatcher, TerminalCharacterization, characterize_finish_transfer,
-    characterize_selected_terminals_for_terminal_count,
+    try_characterize_selected_terminals_for_terminal_count,
 };
 use super::boundary_walk::boundary_accepted_tokens;
 use crate::compiler::stages::equiv_types::InternalIdMap;
@@ -1048,11 +1048,12 @@ fn scoped_transfer_for_terminal(
     }
     let mut local_selected = vec![false; table.num_terminals as usize];
     local_selected[local as usize] = true;
-    let characterized = characterize_selected_terminals_for_terminal_count(
+    let characterized = try_characterize_selected_terminals_for_terminal_count(
         table,
         table.num_terminals,
         &local_selected,
-    );
+    )
+    .map_err(|error| error.to_string())?;
     match characterized.get(&local) {
         Some(characterization) => {
             let injection = context.injection(owner)?;
@@ -1287,11 +1288,12 @@ pub(crate) fn prepare_fragment_transfers(
         for &(_, local) in &terminals {
             selected[local as usize] = true;
         }
-        let characterized = characterize_selected_terminals_for_terminal_count(
+        let characterized = try_characterize_selected_terminals_for_terminal_count(
             table,
             table.num_terminals,
             &selected,
-        );
+        )
+        .map_err(|error| error.to_string())?;
         let injection = context.injection(owner)?;
         for (terminal, local) in terminals {
             let transfer = match characterized.get(&local) {
@@ -1318,11 +1320,12 @@ pub(crate) fn prepare_fragment_transfers(
         let parent_table = context.component_table(link.parent_component)?;
         let mut slot_selected = vec![false; parent_table.num_terminals as usize];
         slot_selected[link.slot_terminal as usize] = true;
-        let slot_characterized = characterize_selected_terminals_for_terminal_count(
+        let slot_characterized = try_characterize_selected_terminals_for_terminal_count(
             parent_table,
             parent_table.num_terminals,
             &slot_selected,
-        );
+        )
+        .map_err(|error| error.to_string())?;
         let local_slot = slot_characterized.get(&link.slot_terminal).ok_or_else(|| {
             format!(
                 "signed link slot terminal {} has no characterization in parent component {}",
@@ -1611,11 +1614,12 @@ fn build_fragment_library_cached_impl(
                 }
                 selected[local as usize] = true;
             }
-            let characterized = characterize_selected_terminals_for_terminal_count(
+            let characterized = try_characterize_selected_terminals_for_terminal_count(
                 table,
                 table.num_terminals,
                 &selected,
-            );
+            )
+            .map_err(|error| error.to_string())?;
             let injection = context.injection(owner)?;
             for local in missing {
                 let transfer = match characterized.get(&local) {

@@ -89,7 +89,7 @@ use crate::compiler::stages::parser_dwa::{
 };
 use crate::compiler::stages::templates::{Templates, commit_template_dfas_enabled};
 use crate::compiler::stages::templates::characterize::{
-    TerminalCharacterization, characterize_terminals_profiled,
+    TerminalCharacterization, try_characterize_terminals_profiled,
 };
 use crate::compiler::stages::templates::compile_dfa::{
     specialize_template_dfa_defaults_for_commit_split_input,
@@ -3476,12 +3476,12 @@ fn build_templates_for_compile(
     table: &GLRTable,
     analyzed_grammar: &AnalyzedGrammar,
     _ignore_terminal: Option<u32>,
-) -> (
+) -> Result<(
     Templates,
     Vec<Option<Arc<crate::runtime::CommitTemplateDfas>>>,
     Vec<Option<TerminalCharacterization>>,
     f64,
-) {
+), String> {
     let templates_started_at = Instant::now();
     if analyzed_grammar.direct_regular_automaton.is_some()
         && !commit_template_dfas_enabled()
@@ -3494,12 +3494,12 @@ fn build_templates_for_compile(
                 templates_ms,
             );
         }
-        return (
+        return Ok((
             Templates::default(),
             vec![None; analyzed_grammar.num_terminals as usize],
             vec![None; analyzed_grammar.num_terminals as usize],
             templates_ms,
-        );
+        ));
     }
     if analyzed_grammar.direct_regular_automaton.is_some()
         && let Some(templates) =
@@ -3544,18 +3544,19 @@ fn build_templates_for_compile(
                 templates_ms,
             );
         }
-        return (
+        return Ok((
             templates,
             template_dfas_by_terminal,
             vec![None; analyzed_grammar.num_terminals as usize],
             templates_ms,
-        );
+        ));
     }
 
     let (characterizations, characterization_profile) =
-        characterize_terminals_profiled(table, analyzed_grammar);
+        try_characterize_terminals_profiled(table, analyzed_grammar)
+            .map_err(|error| error.to_string())?;
     let (templates, template_profile) =
-        Templates::from_characterizations_profiled(&characterizations);
+        Templates::try_from_characterizations_profiled(&characterizations)?;
     let mut composition_parser_characterizations_by_terminal =
         vec![None; analyzed_grammar.num_terminals as usize];
     for (terminal, characterization) in characterizations {
@@ -3629,12 +3630,12 @@ fn build_templates_for_compile(
             commit_template_split_ms,
         );
     }
-    (
+    Ok((
         templates,
         template_dfas_by_terminal,
         composition_parser_characterizations_by_terminal,
         elapsed_ms(templates_started_at),
-    )
+    ))
 }
 
 #[derive(Clone)]
@@ -4884,6 +4885,7 @@ fn compile_prepared_with_profile_and_table_construction(
         let runtime_tokenizer_result = Mutex::new(None);
         let cpm_result = Mutex::new(None);
         let table_build_error = Mutex::new(None);
+        let template_build_error = Mutex::new(None);
 
         rayon::scope(|scope| {
             let terminal_state_ref = &terminal_state;
@@ -4892,6 +4894,7 @@ fn compile_prepared_with_profile_and_table_construction(
             let runtime_tokenizer_result_ref = &runtime_tokenizer_result;
             let cpm_result_ref = &cpm_result;
             let table_build_error_ref = &table_build_error;
+            let template_build_error_ref = &template_build_error;
             let prepared_grammar_ref = &prepared_grammar;
             let synthetic_tokenizer_plan_ref = synthetic_tokenizer_plan.as_ref();
             let partition_local_synthesis_plan_ref = partition_local_synthesis_plan.as_ref();
@@ -5469,11 +5472,20 @@ fn compile_prepared_with_profile_and_table_construction(
                             template_dfas_by_terminal,
                             composition_parser_characterizations_by_terminal,
                             templates_ms,
-                        ) = build_templates_for_compile(
+                        ) = match build_templates_for_compile(
                                 &templates_table,
                                 &templates_analyzed_grammar,
                                 prepared_grammar_ref.ignore_terminal,
-                            );
+                            ) {
+                            Ok(result) => result,
+                            Err(message) => {
+                                *template_build_error_ref
+                                    .lock()
+                                    .expect("template-build error slot poisoned") =
+                                    Some(crate::Error::classify_template_compile_message(message));
+                                return;
+                            }
+                        };
                         let templates_finished_ms = elapsed_ms(compile_started_for_templates.clone());
                         parser_state_ref
                             .lock()
@@ -5547,6 +5559,12 @@ fn compile_prepared_with_profile_and_table_construction(
         if let Some(error) = table_build_error
             .into_inner()
             .expect("table-build error slot poisoned")
+        {
+            return Err(error);
+        }
+        if let Some(error) = template_build_error
+            .into_inner()
+            .expect("template-build error slot poisoned")
         {
             return Err(error);
         }
