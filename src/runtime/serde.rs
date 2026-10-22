@@ -591,14 +591,14 @@ const COMPOSITION_METADATA_SPLIT_CACHE_COMPRESSED: u32 = 1 << 1;
 #[derive(Serialize)]
 enum BoundaryTriggerWireRef<'a> {
     None,
-    Tokens(&'a [u32]),
+    TokenSet(&'a [u32]),
     Exact(&'a crate::automata::weighted_u32::dwa::DWA),
 }
 
 #[derive(Serialize, Deserialize)]
 enum BoundaryTriggerWire {
     None,
-    Tokens(Vec<u32>),
+    TokenSet(Vec<u32>),
     Exact(crate::automata::weighted_u32::dwa::DWA),
 }
 
@@ -607,8 +607,8 @@ fn boundary_trigger_wire_ref(
 ) -> BoundaryTriggerWireRef<'_> {
     match trigger {
         crate::runtime::BoundaryTrigger::None => BoundaryTriggerWireRef::None,
-        crate::runtime::BoundaryTrigger::Tokens(tokens) => {
-            BoundaryTriggerWireRef::Tokens(tokens.as_ref())
+        crate::runtime::BoundaryTrigger::TokenSet(tokens) => {
+            BoundaryTriggerWireRef::TokenSet(tokens.as_ref())
         }
         crate::runtime::BoundaryTrigger::Exact(dwa) => BoundaryTriggerWireRef::Exact(dwa.as_ref()),
     }
@@ -617,10 +617,10 @@ fn boundary_trigger_wire_ref(
 fn restore_boundary_trigger(trigger: BoundaryTriggerWire) -> crate::runtime::BoundaryTrigger {
     match trigger {
         BoundaryTriggerWire::None => crate::runtime::BoundaryTrigger::None,
-        BoundaryTriggerWire::Tokens(mut tokens) => {
+        BoundaryTriggerWire::TokenSet(mut tokens) => {
             tokens.sort_unstable();
             tokens.dedup();
-            crate::runtime::BoundaryTrigger::Tokens(Arc::from(tokens.into_boxed_slice()))
+            crate::runtime::BoundaryTrigger::TokenSet(Arc::from(tokens.into_boxed_slice()))
         }
         BoundaryTriggerWire::Exact(dwa) => crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa)),
     }
@@ -9808,7 +9808,7 @@ mod tests {
                 .clone(),
             unbound_grammar_placeholders: constraint.unbound_grammar_placeholders.clone(),
             composition_grammar_summary: constraint.composition_grammar_summary.clone(),
-            boundary_trigger: BoundaryTriggerWire::Tokens(vec![1, 3]),
+            boundary_trigger: BoundaryTriggerWire::TokenSet(vec![1, 3]),
         };
         let cache = ConstraintCompositionCacheMetadata {
             composition_parser_templates_by_terminal: constraint
@@ -9833,7 +9833,7 @@ mod tests {
         let decoded = decode_composition_metadata(&wire).unwrap();
         assert!(matches!(
             decoded.boundary_trigger,
-            BoundaryTriggerWire::Tokens(ref ids) if ids == &[1, 3]
+            BoundaryTriggerWire::TokenSet(ref ids) if ids == &[1, 3]
         ));
         assert!(matches!(
             decoded.boundary_candidate_summary,
@@ -9847,7 +9847,7 @@ mod tests {
     #[test]
     fn current_constraint_artifact_preserves_boundary_token_trigger() {
         let mut constraint = tiny_constraint();
-        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
+        constraint.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(Arc::from(
             vec![1u32, 3u32].into_boxed_slice(),
         ));
         let mut loaded = Constraint::load(&constraint.save()).unwrap();

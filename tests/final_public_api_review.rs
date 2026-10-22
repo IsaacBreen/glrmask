@@ -349,7 +349,7 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
         let plain = grammar.compile_with_build_options(&v, options.clone()).unwrap();
         let none = grammar.compile_with_build_options(&v, options.clone().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert_eq!(plain.save(), none.save());
-        for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+        for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
             if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
                 assert!(grammar.compile_with_build_options(&v, options.clone().boundary_trigger(detail)).unwrap_err().to_string().contains("retained-LR Dynamic"));
                 continue;
@@ -383,7 +383,7 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
     let explicit_none_link = PreparedGrammar::load(explicit_none.save()).unwrap()
         .bind_snapshot("middle", &child).unwrap().link().unwrap();
     compare_prefixes(&explicit_none_link, &default_link, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
-    for detail in [BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+    for detail in [BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
         let module = grammar.prepare_with(&v, BuildOptions::default().boundary_trigger(detail)).unwrap();
         assert!(module.link().is_err(), "trigger request cannot bypass unresolved slots");
         let saved = module.save();
@@ -397,9 +397,9 @@ fn review_deferred_boundary_request_roundtrips_and_link_override_wins() {
         compare_prefixes(&inherited, &reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
         let suppressed = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         compare_prefixes(&suppressed, &reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
-        let tokens = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+        let tokens = bound.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         let tokens_reference = plain_loaded.bind_snapshot("middle", &child).unwrap().link_with(
-            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         compare_prefixes(&tokens, &tokens_reference, &[0, 1, 2, 3, 4, 5, 10, 11], 4);
         let bound_loaded = PreparedGrammar::load(bound.save()).unwrap().link().unwrap();
         compare_prefixes(&bound_loaded, &inherited, &[0, 1, 2, 3, 4, 5, 10, 11], 4);

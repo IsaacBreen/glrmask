@@ -66,7 +66,7 @@ pub enum BoundaryMaskStrategy {
 impl BoundaryMaskStrategy {
     pub(crate) fn to_detail(self) -> BoundaryTriggerDetail {
         match self {
-            Self::FastBuild => BoundaryTriggerDetail::Tokens,
+            Self::FastBuild => BoundaryTriggerDetail::TokenSet,
             Self::FastRuntime => BoundaryTriggerDetail::Exact,
         }
     }
@@ -2606,6 +2606,11 @@ fn boundary_for_optimization(
 }
 
 impl PreparedGrammar {
+    #[cfg(test)]
+    pub(crate) fn boundary_test_inner(&self) -> &RuntimeConstraint {
+        &self.inner
+    }
+
     fn direct_slot_names(&self) -> BTreeSet<&str> {
         self.inner
             .late_grammar_slots
@@ -6516,7 +6521,7 @@ mod final_boundary_option_tests {
         let v = vocab();
         let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#);
         for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-            for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::Tokens, BoundaryTriggerDetail::Exact] {
+            for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
                 let result = grammar.compile_with_build_options(&v,
                     BuildOptions::default().optimization(mode).boundary_trigger(detail));
                 if mode == MaskStrategy::TokenTrie && detail == BoundaryTriggerDetail::Exact {
@@ -6526,7 +6531,7 @@ mod final_boundary_option_tests {
                 let constraint = result.unwrap();
                 assert!(match (&constraint.boundary_trigger, detail) {
                     (crate::runtime::BoundaryTrigger::None, BoundaryTriggerDetail::None) |
-                    (crate::runtime::BoundaryTrigger::Tokens(_), BoundaryTriggerDetail::Tokens) |
+                    (crate::runtime::BoundaryTrigger::TokenSet(_), BoundaryTriggerDetail::TokenSet) |
                     (crate::runtime::BoundaryTrigger::Exact(_), BoundaryTriggerDetail::Exact) => true,
                     _ => false,
                 });
@@ -6557,14 +6562,14 @@ mod final_boundary_option_tests {
         let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
             .prepare(&v).unwrap();
         let child = Grammar::from_ebnf(r#"start ::= "y""#).prepare_with(&v,
-            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Tokens)).unwrap();
+            BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         parent.bindings.insert("child".to_owned(), ModuleBinding::Module(Arc::new(child)));
         let parent = PreparedGrammar::load(parent.save()).unwrap();
         let linked = parent.link_with(BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::None)).unwrap();
         assert!(matches!(linked.boundary_trigger, crate::runtime::BoundaryTrigger::None));
         let overlay = linked.static_dynamic_overlay.as_ref().unwrap();
         assert!(overlay.segmented_parser_components.iter().any(|component|
-            matches!(component.constraint.boundary_trigger, crate::runtime::BoundaryTrigger::Tokens(_))));
+            matches!(component.constraint.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_))));
     }
 }
 
@@ -6965,16 +6970,15 @@ mod module_build_overhead_tests {
         values[values.len() / 2]
     }
 
-    /// A standalone Module must not eagerly build the composition-only token
-    /// boundary trigger. Building it scans the entire model vocabulary and made
-    /// small JSB schemas ~8x slower than the direct Grammar build path.
+    /// A standalone Module builds the same default TokenSet trigger as the
+    /// direct Grammar path, and must stay close to it in build time.
     #[test]
     fn module_standalone_build_stays_close_to_grammar_build() {
         let vocab = jsb_like_vocab(16_384);
         let source = jsb_like_schema(80);
 
         let grammar = Grammar::from_json_schema(&source);
-        grammar
+        let direct = grammar
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default()
@@ -6986,8 +6990,13 @@ mod module_build_overhead_tests {
             .compile_with(&vocab, CompileOptions::default().end_tokens([0u32]))
             .expect("module build");
         assert!(
-            matches!(standalone.boundary_trigger, crate::runtime::BoundaryTrigger::None),
-            "standalone Module must not eagerly build a boundary trigger"
+            matches!(standalone.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_)),
+            "standalone Module must carry the default TokenSet trigger"
+        );
+        assert_eq!(
+            standalone.boundary_trigger.token_summary(),
+            direct.boundary_trigger.token_summary(),
+            "Module and Grammar must agree on the standalone token set"
         );
 
         let mut grammar_ms = Vec::new();

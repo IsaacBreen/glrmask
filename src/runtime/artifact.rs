@@ -41,9 +41,9 @@ pub(crate) type PossibleMatchesByTerminal = BTreeMap<TerminalID, Weight>;
 /// Optional composition-boundary metadata, independent of the masking optimization. `None` adds no metadata; `Tokens` is a conservative parser-state-independent candidate set; `Exact` adds state-sensitive metadata where supported.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BoundaryTriggerDetail {
-    #[default]
     None,
-    Tokens,
+    #[default]
+    TokenSet,
     Exact,
 }
 
@@ -56,7 +56,7 @@ pub(crate) enum BoundaryTrigger {
     None,
     /// Conservative original model-token IDs that may contain the first
     /// internal boundary crossing. Parser-state independent.
-    Tokens(Arc<[u32]>),
+    TokenSet(Arc<[u32]>),
     /// Exact component-local parser DWA. Its coordinate is deliberately
     /// independent of the ordinary parser-DWA quotient: parser labels are
     /// local LR-state IDs, weight TSIDs are raw local tokenizer-state IDs, and
@@ -71,7 +71,7 @@ impl BoundaryTrigger {
     pub(crate) fn detail(&self) -> BoundaryTriggerDetail {
         match self {
             Self::None => BoundaryTriggerDetail::None,
-            Self::Tokens(_) => BoundaryTriggerDetail::Tokens,
+            Self::TokenSet(_) => BoundaryTriggerDetail::TokenSet,
             Self::Exact(_) => BoundaryTriggerDetail::Exact,
         }
     }
@@ -82,7 +82,7 @@ impl BoundaryTrigger {
 
     pub(crate) fn token_summary(&self) -> Option<&[u32]> {
         match self {
-            Self::Tokens(tokens) => Some(tokens),
+            Self::TokenSet(tokens) => Some(tokens),
             Self::None | Self::Exact(_) => None,
         }
     }

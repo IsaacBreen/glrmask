@@ -129,7 +129,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
             definition: body,
             slot_kinds: module.slot_kinds.as_ref().clone(), slot_spans: module.slot_spans.as_ref().clone(),
             boundary_trigger: match module.boundary_trigger {
-                BoundaryTriggerDetail::None => 0, BoundaryTriggerDetail::Tokens => 1, BoundaryTriggerDetail::Exact => 2,
+                BoundaryTriggerDetail::None => 0, BoundaryTriggerDetail::TokenSet => 1, BoundaryTriggerDetail::Exact => 2,
             },
             bindings,
         });
@@ -223,7 +223,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
             bindings.insert(name,value);
         }
         if height>graph::MAX_DEPTH { return Err(error("prepared attachment depth exceeds 64")); }
-        let boundary_trigger=match instance.boundary_trigger {0=>BoundaryTriggerDetail::None,1=>BoundaryTriggerDetail::Tokens,
+        let boundary_trigger=match instance.boundary_trigger {0=>BoundaryTriggerDetail::None,1=>BoundaryTriggerDetail::TokenSet,
             2=>BoundaryTriggerDetail::Exact,_=>return Err(error("invalid prepared boundary-trigger policy"))};
         instances.push(Arc::new(PreparedGrammar {inner:definitions[def].clone(),bindings,boundary_trigger,
             slot_kinds:Arc::new(instance.slot_kinds),slot_spans:Arc::new(instance.slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone()}));

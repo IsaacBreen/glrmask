@@ -410,7 +410,7 @@ struct DynamicConstraintPayloadV6 {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 enum DynamicBoundaryTriggerWire {
     None,
-    Tokens(Vec<u32>),
+    TokenSet(Vec<u32>),
     Exact(DWA),
 }
 
@@ -418,7 +418,7 @@ impl DynamicBoundaryTriggerWire {
     fn from_trigger(trigger: &crate::runtime::BoundaryTrigger) -> Self {
         match trigger {
             crate::runtime::BoundaryTrigger::None => Self::None,
-            crate::runtime::BoundaryTrigger::Tokens(tokens) => Self::Tokens(tokens.to_vec()),
+            crate::runtime::BoundaryTrigger::TokenSet(tokens) => Self::TokenSet(tokens.to_vec()),
             crate::runtime::BoundaryTrigger::Exact(dwa) => Self::Exact((**dwa).clone()),
         }
     }
@@ -426,10 +426,10 @@ impl DynamicBoundaryTriggerWire {
     fn into_trigger(self) -> crate::runtime::BoundaryTrigger {
         match self {
             Self::None => crate::runtime::BoundaryTrigger::None,
-            Self::Tokens(mut tokens) => {
+            Self::TokenSet(mut tokens) => {
                 tokens.sort_unstable();
                 tokens.dedup();
-                crate::runtime::BoundaryTrigger::Tokens(Arc::from(tokens.into_boxed_slice()))
+                crate::runtime::BoundaryTrigger::TokenSet(Arc::from(tokens.into_boxed_slice()))
             }
             Self::Exact(dwa) => crate::runtime::BoundaryTrigger::Exact(Arc::new(dwa)),
         }
@@ -5077,7 +5077,7 @@ mod tests {
             name: "child".to_owned(),
             terminal_id: 0,
         }];
-        constraint.inner.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(
+        constraint.inner.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(
             Arc::from(vec![1u32].into_boxed_slice()),
         );
         let state_count = constraint.inner.tokenizer.num_states() as u32;

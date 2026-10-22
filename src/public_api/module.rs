@@ -166,12 +166,11 @@ pub(crate) fn resolve_engine(strategy: MaskStrategy, prepared: &BTreeMap<MaskStr
     }
 }
 
-pub(crate) fn target_boundary(strategy: MaskStrategy, boundary: BoundaryMaskStrategy) -> BoundaryTriggerDetail {
-    if strategy == MaskStrategy::TokenTrie {
-        BoundaryTriggerDetail::Tokens
-    } else {
-        boundary.to_detail()
-    }
+pub(crate) fn target_boundary(_strategy: MaskStrategy, _boundary: BoundaryMaskStrategy) -> BoundaryTriggerDetail {
+    // The public boundary trigger is always the LLM token set. BoundaryMaskStrategy
+    // is retained for the separate boundary-parser wiring and no longer selects
+    // the trigger detail here.
+    BoundaryTriggerDetail::TokenSet
 }
 
 /// Settings are per-Module; `mask_strategy` is applied at compile time and `boundary_mask_strategy` defines a minimum detail level.
@@ -424,10 +423,16 @@ impl Module {
     ///
     /// Modules using `TOKEN_TRIE` retain no work and are compiled from source by `compile`.
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab))
+        with_deep_stack(|| self.precompile_on_stack(vocab, true))
     }
 
-    fn precompile_on_stack(&mut self, vocab: &Vocab) -> Result<()> {
+    /// Internal compile_with preparation: retain compilation artifacts and the
+    /// default boundary token set.
+    fn precompile_for_compile(&mut self, vocab: &Vocab) -> Result<()> {
+        with_deep_stack(|| self.precompile_on_stack(vocab, true))
+    }
+
+    fn precompile_on_stack(&mut self, vocab: &Vocab, build_boundary: bool) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         let modules = self.index()?;
 
@@ -467,7 +472,8 @@ impl Module {
             let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
             let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            m.prepare_local_for(vocab, engine, target_b).map(|p| (key, retain_local(p)))
+            m.prepare_local_for(vocab, engine, target_b, build_boundary)
+                .map(|p| (key, retain_local(p)))
         }).collect::<Result<Vec<_>>>()?;
 
         locals.extend(results);
@@ -496,9 +502,20 @@ impl Module {
         Ok(())
     }
 
-    fn prepare_local_for(&self, vocab: &Vocab, engine: MaskStrategy, target_b: BoundaryTriggerDetail) -> Result<PreparedGrammar> {
+    fn prepare_local_for(
+        &self,
+        vocab: &Vocab,
+        engine: MaskStrategy,
+        target_b: BoundaryTriggerDetail,
+        build_boundary: bool,
+    ) -> Result<PreparedGrammar> {
         if let Some(existing) = self.node.prepared.get(&engine) {
             let mut upgraded = existing.prepared().clone();
+            if build_boundary && upgraded.inner.boundary_trigger.detail() < target_b {
+                Arc::make_mut(&mut upgraded.inner)
+                    .build_boundary_trigger(target_b)
+                    .map_err(Error::Compilation)?;
+            }
             upgraded.boundary_trigger = target_b;
             return Ok(upgraded);
         }
@@ -510,7 +527,7 @@ impl Module {
             let mut instances = HashMap::<usize, Module>::new();
             for m in module.index()? {
                 let mut next = m.clone();
-                let p = m.prepare_local_for(vocab, engine, target_b)?;
+                let p = m.prepare_local_for(vocab, engine, target_b, build_boundary)?;
                 let node = Arc::make_mut(&mut next.node);
                 node.prepared.insert(engine, retain_local(p));
                 node.certificate = Arc::new(OnceLock::new());
@@ -571,10 +588,9 @@ impl Module {
                 let inner = Arc::make_mut(&mut p.inner);
                 crate::compiler::boundary_candidates::persist_boundary_candidate_summary(inner, vocab);
                 inner.install_template_parser_from_compile()?;
-                // The trigger is composition metadata, not part of the
-                // standalone constraint. Building it here scans the whole
-                // vocabulary even for a Module that is never linked; defer it
-                // to `materialize`, which applies it only when children exist.
+                if build_boundary {
+                    inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
+                }
                 p.boundary_trigger = target_b;
                 return Ok(p);
             }
@@ -584,7 +600,9 @@ impl Module {
         if engine == MaskStrategy::TokenClassTrie {
             inner.install_template_parser_from_compile()?;
         }
-        inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
+        if build_boundary {
+            inner.build_boundary_trigger(target_b).map_err(Error::Compilation)?;
+        }
         let prepared = PreparedGrammar {
             inner: Arc::new(inner),
             bindings: OrdMap::new(),
@@ -644,7 +662,7 @@ impl Module {
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
         if token_trie {
-            let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?;
+            let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?;
             let result = result.with_end_tokens(&options.end_tokens)?;
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
@@ -696,7 +714,7 @@ impl Module {
                 let end_tokens = options.end_tokens.clone();
                 budget.install(move || {
                     crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
-                        prepared.precompile(vocab)?;
+                        prepared.precompile_for_compile(vocab)?;
                         let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
                         ensure_runnable_constraint(&constraint)?;
                         constraint.with_end_tokens(&end_tokens)
@@ -751,7 +769,7 @@ impl Module {
                     if self.node.mask_strategy == MaskStrategy::Auto {
                         if let Ok(grammar) = self.flatten_source() {
                             let constraint = grammar
-                                .compile_token_trie(vocab, BoundaryTriggerDetail::Tokens)?
+                                .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?
                                 .with_end_tokens(&options.end_tokens)?;
                             route =
                                 crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
@@ -794,6 +812,12 @@ impl Module {
             Ok((name.clone(), Arc::new(child)))
         }).collect::<Result<Vec<_>>>()?;
         let linked = !children.is_empty();
+        let mut child_token_union = Vec::new();
+        for (_, child) in &children {
+            if let crate::runtime::BoundaryTrigger::TokenSet(child_tokens) = &child.boundary_trigger {
+                child_token_union.extend_from_slice(child_tokens);
+            }
+        }
         if linked {
             parent = if parent.has_template_parser() {
                 crate::error::catch_internal_invariant(|| crate::runtime::parser_backend::link::compose_owned(parent, children, vocab))??
@@ -817,14 +841,19 @@ impl Module {
             }
             let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
             apply_final_boundary_trigger(&mut parent, target_b)?;
-        } else {
-            // FastBuild is the default and is only an accelerator; a standalone
-            // constraint does not need it. Preserve an explicit FastRuntime
-            // request, which is observable in the compiled constraint.
-            let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
-            if target_b == crate::runtime::BoundaryTriggerDetail::Exact {
-                apply_final_boundary_trigger(&mut parent, target_b)?;
-            }
+            // A composed trigger is the union of the parent's own set and the
+            // precomputed sets of its children. Sorted merge keeps this cheap.
+            let mut tokens = parent
+                .boundary_trigger
+                .token_summary()
+                .map(|tokens| tokens.to_vec())
+                .unwrap_or_else(|| child_token_union.clone());
+            tokens.extend_from_slice(&child_token_union);
+            tokens.sort_unstable();
+            tokens.dedup();
+            parent.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(Arc::from(
+                tokens.into_boxed_slice(),
+            ));
         }
         cache.insert(id, parent.clone());
         Ok(parent)
@@ -906,5 +935,58 @@ mod preparation_probe {
                 p.active.fetch_sub(1, Ordering::SeqCst);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod precompile_boundary_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+
+    fn vocab() -> Vocab {
+        let vocab = Vocab::new(vec![
+            (0, b"x".to_vec()),
+            (1, b"y".to_vec()),
+            (2, b"xy".to_vec()),
+        ]);
+        vocab.prepare_for_compile();
+        vocab
+    }
+
+    fn tokens(constraint: &RuntimeConstraint) -> Option<Arc<[u32]>> {
+        match &constraint.boundary_trigger {
+            crate::runtime::BoundaryTrigger::TokenSet(tokens) => Some(Arc::clone(tokens)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn precompile_builds_tokens_and_compile_reuses_the_same_arc() {
+        let vocab = vocab();
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#);
+
+        let mut module = Module::new(&grammar);
+        module.precompile(&vocab).expect("precompile");
+        let prepared_trigger = module
+            .node
+            .prepared
+            .values()
+            .next()
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
+            .expect("precompiled Module must carry a Tokens trigger");
+        let compiled = module
+            .compile_with(&vocab, CompileOptions::default())
+            .expect("compile after precompile");
+        let compiled_trigger = tokens(&compiled).expect("compiled Module must carry Tokens");
+        assert!(
+            Arc::ptr_eq(&prepared_trigger, &compiled_trigger),
+            "compile_with must reuse the precompiled Tokens Arc"
+        );
+        assert_eq!(prepared_trigger.as_ref(), compiled_trigger.as_ref());
+
+        let plain = Module::new(&grammar)
+            .compile_with(&vocab, CompileOptions::default())
+            .expect("plain compile");
+        assert!(tokens(&plain).is_some(), "plain compile must build the default trigger");
     }
 }

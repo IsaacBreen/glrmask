@@ -1139,11 +1139,31 @@ impl Constraint {
     /// when a proper prefix can complete a terminal that may either finish the
     /// component or immediately precede one of its unresolved grammar slots.
     pub(crate) fn build_boundary_token_trigger(&mut self) -> Result<(), String> {
-        if matches!(self.boundary_trigger, crate::runtime::BoundaryTrigger::Exact(_)) {
+        if matches!(
+            self.boundary_trigger,
+            crate::runtime::BoundaryTrigger::TokenSet(_) | crate::runtime::BoundaryTrigger::Exact(_)
+        ) {
             return Ok(());
         }
         self.materialize_composition_link_metadata_for_compilation()?;
+        let relevant = self.boundary_relevant_terminals();
+        if relevant.is_empty() {
+            self.boundary_trigger =
+                crate::runtime::BoundaryTrigger::TokenSet(Arc::from([]));
+            self.serialized_artifact_cache = None;
+            return Ok(());
+        }
+        let candidates = self.boundary_token_candidates_from_trie(&relevant);
+        self.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(Arc::from(
+            candidates.into_boxed_slice(),
+        ));
+        self.serialized_artifact_cache = None;
+        Ok(())
+    }
 
+    /// Terminals that may finish the component or immediately precede one of
+    /// its unresolved grammar slots. This is parser-state independent.
+    fn boundary_relevant_terminals(&self) -> BitSet {
         let mut relevant = BitSet::new(self.parser_terminal_count() as usize);
         if let Some(summary) = self.composition_grammar_summary.as_ref() {
             relevant.union_with(&summary.root_last);
@@ -1159,29 +1179,19 @@ impl Constraint {
                     }
                 }
             }
-            // Scoped ignore can occur immediately before an entry/finish point
-            // without appearing in grammar adjacency. A model token may
-            // therefore consume one or more ignore lexemes and then cross the
-            // component boundary internally. Tokens is intentionally an
-            // overapproximation, so treating any matched ignore as a possible
-            // boundary precursor is the sound parser-state-independent choice.
             if let Some(ignore) = self.ignore_terminal {
                 relevant.set(ignore as usize);
             }
         } else {
-            // Older/stripped artifacts may lack the grammar summary. The
-            // Tokens trigger is only a pruning accelerator, so falling back to
-            // every terminal preserves exactness.
             relevant = BitSet::all(self.parser_terminal_count() as usize);
         }
+        relevant
+    }
 
-        if relevant.is_empty() {
-            self.boundary_trigger =
-                crate::runtime::BoundaryTrigger::Tokens(Arc::from([]));
-            self.serialized_artifact_cache = None;
-            return Ok(());
-        }
-
+    /// Reference implementation: step every token independently. Kept for
+    /// differential tests against the prefix-trie walk below.
+    #[cfg(test)]
+    fn boundary_token_candidates_from_scan(&self, relevant: &BitSet) -> Vec<u32> {
         let all_states = (0..self.tokenizer.num_states()).collect::<Vec<_>>();
         let tokens = self.token_bytes_iter().collect::<Vec<_>>();
         let mut candidates = tokens
@@ -1208,12 +1218,6 @@ impl Constraint {
                         return Some(*token_id);
                     }
                     if matched_any {
-                        // A real lexer commits only according to its exact
-                        // longest-match policy. Forking a reset continuation at
-                        // every match is deliberately broader: it preserves all
-                        // real multi-lexeme paths (including ignore -> reset ->
-                        // terminal -> boundary) while admitting only harmless
-                        // false-positive trigger tokens.
                         let reset = self.runtime_commit_initial_state();
                         if !states.contains(&reset) {
                             states.push(reset);
@@ -1226,11 +1230,124 @@ impl Constraint {
             .collect::<Vec<_>>();
         candidates.sort_unstable();
         candidates.dedup();
-        self.boundary_trigger = crate::runtime::BoundaryTrigger::Tokens(Arc::from(
-            candidates.into_boxed_slice(),
-        ));
-        self.serialized_artifact_cache = None;
-        Ok(())
+        candidates
+    }
+
+    /// Walk the vocabulary byte trie once, carrying the tokenizer state set
+    /// down shared prefixes. A subtree is skipped as soon as it is empty or a
+    /// relevant terminal has matched at a proper prefix of every token below.
+    fn boundary_token_candidates_from_trie(&self, relevant: &BitSet) -> Vec<u32> {
+        use crate::vocab::vocab_prefix_tree::{VocabPrefixTreeNode, VocabPrefixTree};
+
+        struct BoundaryPrefixTree(VocabPrefixTree);
+        impl crate::vocab::VocabDerivedArtifact for BoundaryPrefixTree {}
+
+        let tree = if let Some(vocab) = self.late_bind_vocab.get() {
+            if let Some(tree) = vocab.vocab_derived_cache_get::<BoundaryPrefixTree>() {
+                tree
+            } else {
+                let tree = Arc::new(BoundaryPrefixTree(VocabPrefixTree::build_owned(
+                    vocab
+                        .entries_map()
+                        .iter()
+                        .map(|(&id, bytes)| (id as usize, bytes.clone()))
+                        .collect(),
+                )));
+                vocab.vocab_derived_cache_set(tree.clone());
+                tree
+            }
+        } else {
+            Arc::new(BoundaryPrefixTree(VocabPrefixTree::build_owned(
+                self.token_bytes_iter()
+                    .map(|(id, bytes)| (id as usize, bytes.to_vec()))
+                    .collect(),
+            )))
+        };
+        let all_states = TokenizerStateSet::from_iter(0..self.tokenizer.num_states());
+
+        fn advance_edge(
+            tokenizer: &Tokenizer,
+            reset: u32,
+            mut states: TokenizerStateSet,
+            mut depth: usize,
+            edge: &[u8],
+            child: &VocabPrefixTreeNode,
+            relevant: &BitSet,
+            out: &mut Vec<u32>,
+        ) -> Option<(TokenizerStateSet, usize)> {
+            for (edge_index, &byte) in edge.iter().enumerate() {
+                depth += 1;
+                states = tokenizer.step_all(states.as_slice(), byte);
+                if states.is_empty() {
+                    return None;
+                }
+                let mut matched_any = false;
+                let mut matched_relevant = false;
+                for state in states.iter().copied() {
+                    for terminal in tokenizer.matched_terminals_iter(state) {
+                        matched_any = true;
+                        matched_relevant |= relevant.contains(terminal as usize);
+                    }
+                }
+                if matched_relevant {
+                    let at_child_end = edge_index + 1 == edge.len();
+                    for id in child.reachable_token_ids().iter() {
+                        if at_child_end && child.has_token() && id == child.token_id() {
+                            continue;
+                        }
+                        out.push(id as u32);
+                    }
+                    return None;
+                }
+                if matched_any && !states.contains(&reset) {
+                    states.push(reset);
+                    states.sort_unstable();
+                }
+            }
+            Some((states, depth))
+        }
+
+        let reset = self.runtime_commit_initial_state();
+        let root_children = tree.0.root.iter_children().collect::<Vec<_>>();
+        let mut candidates = root_children
+            .par_iter()
+            .flat_map_iter(|(edge, child)| {
+                let mut out = Vec::new();
+                let mut pending: Vec<(&VocabPrefixTreeNode, TokenizerStateSet, usize)> = Vec::new();
+                if let Some((states, depth)) = advance_edge(
+                    &self.tokenizer,
+                    reset,
+                    all_states.clone(),
+                    0,
+                    edge,
+                    child,
+                    relevant,
+                    &mut out,
+                ) {
+                    pending.push((*child, states, depth));
+                }
+                while let Some((node, states, depth)) = pending.pop() {
+                    for (edge, child) in node.iter_children() {
+                        if let Some((states, depth)) = advance_edge(
+                            &self.tokenizer,
+                            reset,
+                            states.clone(),
+                            depth,
+                            edge,
+                            child,
+                            relevant,
+                            &mut out,
+                        ) {
+                            pending.push((child, states, depth));
+                        }
+                    }
+                }
+                out.into_iter()
+            })
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+        candidates
     }
 
     /// Build reusable boundary-trigger metadata at the requested detail level.
@@ -1253,7 +1370,14 @@ impl Constraint {
     fn build_boundary_trigger_impl(&mut self, detail: crate::runtime::BoundaryTriggerDetail) -> Result<(), String> {
         match detail {
             crate::runtime::BoundaryTriggerDetail::None => Ok(()),
-            crate::runtime::BoundaryTriggerDetail::Tokens => self.build_boundary_token_trigger(),
+            crate::runtime::BoundaryTriggerDetail::TokenSet => {
+                if std::env::var_os("GLRMASK_EXPERIMENT_NO_BOUNDARY_TRIGGER")
+                    .is_some_and(|value| value == "1")
+                {
+                    return Ok(());
+                }
+                self.build_boundary_token_trigger()
+            }
             crate::runtime::BoundaryTriggerDetail::Exact => self.build_exact_boundary_trigger(),
         }
     }
@@ -15045,5 +15169,134 @@ mod dense_internal_token_mask_tests {
             constraint.body_mask_len(),
             "expected the replay-cost model to select dirty scratch complement conversion",
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_token_trie_tests {
+    use super::*;
+    use crate::__private::VocabExt as _;
+    use crate::{BuildOptions, Grammar, LarkOptions, MaskStrategy, Vocab};
+
+    fn vocab() -> Vocab {
+        let entries = [
+            "a", "b", " ", "\t", "ab", "aba", "abab", "ba", "aab", "a ", " b", "xy", "xyz",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
+        .collect();
+        let vocab = Vocab::new(entries);
+        vocab.prepare_for_compile();
+        vocab
+    }
+
+    fn assert_matches_reference(constraint: &mut Constraint, label: &str) {
+        constraint
+            .materialize_composition_link_metadata_for_compilation()
+            .unwrap_or_else(|error| panic!("{label}: metadata: {error}"));
+        let relevant = constraint.boundary_relevant_terminals();
+        let scan = constraint.boundary_token_candidates_from_scan(&relevant);
+        let trie = constraint.boundary_token_candidates_from_trie(&relevant);
+        assert_eq!(scan, trie, "{label}: candidate sets differ");
+        constraint
+            .build_boundary_token_trigger()
+            .unwrap_or_else(|error| panic!("{label}: build trigger: {error}"));
+        let crate::runtime::BoundaryTrigger::TokenSet(built) = &constraint.boundary_trigger else {
+            panic!("{label}: expected Tokens trigger");
+        };
+        assert_eq!(built.as_ref(), trie.as_slice(), "{label}: stored candidates differ");
+    }
+
+    #[test]
+    #[ignore = "JSB trigger benchmark; requires /tmp/jsb-probe"]
+    fn jsb_trigger_bench() {
+        let tokens: Vec<Vec<u8>> = serde_json::from_str(
+            &std::fs::read_to_string("/tmp/jsb-probe/vocab_bytes.json").expect("vocab"),
+        )
+        .expect("vocab json");
+        let schemas: Vec<serde_json::Value> = serde_json::from_str(
+            &std::fs::read_to_string("/tmp/jsb-probe/schemas20.json").expect("schemas"),
+        )
+        .expect("schemas json");
+        let vocab = Vocab::new(tokens.into_iter().enumerate().map(|(id, bytes)| (id as u32, bytes)).collect());
+        vocab.prepare_for_compile();
+        for (index, schema) in schemas.iter().enumerate() {
+            let source = serde_json::to_string(schema).unwrap();
+            let started = std::time::Instant::now();
+            let mut constraint = match Grammar::from_json_schema(&source).compile_with_build_options(
+                &vocab,
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            ) {
+                Ok(constraint) => constraint,
+                Err(error) => {
+                    eprintln!("TRIGGER_BENCH schema={index} compile_skip={error}");
+                    continue;
+                }
+            };
+            let compile_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let _ = constraint.late_bind_vocab.set(vocab.clone());
+            constraint.materialize_composition_link_metadata_for_compilation().unwrap();
+            let relevant = constraint.boundary_relevant_terminals();
+            let started = std::time::Instant::now();
+            let scan = constraint.boundary_token_candidates_from_scan(&relevant);
+            let scan_ms = started.elapsed().as_secs_f64() * 1000.0;
+            let started = std::time::Instant::now();
+            let trie = constraint.boundary_token_candidates_from_trie(&relevant);
+            let trie_ms = started.elapsed().as_secs_f64() * 1000.0;
+            assert_eq!(scan, trie, "schema {index}: candidate mismatch");
+            eprintln!(
+                "TRIGGER_BENCH schema={index} compile_ms={compile_ms:.3} scan_ms={scan_ms:.3} trie_ms={trie_ms:.3} candidates={}",
+                trie.len()
+            );
+        }
+    }
+
+    #[test]
+    fn trie_trigger_matches_scan_on_plain_ignore_and_placeholder_grammars() {
+        let vocab = vocab();
+
+        let mut plain = Grammar::from_ebnf(r#"start ::= "a" "b""#)
+            .compile_with_build_options(
+                &vocab,
+                BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+            )
+            .expect("plain")
+            .into();
+        assert_matches_reference(&mut plain, "plain");
+
+        let mut ignored = Grammar::from_lark_with(
+            r#"start: "a" "b"
+%ignore WS
+WS: /[ \t]+/
+"#,
+            LarkOptions::default(),
+        )
+        .compile_with_build_options(
+            &vocab,
+            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+        )
+        .expect("ignore")
+        .into();
+        assert_matches_reference(&mut ignored, "ignore");
+
+        let mut schema = Grammar::from_json_schema(
+            r#"{"type":"object","additionalProperties":false,"properties":{"ab":{"type":"string"},"ba":{"type":"string"}}}"#,
+        )
+        .compile_with_build_options(
+            &vocab,
+            BuildOptions::default().optimization(MaskStrategy::ParserDwa),
+        )
+        .expect("schema")
+        .into();
+        assert_matches_reference(&mut schema, "schema");
+
+        let placeholder = Grammar::from_glrm(
+            r#"glrm 1; start start; extern grammar child; nt start = "a" child | "b";"#,
+        )
+        .prepare(&vocab)
+        .expect("placeholder prepare");
+        let mut placeholder = placeholder.boundary_test_inner().clone();
+        assert_matches_reference(&mut placeholder, "placeholder");
     }
 }
