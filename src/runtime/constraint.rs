@@ -1297,7 +1297,6 @@ impl Constraint {
             mut depth: usize,
             edge: &[u8],
             child: &VocabPrefixTreeNode,
-            relevant: &BitSet,
             matched_flags: &[(bool, bool)],
             out: &mut Vec<u32>,
         ) -> Option<(TokenizerStateSet, usize)> {
@@ -1352,7 +1351,6 @@ impl Constraint {
                     0,
                     edge,
                     child,
-                    relevant,
                     matched_flags.as_slice(),
                     &mut out,
                 ) {
@@ -1367,7 +1365,6 @@ impl Constraint {
                             depth,
                             edge,
                             child,
-                            relevant,
                             matched_flags.as_slice(),
                             &mut out,
                         ) {
