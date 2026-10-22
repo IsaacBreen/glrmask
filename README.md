@@ -234,9 +234,11 @@ Expressions can be bound directly to module externs.
 - `TokenClassTrie`: token-trie walk over token equivalence classes.
 - `Auto`: library chooses the strategy (the default).
 
-`BoundaryMaskStrategy` configures the minimum metadata to build for composition
-boundaries: `FastBuild` (conservative token-set boundary trigger, default) and
-`FastRuntime` (full exact proper-prefix boundary trigger).
+`BoundaryMaskStrategy` selects the boundary parser for crossings between composed
+grammars: `ParserDwa` (default, alias `FAST_RUNTIME`) installs the static boundary
+parser and has faster crossings; an over-budget build returns
+`Error::ResourceLimit` with a `boundary_parser_dwa:` message. `Dynamic` (alias
+`FAST_BUILD`) keeps the segmented dynamic boundary and builds faster.
 
 Each Module captures its own settings via `set_mask_strategy` and
 `set_boundary_mask_strategy` (in Python: constructor keywords or properties).

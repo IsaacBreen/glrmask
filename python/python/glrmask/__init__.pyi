@@ -51,19 +51,19 @@ _internal: ModuleType
 
 @final
 class MaskStrategy:
-    "Mask generation strategy: trade off compilation time against per-token masking latency."
+    """Mask computation strategy, trading build time against per-token latency."""
     AUTO: ClassVar[MaskStrategy]
-    "Library chooses the strategy."
+    """Automatic selection: `PARSER_DWA`, or the retained `TOKEN_CLASS_TRIE` when one is available."""
     PARSER_DWA: ClassVar[MaskStrategy]
-    "Static parser-DWA masks (slowest build, fastest masks)."
+    """Static masks: slowest build, fastest per-token masks."""
     TOKEN_TRIE: ClassVar[MaskStrategy]
-    "Dynamic token-trie walk (fastest build)."
+    """Trie walk per mask: fastest build."""
     TOKEN_CLASS_TRIE: ClassVar[MaskStrategy]
-    "Token-trie walk over token equivalence classes."
+    """Trie walk over token equivalence classes."""
     FAST_BUILD: ClassVar[MaskStrategy]
-    "Alias for TOKEN_TRIE."
+    """Alias for `TOKEN_TRIE`."""
     FAST_RUNTIME: ClassVar[MaskStrategy]
-    "Alias for PARSER_DWA."
+    """Alias for `PARSER_DWA`."""
 
 @final
 class BoundaryMaskStrategy:
@@ -79,148 +79,214 @@ class BoundaryMaskStrategy:
 
 @final
 class Token:
-    "An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton."
+    """An original model token ID without vocabulary identity.
+
+    Only ID membership is checked against the target vocabulary, so the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
+    """
     def __init__(self, id: int) -> None:
+        """Creates a token event for `id`; membership is checked at compile."""
         ...
     @property
     def id(self) -> int:
+        """The original model token ID."""
         ...
 
 @final
 class ExactTokens:
-    "One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing."
+    """One token event chosen from a vocabulary-bound set.
+
+    Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
+    """
     @property
     def ids(self) -> list[int]:
-        "Sorted IDs, materialized on access. Prefer `ranges` for large sets."
+        """The exact model token IDs, sorted in ascending order.
+
+        Materializes the IDs; use `ranges` to inspect large sets.
+        """
         ...
     @property
     def ranges(self) -> list[range]:
-        "Normalized, disjoint Python ranges with exclusive stops; does not expand the IDs."
+        """The normalized, disjoint token-ID ranges.
+
+        Each `range` has an exclusive stop.
+        """
         ...
     def __len__(self) -> int:
-        "Number of IDs, rather than ranges."
+        """Number of allowed token IDs, not the number of ranges."""
         ...
 
 @final
 class Vocab:
-    "Original model IDs mapped to exact token bytes. IDs may be sparse; masks keep their original positions. Reuse one vocabulary across components to share compilation caches."
+    """The model vocabulary a constraint is compiled against.
+
+    Entries map model token IDs to exact token bytes. Token IDs may be sparse; masks use the original model token IDs.
+    """
     @staticmethod
     def from_dict(token_to_id: dict[Union[str, bytes], int]) -> Vocab:
-        "String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer."
+        """Creates a vocabulary from `{token: id}`.
+
+        String tokens are UTF-8 encoded and byte tokens are used verbatim; IDs must be unsigned 32-bit integers.
+        """
         ...
     @staticmethod
     def from_id_to_bytes(id_to_bytes: dict[int, bytes]) -> Vocab:
-        "Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings."
+        """Creates a vocabulary from `{token_id: bytes}`.
+
+        Use the tokenizer's exact decoded bytes, including partial UTF-8 sequences, not display spellings.
+        """
         ...
     @staticmethod
     def from_llama_cpp(llm: Any) -> Vocab:
-        "Extract the byte vocabulary from a llama-cpp-python `Llama`. EOG, control, unused and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy."
+        """Creates a vocabulary from a llama-cpp-python `Llama`.
+
+        EOG, control, unused, and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.
+        """
         ...
     @property
     def llama_cpp_end_token_ids(self) -> list[int]:
-        "EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling."
+        """EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling."""
         ...
     def tokens(self, ids: Iterable[int]) -> ExactTokens:
-        "Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once."
+        """Creates a vocabulary-bound token event matching one of `ids`.
+
+        Unknown or duplicate IDs raise `ValueError`; empty input matches nothing.
+        """
         ...
     def token_ranges(self, ranges: Iterable[range]) -> ExactTokens:
-        "Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides."
+        """Creates a vocabulary-bound token event matching the union of `ranges`.
+
+        Ranges are nonempty Python ranges with step 1 or -1 and exclusive stops; overlapping or adjacent ranges merge. Unknown IDs raise `ValueError`; empty input matches nothing.
+        """
         ...
     def __len__(self) -> int:
-        "Counts byte-backed entries; exact-only control IDs are excluded."
+        """Number of byte-backed entries; exact-only IDs are not counted."""
         ...
 
 @final
 class Extern:
-    "One declared extern contract on a Module."
+    """A declared extern slot on a `Module`."""
     @property
     def name(self) -> str:
-        "Declared extern name."
+        """The declared name."""
         ...
     @property
     def kind(self) -> Literal["token", "grammar"]:
-        "A token extern accepts exact events; a grammar extern accepts grammar/module/expr components."
+        """The declared kind: token or grammar."""
         ...
     @property
     def span(self) -> Optional[tuple[int, int, int, int]]:
-        "`(start_byte, end_byte, line, column)` in the declaring source, or `None`. The byte interval is half-open; line and Unicode-scalar column are one-based."
+        """Source span of the declaration, or `None`.
+
+        `(start_byte, end_byte, line, column)` in the declaring source; the byte interval is half-open and line and Unicode-scalar column are one-based.
+        """
         ...
     def __repr__(self) -> str:
+        """The debug representation."""
         ...
     def __eq__(self, other: object) -> bool:
+        """Compares name, kind, and span."""
         ...
 
 @final
 class Externs(Mapping[str, Extern]):
-    "Read-only snapshot view of a Module's declared externs. Implements collections.abc.Mapping."
+    """A view over a `Module`'s declared externs, in declaration order.
+
+    Implements `collections.abc.Mapping`.
+    """
     @property
     def unbound(self) -> Externs:
-        "Filtered view containing only externs not yet bound."
+        """The same view restricted to unresolved externs."""
         ...
     def __getitem__(self, key: str) -> Extern:
+        """The extern for `key`; raises `KeyError` if absent."""
         ...
     def __iter__(self) -> Iterator[str]:
+        """The declared extern names in declaration order."""
         ...
     def __len__(self) -> int:
+        """Number of externs in this view."""
         ...
     def __repr__(self) -> str:
+        """The debug representation."""
         ...
     def __eq__(self, other: object) -> bool:
+        """Compares the externs in declaration order."""
         ...
 
 @final
 class Expr:
-    "Immutable scope-preserving union, concatenation, or byte-literal leaves."
+    """An immutable unordered union or concatenation of independently scoped grammars."""
     @staticmethod
     def choice(*parts: Union[Grammar, Module, Expr, Token, ExactTokens]) -> Expr:
-        "Unordered context-free union. Empty choice matches nothing. Open parts raise ValueError immediately."
+        """Creates a union without ordered-choice priority.
+
+        An empty choice matches nothing; open parts raise `ValueError` immediately.
+        """
         ...
     @staticmethod
     def sequence(*parts: Union[Grammar, Module, Expr, Token, ExactTokens]) -> Expr:
-        "Concatenation of language pieces. Empty sequence matches epsilon. Open parts raise ValueError immediately."
+        """Creates a concatenation; a model token may cross any number of operand boundaries.
+
+        An empty sequence is epsilon; open parts raise `ValueError` immediately.
+        """
         ...
     @staticmethod
     def literal(value: Union[str, bytes], /) -> Expr:
-        "Match exact bytes without whitespace or ignore inserted (str is UTF-8 encoded)."
+        """Matches exact bytes, with no whitespace or ignore inserted.
+
+        `str` is UTF-8 encoded.
+        """
         ...
 
 @final
 class Module:
-    "An owned, independently configured reusable grammar with snapshot-safe mutable bindings and retained compilation work."
+    """A reusable, independently configured grammar with bindings and any retained compilation work.
+
+    May still have unresolved externs.
+    """
     def __init__(
         self,
         source: Grammar,
         /,
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_RUNTIME,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.PARSER_DWA,
     ) -> None:
-        "Create a cold module from a Grammar with settings."
+        """Creates a module from a source grammar with default settings."""
         ...
     @property
     def mask_strategy(self) -> MaskStrategy:
-        "Mask generation strategy for this module."
+        """The mask computation strategy."""
         ...
     @mask_strategy.setter
     def mask_strategy(self, value: MaskStrategy) -> None:
         ...
     @property
     def boundary_mask_strategy(self) -> BoundaryMaskStrategy:
-        "Boundary mask detail level for this module."
+        """The boundary parser strategy."""
         ...
     @boundary_mask_strategy.setter
     def boundary_mask_strategy(self, value: BoundaryMaskStrategy) -> None:
         ...
     @overload
     def bind(self, name: str, value: Union[Grammar, Module, Expr, Token, ExactTokens], /) -> None:
-        "Fill one extern. Each extern can be bound once; names containing `::` are rejected."
+        """Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.
+
+        Fails if an extern is undeclared or already bound; names containing `::` are rejected.
+        """
         ...
     @overload
     def bind(self, **bindings: Union[Grammar, Module, Expr, Token, ExactTokens]) -> None:
-        "Fill several externs atomically, in order: if any binding fails, none is applied. Mixing positional and keyword forms raises TypeError."
+        """Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.
+
+        Fails if an extern is undeclared or already bound; names containing `::` are rejected.
+        """
         ...
     def precompile(self, vocab: Vocab) -> None:
-        "Perform and retain definition-local work for this vocabulary even while externs are open. Existing clones are unchanged."
+        """Retains vocabulary-specific compilation artifacts for this module.
+
+        A module using `TOKEN_TRIE` retains no work and compiles from source.
+        """
         ...
     def compile(
         self,
@@ -228,43 +294,55 @@ class Module:
         *,
         end_tokens: Optional[Sequence[int]] = None,
     ) -> Constraint:
-        "Create a runnable constraint. Requires all externs resolved."
+        """Compiles the module assembly against `vocab`.
+
+        Requires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping.
+        """
         ...
     @property
     def externs(self) -> Externs:
-        "Read-only snapshot mapping of this module's own declared externs in declaration order."
+        """A view over the module's declared externs, in declaration order."""
         ...
     def copy(self) -> Module:
-        "Return an independent snapshot sharing immutable source and retained work."
+        """An independent snapshot sharing immutable source and retained work."""
         ...
     def __copy__(self) -> Module:
-        "Return a cheap independent snapshot."
+        """An independent snapshot."""
         ...
     def __deepcopy__(self, memo: dict[int, Any]) -> Module:
-        "Return a logically independent snapshot."
+        """An independent snapshot."""
         ...
     def save(self) -> bytes:
-        "Serialize source, settings, bindings and retained work without compiling."
+        """Serializes the module assembly and any retained precompiled artifacts."""
         ...
     @staticmethod
     def load(data: bytes, vocab: Optional[Vocab] = None) -> Module:
-        "Load a saved module artifact, restoring settings and retained work."
+        """Deserializes a module assembly, verifying it against `vocab` when supplied."""
         ...
 
 @final
 class Grammar:
-    "Immutable authored source grammar without compilation settings or bindings."
+    """The source-language definition, without compilation settings.
+
+    Source text is parsed lazily, so parse errors surface at compile time.
+    """
     @staticmethod
     def from_ebnf(source: str) -> Grammar:
-        "Parsing and compilation errors can be deferred until `compile`."
+        """Creates a grammar from EBNF source text."""
         ...
     @staticmethod
     def from_glrm(source: str) -> Grammar:
-        "GLRM supports typed external declarations; bind them via `Module(g).bind(...)` before compiling."
+        """Creates a grammar from GLRM source.
+
+        GLRM supports typed extern slots; bind them before compiling a runnable root.
+        """
         ...
     @staticmethod
     def from_json_schema(schema: Any) -> Grammar:
-        "Accepts JSON text or a JSON-serializable object."
+        """Creates a grammar from a JSON Schema document.
+
+        Accepts JSON text or a JSON-serializable object; `format` is an annotation only.
+        """
         ...
     @staticmethod
     def from_lark(
@@ -273,7 +351,10 @@ class Grammar:
         profile: Literal["recognition", "llm"] = "recognition",
         token_names: Optional[dict[str, Union[int, Sequence[int]]]] = None,
     ) -> Grammar:
-        "The default `recognition` profile and the `llm` extension profile differ in accepted syntax."
+        """Creates a grammar from Lark source.
+
+        `profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.
+        """
         ...
     def compile(
         self,
@@ -281,61 +362,97 @@ class Grammar:
         *,
         end_tokens: Optional[Sequence[int]] = None,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.FAST_RUNTIME,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.PARSER_DWA,
     ) -> Constraint:
-        "Compile this grammar directly. Sugar for `Module(self, ...).compile(vocab, end_tokens=...)`."
+        """Compiles the grammar against `vocab`.
+
+        Equivalent to `Module(self).compile(vocab, ...)`.
+        """
         ...
     def __copy__(self) -> Grammar:
+        """An independent handle."""
         ...
     def __deepcopy__(self, memo: dict[int, Any]) -> Grammar:
+        """An independent handle."""
         ...
 
 @final
 class Constraint:
-    "Immutable runnable grammar and root stopping policy. Reuse across sequences; each `start` creates independent mutable state."
+    """A fully runnable grammar compiled against a specific vocabulary.
+
+    Immutable and safe to share; each `start()` creates independent mutable state.
+    """
     def marker_ids(self) -> list[int]:
-        "Sorted, distinct application marker IDs, independent of model token IDs."
+        """Sorted, distinct application marker IDs."""
         ...
     def start(self) -> ConstraintState:
+        """Creates independent state for one generated sequence."""
         ...
     def mask_len(self) -> int:
-        "Packed 32-bit word count for `fill_mask`, not the Boolean-array length returned by `mask`."
+        """Number of packed `u32` words in a mask, for `fill_mask`; not the Boolean-array length returned by `mask`."""
         ...
     def save(self, *, external_vocab: bool = False) -> bytes:
-        "Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size."
+        """Serializes the constraint, including its vocabulary and root stopping policy.
+
+        With `external_vocab=True`, load with `Constraint.load(data, vocab)` using the exact original token-ID/byte mapping, not merely the same size. Artifact compatibility across GLRMask releases is not guaranteed.
+        """
         ...
     @staticmethod
     def load(data: bytes, vocab: Optional[Vocab] = None) -> Constraint:
-        "Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping."
+        """Deserializes a constraint.
+
+        `vocab` is required for artifacts saved with `external_vocab=True` and must match the original mapping. Rejects malformed or incompatible artifacts.
+        """
         ...
 
 @final
 class ConstraintState:
-    "Mutable state for one generated sequence."
+    """The mutable state for a single generated sequence."""
     def marker_events(self) -> list[tuple[int, int]]:
-        "Initial or most recent commit’s `(marker_id, absolute_byte_offset)` batch, sorted by offset then ID."
+        """Initial or most recent commit's observations as `(marker_id, absolute_byte_offset)`.
+
+        Sorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.
+        """
         ...
     def clone(self) -> ConstraintState:
-        "Independent snapshot at the current prefix."
+        """An independent snapshot at the current prefix."""
         ...
     def mask(self, size: Optional[int] = None) -> NDArray[np.bool_]:
-        "New Boolean array indexed by original token ID."
+        """The current allowed-token mask as a new Boolean array indexed by original token ID.
+
+        `size` must cover the constraint's whole token range; extra positions are false.
+        """
         ...
     def fill_mask(self, bitmask: NDArray[np.int32]) -> None:
-        "Fill a contiguous, writable 1-D NumPy `int32` array with at least `Constraint.mask_len()` words."
+        """Writes the current mask into a contiguous, writable 1-D NumPy `int32` array.
+
+        The array must hold at least `Constraint.mask_len()` words; extra words are cleared.
+        """
         ...
     def commit_token(self, token_id: int) -> None:
-        "Advance by a token event. Unknown or forbidden IDs reject the state."
+        """Commits one model token event.
+
+        Unknown IDs raise `ValueError`; forbidden IDs reject the state and may also raise. Committing after an end token raises.
+        """
         ...
     def commit_bytes(self, data: bytes) -> None:
-        "Advance by raw bytes rather than model token events."
+        """Commits raw bytes rather than a model token event.
+
+        Does not substitute for committing exact-token or end-token events.
+        """
         ...
     def is_accepting(self) -> bool:
-        "The current prefix is a complete grammar match."
+        """Whether the current prefix is a complete grammar match.
+
+        Further tokens may still be allowed; this alone does not commit an end token.
+        """
         ...
     def is_rejected(self) -> bool:
-        "The prefix cannot be extended to a valid match."
+        """Whether the prefix cannot be extended to a valid match."""
         ...
     def forced_tokens(self) -> list[int]:
-        "Read-only canonical prefix of forced tokens."
+        """A read-only prefix of library-canonical forced output, at most 10,000 IDs.
+
+        Uses the longest admitted nonempty token spelling, then the lowest original token ID; exact-token events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.
+        """
         ...
