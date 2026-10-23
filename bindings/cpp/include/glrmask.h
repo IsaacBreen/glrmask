@@ -63,11 +63,12 @@ enum {
 #define GLRMASK_MASK_STRATEGY_FAST_RUNTIME GLRMASK_MASK_STRATEGY_PARSER_DWA
 /// Boundary parser selection for crossings between composed grammars.
 enum {
-    GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC=0,    ///< Segmented dynamic boundary parser; faster build.
-    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1  ///< Static boundary parser; faster crossings.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_AUTO=0,        ///< Automatic selection.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA=1,  ///< Static boundary parser; faster crossings.
+    GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE=2   ///< Segmented dynamic boundary token walk; faster build.
 };
-/// Alias for GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC.
-#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD GLRMASK_BOUNDARY_MASK_STRATEGY_DYNAMIC
+/// Alias for GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE.
+#define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_BUILD GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE
 /// Alias for GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA.
 #define GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA
 /// Source formats accepted by glrmask_grammar_from_source.

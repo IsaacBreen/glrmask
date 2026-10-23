@@ -362,8 +362,9 @@ GLRMask’s dynamic mode trades some mask-generation speed for lower cold-start 
 `BoundaryMaskStrategy` selects the boundary parser for crossings between composed
 grammars:
 
-- `ParserDwa` (default, alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message.
-- `Dynamic` (alias `FAST_BUILD`): segmented dynamic boundary parser; faster build.
+- `ParserDwa` (alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build returns `Error::ResourceLimit` with a `boundary_parser_dwa:` message.
+- `TokenTrie` (alias `FAST_BUILD`): segmented dynamic boundary token walk; faster build.
+- `Auto` (default): `ParserDwa`, falling back to `TokenTrie` for each boundary whose static parser declines on budget.
 
 All modes preserve accepted-language semantics and produce the same public `Constraint` type.
 

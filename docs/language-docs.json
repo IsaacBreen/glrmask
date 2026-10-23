@@ -21,9 +21,10 @@
     "MaskStrategy.FAST_RUNTIME": "Alias for `PARSER_DWA`.",
     "BoundaryMaskStrategy": "Boundary parser selection for crossings between composed grammars.",
     "BoundaryMaskStrategy.PARSER_DWA": "Static boundary parser; faster crossings. An over-budget build raises ValueError.",
-    "BoundaryMaskStrategy.DYNAMIC": "Segmented dynamic boundary parser; faster build.",
+    "BoundaryMaskStrategy.AUTO": "Automatic selection: `PARSER_DWA`, falling back to `TOKEN_TRIE` when the static boundary parser declines on budget.",
+    "BoundaryMaskStrategy.TOKEN_TRIE": "Segmented dynamic boundary token walk; faster build.",
     "BoundaryMaskStrategy.FAST_RUNTIME": "Alias for PARSER_DWA.",
-    "BoundaryMaskStrategy.FAST_BUILD": "Alias for DYNAMIC.",
+    "BoundaryMaskStrategy.FAST_BUILD": "Alias for TOKEN_TRIE.",
     "Token": "An original model token ID without vocabulary identity.\n\nOnly ID membership is checked against the target vocabulary, so the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.",
     "Token.__init__": "Creates a token event for `id`; membership is checked at compile.",
     "Token.id": "The original model token ID.",
@@ -218,8 +219,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "c84b4bde3350345f4d092139284c21d839f04d4e57cb32c068ad96ed47d9ac09",
-    "bindings/node/README.md": "719c5b85de0444d6e56d78119661f83514dde4b234186b664bf8a61a9c349dc9",
+    "bindings/cpp/README.md": "0184b138ecce3431fb7a7c7c1963b7cfe4c35fb77cc4ecb5abcf15d777b673a0",
+    "bindings/node/README.md": "24b72a6b9c046f84a32de7a132650d0d8c27cf501169a521880ed30ae9f4c130",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -227,5 +228,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "a28f6d1262370f9d269a241a11fc94b977d35abd48a2afd9e501c6e223d6e84b"
+  "content_sha256": "a7274094292234c37505ca807bd99a57cde7f1a23ff7f22b25ef56c088728e43"
 }

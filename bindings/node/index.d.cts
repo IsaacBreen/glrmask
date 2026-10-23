@@ -22,14 +22,16 @@ export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
 
 /** Boundary parser selection for crossings between composed grammars. */
 export declare const BoundaryMaskStrategy: Readonly<{
+  /** Automatic selection: `ParserDwa`, falling back to `TokenTrie` when the static boundary parser declines on budget. */
+  Auto: 'auto';
   /** Static boundary parser; faster crossings. An over-budget build raises `GlrMaskError`. */
   ParserDwa: 'parser-dwa';
-  /** Segmented dynamic boundary parser; faster build. */
-  Dynamic: 'dynamic';
+  /** Segmented dynamic boundary token walk; faster build. */
+  TokenTrie: 'token-trie';
+  /** Alias for `TokenTrie`. */
+  FastBuild: 'token-trie';
   /** Alias for `ParserDwa`. */
   FastRuntime: 'parser-dwa';
-  /** Alias for `Dynamic`. */
-  FastBuild: 'dynamic';
 }>;
 /** A boundary parser strategy; the legacy `fast-runtime`/`fast-build` strings are also accepted as input. */
 export type BoundaryMaskStrategy =

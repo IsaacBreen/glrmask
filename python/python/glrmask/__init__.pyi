@@ -68,14 +68,16 @@ class MaskStrategy:
 @final
 class BoundaryMaskStrategy:
     """Boundary parser selection for crossings between composed grammars."""
+    AUTO: ClassVar[BoundaryMaskStrategy]
+    """Automatic selection: `PARSER_DWA`, falling back to `TOKEN_TRIE` when the static boundary parser declines on budget."""
     PARSER_DWA: ClassVar[BoundaryMaskStrategy]
     """Static boundary parser; faster crossings. An over-budget build raises ValueError."""
-    DYNAMIC: ClassVar[BoundaryMaskStrategy]
-    """Segmented dynamic boundary parser; faster build."""
+    TOKEN_TRIE: ClassVar[BoundaryMaskStrategy]
+    """Segmented dynamic boundary token walk; faster build."""
+    FAST_BUILD: ClassVar[BoundaryMaskStrategy]
+    """Alias for TOKEN_TRIE."""
     FAST_RUNTIME: ClassVar[BoundaryMaskStrategy]
     """Alias for PARSER_DWA."""
-    FAST_BUILD: ClassVar[BoundaryMaskStrategy]
-    """Alias for DYNAMIC."""
 
 @final
 class Token:
@@ -250,7 +252,7 @@ class Module:
         /,
         *,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.PARSER_DWA,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
     ) -> None:
         """Creates a module from a source grammar with default settings."""
         ...
@@ -362,7 +364,7 @@ class Grammar:
         *,
         end_tokens: Optional[Sequence[int]] = None,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.PARSER_DWA,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
     ) -> Constraint:
         """Compiles the grammar against `vocab`.
 

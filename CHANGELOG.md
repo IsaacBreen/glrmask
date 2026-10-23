@@ -16,15 +16,18 @@
   `Optimization`; `Balanced` is removed. Explicit strategies error instead of
   silently falling back. `TokenTrie` parts cannot be combined with `ParserDwa`
   or `TokenClassTrie` parts in one composition.
-- `BoundaryMaskStrategy` (`ParserDwa`, the default, and `Dynamic`) selects the
-  boundary parser for composed grammars; `FAST_RUNTIME` and `FAST_BUILD` alias
-  `ParserDwa` and `Dynamic`. The boundary token trigger is always the LLM token
-  set and no longer derives from this setting. A `ParserDwa` budget decline is a
-  typed compile error; use `Dynamic` to keep the segmented dynamic boundary.
+- `BoundaryMaskStrategy` (`Auto`, the default, `ParserDwa`, and `TokenTrie`,
+  with aliases `FAST_BUILD` = `TokenTrie` and `FAST_RUNTIME` = `ParserDwa`)
+  selects the boundary parser for composed grammars. The boundary token trigger
+  is always the LLM token set and no longer derives from this setting. `Auto`
+  uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static
+  parser declines on budget; an explicit `ParserDwa` budget decline is a typed
+  compile error.
 - The bindings now expose the same strategy names: Python
-  `BoundaryMaskStrategy.PARSER_DWA`/`DYNAMIC`, Node.js `ParserDwa`/`Dynamic`,
-  and C/C++ `..._PARSER_DWA`/`..._DYNAMIC`, with the fast-build/fast-runtime
-  aliases retained.
+  `BoundaryMaskStrategy.AUTO`/`PARSER_DWA`/`TOKEN_TRIE`, Node.js
+  `Auto`/`ParserDwa`/`TokenTrie`, and C/C++
+  `..._AUTO`/`..._PARSER_DWA`/`..._TOKEN_TRIE`, with the
+  fast-build/fast-runtime aliases retained.
 - `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
   externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
   applied only to the root.

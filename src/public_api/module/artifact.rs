@@ -94,15 +94,17 @@ fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
 
 fn boundary_to_u8(b: BoundaryMaskStrategy) -> u8 {
     match b {
-        BoundaryMaskStrategy::Dynamic => 0,
+        BoundaryMaskStrategy::Auto => 0,
         BoundaryMaskStrategy::ParserDwa => 1,
+        BoundaryMaskStrategy::TokenTrie => 2,
     }
 }
 
 fn u8_to_boundary(n: u8) -> Result<BoundaryMaskStrategy> {
     match n {
-        0 => Ok(BoundaryMaskStrategy::Dynamic),
+        0 => Ok(BoundaryMaskStrategy::Auto),
         1 => Ok(BoundaryMaskStrategy::ParserDwa),
+        2 => Ok(BoundaryMaskStrategy::TokenTrie),
         _ => Err(err("invalid boundary mask strategy tag")),
     }
 }
@@ -255,7 +257,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
     let mut ports = 0usize;
 
     for (i, node) in manifest.instances.iter().enumerate() {
-        if node.source as usize >= manifest.sources.len() || node.mask_strategy > 3 || node.boundary_mask_strategy > 1 {
+        if node.source as usize >= manifest.sources.len() || node.mask_strategy > 3 || node.boundary_mask_strategy > 2 {
             return Err(err("invalid Module source/options"));
         }
         used_sources.insert(node.source);

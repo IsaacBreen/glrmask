@@ -72,7 +72,7 @@ auto sequence = glrmask::Expr::sequence({
 | `TokenTrie` | `2` | Dynamic token-trie walk; fastest build. |
 | `TokenClassTrie` | `3` | Token-trie walk over token equivalence classes. |
 
-`BoundaryMaskStrategy::ParserDwa` and `BoundaryMaskStrategy::Dynamic` select the boundary parser for crossings between composed grammars. `ParserDwa` is the default and has faster crossings; an over-budget build throws `Error`. `Dynamic` keeps the segmented dynamic boundary and builds faster. `FastRuntime` and `FastBuild` alias them, and the C constants `GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME`/`..._FAST_BUILD` keep their values.
+`BoundaryMaskStrategy::Auto` (the default), `ParserDwa` and `TokenTrie` select the boundary parser for crossings between composed grammars. `ParserDwa` has faster crossings; an over-budget build throws `Error`. `TokenTrie` keeps the segmented dynamic boundary and builds faster. `Auto` uses `ParserDwa` and falls back to `TokenTrie` for a boundary whose static parser declines on budget. `FastRuntime` and `FastBuild` alias `ParserDwa` and `TokenTrie`, and the C constants `GLRMASK_BOUNDARY_MASK_STRATEGY_FAST_RUNTIME`/`..._FAST_BUILD` keep their values.
 
 ## Decoding
 

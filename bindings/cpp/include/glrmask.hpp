@@ -41,12 +41,14 @@ inline constexpr MaskStrategy kFastRuntime = MaskStrategy::ParserDwa;
 
 /// Boundary parser selection for crossings between composed grammars.
 enum class BoundaryMaskStrategy : std::uint32_t {
-    /// Segmented dynamic boundary parser; faster build.
-    Dynamic = 0,
+    /// Automatic selection.
+    Auto = 0,
     /// Static boundary parser; faster crossings.
     ParserDwa = 1,
-    /// Alias for `Dynamic`.
-    FastBuild = Dynamic,
+    /// Segmented dynamic boundary token walk; faster build.
+    TokenTrie = 2,
+    /// Alias for `TokenTrie`.
+    FastBuild = TokenTrie,
     /// Alias for `ParserDwa`.
     FastRuntime = ParserDwa
 };

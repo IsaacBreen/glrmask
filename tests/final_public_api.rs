@@ -379,7 +379,9 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
     assert_eq!(m.mask_strategy(), MaskStrategy::Auto);
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
+    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::Auto);
+    assert_eq!(BoundaryMaskStrategy::FAST_BUILD, BoundaryMaskStrategy::TokenTrie);
+    assert_eq!(BoundaryMaskStrategy::FAST_RUNTIME, BoundaryMaskStrategy::ParserDwa);
 
     m.precompile(&v).unwrap();
     let _saved_before = m.save();
@@ -400,15 +402,15 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
 fn focused_7_boundary_level_minimum() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::Dynamic).unwrap();
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie).unwrap();
     m.precompile(&v).unwrap();
 
-    // Raising to FastRuntime builds more (upgrades to Exact)
+    // Switching to the explicit static boundary keeps retained work valid.
     m.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
     m.precompile(&v).unwrap();
 
-    // Lowering back to FastBuild keeps the higher level (Exact)
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::Dynamic).unwrap();
+    // Switching back to the token-trie boundary also keeps retained work valid.
+    m.set_boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie).unwrap();
     m.precompile(&v).unwrap();
 
     let c = m.compile(&v).unwrap();

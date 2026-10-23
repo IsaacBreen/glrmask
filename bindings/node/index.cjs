@@ -56,10 +56,11 @@ const MaskStrategy = Object.freeze({
 });
 
 const BoundaryMaskStrategy = Object.freeze({
+  Auto: 'auto',
   ParserDwa: 'parser-dwa',
-  Dynamic: 'dynamic',
+  TokenTrie: 'token-trie',
+  FastBuild: 'token-trie',
   FastRuntime: 'parser-dwa',
-  FastBuild: 'dynamic',
 });
 
 const LarkProfile = Object.freeze({Recognition: 'recognition', Llm: 'llm'});
@@ -93,24 +94,27 @@ function formatMaskStrategy(num) {
 }
 
 function parseBoundaryMaskStrategy(value) {
-  if (value === undefined) return 1;
+  if (value === undefined) return 0;
   if (typeof value !== 'string') throw new TypeError('boundaryMaskStrategy must be a string');
   switch (value.toLowerCase()) {
+    case 'auto': return 0;
     case 'parser-dwa':
     case 'parser_dwa':
     case 'fast-runtime':
     case 'fast_runtime': return 1;
-    case 'dynamic':
+    case 'token-trie':
+    case 'token_trie':
     case 'fast-build':
-    case 'fast_build': return 0;
+    case 'fast_build': return 2;
     default: throw new TypeError(`Unknown boundaryMaskStrategy: ${value}`);
   }
 }
 function formatBoundaryMaskStrategy(num) {
   switch (num) {
-    case 0: return 'dynamic';
+    case 0: return 'auto';
     case 1: return 'parser-dwa';
-    default: return 'dynamic';
+    case 2: return 'token-trie';
+    default: return 'auto';
   }
 }
 

@@ -57,23 +57,27 @@ impl MaskStrategy {
 ///
 /// [`BoundaryMaskStrategy::ParserDwa`] installs the static boundary parser
 /// (faster crossings; an over-budget build returns [`Error::ResourceLimit`]
-/// with a `boundary_parser_dwa:` message). [`BoundaryMaskStrategy::Dynamic`]
+/// with a `boundary_parser_dwa:` message). [`BoundaryMaskStrategy::TokenTrie`]
 /// keeps the segmented dynamic boundary and builds faster.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
-    /// Static boundary parser; faster crossings.
+    /// Automatic selection: [`BoundaryMaskStrategy::ParserDwa`], falling back
+    /// to [`BoundaryMaskStrategy::TokenTrie`] when the static boundary parser
+    /// declines on budget.
     #[default]
+    Auto,
+    /// Static boundary parser; faster crossings.
     ParserDwa,
-    /// Segmented dynamic boundary parser; faster build.
-    Dynamic,
+    /// Segmented dynamic boundary token walk; faster build.
+    TokenTrie,
 }
 
 impl BoundaryMaskStrategy {
+    /// Alias for [`BoundaryMaskStrategy::TokenTrie`].
+    pub const FAST_BUILD: Self = Self::TokenTrie;
     /// Alias for [`BoundaryMaskStrategy::ParserDwa`].
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
-    /// Alias for [`BoundaryMaskStrategy::Dynamic`].
-    pub const FAST_BUILD: Self = Self::Dynamic;
 }
 
 /// A declared extern slot on a [`Module`].

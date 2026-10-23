@@ -61,10 +61,12 @@ Expressions can be bound directly to module externs.
 - `Auto`: library chooses the strategy (the default).
 
 `BoundaryMaskStrategy` selects the boundary parser for crossings between composed
-grammars: `ParserDwa` (default, alias `FAST_RUNTIME`) installs the static boundary
-parser and has faster crossings; an over-budget build returns
-`Error::ResourceLimit` with a `boundary_parser_dwa:` message. `Dynamic` (alias
-`FAST_BUILD`) keeps the segmented dynamic boundary and builds faster.
+grammars: `ParserDwa` (alias `FAST_RUNTIME`) installs the static boundary parser
+and has faster crossings; an over-budget build returns `Error::ResourceLimit`
+with a `boundary_parser_dwa:` message. `TokenTrie` (alias `FAST_BUILD`) keeps the
+segmented dynamic boundary and builds faster. `Auto` (the default) uses
+`ParserDwa` and falls back to `TokenTrie` for a boundary whose static parser
+declines on budget.
 
 Each Module captures its own settings via `set_mask_strategy` and
 `set_boundary_mask_strategy` (in Python: constructor keywords or properties).

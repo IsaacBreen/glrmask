@@ -120,8 +120,9 @@ whole graph; callers do not pass one to every constructor.
 
 `BoundaryMaskStrategy` selects the boundary parser for crossings between composed
 grammars:
-- `ParserDwa` (default, alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build is a typed compile error.
-- `Dynamic` (alias `FAST_BUILD`): segmented dynamic boundary parser; faster build.
+- `ParserDwa` (alias `FAST_RUNTIME`): static boundary parser; faster crossings. An over-budget build is a typed compile error.
+- `TokenTrie` (alias `FAST_BUILD`): segmented dynamic boundary token walk; faster build.
+- `Auto` (default): `ParserDwa`, falling back to `TokenTrie` for a boundary whose static parser declines on budget.
 
 Explicit strategy requests never fall back silently. If an engine cannot build
 a part or cannot be linked with neighbouring parts, compilation errors

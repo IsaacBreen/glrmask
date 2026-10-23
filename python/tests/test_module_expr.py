@@ -39,8 +39,8 @@ def test_module_settings_properties_and_compile():
     # Modifying settings properties
     module.mask_strategy = g.MaskStrategy.PARSER_DWA
     assert module.mask_strategy == g.MaskStrategy.PARSER_DWA
-    module.boundary_mask_strategy = g.BoundaryMaskStrategy.DYNAMIC
-    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.DYNAMIC
+    module.boundary_mask_strategy = g.BoundaryMaskStrategy.TOKEN_TRIE
+    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.TOKEN_TRIE
     assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.FAST_BUILD
 
     # Module options and compile options are removed from public API

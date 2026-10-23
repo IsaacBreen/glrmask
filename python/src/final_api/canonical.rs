@@ -336,7 +336,7 @@ impl PyModule {
         let boundary_mask_strategy = boundary_mask_strategy
             .as_deref()
             .copied()
-            .unwrap_or(PyBoundaryMaskStrategy::PARSER_DWA);
+            .unwrap_or(PyBoundaryMaskStrategy::AUTO);
         inner
             .set_mask_strategy(mask_strategy.into())
             .map_err(api_error)?;

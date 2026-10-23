@@ -208,9 +208,9 @@ impl Module {
     ///
     /// A [`BoundaryMaskStrategy::ParserDwa`] build that exceeds its budget
     /// returns [`Error::ResourceLimit`] with a `boundary_parser_dwa:` message;
-    /// choose [`BoundaryMaskStrategy::Dynamic`] (`FAST_BUILD`) to keep the
-    /// dynamic boundary. The returned `Result` reserves room for future
-    /// strategy validation.
+    /// [`BoundaryMaskStrategy::Auto`] (the default) falls back to
+    /// [`BoundaryMaskStrategy::TokenTrie`] (`FAST_BUILD`) instead of failing.
+    /// The returned `Result` reserves room for future strategy validation.
     pub fn set_boundary_mask_strategy(&mut self, strategy: BoundaryMaskStrategy) -> Result<()> {
         Arc::make_mut(&mut self.node).boundary_mask_strategy = strategy;
         Ok(())
@@ -248,7 +248,7 @@ impl Module {
                 node: Arc::new(Node {
                     source: Arc::new(own_local(grammar)),
                     mask_strategy: MaskStrategy::Auto,
-                    boundary_mask_strategy: BoundaryMaskStrategy::ParserDwa,
+                    boundary_mask_strategy: BoundaryMaskStrategy::Auto,
                     prepared: BTreeMap::new(),
                     bindings,
                     certificate: Arc::new(OnceLock::new()),
@@ -854,28 +854,42 @@ impl Module {
             } else {
                 crate::error::catch_internal_invariant(|| compose_named_children(parent, &children, vocab, SegmentedBoundaryBackend::Dynamic))??
             };
-            if self.node.boundary_mask_strategy == BoundaryMaskStrategy::ParserDwa
+            let boundary_strategy = self.node.boundary_mask_strategy;
+            if boundary_strategy != BoundaryMaskStrategy::TokenTrie
                 && parent.has_template_parser()
                 && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
             {
-                #[cfg(test)]
-                if self
-                    .node
-                    .force_boundary_dwa_decline
-                    .load(std::sync::atomic::Ordering::Relaxed)
-                {
+                // `Auto` mirrors `MaskStrategy::Auto`: prefer the static
+                // boundary parser, and fall back to the token-trie boundary
+                // when it declines on budget instead of failing the build.
+                let fallback = (boundary_strategy == BoundaryMaskStrategy::Auto).then(|| parent.clone());
+                let declined = {
+                    #[cfg(test)]
+                    let forced_decline = self
+                        .node
+                        .force_boundary_dwa_decline
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    #[cfg(not(test))]
+                    let forced_decline = false;
+                    if forced_decline {
+                        true
+                    } else {
+                        match crate::compiler::template_boundary::install(&mut parent, vocab) {
+                            Ok(()) => false,
+                            Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => true,
+                            Err(error) => return Err(error),
+                        }
+                    }
+                };
+                if declined && boundary_strategy == BoundaryMaskStrategy::ParserDwa {
                     return Err(Error::ResourceLimit(
-                        "boundary_parser_dwa: forced test decline; use BoundaryMaskStrategy::FAST_BUILD (Dynamic)".into(),
+                        "boundary_parser_dwa: static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (TokenTrie) to keep the segmented dynamic boundary".into(),
                     ));
                 }
-                match crate::compiler::template_boundary::install(&mut parent, vocab) {
-                    Ok(()) => {}
-                    Err(error) if crate::compiler::template_boundary::is_template_budget_decline(&error) => {
-                        return Err(Error::ResourceLimit(
-                            "boundary_parser_dwa: static boundary parser DWA declined within the build budget; use BoundaryMaskStrategy::FAST_BUILD (Dynamic) to keep the segmented dynamic boundary".into(),
-                        ));
+                if declined {
+                    if let Some(fallback) = fallback {
+                        parent = fallback;
                     }
-                    Err(error) => return Err(error),
                 }
             }
             let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
@@ -1200,7 +1214,7 @@ mod boundary_strategy_tests {
     }
 
     #[test]
-    fn dynamic_and_parser_dwa_boundaries_produce_identical_masks() {
+    fn token_trie_and_parser_dwa_boundaries_produce_identical_masks() {
         let vocab = vocab();
         let child = Module::new(&Grammar::from_ebnf(r#"start ::= "y" "z""#));
         let compile = |strategy| {
@@ -1214,10 +1228,10 @@ mod boundary_strategy_tests {
                 .unwrap()
         };
         let static_boundary = compile(BoundaryMaskStrategy::ParserDwa);
-        let dynamic = compile(BoundaryMaskStrategy::Dynamic);
+        let token_trie = compile(BoundaryMaskStrategy::TokenTrie);
         for prefix in [&[0u32][..0], &[0][..], &[0, 1][..]] {
             let mut a = static_boundary.start();
-            let mut b = dynamic.start();
+            let mut b = token_trie.start();
             for &token in prefix {
                 a.commit_token(token).unwrap();
                 b.commit_token(token).unwrap();
@@ -1233,7 +1247,7 @@ mod boundary_error_tests {
     use crate::__private::VocabExt as _;
 
     #[test]
-    fn parser_dwa_budget_decline_is_typed_and_dynamic_succeeds() {
+    fn parser_dwa_budget_decline_is_typed_and_token_trie_succeeds() {
         let vocab = {
             let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
             vocab.prepare_for_compile();
@@ -1258,6 +1272,35 @@ mod boundary_error_tests {
             }
             other => panic!("expected ResourceLimit, got {other:?}"),
         }
-        compile(BoundaryMaskStrategy::Dynamic).expect("Dynamic must bypass the static boundary parser");
+        compile(BoundaryMaskStrategy::TokenTrie).expect("TokenTrie must bypass the static boundary parser");
+    }
+
+    #[test]
+    fn auto_falls_back_to_token_trie_where_parser_dwa_errors() {
+        let vocab = {
+            let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
+            vocab.prepare_for_compile();
+            vocab
+        };
+        let compile = |strategy| {
+            let mut parent = Module::new(&Grammar::from_glrm(
+                r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
+            ));
+            parent
+                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
+                .unwrap();
+            parent.set_boundary_mask_strategy(strategy).unwrap();
+            parent.force_boundary_dwa_decline();
+            parent.compile_with(&vocab, CompileOptions::default())
+        };
+        compile(BoundaryMaskStrategy::ParserDwa).expect_err("explicit ParserDwa must report the budget decline");
+        let auto = compile(BoundaryMaskStrategy::Auto).expect("Auto must fall back to the token-trie boundary");
+        let token_trie = compile(BoundaryMaskStrategy::TokenTrie).expect("TokenTrie must build without the static boundary");
+        let mut auto_state = auto.start();
+        let mut trie_state = token_trie.start();
+        assert_eq!(auto_state.mask(), trie_state.mask());
+        auto_state.commit_token(0).unwrap();
+        trie_state.commit_token(0).unwrap();
+        assert_eq!(auto_state.mask(), trie_state.mask());
     }
 }

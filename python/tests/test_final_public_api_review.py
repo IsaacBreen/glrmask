@@ -37,9 +37,9 @@ def test_public_types_exist_without_exposing_backend_selection():
         assert hasattr(glrmask.MaskStrategy, name), name
     assert glrmask.MaskStrategy.FAST_BUILD is glrmask.MaskStrategy.TOKEN_TRIE
     assert glrmask.MaskStrategy.FAST_RUNTIME is glrmask.MaskStrategy.PARSER_DWA
-    for name in ["FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "DYNAMIC"]:
+    for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "TOKEN_TRIE"]:
         assert hasattr(glrmask.BoundaryMaskStrategy, name), name
-    assert glrmask.BoundaryMaskStrategy.FAST_BUILD is glrmask.BoundaryMaskStrategy.DYNAMIC
+    assert glrmask.BoundaryMaskStrategy.FAST_BUILD is glrmask.BoundaryMaskStrategy.TOKEN_TRIE
     assert glrmask.BoundaryMaskStrategy.FAST_RUNTIME is glrmask.BoundaryMaskStrategy.PARSER_DWA
 
 

@@ -12,21 +12,21 @@ function accept(module,v,ids){const s=module.compileSync(v).start();for(const id
 test('Module: properties, setters, copy and root-only final options',()=>{
   const v=vocab(),original=new Module(host());
   assert.equal(original.maskStrategy,MaskStrategy.Auto);
-  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.ParserDwa);
+  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.Auto);
   assert.equal(BoundaryMaskStrategy.FastRuntime,BoundaryMaskStrategy.ParserDwa);
-  assert.equal(BoundaryMaskStrategy.FastBuild,BoundaryMaskStrategy.Dynamic);
+  assert.equal(BoundaryMaskStrategy.FastBuild,BoundaryMaskStrategy.TokenTrie);
 
   original.maskStrategy=MaskStrategy.TokenClassTrie;
   assert.equal(original.maskStrategy,MaskStrategy.TokenClassTrie);
-  original.boundaryMaskStrategy=BoundaryMaskStrategy.Dynamic;
-  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.Dynamic);
+  original.boundaryMaskStrategy=BoundaryMaskStrategy.TokenTrie;
+  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
 
   const configured=original.copy();
   assert.equal(configured.maskStrategy,MaskStrategy.TokenClassTrie);
-  assert.equal(configured.boundaryMaskStrategy,BoundaryMaskStrategy.Dynamic);
+  assert.equal(configured.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
 
-  const child=new Module(source(),{maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.Dynamic});
-  assert.equal(child.boundaryMaskStrategy,BoundaryMaskStrategy.Dynamic);
+  const child=new Module(source(),{maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
+  assert.equal(child.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
   assert.equal(child.precompileSync(v),undefined);
   accept(child,v,[1]);
 
@@ -53,11 +53,12 @@ test('Module: settings round-trip through save/load',()=>{
 
 test('Module: legacy boundary strategy strings remain accepted',()=>{
   const v=vocab();
-  for (const [input,expected] of [['fast-runtime',BoundaryMaskStrategy.ParserDwa],['fast-build',BoundaryMaskStrategy.Dynamic]]) {
+  for (const [input,expected] of [['fast-runtime',BoundaryMaskStrategy.ParserDwa],['fast-build',BoundaryMaskStrategy.TokenTrie]]) {
     const m=new Module(source(),{boundaryMaskStrategy:input});
     assert.equal(m.boundaryMaskStrategy,expected);
     accept(m,v,[1]);
   }
+  assert.throws(()=>new Module(source(),{boundaryMaskStrategy:'dynamic'}),TypeError);
 });
 
 test('Module: rebinding error, :: error and open-child error',()=>{
