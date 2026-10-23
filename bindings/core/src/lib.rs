@@ -179,7 +179,7 @@ mod tests {
             let mut a = State::start(c).unwrap();
             assert_eq!(a.mask().unwrap(), expected);
             let b = a.try_clone().unwrap();
-            assert!(a.commit_token(31));
+            assert!(a.commit_token(31).unwrap());
             assert!(a.is_accepting().unwrap());
             assert!(!b.is_accepting().unwrap());
             let mut words = [u32::MAX;3];

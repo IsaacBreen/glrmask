@@ -135,6 +135,10 @@ name = "end_tokens"
 path = "tests/end_tokens.rs"
 
 [[test]]
+name = "is_terminated"
+path = "tests/is_terminated.rs"
+
+[[test]]
 name = "glrm_v1"
 path = "tests/glrm_v1.rs"
 
