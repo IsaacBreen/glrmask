@@ -61,9 +61,9 @@ def test_local_precompilation_and_root_only_compile():
     state = parent.compile(v, end_tokens=[63], mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE).start()
     assert not state.mask()[63]
     state.commit_token(4)
-    assert state.is_accepting() and state.mask()[63]
+    assert not state.is_accepting() and state.mask()[63]
     state.commit_token(63)
-    assert not state.mask().any()
+    assert state.is_accepting() and not state.mask().any()
     for keyword in ['optimization', 'boundary_trigger']:
         with pytest.raises(TypeError):
             parent.compile(v, **{keyword: None})
@@ -169,7 +169,7 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
         with pytest.raises(ValueError):
             g.Module.load(data)
     target = g.Module(g.Grammar.from_glrm(MARK))
-    target.bind('MARK', vocab(True)TokenSet([8]))
+    target.bind('MARK', g.TokenSet([99]))
     with pytest.raises(ValueError):
         target.compile(v)
     accepts(parent, v, [1])
