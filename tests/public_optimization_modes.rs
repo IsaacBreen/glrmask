@@ -18,8 +18,8 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
     let reference = g.compile_with_build_options(&v, BuildOptions::default().end_tokens([100])).unwrap();
     for mode in MODES {
         let compiled = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
-        for c in [compiled.clone(), Constraint::load(compiled.save()).unwrap(),
-            Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &v).unwrap()] {
+        for c in [compiled.clone(), Constraint::load_without_vocab(compiled.save()).unwrap(),
+            Constraint::load(compiled.save(), &v).unwrap()] {
             for prefix in [b"".as_slice(),b"(",b"()",b"()(" ] {
                 let mut a = c.start(); let mut r = reference.start();
                 a.commit_bytes(prefix).unwrap(); r.commit_bytes(prefix).unwrap();
@@ -31,15 +31,15 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
                 let snapshot = a.clone();
                 a.commit_token(100).unwrap();
                 if r.is_accepting() {
-                    assert!(a.is_accepting()); assert!(!a.is_rejected());
-                } else { assert!(a.is_rejected()); assert!(!a.is_accepting()); }
+                    assert!(a.is_accepting()); assert!(!(a.mask().iter().all(|word| *word == 0)));
+                } else { assert!((a.mask().iter().all(|word| *word == 0))); assert!(!a.is_accepting()); }
                 assert!(a.mask().iter().all(|&w|w==0));
                 a = snapshot;
                 assert_eq!(a.mask(), r.mask(), "clone restores prior state");
                 let actual_reject = a.commit_token(20);
                 let expected_reject = r.commit_token(20);
                 assert_eq!(actual_reject.is_err(), expected_reject.is_err());
-                assert!(a.is_rejected()); assert!(!a.is_accepting());
+                assert!((a.mask().iter().all(|word| *word == 0))); assert!(!a.is_accepting());
             }
         }
     }
@@ -93,8 +93,8 @@ fn compare_prefixes(actual:&Constraint, expected:&Constraint, ids:&[u32], depth:
         for &id in &prefix { a.commit_token(id).unwrap();b.commit_token(id).unwrap(); }
         assert_eq!(a.mask(),b.mask(),"after {prefix:?}");
         assert_eq!(a.is_accepting(),b.is_accepting());
-        assert_eq!(a.is_rejected(),b.is_rejected());
-        if prefix.len()<depth && !b.is_rejected() {
+        assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
+        if prefix.len()<depth && !(b.mask().iter().all(|word| *word == 0)) {
             for &id in ids { if allowed(&b.mask(),id) { let mut next=prefix.clone();next.push(id);pending.push(next); } }
         }
     }
@@ -115,8 +115,8 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         let description=parent.clone().bind_snapshot("child",child).unwrap();
         let reference=description.compile(&v).unwrap();
         let actual=description.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
-        for c in [actual.clone(),Constraint::load(actual.save()).unwrap(),
-            Constraint::load_with_vocab(actual.save_without_vocab().unwrap(),&v).unwrap()] {
+        for c in [actual.clone(),Constraint::load_without_vocab(actual.save()).unwrap(),
+            Constraint::load(actual.save(),&v).unwrap()] {
             compare_prefixes(&c,&reference,&[0,1,2,3,4,5,6,7,8,9,10,11,33,99],5);
         }
     }
@@ -142,8 +142,8 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     let oracle=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([100])).unwrap();
     let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
-    for c in [actual.clone(),Constraint::load(actual.save()).unwrap(),
-        Constraint::load_with_vocab(actual.save_without_vocab().unwrap(),&v).unwrap()] {
+    for c in [actual.clone(),Constraint::load_without_vocab(actual.save()).unwrap(),
+        Constraint::load(actual.save(),&v).unwrap()] {
         for n in [0,1,15,29,30] {
             let prefix=vec![b'a';n]; let mut a=c.start();let mut o=oracle.start();
             a.commit_bytes(&prefix).unwrap();o.commit_bytes(&prefix).unwrap();
@@ -151,12 +151,12 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
             assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced_canonical_reference(),o.forced_canonical_reference());
             let snapshot=a.clone();
             if n==30 { a.commit_token(1).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !a.is_rejected()); assert!(a.mask().iter().all(|&w|w==0)); }
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !(a.mask().iter().all(|word| *word == 0))); assert!(a.mask().iter().all(|&w|w==0)); }
             assert_eq!(snapshot.mask(),o.mask());
         }
         for n in [29,31] {
             let mut state=c.start();let mut invalid=vec![b'a';n];invalid.push(b'b');
-            assert!(state.commit_bytes(&invalid).is_err());assert!(state.is_rejected());
+            assert!(state.commit_bytes(&invalid).is_err());assert!((state.mask().iter().all(|word| *word == 0)));
         }
     }
 }
@@ -178,8 +178,8 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
         for mode in MODES {
             let compiled=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
-            for c in [compiled.clone(),Constraint::load(compiled.save()).unwrap(),
-                Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(),&v).unwrap()] {
+            for c in [compiled.clone(),Constraint::load_without_vocab(compiled.save()).unwrap(),
+                Constraint::load(compiled.save(),&v).unwrap()] {
                 for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
                     let mut a=c.start();let mut expected=reference.start();
                     a.commit_bytes(&prefix).unwrap();expected.commit_bytes(&prefix).unwrap();
@@ -192,11 +192,11 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                 assert!(allowed(&a.mask(),3));assert!(allowed(&a.mask(),7));
                 assert!(!allowed(&a.mask(),8));assert!(!allowed(&a.mask(),9));
                 a.commit_token(7).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !a.is_rejected()); assert!(a.mask().iter().all(|&w|w==0));
+                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !(a.mask().iter().all(|word| *word == 0))); assert!(a.mask().iter().all(|&w|w==0));
                 for invalid in [8,9,11] {
                     let mut a=c.start();let mut expected=reference.start();
                     assert_eq!(a.commit_token(invalid).is_err(),expected.commit_token(invalid).is_err());
-                    assert!(a.is_rejected());assert!(!a.is_accepting());
+                    assert!((a.mask().iter().all(|word| *word == 0)));assert!(!a.is_accepting());
                 }
             }
         }

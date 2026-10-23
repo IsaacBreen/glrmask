@@ -442,6 +442,22 @@ impl Module {
         Ok(())
     }
 
+    /// Retained precompiled work is vocabulary-specific. Verify it against the
+    /// vocabulary of the compile or precompile call that will use it.
+    fn validate_retained_vocab(&self, vocab: &Vocab) -> Result<()> {
+        let expected = crate::compiler::compile::vocab_fingerprint(vocab);
+        for module in &self.index()? {
+            for prepared in module.node.prepared.values() {
+                if prepared.prepared().inner.vocab_fingerprint() != expected {
+                    return Err(error(
+                        "module retained work was precompiled for a different vocabulary",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Retains vocabulary-specific compilation artifacts for every module in
     /// this assembly with default options.
     ///
@@ -468,6 +484,7 @@ impl Module {
 
     fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool, mixed: bool) -> Result<()> {
         self.validate_targets(Some(vocab))?;
+        self.validate_retained_vocab(vocab)?;
         let modules = self.index()?;
         let resolved = resolve_compile_strategy(options.mask_strategy, &modules);
         let target_b = target_boundary();
@@ -684,6 +701,7 @@ impl Module {
             return Err(error(format!("extern {:?} is unbound", slot.name())));
         }
         self.validate_targets(Some(vocab))?;
+        self.validate_retained_vocab(vocab)?;
         let modules = self.index()?;
         let mut expanded = HashMap::<usize, usize>::new();
         for module in &modules {
@@ -1003,8 +1021,11 @@ impl Module {
 
     /// Serializes the module assembly and any retained precompiled artifacts.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Deserializes a module assembly, verifying it against `vocab` when supplied.
-    pub fn load(bytes: &[u8], vocab: Option<&Vocab>) -> Result<Self> { with_deep_stack(|| artifact::load(bytes, vocab)) }
+    /// Deserializes a module assembly. Retained work is checked against the
+    /// vocabulary supplied to [`Self::compile`] or [`Self::precompile`].
+    pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
+        with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
+    }
 }
 
 #[cfg(test)]
@@ -1138,7 +1159,7 @@ mod precompile_boundary_tests {
         assert!(tokens(&plain).is_some(), "plain compile must build the default trigger");
 
         let bytes = module.save();
-        let loaded = Module::load(&bytes, Some(&vocab)).expect("Module artifact round-trip");
+        let loaded = Module::load(&bytes).expect("Module artifact round-trip");
         let loaded_trigger = loaded
             .node
             .prepared
@@ -1149,7 +1170,7 @@ mod precompile_boundary_tests {
         assert_eq!(loaded_trigger.as_ref(), prepared_trigger.as_ref());
 
         let constraint_bytes = compiled.save();
-        let mut loaded_constraint = RuntimeConstraint::load(&constraint_bytes).expect("Constraint round-trip");
+        let mut loaded_constraint = RuntimeConstraint::load_without_vocab(&constraint_bytes).expect("Constraint round-trip");
         loaded_constraint
             .materialize_composition_metadata_for_compilation()
             .expect("materialize loaded metadata");
@@ -1158,7 +1179,7 @@ mod precompile_boundary_tests {
 
         let mut old = b"GLRASM01".to_vec();
         old.extend_from_slice(&bytes[8..]);
-        let error = Module::load(&old, Some(&vocab)).expect_err("old Module artifact must be rejected");
+        let error = Module::load(&old).expect_err("old Module artifact must be rejected");
         assert!(error.to_string().contains("unsupported Module artifact version"), "{error}");
     }
 

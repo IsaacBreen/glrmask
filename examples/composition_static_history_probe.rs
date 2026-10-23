@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().collect();
     assert!(args.len() >= 7, "VOCAB ARTIFACT TRACES TRACE STEP OUTPUT [REPEATS]");
     let vocabulary = vocab(Path::new(&args[1]))?;
-    let constraint = Constraint::load_with_vocab(fs::read(&args[2])?, &vocabulary)?;
+    let constraint = Constraint::load(fs::read(&args[2])?, &vocabulary)?;
     let traces: Vec<Trace> = serde_json::from_slice(&fs::read(&args[3])?)?;
     let selected = args[4].parse::<usize>()?;
     let step = args[5].parse::<usize>()?;

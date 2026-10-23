@@ -93,7 +93,7 @@ fn measure_arm(constraint: &Constraint, arm: &str, repeat: Option<usize>,
             let hash = mask_hash(&mask);
             assert_eq!((hash, state.is_accepting()), expected[index][step],
                 "isolated arm={arm} trace={index} step={step}");
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             if let Some(repeat) = repeat {
                 writeln!(csv, "{arm},{repeat},{index},{step},{},{commit_ns},{mask_ns},{tbm_ns},{hash:016x}",
                     previous.map(|id| id.to_string()).unwrap_or_default())?;
@@ -233,16 +233,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now(); let saved = candidate.save(); let save_ns = start.elapsed().as_nanos();
     if std::env::var_os("GLRMASK_PROFILE_METADATA_STORAGE").is_some() {
         let isolated=glrmask::__private::save_without_effect_metadata_for_diagnostic(&candidate);
-        let checked=Constraint::load(&isolated)?;assert_table_free(&parser_backend_report(&checked));
+        let checked=Constraint::load_without_vocab(&isolated)?;assert_table_free(&parser_backend_report(&checked));
         let footprint=serde_json::json!({"with_metadata_bytes":saved.len(),"without_optional_effect_metadata_bytes":isolated.len(),
             "actual_artifact_difference_bytes":saved.len() as i64-isolated.len() as i64,
             "isolated_clone_only":true,"original_artifact_and_runtime_unchanged":true});
         fs::write(output.join("effect-metadata-storage.json"),serde_json::to_vec_pretty(&footprint)?)?;
         eprintln!("EFFECT_METADATA_STORAGE {footprint}");
     }
-    let start = Instant::now(); let loaded = Constraint::load(&saved)?; let load_ns = start.elapsed().as_nanos();
+    let start = Instant::now(); let loaded = Constraint::load_without_vocab(&saved)?; let load_ns = start.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&loaded)); if args[3] == "static" { assert_static(&parser_backend_report(&loaded)); } assert_eq!(saved, loaded.save());
-    let external = candidate.save_without_vocab()?; let external_loaded = Constraint::load_with_vocab(&external, &vocab)?;
+    let external = candidate.save(); let external_loaded = Constraint::load(&external, &vocab)?;
     assert_table_free(&parser_backend_report(&external_loaded)); if args[3] == "static" { assert_static(&parser_backend_report(&external_loaded)); }
     let mut csv = BufWriter::new(fs::File::create(output.join("exact-replay.csv"))?);
     writeln!(csv, "trace,step,token,inline_mask_ns,template_mask_ns,self_load_mask_ns,external_load_mask_ns,hash")?;

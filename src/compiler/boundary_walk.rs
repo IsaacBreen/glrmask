@@ -4293,12 +4293,12 @@ mod tests {
             "selected10 expects the CFA Llama-3.1 vocabulary",
         );
         let mut core =
-            Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
+            Constraint::load_without_vocab(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
                 .expect("load core");
         let dispatch_name = std::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
-            Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"))
+            Constraint::load_without_vocab(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"))
                 .expect("load dispatch");
         restore_component(&mut core, "core");
         restore_component(&mut dispatch, "dispatch");
@@ -4687,8 +4687,8 @@ mod tests {
         std::fs::write(dir.join("static.bin"), &raw_static).expect("write static.bin");
         std::fs::write(dir.join("dynamic.bin"), &raw_dynamic).expect("write dynamic.bin");
         // Same-vocabulary reload with the caller's fixture vocab.
-        let re_static = Constraint::load_with_vocab(&raw_static, vocab).expect("reload static");
-        let re_dynamic = Constraint::load_with_vocab(&raw_dynamic, vocab).expect("reload dynamic");
+        let re_static = Constraint::load(&raw_static, vocab).expect("reload static");
+        let re_dynamic = Constraint::load(&raw_dynamic, vocab).expect("reload dynamic");
         // Backend pins on the RELOADED static (serialization must not lose them).
         assert!(
             re_static.uses_compact_segmented_parser_runtime(),
@@ -4935,9 +4935,9 @@ mod tests {
         let raw_dynamic = std::fs::read(dir.join("dynamic.bin")).expect("read dynamic.bin");
         assert!(!raw_static.is_empty() && !raw_dynamic.is_empty(), "refusing empty bins");
         let static_comp =
-            Constraint::load_with_vocab(&raw_static, &vocab).expect("reload static");
+            Constraint::load(&raw_static, &vocab).expect("reload static");
         let dynamic =
-            Constraint::load_with_vocab(&raw_dynamic, &vocab).expect("reload dynamic");
+            Constraint::load(&raw_dynamic, &vocab).expect("reload dynamic");
         assert!(
             static_comp.uses_compact_segmented_parser_runtime(),
             "reloaded static must stay on the compact runtime",
@@ -5477,18 +5477,18 @@ mod tests {
         let mut schemas = Vec::with_capacity(10);
         for name in &schema_paths {
             let mut schema =
-                Constraint::load(&std::fs::read(root.join(name)).expect("read schema"))
+                Constraint::load_without_vocab(&std::fs::read(root.join(name)).expect("read schema"))
                     .expect("load schema");
             restore_component(&mut schema, name);
             schemas.push(schema);
         }
         let mut core =
-            Constraint::load(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
+            Constraint::load_without_vocab(&std::fs::read(root.join("core.bin")).expect("read core.bin"))
                 .expect("load core");
         let dispatch_name = std::env::var("PHASE1_DISPATCH")
             .unwrap_or_else(|_| "dispatch-literal.bin".to_string());
         let mut dispatch =
-            Constraint::load(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"))
+            Constraint::load_without_vocab(&std::fs::read(root.join(&dispatch_name)).expect("read dispatch"))
                 .expect("load dispatch");
         restore_component(&mut core, "core");
         restore_component(&mut dispatch, "dispatch");
@@ -6125,7 +6125,7 @@ mod tests {
         let inline = Constraint::from_glrm_grammar(r#"
             start document; nt document ::= "L" "a"? "x";
         "#, &vocab).unwrap();
-        let reloaded = Constraint::load(&static_link.save()).unwrap();
+        let reloaded = Constraint::load_without_vocab(&static_link.save()).unwrap();
         let mut prefixes = vec![Vec::<u32>::new()];
         while let Some(prefix) = prefixes.pop() {
             let mut expected = inline.start();
@@ -7373,7 +7373,7 @@ mod tests {
         let bytes = std::fs::read(&path).expect("read artifact bytes");
         let digest = blake3::hash(&bytes);
         let bin_sha = digest.to_hex().to_string();
-        let constraint = Constraint::load(bytes).expect("load composed artifact");
+        let constraint = Constraint::load_without_vocab(bytes).expect("load composed artifact");
         let overlay = constraint
             .static_dynamic_overlay
             .as_ref()

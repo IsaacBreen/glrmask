@@ -28,6 +28,21 @@
 
 ## Unreleased (0.4.0 candidate) — v1 API: modules, expressions and mask strategies
 
+- `ConstraintState` commits (`commit_token`, `commit_bytes`, `commit_tokens`)
+  always return an error when the commit is not allowed: unknown ID, forbidden
+  ID, bytes with no viable continuation, or a commit after an end token. A
+  failed commit leaves the state unusable: later commits fail, the mask is
+  empty, and `is_accepting()` is false. Clone the state to try a token
+  speculatively. `is_rejected` is removed from every binding.
+- Add `commit_tokens` / `commitTokens` / `glrmask_state_commit_tokens` to the
+  Rust, Python, Node.js, C and C++ APIs. It commits IDs in order and stops at
+  the first disallowed token.
+- `Constraint::save()` no longer embeds the vocabulary; `Constraint::load(data,
+  vocab)` verifies a stored vocabulary fingerprint covering the ID-to-bytes
+  mapping and the special token IDs. `Module::load(data)` takes no vocabulary;
+  retained precompiled work is checked against the `compile`/`precompile`
+  vocabulary. `save_without_vocab` and `load_with_vocab` are removed.
+
 - The public pipeline is `Grammar` → `Module` → `Constraint`, plus `Expr` for
   composition. `Grammar` is immutable source without settings or bindings;
   `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a

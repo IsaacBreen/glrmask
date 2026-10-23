@@ -124,7 +124,7 @@ fn main() {
         let prefixes = [("root", vec![]), ("entry", vec![t("X")]),
                         ("return", vec![t("X"), t("a")]), ("done", vec![t("X"), t("a"), t("!")])];
         probe("scoped_ignores_static", &bound, &reference, &prefixes, &ids, repeats);
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         probe("scoped_ignores_static_loaded", &loaded, &reference, &prefixes, &ids, repeats);
     }
 
@@ -148,7 +148,7 @@ fn main() {
         assert!(!bit(&excluded.mask(), t("=")));
         assert!(!bit(&excluded.mask(), t("%")));
         probe("exclusion_static", &bound, &body, &prefixes, &ids, repeats);
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         probe("exclusion_static_loaded", &loaded, &body, &prefixes, &ids, repeats);
     }
 
@@ -169,7 +169,7 @@ fn main() {
                         ("special_return", vec![t("X"), special_id]),
                         ("unspelled_return", vec![t("X"), 5000]), ("empty_done", vec![t("X!")])];
         probe("nullable_special_static", &bound, &reference, &prefixes, &ids_with_special, repeats);
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         probe("nullable_special_static_loaded", &loaded, &reference, &prefixes, &ids_with_special, repeats);
     }
 }

@@ -2099,7 +2099,7 @@ impl DynamicConstraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
             if !recursive_range.is_empty() {
-                let mut inner = Constraint::load_with_vocab(&backing[recursive_range], vocab)?;
+                let mut inner = Constraint::load_embedded_with_vocab(&backing[recursive_range], vocab)?;
                 if metadata.projected_terminal_quotients_prepared {
                     Self::restore_projected_terminal_quotients(
                         &mut inner,
@@ -2425,7 +2425,7 @@ impl DynamicConstraint {
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
 
             if !recursive_range.is_empty() {
-                let mut inner = Constraint::load_with_vocab(&backing[recursive_range], vocab)?;
+                let mut inner = Constraint::load_embedded_with_vocab(&backing[recursive_range], vocab)?;
                 inner
                     .tokenizer
                     .restore_virtual_residual_master_slice_artifacts(
@@ -2991,7 +2991,7 @@ impl DynamicConstraint {
                 let projected_terminal_quotients = inner
                     .dynamic_mask_vocab
                     .projected_terminal_quotients_for_artifact();
-                let loaded = Constraint::load(recursive_artifact)?;
+                let loaded = Constraint::load_self_contained(recursive_artifact)?;
                 let same_vocab = loaded.token_bytes_count() == inner.token_bytes_count()
                     && inner.token_bytes.iter().all(|(&token_id, bytes)| {
                         loaded.token_bytes_for_id(token_id) == Some(bytes.as_slice())
@@ -3122,7 +3122,7 @@ impl DynamicConstraint {
                 .map_err(|_| error("template dynamic length does not fit this platform"))?;
             let end = header_end.checked_add(length).ok_or_else(|| error("template dynamic length overflow"))?;
             let body = payload.get(header_end..end).ok_or_else(|| error("truncated template dynamic alternative"))?;
-            let constraint = match vocab { Some(vocab) => Constraint::load_with_vocab(body, vocab)?, None => Constraint::load(body)? };
+            let constraint = match vocab { Some(vocab) => Constraint::load_embedded_with_vocab(body, vocab)?, None => Constraint::load_self_contained(body)? };
             if !constraint.has_template_parser() || constraint.table.is_present() {
                 return Err(error("template dynamic alternative is not a table-free constraint"));
             }
@@ -3560,7 +3560,7 @@ impl DynamicConstraint {
                 deferred_terminal_exprs_compressed,
             )| -> crate::Result<Self> {
                 if let Some(recursive_artifact) = recursive_artifact {
-                    let mut inner = Constraint::load_with_vocab(recursive_artifact, vocab)?;
+                    let mut inner = Constraint::load_embedded_with_vocab(recursive_artifact, vocab)?;
                     if projected_terminal_quotients_prepared {
                         Self::restore_projected_terminal_quotients(
                             &mut inner,
@@ -3884,9 +3884,9 @@ mod parser_replacement_compile_tests {
         }
         let reference = ordinary.into_constraints().pop().unwrap();
         let candidate = replacement.into_constraints().pop().unwrap();
-        let restored = Constraint::load(candidate.save()).unwrap();
-        let external = Constraint::load_with_vocab(
-            candidate.save_without_vocab().unwrap(), &vocab,
+        let restored = Constraint::load_without_vocab(candidate.save()).unwrap();
+        let external = Constraint::load_embedded_with_vocab(
+            candidate.save(), &vocab,
         ).unwrap();
         for constraint in [&candidate, &restored, &external] {
             assert!(constraint.table.as_lr().is_none());
@@ -3941,11 +3941,22 @@ impl<'a> DynamicConstraintState<'a> {
             .iter()
             .all(|state| !state.knows_token_id(token_id))
         {
+            // An unknown ID is a failed commit: the state is dead.
+            self.alternatives.clear();
             return Err(crate::Error::State(format!(
                 "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
             )));
         }
         self.commit_token_raw(token_id).map_err(crate::Error::State)
+    }
+
+    /// Advance the state by a batch of model token IDs in order. A disallowed
+    /// event returns an error and rejects the state.
+    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> crate::Result<()> {
+        for &token_id in token_ids {
+            self.commit_token(token_id)?;
+        }
+        Ok(())
     }
 
     fn commit_token_raw(&mut self, token_id: u32) -> Result<(), String> {
@@ -4060,11 +4071,6 @@ impl<'a> DynamicConstraintState<'a> {
     /// An accepting prefix may still admit additional tokens.
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
-    }
-
-    /// Return whether the committed prefix has been irrecoverably rejected.
-    pub fn is_rejected(&self) -> bool {
-        self.alternatives.is_empty()
     }
 
     /// Return the allowed-token mask as a packed `u32` bitset.
@@ -4724,7 +4730,7 @@ mod tests {
         .unwrap();
         let original = dynamic.clone().into_constraint();
         assert!(!original.tokenizer.virtual_runtime_metadata().is_empty());
-        let loaded = Constraint::load(original.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(original.save()).unwrap();
         assert_eq!(
             loaded.tokenizer.virtual_runtime_metadata(),
             original.tokenizer.virtual_runtime_metadata(),
@@ -7532,13 +7538,12 @@ mod tests {
                     );
                 }
                 if !results[0] {
-                    // All four agree on rejection; the API's post-failure
-                    // guarantee is `is_rejected`, so assert that (not masks or
-                    // acceptance) and stop this path.
-                    for (index, state) in states.iter().enumerate() {
-                        assert!(
-                            state.is_rejected(),
-                            "rejected state {index} at {path:?} token {token} must report is_rejected",
+                    // A failed commit leaves the state unchanged, so the four
+                    // variants must still agree on the pre-commit mask.
+                    for (index, (state, mask)) in states.iter().zip(&masks).enumerate() {
+                        assert_eq!(
+                            &state.mask(), mask,
+                            "state {index} changed after a failed commit at {path:?} token {token}",
                         );
                     }
                     failed = true;
@@ -7959,7 +7964,7 @@ nt start ::= A;
         static_state.commit_token(0).unwrap();
         assert_eq!(static_state.mask(), after_third);
 
-        let loaded = crate::Constraint::load(&constraint.save()).unwrap();
+        let loaded = crate::Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(!loaded.uses_dynamic_runtime());
         let mut loaded_state = loaded.start();
         let mut original_state = constraint.start();

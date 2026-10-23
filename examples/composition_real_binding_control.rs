@@ -23,8 +23,8 @@ fn main()->Result<(),Box<dyn std::error::Error>> {
             if std::env::var("BIND_SHARED").is_ok_and(|s| (s=="1")!=shared) {continue;}
             eprintln!("BIND_CASE prepared={prepared} shared={shared} load_start");
             let load=Instant::now();
-            let mut core=Constraint::load_with_vocab(&core_bytes,&vocab)?;
-            let mut dispatch=Constraint::load_with_vocab(&dispatch_bytes,&vocab)?;
+            let mut core=Constraint::load(&core_bytes,&vocab)?;
+            let mut dispatch=Constraint::load(&dispatch_bytes,&vocab)?;
             let load_ns=load.elapsed().as_nanos();
             eprintln!("BIND_LOAD_DONE ns={load_ns}");
             let t=Instant::now();

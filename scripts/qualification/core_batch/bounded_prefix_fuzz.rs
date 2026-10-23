@@ -33,7 +33,7 @@ fn main() {
       for (gno,source) in grammars.iter().enumerate() {
         for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
           let c=Grammar::from_glrm(source).compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
-          let loaded=Constraint::load(c.save()).unwrap();
+          let loaded=Constraint::load_without_vocab(c.save()).unwrap();
           for (is_loaded,c) in [(false,&c),(true,&loaded)] {
             for prefix in &prefixes {
               let mut state=c.start();if state.commit_bytes(prefix).is_err(){continue;}

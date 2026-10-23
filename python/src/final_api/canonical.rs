@@ -475,7 +475,7 @@ impl PyModule {
     fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
         let data = data.to_vec();
         let vocab = vocab.map(|v| v.inner.clone());
-        py.detach(move || glrmask::Module::load(&data, vocab.as_ref()))
+        py.detach(move || glrmask::Module::load(&data))
             .map(Self::from_inner)
             .map_err(api_error)
     }

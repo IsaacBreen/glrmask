@@ -46,11 +46,11 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
                 for _ in 0..reps {
                     let state=constraint.start();
                     if warm {black_box(state.mask());}
-                    let accepting=state.is_accepting();let rejected=state.is_rejected();
+                    let accepting=state.is_accepting();let rejected=(state.mask().iter().all(|word| *word == 0));
                     let events=state.marker_events().to_vec();
                     let t=Instant::now();let ids=black_box(state.forced_tokens()?);times.push(t.elapsed().as_nanos());
                     assert_eq!(ids,reference);assert_eq!(state.is_accepting(),accepting);
-                    assert_eq!(state.is_rejected(),rejected);assert_eq!(state.marker_events(),events);
+                    assert_eq!((state.mask().iter().all(|word| *word == 0)),rejected);assert_eq!(state.marker_events(),events);
                 }
                 times.sort_unstable();let sum:u128=times.iter().sum();
                 if !first {print!(",");}first=false;

@@ -87,7 +87,7 @@ def test_precompilation_persists_across_save_and_retained_work_preserved():
     module = g.Module(source())
     module.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE)
     saved = module.save()
-    loaded = g.Module.load(saved, vocab=v)
+    loaded = g.Module.load(saved)
     accepts(loaded, v, [1])
 
 
@@ -150,7 +150,7 @@ def test_grammar_precompile_returns_a_module():
     # preparation, survives a round-trip, and a TokenTrie compile keeps it.
     retained = source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA)
     assert len(retained.save()) > len(g.Module(source()).save())
-    restored = g.Module.load(retained.save(), v)
+    restored = g.Module.load(retained.save())
     expected = list(g.Module(source()).compile(v).start().mask())
     assert list(restored.compile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE).start().mask()) == expected
 
@@ -164,7 +164,7 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
         parent.precompile(vocab(True))
     assert parent.save() == before
     with pytest.raises(ValueError):
-        g.Module.load(before, vocab(True))
+        g.Module.load(before)
     for data in [b'', b'GLRASM01bad', before[:-1]]:
         with pytest.raises(ValueError):
             g.Module.load(data)

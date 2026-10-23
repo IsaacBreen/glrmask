@@ -64,7 +64,7 @@ fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
             b.fill_mask(&mut bm);
             assert_eq!(am, bm, "mask before {byte:?} in {prefix:?}");
             assert_eq!(a.is_accepting(), b.is_accepting());
-            assert_eq!(a.is_rejected(), b.is_rejected());
+            assert_eq!((a.mask().iter().all(|word| *word == 0)), (b.mask().iter().all(|word| *word == 0)));
             let Some(byte) = byte else {
                 break;
             };
@@ -72,7 +72,7 @@ fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
                 a.commit_bytes(&[byte]).is_ok(),
                 b.commit_bytes(&[byte]).is_ok()
             );
-            if a.is_rejected() {
+            if a.mask().iter().all(|word| *word == 0) {
                 break;
             }
         }
@@ -104,7 +104,7 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
                     .compile_with_build_options(&vocab, options)
                     .unwrap();
                 let bytes = fresh.save();
-                let loaded = Constraint::load(&bytes).unwrap();
+                let loaded = Constraint::load_without_vocab(&bytes).unwrap();
                 let cloned = loaded.clone();
                 assert_eq!(cloned.parser_backend(), backend);
                 transition_checks += assert_tokenizer_transition_cache(&fresh);
@@ -121,13 +121,13 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
                 );
                 assert_eq!(cloned.save(), bytes);
                 if backend == ParserBackend::TemplateDfa {
-                    let external = fresh.save_without_vocab().unwrap();
-                    let externally_loaded = Constraint::load_with_vocab(&external, &vocab).unwrap();
+                    let external = fresh.save();
+                    let externally_loaded = Constraint::load(&external, &vocab).unwrap();
                     transition_checks += assert_tokenizer_transition_cache(&externally_loaded);
                     total_checks += assert_packed_final_mask_cache(&externally_loaded, 32);
                     check_prefixes(&fresh, &externally_loaded);
                     assert_eq!(
-                        externally_loaded.save_without_vocab().unwrap(),
+                        externally_loaded.save(),
                         external
                     );
                 }
@@ -172,7 +172,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
             .compile_with_build_options(&vocab, options)
             .unwrap();
         let bytes = fresh.save();
-        let loaded = Constraint::load(&bytes).unwrap();
+        let loaded = Constraint::load_without_vocab(&bytes).unwrap();
         let fresh_checks = assert_tokenizer_transition_cache(&fresh);
         let loaded_checks = assert_tokenizer_transition_cache(&loaded);
         assert!(

@@ -62,7 +62,7 @@
     "Module.__copy__": "An independent snapshot.",
     "Module.__deepcopy__": "An independent snapshot.",
     "Module.save": "Serializes the module assembly and any retained precompiled artifacts.",
-    "Module.load": "Deserializes a module assembly, verifying it against `vocab` when supplied.",
+    "Module.load": "Deserializes a module assembly. Retained work is checked against the vocabulary supplied to `compile` or `precompile`.",
     "Grammar": "The source-language definition, without compilation settings.\n\nSource text is parsed lazily, so parse errors surface at compile time.",
     "Grammar.from_ebnf": "Creates a grammar from EBNF source text.",
     "Grammar.from_glrm": "Creates a grammar from GLRM source.\n\nGLRM supports typed extern slots; bind them before compiling a runnable root.",
@@ -77,16 +77,16 @@
     "Constraint.marker_ids": "Sorted, distinct application marker IDs.",
     "Constraint.start": "Creates independent state for one generated sequence.",
     "Constraint.mask_len": "Number of packed `u32` words in a mask, for `fill_mask`; not the Boolean-array length returned by `mask`.",
-    "Constraint.save": "Serializes the constraint, including its vocabulary and root stopping policy.\n\nWith `external_vocab=True`, load with `Constraint.load(data, vocab)` using the exact original token-ID/byte mapping, not merely the same size. Artifact compatibility across GLRMask releases is not guaranteed.",
-    "Constraint.load": "Deserializes a constraint.\n\n`vocab` is required for artifacts saved with `external_vocab=True` and must match the original mapping. Rejects malformed or incompatible artifacts.",
+    "Constraint.save": "Serializes the constraint without its vocabulary.\n\nLoad with `Constraint.load(data, vocab)` using the exact original token-ID/byte mapping, not merely the same size. Artifact compatibility across GLRMask releases is not guaranteed.",
+    "Constraint.load": "Deserializes a constraint.\n\n`vocab` must match the original mapping. Rejects malformed or incompatible artifacts.",
     "ConstraintState": "The mutable state for a single generated sequence.",
     "ConstraintState.clone": "An independent snapshot at the current prefix.",
     "ConstraintState.mask": "The current allowed-token mask as a new Boolean array indexed by original token ID.\n\n`size` must cover the constraint's whole token range; extra positions are false.",
     "ConstraintState.fill_mask": "Writes the current mask into a contiguous, writable 1-D NumPy `int32` array.\n\nThe array must hold at least `Constraint.mask_len()` words; extra words are cleared.",
-    "ConstraintState.commit_token": "Commits one model token event.\n\nUnknown IDs raise `ValueError`; forbidden IDs reject the state and may also raise. Committing after an end token raises.",
+    "ConstraintState.commit_token": "Commits one model token event.\n\nReturns an error if the token is not allowed; the state is then unusable, so clone it first to try a token speculatively.",
+    "ConstraintState.commit_tokens": "Commits model token IDs in order.\n\nStops with an error at the first disallowed token; the state is then unusable.",
     "ConstraintState.commit_bytes": "Commits raw bytes rather than a model token event.\n\nDoes not substitute for committing a token-set or end-token event.",
     "ConstraintState.is_accepting": "Whether the current prefix is a complete grammar match.\n\nFurther tokens may still be allowed; this alone does not commit an end token.",
-    "ConstraintState.is_rejected": "Whether the prefix cannot be extended to a valid match.",
     "ConstraintState.forced_tokens": "A read-only prefix of library-canonical forced output, at most 10,000 IDs.\n\nUses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.",
     "ConstraintState.marker_events": "Initial or most recent commit's observations as `(marker_id, absolute_byte_offset)`.\n\nSorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.",
     "auto": "Adaptive JSON Schema policy inspection and persisted tier selection.\n\nFor ordinary compilation, prefer `Grammar.compile(..., mask_strategy=MaskStrategy.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer's partial assertion support.",
@@ -214,8 +214,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "a5ba3c336f640dea4da2695c723d2b027599a47ab45821e40818b1bd7525a35b",
-    "bindings/node/README.md": "0074fc5679854c665d20bdc4d3aea2d5ae44ed64c4a0899ad92f23235f6d2b78",
+    "bindings/cpp/README.md": "f7446c756cdf61b5e32a597c8ea4a5856409fe0c305a8ff8ba9ce533e0f52c59",
+    "bindings/node/README.md": "250518edb78977efa441238c57da622b0cba0faf25cd292e93228e9e62a73fe7",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -223,5 +223,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "ec324afa2d566eab5d8089b10083c139f319bd05e75c9692980b7c9242952792"
+  "content_sha256": "38c39295e8cac45a1a4352648e4290eb6ab7752f032ba75c5621b645dcefa7e5"
 }

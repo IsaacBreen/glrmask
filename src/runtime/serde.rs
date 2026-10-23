@@ -32,6 +32,11 @@ mod remainder_tests;
 const PREVIOUS_ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT1";
 const ROOT_POLICY_MAGIC: &[u8; 8] = b"GLRROOT2";
 
+/// Outer envelope of every public `Constraint` artifact: magic, the vocabulary
+/// fingerprint, then a self-describing body.
+const CONSTRAINT_ARTIFACT_MAGIC: &[u8; 8] = b"GLRCON01";
+const CONSTRAINT_ARTIFACT_HEADER_LEN: usize = CONSTRAINT_ARTIFACT_MAGIC.len() + 32;
+
 const CONSTRAINT_MAGIC: [u8; 8] = *b"GLRCONS\0";
 const LEGACY_CONSTRAINT_VERSION: u16 = 7;
 const PREVIOUS_COMPRESSED_CONSTRAINT_VERSION: u16 = 9;
@@ -6060,13 +6065,89 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Serializes the constraint, including its vocabulary and root stopping
-    /// policy.
+    /// Serializes the constraint without embedding the vocabulary.
     ///
-    /// See [`Self::save_without_vocab`] to omit the vocabulary. Artifact
-    /// compatibility across GLRMask releases is not guaranteed.
+    /// Load with [`Self::load`] and the exact original vocabulary.
+    /// Artifact compatibility across GLRMask releases is not guaranteed.
     pub fn save(&self) -> Vec<u8> {
+        crate::with_deep_stack(|| self.save_artifact())
+    }
+
+    pub(crate) fn save_self_contained(&self) -> Vec<u8> {
         crate::with_deep_stack(|| self.save_with_vocab_policy(false))
+    }
+
+    pub(crate) fn load_self_contained<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
+    ) -> crate::Result<Self> {
+        crate::with_deep_stack(|| Self::load_with_vocab_policy(bytes.into(), None))
+    }
+
+    /// Test-only vocabulary-free loader for self-contained bodies.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn load_without_vocab<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
+    ) -> crate::Result<Self> {
+        Self::load_self_contained(bytes)
+    }
+
+    /// Internal loader for vocabulary-free bodies embedded in another artifact.
+    pub(crate) fn load_embedded_with_vocab<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        crate::with_deep_stack(|| {
+            let mut constraint = Self::load_with_vocab_policy(bytes.into(), Some(vocab))?;
+            constraint
+                .bind_vocab_exact(vocab)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            Ok(constraint)
+        })
+    }
+
+    fn save_artifact(&self) -> Vec<u8> {
+        let external = self.can_save_external();
+        let body = self.save_with_vocab_policy(!external);
+        let mut bytes = Vec::with_capacity(CONSTRAINT_ARTIFACT_HEADER_LEN + body.len());
+        bytes.extend_from_slice(CONSTRAINT_ARTIFACT_MAGIC);
+        bytes.extend_from_slice(&self.vocab_fingerprint());
+        bytes.extend_from_slice(&body);
+        bytes
+    }
+
+    /// Whether this constraint can omit its token bytes from the body.
+    ///
+    /// The external envelopes carry the vocabulary digest on the LR or template
+    /// section; constraints without either retain their token bytes.
+    fn can_save_external(&self) -> bool {
+        self.has_template_parser() || self.table.is_present()
+    }
+
+    /// Fingerprint of the vocabulary this constraint is bound to. Covers the
+    /// ID-to-bytes mapping and the special (exact-only) ID set.
+    pub(crate) fn vocab_fingerprint(&self) -> [u8; 32] {
+        if let Some(vocab) = self.late_bind_vocab.get() {
+            return crate::compiler::compile::vocab_fingerprint(vocab);
+        }
+        let mut digest = blake3::Hasher::new();
+        digest.update(b"glrmask-vocab-fingerprint-v1\0");
+        digest.update(&(self.token_bytes_count() as u64).to_le_bytes());
+        for (id, bytes) in self.token_bytes_iter() {
+            digest.update(&id.to_le_bytes());
+            digest.update(&(bytes.len() as u64).to_le_bytes());
+            digest.update(bytes);
+        }
+        let special = self
+            .special_token_terminals
+            .iter()
+            .flat_map(|special| special.token_ids())
+            .collect::<std::collections::BTreeSet<_>>();
+        digest.update(&(special.len() as u64).to_le_bytes());
+        for id in special {
+            digest.update(&id.to_le_bytes());
+        }
+        *digest.finalize().as_bytes()
     }
 
     pub(crate) fn artifact_vocab_digest(&self) -> [u8; 32] {
@@ -6084,17 +6165,31 @@ impl Constraint {
         *digest.finalize().as_bytes()
     }
 
-    /// Serializes the constraint without its vocabulary.
-    ///
-    /// Load with [`Self::load_with_vocab`] using the exact original
-    /// token-ID/byte mapping, not merely the same size.
-    pub fn save_without_vocab(&self) -> crate::Result<Vec<u8>> {
+    /// Serializes the constraint body without its vocabulary. Load with
+    /// [`Self::load_body_external_artifact`].
+    pub(crate) fn save_body_external_artifact(&self) -> Vec<u8> {
         crate::with_deep_stack(|| {
-            if !self.has_template_parser() && !self.table.is_present() {
+            let body = self.save_body_with_vocab_policy(true);
+            let mut bytes = Vec::with_capacity(CONSTRAINT_ARTIFACT_HEADER_LEN + body.len());
+            bytes.extend_from_slice(CONSTRAINT_ARTIFACT_MAGIC);
+            bytes.extend_from_slice(&self.vocab_fingerprint());
+            bytes.extend_from_slice(&body);
+            bytes
+        })
+    }
+
+    pub(crate) fn load_body_external_artifact<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        crate::with_deep_stack(|| {
+            let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
+            if recorded != crate::compiler::compile::vocab_fingerprint(vocab) {
                 return Err(crate::Error::Serialization(
-                    "external-vocabulary Constraint artifacts require a template parser or a retained LR table".into()));
+                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                ));
             }
-            Ok(self.save_with_vocab_policy(true))
+            Self::load_body_artifact_with_vocab(body, vocab)
         })
     }
 
@@ -7069,13 +7164,50 @@ impl Constraint {
         bytes
     }
 
-    /// Deserializes a vocabulary-bearing constraint.
+    /// Deserializes a constraint saved with [`Self::save`].
     ///
-    /// Rejects malformed or incompatible artifacts. An owned `Vec<u8>`
-    /// transfers its allocation; borrowed input is copied once because runtime
-    /// views retain it.
-    pub fn load<'a>(bytes: impl Into<Cow<'a, [u8]>>) -> crate::Result<Self> {
-        crate::with_deep_stack(|| Self::load_with_vocab_policy(bytes.into(), None))
+    /// `vocab` must be the exact vocabulary the constraint was compiled
+    /// against; the stored fingerprint covers the ID-to-bytes mapping and the
+    /// special token IDs.
+    pub fn load<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
+        vocab: &crate::Vocab,
+    ) -> crate::Result<Self> {
+        crate::with_deep_stack(|| {
+            let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
+            let expected = crate::compiler::compile::vocab_fingerprint(vocab);
+            if recorded != expected {
+                return Err(crate::Error::Serialization(
+                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                ));
+            }
+            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
+            constraint
+                .bind_vocab_exact(vocab)
+                .map_err(crate::GlrMaskError::Serialization)?;
+            Ok(constraint)
+        })
+    }
+
+    fn decode_artifact_envelope<'b>(
+        bytes: Cow<'b, [u8]>,
+    ) -> crate::Result<(Cow<'b, [u8]>, [u8; 32])> {
+        if bytes.len() < CONSTRAINT_ARTIFACT_HEADER_LEN
+            || &bytes[..CONSTRAINT_ARTIFACT_MAGIC.len()] != CONSTRAINT_ARTIFACT_MAGIC
+        {
+            return Err(crate::Error::Serialization(
+                "invalid or unsupported constraint artifact envelope".to_owned(),
+            ));
+        }
+        let mut fingerprint = [0u8; 32];
+        fingerprint.copy_from_slice(
+            &bytes[CONSTRAINT_ARTIFACT_MAGIC.len()..CONSTRAINT_ARTIFACT_HEADER_LEN],
+        );
+        let body = match bytes {
+            Cow::Owned(mut bytes) => Cow::Owned(bytes.split_off(CONSTRAINT_ARTIFACT_HEADER_LEN)),
+            Cow::Borrowed(bytes) => Cow::Borrowed(&bytes[CONSTRAINT_ARTIFACT_HEADER_LEN..]),
+        };
+        Ok((body, fingerprint))
     }
 
     fn load_with_vocab_policy(bytes: Cow<'_, [u8]>, supplied_vocab: Option<&crate::Vocab>) -> crate::Result<Self> {
@@ -7242,25 +7374,29 @@ impl Constraint {
 
     /// Internal embeddable body loader with an exact external vocabulary.
     /// Public closed-root loading still rejects unresolved slots.
-    pub(crate) fn load_body_artifact_with_vocab<'a>(
-        bytes: impl Into<Cow<'a, [u8]>>, vocab: &crate::Vocab,
+    pub(crate) fn load_body_artifact_with_vocab<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>, vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
         let mut constraint = Self::load_body_with_vocab_policy(bytes.into(), Some(vocab))?;
         constraint.bind_vocab_exact(vocab).map_err(crate::GlrMaskError::Serialization)?;
         Ok(constraint)
     }
 
-    /// Deserializes a constraint saved without its vocabulary.
-    ///
-    /// `vocab` must match the original token-ID/byte mapping; its caches are
-    /// shared and the packed artifact backing is retained. Required for
-    /// artifacts from [`Self::save_without_vocab`].
-    pub fn load_with_vocab<'a>(
-        bytes: impl Into<Cow<'a, [u8]>>,
+    /// Internal external-vocabulary loader used by the module and prepared
+    /// artifact readers, which already checked the fingerprint.
+    pub(crate) fn load_external<'b>(
+        bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,
     ) -> crate::Result<Self> {
         crate::with_deep_stack(|| {
-            let mut constraint = Self::load_with_vocab_policy(bytes.into(), Some(vocab))?;
+            let (body, recorded) = Self::decode_artifact_envelope(bytes.into())?;
+            let expected = crate::compiler::compile::vocab_fingerprint(vocab);
+            if recorded != expected {
+                return Err(crate::Error::Serialization(
+                    "constraint artifact was saved for a different vocabulary".to_owned(),
+                ));
+            }
+            let mut constraint = Self::load_with_vocab_policy(body, Some(vocab))?;
             constraint
                 .bind_vocab_exact(vocab)
                 .map_err(crate::GlrMaskError::Serialization)?;
@@ -8774,8 +8910,8 @@ mod tests {
         original.inner.serialized_artifact_cache = None;
         // Use Constraint body saves, avoiding DynamicConstraint's unchanged
         // wrapper cache when deliberately mutating internal proof fixtures.
-        let valid = original.inner.save_without_vocab().unwrap();
-        let loaded = Constraint::load_with_vocab(&valid, &vocab).unwrap();
+        let valid = original.inner.save();
+        let loaded = Constraint::load(&valid, &vocab).unwrap();
         assert!(loaded.dynamic_mask_vocab.projected_terminal_quotients_prepared());
         assert!(loaded.dynamic_mask_vocab.has_projected_terminal_quotients());
         assert_eq!(original.inner.start().mask(), loaded.start().mask());
@@ -8784,8 +8920,8 @@ mod tests {
         let mut bad_rows = invalid.tokenizer.build_terminal_projected_quotients_for_containment();
         bad_rows[0].0 = invalid.tokenizer.num_terminals();
         invalid.dynamic_mask_vocab.set_projected_terminal_quotients(bad_rows);
-        let invalid_wire = invalid.save_without_vocab().unwrap();
-        assert!(Constraint::load_with_vocab(&invalid_wire, &vocab).is_err(),
+        let invalid_wire = invalid.save();
+        assert!(Constraint::load(&invalid_wire, &vocab).is_err(),
             "the cached Vocab must not authorize an invalid source-state proof");
     }
 
@@ -8821,7 +8957,7 @@ mod tests {
             "required":["a","b"],"additionalProperties":false
         }"#;
         let original = Constraint::compile(crate::Grammar::json_schema(schema), &vocab).unwrap();
-        let loaded = Constraint::load(original.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(original.save()).unwrap();
         assert!(original.tokenizer.has_compressed_transition_segments());
         assert!(loaded.tokenizer.has_compressed_transition_segments());
         assert_eq!(original.tokenizer.num_states(), loaded.tokenizer.num_states());
@@ -8856,7 +8992,7 @@ mod tests {
             r#"start ::= @token(9) "b" | "a" "y""#,
             &vocab,
         ).unwrap();
-        let mut loaded = Constraint::load(original.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(original.save()).unwrap();
         let packed = loaded.packed_non_dwa_weights.as_ref().unwrap();
         let distinct_ids = packed.parser_top_accept.values()
             .copied().collect::<std::collections::BTreeSet<_>>();
@@ -8866,7 +9002,7 @@ mod tests {
         // runtime pools. Re-serialization must preserve the sidecar IDs, not
         // intern the empty structural Weight placeholders by pointer.
         loaded.serialized_artifact_cache = None;
-        let again = Constraint::load(loaded.save()).unwrap();
+        let again = Constraint::load_without_vocab(loaded.save()).unwrap();
         assert_eq!(loaded.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept,
                    again.packed_non_dwa_weights.as_ref().unwrap().parser_top_accept);
         for path in [&[][..], &[1], &[1, 3], &[9], &[9, 2]] {
@@ -9094,7 +9230,7 @@ mod tests {
             V23_SECTION_HEADER_LEN,
             &previous_runtime,
         );
-        let loaded = Constraint::load(previous).unwrap();
+        let loaded = Constraint::load_without_vocab(previous).unwrap();
         assert!(!loaded.uses_compact_segmented_parser_runtime());
         let overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert_eq!(overlay.segmented_parser_components.len(), 1);
@@ -9158,7 +9294,7 @@ mod tests {
             V24_SECTION_HEADER_LEN,
             &previous_runtime,
         );
-        let loaded = Constraint::load(previous).unwrap();
+        let loaded = Constraint::load_without_vocab(previous).unwrap();
         assert!(!loaded.uses_compact_segmented_parser_runtime());
         let overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert_eq!(overlay.segmented_parser_state_offsets, vec![0]);
@@ -9258,7 +9394,7 @@ mod tests {
             V24_SECTION_HEADER_LEN,
             &previous_runtime,
         );
-        let loaded = Constraint::load(previous).unwrap();
+        let loaded = Constraint::load_without_vocab(previous).unwrap();
         assert!(!loaded.uses_compact_segmented_parser_runtime());
         let overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(overlay.segmented_parser_links.is_empty());
@@ -9301,7 +9437,7 @@ mod tests {
         assert!(saved.windows(4).any(|window| window == STATIC_RESIDUAL_MASK_MAGIC));
         assert!(saved.windows(4).any(|window| window == b"TKS3"));
         assert!(saved.windows(4).any(|window| window == b"BCO2"));
-        let loaded = Constraint::load(saved.clone())
+        let loaded = Constraint::load_without_vocab(saved.clone())
             .expect("Static residual artifact should round-trip");
         assert!(loaded.tokenizer.has_virtual_residual_runtime());
         assert!(loaded.dynamic_mask_vocab.mask_projection_tokenizer().is_some());
@@ -9342,7 +9478,7 @@ mod tests {
             .expect("SRM3 marker must be present");
         corrupted[marker] ^= 0x01;
         assert!(
-            Constraint::load(corrupted).is_err(),
+            Constraint::load_without_vocab(corrupted).is_err(),
             "corrupted SRM3 marker must fail closed",
         );
     }
@@ -9364,7 +9500,7 @@ mod tests {
         actual.commit_token(0).unwrap();
         assert_eq!(actual.mask(), expected.mask());
 
-        let loaded = Constraint::load(packed.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(packed.save()).unwrap();
         let mut loaded_state = loaded.start();
         assert_eq!(loaded_state.mask(), baseline.start().mask());
         loaded_state.commit_token(0).unwrap();
@@ -9395,26 +9531,26 @@ mod tests {
         let saved = constraint.save();
         assert!(saved.starts_with(&CONSTRAINT_MAGIC));
         assert!(bincode::deserialize::<DeserializedConstraint>(&saved).is_err());
-        let loaded = Constraint::load(&saved).unwrap();
+        let loaded = Constraint::load_without_vocab(&saved).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());
 
         // Raw native section bytes lack the required versioned envelope.
         let raw = &saved[CONSTRAINT_HEADER_LEN..];
-        assert!(Constraint::load(raw)
+        assert!(Constraint::load_without_vocab(raw)
             .unwrap_err()
             .to_string()
             .contains("header"));
 
         let mut previous_version = saved;
         previous_version[8..10].copy_from_slice(&2u16.to_le_bytes());
-        assert!(Constraint::load(&previous_version)
+        assert!(Constraint::load_without_vocab(&previous_version)
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
 
         let mut previous_schema = constraint.save();
         previous_schema[8..10].copy_from_slice(&8u16.to_le_bytes());
-        assert!(Constraint::load(&previous_schema)
+        assert!(Constraint::load_without_vocab(&previous_schema)
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
@@ -9425,7 +9561,7 @@ mod tests {
         // structurally different payload under the current schema.
         let mut previous_development = constraint.save();
         previous_development[8..10].copy_from_slice(&25u16.to_le_bytes());
-        assert!(Constraint::load(&previous_development)
+        assert!(Constraint::load_without_vocab(&previous_development)
             .unwrap_err()
             .to_string()
             .contains("unsupported"));
@@ -9435,7 +9571,7 @@ mod tests {
         // The native (`TEMPLATE_CONSTRAINT_VERSION`) envelope's table section is
         // a template program, not a compact LR table. Relabeling it as the
         // self-contained LR version must be rejected predictably, never panic.
-        assert!(Constraint::load(&lr_envelope).is_err(),
+        assert!(Constraint::load_without_vocab(&lr_envelope).is_err(),
             "a template body mislabeled as the LR envelope must be rejected");
     }
 
@@ -9452,7 +9588,7 @@ mod tests {
             CONSTRAINT_VERSION,
             "explicit LR self-contained envelope uses the retained LR format",
         );
-        let reloaded = Constraint::load(lr_bytes.clone()).unwrap();
+        let reloaded = Constraint::load_without_vocab(lr_bytes.clone()).unwrap();
         assert_eq!(reloaded.parser_backend(), crate::ParserBackend::LrTable);
         assert_eq!(reloaded.start().mask(), lr.start().mask());
 
@@ -9460,7 +9596,7 @@ mod tests {
         // rejected predictably, not panic.
         let mut lr_as_template = lr_bytes.clone();
         lr_as_template[8..10].copy_from_slice(&TEMPLATE_CONSTRAINT_VERSION.to_le_bytes());
-        assert!(Constraint::load(lr_as_template).is_err());
+        assert!(Constraint::load_without_vocab(lr_as_template).is_err());
 
         // Native artifact relabeled as LR must also be rejected, not panic.
         let native = grammar
@@ -9471,12 +9607,12 @@ mod tests {
             .unwrap();
         let mut native_as_lr = native.save();
         native_as_lr[8..10].copy_from_slice(&CONSTRAINT_VERSION.to_le_bytes());
-        assert!(Constraint::load(native_as_lr).is_err());
+        assert!(Constraint::load_without_vocab(native_as_lr).is_err());
 
         // External LR requires the exact vocabulary and rejects a missing one.
-        let external = lr.save_without_vocab().unwrap();
-        assert!(Constraint::load(external.clone()).is_err());
-        assert!(Constraint::load_with_vocab(external, &vocab).is_ok());
+        let external = lr.save();
+        assert!(Constraint::load_without_vocab(external.clone()).is_err());
+        assert!(Constraint::load(external, &vocab).is_ok());
     }
 
     #[test]
@@ -9485,7 +9621,7 @@ mod tests {
 
         let owned = constraint.save();
         let owned_ptr = owned.as_ptr();
-        let loaded_owned = Constraint::load(owned).unwrap();
+        let loaded_owned = Constraint::load_without_vocab(owned).unwrap();
         let owned_backing = loaded_owned
             .serialized_artifact_cache
             .as_ref()
@@ -9494,7 +9630,7 @@ mod tests {
 
         let borrowed = constraint.save();
         let borrowed_ptr = borrowed.as_ptr();
-        let loaded_borrowed = Constraint::load(borrowed.as_slice()).unwrap();
+        let loaded_borrowed = Constraint::load_without_vocab(borrowed.as_slice()).unwrap();
         let borrowed_backing = loaded_borrowed
             .serialized_artifact_cache
             .as_ref()
@@ -9503,7 +9639,7 @@ mod tests {
         assert_eq!(loaded_borrowed.start().mask(), constraint.start().mask());
 
         // `&Vec<u8>` is a common caller shape and should remain ergonomic.
-        let loaded_vec_ref = Constraint::load(&borrowed).unwrap();
+        let loaded_vec_ref = Constraint::load_without_vocab(&borrowed).unwrap();
         assert_eq!(loaded_vec_ref.start().mask(), constraint.start().mask());
     }
 
@@ -9520,7 +9656,7 @@ mod tests {
             "ordinary small compiles should not prepay a complete save artifact",
         );
         let saved = constraint.save();
-        let loaded = Constraint::load(saved).unwrap();
+        let loaded = Constraint::load_without_vocab(saved).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 
@@ -9528,7 +9664,7 @@ mod tests {
     fn owned_load_keeps_token_mask_prefix_matrix_in_artifact_backing() {
         let constraint = tiny_constraint();
         let saved = constraint.save();
-        let loaded = Constraint::load(saved).unwrap();
+        let loaded = Constraint::load_without_vocab(saved).unwrap();
 
         let backing = loaded
             .serialized_artifact_cache
@@ -9576,7 +9712,7 @@ mod tests {
         // estimate.
         constraint.packed_parser_dwa = Some(Arc::new(packed));
         let saved = constraint.save();
-        let loaded = Constraint::load(&saved).unwrap();
+        let loaded = Constraint::load_without_vocab(&saved).unwrap();
         assert_eq!(loaded.start().mask(), constraint.start().mask());
     }
 
@@ -9591,7 +9727,7 @@ mod tests {
         );
         let raw = bincode::serialize(&SerializedConstraint(&constraint)).unwrap();
 
-        let loaded = Constraint::load(&envelope(LEGACY_CONSTRAINT_VERSION, &raw))
+        let loaded = Constraint::load_without_vocab(&envelope(LEGACY_CONSTRAINT_VERSION, &raw))
             .expect("legacy artifact should remain loadable");
 
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -9608,7 +9744,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(
+        let loaded = Constraint::load_without_vocab(&envelope(
             PREVIOUS_COMPRESSED_CONSTRAINT_VERSION,
             &payload,
         ))
@@ -9632,7 +9768,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(PREVIOUS_EXPRLESS_CONSTRAINT_VERSION, &payload))
+        let loaded = Constraint::load_without_vocab(&envelope(PREVIOUS_EXPRLESS_CONSTRAINT_VERSION, &payload))
             .expect("v10 exprless artifact should remain loadable");
 
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
@@ -9655,7 +9791,7 @@ mod tests {
         payload.extend_from_slice(&(raw.len() as u64).to_le_bytes());
         payload.extend_from_slice(&compressed);
 
-        let loaded = Constraint::load(&envelope(
+        let loaded = Constraint::load_without_vocab(&envelope(
             PREVIOUS_TERMINAL_EXPRS_CONSTRAINT_VERSION,
             &payload,
         ))
@@ -9671,7 +9807,7 @@ mod tests {
     fn current_constraint_artifact_rejects_invalid_parser_state_domain_map() {
         let mut constraint = ignored_constraint();
         constraint.parser_state_domain_labels = vec![0];
-        let error = Constraint::load(&constraint.save()).unwrap_err().to_string();
+        let error = Constraint::load_without_vocab(&constraint.save()).unwrap_err().to_string();
         assert!(error.contains("parser-state domain map") || error.contains("domain label"));
     }
 
@@ -9684,7 +9820,7 @@ mod tests {
         if let Some(first) = constraint.parser_state_domain_labels.first_mut() {
             *first = symbol_count as i32;
         }
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert_eq!(
             loaded.parser_state_domain_labels,
             constraint.parser_state_domain_labels,
@@ -9698,7 +9834,7 @@ mod tests {
             "glrm 1; start root; extern child; nt root = \"a\" child;"), &vocab).unwrap();
         let child = Constraint::from_glrm_grammar("start root; nt root ::= \"b\";", &vocab).unwrap();
         let constraint = parent.bind_grammar_dynamic_boundary("child", &child).unwrap();
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         let expected = constraint.static_dynamic_overlay.as_ref().unwrap();
         let actual = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert_eq!(actual.terminal_offsets, expected.terminal_offsets);
@@ -9862,7 +9998,7 @@ mod tests {
         constraint.boundary_trigger = crate::runtime::BoundaryTrigger::TokenSet(Arc::from(
             vec![1u32, 3u32].into_boxed_slice(),
         ));
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(matches!(
             loaded.boundary_trigger,
             crate::runtime::BoundaryTrigger::None
@@ -9891,7 +10027,7 @@ mod tests {
                 precision: crate::runtime::SummaryPrecision::RegularUpperBound,
             })
             .unwrap();
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.boundary_candidate_summary.get().is_none());
         loaded
             .materialize_composition_link_metadata_for_compilation()
@@ -9944,7 +10080,7 @@ mod tests {
         ] {
             let constraint = tiny_constraint();
             constraint.boundary_candidate_summary.set(summary.clone()).unwrap();
-            let mut loaded = Constraint::load(&constraint.save()).unwrap();
+            let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
             loaded
                 .materialize_composition_link_metadata_for_compilation()
                 .unwrap();
@@ -9994,7 +10130,7 @@ mod tests {
                 precision: crate::runtime::SummaryPrecision::RegularUpperBound,
             })
             .unwrap();
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         loaded
             .materialize_composition_link_metadata_for_compilation()
             .unwrap();
@@ -10012,7 +10148,7 @@ mod tests {
     fn v29_artifact_without_composition_metadata_is_rejected() {
         let mut saved = tiny_constraint().save();
         saved[8..10].copy_from_slice(&PREVIOUS_BOUNDARY_SUMMARYLESS_CONSTRAINT_VERSION.to_le_bytes());
-        let error = Constraint::load(&saved).unwrap_err().to_string();
+        let error = Constraint::load_without_vocab(&saved).unwrap_err().to_string();
         assert!(error.contains("unsupported"), "{error}");
     }
 
@@ -10029,7 +10165,7 @@ mod tests {
             .iter()
             .any(|row| !row.is_empty()));
         let expected = constraint.composition_reset_tokens_by_terminal.clone();
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.composition_reset_tokens_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10056,7 +10192,7 @@ mod tests {
         assert!(!expected.is_empty());
         assert!(matches!(original.retained_parser_templates_for_compilation().unwrap(), Cow::Borrowed(_)));
         let bytes = original.save();
-        let loaded = Constraint::load(&bytes).unwrap();
+        let loaded = Constraint::load_without_vocab(&bytes).unwrap();
         assert!(loaded.composition_parser_templates_by_terminal.is_empty());
         let templates = loaded.retained_parser_templates_for_compilation().unwrap();
         assert!(matches!(templates, Cow::Owned(_)));
@@ -10079,7 +10215,7 @@ mod tests {
             .composition_parser_templates_by_terminal
             .iter()
             .any(Option::is_some));
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.composition_parser_templates_by_terminal.is_empty());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10115,7 +10251,7 @@ mod tests {
             .composition_parser_characterizations_by_terminal
             .iter()
             .any(Option::is_some));
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded
             .composition_parser_characterizations_by_terminal
             .is_empty());
@@ -10147,7 +10283,7 @@ mod tests {
             .composition_grammar_summary
             .clone()
             .expect("fresh static constraint should retain composition grammar summary");
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.composition_grammar_summary.is_none());
         assert!(loaded.deferred_composition_metadata_blob.is_some());
         assert_eq!(loaded.start().mask(), constraint.start().mask());
@@ -10168,7 +10304,7 @@ mod tests {
         assert!(expected_summary.is_some());
         assert!(expected_templates.iter().any(Option::is_some));
 
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         let deferred = loaded
             .deferred_composition_metadata_blob
             .as_ref()
@@ -10205,7 +10341,7 @@ mod tests {
     #[test]
     fn current_constraint_artifact_preserves_global_ignore_descriptor() {
         let constraint = ignored_constraint();
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(constraint.ignore_expr.is_some());
         assert_eq!(loaded.ignore_expr, constraint.ignore_expr);
         assert!(
@@ -10255,14 +10391,14 @@ mod tests {
         // The next numeric version is now a supported table-free format.
         // Check an actually unsupported version instead of assuming adjacency.
         wrong_version[8..10].copy_from_slice(&u16::MAX.to_le_bytes());
-        assert!(Constraint::load(&wrong_version)
+        assert!(Constraint::load_without_vocab(&wrong_version)
             .unwrap_err()
             .to_string()
             .contains("version"));
 
         let mut wrong_length = constraint.save();
         wrong_length[10..18].copy_from_slice(&0u64.to_le_bytes());
-        assert!(Constraint::load(&wrong_length)
+        assert!(Constraint::load_without_vocab(&wrong_length)
             .unwrap_err()
             .to_string()
             .contains("payload length"));
@@ -10285,7 +10421,7 @@ mod tests {
         let template = constraint.template_dfas_by_terminal[1].as_deref().unwrap();
         let accepted = *template.pop.states[template.pop.start_state as usize].transitions.get(&7).unwrap();
 
-        let loaded = Constraint::load(&constraint.save()).expect("template artifact should load");
+        let loaded = Constraint::load_without_vocab(&constraint.save()).expect("template artifact should load");
         let loaded_template = loaded.template_dfas_by_terminal[1]
             .as_deref()
             .expect("serialized template should survive load");

@@ -14,9 +14,9 @@ fn isolated(name: &str) -> bool {
 
 fn verify_forms(reference: &Constraint, candidate: &Constraint, vocab: &Vocab, tokens: &[(u32, Vec<u8>)], prefixes: &[Vec<u8>]) {
     let saved = candidate.save();
-    let loaded = Constraint::load(&saved).unwrap();
+    let loaded = Constraint::load_without_vocab(&saved).unwrap();
     assert_eq!(saved, loaded.save());
-    let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), vocab).unwrap();
+    let external = Constraint::load(candidate.save(), vocab).unwrap();
     for c in [candidate, &loaded, &external] { compare(reference, c, tokens, prefixes); }
 }
 
@@ -77,7 +77,7 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
     let child = Grammar::from_json_schema(r#"{"type":"string","format":"uri","pattern":"^[a-z][a-z0-9+.-]*:[a-z]*$","minLength":1,"maxLength":5000}"#)
         .compile_with_build_options(&vocab, options(MaskStrategy::ParserDwa)).unwrap();
     assert_eq!(glrmask::__private::parser_backend_report(&child)["virtual_lexer"], true, "test must exercise a virtual lexer");
-    let child = Constraint::load(child.save()).unwrap();
+    let child = Constraint::load_without_vocab(child.save()).unwrap();
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "p" child "q";"#)
         .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     let reference = parent.link_with(options(MaskStrategy::TokenClassTrie)).unwrap();
@@ -87,9 +87,9 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
         let mut prefix = b"p\"x:".to_vec(); prefix.extend(std::iter::repeat_n(b'a', count)); prefixes.push(prefix);
     }
     let saved = candidate.save();
-    let loaded = Constraint::load(&saved).unwrap();
+    let loaded = Constraint::load_without_vocab(&saved).unwrap();
     assert_eq!(saved, loaded.save());
-    let external = Constraint::load_with_vocab(candidate.save_without_vocab().unwrap(), &vocab).unwrap();
+    let external = Constraint::load(candidate.save(), &vocab).unwrap();
     for c in [&candidate, &loaded, &external] { compare(&reference, c, &tokens, &prefixes); }
     let mut too_long = b"p\"x:".to_vec(); too_long.extend(std::iter::repeat_n(b'a', 4999));
     assert!(candidate.start().commit_bytes(&too_long).is_err());
@@ -108,7 +108,7 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     let middle = Grammar::from_glrm(r#"glrm 1; start root; extern grammar leaf; nt root = "p" leaf "q";"#)
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
         .link_with(options(MaskStrategy::ParserDwa)).unwrap();
-    let middle = Constraint::load(middle.save()).unwrap();
+    let middle = Constraint::load_without_vocab(middle.save()).unwrap();
     let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle "." middle "!";"#)
         .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap();
     let reference = parent.link_with(options(MaskStrategy::TokenClassTrie).end_tokens([1000])).unwrap();
@@ -119,7 +119,7 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     verify_forms(&reference, &candidate, &vocab, &tokens, &prefixes);
     let mut state = candidate.start(); state.commit_token(310).unwrap();
     assert!(state.is_accepting()); state.commit_token(1000).unwrap();
-    assert!(state.is_accepting() && !state.is_rejected());
+    assert!(state.is_accepting() && !(state.mask().iter().all(|word| *word == 0)));
     assert!(state.mask().iter().all(|&w| w == 0));
     assert!(state.commit_token(310).is_err());
 }
@@ -151,7 +151,7 @@ fn virtual_parent_observation_is_not_its_component_mask_quotient() {
     // an intact lexer leaf. Reusing it must retain its leaf observations rather
     // than trying to prepare a projection over the coordinator's tokenizer.
     let saved = candidate.save();
-    let middle = Constraint::load(&saved).unwrap();
+    let middle = Constraint::load_without_vocab(&saved).unwrap();
     let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "p" middle "q";"#)
         .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap();
     let outer_reference = outer.link_with(options(MaskStrategy::TokenClassTrie)).unwrap();
@@ -178,7 +178,7 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
     let offsets = report["finite_observation_offsets"].as_array().unwrap().iter()
         .map(|value| value.as_u64().unwrap() as u32).collect::<Vec<_>>();
     let saved = candidate.save();
-    let loaded = Constraint::load(&saved).expect("corruption fixture must have a valid native baseline");
+    let loaded = Constraint::load_without_vocab(&saved).expect("corruption fixture must have a valid native baseline");
     assert_eq!(loaded.save(), saved);
     let prefixes = vec![vec![], b"p".to_vec(), b"p\"".to_vec(), b"p\"x:".to_vec(),
         b"p\"x:a".to_vec(), b"p\"x:a\"".to_vec(), b"p\"x:a\"q".to_vec()];
@@ -206,14 +206,14 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
     for (index, replacement) in [(0, 0), (1, 1), (offsets.len() - 1, u32::MAX)] {
         let mut corrupted = saved.clone();
         corrupted[base + 8 + index * 4..base + 12 + index * 4].copy_from_slice(&u32::to_le_bytes(replacement));
-        let error = Constraint::load(corrupted).unwrap_err().to_string();
+        let error = Constraint::load_without_vocab(corrupted).unwrap_err().to_string();
         assert!(error.contains("observation"), "{error}");
     }
     let descriptor = base + needle.len();
     for (offset, replacement) in [(descriptor, 0u32), (descriptor + 4, 1u32)] {
         let mut corrupted = saved.clone();
         corrupted[offset..offset + 4].copy_from_slice(&replacement.to_le_bytes());
-        let error = Constraint::load(corrupted).unwrap_err().to_string();
+        let error = Constraint::load_without_vocab(corrupted).unwrap_err().to_string();
         assert!(error.contains("observation"), "{error}");
     }
     let count = u64::from_le_bytes(saved[descriptor + 8..descriptor + 16].try_into().unwrap()) as usize;
@@ -225,14 +225,14 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
         if present != 0 {
             assert_eq!(present, 1);
             let mut corrupted = saved.clone(); corrupted[digest] ^= 1;
-            let error = Constraint::load(corrupted).unwrap_err().to_string();
+            let error = Constraint::load_without_vocab(corrupted).unwrap_err().to_string();
             assert!(error.contains("observation"), "{error}");
             corrupted_fingerprint = true;
             break;
         }
     }
     assert!(corrupted_fingerprint, "virtual child must supply an observation fingerprint to corrupt");
-    let loaded = Constraint::load(saved).unwrap();
+    let loaded = Constraint::load_without_vocab(saved).unwrap();
     let mut state = loaded.start(); state.commit_token(3).unwrap(); assert!(state.is_accepting());
 }
 
@@ -304,7 +304,7 @@ fn unsupported_general_virtual_projection_fails_without_changing_dynamic_languag
     let error = parent.link_with(options(MaskStrategy::ParserDwa)).unwrap_err().to_string();
     assert!(error.contains("no supported finite boundary observation"), "{error}");
     let dynamic = parent.link_with(options(MaskStrategy::TokenClassTrie)).unwrap();
-    let loaded = Constraint::load(dynamic.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(dynamic.save()).unwrap();
     for c in [&dynamic, &loaded] {
         for count in [0usize, 1, 2, 31, 65] {
             let mut prefix = vec![b'p']; prefix.extend(std::iter::repeat_n(b'a', count));
@@ -362,9 +362,9 @@ mod product_review {
         println!("STATIC {}", glrmask::__private::parser_backend_report(&candidate));
         assert_eq!(child.save(), original, "link changed reusable child");
         let saved = candidate.save();
-        let loaded = Constraint::load(&saved)?;
+        let loaded = Constraint::load_without_vocab(&saved)?;
         assert_eq!(loaded.save(), saved);
-        let external = Constraint::load_with_vocab(candidate.save_without_vocab()?, &vocab)?;
+        let external = Constraint::load(candidate.save(), &vocab)?;
         let mut prefixes = vec![vec![], b"p".to_vec(), b"pq".to_vec(), b"pabcq".to_vec()];
         for count in [1, 7, 1979, 1980, 1998, 1999, 2000] {
             let prefix = format!("p{}", "abc".repeat(count)).into_bytes();

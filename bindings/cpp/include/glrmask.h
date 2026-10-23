@@ -183,8 +183,8 @@ GLRMASK_API glrmask_status glrmask_module_externs(const glrmask_module*,glrmask_
 GLRMASK_API glrmask_status glrmask_module_unbound_externs(const glrmask_module*,glrmask_externs**);
 /// Serializes the module assembly and retained artifacts.
 GLRMASK_API glrmask_status glrmask_module_save(const glrmask_module*,glrmask_bytes**);
-/// Deserializes a module assembly, optionally verifying a vocabulary.
-GLRMASK_API glrmask_status glrmask_module_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_module**);
+/// Deserializes a module assembly.
+GLRMASK_API glrmask_status glrmask_module_load(const uint8_t*,size_t,glrmask_module**);
 
 /// Creates a union without ordered-choice priority.
 GLRMASK_API glrmask_status glrmask_expr_choice(const glrmask_expr_operand*,size_t,glrmask_expr**);
@@ -207,9 +207,9 @@ GLRMASK_API glrmask_status glrmask_constraint_start(const glrmask_constraint*,gl
 GLRMASK_API glrmask_status glrmask_constraint_mask_len(const glrmask_constraint*,size_t*);
 /// Returns owning sorted application marker IDs; free with glrmask_u32s_free.
 GLRMASK_API glrmask_status glrmask_constraint_marker_ids(const glrmask_constraint*,glrmask_u32s**);
-/// Serializes the constraint; nonzero external_vocab omits the vocabulary.
-GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint*,uint32_t,glrmask_bytes**);
-/// Deserializes a constraint, optionally with the exact original vocabulary.
+/// Serializes the constraint without its vocabulary.
+GLRMASK_API glrmask_status glrmask_constraint_save(const glrmask_constraint*,glrmask_bytes**);
+/// Deserializes a constraint with the exact original vocabulary.
 GLRMASK_API glrmask_status glrmask_constraint_load(const uint8_t*,size_t,const glrmask_vocab*,glrmask_constraint**);
 
 /// Clones a sequence state.
@@ -221,14 +221,14 @@ GLRMASK_API glrmask_status glrmask_state_mask_len(const glrmask_state*,size_t*);
 /// Writes packed original-ID words, zeroing excess words. Never allocates a
 /// temporary language-bridge mask. An undersized buffer is unchanged.
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state*,uint32_t*,size_t);
-/// Commits one model token event; unknown or forbidden IDs reject the state.
+/// Commits one model token event; a disallowed event rejects the state.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state*,uint32_t);
+/// Commits model token events in order; a disallowed event rejects the state.
+GLRMASK_API glrmask_status glrmask_state_commit_tokens(glrmask_state*,const uint32_t*,size_t);
 /// Commits raw bytes rather than a model token event.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state*,const uint8_t*,size_t);
 /// Writes nonzero when the current prefix is a complete grammar match.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state*,uint32_t*);
-/// Writes nonzero when the prefix cannot be extended to a valid match.
-GLRMASK_API glrmask_status glrmask_state_is_rejected(const glrmask_state*,uint32_t*);
 /// Returns an owning read-only prefix of library-canonical forced output.
 GLRMASK_API glrmask_status glrmask_state_forced_tokens(const glrmask_state*,glrmask_u32s**);
 /// Returns an owning batch of marker observations for the initial or most recent commit.

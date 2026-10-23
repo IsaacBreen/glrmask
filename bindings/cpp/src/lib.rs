@@ -158,16 +158,14 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_marker_ids(p: *const glrmask_constraint, out: *mut *mut glrmask_u32s) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.marker_ids().to_vec()))) })
 }
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p: *const glrmask_constraint, external: u32, out: *mut *mut glrmask_bytes) -> i32 {
-    ffi(|| unsafe { produce(out, || {
-        let c = &read(p)?.0;
-        Ok(glrmask_bytes(match external { 0 => c.save(), 1 => c.save_without_vocab()?, _ => return Err(Error::invalid("external_vocab must be 0 or 1")) }))
-    }) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_save(p: *const glrmask_constraint, out: *mut *mut glrmask_bytes) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_bytes(read(p)?.0.save()))) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_constraint_load(bytes: *const u8, n: usize, v: *const glrmask_vocab, out: *mut *mut glrmask_constraint) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let bytes = input(bytes, n)?.to_vec();
-        Ok(glrmask_constraint(Arc::new(if v.is_null() { g::Constraint::load(bytes)? } else { g::Constraint::load_with_vocab(bytes, &read(v)?.0)? })))
+        if v.is_null() { return Err(Error::invalid("constraint load requires the exact vocabulary")); }
+        Ok(glrmask_constraint(Arc::new(g::Constraint::load(bytes, &read(v)?.0)?)))
     }) })
 }
 
@@ -183,14 +181,17 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> i32 {
     ffi(|| unsafe { write(p)?.0.commit_token(id) })
 }
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> i32 {
+    ffi(|| unsafe {
+        let ids = if n == 0 { &[] } else if ids.is_null() { return Err(Error::invalid("token ID array is null")); } else { std::slice::from_raw_parts(ids, n) };
+        write(p)?.0.commit_tokens(ids)
+    })
+}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> i32 {
     ffi(|| unsafe { write(p)?.0.commit_bytes(input(bytes, n)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_accepting()?); Ok(()) })
-}
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_rejected(p: *const glrmask_state, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_rejected()?); Ok(()) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_forced_tokens(p: *const glrmask_state, out: *mut *mut glrmask_u32s) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_u32s(read(p)?.0.forced_tokens()?))) })

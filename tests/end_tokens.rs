@@ -55,7 +55,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
         {
             let mut state = constraint.start();
             assert!(!state.is_accepting());
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(allowed(&state.mask(), 0));
             assert!(!allowed(&state.mask(), 1));
             assert!(!allowed(&state.mask(), 99));
@@ -63,14 +63,14 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             state.commit_token(0).unwrap();
             // Live acceptance after "a", which permits both continuation "b" and EOS 99
             assert!(state.is_accepting());
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(allowed(&state.mask(), 1));
             assert!(allowed(&state.mask(), 99));
 
             // Commit EOS 99
             state.commit_token(99).unwrap();
             assert!(state.is_accepting());
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(state.mask().iter().all(|&w| w == 0));
             assert!(state.commit_token(1).is_err());
             assert!(state.commit_bytes(b"b").is_err());
@@ -78,7 +78,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Terminated clone behavior
             let mut clone = state.clone();
             assert!(clone.is_accepting());
-            assert!(!clone.is_rejected());
+            assert!(!(clone.mask().iter().all(|word| *word == 0)));
             assert!(clone.mask().iter().all(|&w| w == 0));
             assert!(clone.commit_token(1).is_err());
             assert!(clone.commit_bytes(b"b").is_err());
@@ -95,7 +95,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Continue through "b"
             state.commit_token(1).unwrap();
             assert!(state.is_accepting());
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(!allowed(&state.mask(), 0));
             assert!(!allowed(&state.mask(), 1));
             assert!(allowed(&state.mask(), 99));
@@ -103,7 +103,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Commit EOS 99
             state.commit_token(99).unwrap();
             assert!(state.is_accepting());
-            assert!(!state.is_rejected());
+            assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(state.mask().iter().all(|&w| w == 0));
             assert!(state.commit_token(0).is_err());
             assert!(state.commit_token(1).is_err());
@@ -112,7 +112,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             // Terminated clone behavior
             let mut clone = state.clone();
             assert!(clone.is_accepting());
-            assert!(!clone.is_rejected());
+            assert!(!(clone.mask().iter().all(|word| *word == 0)));
             assert!(clone.mask().iter().all(|&w| w == 0));
             assert!(clone.commit_token(0).is_err());
             assert!(clone.commit_bytes(b"a").is_err());

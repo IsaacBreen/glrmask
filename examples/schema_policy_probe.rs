@@ -62,7 +62,7 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
                     return Ok(false);
                 }
                 state.commit_token(id).map_err(|error| error.to_string())?;
-                if state.is_rejected() {
+                if state.mask().iter().all(|word| *word == 0) {
                     return Err("mask allowed a token whose commit rejected the state".to_string());
                 }
             }

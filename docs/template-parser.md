@@ -203,14 +203,14 @@ also work.
 
 ## Serialization
 
-`Constraint::save()` produces a self-contained artifact. In template mode it
-contains the lexer, required masking data, complete finite template relations,
-completion, and minimal metadata, but no LR actions, gotos, or production table.
-Derived runtime lookup structures are rebuilt from validated template data.
+`Constraint::save()` produces an artifact without the model vocabulary. In
+template mode it contains the lexer, required masking data, complete finite
+template relations, completion, and minimal metadata, but no LR actions, gotos,
+or production table. Derived runtime lookup structures are rebuilt from
+validated template data.
 
-`Constraint::save_without_vocab()` omits the model vocabulary. Load such
-an artifact with `Constraint::load_with_vocab(bytes, &vocab)`. Loading without a
-vocabulary, or with a different mapping, fails. End-token policy uses
+Load the artifact with `Constraint::load(bytes, &vocab)`. A different mapping
+fails. Both forms retain the policy through save/load. End-token policy uses
 `TemplateBuildOptions::end_tokens` for data-only parsers and ordinary
 `BuildOptions::end_tokens` for built-in grammars. Both forms retain the policy
 through save/load.

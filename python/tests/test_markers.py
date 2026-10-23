@@ -72,7 +72,7 @@ def test_save_load_external_vocab_and_compiled_children(mode):
     v = vocab()
     c = glrmask.Grammar.from_glrm(SOURCE).compile(v, mask_strategy=mode)
     for restored in [glrmask.Constraint.load(c.save()),
-                     glrmask.Constraint.load(c.save(external_vocab=True), vocab=v)]:
+                     glrmask.Constraint.load(c.save(), vocab=v)]:
         assert restored.marker_ids() == [10, 20, 30]
         s = restored.start(); s.commit_token(2)
         assert events(s) == [(20, 1), (30, 2)]
@@ -83,7 +83,7 @@ def test_save_load_external_vocab_and_compiled_children(mode):
     child = glrmask.Module(glrmask.Grammar.from_glrm(SOURCE))
     assert parent.bind("child", child) is None
     parent.precompile(v, mask_strategy=mode)
-    prepared = glrmask.Module.load(parent.save(), vocab=v)
+    prepared = glrmask.Module.load(parent.save())
     linked = prepared.compile(v, mask_strategy=mode)
     assert linked.marker_ids() == [10, 20, 30, 40, 50]
     s = linked.start(); assert events(s) == [(40, 0)]
@@ -135,10 +135,10 @@ def test_clone_and_failed_commits_do_not_leak_marker_batches(mode):
     branch.commit_token(0)
     assert events(branch) == [(20, 1)] and events(original) == [(10, 0)]
     with pytest.raises(ValueError): branch.commit_token(9999)
-    assert events(branch) == [] and not branch.is_rejected()
+    assert events(branch) == [] and not (not branch.mask().any())
     branch.commit_token(1); assert events(branch) == [(30, 2)]
     with pytest.raises(ValueError): original.commit_token(3)
-    assert original.is_rejected() and events(original) == []
+    assert (not original.mask().any()) and events(original) == []
 
 
 @pytest.mark.parametrize("mode", MODES)

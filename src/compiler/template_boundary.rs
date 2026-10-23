@@ -507,7 +507,7 @@ mod tests {
             let reference=Grammar::from_ebnf(if nullable {r#"start ::= "x" ("a" | "") "y""#}
                 else {r#"start ::= "x" "a" "y""#})
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-            let loaded=Constraint::load(&candidate.save()).unwrap();
+            let loaded=Constraint::load_without_vocab(&candidate.save()).unwrap();
             let mut words=vec![Vec::new()];
             for depth in 0..=4 {
                 let mut next=Vec::new();
@@ -518,7 +518,7 @@ mod tests {
                             let mut actual_mask=vec![0;actual.mask_len()];let mut expected_mask=vec![0;reference.mask_len()];
                             a.fill_mask(&mut actual_mask);b.fill_mask(&mut expected_mask);
                             assert_eq!(actual_mask,expected_mask,"nullable={nullable} word={word:?} prefix={prefix}");
-                            assert_eq!(a.is_accepting(),b.is_accepting());assert_eq!(a.is_rejected(),b.is_rejected());
+                            assert_eq!(a.is_accepting(),b.is_accepting());assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
                             if prefix<word.len() {assert_eq!(a.commit_bytes(&word[prefix..prefix+1]).is_ok(),
                                 b.commit_bytes(&word[prefix..prefix+1]).is_ok());}
                         }
@@ -539,7 +539,7 @@ mod tests {
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
         let right=Grammar::from_glrm(r#"glrm 1; start root; t TEXT = /a[ab]*/; nt root = TEXT "?";"#)
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::ParserDwa)).unwrap();
-        let loaded_left=Constraint::load(&left.save()).unwrap();let loaded_right=Constraint::load(&right.save()).unwrap();
+        let loaded_left=Constraint::load_without_vocab(&left.save()).unwrap();let loaded_right=Constraint::load_without_vocab(&right.save()).unwrap();
         for leaves in [vec![&left,&right],vec![&loaded_left,&loaded_right],vec![&left,&loaded_right]] {
             let terminals=vec![0,leaves[0].tokenizer.num_terminals()];
             let inputs=leaves.iter().zip(&terminals).map(|(&leaf,&offset)|(leaf.tokenizer.as_ref(),offset)).collect::<Vec<_>>();
@@ -598,7 +598,7 @@ mod tests {
                     actual.fill_mask(&mut a); expected.fill_mask(&mut b);
                     assert_eq!(a,b,"retain={retain} prefix={prefix} text={text:?}");
                     assert_eq!(actual.is_accepting(),expected.is_accepting());
-                    assert_eq!(actual.is_rejected(),expected.is_rejected());
+                    assert_eq!((actual.mask().iter().all(|word| *word == 0)),(expected.mask().iter().all(|word| *word == 0)));
                     if prefix < text.len() {
                         assert_eq!(actual.commit_bytes(&text[prefix..prefix+1]).is_ok(),
                             expected.commit_bytes(&text[prefix..prefix+1]).is_ok());

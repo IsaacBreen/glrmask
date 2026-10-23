@@ -328,9 +328,9 @@ mod tests {
                 TemplateBuildOptions::default().optimization(MaskStrategy::TokenClassTrie),
             )
             .unwrap();
-        let loaded = Constraint::load(fresh.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(fresh.save()).unwrap();
         let external =
-            Constraint::load_with_vocab(fresh.save_without_vocab().unwrap(), &vocab).unwrap();
+            Constraint::load(fresh.save(), &vocab).unwrap();
         for constraint in [&fresh, &loaded, &external] {
             assert!(constraint.table.as_lr().is_none());
             MASK_SUCCESSES.with(|count| count.set(0));
@@ -527,9 +527,9 @@ mod tests {
                     TemplateBuildOptions::default().optimization(optimization),
                 )
                 .unwrap();
-            let loaded = Constraint::load(fresh.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(fresh.save()).unwrap();
             let external =
-                Constraint::load_with_vocab(fresh.save_without_vocab().unwrap(), &vocab)
+                Constraint::load(fresh.save(), &vocab)
                     .unwrap();
             for constraint in [&fresh, &loaded, &external] {
                 assert!(constraint.table.as_lr().is_none());

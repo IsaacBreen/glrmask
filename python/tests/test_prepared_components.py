@@ -136,7 +136,7 @@ def test_compile_options_and_save_load_roundtrip():
 
     # Save / load round-trip preserves retained work; options are supplied per compile.
     saved = m.save()
-    loaded = glrmask.Module.load(saved, vocab=v)
+    loaded = glrmask.Module.load(saved)
     assert loaded.compile(
         v,
         mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,

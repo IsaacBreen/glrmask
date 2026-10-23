@@ -25,7 +25,7 @@ fn main(){
     assert!(matches!(args.len(),4|5),"component-candidates COMPONENT.bin VOCAB.bin OUTPUT.json [PREPARED_COMPONENT.bin]");
     let bytes=fs::read(&args[1]).expect("read one component");
     let vocab=read_vocab(Path::new(&args[2]));
-    let started=Instant::now();let mut component=Constraint::load_with_vocab(&bytes,&vocab).expect("load one component");
+    let started=Instant::now();let mut component=Constraint::load(&bytes,&vocab).expect("load one component");
     let load_ms=started.elapsed().as_secs_f64()*1000.0;
     let started=Instant::now();
     if args.len()==5 { component.prepare_for_composition(&vocab).expect("prepare one component"); }

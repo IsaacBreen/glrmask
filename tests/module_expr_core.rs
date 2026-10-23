@@ -91,13 +91,13 @@ fn mixed_roundtrip_retains_open_raw_and_prepared_nodes() {
     child.bind("item", a()).unwrap();
     parent.bind("child", child).unwrap();
 
-    let loaded = Module::load(&parent.save(), Some(&v)).unwrap();
+    let loaded = Module::load(&parent.save()).unwrap();
     assert!(accepts(&loaded.compile(&v).unwrap(), &[4]));
 
-    let raw = Module::load(&Module::new(&a()).save(), None).unwrap();
+    let raw = Module::load(&Module::new(&a()).save()).unwrap();
     assert!(accepts(&raw.compile(&v).unwrap(), &[1]));
 
-    let mut open = Module::load(&Module::new(&Grammar::from_glrm(OPEN)).save(), None).unwrap();
+    let mut open = Module::load(&Module::new(&Grammar::from_glrm(OPEN)).save()).unwrap();
     open.bind("item", a()).unwrap();
     assert!(accepts(&open.compile(&v).unwrap(), &[1]));
 }
@@ -138,7 +138,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     let mut m = Module::new(&host);
     assert!(m.bind("mark", a()).is_err());
     m.bind("mark", TokenSet::new([7, 99])).unwrap();
-    let loaded = Module::load(&m.save(), None).unwrap();
+    let loaded = Module::load(&m.save()).unwrap();
     let c = loaded.compile(&v).unwrap();
     let mask = c.start().mask();
     assert!(allowed(&mask, 7));
@@ -146,7 +146,6 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     assert!(!allowed(&mask, 1));
 
     let wrong = Vocab::new(vec![(7, b"different".to_vec())]).with_special_tokens([99]);
-    assert!(Module::load(&m.save(), Some(&wrong)).is_err());
     assert!(loaded.compile(&wrong).is_err());
 
     let mut wide = Module::new(&Grammar::from_glrm(OPEN));
@@ -162,7 +161,7 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
     let mut leaf = Module::new(&a());
     leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
         .unwrap();
-    let leaf = Module::load(&leaf.save(), None).unwrap();
+    let leaf = Module::load(&leaf.save()).unwrap();
     assert!(accepts(&leaf.compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap(), &[1]));
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
@@ -186,14 +185,14 @@ fn final_end_tokens_are_root_only() {
 fn malformed_storage_is_rejected() {
     let bytes = Module::new(&a()).save();
     for len in [0, 7, 15, bytes.len() - 1] {
-        assert!(Module::load(&bytes[..len], None).is_err());
+        assert!(Module::load(&bytes[..len]).is_err());
     }
     let mut bad = bytes.clone();
     bad[7] = b'9';
-    assert!(Module::load(&bad, None).is_err());
+    assert!(Module::load(&bad).is_err());
     let mut bad = bytes;
     bad.push(0);
-    assert!(Module::load(&bad, None).is_err());
+    assert!(Module::load(&bad).is_err());
 }
 
 #[test]
@@ -227,9 +226,9 @@ fn raw_module_is_owned_and_can_preserve_deferred_source_errors() {
         let text = String::from("start ::= \"a\"");
         Module::new(&Grammar::from_ebnf(&text))
     };
-    assert!(accepts(&Module::load(&module.save(), None).unwrap().compile(&vocab()).unwrap(), &[1]));
+    assert!(accepts(&Module::load(&module.save()).unwrap().compile(&vocab()).unwrap(), &[1]));
     let invalid = Module::new(&Grammar::from_glrm("invalid source"));
-    let loaded = Module::load(&invalid.save(), None).unwrap();
+    let loaded = Module::load(&invalid.save()).unwrap();
     assert!(loaded.compile(&vocab()).is_err());
 }
 
@@ -241,7 +240,7 @@ fn local_modes_retain_actual_native_or_lr_storage_across_load() {
         module
             .precompile_with(&v, CompileOptions::default().mask_strategy(mode))
             .unwrap();
-        let loaded = Module::load(&module.save(), Some(&v)).unwrap();
+        let loaded = Module::load(&module.save()).unwrap();
         assert!(accepts(
             &loaded
                 .compile_with(&v, CompileOptions::default().mask_strategy(mode))
@@ -263,13 +262,13 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     leaf.precompile_with(&v, trie.clone()).unwrap();
     root.bind("child", &leaf).unwrap();
 
-    for m in [root.clone(), Module::load(&root.save(), Some(&v)).unwrap()] {
+    for m in [root.clone(), Module::load(&root.save()).unwrap()] {
         let c = m.compile_with(&v, trie.clone()).unwrap();
         assert!(accepts(&c, &[4]));
         assert!(!accepts(&c, &[6]));
     }
 
-    let mut token = Module::load(&open, Some(&v)).unwrap();
+    let mut token = Module::load(&open).unwrap();
     token.bind("child", TokenSet::new([7, 99])).unwrap();
     let c = token.compile_with(&v, trie.clone()).unwrap();
     assert!(accepts(&c, &[0, 7, 3]));
@@ -278,7 +277,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
     terminal.precompile_with(&v, trie.clone()).unwrap();
     terminal.bind("mark", TokenSet::from(99)).unwrap();
-    let c = Module::load(&terminal.save(), None).unwrap().compile_with(&v, trie).unwrap();
+    let c = Module::load(&terminal.save()).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[99]));
 }
 
@@ -293,7 +292,7 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie);
     parent.precompile_with(&v, trie.clone()).unwrap();
     parent.bind("child", expr).unwrap();
-    let c = Module::load(&parent.save(), None).unwrap().compile_with(&v, trie).unwrap();
+    let c = Module::load(&parent.save()).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[0, 5, 3]));
 }
 

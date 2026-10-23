@@ -1450,7 +1450,7 @@ fn forced_reports_deterministic_prefix() {
 fn save_load_roundtrip_preserves_behavior() {
     let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
     let bytes = constraint.save();
-    let loaded = Constraint::load(&bytes).unwrap();
+    let loaded = Constraint::load_without_vocab(&bytes).unwrap();
     assert_accepts_tokens(&loaded, &[0, 1]);
 }
 
@@ -1570,7 +1570,7 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
     dynamic_state.commit_token(7).unwrap();
     assert_eq!(static_state.mask(), dynamic_state.mask());
 
-    let loaded = Constraint::load(&constraint.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
     assert_special_token_sequence(&loaded);
     let dynamic_loaded = DynamicConstraint::load(&dynamic.save()).unwrap();
     let mut dynamic_loaded_state = dynamic_loaded.start();
@@ -1771,7 +1771,7 @@ fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
         frontier = next;
     }
 
-    let loaded = Constraint::load(&isolated.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(&isolated.save()).unwrap();
     assert_eq!(loaded.start().mask(), isolated.start().mask());
 }
 
@@ -2432,3 +2432,83 @@ mod forcing_semantics_oracle;
 
 #[path = "historical_public_nonstall_regressions.rs"]
 mod historical_public_nonstall_regressions;
+
+#[test]
+fn every_failed_commit_returns_err_and_kills_the_state() {
+    let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
+    let dead = |state: &ConstraintState<'_>| {
+        assert!(state.mask().iter().all(|word| *word == 0), "dead state must have an empty mask");
+        assert!(!state.is_accepting(), "dead state must not be accepting");
+    };
+    // Unknown ID.
+    let mut state = constraint.start();
+    assert!(state.commit_token(99).is_err());
+    dead(&state);
+    assert!(state.commit_token(0).is_err());
+    // Forbidden ID.
+    let mut state = constraint.start();
+    assert!(state.commit_token(1).is_err());
+    dead(&state);
+    assert!(state.commit_token(0).is_err());
+    // Bytes with no viable continuation.
+    let mut state = constraint.start();
+    assert!(state.commit_bytes(b"z").is_err());
+    dead(&state);
+    assert!(state.commit_bytes(b"a").is_err());
+    // commit_tokens stops at the first failure and leaves the state dead.
+    let mut state = constraint.start();
+    assert!(state.commit_tokens(&[0, 1, 0]).is_err());
+    dead(&state);
+    assert!(state.commit_tokens(&[0]).is_err());
+}
+
+#[test]
+fn commit_tokens_commits_in_order_and_post_end_commits_error() {
+    let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
+        .with_special_tokens([7]);
+    let constraint = glrmask::Grammar::ebnf(r#""a" "b""#)
+        .compile_with(&vocab, glrmask::CompileOptions::default().end_tokens([7]))
+        .unwrap();
+    let mut state = constraint.start();
+    state.commit_tokens(&[0, 1, 7]).unwrap();
+    assert!(state.is_accepting());
+    // After an end token every commit errors and the state is dead.
+    assert!(state.commit_token(0).is_err());
+    assert!(state.mask().iter().all(|word| *word == 0));
+    assert!(!state.is_accepting());
+    // A disallowed end token is an error too.
+    let mut early = constraint.start();
+    assert!(early.commit_token(7).is_err());
+    assert!(!early.is_accepting());
+    assert!(early.commit_token(0).is_err());
+}
+
+#[test]
+fn constraint_artifacts_require_the_exact_vocabulary() {
+    let vocab = vocab(&["a", "b"]);
+    let constraint = ebnf(&["a", "b"], r#"start ::= "a" "b""#);
+    let bytes = constraint.save();
+    let loaded = Constraint::load(bytes.clone(), &vocab).unwrap();
+    assert_eq!(loaded.start().mask(), constraint.start().mask());
+    // Same size, different mapping.
+    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+    assert!(Constraint::load(bytes.clone(), &wrong).is_err());
+    // Special/exact-only IDs are part of the fingerprint.
+    let special = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
+        .with_special_tokens([9]);
+    assert!(Constraint::load(bytes, &special).is_err());
+}
+
+#[test]
+fn module_retained_work_is_checked_against_the_compile_vocabulary() {
+    let vocab = vocab(&["a", "b"]);
+    let mut module = glrmask::Module::new(&glrmask::Grammar::ebnf(r#""a" "b""#));
+    module.precompile(&vocab).unwrap();
+    let loaded = glrmask::Module::load(module.save()).unwrap();
+    assert_eq!(
+        loaded.compile(&vocab).unwrap().start().mask(),
+        module.compile(&vocab).unwrap().start().mask(),
+    );
+    let wrong = Vocab::new(vec![(0, b"a".to_vec()), (1, b"c".to_vec())]);
+    assert!(loaded.compile(&wrong).is_err());
+}

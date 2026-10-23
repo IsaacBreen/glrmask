@@ -3154,7 +3154,7 @@ mod tests {
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
             .compile(&vocab).unwrap().with_end_tokens(&[99]).unwrap();
         let parent = PreparedGrammar::load_with_vocab(parent.save(), &vocab).unwrap();
-        let child = RuntimeConstraint::load_with_vocab(child.save(), &vocab).unwrap();
+        let child = RuntimeConstraint::load(child.save(), &vocab).unwrap();
         assert!(child.deferred_composition_metadata_blob.is_some());
         assert!(!child.composition_link_metadata_materialized);
         (vocab, parent, child)
@@ -3224,7 +3224,7 @@ mod tests {
         assert_eq!(owned.save(), borrowed.save()); assert_eq!(owned.save(), shared.save());
         assert_compose_owned_behavior_equal(&owned, &borrowed);
         assert_compose_owned_behavior_equal(&owned, &shared);
-        let reloaded = RuntimeConstraint::load_with_vocab(owned.save(), &vocab).unwrap();
+        let reloaded = RuntimeConstraint::load(owned.save(), &vocab).unwrap();
         assert_compose_owned_behavior_equal(&owned, &reloaded);
         assert_eq!(parent.save(), parent_bytes); assert_eq!(parent.inner.start().mask(), parent_mask);
         assert_eq!(child.save(), child_bytes); assert_eq!(child.start().mask(), child_mask);
@@ -3250,7 +3250,7 @@ mod tests {
             assert_eq!(parent.save(), parent_bytes); assert_eq!(parent.inner.start().mask(), parent_mask);
             assert_eq!(child.save(), child_bytes); assert_eq!(child.start().mask(), child_mask);
         }
-        assert_eq!(RuntimeConstraint::load_with_vocab(first.unwrap(), &vocab).unwrap().parser_backend(), ParserBackend::TemplateDfa);
+        assert_eq!(RuntimeConstraint::load(first.unwrap(), &vocab).unwrap().parser_backend(), ParserBackend::TemplateDfa);
     }
 
     fn token_allowed(mask: &[u32], token_id: u32) -> bool {
@@ -3300,7 +3300,7 @@ mod tests {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"ab".to_vec())]);
         let component = Grammar::glrm(r#"glrm 1; start value; nt value = "a";"#)
             .compile(&vocab).unwrap();
-        let mut loaded = RuntimeConstraint::load_with_vocab(component.save(), &vocab).unwrap();
+        let mut loaded = RuntimeConstraint::load(component.save(), &vocab).unwrap();
         let expected = crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(&loaded, &vocab)
             .unwrap().expect("loaded native component must carry a checked certificate");
         assert!(loaded.serialized_artifact_cache.is_some());
@@ -4207,7 +4207,7 @@ mod tests {
                 "fused parent/child token must be live before serialization",
             );
 
-            let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+            let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
             let overlay = loaded
                 .static_dynamic_overlay
                 .as_ref()
@@ -4331,7 +4331,7 @@ mod tests {
             .contains(&2));
 
         let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
-        let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
+        let loaded_child = RuntimeConstraint::load_without_vocab(child.save()).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
             .unwrap();
@@ -4395,7 +4395,7 @@ mod tests {
         ));
 
         let loaded_parent = RuntimeConstraint::load_body_artifact(parent.save()).unwrap();
-        let loaded_child = RuntimeConstraint::load(child.save()).unwrap();
+        let loaded_child = RuntimeConstraint::load_without_vocab(child.save()).unwrap();
         let bound = loaded_parent
             .bind_grammar_dynamic_boundary("child", loaded_child)
             .unwrap();
@@ -4471,7 +4471,7 @@ mod tests {
         )
         .unwrap();
         let composed = outer
-            .bind_grammar_dynamic_boundary("inner", RuntimeConstraint::load(inner.save()).unwrap())
+            .bind_grammar_dynamic_boundary("inner", RuntimeConstraint::load_without_vocab(inner.save()).unwrap())
             .unwrap();
         let reference = RuntimeConstraint::compile(
             Grammar::ebnf(r#"start ::= "<" "a" ">" "!""#),
@@ -4743,7 +4743,7 @@ mod tests {
         )
         .unwrap();
 
-        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
         assert_recursive_compiler_views_detached(&bound);
         assert_recursive_compiler_views_detached(&loaded);
         let mut no_trigger = bound.clone();
@@ -4885,7 +4885,7 @@ mod tests {
         )
         .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
             for tokens in [
                 &[7][..],
                 &[0, 6][..],
@@ -4923,7 +4923,7 @@ mod tests {
         let bound = parent.bind_grammar("child", child).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
 
-        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
         let mut no_outer_table = loaded.clone();
         assert_no_materialized_outer_table(&mut no_outer_table);
         for constraint in [&bound, &loaded, &no_outer_table] {
@@ -4977,11 +4977,11 @@ mod tests {
         assert!(static_bound.static_dynamic_overlay.as_ref().unwrap()
             .segmented_boundary_shards.iter().all(|shard| !matches!(
                 shard.backend, crate::runtime::SegmentedBoundaryShardBackend::DynamicDirect)));
-        let static_loaded = RuntimeConstraint::load(&static_bound.save()).unwrap();
+        let static_loaded = RuntimeConstraint::load_without_vocab(&static_bound.save()).unwrap();
         let bound = parent
             .bind_grammar_dynamic_boundary("payload", child)
             .unwrap();
-        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
         // Keep the schema's exact internal regular nodes; source serialization
         // is not the composition protocol and may intentionally have a narrower
         // syntax than the JSON frontend's already constructed representation.
@@ -5096,7 +5096,7 @@ mod tests {
         let layout = bound.recursive_parser_layout().unwrap().unwrap();
         assert_eq!(layout.leaves.len(), 3);
 
-        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         assert!(
             loaded
@@ -5229,7 +5229,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
-        let loaded = RuntimeConstraint::load(&bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(&bound.save()).unwrap();
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let monolithic = RuntimeConstraint::compile(
             Grammar::glrm("glrm 1; start document; nt document = \"X\" \"a\"? \"!\";"),
@@ -5298,7 +5298,7 @@ mod tests {
             .bind_grammar_dynamic_boundary("middle", middle)
             .unwrap();
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
             let layout = constraint
                 .recursive_parser_layout()
                 .unwrap()
@@ -5500,7 +5500,7 @@ mod tests {
                 + terminal(&outer_parent, "BANG"),
         ];
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
             let start = crate::compiler::glr::parser::ParserGSS::from_single_stack(
                 vec![0],
                 crate::compiler::glr::accumulator::TerminalsDisallowed::new(),
@@ -5592,7 +5592,7 @@ mod tests {
             half_offset + original_parent_offset + terminal(&parent, "GT"),
         ];
 
-        for constraint in [&full, &RuntimeConstraint::load(&full.save()).unwrap()] {
+        for constraint in [&full, &RuntimeConstraint::load_without_vocab(&full.save()).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             assert_eq!(
                 layout
@@ -5809,7 +5809,7 @@ mod tests {
         let bang = outer_overlay.segmented_parser_components[0].terminal_offset
             + terminal(&outer_parent, "BANG");
 
-        for constraint in [&bound, &RuntimeConstraint::load(&bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(&bound.save()).unwrap()] {
             let layout = constraint.recursive_parser_layout().unwrap().unwrap();
             let outer_link = layout
                 .links
@@ -5887,7 +5887,7 @@ mod tests {
         );
         assert!(overlay.segmented_boundary_terminal_trie.is_none());
 
-        let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
         let loaded_overlay = loaded.static_dynamic_overlay.as_ref().unwrap();
         assert!(loaded_overlay.segmented_boundary_parser.is_none());
         assert!(loaded_overlay.segmented_boundary_terminal_trie.is_none());
@@ -6015,7 +6015,7 @@ mod tests {
             .iter()
             .all(|component| component.root_disallowed_terminal.is_none()));
 
-        let loaded = RuntimeConstraint::load(bound.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(bound.save()).unwrap();
         assert!(bound.uses_compact_segmented_parser_runtime());
         assert!(loaded.uses_compact_segmented_parser_runtime());
         let loaded_overlay = loaded
@@ -6102,7 +6102,7 @@ mod tests {
         let bound = parent
             .bind_grammar_dynamic_boundary("child", child)
             .unwrap();
-        for constraint in [&bound, &RuntimeConstraint::load(bound.save()).unwrap()] {
+        for constraint in [&bound, &RuntimeConstraint::load_without_vocab(bound.save()).unwrap()] {
             let mut actual = constraint.start();
             let mut expected = monolithic.start();
             for token in [0, 1] {
@@ -6463,7 +6463,7 @@ mod cached_parent_main_tests {
         runtime_state.commit_token(2).unwrap();
         assert_eq!(build_state.is_accepting(), runtime_state.is_accepting());
 
-        let loaded = RuntimeConstraint::load(fast_build.save()).unwrap();
+        let loaded = RuntimeConstraint::load_without_vocab(fast_build.save()).unwrap();
         assert!(loaded.uses_dynamic_runtime());
         assert_eq!(loaded.start().mask(), fast_runtime.start().mask());
     }
@@ -6561,8 +6561,8 @@ mod final_ordinary_dynamic_selection_tests {
         assert!(actual.uses_dynamic_runtime());
         assert!(!actual.has_template_parser()); assert!(actual.table.is_present());
         assert_eq!(actual.dynamic_mask_vocab.is_grammar_quotiented(),oracle.dynamic_mask_vocab.is_grammar_quotiented());
-        for bytes in [actual.save(),actual.save_without_vocab().unwrap()] {
-            let restored=RuntimeConstraint::load_with_vocab(bytes,&v).unwrap();
+        for bytes in [actual.save(),actual.save()] {
+            let restored=RuntimeConstraint::load(bytes,&v).unwrap();
             assert!(restored.uses_dynamic_runtime());
             assert!(!restored.has_template_parser()); assert!(restored.table.is_present());
             for prefix in [b"".as_slice(),b"(",b"()",b"()("] {
@@ -6612,14 +6612,14 @@ mod final_unsplit_dynamic_tests {
         let c=crate::import::compile_dynamic_named_single(named,&v,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false).unwrap();
         assert!(c.uses_dynamic_runtime());assert!(!c.has_template_parser());
-        for actual in [c.clone(),RuntimeConstraint::load(c.save()).unwrap(),
-            RuntimeConstraint::load_with_vocab(c.save_without_vocab().unwrap(),&v).unwrap()] {
+        for actual in [c.clone(),RuntimeConstraint::load_without_vocab(c.save()).unwrap(),
+            RuntimeConstraint::load(c.save(),&v).unwrap()] {
             for prefix in [b"".as_slice(),b"a",b"aa",b"b",b"bb",b"ax",b"bx",b"ab",b"ba"] {
                 let mut a=actual.start();let mut o=oracle.start();
                 let _=a.commit_bytes(prefix);let _=o.commit_bytes(prefix);
                 assert_eq!(a.mask(),o.mask(),"after {prefix:?}");
                 assert_eq!(a.is_accepting(),o.is_accepting());
-                assert_eq!(a.is_rejected(),o.is_rejected());
+                assert_eq!((a.mask().iter().all(|word| *word == 0)),(o.mask().iter().all(|word| *word == 0)));
                 assert_eq!(a.forced_canonical_reference(),o.forced_canonical_reference());
             }
         }
@@ -6659,8 +6659,8 @@ mod bare_direct_region_regression_tests {
             assert!(c.direct_regular_automaton.is_none()); assert!(!c.has_template_parser());
         }
         assert_eq!(union.start().mask(),vec![143]);
-        for actual in [single.clone(),RuntimeConstraint::load(single.save()).unwrap(),
-            RuntimeConstraint::load_with_vocab(single.save_without_vocab().unwrap(),&v).unwrap()] {
+        for actual in [single.clone(),RuntimeConstraint::load_without_vocab(single.save()).unwrap(),
+            RuntimeConstraint::load(single.save(),&v).unwrap()] {
             for (prefix,mask,accept,reject) in [(b"".as_slice(),143,false,false),(b"a",133,true,false),
                 (b"aa",133,true,false),(b"b",10,true,false),(b"bb",10,true,false),
                 (b"ab",0,false,true),(b"ba",0,false,true)] {
@@ -6669,8 +6669,8 @@ mod bare_direct_region_regression_tests {
                 assert_eq!(ae.is_err(),oe.is_err(),"after {prefix:?}");
                 assert_eq!(a.mask(),vec![mask],"unsplit after {prefix:?}");
                 assert_eq!(o.mask(),vec![mask],"union after {prefix:?}");
-                assert_eq!((a.is_accepting(),a.is_rejected()),(accept,reject));
-                assert_eq!((o.is_accepting(),o.is_rejected()),(accept,reject));
+                assert_eq!((a.is_accepting(),(a.mask().iter().all(|word| *word == 0))),(accept,reject));
+                assert_eq!((o.is_accepting(),(o.mask().iter().all(|word| *word == 0))),(accept,reject));
                 assert_eq!(a.forced_canonical_reference(),o.forced_canonical_reference());
             }
         }
@@ -6689,9 +6689,9 @@ mod static_whole_token_regression_tests {
             for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
                 let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 assert!(c.direct_regular_automaton.is_some());
-                for c in [c.clone(),RuntimeConstraint::load(c.save()).unwrap(),RuntimeConstraint::load_with_vocab(c.save_without_vocab().unwrap(),&v).unwrap()] {
+                for c in [c.clone(),RuntimeConstraint::load_without_vocab(c.save()).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
-                    state.commit_token(3).unwrap();assert!(state.is_accepting());assert!(!state.is_rejected());
+                    state.commit_token(3).unwrap();assert!(state.is_accepting());assert!(!(state.mask().iter().all(|word| *word == 0)));
                 }
             }
         }

@@ -26,7 +26,7 @@ for(const maskStrategy of strategies) {
     const copy=s.clone();c.dispose();g.dispose();v.dispose();closed(()=>c.start());
     s.commitToken(31);assert.ok(s.isAccepting());assert.ok(!copy.isAccepting());
     copy.commitToken(0);assert.deepEqual(Array.from(copy.forcedTokens()),[1]);assert.ok(!copy.isAccepting());
-    copy.commitToken(1);assert.ok(copy.isAccepting());assert.ok(!copy.isRejected());
+    copy.commitToken(1);assert.ok(copy.isAccepting());
     s.dispose();s.dispose();closed(()=>s.mask());closed(()=>s.commitToken(0));
     copy[Symbol.dispose]();closed(()=>copy.isAccepting());
   });
@@ -47,21 +47,20 @@ for(const maskStrategy of strategies) {
     const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
     const s=Grammar.fromEbnf('start ::= "a"').compileSync(v,{maskStrategy,endTokens:[99]}).start();
     assert.ok(!allowed(s.mask(),99));s.commitToken(0);assert.ok(s.isAccepting());assert.ok(allowed(s.mask(),99));
-    s.commitToken(99);assert.ok(s.isAccepting());assert.ok(!s.isRejected());assert.ok(s.mask().every(w=>w===0));
+    s.commitToken(99);assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.throws(()=>s.commitToken(99));
   });
   test(`${maskStrategy}: synchronous and asynchronous persistence`,async()=>{
     const v=vocab(),c=await simple().compile(v,{maskStrategy});
     const expected=c.start().mask();
     const bytes=await c.save();assert.ok(types.isUint8Array(bytes));
-    const copied=Buffer.from(bytes);const pending=Constraint.load(bytes);bytes.fill(0);
+    const copied=Buffer.from(bytes);const pending=Constraint.load(bytes,v);bytes.fill(0);
     assert.deepEqual((await pending).start().mask(),expected);
-    assert.deepEqual(Constraint.loadSync(copied).start().mask(),expected);
-    const external=await c.save({externalVocab:true});await assert.rejects(Constraint.load(external));
-    assert.deepEqual((await Constraint.load(external,v)).start().mask(),expected);
-    assert.deepEqual(Constraint.loadSync(external,v).start().mask(),expected);
+    assert.deepEqual(Constraint.loadSync(copied,v).start().mask(),expected);
+    assert.deepEqual((await Constraint.load(bytes,v)).start().mask(),expected);
     const wrong=new Vocab([[0,b('WRONG')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
-    await assert.rejects(Constraint.load(external,wrong));
+    await assert.rejects(Constraint.load(bytes,wrong));
+    assert.throws(()=>Constraint.loadSync(bytes));
     const saving=c.save();c.dispose();assert.ok((await saving).length>0);
     assert.throws(()=>Constraint.loadSync(Buffer.from('not an artifact')));
   });
@@ -71,7 +70,7 @@ for(const maskStrategy of strategies) {
     const s=c.start();assert.deepEqual(s.markerEvents(),[{id:10,byteOffset:0n}]);
     s.commitToken(31);const expected=[{id:20,byteOffset:1n},{id:30,byteOffset:2n}];
     assert.deepEqual(s.markerEvents(),expected);assert.deepEqual(s.clone().markerEvents(),expected);
-    assert.deepEqual((await Constraint.load(await c.save())).markerIds(),c.markerIds());
+    assert.deepEqual((await Constraint.load(await c.save(),v)).markerIds(),c.markerIds());
   });
 }
 

@@ -2417,7 +2417,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
             &constraint, &vocab).unwrap());
         assert_eq!(*precision, if widened { crate::runtime::SummaryPrecision::BudgetWidenedUpperBound }
             else { crate::runtime::SummaryPrecision::RegularUpperBound });
-        let loaded = crate::Constraint::load_with_vocab(constraint.save(), &vocab).unwrap();
+        let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
         assert_eq!(loaded.composition_start_nullable().unwrap(), nullable);
         let loaded_summary = loaded.retained_boundary_candidate_summary_for_compilation().unwrap().unwrap();
         let BoundaryCandidateSummary::Known { fingerprint: loaded_fp, tokens: loaded_ids,

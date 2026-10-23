@@ -33,7 +33,7 @@ fn main() {
     let vocab = read_vocab(Path::new(&args[2]));
     let original = fs::read(&args[1]).expect("read component");
     let start = Instant::now();
-    let mut component = Constraint::load_with_vocab(&original, &vocab).expect("load component");
+    let mut component = Constraint::load(&original, &vocab).expect("load component");
     let load_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
     component.prepare_for_composition(&vocab).expect("prepare independent component");
@@ -42,7 +42,7 @@ fn main() {
     let bytes = component.save();
     let save_ms = start.elapsed().as_secs_f64() * 1000.0;
     let start = Instant::now();
-    let reloaded = Constraint::load_with_vocab(&bytes, &vocab).expect("certify prepared component");
+    let reloaded = Constraint::load(&bytes, &vocab).expect("certify prepared component");
     let reload_ms = start.elapsed().as_secs_f64() * 1000.0;
     assert_eq!(component.num_tokenizer_states(), reloaded.num_tokenizer_states());
     assert_eq!(reloaded.save(), bytes, "prepared component must roundtrip exactly");

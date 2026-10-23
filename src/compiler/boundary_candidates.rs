@@ -1627,7 +1627,7 @@ mod tests {
 
         let (fresh, _) = boundary_candidate_ids(&composed, &vocab);
         assert_eq!(fresh, Some(vec![0, 1]));
-        let mut loaded = Constraint::load(&composed.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
         assert!(
             loaded.boundary_candidate_summary.get().is_none(),
             "current artifacts deliberately defer composition-link metadata",
@@ -1665,13 +1665,13 @@ mod preparation_tests {
         }).unwrap();
         let original=source.save();
         let expected=boundary_candidate_ids(&source,&vocab).0.unwrap();
-        let mut loaded=Constraint::load_with_vocab(&original,&vocab).unwrap();
+        let mut loaded=Constraint::load(&original,&vocab).unwrap();
         loaded.prepare_for_composition_internal(&vocab).unwrap();
         assert!(loaded.boundary_candidate_summary.get().unwrap().is_known());
         assert_eq!(boundary_candidate_ids(&loaded,&vocab).0,Some(expected.clone()));
         assert!(loaded.serialized_artifact_cache.is_none());
         let saved=loaded.save();
-        let mut reloaded=Constraint::load_with_vocab(&saved,&vocab).unwrap();
+        let mut reloaded=Constraint::load(&saved,&vocab).unwrap();
         reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
         assert!(reloaded.boundary_candidate_summary.get().unwrap().is_known());
         assert_eq!(boundary_candidate_ids(&reloaded,&vocab).0,Some(expected));
@@ -1685,10 +1685,10 @@ mod preparation_tests {
         source.boundary_candidate_summary.set(BoundaryCandidateSummary::Unknown {
             reason:SummaryUnavailable::Disabled,
         }).unwrap();
-        let mut loaded=Constraint::load_with_vocab(&source.save(),&vocab).unwrap();
+        let mut loaded=Constraint::load(&source.save(),&vocab).unwrap();
         loaded.prepare_for_composition_internal(&vocab).unwrap();
         assert!(matches!(loaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
-        let mut reloaded=Constraint::load_with_vocab(&loaded.save(),&vocab).unwrap();
+        let mut reloaded=Constraint::load(&loaded.save(),&vocab).unwrap();
         reloaded.materialize_composition_link_metadata_for_compilation().unwrap();
         assert!(matches!(reloaded.boundary_candidate_summary.get(),Some(BoundaryCandidateSummary::Unknown{reason:SummaryUnavailable::Disabled})));
         assert!(boundary_candidate_ids(&reloaded,&vocab).0.is_none());
@@ -1721,7 +1721,7 @@ mod preparation_tests {
             assert!(!expected.is_empty());
             assert!(expected.len() < vocab.len());
 
-            let loaded = Constraint::load(&source.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(&source.save()).unwrap();
             assert!(!loaded.table.is_present());
             assert!(loaded.boundary_candidate_summary.get().is_none());
             assert!(loaded.deferred_composition_metadata_blob.is_some());
@@ -1754,7 +1754,7 @@ mod preparation_tests {
             fingerprint, tokens: OriginalTokenSet::Sparse(std::sync::Arc::from([0, 1])), precision,
         }).unwrap();
         middle.serialized_artifact_cache = None;
-        let loaded = Constraint::load_with_vocab(middle.save(), &vocab).unwrap();
+        let loaded = Constraint::load(middle.save(), &vocab).unwrap();
         assert!(persisted_boundary_candidate_ids(&loaded, &vocab).unwrap().is_none(),
             "pre-fix nullable candidate proof must widen before it can exclude []!");
         let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)

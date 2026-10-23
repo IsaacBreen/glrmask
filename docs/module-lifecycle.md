@@ -69,7 +69,7 @@ parent.precompile(vocab)?;
 assert_eq!(parent.unbound()?[0].name(), "TOOL");
 let saved = parent.save();
 
-let mut restored = Module::load_with_vocab(saved, vocab)?;
+let mut restored = Module::load(saved)?;
 restored.bind("TOOL", Grammar::from_ebnf(r#"start ::= "ping""#))?;
 let constraint = restored.compile(vocab)?;
 # let _ = constraint;
@@ -140,7 +140,7 @@ when available. Traversal and expansion limits protect callers from unbounded
 diagnostic output.
 
 No deferred grammar compilation occurs during `Constraint.start()`, masking or
-token commitment. `is_accepting()` means that the prefix is a match now, not that
-generation has terminated. `is_rejected()` means that no parsing/tokenizer path
-survives, not merely that the next mask is empty. These runtime contracts are
-unchanged by the module lifecycle.
+token commitment. `is_accepting()` means that the prefix is a match now, not that generation has
+terminated. A failed commit returns an error and kills the state: later commits
+fail and the mask is empty. These runtime contracts are unchanged by the module
+lifecycle.

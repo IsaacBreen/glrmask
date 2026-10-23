@@ -18,7 +18,7 @@ fn prepared_cut_roundtrip_pins_source_and_matches_actual_union_filter(){
     let b=with_prepared_cut(Constraint::from_glrm_grammar(r#"start x; nt x ::= "!" | " a" | "abc";"#,&v).unwrap(),&v);
     let mut components=Vec::new();
     for original in [a,b]{
-        let wire=original.save();let loaded=Constraint::load_with_vocab(&wire,&v).unwrap();assert_eq!(loaded.save(),wire);
+        let wire=original.save();let loaded=Constraint::load(&wire,&v).unwrap();assert_eq!(loaded.save(),wire);
         let prepared=loaded.boundary_completion_index.as_ref().unwrap();assert!(prepared.cut.is_some());assert!(prepared.matches(loaded.composition_tokenizer()));
         assert!(saved_wire(&loaded).unwrap().starts_with(CUT_MAGIC));
         let mut clone=loaded.clone();assert!(Arc::get_mut(&mut clone.tokenizer).is_none(),"source must remain pinned");

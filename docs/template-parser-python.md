@@ -119,18 +119,14 @@ this is not a whole-process memory guarantee.
 
 ```python
 raw = constraint.save()
-loaded = glrmask.Constraint.load(raw)
+loaded = glrmask.Constraint.load(raw, vocab=vocab)
 assert glrmask._internal.parser_backend(loaded) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 assert loaded.save() == raw
-
-external = constraint.save(external_vocab=True)
-loaded = glrmask.Constraint.load(external, vocab=vocab)
-assert glrmask._internal.parser_backend(loaded) == glrmask._internal.ParserBackend.TEMPLATE_DFA
 ```
 
-An external-vocabulary artifact requires the exact original vocabulary
-mapping. The same number of tokens with different IDs or byte strings is not
-sufficient. Self-contained and external forms retain the end-token policy.
+A constraint artifact requires the exact original vocabulary mapping. The same
+number of tokens with different IDs or byte strings is not sufficient. The
+artifact retains the end-token policy.
 
 ## Composition and compatibility
 

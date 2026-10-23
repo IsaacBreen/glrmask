@@ -21,7 +21,7 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
     ))
     assert parent.precompile(v) is None
     persisted = parent.save()
-    first = glrmask.Module.load(persisted, vocab=v)
+    first = glrmask.Module.load(persisted)
     second = copy.copy(first)
     assert first.bind("LEFT", source("a")) is None
     assert first.bind("RIGHT", source("b")) is None
@@ -34,7 +34,7 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
     assert state.mask()[2]
     state.commit_token(2)
     assert state.is_accepting()
-    assert not state.is_rejected()
+    assert not (not state.mask().any())
 
 
 @pytest.mark.parametrize("mask_strategy", [
@@ -57,7 +57,7 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
         "glrm 1; start s; extern grammar EVENT; nt s=EVENT;"
     ))
     grammar_slot.bind("EVENT", glrmask.TokenSet([5]))
-    state = glrmask.Module.load(grammar_slot.save(), vocab=v).compile(v).start()
+    state = glrmask.Module.load(grammar_slot.save()).compile(v).start()
     assert state.mask()[5]
     state.commit_token(5)
     assert state.is_accepting()
@@ -76,7 +76,7 @@ def test_invalid_target_and_artifact_are_not_accepted_silently():
     data = m.save()
     different = glrmask.Vocab.from_id_to_bytes({0: b"b", 1: b"a"})
     with pytest.raises(ValueError):
-        glrmask.Module.load(data, vocab=different)
+        glrmask.Module.load(data)
     with pytest.raises(ValueError):
         m.compile(different)
     with pytest.raises(ValueError):

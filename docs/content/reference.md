@@ -123,11 +123,11 @@ children. Retained work and source identities survive the round-trip:
 
 ```python
 saved = package.save()
-restored = glrmask.Module.load(saved, vocab=vocab)
+restored = glrmask.Module.load(saved)
 assert len(restored.externs.unbound) == 0
 ```
 
-Runnable constraints separately support `save()` and `Constraint.load(...)`.
+Runnable constraints separately support `save()` and `Constraint.load(data, vocab)`.
 Artifacts preserve original token coordinates and vocabulary identity, not merely
 a set of decoded spellings. Unsupported older pre-release formats are rejected.
 Retained compiled work is vocabulary-specific, not portable across arbitrary models.

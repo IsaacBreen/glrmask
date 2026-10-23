@@ -11,7 +11,7 @@ fn replay(state: &glrmask::ConstraintState<'_>, ids: &[u32]) {
     for &id in ids {
         assert!(!next.is_accepting(), "forced beyond an accepting boundary");
         assert!(allows(&next.mask(),id), "forcing selected an unadmitted ID {id}");
-        next.commit_token(id).unwrap();assert!(!next.is_rejected());
+        next.commit_token(id).unwrap();assert!(!(next.mask().iter().all(|word| *word == 0)));
     }
     assert_eq!(state.mask(),before,"forcing/replay mutated source state");
 }
@@ -24,13 +24,13 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
-    assert!(!state.is_rejected());
+    assert!(!(state.mask().iter().all(|word| *word == 0)));
     let mut replay = state.clone();
     for &id in &ids {
         assert!(!replay.is_accepting(), "forced past an accepting token boundary");
         assert!(allows(&replay.mask(), id), "forced ID {id} is excluded by the authoritative mask");
         replay.commit_token(id).unwrap();
-        assert!(!replay.is_rejected());
+        assert!(!(replay.mask().iter().all(|word| *word == 0)));
     }
     ids
 }
@@ -42,7 +42,7 @@ fn forcing_stops_when_acceptance_competes_with_more_text() {
         let c = Grammar::from_glrm("glrm 1; start root; nt root = \"ab\" \"c\"?;")
             .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
         assert_eq!(checked_force(&c), [0,1], "{mode:?}");
-        assert_eq!(checked_force(&Constraint::load(&c.save()).unwrap()), [0,1]);
+        assert_eq!(checked_force(&Constraint::load_without_vocab(&c.save()).unwrap()), [0,1]);
     }
 }
 
@@ -122,7 +122,7 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
         assert_eq!(checked_force(&baseline),[1],"ordinary baseline {mode:?}");
 
         let guarded=guarded.compile_with_build_options(&vocab,options).unwrap();
-        for guarded in [guarded.clone(),Constraint::load(&guarded.save()).unwrap()] {
+        for guarded in [guarded.clone(),Constraint::load_without_vocab(&guarded.save()).unwrap()] {
             // Both paths project to ordinary bytes `ab`, but greedy token 1
             // would cross the valid MARK opportunity after `a`. Returning token
             // 0 instead would cease to be the canonical greedy tokenization.
@@ -252,7 +252,7 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
         assert_eq!(state.mask(),before);
         let mut cursor=state.clone();cursor.commit_token(0).unwrap();
         assert_eq!(cursor.forced_token_ids_reference(),[1]);
-        let loaded=Constraint::load(&c.save()).unwrap();
+        let loaded=Constraint::load_without_vocab(&c.save()).unwrap();
         assert!(loaded.start().forced_token_ids_reference().is_empty());
     }
 }

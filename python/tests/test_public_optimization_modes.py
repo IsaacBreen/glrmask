@@ -23,7 +23,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
     reference = grammar.compile(vocab, end_tokens=[100])
     compiled = grammar.compile(vocab, mask_strategy=mode, end_tokens=[100])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"(", b"()", b"()("]:
             state, expected = constraint.start(), reference.start()
             state.commit_bytes(prefix)
@@ -37,7 +37,7 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             snapshot = state.clone()
             state.commit_token(100)
             assert state.is_accepting() == expected.is_accepting()
-            assert state.is_rejected() != expected.is_accepting()
+            assert (not state.mask().any()) != expected.is_accepting()
             assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), mask)
             assert snapshot.is_accepting() == expected.is_accepting()
@@ -58,14 +58,14 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
     module.precompile(vocab, mask_strategy=mode)
     linked = module.compile(vocab, mask_strategy=mode)
     for constraint in [compiled, linked, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"x", b"xa", b"xab", b"xab\t", b"xaby"]:
             actual, expected = constraint.start(), reference.start()
             actual.commit_bytes(prefix)
             expected.commit_bytes(prefix)
             assert np.array_equal(actual.mask(), expected.mask())
             assert actual.is_accepting() == expected.is_accepting()
-            assert actual.is_rejected() == expected.is_rejected()
+            assert (not actual.mask().any()) == (not expected.mask().any())
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -75,7 +75,7 @@ def test_exact_token_identity_survives_source_compilation(mode):
         "glrm 1; start root; extern token MARK; nt root = MARK;"), "MARK", glrmask.TokenSet([15]))
     compiled = grammar.compile(vocab, mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert state.mask()[15]
         assert not state.mask()[0]
@@ -90,7 +90,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
     reference = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE, end_tokens=[100])
     compiled = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_BUILD, end_tokens=[100])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         for n in [0, 1, 15, 29, 30]:
             state, expected = constraint.start(), reference.start()
             state.commit_bytes(b"a" * n)
@@ -103,7 +103,7 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
                 assert state.is_accepting()
                 assert state.mask()[100]
                 state.commit_token(100)
-                assert state.is_accepting() and not state.is_rejected()
+                assert state.is_accepting() and not (not state.mask().any())
                 assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), expected.mask())
 
@@ -119,7 +119,7 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
     reference = grammar.compile(vocab, mask_strategy=glrmask.MaskStrategy.FAST_BUILD, end_tokens=[100])
     compiled = grammar.compile(vocab, mask_strategy=mode, end_tokens=[100])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix in [b"", b"a", b"a" * (n-1), b"a" * n, word]:
             state, expected = constraint.start(), reference.start()
             state.commit_bytes(prefix)
@@ -134,5 +134,5 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
         state.commit_token(7)
         assert state.is_accepting()
         state.commit_token(100)
-        assert state.is_accepting() and not state.is_rejected()
+        assert state.is_accepting() and not (not state.mask().any())
         assert not state.mask().any()

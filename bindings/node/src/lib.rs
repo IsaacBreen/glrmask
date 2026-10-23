@@ -204,12 +204,12 @@ impl NativeConstraint {
     #[napi]
     pub fn marker_ids(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.marker_ids().to_vec().into())) }
     #[napi]
-    pub fn save_sync(&self, external: bool) -> napi::Result<Buffer> {
-        call(|| { let c = live(&self.inner)?; Ok(if external { c.save_without_vocab()? } else { c.save() }.into()) })
+    pub fn save_sync(&self) -> napi::Result<Buffer> {
+        call(|| Ok(live(&self.inner)?.save().into()))
     }
     #[napi]
-    pub fn save(&self, external: bool) -> napi::Result<AsyncTask<SaveTask>> {
-        call(|| Ok(AsyncTask::new(SaveTask { object: SaveObject::Constraint(live(&self.inner)?.clone(), external) })))
+    pub fn save(&self) -> napi::Result<AsyncTask<SaveTask>> {
+        call(|| Ok(AsyncTask::new(SaveTask { object: SaveObject::Constraint(live(&self.inner)?.clone()) })))
     }
 }
 
@@ -232,13 +232,15 @@ impl NativeState {
     #[napi]
     pub fn commit_token(&self, value: f64) -> napi::Result<()> { call(|| live(&self.inner)?.commit_token(id(value)?)) }
     #[napi]
+    pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<()> {
+        call(|| live(&self.inner)?.commit_tokens(ids.as_ref()))
+    }
+    #[napi]
     pub fn commit_bytes(&self, env: Env, bytes: Unknown<'_>) -> napi::Result<()> {
         call(|| arrays::with_bytes(&env, &bytes, |bytes| live(&self.inner)?.commit_bytes(bytes)))
     }
     #[napi]
     pub fn is_accepting(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_accepting()) }
-    #[napi]
-    pub fn is_rejected(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_rejected()) }
     #[napi]
     pub fn forced_tokens(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.forced_tokens()?.into())) }
     #[napi]
@@ -267,7 +269,7 @@ impl Task for GrammarPrecompileTask {
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeModule::new(value)) }
 }
 
-enum SaveObject { Module(g::Module), Constraint(Arc<g::Constraint>, bool) }
+enum SaveObject { Module(g::Module), Constraint(Arc<g::Constraint>) }
 pub struct SaveTask { object: SaveObject }
 #[napi]
 impl Task for SaveTask {
@@ -275,15 +277,14 @@ impl Task for SaveTask {
     type JsValue = Buffer;
     fn compute(&mut self) -> napi::Result<Self::Output> {
         call(|| Ok(match &self.object {
-            SaveObject::Constraint(c, false) => c.save(),
-            SaveObject::Constraint(c, true) => c.save_without_vocab()?,
+            SaveObject::Constraint(c) => c.save(),
             SaveObject::Module(m) => m.save(),
         }))
     }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(value.into()) }
 }
 
-pub struct LoadConstraintTask { bytes: Vec<u8>, vocab: Option<g::Vocab> }
+pub struct LoadConstraintTask { bytes: Vec<u8>, vocab: g::Vocab }
 #[napi]
 impl Task for LoadConstraintTask {
     type Output = Arc<g::Constraint>;
@@ -291,22 +292,19 @@ impl Task for LoadConstraintTask {
     fn compute(&mut self) -> napi::Result<Self::Output> {
         call(|| {
             let bytes = std::mem::take(&mut self.bytes);
-            Ok(Arc::new(match &self.vocab {
-                Some(v) => g::Constraint::load_with_vocab(bytes, v)?,
-                None => g::Constraint::load(bytes)?,
-            }))
+            Ok(Arc::new(g::Constraint::load(bytes, &self.vocab)?))
         })
     }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeConstraint { inner: Handle::new(value) }) }
 }
 
 #[napi]
-pub fn load_constraint(env: Env, bytes: Unknown<'_>, vocab: Option<&NativeVocab>) -> napi::Result<AsyncTask<LoadConstraintTask>> {
-    call(|| Ok(AsyncTask::new(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: vocab.map(|v| live(&v.inner).map(|v| v.clone())).transpose()? })))
+pub fn load_constraint(env: Env, bytes: Unknown<'_>, vocab: &NativeVocab) -> napi::Result<AsyncTask<LoadConstraintTask>> {
+    call(|| Ok(AsyncTask::new(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: live(&vocab.inner)?.clone() })))
 }
 #[napi]
-pub fn load_constraint_sync(env: Env, bytes: Unknown<'_>, vocab: Option<&NativeVocab>) -> napi::Result<NativeConstraint> {
-    let mut task = call(|| Ok(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: vocab.map(|v| live(&v.inner).map(|v| v.clone())).transpose()? }))?;
+pub fn load_constraint_sync(env: Env, bytes: Unknown<'_>, vocab: &NativeVocab) -> napi::Result<NativeConstraint> {
+    let mut task = call(|| Ok(LoadConstraintTask { bytes: arrays::bytes(&env, &bytes)?, vocab: live(&vocab.inner)?.clone() }))?;
     let value = task.compute()?; task.resolve(env, value)
 }
 

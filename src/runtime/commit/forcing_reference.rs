@@ -65,7 +65,7 @@ fn same_spelling_policy(states: &[ConstraintState<'_>]) -> bool {
 
 fn masks(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> (Vec<Vec<u32>>, Vec<u32>) {
     let individual = states.iter().map(|state| {
-        if state.is_rejected() { return Vec::new(); }
+        if state.state.is_empty() { return Vec::new(); }
         state.mask_for_forced(dynamic.unwrap_or_else(|| state.constraint.uses_dynamic_runtime()))
     }).collect::<Vec<_>>();
     let mut union = vec![0; individual.iter().map(Vec::len).max().unwrap_or(0)];
@@ -202,9 +202,9 @@ fn commit_selected(
         let result = if dynamic.unwrap_or_else(|| state.constraint.uses_dynamic_runtime()) {
             state.commit_token_dynamic(id)
         } else { state.commit_token_raw(id) };
-        if result.is_err() || state.is_rejected() { return false; }
+        if result.is_err() { return false; }
     }
-    states.retain(|state| !state.is_rejected());
+    states.retain(|state| !state.state.is_empty());
     !states.is_empty()
 }
 
@@ -227,7 +227,7 @@ pub(crate) fn force_result(
 pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| {
         let mut states = states.to_vec();
-        states.retain(|state| !state.is_rejected());
+        states.retain(|state| !state.state.is_empty());
         let mut output = Vec::new();
         while !states.is_empty() && output.len() < MAX_OUTPUT_IDS {
             if states.iter().any(ConstraintState::is_accepting) { break; }
@@ -245,7 +245,7 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
         return Vec::new();
     }
     let mut states = states.to_vec();
-    states.retain(|state| !state.is_rejected());
+    states.retain(|state| !state.state.is_empty());
     let mut budget = Budget(MAX_PROBES);
     let mut output = Vec::new();
     let mut output_bytes = 0;

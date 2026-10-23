@@ -80,7 +80,7 @@ def test_deferred_range_binding_and_serialization():
     module.precompile(v)
     bound = _bound_snapshot(module, "T", glrmask.TokenSet.from_ranges([range(3, 9), range(90, 100)]))
     expected = set(range(3, 9)) | set(range(90, 100))
-    loaded = glrmask.Module.load(bound.save(), vocab=v)
+    loaded = glrmask.Module.load(bound.save())
     for mode in MODES:
         constraint = loaded.compile(v, mask_strategy=mode)
         assert accepted_ids(constraint.start()) == expected

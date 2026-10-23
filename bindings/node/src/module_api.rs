@@ -195,29 +195,23 @@ impl Task for ModulePrecompileTask {
     }
 }
 
-pub struct LoadModuleTask { bytes: Vec<u8>, vocab: Option<g::Vocab> }
+pub struct LoadModuleTask { bytes: Vec<u8> }
 #[napi]
 impl Task for LoadModuleTask {
     type Output = g::Module;
     type JsValue = NativeModule;
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        call(|| Ok(g::Module::load(&self.bytes, self.vocab.as_ref())?))
+        call(|| Ok(g::Module::load(self.bytes.as_slice())?))
     }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<NativeModule> { Ok(NativeModule::new(value)) }
 }
 
 #[napi]
-pub fn load_module(env: Env, bytes: Unknown<'_>, vocab: Option<&NativeVocab>) -> napi::Result<AsyncTask<LoadModuleTask>> {
-    call(|| Ok(AsyncTask::new(LoadModuleTask {
-        bytes: arrays::bytes(&env, &bytes)?,
-        vocab: vocab.map(|v| live(&v.inner).map(|v| v.clone())).transpose()?,
-    })))
+pub fn load_module(env: Env, bytes: Unknown<'_>) -> napi::Result<AsyncTask<LoadModuleTask>> {
+    call(|| Ok(AsyncTask::new(LoadModuleTask { bytes: arrays::bytes(&env, &bytes)? })))
 }
 #[napi]
-pub fn load_module_sync(env: Env, bytes: Unknown<'_>, vocab: Option<&NativeVocab>) -> napi::Result<NativeModule> {
-    let mut task = call(|| Ok(LoadModuleTask {
-        bytes: arrays::bytes(&env, &bytes)?,
-        vocab: vocab.map(|v| live(&v.inner).map(|v| v.clone())).transpose()?,
-    }))?;
+pub fn load_module_sync(env: Env, bytes: Unknown<'_>) -> napi::Result<NativeModule> {
+    let mut task = call(|| Ok(LoadModuleTask { bytes: arrays::bytes(&env, &bytes)? }))?;
     let value = task.compute()?; task.resolve(env, value)
 }

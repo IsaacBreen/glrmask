@@ -12,7 +12,7 @@ fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
             let c=lark(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([10])).unwrap();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
             for &id in &expected{assert!(accepts(&c,&[id]));}
-            let loaded=Constraint::load(c.save()).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
+            let loaded=Constraint::load_without_vocab(c.save()).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
     assert!(lark("start: <[0-5]>").compile(&v).is_err());

@@ -126,7 +126,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
         let key = (Arc::as_ptr(value) as usize, runnable);
         if let Some(&id) = ids.get(&key) { return id; }
         let id = definitions.len() as u32;
-        let body = if runnable { value.save() } else { value.save_body() };
+        let body = if runnable { value.save_self_contained() } else { value.save_body() };
         definitions.push(Definition {
             bytes: body.len() as u64,
             runnable,
@@ -195,7 +195,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
     if offset!=data.len() { return Err(error("trailing data in prepared-grammar artifact")); }
     let mut definitions=Vec::<Arc<RuntimeConstraint>>::with_capacity(slices.len());
     for (definition,range) in manifest.definitions.iter().zip(slices) {
-        let mut inner=if definition.runnable { RuntimeConstraint::load(&data[range])? }
+        let mut inner=if definition.runnable { RuntimeConstraint::load_self_contained(&data[range])? }
             else { RuntimeConstraint::load_body_artifact(&data[range])? };
         if definition.runnable {
             if !definition.exact_only_token_ids.is_empty() { return Err(error("runnable definition has duplicate event-domain metadata")); }

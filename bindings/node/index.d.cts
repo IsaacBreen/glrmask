@@ -81,11 +81,6 @@ export interface VocabOptions {
   /** Token IDs valid for token-set bindings that have no byte spelling. */
   specialTokenIds?: Iterable<number>;
 }
-/** Constraint serialization options. */
-export interface SaveOptions {
-  /** Omit the vocabulary; load with the exact original token-ID/byte mapping. */
-  externalVocab?: boolean;
-}
 /** The model vocabulary a constraint is compiled against. Entries map model token IDs to exact token bytes; token IDs may be sparse. */
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
@@ -231,10 +226,10 @@ export declare class Module implements Disposable {
   save(): Promise<Uint8Array>;
   /** Serializes the module assembly and any retained precompiled artifacts. */
   saveSync(): Uint8Array;
-  /** Deserializes a module assembly, verifying it against `vocab` when supplied. */
-  static load(data: Uint8Array, vocab?: Vocab): Promise<Module>;
-  /** Deserializes a module assembly, verifying it against `vocab` when supplied. */
-  static loadSync(data: Uint8Array, vocab?: Vocab): Module;
+  /** Deserializes a module assembly. Retained work is checked against the vocabulary supplied to `compile` or `precompile`. */
+  static load(data: Uint8Array): Promise<Module>;
+  /** Deserializes a module assembly. Retained work is checked against the vocabulary supplied to `compile` or `precompile`. */
+  static loadSync(data: Uint8Array): Module;
   /** Releases the native handle. */
   dispose(): void;
   /** Releases the native handle when leaving a `using` block. */
@@ -255,14 +250,14 @@ export declare class Constraint implements Disposable {
   start(): ConstraintState;
   /** Sorted, distinct application marker IDs. */
   markerIds(): Uint32Array;
-  /** Serializes the constraint, including its vocabulary and root stopping policy; `externalVocab` outputs an artifact that needs the exact original token-ID/byte mapping to load. */
-  save(options?: SaveOptions): Promise<Uint8Array>;
-  /** Serializes the constraint, including its vocabulary and root stopping policy; `externalVocab` outputs an artifact that needs the exact original token-ID/byte mapping to load. */
-  saveSync(options?: SaveOptions): Uint8Array;
-  /** Deserializes a constraint; `vocab` is required for external-vocabulary artifacts and must match the original mapping. */
-  static load(data: Uint8Array, vocab?: Vocab): Promise<Constraint>;
-  /** Deserializes a constraint; `vocab` is required for external-vocabulary artifacts and must match the original mapping. */
-  static loadSync(data: Uint8Array, vocab?: Vocab): Constraint;
+  /** Serializes the constraint without its vocabulary; load with the exact original token-ID/byte mapping. */
+  save(): Promise<Uint8Array>;
+  /** Serializes the constraint without its vocabulary; load with the exact original token-ID/byte mapping. */
+  saveSync(): Uint8Array;
+  /** Deserializes a constraint. `vocab` must match the original mapping. */
+  static load(data: Uint8Array, vocab: Vocab): Promise<Constraint>;
+  /** Deserializes a constraint. `vocab` must match the original mapping. */
+  static loadSync(data: Uint8Array, vocab: Vocab): Constraint;
   /** Releases the native handle. */
   dispose(): void;
   /** Releases the native handle when leaving a `using` block. */
@@ -283,14 +278,14 @@ export declare class ConstraintState implements Disposable {
   mask(): Uint32Array;
   /** Writes the current mask into `output`, which must hold at least `maskLength` words; extra words are cleared. */
   fillMask(output: Uint32Array): void;
-  /** Commits one model token event; unknown or forbidden IDs reject the state. */
+  /** Commits one model token event; a disallowed event returns an error and rejects the state. */
   commitToken(id: number): void;
+  /** Commits model token events in order; a disallowed event returns an error and rejects the state. */
+  commitTokens(ids: Iterable<number> | Uint32Array): void;
   /** Commits raw bytes rather than a model token event; does not substitute for committing a token-set or end-token event. */
   commitBytes(bytes: Uint8Array): void;
   /** Whether the current prefix is a complete grammar match; further tokens may still be allowed. */
   isAccepting(): boolean;
-  /** Whether the prefix cannot be extended to a valid match. */
-  isRejected(): boolean;
   /** A read-only prefix of library-canonical forced output. */
   forcedTokens(): Uint32Array;
   /** Initial or most recent commit's observations, ordered by byte offset then marker ID. */

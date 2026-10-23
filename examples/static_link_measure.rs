@@ -55,7 +55,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
 
 fn load_constraint(path: &Path) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn schema_source(cfa_root: &Path, file: &str) -> String {
@@ -170,7 +170,7 @@ fn matrix_link_setup(
         let (schema_path, short_name) = &files[n];
         let schema_bytes = fs::read(schema_path)
             .unwrap_or_else(|error| panic!("read {}: {error}", schema_path.display()));
-        let schema = Constraint::load(&schema_bytes)
+        let schema = Constraint::load_without_vocab(&schema_bytes)
             .unwrap_or_else(|error| panic!("load {}: {error}", schema_path.display()));
         let parent = Constraint::compile(
             Grammar::glrm(parent_source.as_ref().expect("inner source")),
@@ -295,8 +295,8 @@ fn cmd_matrix_link_with_vocab(
     // Fresh-vs-reload per backend (separately timed validation): each
     // backend's reload mask must equal ITS OWN fresh mask, not just each other.
     let r0 = Instant::now();
-    let rs = Constraint::load(&s_bytes).expect("reload static");
-    let rd = Constraint::load(&d_bytes).expect("reload dynamic");
+    let rs = Constraint::load_without_vocab(&s_bytes).expect("reload static");
+    let rd = Constraint::load_without_vocab(&d_bytes).expect("reload dynamic");
     let rs_mask: Vec<u32> = rs.start().mask();
     let rd_mask: Vec<u32> = rd.start().mask();
     let reload_static_equal = rs_mask == static_mask;
@@ -411,7 +411,7 @@ fn stat_line(name: &str, bytes_len: usize, c: &Constraint) {
 
 fn print_stat_row(name: &str, path: &Path) {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    let c = Constraint::load(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
+    let c = Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()));
     stat_line(name, bytes.len(), &c);
 }
 
@@ -440,8 +440,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
     for run in 0..runs {
         // Static path A: compose_compiled_subgrammars (the bench path).
         let started = Instant::now();
-        let core = Constraint::load(&core_bytes).unwrap();
-        let dispatch = Constraint::load(&dispatch_bytes).unwrap();
+        let core = Constraint::load_without_vocab(&core_bytes).unwrap();
+        let dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
         let load = started.elapsed();
         let started = Instant::now();
         let composed = core
@@ -457,8 +457,8 @@ fn cmd_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: usize) {
 
         // Dynamic path: same placeholder substitution, DynamicDirect backend.
         let started = Instant::now();
-        let core = Constraint::load(&core_bytes).unwrap();
-        let dispatch = Constraint::load(&dispatch_bytes).unwrap();
+        let core = Constraint::load_without_vocab(&core_bytes).unwrap();
+        let dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
         let _ = started.elapsed();
         let started = Instant::now();
         let dyn_result = core.compose_compiled_subgrammars_dynamic(
@@ -516,8 +516,8 @@ fn cmd_dynamic_link(cache_dir: &Path, vocab: &Vocab, dispatch_name: &str, runs: 
         // Keep artifact load/deserialization outside the composition clock. This
         // command exists specifically to make the DynamicDirect linker cheap to
         // iterate without paying the much slower static linker on every sample.
-        let mut core = Constraint::load_with_vocab(&core_bytes, vocab).unwrap();
-        let mut dispatch = Constraint::load_with_vocab(&dispatch_bytes, vocab).unwrap();
+        let mut core = Constraint::load(&core_bytes, vocab).unwrap();
+        let mut dispatch = Constraint::load(&dispatch_bytes, vocab).unwrap();
         core.prepare_for_dynamic_composition(vocab).unwrap();
         dispatch.prepare_for_dynamic_composition(vocab).unwrap();
         let dispatch = Arc::new(dispatch);
@@ -584,12 +584,12 @@ fn validate_dynamic_link_artifact(
     vocab: &Vocab,
 ) {
     let saved = fast.save();
-    let reloaded = Constraint::load_with_vocab(&saved, vocab)
+    let reloaded = Constraint::load(&saved, vocab)
         .expect("reload optimized DynamicDirect artifact");
 
-    let reference_core = Constraint::load_with_vocab(core_bytes, vocab)
+    let reference_core = Constraint::load(core_bytes, vocab)
         .expect("load reference core with vocab");
-    let reference_dispatch = Constraint::load_with_vocab(dispatch_bytes, vocab)
+    let reference_dispatch = Constraint::load(dispatch_bytes, vocab)
         .expect("load reference dispatch with vocab");
     let reference = reference_core
         .compose_compiled_subgrammars_dynamic(
@@ -641,7 +641,7 @@ fn validate_dynamic_link_artifact(
     // the just-built result once more verifies that an optimized recursive
     // coordinator can itself be consumed as an immutable child without
     // reconstructing its retired flattened compiler views.
-    let nested_core = Constraint::load_with_vocab(core_bytes, vocab)
+    let nested_core = Constraint::load(core_bytes, vocab)
         .expect("load nested core with vocab");
     let fast_child = Arc::new(fast.clone());
     let nested = nested_core
@@ -651,7 +651,7 @@ fn validate_dynamic_link_artifact(
         )
         .expect("compose optimized recursive result as nested child");
     let nested_saved = nested.save();
-    let nested_reload = Constraint::load_with_vocab(&nested_saved, vocab)
+    let nested_reload = Constraint::load(&nested_saved, vocab)
         .expect("reload nested optimized DynamicDirect artifact");
     let nested_mask = nested.start().mask();
     let nested_reload_mask = nested_reload.start().mask();
@@ -706,8 +706,8 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
             };
             let core_bytes = fs::read(cache_dir.join("core.bin")).expect("core cache missing");
             let dispatch_bytes = fs::read(cache_dir.join(dispatch_name)).expect("dispatch cache missing");
-            let mut core = Constraint::load_with_vocab(&core_bytes, vocab).expect("load core with vocab");
-            let mut dispatch = Constraint::load_with_vocab(&dispatch_bytes, vocab).expect("load dispatch with vocab");
+            let mut core = Constraint::load(&core_bytes, vocab).expect("load core with vocab");
+            let mut dispatch = Constraint::load(&dispatch_bytes, vocab).expect("load dispatch with vocab");
             core.prepare_for_dynamic_composition(vocab).expect("prepare core link metadata");
             dispatch.prepare_for_dynamic_composition(vocab).expect("prepare dispatch link metadata");
             if which == "static" {
@@ -1112,8 +1112,8 @@ fn cmd_prefix_diff(
         static_path, dynamic_path,
         "static and dynamic artifact paths must differ",
     );
-    let static_c = Constraint::load(&static_bytes).expect("load static artifact");
-    let dynamic_c = Constraint::load(&dynamic_bytes).expect("load dynamic artifact");
+    let static_c = Constraint::load_without_vocab(&static_bytes).expect("load static artifact");
+    let dynamic_c = Constraint::load_without_vocab(&dynamic_bytes).expect("load dynamic artifact");
     mark("load done");
     // Pair identity via existing public metadata APIs: same terminal /
     // tokenizer-state counts, exact-vocab bind on both. NOTE (verified
@@ -1498,8 +1498,8 @@ fn cmd_trace_replay(
         let d_bytes = fs::read(dir.join("dynamic.bin")).expect("prepared dynamic.bin missing");
         let s_ms = t0.elapsed().as_secs_f64() * 1000.0;
         let t0 = Instant::now();
-        let static_comp = Constraint::load_with_vocab(&s_bytes, vocab).expect("load prepared static");
-        let dynamic_comp = Constraint::load_with_vocab(&d_bytes, vocab).expect("load prepared dynamic");
+        let static_comp = Constraint::load(&s_bytes, vocab).expect("load prepared static");
+        let dynamic_comp = Constraint::load(&d_bytes, vocab).expect("load prepared dynamic");
         let l_ms = t0.elapsed().as_secs_f64() * 1000.0;
         eprintln!("[trace-progress] stage=prepared-load BEGIN");
         (static_comp, dynamic_comp, format!("prepared_read_ms={s_ms:.3} prepared_decode_ms={l_ms:.3}"))
@@ -1536,8 +1536,8 @@ fn cmd_trace_replay(
         // Reload round-trip through save/load_with_vocab with shared vocab.
         let s_bytes = static_comp.save();
         let d_bytes = dynamic_comp.save();
-        let re_static = Constraint::load_with_vocab(&s_bytes, vocab).expect("reload static");
-        let re_dynamic = Constraint::load_with_vocab(&d_bytes, vocab).expect("reload dynamic");
+        let re_static = Constraint::load(&s_bytes, vocab).expect("reload static");
+        let re_dynamic = Constraint::load(&d_bytes, vocab).expect("reload dynamic");
         // Verify on the first selected trace: initial + first 4 commits.
         let first_label = only_trace.unwrap_or("sequential-3");
         let first_ids: Vec<u32> = list

@@ -142,7 +142,7 @@ for(const parentPrepared of [false,true])for(const childPrepared of [false,true]
     if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.TokenClassTrie}),undefined);
     child.bind('MARK',new TokenSet([8]));
     parent.bind('child',child);const bytes=await parent.save();
-    const loaded=await Module.load(bytes,v);
+    const loaded=await Module.load(bytes);
     assert.equal(loaded.externs.unbound.size,0);
     accept(loaded,v,[0,8,3]);
   });

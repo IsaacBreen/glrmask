@@ -89,13 +89,13 @@ if ((mask[0] & 1) != 0) state.commit_token(0);
 
 Masks are packed original-ID bitsets. Bit `id % 32` of word `id / 32` is set when token `id` is allowed. The word count is `constraint.mask_len()`, not `vocab.size()`; sparse or very large IDs still require a dense output buffer. `fill_mask(pointer, word_count)` and `fill_mask(vector)` zero extra words. An undersized buffer throws `glrmask::Error` with `status() == GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` is the allocating convenience form.
 
-`is_rejected()` reports a prefix that cannot be recovered. A failed grammar commit follows the core's state semantics rather than acting as a general rollback; retain a clone before speculative commits. `forced_tokens()` performs read-only bounded lookahead and does not advance the state. `marker_ids()` and `marker_events()` expose possible recognition observations from the initial or latest commit. A marker event carries an `id` and a `uint64_t` byte offset; these are not final parse captures.
+A failed `commit_token`, `commit_bytes` or `commit_tokens` returns `glrmask::Error` and leaves the state unusable: later commits fail and the mask is empty. Clone the state before a speculative commit. `forced_tokens()` performs read-only bounded lookahead and does not advance the state. `marker_ids()` and `marker_events()` expose possible recognition observations from the initial or latest commit. A marker event carries an `id` and a `uint64_t` byte offset; these are not final parse captures.
 
 ## End tokens
 
 `is_accepting()` means the current prefix is a complete match. It does not mean generation must stop, because the grammar may permit more input. To stop at an explicit event, configure root `end_tokens` in `CompileOptions` and stop when one is sampled and committed.
 
-An allowed end token leaves the state accepting and non-rejected, empties the next mask, and prevents further commits. End-token policy belongs to the root; embedded child modules do not inherit it.
+An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root; embedded child modules do not inherit it.
 
 ## Persistence
 

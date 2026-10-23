@@ -26,7 +26,7 @@ def assert_read_only_and_replay(state, method):
         assert not cursor.is_accepting()
         assert cursor.mask()[token]
         cursor.commit_token(token)
-        assert not cursor.is_rejected()
+        assert not (not cursor.mask().any())
     return result
 
 

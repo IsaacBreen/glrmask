@@ -2193,7 +2193,7 @@ mod tests {
         assert_eq!(constraint.parser_terminal_count(), table.num_terminals);
         drop(table);
 
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert_eq!(constraint.start().mask(), loaded.start().mask());
         for native in [constraint, &loaded] {
             assert!(native.has_template_parser());
@@ -2939,7 +2939,7 @@ mod tests {
             composed.parser_control_terminals().is_empty(),
             "a child followed directly by an end token must compile linker controls away",
         );
-        let loaded = Constraint::load(&composed.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&composed.save()).unwrap();
 
         for constraint in [&composed, &loaded] {
             let mut state = constraint.start();

@@ -44,7 +44,7 @@ fn fixture(optimization: MaskStrategy, external: bool) -> Vec<u8> {
         )
         .unwrap();
     if external {
-        constraint.save_without_vocab().unwrap()
+        constraint.save()
     } else {
         constraint.save()
     }
@@ -97,9 +97,9 @@ fn replace_var(bytes: &[u8], range: Range<usize>, mut value: u32) -> Vec<u8> {
 
 fn load(bytes: Vec<u8>, external: bool) -> glrmask::Result<Constraint> {
     if external {
-        Constraint::load_with_vocab(bytes, &vocab())
+        Constraint::load(bytes, &vocab())
     } else {
-        Constraint::load(bytes)
+        Constraint::load_without_vocab(bytes)
     }
 }
 
@@ -254,12 +254,12 @@ fn external_binding_accepts_reordered_identical_mapping_but_not_id_changes() {
     let remapped = Vocab::new(remapped);
     for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let bytes = fixture(optimization, true);
-        let good = Constraint::load_with_vocab(bytes.clone(), &reversed).unwrap();
+        let good = Constraint::load(bytes.clone(), &reversed).unwrap();
         assert_eq!(good.parser_backend(), ParserBackend::TemplateDfa);
         let mut state = good.start();
         state.commit_token(11).unwrap(); // duplicate token bytes, distinct token ID
         assert!(state.is_accepting());
-        assert_eq!(good.save_without_vocab().unwrap(), bytes);
-        assert!(Constraint::load_with_vocab(bytes, &remapped).is_err());
+        assert_eq!(good.save(), bytes);
+        assert!(Constraint::load(bytes, &remapped).is_err());
     }
 }

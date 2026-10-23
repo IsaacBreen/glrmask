@@ -17,7 +17,7 @@ fn initial_split_and_inside_fused_token_events_all_modes() {
     let v = vocab(&[b"a",b"b",b"ab"]);
     for mode in MODES {
         let c = compile("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n", &v, mode);
-        for c in [&c, &Constraint::load(c.save()).unwrap()] {
+        for c in [&c, &Constraint::load_without_vocab(c.save()).unwrap()] {
             let mut s = c.start();
             assert_eq!(events(&s), [(0,0)], "start {mode:?}");
             s.commit_token(0).unwrap();
@@ -111,7 +111,7 @@ fn clone_masks_forcing_errors_and_eos_obey_batch_lifecycle() {
         s.commit_token(4).unwrap();assert!(s.is_accepting());assert!(events(&s).is_empty());
         assert!(s.commit_token(0).is_err());assert!(events(&s).is_empty());
         let mut rejected=c.start();let _=rejected.commit_token(3);
-        assert!(rejected.is_rejected());assert!(events(&rejected).is_empty());
+        assert!((rejected.mask().iter().all(|word| *word == 0)));assert!(events(&rejected).is_empty());
     }
 }
 

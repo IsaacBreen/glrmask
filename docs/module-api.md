@@ -94,7 +94,7 @@ source = Grammar.from_glrm('extern grammar ITEM start root nt root = "[" ITEM "]
 parent = Module(source)
 parent.precompile(vocab)             # Real work; an open extern is allowed.
 saved = parent.save()                # Bytes, including retained work.
-loaded = Module.load(saved, vocab=vocab)
+loaded = Module.load(saved)
 loaded.bind("ITEM", Grammar.from_glrm('start root nt root = /[0-9]+/'))
 constraint = loaded.compile(vocab)   # Performs any remaining required work.
 state = constraint.start()

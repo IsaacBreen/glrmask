@@ -133,9 +133,9 @@ images before accepting the saved boundary. It does not rebuild the parser.
 Only current native artifact variants are accepted. Obsolete projected and
 non-projected variants must be rebuilt.
 
-`save_without_vocab()` omits the separately supplied model vocabulary and
-requires `Constraint::load_with_vocab()` with the exact original binding. Both
-artifact forms retain parser, component, and final-root termination semantics.
+`Constraint::save()` omits the separately supplied model vocabulary and
+`Constraint::load(bytes, &vocab)` requires the exact original binding. The
+artifact retains parser, component, and final-root termination semantics.
 
 ## Verification
 

@@ -102,7 +102,7 @@ fn read_vocab_dump(path: &Path) -> Vocab {
 
 fn load_constraint(path: &Path) -> Constraint {
     let bytes = fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
-    Constraint::load(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
+    Constraint::load_without_vocab(&bytes).unwrap_or_else(|error| panic!("load {}: {error}", path.display()))
 }
 
 fn save_constraint(path: &Path, constraint: &Constraint) {
@@ -414,8 +414,8 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
     for run in 0..runs {
         eprintln!("[selected10/debug] run={} before_load dispatch={dispatch_name}", run + 1);
         let load_started = Instant::now();
-        let mut core = Constraint::load(&core_bytes).unwrap();
-        let mut dispatch = Constraint::load(&dispatch_bytes).unwrap();
+        let mut core = Constraint::load_without_vocab(&core_bytes).unwrap();
+        let mut dispatch = Constraint::load_without_vocab(&dispatch_bytes).unwrap();
         if std::env::var_os("SELECTED10_BIND_VOCAB_ON_LOAD").is_some() {
             core.bind_vocab_exact(vocab).unwrap();
             dispatch.bind_vocab_exact(vocab).unwrap();
@@ -537,7 +537,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
         };
         let save = save_started.elapsed();
         if std::env::var_os("SELECTED10_VALIDATE_SAVE_LOAD").is_some() {
-            let loaded = Constraint::load(&bytes).expect("reload composed constraint");
+            let loaded = Constraint::load_without_vocab(&bytes).expect("reload composed constraint");
             for prefix in [
                 b"const x = tools".as_slice(),
                 b"const x = tools.tool_0".as_slice(),

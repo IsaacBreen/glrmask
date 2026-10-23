@@ -186,7 +186,7 @@ mod lifecycle_tests {
         let mut source=Constraint::from_glrm_grammar(r#"start x; nt x ::= "abc" | "xyc";"#,&vocab).unwrap();
         assert!(prepare_component(&mut source,&vocab).unwrap(),"fixture must select component-only preparation");
         let wire=source.save();
-        let loaded=Constraint::load(&wire).unwrap();
+        let loaded=Constraint::load_without_vocab(&wire).unwrap();
         let prepared=loaded.boundary_completion_index.as_ref().expect("saved index must be certified at load");
         assert!(prepared.matches(loaded.tokenizer.as_ref()));
         assert_eq!(loaded.save(),wire);

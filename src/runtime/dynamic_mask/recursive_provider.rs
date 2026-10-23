@@ -653,7 +653,7 @@ mod epsilon_reset_boundary_tests {
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();
-            let loaded = Constraint::load(bound.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
             for constraint in [&bound, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
@@ -737,7 +737,7 @@ mod closed_admission_support_tests {
             ), &vocab).unwrap();
             let child = Constraint::compile(Grammar::glrm(child_source), &vocab).unwrap();
             let bound = outer.bind_grammar_dynamic_boundary("leaf", child).unwrap();
-            let loaded = Constraint::load(bound.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
             for constraint in [&bound, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();

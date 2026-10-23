@@ -50,8 +50,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         assert_eq!(decoded, trace.text.as_bytes(), "canonical trace byte identity");
     }
     eprintln!("LOAD canonical selected10, traces={} positions=11767", traces.len());
-    let core = Constraint::load_with_vocab(fs::read(fixture.join("core.bin"))?, &vocab)?;
-    let dispatch = Constraint::load_with_vocab(fs::read(fixture.join("dispatch-literal.bin"))?, &vocab)?;
+    let core = Constraint::load(fs::read(fixture.join("core.bin"))?, &vocab)?;
+    let dispatch = Constraint::load(fs::read(fixture.join("dispatch-literal.bin"))?, &vocab)?;
     let start = Instant::now();
     let reference = if args[3] == "static" {
         core.compose_compiled_subgrammars(&[("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)], &vocab)?
@@ -65,9 +65,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = parser_backend_report(&candidate); assert_table_free(&report);
     fs::write(output.join("backend.json"), serde_json::to_vec_pretty(&report)?)?;
     let start = Instant::now(); let saved = candidate.save(); let save_ns = start.elapsed().as_nanos();
-    let start = Instant::now(); let loaded = Constraint::load(&saved)?; let load_ns = start.elapsed().as_nanos();
+    let start = Instant::now(); let loaded = Constraint::load_without_vocab(&saved)?; let load_ns = start.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&loaded)); assert_eq!(saved, loaded.save());
-    let external = candidate.save_without_vocab()?; let external_loaded = Constraint::load_with_vocab(&external, &vocab)?;
+    let external = candidate.save(); let external_loaded = Constraint::load(&external, &vocab)?;
     assert_table_free(&parser_backend_report(&external_loaded));
     let mut csv = BufWriter::new(fs::File::create(output.join("exact-replay.csv"))?);
     writeln!(csv, "trace,step,token,lr_mask_ns,template_mask_ns,self_load_mask_ns,external_load_mask_ns,hash")?;

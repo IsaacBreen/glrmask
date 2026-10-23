@@ -35,7 +35,7 @@ fn main(){
         let v=Vocab::new(words).with_special_tokens([9000]);
         for mode in modes{for source in sources{
             let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();compiled+=1;
-            let restored=Constraint::load(c.save()).unwrap();
+            let restored=Constraint::load_without_vocab(c.save()).unwrap();
             for c in [&c,&restored]{
                 for text in ["","A","AxyB","xy!","A xy B","A\txyB","Axyz!","!ac?","ac!","abc!","[badly]","A\u{e9}!","!?!"]{
                     for end in 0..=text.len(){examine(c,&text.as_bytes()[..end],&mut n);}
@@ -45,7 +45,7 @@ fn main(){
         let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",TokenSet::from(9000)).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar C start r nt r=\"A\" C \"B\"");parent.bind("C",&child).unwrap();
         let c=parent.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
-        for c in [&c,&Constraint::load(c.save()).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}
+        for c in [&c,&Constraint::load_without_vocab(c.save()).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}
         }
     }
     println!("PASS {n} nested/nullable/ignore/Unicode/shortest/alias/exact-event frontier comparisons across {compiled} compiled cases and all 4 modes, each source + loaded");

@@ -31,7 +31,7 @@ int main(void) {
     CHECK(glrmask_module_bind_token(module,"missing",7,0)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);
-    CHECK(glrmask_module_load(artifact,artifact_len,vocab,&loaded)==GLRMASK_OK);
+    CHECK(glrmask_module_load(artifact,artifact_len,&loaded)==GLRMASK_OK);
     glrmask_bytes_free(saved);glrmask_module_free(module);
     const glrmask_expr_operand operand={1,loaded};CHECK(glrmask_expr_choice(&operand,1,&expr)==GLRMASK_OK);
     glrmask_expr_free(expr);

@@ -28,7 +28,7 @@ fn reconverging_push_and_pop_languages_remain_shared_across_reload() {
         let fresh=parser.compile(&lex,&vocabulary).unwrap();
         let bytes=fresh.save();
         assert!(bytes.len()<64_000+depth*64,"a linear graph must not serialize its exponentially many paths");
-        let restored=Constraint::load(&bytes).unwrap();
+        let restored=Constraint::load_without_vocab(&bytes).unwrap();
         for constraint in [&fresh,&restored] {
             assert_eq!(constraint.parser_backend(),ParserBackend::TemplateDfa);
             let mut state=constraint.start();let mut mask=vec![0;constraint.mask_len()];
@@ -94,16 +94,16 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     let v=vocab();
     let c=program.compile_with(&lexer(),&v,TemplateBuildOptions::default().end_tokens([64])).unwrap();
     check_all_prefixes(&c);
-    let bytes=c.save();let restored=Constraint::load(bytes.clone()).unwrap();
+    let bytes=c.save();let restored=Constraint::load_without_vocab(bytes.clone()).unwrap();
     check_all_prefixes(&restored);assert_eq!(restored.save(),bytes);
-    let external=c.save_without_vocab().unwrap();
-    assert!(Constraint::load(external.clone()).is_err());
+    let external=c.save();
+    assert!(Constraint::load_without_vocab(external.clone()).is_err());
     let wrong=Vocab::new(vec![(0,b"different".to_vec()),(64,Vec::new())]);
-    assert!(Constraint::load_with_vocab(external.clone(),&wrong).is_err());
-    let restored=Constraint::load_with_vocab(external,&v).unwrap();check_all_prefixes(&restored);
-    let mut s=c.start();assert!(s.commit_bytes(b")").is_err());assert!(s.is_rejected());
+    assert!(Constraint::load(external.clone(),&wrong).is_err());
+    let restored=Constraint::load(external,&v).unwrap();check_all_prefixes(&restored);
+    let mut s=c.start();assert!(s.commit_bytes(b")").is_err());assert!((s.mask().iter().all(|word| *word == 0)));
     let mut s=c.start();s.commit_token(64).unwrap();
-    assert!(s.is_accepting() && !s.is_rejected());
+    assert!(s.is_accepting() && !(s.mask().iter().all(|word| *word == 0)));
     assert!(s.mask().iter().all(|&w| w == 0));
     assert!(s.commit_token(64).is_err());
 }
@@ -189,11 +189,11 @@ fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
 
 fn native_representations(compiled:&Constraint,vocab:&Vocab)->[Constraint;3] {
     let bytes=compiled.save();
-    let loaded=Constraint::load(bytes.clone()).unwrap();
+    let loaded=Constraint::load_without_vocab(bytes.clone()).unwrap();
     assert_eq!(loaded.save(),bytes);
-    let external=compiled.save_without_vocab().unwrap();
-    assert!(Constraint::load(external.clone()).is_err());
-    let external=Constraint::load_with_vocab(external,vocab).unwrap();
+    let external=compiled.save();
+    assert!(Constraint::load_without_vocab(external.clone()).is_err());
+    let external=Constraint::load(external,vocab).unwrap();
     [compiled.clone(),loaded,external]
 }
 
@@ -334,7 +334,7 @@ fn exponentially_many_custom_push_outputs_remain_runnable_after_roundtrip() {
     let lexer = LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec())]);
     let v = Vocab::new(vec![(0, b"a".to_vec()), (1, b"aa".to_vec()), (2, b"b".to_vec())]);
     let c = program.compile(&lexer, &v).unwrap();
-    for parser in [&c, &Constraint::load(c.save()).unwrap()] {
+    for parser in [&c, &Constraint::load_without_vocab(c.save()).unwrap()] {
         assert_eq!(parser.parser_backend(), ParserBackend::TemplateDfa);
         let mut state = parser.start(); let mut mask = vec![0; parser.mask_len()];
         for _ in 0..3 {
@@ -360,8 +360,8 @@ fn epsilon_read_links_apply_after_popping_the_last_concrete_symbol() {
     let words=["a","b","ab","ba","aa","bb"];
     let vocab=Vocab::new(words.iter().enumerate().map(|(i,s)|(i as u32,s.as_bytes().to_vec())).collect());
     let built=program.compile(&lexer,&vocab).unwrap();
-    for constraint in [&built,&Constraint::load(built.save()).unwrap(),
-        &Constraint::load_with_vocab(built.save_without_vocab().unwrap(),&vocab).unwrap()]
+    for constraint in [&built,&Constraint::load_without_vocab(built.save()).unwrap(),
+        &Constraint::load(built.save(),&vocab).unwrap()]
     {
         for length in 0..=7 {
             for bits in 0..(1usize<<length) {
@@ -405,7 +405,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         .compile_with_build_options(&vocab, glrmask::BuildOptions::default()
             .optimization(glrmask::MaskStrategy::TokenClassTrie)
             .parser_backend(glrmask::ParserBackend::TemplateDfa)).unwrap();
-    let loaded = glrmask::Constraint::load(compiled.save()).unwrap();
+    let loaded = glrmask::Constraint::load_without_vocab(compiled.save()).unwrap();
     for constraint in [&compiled,&loaded] {
         assert_eq!(constraint.parser_backend(),glrmask::ParserBackend::TemplateDfa);
         let mut state = constraint.start();
@@ -432,9 +432,9 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
         let compiled = Grammar::from_json_schema(r#"{"type":"boolean"}"#)
             .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
-        let loaded = Constraint::load(compiled.save()).unwrap();
-        let external = Constraint::load_with_vocab(
-            compiled.save_without_vocab().unwrap(), &vocab).unwrap();
+        let loaded = Constraint::load_without_vocab(compiled.save()).unwrap();
+        let external = Constraint::load(
+            compiled.save(), &vocab).unwrap();
         for constraint in [&compiled, &loaded, &external] {
             let report = parser_backend_report(constraint);
             assert_eq!(report["lr_table_present"], false);

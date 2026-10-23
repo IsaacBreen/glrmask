@@ -109,8 +109,8 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_token_set, |t| g::Binding::from
     ffi(|| unsafe { produce(out, || Ok(glrmask_bytes(read(p)?.0.save()))) })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_load(bytes: *const u8, n: usize, v: *const glrmask_vocab, out: *mut *mut glrmask_module) -> i32 {
-    ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::load(input(bytes, n)?, if v.is_null() { None } else { Some(&read(v)?.0) })?))) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_load(bytes: *const u8, n: usize, out: *mut *mut glrmask_module) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::load(input(bytes, n)?)?))) })
 }
 
 unsafe fn parse_expr_operand(item: &glrmask_expr_operand) -> Result<g::Expr> {

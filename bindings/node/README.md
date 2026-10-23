@@ -147,25 +147,22 @@ if (allowed) state.commitToken(id);
 
 Masks use original token IDs. Bit `id % 32` of word `Math.floor(id / 32)` is set when token `id` is allowed, and `maskLength` counts words rather than vocabulary entries or bytes. JavaScript bitwise results are signed 32-bit values, so test a bit with `!== 0` rather than `> 0`. `fillMask(output)` writes directly into a caller-owned `Uint32Array` and zeros surplus words. An undersized buffer throws a `GlrMaskError` with code `GLRMASK_BUFFER_TOO_SMALL` and is left unchanged. `state.mask()` allocates a new array.
 
-`isRejected()` reports an irrecoverably rejected prefix. A failed grammar commit follows the core's state semantics, not a general rollback; clone before speculative commits. `forcedTokens()` performs read-only bounded lookahead. `markerIds()` and `markerEvents()` expose possible recognition observations from the initial or latest commit. A marker is `{id, byteOffset}` with a `bigint` offset; these are not final parse captures.
+A failed `commitToken`, `commitBytes` or `commitTokens` throws and leaves the state unusable: later commits throw and the mask is empty. Clone the state before a speculative commit. `forcedTokens()` performs read-only bounded lookahead. `markerIds()` and `markerEvents()` expose possible recognition observations from the initial or latest commit. A marker is `{id, byteOffset}` with a `bigint` offset; these are not final parse captures.
 
 ## End tokens
 
 `isAccepting()` means the current prefix is a complete match, not that generation must stop. To stop on an explicit event, configure root `endTokens` and stop when one is sampled and committed.
 
-An allowed end token leaves the state accepting and non-rejected, empties the next mask, and prevents further commits. End-token policy belongs to the root and is not inherited by embedded children.
+An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root and is not inherited by embedded children.
 
 ## Persistence
 
 ```js
 const bytes = await constraint.save();
-const restored = await Constraint.load(bytes);
-
-const external = await constraint.save({ externalVocab: true });
-const rebound = await Constraint.load(external, vocab);
+const restored = await Constraint.load(bytes, vocab);
 
 const moduleBytes = await parent.save();
-const module = await Module.load(moduleBytes, vocab);
+const module = await Module.load(moduleBytes);
 ```
 
 `saveSync` and `loadSync` provide the same formats without promises. These are the Rust core's artifact formats and can be exchanged between compatible Rust, Python, C++, and Node builds. Exact vocabulary identity is validated when a vocabulary is supplied; an external-vocabulary artifact cannot load without it, and equal size is insufficient. Compatibility is not promised across releases, architectures, or unrelated builds. Keep source and configuration for long-term regeneration, and treat untrusted artifacts according to the core loader's limitations.

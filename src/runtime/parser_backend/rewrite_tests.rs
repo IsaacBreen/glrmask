@@ -181,9 +181,9 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
             "runtime finalization must reuse the already-prepared immutable view");
     }
 
-    let restored = Constraint::load(candidate.save()).unwrap();
-    let external = Constraint::load_with_vocab(
-        candidate.save_without_vocab().unwrap(), &vocab,
+    let restored = Constraint::load_without_vocab(candidate.save()).unwrap();
+    let external = Constraint::load(
+        candidate.save(), &vocab,
     ).unwrap();
     for constraint in [&restored, &external] {
         assert!(constraint.has_template_parser() && !constraint.table.is_present());
@@ -258,7 +258,7 @@ fn native_compiler_effect_metadata_survives_reload_and_nested_links_without_tabl
         let summary = parser.link_grammar.as_ref().unwrap().stack_effects().unwrap();
         assert_eq!(summary.states, parser.state_count);
         assert!(!summary.effects.is_empty());
-        let loaded = Constraint::load(&component.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&component.save()).unwrap();
         assert!(!loaded.table.is_present());
         assert_eq!(
             loaded.template_parser.as_ref().unwrap().link_grammar.as_ref().unwrap()
@@ -447,10 +447,10 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
             crate::BuildOptions::default().optimization(optimization),
         ).unwrap().with_end_tokens(&[64]).unwrap();
         let self_bytes = fresh.save();
-        let loaded = Constraint::load(&self_bytes).unwrap();
+        let loaded = Constraint::load_without_vocab(&self_bytes).unwrap();
         assert_eq!(loaded.save(), self_bytes);
-        let external_bytes = fresh.save_without_vocab().unwrap();
-        let external = Constraint::load_with_vocab(&external_bytes, &vocab).unwrap();
+        let external_bytes = fresh.save();
+        let external = Constraint::load(&external_bytes, &vocab).unwrap();
         for constraint in [&fresh, &loaded, &external] {
             assert!(constraint.has_template_parser());
             assert!(!constraint.table.is_present());
@@ -472,7 +472,7 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
             }
             let mut rejected = constraint.start();
             assert!(rejected.commit_bytes(b"b").is_err());
-            assert!(rejected.is_rejected());
+            assert!((rejected.mask().iter().all(|word| *word == 0)));
         }
     }
 }
@@ -498,7 +498,7 @@ fn dynamic_envelope_contains_exactly_the_native_constraint_bodies() {
         let mut payload = 2u32.to_le_bytes().to_vec();
         for constraint in [&a, &b] {
             let body = if external {
-                constraint.save_without_vocab().unwrap()
+                constraint.save()
             } else {
                 constraint.save()
             };

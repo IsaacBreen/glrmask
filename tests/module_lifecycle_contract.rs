@@ -30,7 +30,7 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
     let mut prepared = Module::new(&source);
     prepared.precompile(&v).unwrap();
     let saved_open = prepared.save();
-    let mut first = Module::load(&saved_open, Some(&v)).unwrap();
+    let mut first = Module::load(&saved_open).unwrap();
     let mut second = first.clone();
     first.bind("LEFT", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
     first.bind("RIGHT", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
@@ -55,7 +55,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
         let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
         host.bind("E", expr).unwrap();
-        let loaded = Module::load(&host.save(), Some(&v)).unwrap();
+        let loaded = Module::load(&host.save()).unwrap();
         let root = loaded
             .compile_with(&v, CompileOptions::default().mask_strategy(mode))
             .unwrap();
@@ -63,7 +63,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
         assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
         state.commit_token(2).unwrap();
         assert!(state.is_accepting());
-        assert!(!state.is_rejected());
+        assert!(!(state.mask().iter().all(|word| *word == 0)));
     }
 }
 
@@ -102,5 +102,5 @@ fn compile_options_never_invalidate_retained_work() {
     assert!(state.is_accepting());
     state.commit_token(5).unwrap();
     assert!(state.is_accepting());
-    assert!(!state.is_rejected());
+    assert!(!(state.mask().iter().all(|word| *word == 0)));
 }

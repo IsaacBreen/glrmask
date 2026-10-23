@@ -21,8 +21,8 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     if args.get(1).map(String::as_str)==Some("build") {
         assert_eq!(args.len(),4,"build CACHE OUTPUT");
         let cache=Path::new(&args[2]);let vocabulary=vocab(&cache.join("vocab_dump.bin"))?;
-        let core=Constraint::load_with_vocab(fs::read(cache.join("core.bin"))?,&vocabulary)?;
-        let dispatch=Constraint::load_with_vocab(fs::read(cache.join("dispatch-literal.bin"))?,&vocabulary)?;
+        let core=Constraint::load(fs::read(cache.join("core.bin"))?,&vocabulary)?;
+        let dispatch=Constraint::load(fs::read(cache.join("dispatch-literal.bin"))?,&vocabulary)?;
         let started=Instant::now();
         let bound=core.compose_compiled_subgrammars_dynamic(&[("PROGRAMMATIC_TOOL_SUFFIX",&dispatch)],&vocabulary)?;
         let elapsed=started.elapsed().as_nanos();
@@ -32,8 +32,8 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     assert!(args.get(1).map(String::as_str)==Some("replay") && args.len()>=7,
         "replay VOCAB STATIC DYNAMIC TRACES OUTPUT [LIMIT]");
     let vocabulary=vocab(Path::new(&args[2]))?;
-    let static_constraint=Constraint::load_with_vocab(fs::read(&args[3])?,&vocabulary)?;
-    let dynamic_constraint=Constraint::load_with_vocab(fs::read(&args[4])?,&vocabulary)?;
+    let static_constraint=Constraint::load(fs::read(&args[3])?,&vocabulary)?;
+    let dynamic_constraint=Constraint::load(fs::read(&args[4])?,&vocabulary)?;
     let traces:Vec<Trace>=serde_json::from_slice(&fs::read(&args[5])?)?;
     let limit=args.get(7).map(|s|s.parse::<usize>()).transpose()?.unwrap_or(0);
     let dynamic_reference=std::env::var_os("DYNAMIC_REFERENCE").is_some();

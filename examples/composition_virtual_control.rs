@@ -37,7 +37,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
             fs::write(&file,bound.save())?;
             eprintln!("BUILD_DONE {name} components_ms={components_ms} link_ms={link_ms}");
         }
-        let bound=Constraint::load_with_vocab(fs::read(&file)?,&vocab)?;
+        let bound=Constraint::load(fs::read(&file)?,&vocab)?;
         for prefix in prefixes {
             eprintln!("MASK_BEGIN {name} {prefix:?}");
             let mut template=bound.start();template.commit_bytes(prefix.as_bytes())?;

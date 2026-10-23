@@ -389,8 +389,8 @@ public:
         glrmask_bytes* p = nullptr; detail::check(glrmask_module_save(native_handle(), &p)); return detail::take_bytes(p);
     }
     /// Deserializes a module assembly, verifying it against `vocab` when supplied.
-    static Module load(const Bytes& bytes, const Vocab* vocab = nullptr) {
-        glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes.data(), bytes.size(), vocab ? vocab->native_handle() : nullptr, &p)); return Module(p);
+    static Module load(const Bytes& bytes) {
+        glrmask_module* p = nullptr; detail::check(glrmask_module_load(bytes.data(), bytes.size(), &p)); return Module(p);
     }
 };
 
@@ -418,7 +418,7 @@ public:
     /// Sorted, distinct application marker IDs.
     std::vector<TokenId> marker_ids() const { glrmask_u32s* p = nullptr; detail::check(glrmask_constraint_marker_ids(native_handle(), &p)); return detail::take_ids(p); }
     /// Serializes the constraint; `external_vocab` omits the vocabulary.
-    Bytes save(bool external_vocab = false) const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), external_vocab ? 1u : 0u, &p)); return detail::take_bytes(p); }
+    Bytes save() const { glrmask_bytes* p = nullptr; detail::check(glrmask_constraint_save(native_handle(), &p)); return detail::take_bytes(p); }
     /// Deserializes a constraint, optionally with the exact original vocabulary.
     static Constraint load(const Bytes& bytes, const Vocab* vocab = nullptr) {
         glrmask_constraint* p = nullptr; detail::check(glrmask_constraint_load(bytes.data(), bytes.size(), vocab ? vocab->native_handle() : nullptr, &p)); return Constraint(p);
@@ -441,6 +441,8 @@ public:
     std::vector<TokenId> mask() const { std::vector<TokenId> out(mask_len()); fill_mask(out); return out; }
     /// Commits one model token event; unknown or forbidden IDs reject the state.
     void commit_token(TokenId id) { detail::check(glrmask_state_commit_token(native_handle(), id)); }
+    void commit_tokens(const std::uint32_t* ids, std::size_t count) { detail::check(glrmask_state_commit_tokens(native_handle(), ids, count)); }
+    void commit_tokens(const std::vector<std::uint32_t>& ids) { commit_tokens(ids.data(), ids.size()); }
     /// Commits raw bytes rather than a model token event.
     void commit_bytes(const std::uint8_t* bytes, std::size_t size) { detail::check(glrmask_state_commit_bytes(native_handle(), bytes, size)); }
     /// Commits the bytes of an owning buffer.
@@ -450,7 +452,6 @@ public:
     /// Whether the current prefix is a complete grammar match.
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
     /// Whether the prefix cannot be extended to a valid match.
-    bool is_rejected() const { std::uint32_t value = 0; detail::check(glrmask_state_is_rejected(native_handle(), &value)); return value != 0; }
     /// A read-only prefix of library-canonical forced output.
     std::vector<TokenId> forced_tokens() const { glrmask_u32s* p = nullptr; detail::check(glrmask_state_forced_tokens(native_handle(), &p)); return detail::take_ids(p); }
     /// Initial or most recent commit's marker observations, ordered by byte offset then ID.

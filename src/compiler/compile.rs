@@ -59,8 +59,27 @@ impl glrmask_vocab::__private::VocabDerivedArtifact for VocabContentDigest {}
 /// invoke outside per-schema timing.  Transfer artifacts can therefore verify
 /// that the parent supplied the same vocabulary as the compile worker without
 /// rescanning every token byte string for every schema load.
-pub(crate) fn vocab_content_digest(vocab: &crate::Vocab) -> [u8; 32] {
-    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabContentDigest>() {
+/// Fingerprint of a vocabulary's complete public identity: every ID-to-bytes
+/// mapping plus the special (exact-only) token ID set. Persisted artifacts store
+/// this fingerprint instead of the vocabulary.
+pub(crate) fn vocab_fingerprint(vocab: &crate::Vocab) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"glrmask-vocab-fingerprint-v1\0");
+    hasher.update(&(vocab.len() as u64).to_le_bytes());
+    for (token_id, bytes) in vocab.iter() {
+        hasher.update(&token_id.to_le_bytes());
+        hasher.update(&(bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let special = vocab.special_token_ids().collect::<Vec<_>>();
+    hasher.update(&(special.len() as u64).to_le_bytes());
+    for token_id in special {
+        hasher.update(&token_id.to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+pub(crate) fn vocab_content_digest(vocab: &crate::Vocab) -> [u8; 32] {    if let Some(cached) = vocab.vocab_derived_cache_get::<VocabContentDigest>() {
         return cached.digest;
     }
     let buffered = crate::compiler::boundary_env::enabled("GLRMASK_BUFFERED_VOCAB_DIGEST");

@@ -22,18 +22,15 @@ let checkpoint = state.clone();
 state.commit_token(0)?;
 state.commit_token(1)?;
 assert!(state.is_accepting());
-assert!(!state.is_rejected());
 
 // End token 2 is now allowed because the grammar body accepts:
 state.commit_token(2)?;
 assert!(state.is_accepting());
-assert!(!state.is_rejected());
 assert!(state.mask().iter().all(|word| *word == 0));
 assert!(state.commit_token(0).is_err());
 
 state = checkpoint;
 assert!(!state.is_accepting());
-assert!(!state.is_rejected());
 # Ok::<(), glrmask::Error>(())
 ```
 
@@ -42,7 +39,7 @@ There is no built-in rollback history. For speculative decoding, clone the state
 ## State predicates and stopping policy
 
 - `is_accepting()` means the grammar body is complete at the current prefix. An accepting body may still admit continuation tokens.
-- `is_rejected()` means no valid parser/tokenizer state remains.
+- A failed commit returns an error and kills the state: later commits fail and the mask is empty. Clone the state to try a token speculatively.
 
 ### Stopping choices
 

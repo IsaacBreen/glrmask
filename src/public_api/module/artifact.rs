@@ -325,21 +325,21 @@ mod tests {
         let bytes = module.save();
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().bindings[0].1 = Value::Module(1);
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().prepared[0].1 = 99;
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().source = 999;
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
         let mut m = read(&bytes);
         let binding = m.instances.last_mut().unwrap().bindings.pop().unwrap();
         m.instances.last_mut().unwrap().bindings.push((binding.0.clone(), Value::Module(0)));
         m.instances.last_mut().unwrap().bindings.push((binding.0, Value::Module(0)));
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
         let mut m = read(&bytes);
         m.prepared[0].bytes.truncate(20);
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
     }
     #[test]
     fn token_set_ranges_are_validated() {
@@ -349,7 +349,7 @@ mod tests {
         let bytes = module.save();
         let mut m = read(&bytes);
         if let Value::Exact(e) = &mut m.instances[0].bindings[0].1 { e.ranges = vec![(7, 7), (7, 7)]; }
-        assert!(Module::load(&write(&m), None).is_err());
+        assert!(Module::load(&write(&m)).is_err());
 
     }
     #[test]
@@ -360,12 +360,12 @@ mod tests {
             let mut bytes = MAGIC.to_vec();
             bytes.extend_from_slice(&(body.len() as u64).to_le_bytes());
             bytes.extend(body);
-            let error = Module::load(&bytes, None).unwrap_err().to_string();
+            let error = Module::load(&bytes).unwrap_err().to_string();
             assert!(error.contains("excessive artifact element count"), "{offset}: {error}");
         }
         let mut bytes = MAGIC.to_vec();
         bytes.extend_from_slice(&u64::MAX.to_le_bytes());
-        assert!(Module::load(&bytes, None).is_err());
+        assert!(Module::load(&bytes).is_err());
     }
     #[test]
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
@@ -393,11 +393,11 @@ mod tests {
             slot_spans: Arc::new(BTreeMap::new()),
         };
         m.prepared[0].bytes = non_native.save();
-        let error = Module::load(&write(&m), None).unwrap_err().to_string();
+        let error = Module::load(&write(&m)).unwrap_err().to_string();
         assert!(error.contains("native Module artifact contains LR"), "{error}");
         let mut m = read(&module.save());
         m.instances[0].source = 1;
         m.sources.push(Source::Ebnf("start ::= \"b\"".into()));
-        assert!(Module::load(&write(&m), None).is_err(), "preparation must match its immutable source reference");
+        assert!(Module::load(&write(&m)).is_err(), "preparation must match its immutable source reference");
     }
 }

@@ -522,7 +522,7 @@ fn minimal_scoped_ignore_survives_reload() {
         .unwrap();
 
     let bytes = composed_static.save();
-    let reloaded = Constraint::load(&bytes).expect("reload composed static constraint");
+    let reloaded = Constraint::load_without_vocab(&bytes).expect("reload composed static constraint");
     assert_eq!(
         mb_scoped_mask_bits(&reloaded.start().mask()),
         mb_scoped_mask_bits(&composed_static.start().mask()),

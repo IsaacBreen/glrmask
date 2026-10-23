@@ -786,26 +786,18 @@ impl PyConstraint {
         self.inner.marker_ids().to_vec()
     }
 
-    /// Embeds the vocabulary by default. With `external_vocab=True`, loading requires the exact original token-ID/byte mapping, not merely the same vocabulary size.
-    #[pyo3(signature = (*, external_vocab=false))]
-    fn save<'py>(&self, py: Python<'py>, external_vocab: bool) -> PyResult<Bound<'py, PyBytes>> {
-        let bytes = py.detach(|| {
-            if external_vocab { self.inner.save_without_vocab() }
-            else { Ok(self.inner.save()) }
-        }).map_err(final_api::api_error)?;
+    /// Serializes without the vocabulary; load with the exact original token-ID/byte mapping.
+    fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
+        let bytes = py.detach(|| self.inner.save());
         Ok(PyBytes::new(py, &bytes))
     }
 
-    /// Rejects malformed or incompatible artifacts. Supply `vocab` for external-vocabulary artifacts; it must match the original mapping.
+    /// Rejects malformed or incompatible artifacts. `vocab` must match the original mapping.
     #[staticmethod]
-    #[pyo3(signature = (data, vocab=None))]
-    fn load(py: Python<'_>, data: &[u8], vocab: Option<&PyVocab>) -> PyResult<Self> {
+    fn load(py: Python<'_>, data: &[u8], vocab: &PyVocab) -> PyResult<Self> {
         let data = data.to_vec();
-        let vocab = vocab.map(|vocab| vocab.inner.clone());
-        let loaded = py.detach(move || match vocab {
-            Some(vocab) => glrmask::Constraint::load_with_vocab(data, &vocab),
-            None => glrmask::Constraint::load(data),
-        });
+        let vocab = vocab.inner.clone();
+        let loaded = py.detach(move || glrmask::Constraint::load(data, &vocab));
         let inner = constraint_result(loaded)?;
         let max_token = inner.max_original_token_id().unwrap_or(0);
         Ok(Self { inner: Arc::new(inner), max_token })
@@ -980,10 +972,12 @@ impl PyDynamicConstraintState {
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
     }
 
-    fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
+    /// Commits model token IDs in order. A disallowed event raises an error and rejects the state.
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
+            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
     }
+
 
     /// Diagnostic commit profile for the common single-alternative dynamic
     /// constraint. This mirrors ConstraintState.commit_token_profiled so CFA's
@@ -1068,11 +1062,6 @@ impl PyDynamicConstraintState {
             .with_dependent(|_owner, state| state.is_accepting())
     }
 
-    fn is_rejected(&self) -> bool {
-        self.inner
-            .with_dependent(|_owner, state| state.is_rejected())
-    }
-
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1152,20 +1141,17 @@ impl PyConstraintState {
     }
 
     /// Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error.
-    fn commit_token(&mut self, token_id: u32) -> PyResult<()> {
+    /// Commits model token IDs in order. A disallowed event raises an error and rejects the state.
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_token(token_id)))
+            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
     }
+
 
     /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
     fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
         self.inner
             .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
-    }
-
-    /// The prefix cannot be extended to a valid match.
-    fn is_rejected(&self) -> bool {
-        self.inner.with_dependent(|_owner, state| state.is_rejected())
     }
 
     /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.

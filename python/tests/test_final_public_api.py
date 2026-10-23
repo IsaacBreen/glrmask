@@ -101,12 +101,12 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     words = np.full(7, -1, dtype=np.int32)
     s.fill_mask(words)
     assert words[-2:].tolist() == [0, 0]
-    assert not s.is_accepting() and not s.is_rejected()
+    assert not s.is_accepting() and not (not s.mask().any())
     assert s.mask()[0]
     s.commit_token(0)
     assert s.mask()[130]
     s.commit_token(130)
-    assert s.is_accepting() and not s.is_rejected()
+    assert s.is_accepting() and not (not s.mask().any())
     assert not np.any(s.mask())
     with pytest.raises(ValueError):
         s.commit_token(0)

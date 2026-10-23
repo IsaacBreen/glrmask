@@ -185,7 +185,7 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         vocab,
         subgrammars={"leaf": leaf},
     )
-    middle = glrmask.Module.load(middle.save(), vocab)
+    middle = glrmask.Module.load(middle.save())
     composed = _glrm(
         '''
         glrm 1;
@@ -409,7 +409,7 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     state.commit_token(1)
     assert state.is_accepting()
 
-    loaded_parent = glrmask.Module.load(parent.save(), vocab=vocab)
+    loaded_parent = glrmask.Module.load(parent.save())
     loaded_with_a = _bound_snapshot(loaded_parent, "payload", child_a).compile(vocab)
     state = loaded_with_a.start()
     state.commit_token(0)

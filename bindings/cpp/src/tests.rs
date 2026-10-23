@@ -39,10 +39,9 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 let mut words = vec![u32::MAX; rust.mask_len()];
                 assert_eq!(glrmask_state_fill_mask(state, words.as_mut_ptr(), words.len()), 0);
                 assert_eq!(words, reference.mask(), "strategy {strategy}");
-                let (mut accepting, mut rejected) = (99, 99);
+                let mut accepting = 99;
                 assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0);
-                assert_eq!(glrmask_state_is_rejected(state, &mut rejected), 0);
-                assert_eq!(accepting != 0, reference.is_accepting()); assert_eq!(rejected != 0, reference.is_rejected());
+                assert_eq!(accepting != 0, reference.is_accepting());
                 if let Some(token) = token { assert_eq!(glrmask_state_commit_token(state, token), 0); reference.commit_token(token).unwrap(); }
             }
             glrmask_state_free(state);
@@ -119,7 +118,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         // Save & Load
         let mut artifact = ptr::null_mut(); assert_eq!(glrmask_module_save(parent, &mut artifact), 0);
         let (mut data, mut len) = (ptr::null(), 0); assert_eq!(glrmask_bytes_data(artifact, &mut data, &mut len), 0);
-        let mut loaded = ptr::null_mut(); assert_eq!(glrmask_module_load(data, len, vocab, &mut loaded), 0);
+        let mut loaded = ptr::null_mut(); assert_eq!(glrmask_module_load(data, len, &mut loaded), 0);
         glrmask_bytes_free(artifact); glrmask_module_free(parent); glrmask_module_free(prepared);
         glrmask_grammar_free(grammar); glrmask_grammar_free(child);
 

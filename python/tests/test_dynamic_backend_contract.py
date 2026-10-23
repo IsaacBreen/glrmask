@@ -36,7 +36,7 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
                 assert mask[0] and mask[15]  # Sparse IDs with duplicate bytes.
             with pytest.raises(ValueError):
                 state.commit_token(25)
-            assert state.is_rejected()
+            assert (not state.mask().any())
     for changed in [{**TOKENS, 0: b"["}, {**TOKENS, 20: b"y"},
                     {key: value for key, value in TOKENS.items() if key != 15},
                     {**TOKENS, 15: b")"}]:
@@ -60,7 +60,7 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
     compiled = glrmask.Grammar.from_ebnf(SOURCE).compile(vocab, mask_strategy=mode, end_tokens=[26])
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
             state = constraint.start()
             state.commit_bytes(prefix)
@@ -69,11 +69,11 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
                 assert bool(state.mask()[26]) == accepting
             if accepting:
                 state.commit_token(26)
-                assert state.is_accepting() and not state.is_rejected()
+                assert state.is_accepting() and not (not state.mask().any())
                 assert not state.mask().any()
             else:
                 state.commit_token(26)
-                assert state.is_rejected() and not state.is_accepting()
+                assert (not state.mask().any()) and not state.is_accepting()
                 assert not state.mask().any()
 
 
@@ -98,7 +98,7 @@ def test_dynamic_profiled_wrapper_preserves_empty_eos(monkeypatch, flag, partiti
             # with an error; the public root-end policy above returns Ok.
             with pytest.raises(ValueError):
                 state.commit_token(26)
-            assert state.is_rejected()
+            assert (not state.mask().any())
 
 
 @pytest.mark.parametrize("flag", ["0", "1"])

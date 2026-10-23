@@ -25,8 +25,8 @@ fn compare_prefixes(actual: &Constraint, expected: &Constraint, ids: &[u32], dep
         }
         assert_eq!(a.mask(), e.mask(), "mask differs after {prefix:?}");
         assert_eq!(a.is_accepting(), e.is_accepting(), "acceptance differs after {prefix:?}");
-        assert_eq!(a.is_rejected(), e.is_rejected(), "rejection differs after {prefix:?}");
-        if prefix.len() < depth && !a.is_rejected() {
+        assert_eq!((a.mask().iter().all(|word| *word == 0)), (e.mask().iter().all(|word| *word == 0)), "rejection differs after {prefix:?}");
+        if prefix.len() < depth && !(a.mask().iter().all(|word| *word == 0)) {
             for &id in ids {
                 // Only advance prefixes admitted by the reference. Mask comparison
                 // already checks rejection of every other ID. Invalid commits may
@@ -150,7 +150,7 @@ fn review_open_module_artifact_cannot_be_loaded_as_runnable_constraint() {
     let v = vocab();
     for source in [OUTER, TOKEN, BOTH] {
         let module = Grammar::from_glrm(source).prepare(&v).unwrap();
-        assert!(Constraint::load(module.save()).is_err(), "unbound module loaded as runnable: {source}");
+        assert!(Constraint::load_without_vocab(module.save()).is_err(), "unbound module loaded as runnable: {source}");
     }
 }
 
@@ -231,7 +231,7 @@ fn review_end_tokens_are_root_only_and_survive_root_roundtrip() {
     let v = vocab();
     let prepared = Grammar::from_ebnf(r#"start ::= "a""#).prepare(&v).unwrap();
     let child = prepared.link_with(BuildOptions::default().end_tokens([127])).unwrap();
-    let loaded = Constraint::load(child.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(child.save()).unwrap();
     for standalone in [&child, &loaded] {
         let mut state = standalone.start();
         assert!(!allowed(&state.mask(), 127));
@@ -333,7 +333,7 @@ fn review_repeated_roundtrips_preserve_distinct_packed_acceptance_rows() {
         let mut actual = module.link().unwrap();
         compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
         for _ in 0..3 {
-            actual = Constraint::load(actual.save()).unwrap();
+            actual = Constraint::load_without_vocab(actual.save()).unwrap();
             compare_prefixes(&actual, &expected, &[1, 2, 3, 5, 7, 63], 3);
         }
     }
@@ -364,7 +364,7 @@ fn review_boundary_request_is_eager_and_preserves_semantics() {
             }
             compare_prefixes(&requested, &plain, &[1, 2, 5, 7, 33], 3);
             assert_eq!(requested.save(), bytes, "matching must not materialize trigger metadata");
-            compare_prefixes(&Constraint::load(bytes).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);
+            compare_prefixes(&Constraint::load_without_vocab(bytes).unwrap(), &plain, &[1, 2, 5, 7, 33], 3);
         }
     }
 }

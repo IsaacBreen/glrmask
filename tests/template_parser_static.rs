@@ -20,12 +20,12 @@ fn compile_static(p: &ParserProgram, l: &LexerDefinition, v: &Vocab) -> Constrai
 
 fn representations(c: &Constraint, v: &Vocab) -> Vec<Constraint> {
     let bytes = c.save();
-    let loaded = Constraint::load(&bytes).unwrap();
+    let loaded = Constraint::load_without_vocab(&bytes).unwrap();
     assert_eq!(loaded.save(), bytes);
     vec![
         c.clone(),
         loaded,
-        Constraint::load_with_vocab(c.save_without_vocab().unwrap(), v).unwrap(),
+        Constraint::load(c.save(), v).unwrap(),
     ]
 }
 
@@ -115,7 +115,7 @@ fn recursive_static_parser_matches_literal_prefix_oracle_in_all_artifact_forms()
         }
         let mut rejected = c.start();
         assert!(rejected.commit_bytes(b")").is_err());
-        assert!(rejected.is_rejected());
+        assert!((rejected.mask().iter().all(|word| *word == 0)));
     }
 }
 

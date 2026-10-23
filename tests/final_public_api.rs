@@ -55,7 +55,7 @@ fn module_reuse_load_and_closed_link() {
     let mut b = Module::new(&Grammar::from_ebnf(r#"start ::= "b""#));
     b.precompile(&v).unwrap();
 
-    for parent in [&host, &Module::load(&host.save(), Some(&v)).unwrap()] {
+    for parent in [&host, &Module::load(&host.save()).unwrap()] {
         assert!(parent.compile(&v).is_err());
         let mut bound_a = parent.clone();
         bound_a.bind("child", &a).unwrap();
@@ -115,7 +115,7 @@ fn unbound_exact_token_survives_save_load() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_glrm(TOKEN_HOST));
     m.precompile(&v).unwrap();
-    let mut loaded = Module::load(&m.save(), Some(&v)).unwrap();
+    let mut loaded = Module::load(&m.save()).unwrap();
     assert!(loaded.compile(&v).is_err(), "loading must not silently close unresolved token slots");
     loaded.bind("MARK", TokenSet::from(7)).unwrap();
     let c = loaded.compile(&v).unwrap();
@@ -161,19 +161,19 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
     let mut module = Module::new(&Grammar::from_glrm(TOKEN_HOST));
     module.precompile(&v).unwrap();
     let bytes = module.save();
-    assert!(Constraint::load(bytes.clone()).is_err());
+    assert!(Constraint::load_without_vocab(bytes.clone()).is_err());
     assert!(bytes.starts_with(b"GLRASM02"));
 
     let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&v).unwrap();
-    assert!(Module::load(&constraint.save(), None).is_err());
+    assert!(Module::load(&constraint.save()).is_err());
     for length in [0, 1, 8, 15, 16, bytes.len() - 1] {
-        assert!(Module::load(&bytes[..length], None).is_err(), "accepted truncation to {length}");
+        assert!(Module::load(&bytes[..length]).is_err(), "accepted truncation to {length}");
     }
     let mut corrupt = bytes.clone();
     corrupt[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
-    assert!(Module::load(&corrupt, None).is_err());
+    assert!(Module::load(&corrupt).is_err());
     let incompatible = Vocab::new(vec![(7, b"different".to_vec())]);
-    assert!(Module::load(&bytes, Some(&incompatible)).is_err());
+    assert!(Module::load(&bytes).is_err());
 }
 
 #[test]
@@ -195,19 +195,19 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert!(allowed(&state.mask(), 255));
         let mut other = state.clone();
         state.commit_token(130).unwrap();
-        assert!(state.is_accepting() && !state.is_rejected());
+        assert!(state.is_accepting() && !(state.mask().iter().all(|word| *word == 0)));
         assert_eq!(state.mask(), vec![0; 8]);
         assert!(state.forced_canonical_reference().is_empty());
         assert!(state.commit_token(1).is_err());
         assert!(state.commit_bytes(b"a").is_err());
-        assert!(other.is_accepting() && !other.is_rejected());
+        assert!(other.is_accepting() && !(other.mask().iter().all(|word| *word == 0)));
         assert!(allowed(&other.mask(), 130));
         assert!(allowed(&other.mask(), 255));
         other.commit_token(255).unwrap();
-        assert!(other.is_accepting() && !other.is_rejected());
+        assert!(other.is_accepting() && !(other.mask().iter().all(|word| *word == 0)));
         assert_eq!(other.mask(), vec![0; 8]);
         assert!(other.commit_token(1).is_err());
-        constraint = Constraint::load_with_vocab(constraint.save(), &v).unwrap();
+        constraint = Constraint::load(constraint.save(), &v).unwrap();
     }
     assert_eq!(module.compile(&v).unwrap().mask_len(), 1);
     let policy_b = module.compile_with(&v, CompileOptions::default().end_tokens([63])).unwrap();
@@ -223,14 +223,14 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     assert!(allowed(&state.mask(), 1));
     assert!(!allowed(&state.mask(), 7));
     state.commit_token(7).unwrap();
-    assert!(state.is_rejected());
+    assert!((state.mask().iter().all(|word| *word == 0)));
     assert!(!state.is_accepting());
     assert!(state.mask().iter().all(|word| *word == 0));
     let mut valid = constraint.start();
     valid.commit_token(1).unwrap();
     assert!(allowed(&valid.mask(), 7));
     valid.commit_token(7).unwrap();
-    assert!(valid.is_accepting() && !valid.is_rejected());
+    assert!(valid.is_accepting() && !(valid.mask().iter().all(|word| *word == 0)));
     assert!(valid.mask().iter().all(|word| *word == 0));
     assert!(valid.commit_token(1).is_err());
     assert!(Grammar::from_ebnf(r#"start ::= "a""#)
@@ -244,7 +244,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ));
     open.precompile(&vocab).unwrap();
-    let mut loaded_open = Module::load(&open.save(), Some(&vocab)).unwrap();
+    let mut loaded_open = Module::load(&open.save()).unwrap();
     loaded_open.bind("CONTROL", TokenSet::from(2)).unwrap();
     let constraint = loaded_open.compile(&vocab).unwrap();
 
@@ -256,7 +256,7 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     state.commit_token(1).unwrap();
     assert!(state.is_accepting());
 
-    let loaded = Constraint::load(constraint.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
     let mut state = loaded.start();
     state.commit_token(0).unwrap();
     assert!(allowed(&state.mask(), 2));
@@ -265,8 +265,8 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     assert!(state.is_accepting());
 
     let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
-    assert!(Module::load(&open.save(), Some(&missing_domain)).is_err());
-    assert!(Constraint::load_with_vocab(constraint.save(), &missing_domain).is_err());
+    assert!(Module::load(&open.save()).is_err());
+    assert!(Constraint::load(constraint.save(), &missing_domain).is_err());
 }
 
 // -------------------------------------------------------------------------

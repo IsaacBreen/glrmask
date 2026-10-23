@@ -268,8 +268,8 @@ class Module:
         """Serializes the module assembly and any retained precompiled artifacts."""
         ...
     @staticmethod
-    def load(data: bytes, vocab: Optional[Vocab] = None) -> Module:
-        """Deserializes a module assembly, verifying it against `vocab` when supplied."""
+    def load(data: bytes) -> Module:
+        """Deserializes a module assembly. Retained work is checked against the vocabulary supplied to `compile` or `precompile`."""
         ...
 
 @final
@@ -354,17 +354,17 @@ class Constraint:
     def mask_len(self) -> int:
         """Number of packed `u32` words in a mask, for `fill_mask`; not the Boolean-array length returned by `mask`."""
         ...
-    def save(self, *, external_vocab: bool = False) -> bytes:
-        """Serializes the constraint, including its vocabulary and root stopping policy.
+    def save(self) -> bytes:
+        """Serializes the constraint without its vocabulary.
 
-        With `external_vocab=True`, load with `Constraint.load(data, vocab)` using the exact original token-ID/byte mapping, not merely the same size. Artifact compatibility across GLRMask releases is not guaranteed.
+        Load with `Constraint.load(data, vocab)` using the exact original token-ID/byte mapping, not merely the same size. Artifact compatibility across GLRMask releases is not guaranteed.
         """
         ...
     @staticmethod
-    def load(data: bytes, vocab: Optional[Vocab] = None) -> Constraint:
+    def load(data: bytes, vocab: Vocab) -> Constraint:
         """Deserializes a constraint.
 
-        `vocab` is required for artifacts saved with `external_vocab=True` and must match the original mapping. Rejects malformed or incompatible artifacts.
+        `vocab` must match the original mapping. Rejects malformed or incompatible artifacts.
         """
         ...
 
@@ -395,7 +395,13 @@ class ConstraintState:
     def commit_token(self, token_id: int) -> None:
         """Commits one model token event.
 
-        Unknown IDs raise `ValueError`; forbidden IDs reject the state and may also raise. Committing after an end token raises.
+        Returns an error if the token is not allowed; the state is then unusable, so clone it first to try a token speculatively.
+        """
+        ...
+    def commit_tokens(self, token_ids: Sequence[int]) -> None:
+        """Commits model token IDs in order.
+
+        Stops with an error at the first disallowed token; the state is then unusable.
         """
         ...
     def commit_bytes(self, data: bytes) -> None:
@@ -409,9 +415,6 @@ class ConstraintState:
 
         Further tokens may still be allowed; this alone does not commit an end token.
         """
-        ...
-    def is_rejected(self) -> bool:
-        """Whether the prefix cannot be extended to a valid match."""
         ...
     def forced_tokens(self) -> list[int]:
         """A read-only prefix of library-canonical forced output, at most 10,000 IDs.

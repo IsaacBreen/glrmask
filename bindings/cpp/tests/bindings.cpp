@@ -47,7 +47,7 @@ void basic() {
         auto copy = s; c.dispose(); g.dispose(); v.dispose();
         s.commit_token(31); CHECK(s.is_accepting()); CHECK(!copy.is_accepting());
         copy.commit_token(0); CHECK(copy.forced_tokens()==std::vector<TokenId>{1});
-        CHECK(!copy.is_accepting()); copy.commit_token(1); CHECK(copy.is_accepting()); CHECK(!copy.is_rejected());
+        CHECK(!copy.is_accepting()); copy.commit_token(1); CHECK(copy.is_accepting());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
         s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
     }
@@ -99,7 +99,7 @@ void end_tokens() {
         auto m = Module(Grammar::from_ebnf(R"(start ::= "a")"));
         auto s = m.compile(v, o).start();
         CHECK(!allowed(s.mask(),99)); s.commit_token(0); CHECK(s.is_accepting()); CHECK(allowed(s.mask(),99));
-        s.commit_token(99); CHECK(s.is_accepting() && !s.is_rejected());
+        s.commit_token(99); CHECK(s.is_accepting());
         const auto m_words = s.mask(); CHECK(std::all_of(m_words.begin(), m_words.end(), [](auto w){ return w==0; }));
         CHECK(ConstraintState(s).is_accepting()); throws([&]{ s.commit_token(99); });
     }
@@ -249,7 +249,7 @@ void emit_parity() {
             if (step) { s.commit_token(step-1); std::cout << ','; }
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
             for (std::size_t j=0; j<mask_words.size(); ++j) { if (j) std::cout << ','; std::cout << mask_words[j]; }
-            std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false") << ",\"rejected\":" << (s.is_rejected()?"true":"false") << '}';
+            std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false") << '}';
         } std::cout << "]}";
     } std::cout << "]\n";
 }

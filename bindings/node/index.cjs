@@ -369,11 +369,11 @@ class Module extends Owned {
   saveSync() { return invoke(() => handle(this, Module).saveSync()); }
   async save() { return invokeAsync(() => handle(this, Module).save()); }
 
-  static loadSync(data, vocab) {
-    bytes(data); return wrap(Module, invoke(() => native.loadModuleSync(data, vocab === undefined ? undefined : handle(vocab, Vocab))));
+  static loadSync(data) {
+    bytes(data); return wrap(Module, invoke(() => native.loadModuleSync(data)));
   }
-  static async load(data, vocab) {
-    bytes(data); return wrap(Module, await invokeAsync(() => native.loadModule(data, vocab === undefined ? undefined : handle(vocab, Vocab))));
+  static async load(data) {
+    bytes(data); return wrap(Module, await invokeAsync(() => native.loadModule(data)));
   }
 }
 
@@ -383,19 +383,13 @@ class Constraint extends Owned {
   clone() { return this.copy(); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
   markerIds() { return invoke(() => handle(this, Constraint).markerIds()); }
-  saveSync(options) {
-    const flag = checkedOptions(options, ['externalVocab']).externalVocab;
-    return invoke(() => handle(this, Constraint).saveSync(flag === true));
-  }
-  async save(options) {
-    const flag = checkedOptions(options, ['externalVocab']).externalVocab;
-    return invokeAsync(() => handle(this, Constraint).save(flag === true));
-  }
+  saveSync() { return invoke(() => handle(this, Constraint).saveSync()); }
+  async save() { return invokeAsync(() => handle(this, Constraint).save()); }
   static loadSync(data, vocab) {
-    bytes(data); return wrap(Constraint, invoke(() => native.loadConstraintSync(data, vocab === undefined ? undefined : handle(vocab, Vocab))));
+    bytes(data); return wrap(Constraint, invoke(() => native.loadConstraintSync(data, handle(vocab, Vocab))));
   }
   static async load(data, vocab) {
-    bytes(data); return wrap(Constraint, await invokeAsync(() => native.loadConstraint(data, vocab === undefined ? undefined : handle(vocab, Vocab))));
+    bytes(data); return wrap(Constraint, await invokeAsync(() => native.loadConstraint(data, handle(vocab, Vocab))));
   }
 }
 
@@ -409,9 +403,12 @@ class ConstraintState extends Owned {
     invoke(() => handle(this, ConstraintState).fillMask(output));
   }
   commitToken(id) { tokenId(id); invoke(() => handle(this, ConstraintState).commitToken(id)); }
+  commitTokens(ids) {
+    const words = ids instanceof Uint32Array ? ids : Uint32Array.from(ids, tokenId);
+    invoke(() => handle(this, ConstraintState).commitTokens(words));
+  }
   commitBytes(data) { bytes(data); invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }
-  isRejected() { return invoke(() => handle(this, ConstraintState).isRejected()); }
   forcedTokens() { return invoke(() => handle(this, ConstraintState).forcedTokens()); }
   markerEvents() { return invoke(() => handle(this, ConstraintState).markerEvents()); }
 }

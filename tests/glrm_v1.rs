@@ -242,7 +242,7 @@ fn exact_tokens_survive_static_and_dynamic_serialization() {
         .unwrap();
 
     let compiled = spec.compile().unwrap();
-    let loaded = Constraint::load(&compiled.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(&compiled.save()).unwrap();
     let mut state = loaded.start();
     state.commit_token(100).unwrap();
     assert!(state.is_accepting());
@@ -498,7 +498,7 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
     let bound = parent
         .bind_grammar_dynamic_boundary("child", &child)
         .unwrap();
-    let loaded = Constraint::load(&bound.save()).unwrap();
+    let loaded = Constraint::load_without_vocab(&bound.save()).unwrap();
 
     for tokens in [
         &[5][..],

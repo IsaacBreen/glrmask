@@ -182,7 +182,7 @@ fn empty_exact_bindings_are_empty_languages_not_epsilon() {
         }
         let c=event.compile_with_build_options(&v,options).unwrap();
         assert!(!c.start().is_accepting());assert!(c.start().mask().iter().all(|word|*word==0));
-        assert!(!Constraint::load(c.save()).unwrap().start().is_accepting());
+        assert!(!Constraint::load_without_vocab(c.save()).unwrap().start().is_accepting());
     }
 }
 

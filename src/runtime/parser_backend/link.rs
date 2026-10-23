@@ -356,7 +356,7 @@ mod candidate_tests {
         let _ = state.mask();
         assert!(linked.boundary_candidate_summary.get().is_none(),
             "current masks and commits must not request the wrapper's future outward proof");
-        check(&Constraint::load(&linked.save()).unwrap());
+        check(&Constraint::load_without_vocab(&linked.save()).unwrap());
         assert!(linked.boundary_candidate_summary.get().unwrap().is_known());
     }
 
@@ -422,7 +422,7 @@ mod candidate_tests {
             reason: crate::runtime::SummaryUnavailable::Disabled }).unwrap();
         assert!(crate::compiler::boundary_candidates::persisted_boundary_candidate_ids(
             &disabled, &vocab).unwrap().is_none());
-        let loaded = Constraint::load(disabled.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(disabled.save()).unwrap();
         assert!(matches!(loaded.retained_boundary_candidate_summary_for_compilation().unwrap(),
             Some(crate::runtime::BoundaryCandidateSummary::Unknown {
                 reason: crate::runtime::SummaryUnavailable::Disabled })));

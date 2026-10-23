@@ -83,7 +83,7 @@ fn run(case:&str,text:&str,mode:MaskStrategy,n:usize,reps:usize)->Result<Value,B
     let (linked,link_ns)=time(||prepared.link_with(options.clone()));assert_eq!(mask_trace(&linked?,&ids),fingerprint);
     let mut links=Vec::new();for _ in 0..7 {let (next,t)=time(||prepared.link_with(options.clone()));assert_eq!(mask_trace(&next?,&ids),fingerprint);links.push(t);}
     let (saved,save_ns)=time(||c.save());let bytes=saved.len();
-    let (loaded,load_ns)=time(||Constraint::load(saved));assert_eq!(mask_trace(&loaded?,&ids),fingerprint);
+    let (loaded,load_ns)=time(||Constraint::load_without_vocab(saved));assert_eq!(mask_trace(&loaded?,&ids),fingerprint);
     let (psaved,prepared_save_ns)=time(||prepared.save());let prepared_bytes=psaved.len();
     let (ploaded,prepared_load_ns)=time(||Prepared::load_with_vocab(psaved,&v));assert_eq!(mask_trace(&ploaded?.link_with(options.clone())?,&ids),fingerprint);
     // Validation and allocator warmup are outside the sampled trace loop.

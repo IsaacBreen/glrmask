@@ -42,10 +42,10 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
             assert!(allowed(&mask, 95));
             assert_eq!(mask.iter().map(|w| w.count_ones()).sum::<u32>(), 1);
         }
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert_mask(&loaded, &[], 96, accepts);
-        let external = constraint.save_without_vocab().unwrap();
-        let external = Constraint::load_with_vocab(&external, &vocab).unwrap();
+        let external = constraint.save();
+        let external = Constraint::load(&external, &vocab).unwrap();
         assert_mask(&external, &[], 96, accepts);
     }
 }
@@ -95,7 +95,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
         let mut state = outer.start();
         for id in [0, 120, 5, 1] { state.commit_token(id).unwrap(); }
         assert!(state.is_accepting());
-        let outer_loaded = Constraint::load(&outer.save()).unwrap();
+        let outer_loaded = Constraint::load_without_vocab(&outer.save()).unwrap();
         assert_mask(&outer_loaded, &[0, 120], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
     }
     // Binding is immutable: the original description is still open.
@@ -235,7 +235,7 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
         assert_mask(&repeated, &[7, 9], 16, |id| id == 8);
         let mut early = repeated.start();
         early.commit_token(8).unwrap();
-        assert!(early.is_rejected());
+        assert!((early.mask().iter().all(|word| *word == 0)));
         assert!(!early.is_accepting());
         assert!(early.mask().iter().all(|&word| word == 0));
         let mut state = repeated.start();
@@ -274,7 +274,7 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
                 .bind_snapshot("B", TokenSet::from_ranges([b])).unwrap();
             let options = BuildOptions::default().optimization(mode).end_tokens([15]);
             let constraint = grammar.compile_with_build_options(&vocab, options).unwrap();
-            for constraint in [constraint.clone(), Constraint::load(&constraint.save()).unwrap()] {
+            for constraint in [constraint.clone(), Constraint::load_without_vocab(&constraint.save()).unwrap()] {
                 assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
                 let mut state = constraint.start();
                 state.commit_token(0).unwrap();
@@ -296,7 +296,7 @@ fn full_empty_spelled_ranges_stay_exact_across_grammar_positions() {
             .bind_snapshot("B", TokenSet::from_ranges([0..=n / 2 - 1, n / 2 + 1..=n - 1])).unwrap();
         let original = grammar.compile_with_build_options(&vocab,
             BuildOptions::default().optimization(mode).end_tokens([n])).unwrap();
-        for constraint in [original.clone(), Constraint::load(&original.save()).unwrap()] {
+        for constraint in [original.clone(), Constraint::load_without_vocab(&original.save()).unwrap()] {
             assert_mask(&constraint, &[], n + 1, |id| id < n);
             assert_mask(&constraint, &[0], n + 1, |id| id < n && id != n / 2);
             assert_mask(&constraint, &[0, n - 1], n + 1, |id| id == n);

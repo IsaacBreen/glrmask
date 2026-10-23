@@ -490,7 +490,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u3
         if states.is_empty() || states.iter().any(ConstraintState::is_accepting){return Ok(Vec::new());}
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
-        let mut cursors=states.iter().filter(|s|!s.is_rejected()&&!s.terminated)
+        let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
             .map(|s|Cursor {constraint:s.constraint,state:s.state.clone(),buffers:CommitBuffers::for_mask_only_shadow()})
             .collect::<Vec<_>>();
         let mut output=Vec::new();
@@ -580,7 +580,7 @@ mod tests {
             for mode in MODES {
                 let c=Grammar::from_glrm(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 explore(&c,&format!("{mode:?} {body}"));
-                let loaded=Constraint::load(c.save()).unwrap();explore(&loaded,&format!("loaded {mode:?} {body}"));
+                let loaded=Constraint::load_without_vocab(c.save()).unwrap();explore(&loaded,&format!("loaded {mode:?} {body}"));
             }
         }
     }
@@ -649,7 +649,7 @@ mod tests {
             for mode in MODES {
                 let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 for loaded in [false,true] {
-                    let c=if loaded{Constraint::load(c.save()).unwrap()}else{c.clone()};
+                    let c=if loaded{Constraint::load_without_vocab(c.save()).unwrap()}else{c.clone()};
                     let state=c.start();
                     let cached_before=state.mask_cache.lock().unwrap().as_ref()
                         .map(|m|(m.generation,m.mask.clone()));
@@ -677,7 +677,7 @@ mod tests {
             for mode in MODES {
                 let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 explore(&c,&format!("alphabet boundary {mode:?}, {source}"));
-                let loaded=Constraint::load(c.save()).unwrap();
+                let loaded=Constraint::load_without_vocab(c.save()).unwrap();
                 explore(&loaded,&format!("loaded alphabet boundary {mode:?}, {source}"));
             }
         }
@@ -760,7 +760,7 @@ mod differential_tests {
                     let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens(eos.clone())).unwrap();
                     let tag=format!("{source:?}, {mode:?}, end={eos:?}");
                     walk(&c,&tag,2);
-                    let loaded=Constraint::load(&c.save()).unwrap();
+                    let loaded=Constraint::load_without_vocab(&c.save()).unwrap();
                     check(&loaded.start(),&format!("{tag}, loaded"));
                 }
             }
@@ -849,7 +849,7 @@ mod differential_tests {
             for mode in MODES {
                 let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([2000])).unwrap();
                 for loaded in [false,true] {
-                    let c=if loaded{Constraint::load(c.save()).unwrap()}else{c.clone()};
+                    let c=if loaded{Constraint::load_without_vocab(c.save()).unwrap()}else{c.clone()};
                     let mut state=c.start();let mut remaining=text.as_bytes();let mut step=0;
                     while !remaining.is_empty() {
                         let context=format!("frontend {name}, {mode:?}, loaded={loaded}, step={step}");

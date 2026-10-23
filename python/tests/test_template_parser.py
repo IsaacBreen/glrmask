@@ -115,7 +115,7 @@ def representations(constraint, vocab):
     raw = constraint.save()
     loaded = glrmask.Constraint.load(raw)
     assert loaded.save() == raw
-    external = constraint.save(external_vocab=True)
+    external = constraint.save()
     with pytest.raises(ValueError):
         glrmask.Constraint.load(external)
     return [constraint, loaded, glrmask.Constraint.load(external, vocab=vocab)]
@@ -226,7 +226,7 @@ def test_python_prepared_composition_uses_native_defaults(mode):
     prepared = body.prepare(vocab)
     parent = grammar_from_glrm('extern grammar C start root nt root = C').prepare(vocab)
     for source in [prepared, glrmask.Module.load(prepared.save()),
-                   glrmask.Module.load(prepared.save(), vocab=vocab)]:
+                   glrmask.Module.load(prepared.save())]:
         child_bytes = source.save()
         for selection in [{}, {}]:
             linked = link_module(_bound_snapshot(parent, "C", source), vocab, optimization=mode)
@@ -265,7 +265,7 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
             assert state.is_accepting()
             assert state.mask()[6]
             state.commit_token(6)
-            assert state.is_accepting() and not state.is_rejected()
+            assert state.is_accepting() and not (not state.mask().any())
             assert not state.mask().any()
 
 
@@ -293,7 +293,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
     child = grammar_from_json_schema(json.dumps({
         "type": "string", "format": "uri", "minLength": 1, "maxLength": 5000,
     })).prepare(vocab)
-    child = glrmask.Module.load(child.save(), vocab=vocab)
+    child = glrmask.Module.load(child.save())
     parent = grammar_from_glrm(
         'glrm 1; start root; extern grammar C; nt root = "p" C "q";').prepare(vocab)
     compiled = link_module(_bound_snapshot(parent, "C", child), vocab, optimization=mode,
@@ -305,7 +305,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
         state.commit_token(3)
         assert state.is_accepting() and state.mask()[8]
         state.commit_token(8)
-        assert state.is_accepting() and not state.is_rejected()
+        assert state.is_accepting() and not (not state.mask().any())
         assert not state.mask().any()
 
         for count in [0, 1, 31, 4996, 4997, 4998]:
@@ -335,7 +335,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
         'glrm 1; start root; extern grammar C; nt root = "x" C "y";').prepare(vocab)
     language = [b"xy", b"xay"]
     for child in [prepared, glrmask.Module.load(prepared.save()),
-                  glrmask.Module.load(prepared.save(), vocab=vocab)]:
+                  glrmask.Module.load(prepared.save())]:
         child_bytes = child.save()
         linked = link_module(_bound_snapshot(parent, "C", child), vocab,
             optimization=mode, end_tokens=[8])
@@ -360,5 +360,5 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                         assert branch.is_accepting() == (prefix + word in language)
                 if prefix in language:
                     state.commit_token(8)
-                    assert state.is_accepting() and not state.is_rejected()
+                    assert state.is_accepting() and not (not state.mask().any())
                     assert not state.mask().any()

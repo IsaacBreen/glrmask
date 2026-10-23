@@ -36,9 +36,9 @@ fn main() {
     let core_bytes = fs::read(cache.join("core.bin")).expect("read core.bin");
     let dispatch_bytes =
         fs::read(cache.join("dispatch-literal.bin")).expect("read dispatch-literal.bin");
-    let core = Constraint::load_with_vocab(&core_bytes, &vocab).expect("load core");
+    let core = Constraint::load(&core_bytes, &vocab).expect("load core");
     let dispatch =
-        Constraint::load_with_vocab(&dispatch_bytes, &vocab).expect("load dispatch");
+        Constraint::load(&dispatch_bytes, &vocab).expect("load dispatch");
 
     let started = Instant::now();
     let composed = core

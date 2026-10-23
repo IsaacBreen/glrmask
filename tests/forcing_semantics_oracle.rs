@@ -94,7 +94,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         checked += 1;
         assert!(checked < 20_000, "bounded finite-tape test exceeded its intended workload");
         assert_eq!(state.is_accepting(), accepting(&words), "{label}; trace={trace:?}");
-        assert_eq!(state.is_rejected(), words.is_empty(), "{label}; trace={trace:?}");
+        assert_eq!((state.mask().iter().all(|word| *word == 0)), words.is_empty(), "{label}; trace={trace:?}");
         let original_mask = state.mask();
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
@@ -163,7 +163,7 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
             let label=format!("case={case},mode={mode:?}");
             count+=check_states(&compiled,words,&entries,&label);
             if case%7==0 {
-                let loaded=Constraint::load(&compiled.save()).unwrap();
+                let loaded=Constraint::load_without_vocab(&compiled.save()).unwrap();
                 count+=check_states(&loaded,words,&entries,&format!("loaded:{label}"));
             }
         }
@@ -219,7 +219,7 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
             let source=source_assembly.compile_with_build_options(&vocab,opts).unwrap();
             count+=check_states(&prepared,&expected,&entries,&format!("prepared:{case}:{mode:?}"));
             count+=check_states(&source,&expected,&entries,&format!("source:{case}:{mode:?}"));
-            let loaded=Constraint::load(&prepared.save()).unwrap();
+            let loaded=Constraint::load_without_vocab(&prepared.save()).unwrap();
             count+=check_states(&loaded,&expected,&entries,&format!("loaded:{case}:{mode:?}"));
         }
     }
@@ -236,7 +236,7 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
             .bind_snapshot("MARK",TokenSet::new([3])).unwrap();
         for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let c=g.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
-            for c in [c.clone(),Constraint::load(&c.save()).unwrap()] {
+            for c in [c.clone(),Constraint::load_without_vocab(&c.save()).unwrap()] {
                 let mut s=c.start();
                 assert!(s.mask().len() >= (highest as usize + 1).div_ceil(32));
                 assert!(!bit(&s.mask(),highest)); assert!(!bit(&s.mask(),highest-1));

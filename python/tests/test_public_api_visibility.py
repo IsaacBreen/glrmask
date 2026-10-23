@@ -44,9 +44,9 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
         vocab, mask_strategy=mode, end_tokens=[3])
     assert not hasattr(constraint, "save_with_external_vocab")
     self_contained = constraint.save()
-    assert self_contained == constraint.save(external_vocab=False)
-    external = constraint.save(external_vocab=True)
-    assert external == constraint.save(external_vocab=True)
+    assert self_contained == constraint.save()
+    external = constraint.save()
+    assert external == constraint.save()
     for restored in [glrmask.Constraint.load(self_contained),
                      glrmask.Constraint.load(external, vocab)]:
         for prefix in [b"", b"a", b"ab"]:
@@ -58,7 +58,7 @@ def test_save_flag_preserves_default_and_external_roundtrips(mode):
             assert expected.is_accepting() == actual.is_accepting()
             if actual.is_accepting():
                 actual.commit_token(3)
-                assert actual.is_accepting() and not actual.is_rejected()
+                assert actual.is_accepting() and not (not actual.mask().any())
                 assert not actual.mask().any()
     wrong_vocab = glrmask.Vocab.from_id_to_bytes({0: b"b", 1: b"ab", 2: b"a", 3: b""})
     with pytest.raises(ValueError):
@@ -117,13 +117,13 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     compiled = glrmask.Grammar.from_ebnf('start ::= "a" "b"?').compile(
         vocab, mask_strategy=mode, end_tokens=list(end_token_ids))
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
-                       glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
+                       glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert not hasattr(state, "is_terminated")
-        assert not state.is_accepting() and not state.is_rejected()
+        assert not state.is_accepting() and not (not state.mask().any())
         assert not state.mask()[130]
         state.commit_token(0)
-        assert state.is_accepting() and not state.is_rejected()
+        assert state.is_accepting() and not (not state.mask().any())
         assert state.mask()[1] and state.mask()[130]
         for sequence in [(130,), (1, 130)]:
             branch = state.clone()
@@ -133,12 +133,12 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
                 if token_id in end_token_ids:
                     break
             for ended in [branch, branch.clone()]:
-                assert ended.is_accepting() and not ended.is_rejected()
+                assert ended.is_accepting() and not (not ended.mask().any())
                 assert not ended.mask().any()
                 assert ended.forced_tokens() == []
                 with pytest.raises(ValueError, match="already terminated"):
                     ended.commit_token(0)
                 with pytest.raises(ValueError, match="already terminated"):
                     ended.commit_bytes(b"a")
-                assert ended.is_accepting() and not ended.is_rejected()
+                assert ended.is_accepting() and not (not ended.mask().any())
             assert state.is_accepting() and state.mask()[1] and state.mask()[130]

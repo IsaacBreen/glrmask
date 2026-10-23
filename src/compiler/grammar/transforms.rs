@@ -1848,8 +1848,8 @@ mod tests {
         let mut errors = Vec::new();
         for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
             let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
-            let loaded = crate::Constraint::load(compiled.save()).unwrap();
-            let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
+            let loaded = crate::Constraint::load_without_vocab(compiled.save()).unwrap();
+            let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
                 for depth in [0, 1, 17, 257] {
                     let mut state = constraint.start();
@@ -1885,8 +1885,8 @@ mod tests {
         after_bang[b'x' as usize / 32] = 1 << (b'x' % 32);
         for optimization in [crate::MaskStrategy::Auto, crate::MaskStrategy::TokenClassTrie] {
             let compiled = crate::Grammar::glrm(source).compile_with_build_options(&vocab, crate::BuildOptions::default().optimization(optimization)).unwrap();
-            let loaded = crate::Constraint::load(compiled.save()).unwrap();
-            let external = crate::Constraint::load_with_vocab(compiled.save_without_vocab().unwrap(), &vocab).unwrap();
+            let loaded = crate::Constraint::load_without_vocab(compiled.save()).unwrap();
+            let external = crate::Constraint::load(compiled.save(), &vocab).unwrap();
             for constraint in [compiled, loaded, external] {
                 let mut state = constraint.start();
                 let mut mask = vec![0; 8];

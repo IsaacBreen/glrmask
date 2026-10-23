@@ -14673,13 +14673,13 @@ mod dense_internal_token_mask_tests {
         // the path used by serving/CFA where vocabulary preparation is shared
         // across many independently loaded constraints.
         let _ = crate::compiler::compile::vocab_packed_token_bytes(&vocab_b);
-        let mut loaded = Constraint::load(saved.clone()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(saved.clone()).unwrap();
         assert!(loaded.packed_token_bytes.is_some());
         loaded.bind_vocab_exact(&vocab_b).unwrap();
         assert!(Arc::ptr_eq(&loaded.token_bytes, &vocab_b.entries_arc()));
 
         let _ = crate::compiler::compile::vocab_packed_token_bytes(&vocab_bad);
-        let mut mismatched = Constraint::load(saved).unwrap();
+        let mut mismatched = Constraint::load_without_vocab(saved).unwrap();
         assert!(mismatched.packed_token_bytes.is_some());
         assert!(mismatched.bind_vocab_exact(&vocab_bad).is_err());
     }
@@ -14702,7 +14702,7 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.direct_regular_wide_frontier_acceptance.is_empty());
         assert!(
             loaded.lazy_dynamic_mask_vocab.get().is_none(),
@@ -14737,7 +14737,7 @@ mod dense_internal_token_mask_tests {
             &vocab,
         )
         .unwrap();
-        let mut loaded = Constraint::load(&constraint.save()).unwrap();
+        let mut loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert!(loaded.lazy_dynamic_mask_vocab.get().is_none());
 
         let initial = loaded.initial_state_map();
@@ -14868,7 +14868,7 @@ mod dense_internal_token_mask_tests {
                 assert!(!expected.is_empty(), "fixture must admit a cheap class");
                 assert!(expected.len() < sets.len(), "fixture must reject an over-budget class");
                 // Real packed/backed resident rows must also provide a valid fallback.
-                let loaded = Constraint::load(constraint.save()).unwrap();
+                let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
                 assert_eq!(loaded.compute_direct_sparse_weight_token_buf_masks(&sets, &[]).eligible, expected);
                 clear_resident_fragments(&mut constraint);
                 assert_eq!(constraint.compute_direct_sparse_weight_token_buf_masks(&sets, &rows).eligible, expected);
@@ -14889,7 +14889,7 @@ mod dense_internal_token_mask_tests {
         for threads in [1, 2] {
             rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
                 let mut rebuilt = prepared_fragment_fixture();
-                let loaded = Constraint::load(rebuilt.save()).unwrap();
+                let loaded = Constraint::load_without_vocab(rebuilt.save()).unwrap();
                 // Current artifacts keep weights packed. Exercise the supported
                 // compiler materialization path before rebuilding derived caches.
                 rebuilt.materialize_non_dwa_weights_for_compilation().unwrap();
@@ -14934,7 +14934,7 @@ mod dense_internal_token_mask_tests {
                         if !allowed {
                             assert!(actual.commit_token(token).is_err());
                             assert!(reference.commit_token(token).is_err());
-                            assert_eq!(actual.is_rejected(), reference.is_rejected());
+                            assert_eq!((actual.mask().iter().all(|word| *word == 0)), (reference.mask().iter().all(|word| *word == 0)));
                             break;
                         }
                         actual.commit_token(token).unwrap();
@@ -14986,7 +14986,7 @@ mod dense_internal_token_mask_tests {
             "duplicate-token expansion should produce at least one heavy internal token",
         );
 
-        let loaded = Constraint::load(constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(constraint.save()).unwrap();
         let backed = loaded
             .backed_internal_token_buf_flat
             .as_ref()

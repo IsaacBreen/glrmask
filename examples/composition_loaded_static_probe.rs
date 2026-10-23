@@ -88,7 +88,7 @@ fn main() {
         other => panic!("unknown kind {other:?}"),
     };
     let bytes = fs::read(&artifact).unwrap_or_else(|error| panic!("read {}: {error}", artifact.display()));
-    let constraint = Constraint::load_with_vocab(&bytes, &vocab)
+    let constraint = Constraint::load(&bytes, &vocab)
         .unwrap_or_else(|error| panic!("load {}: {error}", artifact.display()));
     let prefixes = match kind {
         "composed" => composed_prefixes(),

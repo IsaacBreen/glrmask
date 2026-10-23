@@ -580,11 +580,6 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Whether the prefix cannot be extended to a valid match.
-    pub fn is_rejected(&self) -> bool {
-        self.state.is_empty()
-    }
-
     /// Whether the current prefix is a complete grammar match.
     ///
     /// Further tokens may still be allowed; this alone does not commit an end

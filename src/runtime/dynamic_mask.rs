@@ -10387,7 +10387,7 @@ mod tests {
             let child = crate::DynamicConstraint::from_glrm_with_bounded_template_parser(
                 source, &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("leaf", child).unwrap();
-            let loaded = Constraint::load(bound.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
             for c in [&bound, &loaded] {
                 for ids in [Vec::new(),vec![8],vec![8,99],vec![99,8,99,8],entries.iter().rev().map(|(id,_)|*id).collect()] {
                     let a = PreparedMaskVocabulary::make_vocab_owned_reference(c,&ids).unwrap();
@@ -10446,7 +10446,7 @@ mod tests {
         let saved = bound.save();
         let mut saw_simultaneous_siblings = false;
         for mode in 0..4 {
-            let mut constraint = Constraint::load(saved.clone()).unwrap();
+            let mut constraint = Constraint::load_without_vocab(saved.clone()).unwrap();
             // Native metadata, all-known conservative domains, one unknown
             // child, and all unknown. Unknown must widen, never mean empty.
             if mode != 0 {
@@ -10689,7 +10689,7 @@ mod tests {
         let parent=Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern child; nt root = "X" child "!";"#),&vocab).unwrap();
         let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
-        let loaded=Constraint::load(bound.save()).unwrap();
+        let loaded=Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound,&loaded] {
             for domain in [ids.clone(),vec![],vec![19,2,2,40],vec![0,7,50],vec![9001]] {
                 let owned=PreparedMaskVocabulary::make_vocab_owned_reference(constraint,&domain).unwrap();
@@ -10728,7 +10728,7 @@ mod tests {
         let parent=Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern child; nt root = "X" child "!";"#),&vocab).unwrap();
         let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
-        let loaded=Constraint::load(bound.save()).unwrap();
+        let loaded=Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound,&loaded] {
             for domain in [ids.clone(),vec![],vec![19,2,2,40],vec![0,7,50],vec![9001]] {
                 let owned=PreparedMaskVocabulary::make_vocab_owned_reference(constraint,&domain).unwrap();
@@ -10765,7 +10765,7 @@ mod tests {
             let parent=Constraint::compile(Grammar::glrm(
                 r#"glrm 1; start root; extern child; nt root = "P" child "!";"#),&vocab).unwrap();
             let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
-            let loaded=Constraint::load(bound.save()).unwrap();
+            let loaded=Constraint::load_without_vocab(bound.save()).unwrap();
             for constraint in [&bound,&loaded] {
                 let mut state=constraint.start();state.commit_bytes(b"P").unwrap();
                 for id in [1,2,3,4] {
@@ -10846,7 +10846,7 @@ mod tests {
         let parent = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern child; nt root = "P" child "!";"#), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound, &loaded] {
             let domain = [2, 7];
             let prepared = PreparedMaskVocabulary::new_with_policy(
@@ -10895,7 +10895,7 @@ mod tests {
         let parent = Constraint::compile(Grammar::glrm(
             r#"glrm 1; start root; extern child; nt root = "P" child "!";"#), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound, &loaded] {
             assert!(PureMaskByteDomain::for_ids(constraint, &[2]).is_none());
             assert!(PureMaskByteDomain::for_ids(constraint, &[9001]).is_none());
@@ -10947,7 +10947,7 @@ mod tests {
             r#"glrm 1; start child; t A = "a"+; nt child = A;"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound, &loaded] {
             for domain in [vec![], vec![7], vec![19,7,7], vec![0,65,31,22],
                 vec![130,99,65,31,22,19,7,1,0]] {
@@ -11226,7 +11226,7 @@ mod tests {
             assert!(bound.uses_compact_segmented_parser_runtime());
             for constraint in [
                 bound.clone(),
-                Constraint::load(bound.save()).expect("reload recursive fixture"),
+                Constraint::load_without_vocab(bound.save()).expect("reload recursive fixture"),
             ] {
                 for prefix in &prefixes {
                     let mut state = constraint.start_dynamic();
@@ -11354,7 +11354,7 @@ mod tests {
             "ordinary and scoped recursive coordinates must be distinguished even on hash collision");
 
         assert_recursive_persistent_roundtrip(&state);
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         let mut loaded_state = loaded.start_dynamic();
         loaded_state.commit_bytes(b"X[a").unwrap();
         assert_recursive_persistent_roundtrip(&loaded_state);
@@ -11454,7 +11454,7 @@ mod tests {
             (epsilon_child, vec!["", "X", "Xa", "Xab", "Xaa", "Xab!"]),
         ] {
             let composed = parent.bind_grammar_dynamic_boundary("payload", child).unwrap();
-            let loaded = Constraint::load(composed.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(composed.save()).unwrap();
             for constraint in [&composed, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
@@ -12107,7 +12107,7 @@ t B ::= 'b';
 nt start ::= A B;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
-        let loaded = Constraint::load(&constraint.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert_dynamic_parity(&loaded.start());
     }
 
@@ -12940,7 +12940,7 @@ nt start ::= A;
                 r#"start payload; t A ::= "a"+; nt payload ::= A;"#,
             ), &vocab).unwrap();
             let composed = parent.bind_grammar_dynamic_boundary("payload", child).unwrap();
-            let loaded = Constraint::load(composed.save()).unwrap();
+            let loaded = Constraint::load_without_vocab(composed.save()).unwrap();
             for constraint in [&composed, &loaded] {
                 for prefix in ["X", "Xa", "Xaa"] {
                     let mut state = constraint.start();
@@ -12985,7 +12985,7 @@ nt start ::= A;
             r#"glrm 1; start root; extern child; nt root = "X" child "!";"#,
         ), &vocab).unwrap();
         let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
-        let loaded = Constraint::load(bound.save()).unwrap();
+        let loaded = Constraint::load_without_vocab(bound.save()).unwrap();
         for constraint in [&bound, &loaded] {
             assert_eq!(constraint.empty_byte_token_ids.as_ref(), &[0, 7, 31]);
             // Domain sanitization must not build a full model-vocabulary trie

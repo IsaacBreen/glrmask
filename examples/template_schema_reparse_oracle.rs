@@ -123,10 +123,10 @@ fn main() -> Result<()> {
             }
             // An invalid known token/byte can return Ok and enter a fail state.
             // Compare rejection explicitly, including every dead suffix prefix.
-            if a.is_rejected() != b.is_rejected() || a.is_accepting() != b.is_accepting() {
+            if (a.mask().iter().all(|word| *word == 0)) != (b.mask().iter().all(|word| *word == 0)) || a.is_accepting() != b.is_accepting() {
                 return Err(format!("byte prefix state differs: {label} prefix={prefix_len}").into());
             }
-            if a.is_rejected() && first_rejected_prefix.is_none() {
+            if (a.mask().iter().all(|word| *word == 0)) && first_rejected_prefix.is_none() {
                 first_rejected_prefix = Some(prefix_len);
             }
             a.fill_mask(&mut original_mask);
@@ -140,8 +140,8 @@ fn main() -> Result<()> {
             }
             prefix_checks += 1;
         }
-        if a.is_accepting() != expected_accepting || a.is_rejected() == expected_accepting {
-            return Err(format!("independent document expectation failed: {label} expected_accepting={expected_accepting} accepting={} rejected={}", a.is_accepting(), a.is_rejected()).into());
+        if a.is_accepting() != expected_accepting || (a.mask().iter().all(|word| *word == 0)) == expected_accepting {
+            return Err(format!("independent document expectation failed: {label} expected_accepting={expected_accepting} accepting={} rejected={}", a.is_accepting(), (a.mask().iter().all(|word| *word == 0))).into());
         }
         document_records.push(json!({
             "label": label, "text": document, "expected_accepting": expected_accepting,
@@ -174,7 +174,7 @@ fn main() -> Result<()> {
         let mut b = reparsed.start();
         a.commit_bytes(prefix.as_bytes())?;
         b.commit_bytes(prefix.as_bytes())?;
-        if a.is_rejected() || b.is_rejected() || a.is_accepting() != b.is_accepting() {
+        if (a.mask().iter().all(|word| *word == 0)) || (b.mask().iter().all(|word| *word == 0)) || a.is_accepting() != b.is_accepting() {
             return Err(format!("independent branch frontier is invalid: {prefix:?}").into());
         }
         a.fill_mask(&mut original_mask);
@@ -197,13 +197,13 @@ fn main() -> Result<()> {
             let a_result = fresh_a.commit_token(token_id as u32);
             let b_result = fresh_b.commit_token(token_id as u32);
             if a_result.is_ok() != b_result.is_ok()
-                || fresh_a.is_rejected() != fresh_b.is_rejected()
+                || (fresh_a.mask().iter().all(|word| *word == 0)) != (fresh_b.mask().iter().all(|word| *word == 0))
                 || fresh_a.is_accepting() != fresh_b.is_accepting()
                 || fresh_a.mask() != fresh_b.mask()
             {
                 return Err(format!("token branch differs: frontier={index} token={token_id} original={a_result:?} reparsed={b_result:?}").into());
             }
-            if a_result.is_err() || fresh_a.is_rejected() {
+            if a_result.is_err() || (fresh_a.mask().iter().all(|word| *word == 0)) {
                 return Err(format!("admitted token rejected: frontier={index} token={token_id} result={a_result:?}").into());
             }
             admitted += 1;
