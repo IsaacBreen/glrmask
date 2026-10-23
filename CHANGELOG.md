@@ -2,7 +2,16 @@
 
 ## 1.0.0
 
-- Add `is_terminated` to `ConstraintState` in every binding.
+- The `end_tokens` compile option is removed. To require an end token after a
+  grammar, write `Grammar::from_expr(Expr::sequence([grammar, eos]))`. GLRMask
+  recognises this shape and compiles it with no extra work. `is_accepting()` is
+  true only after the end token is committed.
+- Add `is_terminated` to `ConstraintState` in every binding. It is true when
+  nothing more can be committed: after an end token, after a failed commit, or
+  at a complete match that allows no further input.
+- `Grammar::from_expr` and `Grammar::bind` are public in every binding.
+- `forced_tokens` returns a list of token IDs instead of a `Result`.
+- The guide gains a Design principles section explaining what the API leaves out, and why.
 - `Token` and `ExactTokens` are replaced by one value type, `TokenSet`.
   `TokenSet::new(ids)` takes individual IDs; `TokenSet::from_ranges(ranges)`
   accepts inclusive (`0..=9`) or half-open (`0..10`) ranges and ignores empty
@@ -27,25 +36,22 @@
   implement serde. `MaskStrategy` and `BoundaryMaskStrategy` no longer
   implement `PartialOrd`/`Ord`.
 - `ConstraintState` commits (`commit_token`, `commit_bytes`, `commit_tokens`)
-  always return an error when the commit is not allowed: unknown ID, forbidden
-  ID, bytes with no viable continuation, or a commit after an end token. A
-  failed commit leaves the state unusable: later commits fail, the mask is
-  empty, and `is_accepting()` is false. Clone the state to try a token
-  speculatively. `is_rejected` is removed from every binding.
+  return `false` when the commit is not allowed: unknown ID, forbidden ID,
+  bytes with no viable continuation, or a commit after an end token. C returns
+  `GLRMASK_REJECTED`. A failed commit leaves the state unusable: later commits
+  fail, the mask is empty, `is_accepting()` is false and `is_terminated()` is
+  true. Clone the state to try a token speculatively. `is_rejected` and
+  `ErrorKind::State` are removed.
 - Add `commit_tokens` / `commitTokens` / `glrmask_state_commit_tokens` to the
   Rust, Python, Node.js, C and C++ APIs. It commits IDs in order and stops at
   the first disallowed token.
-- With `end_tokens` configured, `is_accepting()` is true only after an end token
-  has been committed. Without end tokens it still reports a complete grammar
-  match. A rejected state is never accepting.
 - `Constraint::save()` no longer embeds the vocabulary; `Constraint::load(data,
   vocab)` verifies a stored vocabulary fingerprint covering the ID-to-bytes
   mapping and the special token IDs. `Module::load(data)` takes no vocabulary;
   retained precompiled work is checked against the `compile`/`precompile`
   vocabulary. `save_without_vocab` and `load_with_vocab` are removed.
-
 - The public pipeline is `Grammar` → `Module` → `Constraint`, plus `Expr` for
-  composition. `Grammar` is immutable source without settings or bindings;
+  composition. `Grammar` has no settings;
   `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a
   default `Module`.
 - `Grammar::precompile` and `Grammar::precompile_with(CompileOptions)` return a
@@ -89,9 +95,7 @@
   fast-build/fast-runtime aliases retained.
 - `Grammar::externs` describes a source's declared externs and `Module::externs`
   a module's, both in declaration order with an `unbound()` view. `Extern`
-  carries `name` and `kind`; source spans are no longer exposed. `CompileOptions`
-  carries `end_tokens`, applied only to the root, alongside the two strategies,
-  and applies to `Grammar::compile` as well as module compiles.
+  carries `name` and `kind`; source spans are no longer exposed.
 - Saved modules preserve cold, open, partly compiled and mixed graphs,
   including exact vocabulary identity, bindings and retained work.
 - `Expr.choice`, `Expr.sequence` and `Expr.literal` compose grammars without
@@ -112,7 +116,7 @@
   `%json` and `[lazy]` extensions are always available. `LarkOptions` and
   `LarkProfile` are removed. A named token atom `<|name|>` declares a token
   extern, bound like a GLRM token extern with `Module::bind(name, token_set)`.
-- Removed: `PreparedGrammar`, `link`, `requirements`, `Grammar::bind`,
+- Removed: `PreparedGrammar`, `link`, `requirements`,
   `Grammar::exact`, `Optimization`, `BoundaryTriggerDetail`, `UnboundExtern`,
   `with_options`/`set_options`, and Python `clone()`.
 - Remove native GLRM `shortest { ... }` syntax. Preserve internal prefix-minimal
