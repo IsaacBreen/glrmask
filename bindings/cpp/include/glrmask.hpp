@@ -463,6 +463,8 @@ public:
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
     /// The current allowed-token mask as packed original-token-ID words.
     std::vector<std::uint32_t> mask() const { std::vector<std::uint32_t> out(mask_len()); fill_mask(out); return out; }
+    // TODO(docs)
+    bool is_terminated() const { std::uint32_t value = 0; detail::check(glrmask_state_is_terminated(native_handle(), &value)); return value != 0; }
     /// Commits one model token event; false when it is disallowed.
     [[nodiscard]] bool commit_token(TokenId id) { return commit_status(glrmask_state_commit_token(native_handle(), id)); }
     [[nodiscard]] bool commit_tokens(const std::uint32_t* ids, std::size_t count) { return commit_status(glrmask_state_commit_tokens(native_handle(), ids, count)); }

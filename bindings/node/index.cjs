@@ -392,6 +392,7 @@ class ConstraintState extends Owned {
   }
   commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }
+  isTerminated() { return invoke(() => handle(this, ConstraintState).isTerminated()); }
   forcedTokens() { return invoke(() => handle(this, ConstraintState).forcedTokens()); }
   markerEvents() { return invoke(() => handle(this, ConstraintState).markerEvents()); }
 }

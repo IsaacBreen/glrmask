@@ -249,6 +249,8 @@ export declare class ConstraintState implements Disposable {
   commitBytes(bytes: Uint8Array): boolean;
   /** Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed. */
   isAccepting(): boolean;
+  /** TODO(docs) */
+  isTerminated(): boolean;
   /** A read-only prefix of library-canonical forced output. */
   forcedTokens(): Uint32Array;
   /** Initial or most recent commit's observations, ordered by byte offset then marker ID. */

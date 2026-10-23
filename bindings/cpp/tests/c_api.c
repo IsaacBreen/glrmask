@@ -46,10 +46,14 @@ int main(void) {
     CHECK(glrmask_state_fill_mask(state,NULL,1)==GLRMASK_INVALID_ARGUMENT);
     CHECK(glrmask_state_fill_mask(state,words,3)==GLRMASK_OK);
     CHECK(words[0]==(UINT32_C(1)|UINT32_C(0x80000000)) && words[1]==0 && words[2]==0);
+    uint32_t terminated=0;
+    CHECK(glrmask_state_is_terminated(state,&terminated)==GLRMASK_OK);CHECK(terminated==0);
     CHECK(glrmask_state_commit_token(state,31)==GLRMASK_OK);
     uint32_t accepting=0;CHECK(glrmask_state_is_accepting(state,&accepting)==GLRMASK_OK);CHECK(accepting==1);
+    CHECK(glrmask_state_is_terminated(state,&terminated)==GLRMASK_OK);CHECK(terminated==1);
     glrmask_state* copy=NULL;CHECK(glrmask_state_clone(state,&copy)==GLRMASK_OK);
     glrmask_state_free(state);CHECK(glrmask_state_is_accepting(copy,&accepting)==GLRMASK_OK && accepting==1);
+    CHECK(glrmask_state_is_terminated(copy,&terminated)==GLRMASK_OK && terminated==1);
     glrmask_state_free(copy);glrmask_state_free(NULL);
     const char bad_utf8[]={(char)255};grammar=(glrmask_grammar*)(uintptr_t)1;
     CHECK(glrmask_grammar_from_source(GLRMASK_EBNF,bad_utf8,1,&grammar)==GLRMASK_INVALID_ARGUMENT);CHECK(grammar==NULL);

@@ -156,6 +156,7 @@ impl State {
     pub fn commit_tokens(&mut self, ids: &[u32]) -> Result<bool> { self.write(|s| Ok(s.commit_tokens(ids))) }
     pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<bool> { self.write(|s| Ok(s.commit_bytes(bytes))) }
     pub fn is_accepting(&self) -> Result<bool> { self.read(|s| Ok(s.is_accepting())) }
+    pub fn is_terminated(&self) -> Result<bool> { self.read(|s| Ok(s.is_terminated())) }
     pub fn forced_tokens(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.forced_tokens())) }
     pub fn marker_events(&self) -> Result<Vec<glrmask::MarkerEvent>> { self.read(|s| Ok(s.marker_events().to_vec())) }
 }

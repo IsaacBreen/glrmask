@@ -1070,6 +1070,12 @@ impl PyDynamicConstraintState {
             .with_dependent(|_owner, state| state.is_accepting())
     }
 
+    /// TODO(docs)
+    fn is_terminated(&self) -> bool {
+        self.inner
+            .with_dependent(|_owner, state| state.is_terminated())
+    }
+
     #[pyo3(signature = (size=None))]
     fn mask<'py>(
         &self,
@@ -1176,6 +1182,11 @@ impl PyConstraintState {
     /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     fn is_accepting(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
+    }
+
+    /// TODO(docs)
+    fn is_terminated(&self) -> bool {
+        self.inner.with_dependent(|_owner, state| state.is_terminated())
     }
 
     #[cfg(feature = "allocation-tracking")]

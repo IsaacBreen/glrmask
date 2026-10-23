@@ -261,6 +261,8 @@ impl NativeState {
     #[napi]
     pub fn is_accepting(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_accepting()) }
     #[napi]
+    pub fn is_terminated(&self) -> napi::Result<bool> { call(|| live(&self.inner)?.is_terminated()) }
+    #[napi]
     pub fn forced_tokens(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.forced_tokens()?.into())) }
     #[napi]
     pub fn marker_events(&self) -> napi::Result<Vec<NativeMarkerEvent>> {

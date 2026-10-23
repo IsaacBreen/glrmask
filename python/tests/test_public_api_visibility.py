@@ -110,7 +110,7 @@ def test_boundary_request_applies_to_compile_after_save_and_bind():
                                   glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
                                   glrmask.MaskStrategy.FAST_RUNTIME])
 def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
-    assert not hasattr(glrmask.ConstraintState, "is_terminated")
+    assert hasattr(glrmask.ConstraintState, "is_terminated")
     assert hasattr(glrmask.ConstraintState, "is_accepting")
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
     end_token_ids = {130}
@@ -118,7 +118,7 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
-        assert not hasattr(state, "is_terminated")
+        assert hasattr(state, "is_terminated")
         assert not state.is_accepting() and not (not state.mask().any())
         assert not state.mask()[130]
         assert state.commit_token(0)

@@ -159,6 +159,15 @@ test('garbage collection cannot invalidate a retained state or materialized mask
   const kept=s.clone();s.dispose();global.gc();assert.ok(kept.isAccepting());assert.ok(allowed(mask,31));
 });
 
+test('isTerminated tracks commit admission',()=>{
+  const v=new Vocab([[0,b('a')]]);
+  const s=Grammar.fromEbnf('start ::= "a"').compileSync(v).start();
+  assert.equal(s.isTerminated(),false);
+  assert.equal(s.commitToken(0),true);assert.equal(s.isTerminated(),true);
+  assert.equal(s.commitToken(0),false);assert.equal(s.isTerminated(),true);
+  v.dispose();s.dispose();
+});
+
 test('ESM and CommonJS share constructor identities',async()=>{
   const esm=await import('../index.mjs');assert.equal(esm.Vocab,Vocab);assert.equal(esm.Grammar,Grammar);assert.equal(esm.version,version);
 });

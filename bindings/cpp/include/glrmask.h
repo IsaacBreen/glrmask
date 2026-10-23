@@ -240,6 +240,8 @@ GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state* p,uin
 /// Writes packed original-ID words, zeroing excess words. Never allocates a
 /// temporary language-bridge mask. An undersized buffer is unchanged.
 GLRMASK_API glrmask_status glrmask_state_fill_mask(const glrmask_state* p,uint32_t* out,size_t n);
+// TODO(docs)
+GLRMASK_API glrmask_status glrmask_state_is_terminated(const glrmask_state* p,uint32_t* out);
 /// Commits one model token event; a disallowed event rejects the state.
 GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state* p,uint32_t id);
 /// Commits model token events in order; a disallowed event rejects the state.

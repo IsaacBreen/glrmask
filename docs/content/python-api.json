@@ -74,6 +74,7 @@
   "ConstraintState.commit_tokens": "Commits model token IDs in order.\n\nStops with an error at the first disallowed token; the state is then unusable.",
   "ConstraintState.commit_bytes": "Commits raw bytes rather than a model token event.\n\nDoes not substitute for committing a token-set or end-token event.",
   "ConstraintState.is_accepting": "Whether the input so far is a complete match.\n\nWith end tokens configured, this becomes true only once an end token is committed.",
+  "ConstraintState.is_terminated": "TODO(docs)",
   "ConstraintState.forced_tokens": "A read-only prefix of library-canonical forced output, at most 10,000 IDs.\n\nUses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.",
   "ConstraintState.marker_events": "Initial or most recent commit's observations as `(marker_id, absolute_byte_offset)`.\n\nSorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.",
   "auto": "Adaptive JSON Schema policy inspection and persisted tier selection.\n\nFor ordinary compilation, prefer `Grammar.compile(..., mask_strategy=MaskStrategy.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer's partial assertion support.",

@@ -421,3 +421,6 @@ class ConstraintState:
         Uses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.
         """
         ...
+    def is_terminated(self) -> bool:
+        """TODO(docs)"""
+        ...

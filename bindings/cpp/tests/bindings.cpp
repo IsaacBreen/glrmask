@@ -45,9 +45,10 @@ void basic() {
         std::vector<TokenId> short_buffer(1, 123); throws([&]{ s.fill_mask(short_buffer); }, GLRMASK_BUFFER_TOO_SMALL);
         CHECK(short_buffer[0]==123); CHECK(s.mask()==initial);
         auto copy = s; c.dispose(); g.dispose(); v.dispose();
-        CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(!copy.is_accepting());
+        CHECK(!s.is_terminated());
+        CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(s.is_terminated()); CHECK(!copy.is_accepting());
         CHECK(copy.commit_token(0)); CHECK(copy.forced_tokens()==std::vector<TokenId>{1});
-        CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting());
+        CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting()); CHECK(copy.is_terminated());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
         s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
     }
