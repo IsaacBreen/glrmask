@@ -5,7 +5,7 @@ use std::{
 
 use super::{choice_or_single, sequence_or_single};
 mod document;
-pub use document::{LarkDocument,LarkProfile,LarkTokenSet,parse_lark_document};
+pub use document::{LarkDocument,LarkExtern,LarkExternKind,LarkTokenSet,parse_lark_document};
 use crate::{GlrMaskError,SourceSpan};
 use crate::automata::lexer::regex::checked_pattern;
 use crate::automata::lexer::{
@@ -55,7 +55,6 @@ struct Lexer<'a> {
     pos: usize,
     offsets:Vec<(usize,usize)>,
     current_start:usize,
-    profile: LarkProfile,
 }
 
 impl<'a> Lexer<'a> {
@@ -63,19 +62,7 @@ impl<'a> Lexer<'a> {
         Lexer {
             input: input.as_bytes(),
             pos: 0, offsets:Vec::new(), current_start:0,
-            profile: LarkProfile::Llm,
         }
-    }
-
-    fn with_profile(input:&'a str,profile:LarkProfile)->Self {
-        Self {input:input.as_bytes(),pos:0,profile,offsets:Vec::new(),current_start:0}
-    }
-
-    fn require_llm(&self, feature:&str)->Result<(),GlrMaskError> {
-        if self.profile!=LarkProfile::Llm {
-            return Err(GlrMaskError::GrammarParse(format!("{feature} requires the explicit Lark LLM compatibility profile")));
-        }
-        Ok(())
     }
 
     fn peek(&self) -> Option<u8> {
@@ -254,7 +241,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_event_set(&mut self) -> Result<Token,GlrMaskError> {
-        self.require_llm("exact-token atoms")?;
         self.pos+=1; // '<'
         if self.peek()==Some(b'|') {
             self.pos+=1;let start=self.pos;
@@ -293,7 +279,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_json_schema(&mut self)->Result<Token,GlrMaskError> {
-        self.require_llm("inline JSON Schema")?;
         while self.peek().is_some_and(|b|b.is_ascii_whitespace()){self.pos+=1;}
         let start=self.pos;
         if self.advance()!=Some(b'{'){return Err(GlrMaskError::GrammarParse("%json requires a JSON object".into()));}
@@ -314,7 +299,6 @@ impl<'a> Lexer<'a> {
     }
 
     fn lex_at_reference(&mut self)->Result<Token,GlrMaskError> {
-        self.require_llm("external grammar references")?;
         if self.input[self.pos..].starts_with(b"token("){return self.lex_special_token();}
         let first=self.advance().filter(|b|b.is_ascii_alphabetic()||*b==b'_')
             .ok_or_else(||GlrMaskError::GrammarParse("expected external grammar name after @".into()))?;
@@ -431,7 +415,6 @@ impl<'a> Lexer<'a> {
                 Some(b'@') => {
                     self.pos += 1;
                     if self.input[self.pos..].starts_with(b"mark(") {
-                        self.require_llm("marker atoms")?;
                         tokens.push(self.lex_special_token()?);
                     } else { tokens.push(self.lex_at_reference()?); }
                 }
@@ -551,8 +534,8 @@ struct Parser {
     tokens: Vec<Token>,
     spans:Vec<SourceSpan>,
     pos: usize,
-    profile: LarkProfile,
     ignored:Vec<String>,
+    externs:Vec<LarkExtern>,
     events:Vec<(String,LarkTokenSet)>,
     schemas:Vec<(String,std::ops::Range<usize>)>,
     imports:std::collections::BTreeSet<String>,
@@ -1007,7 +990,7 @@ impl Parser {
         match self.spans.get(position).or_else(||self.spans.last()){Some(span)=>error.at(*span),None=>error}
     }
     fn new(tokens: Vec<Token>) -> Self {
-        Parser { tokens, spans:Vec::new(), pos: 0,profile:LarkProfile::Llm,ignored:Vec::new(),events:Vec::new(),schemas:Vec::new(),imports:Default::default(),source_spans:BTreeMap::new(),expression_depth:0 }
+        Parser { tokens, spans:Vec::new(), pos: 0,ignored:Vec::new(),externs:Vec::new(),events:Vec::new(),schemas:Vec::new(),imports:Default::default(),source_spans:BTreeMap::new(),expression_depth:0 }
     }
 
     fn peek(&self) -> Option<&Token> {
@@ -1180,9 +1163,6 @@ impl Parser {
         let lazy = if self.peek() == Some(&Token::LBracket) {
             self.pos += 1;
             let attribute = self.import_name()?;
-            if self.profile!=LarkProfile::Llm {
-                return Err(GlrMaskError::GrammarParse("[lazy] requires the Lark LLM compatibility profile".into()));
-            }
             if attribute != "lazy" {
                 return Err(GlrMaskError::GrammarParse(format!("unsupported Lark rule attribute {attribute:?}; only [lazy] on regular bodies is supported")));
             }
@@ -1349,6 +1329,12 @@ impl Parser {
         }
     }
 
+    fn remember_extern(&mut self,name:&str,kind:LarkExternKind) {
+        if !self.externs.iter().any(|e|e.name==name) {
+            self.externs.push(LarkExtern{name:name.to_owned(),kind});
+        }
+    }
+
     fn remember_source_span(&mut self,name:&str,position:usize) {
         if let Some(span)=self.spans.get(position) {
             self.source_spans.entry(name.to_owned()).or_insert(*span);
@@ -1368,9 +1354,10 @@ impl Parser {
                 Ok(GrammarExpr::Ref(name))
             }
             Some(Token::EventSet(set))=>{
+                if let LarkTokenSet::Named(name)=&set {self.remember_extern(name,LarkExternKind::Token);}
                 let name=format!("$lark_event_{}",self.events.len());self.remember_source_span(&name,position);self.events.push((name.clone(),set));Ok(GrammarExpr::Ref(name))
             }
-            Some(Token::External(name))=>{self.remember_source_span(&name,position);self.imports.insert(name.clone());Ok(GrammarExpr::Ref(format!("@{name}")))}
+            Some(Token::External(name))=>{self.remember_source_span(&name,position);self.remember_extern(&name,LarkExternKind::Grammar);self.imports.insert(name.clone());Ok(GrammarExpr::Ref(format!("@{name}")))}
             Some(Token::JsonSchema(range))=>{
                 let name=format!("$lark_json_{}",self.schemas.len());self.remember_source_span(&name,position);self.schemas.push((name.clone(),range));Ok(GrammarExpr::Ref(name))
             }
@@ -1403,7 +1390,7 @@ pub fn parse_lark(input: &str) -> Result<GrammarDef, GlrMaskError> {
 }
 
 pub fn parse_lark_to_named_uncompressed(input:&str)->Result<NamedGrammar,GlrMaskError> {
-    let document=parse_lark_document(input,LarkProfile::Llm)?;
+    let document=parse_lark_document(input)?;
     document.into_plain_grammar()
 }
 
@@ -1603,6 +1590,88 @@ mod tests {
 
 
 #[cfg(test)]
+mod standard_dialect_corpus {
+    use super::*;
+
+    /// Standard Lark sources from this repository's recognition-profile tests
+    /// and guides. None of them uses a GLRMask LLM extension.
+    const STANDARD: &[&str] = &[
+        "start: \"a\" \"b\"?",
+        "start: A\nA: /a?/",
+        "start: \"abc\"i | /a.b/s",
+        "%ignore \"a\"\n%ignore \"ab\"\nstart: \"b\"",
+        "%import common.INT -> N\nstart: N",
+        "%import common (INT, WS)\n%ignore WS\nstart: \"[\" INT (\",\" INT)* \"]\"",
+        "start: INT\nINT: /[0-9]+/",
+        "start: \"a\"~3",
+        "start: \"α\"..\"ω\"",
+        "start: \"a\"\n%ignore /[ \\t]/+",
+        "start: word \"!\"\nword: /a+/",
+        "start: \"hello\" \" \" \"world\"",
+        "start: \"<\" \">\"",
+        "start: payload\npayload: \"x\"",
+        "start: A\nA: \"a\"\nB: \"b\"",
+        "start: \"a\" | \"b\"",
+        "start: \"a\" (\"b\" | \"c\")*",
+        "start: /[a-z]+/",
+        "start: ROOT\nROOT: PREFIX SUFFIX\nPREFIX: \"a\"\nSUFFIX: \"b\"\n",
+        "%ignore /[ ]+/\nstart: \"<\" \">\"",
+    ];
+
+    /// Inputs that are invalid standard Lark and must stay invalid.
+    const REJECTED: &[&str] = &[
+        "start.0: \"a\"",
+        "start.-2: \"a\"",
+        "start: A\nA.2: \"a\"",
+        "%extend start: \"x\"\nstart: \"a\"",
+        "%unknown thing\nstart: \"a\"",
+        "%import unknown.A\nstart: A",
+        "start: .",
+        "other: \"a\"",
+        "start: /a+?/",
+        "start: /a+/q",
+        "start: \"ab\"..\"z\"",
+        "start: \"a\"~3..2",
+        "start: A\nA: B\nB: A\n",
+    ];
+
+    fn fingerprint(source: &str) -> String {
+        match parse_lark_document(source) {
+            Ok(document) => format!(
+                "{}\nignores={:?}\nimports={:?}\nevents={:?}\nschemas={}\nspans={:?}",
+                crate::grammar::glrm::to_glrm(&document.grammar),
+                document.additional_ignores,
+                document.imports,
+                document.events,
+                document.schemas.len(),
+                document.source_spans,
+            ),
+            Err(error) => format!("error: {error}"),
+        }
+    }
+
+    fn corpus() -> String {
+        STANDARD
+            .iter()
+            .map(|source| format!("== standard\n{source}\n-- result\n{}\n", fingerprint(source)))
+            .chain(REJECTED.iter().map(|source| {
+                format!("== rejected\n{source}\n-- result\n{}\n", fingerprint(source))
+            }))
+            .collect()
+    }
+
+    // The recorded results were produced by the former recognition profile.
+    #[test]
+    fn standard_lark_corpus_matches_its_recorded_results() {
+        let actual = corpus();
+        if std::env::var_os("GLRMASK_WRITE_LARK_CORPUS").is_some() {
+            std::fs::write("/tmp/lark-standard-corpus.golden", &actual).unwrap();
+        }
+        assert_eq!(actual, include_str!("../../tests/data/lark-standard-corpus.golden"));
+    }
+}
+
+#[cfg(test)]
 mod compatibility_regressions {
     use super::*;
     #[test]
@@ -1688,7 +1757,7 @@ mod lazy_prefix_minimal_regressions {
         ] {
             for name in ["WORD", "word"] {
                 let source = format!("start: {name}\n{name}[lazy]: {body}");
-                let grammar = parse_lark_document(&source, LarkProfile::Llm).unwrap().grammar;
+                let grammar = parse_lark_document(&source).unwrap().grammar;
                 assert!(matches!(&grammar.rules.iter().find(|r| r.name == name).unwrap().expr,
                     GrammarExpr::Shortest(_)));
                 assert_language(&grammar, name, &samples);
@@ -1701,14 +1770,7 @@ mod lazy_prefix_minimal_regressions {
     }
 
     #[test]
-    fn lazy_still_requires_llm_profile_and_regular_operands() {
-        for source in [
-            "start: WORD\nWORD[lazy]: /a|ab/",
-            "start: word\nword[lazy]: /a|ab/",
-        ] {
-            let error = parse_lark_document(source, LarkProfile::Recognition).unwrap_err();
-            assert!(error.to_string().contains("[lazy] requires"), "{error}");
-        }
+    fn lazy_rejects_non_regular_operands() {
         for source in [
             "start: word\nword[lazy]: other\nother: \"a\"",
             "start: word\nword[lazy]: @child",
@@ -1717,7 +1779,7 @@ mod lazy_prefix_minimal_regressions {
             "start: word\nword[lazy]: word \"a\" | \"b\"",
             "start: WORD\nWORD[lazy]: /a+?/",
         ] {
-            assert!(parse_lark_document(source, LarkProfile::Llm).is_err(), "{source}");
+            assert!(parse_lark_document(source).is_err(), "{source}");
         }
     }
 }

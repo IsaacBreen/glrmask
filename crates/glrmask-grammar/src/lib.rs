@@ -65,7 +65,7 @@ pub use grammar::ast::parser_grammar::{ParserAutomaton, ParserAutomatonState,
     ParserExpr, ParserGrammar, ParserRule, CfgRecursion, FlatParserGrammar,
     ParserAnalysis, ParserProduction, ParserSymbol};
 pub use import::ebnf::parse_ebnf_to_named;
-pub use import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed, parse_lark_document, LarkDocument, LarkProfile, LarkTokenSet};
+pub use import::lark::{parse_lark_to_named, parse_lark_to_named_uncompressed, parse_lark_document, LarkDocument, LarkExtern, LarkExternKind, LarkTokenSet};
 
 /// Implementation details shared by the GLRMask workspace.
 ///

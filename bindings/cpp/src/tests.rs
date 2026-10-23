@@ -10,7 +10,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
     unsafe {
         let (mut vocab, mut grammar) = (ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
-        assert_eq!(glrmask_grammar_from_source(0, source.as_ptr().cast(), source.len(), ptr::null(), &mut grammar), 0);
+        assert_eq!(glrmask_grammar_from_source(0, source.as_ptr().cast(), source.len(), &mut grammar), 0);
         for strategy in 0..4 {
             let rust_g = g::Grammar::from_ebnf(source);
             let rust_m = g::Module::new(&rust_g);
@@ -68,11 +68,10 @@ fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<*const u8>(), 8);
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
     assert_eq!(size_of::<glrmask_compile_options>(), 32);
-    assert_eq!(size_of::<glrmask_lark_options>(), 32);
-    assert_eq!(size_of::<glrmask_extern>(), 56);
+    assert_eq!(size_of::<glrmask_extern>(), 24);
     assert_eq!(size_of::<glrmask_marker_event>(), 16);
     assert_eq!(offset_of!(glrmask_marker_event, byte_offset), 8);
-    assert_eq!(offset_of!(glrmask_extern, start_byte), 24);
+    assert_eq!(offset_of!(glrmask_extern, kind), 16);
 }
 
 #[test]
@@ -84,8 +83,8 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         let host = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
         let leaf = "start ::= \"a\"";
         let (mut grammar, mut child) = (ptr::null_mut(), ptr::null_mut());
-        assert_eq!(glrmask_grammar_from_source(1, host.as_ptr().cast(), host.len(), ptr::null(), &mut grammar), 0);
-        assert_eq!(glrmask_grammar_from_source(0, leaf.as_ptr().cast(), leaf.len(), ptr::null(), &mut child), 0);
+        assert_eq!(glrmask_grammar_from_source(1, host.as_ptr().cast(), host.len(), &mut grammar), 0);
+        assert_eq!(glrmask_grammar_from_source(0, leaf.as_ptr().cast(), leaf.len(), &mut child), 0);
         let (mut parent, mut clone, mut prepared) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_module_new(grammar, &mut parent), 0);
         assert_eq!(glrmask_module_precompile(parent, vocab, ptr::null()), 0);
@@ -107,7 +106,7 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         // Check unbound externs
         let mut slots = ptr::null_mut(); assert_eq!(glrmask_module_unbound_externs(parent, &mut slots), 0);
         let mut count = 0; assert_eq!(glrmask_externs_len(slots, &mut count), 0); assert_eq!(count, 1);
-        let mut ext = glrmask_extern { name: ptr::null(), name_len: 0, kind: 0, has_source_span: 0, start_byte: 0, end_byte: 0, line: 0, column: 0 };
+        let mut ext = glrmask_extern { name: ptr::null(), name_len: 0, kind: 0 };
         assert_eq!(glrmask_externs_get(slots, 0, &mut ext), 0);
         assert_eq!(std::slice::from_raw_parts(ext.name.cast::<u8>(), ext.name_len), b"child");
         glrmask_externs_free(slots);

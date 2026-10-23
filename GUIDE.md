@@ -395,12 +395,12 @@ regular intersection/subtraction, structural nonterminal-alternative subtraction
 separated sequences, explicit finite automata and Unicode/byte expressions.
 Use regular-language subtraction for prefix-minimal matching. See [the native format](docs/glrm-format.md).
 
-Lark is a recognition-focused frontend with an explicit optional LLM compatibility
-profile. That profile adds selected exact-token syntax, named token resolution,
-`@name` grammar bindings and isolated inline `%json` schemas. Those literal families
-are **not native GLRM syntax**; native callers provide equivalent components through
-typed host bindings. The regular-body `[lazy]` annotation uses the same shortest
-terminal operation. See [the Lark dialect](docs/lark-dialect.md).
+Lark is a recognition-focused frontend with selected GLRMask extensions. It adds
+exact-token syntax, named token externs, `@name` grammar externs and isolated inline
+`%json` schemas. Those literal families are **not native GLRM syntax**; native
+callers provide equivalent components through typed host bindings. The regular-body
+`[lazy]` annotation uses the same shortest terminal operation. See
+[the Lark dialect](docs/lark-dialect.md).
 
 Regex-internal reluctant quantifiers, priorities, captures, substring generation,
 sampling annotations and grammar token/character budgets are not supported.

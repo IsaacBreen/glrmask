@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 use snapshot_map::SnapshotMap as OrdMap;
 use crate::grammar::glrm::{ExternalKind, GlrmExternalDeclarations, ParsedComponent};
-use glrmask_grammar::{LarkDocument,LarkProfile,LarkTokenSet};
+use glrmask_grammar::{LarkDocument,LarkExternKind,LarkTokenSet};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -85,7 +85,6 @@ impl BoundaryMaskStrategy {
 pub struct Extern {
     pub(crate) name: String,
     pub(crate) kind: ExternalKind,
-    pub(crate) span: Option<glrmask_grammar::SourceSpan>,
 }
 
 impl Extern {
@@ -97,39 +96,55 @@ impl Extern {
     pub fn kind(&self) -> ExternalKind {
         self.kind
     }
-    /// Source span of the declaration, when the frontend can locate it.
-    pub fn span(&self) -> Option<glrmask_grammar::SourceSpan> {
-        self.span
-    }
 }
 
-/// A view over a [`Module`]'s declared externs, in declaration order.
+/// A view over a source's or module's declared externs, in declaration order.
 #[derive(Debug, Clone)]
 pub struct Externs<'a> {
-    pub(crate) module: &'a Module,
+    pub(crate) source: ExternsSource<'a>,
     pub(crate) only_unbound: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ExternsSource<'a> {
+    Module(&'a Module),
+    Grammar(&'a Grammar),
+}
+
+impl ExternsSource<'_> {
+    fn declarations(&self) -> Option<&GlrmExternalDeclarations> {
+        match self {
+            Self::Module(module) => module.node.source.declarations().ok(),
+            Self::Grammar(grammar) => grammar.declarations().ok(),
+        }
+    }
+    fn bound(&self, name: &str) -> bool {
+        match self {
+            Self::Module(module) => module.node.bindings.contains_key(name),
+            Self::Grammar(grammar) => grammar.bindings.contains_key(name),
+        }
+    }
 }
 
 impl<'a> Externs<'a> {
     /// The extern declared as `name`, if any.
     pub fn get(&self, name: &str) -> Option<Extern> {
-        let declared = self.module.node.source.declarations().ok()?;
-        if self.only_unbound && self.module.node.bindings.contains_key(name) {
+        let declared = self.source.declarations()?;
+        if self.only_unbound && self.source.bound(name) {
             return None;
         }
         let kind = *declared.kinds.get(name)?;
         Some(Extern {
             name: name.to_string(),
             kind,
-            span: declared.spans.get(name).copied(),
         })
     }
 
     /// Number of externs in this view.
     pub fn len(&self) -> usize {
-        let Ok(declared) = self.module.node.source.declarations() else { return 0; };
+        let Some(declared) = self.source.declarations() else { return 0; };
         if self.only_unbound {
-            declared.names.iter().filter(|n| !self.module.node.bindings.contains_key(n.as_str())).count()
+            declared.names.iter().filter(|n| !self.source.bound(n)).count()
         } else {
             declared.names.len()
         }
@@ -143,28 +158,27 @@ impl<'a> Externs<'a> {
     /// The same view restricted to unresolved externs.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
-            module: self.module,
+            source: self.source.clone(),
             only_unbound: true,
         }
     }
 
     /// The externs in declaration order.
     pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
-        let items: Vec<Extern> = match self.module.node.source.declarations() {
-            Ok(declared) => declared
+        let items: Vec<Extern> = match self.source.declarations() {
+            Some(declared) => declared
                 .names
                 .iter()
-                .filter(|name| !self.only_unbound || !self.module.node.bindings.contains_key(name.as_str()))
+                .filter(|name| !self.only_unbound || !self.source.bound(name))
                 .filter_map(|name| {
                     let kind = *declared.kinds.get(name)?;
                     Some(Extern {
                         name: name.clone(),
                         kind,
-                        span: declared.spans.get(name).copied(),
                     })
                 })
                 .collect(),
-            Err(_) => Vec::new(),
+            None => Vec::new(),
         };
         items.into_iter()
     }
@@ -310,6 +324,13 @@ pub(crate) trait IntoUnlinkedValue<'a> {
     fn into_unlinked_value(self) -> UnlinkedValue<'a>;
 }
 
+fn lark_declarations(document:&LarkDocument)->impl Iterator<Item=(String,ExternalKind)>+'_ {
+    document.externs.iter().map(|e|(e.name.clone(),match e.kind {
+        LarkExternKind::Token=>ExternalKind::Token,
+        LarkExternKind::Grammar=>ExternalKind::Grammar,
+    }))
+}
+
 fn attached_path<'n,T:Clone>(name:&'n str, bindings:&OrdMap<String,T>) -> Option<(&'n str,&'n str)> {
     // Look up only the qualified prefixes, never scan every unrelated binding.
     name.rmatch_indices("::").find_map(|(index,_)| {
@@ -322,26 +343,6 @@ fn check_binding_kind(name:&str,kind:ExternalKind,grammar:bool)->Result<()> {
         return Err(Error::Compilation(format!("external {name:?} expects {kind:?}; a general grammar cannot fill an atomic token port")));
     }
     Ok(())
-}
-
-/// Lark dialect and explicit named-token mappings.
-///
-/// Named token atoms must be mapped explicitly; tokenizer spellings are never
-/// inferred.
-#[derive(Debug,Clone,Default)]
-pub struct LarkOptions {
-    profile: LarkProfile,
-    token_names: BTreeMap<String,Vec<u32>>,
-}
-impl LarkOptions {
-    /// Options using the LLM extension profile.
-    pub fn llm()->Self {Self {profile:LarkProfile::Llm,token_names:BTreeMap::new()}}
-    /// Sets the dialect: [`LarkProfile::Recognition`] or [`LarkProfile::Llm`].
-    pub fn profile(mut self,profile:LarkProfile)->Self{self.profile=profile;self}
-    /// Maps a named token atom to original model token IDs.
-    pub fn token(mut self,name:impl Into<String>,ids:impl IntoIterator<Item=u32>)->Self {
-        self.token_names.insert(name.into(),ids.into_iter().collect());self
-    }
 }
 
 /// The source-language definition, without compilation settings.
@@ -358,7 +359,6 @@ pub struct Grammar {
     parsed_component: Arc<OnceLock<std::result::Result<ParsedComponent, Error>>>,
     exact_value: Option<ExactTokens>,
     exact_token_id: Option<u32>,
-    lark_options:Arc<LarkOptions>,
     lark_document:Arc<OnceLock<std::result::Result<LarkDocument,Error>>>,
 }
 
@@ -417,7 +417,7 @@ impl Grammar {
     pub fn ebnf(source: &str) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source))) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn lark(source: &str) -> Self { Self::from_lark_with(source,LarkOptions::llm()) }
+    pub fn lark(source: &str) -> Self { Self::from_lark(source) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn json_schema(source: &str) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source))) }
@@ -432,15 +432,8 @@ impl Grammar {
     /// Creates a grammar from EBNF source text.
     pub fn from_ebnf(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref()))) }
 
-    /// Creates a grammar from Lark source using the recognition profile.
-    ///
-    /// See [`Self::from_lark_with`] for LLM extensions and named-token mappings.
+    /// Creates a grammar from Lark source.
     pub fn from_lark(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Lark(Arc::from(source.as_ref()))) }
-
-    /// Creates a grammar from Lark source with explicit [`LarkOptions`].
-    pub fn from_lark_with(source:impl AsRef<str>,options:LarkOptions)->Self {
-        let mut grammar=Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));grammar.lark_options=Arc::new(options);grammar
-    }
 
 
     /// Creates a grammar from a JSON Schema document.
@@ -456,7 +449,7 @@ impl Grammar {
     pub fn from_glrm(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Glrm(Arc::from(source.as_ref()))) }
 
     fn new(source: GrammarSource) -> Self {
-        Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_options:Arc::new(LarkOptions::default()),lark_document:Arc::new(OnceLock::new()) }
+        Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_document:Arc::new(OnceLock::new()) }
     }
 
     fn component(&self) -> Result<&ParsedComponent> {
@@ -478,7 +471,7 @@ impl Grammar {
 
     fn lark_document(&self)->Result<&LarkDocument> {
         let GrammarSource::Lark(source)=&self.source else{return Err(Error::Compilation("not a Lark description".into()));};
-        self.lark_document.get_or_init(||glrmask_grammar::parse_lark_document(source,self.lark_options.profile).map_err(Into::into))
+        self.lark_document.get_or_init(||glrmask_grammar::parse_lark_document(source).map_err(Into::into))
             .as_ref().map_err(Clone::clone)
     }
 
@@ -489,6 +482,11 @@ impl Grammar {
         let domain=RangeSetBlaze::from_iter(vocab.exact_token_ranges());
         let mut values=std::collections::HashMap::new();
         for (name,set) in &document.events {
+            // A named atom is a token extern; its binding supplies the IDs.
+            if let LarkTokenSet::Named(external)=set {
+                values.insert(name.clone(),glrmask_grammar::GrammarExpr::Ref(external.clone()));
+                continue;
+            }
             let ranges=(|| -> Result<RangeSetBlaze<u32>> { Ok(match set {
                 LarkTokenSet::Any=>domain.clone(),
                 LarkTokenSet::Ranges{ranges,negate}=>{
@@ -498,12 +496,7 @@ impl Grammar {
                     let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
                     if *negate {&domain-&selected}else{selected}
                 }
-                LarkTokenSet::Named(name)=>{
-                    let ids=self.lark_options.token_names.get(name).ok_or_else(||Error::Compilation(format!("named token <|{name}|> has no explicit mapping")))?;
-                    if ids.is_empty(){return Err(Error::Compilation(format!("named token {name:?} resolves to an empty set")));}
-                    for &id in ids {if !vocab.contains_exact_token_id(id){return Err(Error::Compilation(format!("named token {name:?} resolves to unknown token ID {id}")));}}
-                    RangeSetBlaze::from_iter(ids.iter().copied())
-                }
+                LarkTokenSet::Named(_)=>unreachable!("handled above"),
             }) })().map_err(|e|e.with_source_span(document.source_spans.get(name).copied()))?;
             let mut atoms=ranges.ranges().map(|range|if range.start()==range.end(){
                 glrmask_grammar::GrammarExpr::SpecialToken(*range.start())
@@ -512,7 +505,7 @@ impl Grammar {
             values.insert(name.clone(),expression);
         }
         let named=document.resolve_events(&values);
-        let externs=document.imports.iter().map(|name|(name.clone(),ExternalKind::Grammar))
+        let externs=lark_declarations(document)
             .chain(document.schemas.iter().map(|(name,_)|(name.clone(),ExternalKind::Grammar))).collect::<Vec<_>>();
         let mut resolved=Self::new(GrammarSource::Constructed);
         let spans=externs.iter().filter_map(|(name,_)|document.source_spans.get(name).map(|span|(name.clone(),*span))).collect();
@@ -534,9 +527,10 @@ impl Grammar {
             GrammarSource::Glrm(_) | GrammarSource::Constructed => Ok(self.component()?.declarations().clone()),
             GrammarSource::Lark(_)=>{
                 let document=self.lark_document()?;
-                let kinds=document.imports.iter().map(|name|(name.clone(),ExternalKind::Grammar)).collect::<BTreeMap<_,_>>();
-                let spans=document.imports.iter().filter_map(|name|document.source_spans.get(name).map(|span|(name.clone(),*span))).collect();
-                Ok(GlrmExternalDeclarations{names:kinds.keys().cloned().collect(),kinds,spans})
+                let declared=lark_declarations(document).collect::<Vec<_>>();
+                let kinds=declared.iter().cloned().collect::<BTreeMap<_,_>>();
+                let spans=declared.iter().filter_map(|(name,_)|document.source_spans.get(name).map(|span|(name.clone(),*span))).collect();
+                Ok(GlrmExternalDeclarations{names:declared.into_iter().map(|(name,_)|name).collect(),kinds,spans})
             }
             _ => Ok(GlrmExternalDeclarations::default()),
         }).as_ref().map_err(Clone::clone)
@@ -671,6 +665,16 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
+    /// The source's declared externs, in declaration order.
+    ///
+    /// A source that fails to parse yields an empty view.
+    pub fn externs(&self) -> Externs<'_> {
+        Externs {
+            source: ExternsSource::Grammar(self),
+            only_unbound: false,
+        }
+    }
+
     /// Compiles the grammar against `vocab`.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         Module::new(self).compile(vocab)
@@ -680,14 +684,14 @@ impl Grammar {
     ///
     /// Equivalent to [`Module::new`] followed by [`Module::precompile`].
     pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
-        self.precompile_with(vocab, &CompileOptions::default())
+        self.precompile_with(vocab, CompileOptions::default())
     }
 
     /// Retains vocabulary-specific compilation artifacts using `options` and
     /// returns a module.
     ///
     /// Equivalent to [`Module::new`] followed by [`Module::precompile_with`].
-    pub fn precompile_with(&self, vocab: &Vocab, options: &CompileOptions) -> Result<Module> {
+    pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module> {
         let mut module = Module::new(self);
         module.precompile_with(vocab, options)?;
         Ok(module)

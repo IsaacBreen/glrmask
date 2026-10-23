@@ -9,7 +9,7 @@ mod mixed_validation;
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 
-/// Compilation settings for a [`Module`] assembly.
+/// Options for compiling a grammar or module.
 ///
 /// `end_tokens` applies only to the top-level sequence. The strategy settings
 /// apply to the whole compile, including every composed child.
@@ -78,8 +78,7 @@ pub(crate) enum BoundValue {
     ExactTokens(ExactTokens),
 }
 
-/// A reusable, independently configured grammar with bindings and any retained
-/// compilation work.
+/// A reusable grammar with bindings and any retained compilation work.
 ///
 /// May still have unresolved externs.
 #[derive(Debug, Clone)]
@@ -166,7 +165,6 @@ fn own_local(grammar: &Grammar) -> Grammar {
         parsed_component: grammar.parsed_component.clone(),
         exact_value: grammar.exact_value.clone(),
         exact_token_id: grammar.exact_token_id,
-        lark_options: grammar.lark_options.clone(),
         lark_document: grammar.lark_document.clone(),
     }
 }
@@ -225,8 +223,6 @@ pub(crate) fn target_boundary() -> BoundaryTriggerDetail {
     BoundaryTriggerDetail::TokenSet
 }
 
-/// Compilation settings for a [`Module`] assembly are supplied to
-/// [`Module::compile_with`] and [`Module::precompile_with`].
 impl Module {
     #[cfg(test)]
     pub(crate) fn force_boundary_dwa_decline(&mut self) {
@@ -241,7 +237,7 @@ impl Grammar {
 }
 
 impl Module {
-    /// Wraps a source grammar with default settings.
+    /// Wraps a source grammar in a module.
     pub fn new(grammar: &Grammar) -> Self {
         fn convert(grammar: &Grammar, cache: &mut HashMap<usize, Module>) -> Module {
             if let Some(module) = grammar.module_snapshot.get() { return module.clone(); }
@@ -281,16 +277,9 @@ impl Module {
     /// the parse error.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
-            module: self,
+            source: ExternsSource::Module(self),
             only_unbound: false,
         }
-    }
-
-    // Lets bindings surface a parse error where the Rust view must stay infallible.
-    #[cfg(any(test, feature = "internal-api"))]
-    #[doc(hidden)]
-    pub fn check_source(&self) -> Result<()> {
-        self.node.source.declarations().map(|_| ())
     }
 
     /// Binds the extern `name` to a module, expression, token, or exact token
@@ -462,7 +451,7 @@ impl Module {
     /// Modules resolved to [`MaskStrategy::TokenTrie`] retain no work and are
     /// compiled from source by [`Self::compile`].
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
-        self.precompile_with(vocab, &CompileOptions::default())
+        self.precompile_with(vocab, CompileOptions::default())
     }
 
     /// Retains vocabulary-specific compilation artifacts for every module in
@@ -470,8 +459,8 @@ impl Module {
     ///
     /// The options decide which static parts are built and stored. Modules
     /// resolved to [`MaskStrategy::TokenTrie`] retain no work.
-    pub fn precompile_with(&mut self, vocab: &Vocab, options: &CompileOptions) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, options, true, false))
+    pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
+        with_deep_stack(|| self.precompile_on_stack(vocab, &options, true, false))
     }
 
     /// Internal compile preparation: retain compilation artifacts and the
@@ -572,7 +561,17 @@ impl Module {
         }
         let source = &self.node.source;
         if matches!(source.source, GrammarSource::Lark(_)) {
-            let resolved = source.resolve_lark(vocab)?;
+            let mut resolved = source.resolve_lark(vocab)?;
+            // Token externs (named Lark atoms) must be bound before the local
+            // component is linked; grammar externs stay open for `materialize`.
+            for (name, value) in &self.node.bindings {
+                if resolved.bindings.contains_key(name) { continue; }
+                match value {
+                    BoundValue::Token(t) => resolved = resolved.bind_value(name, GrammarValue::Token(*t))?,
+                    BoundValue::ExactTokens(t) => resolved = resolved.bind_value(name, GrammarValue::ExactTokens(t.clone()))?,
+                    BoundValue::Module(_) => {}
+                }
+            }
             let mut module = Module::new(&resolved);
             let mut instances = HashMap::<usize, Module>::new();
             for m in module.index()? {
@@ -1178,7 +1177,7 @@ mod precompile_boundary_tests {
         module
             .precompile_with(
                 &vocab,
-                &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+                CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
             )
             .expect("precompile with ParserDwa");
         let prepared_trigger = module
@@ -1251,11 +1250,11 @@ mod precompile_boundary_tests {
         let static_options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
         let mut child = Module::new(&Grammar::from_ebnf(CHILD));
         if precompile_child {
-            child.precompile_with(&vocab, &static_options).expect("precompile child");
+            child.precompile_with(&vocab, static_options.clone()).expect("precompile child");
         }
         let mut parent = Module::new(&Grammar::from_glrm(PARENT));
         if precompile_parent {
-            parent.precompile_with(&vocab, &static_options).expect("precompile unbound parent");
+            parent.precompile_with(&vocab, static_options).expect("precompile unbound parent");
         }
         let mut assembly = parent.clone();
         assembly.bind("child", child.clone()).expect("bind child");
@@ -1319,7 +1318,7 @@ mod grammar_precompile_tests {
         let options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
         let child = Grammar::from_ebnf(r#"start ::= "a""#);
 
-        let module = child.precompile_with(&vocab, &options).expect("grammar precompile");
+        let module = child.precompile_with(&vocab, options).expect("grammar precompile");
         let builds = static_build_probe::builds(&module);
         assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
 

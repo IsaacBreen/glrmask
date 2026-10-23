@@ -26,7 +26,7 @@ enum Source {
     Ebnf(String),
     Glrm(String),
     Json(String),
-    Lark { text: String, llm: bool, tokens: BTreeMap<String, Vec<u32>> },
+    Lark(String),
     Token(u32),
     Exact(Exact),
 }
@@ -108,11 +108,7 @@ fn source(grammar: &Grammar, vocabs: &mut Vec<Vocab>) -> Source {
         GrammarSource::Ebnf(s) => Source::Ebnf(s.to_string()),
         GrammarSource::Glrm(s) => Source::Glrm(s.to_string()),
         GrammarSource::JsonSchema(s) => Source::Json(s.to_string()),
-        GrammarSource::Lark(s) => Source::Lark {
-            text: s.to_string(),
-            llm: grammar.lark_options.profile == LarkProfile::Llm,
-            tokens: grammar.lark_options.token_names.clone(),
-        },
+        GrammarSource::Lark(s) => Source::Lark(s.to_string()),
         GrammarSource::Constructed => Source::Glrm(grammar.component().expect("validated constructed source")
             .to_glrm_source().expect("serializable constructed source")),
     }
@@ -200,11 +196,7 @@ fn decode_source(value: Source, vocabs: &[Vocab]) -> Result<Grammar> {
         Source::Ebnf(s) => GrammarSource::Ebnf(Arc::from(s)),
         Source::Glrm(s) => GrammarSource::Glrm(Arc::from(s)),
         Source::Json(s) => GrammarSource::JsonSchema(Arc::from(s)),
-        Source::Lark { text, llm, tokens } => {
-            let mut grammar = Grammar::new(GrammarSource::Lark(Arc::from(text)));
-            grammar.lark_options = Arc::new(LarkOptions { profile: if llm { LarkProfile::Llm } else { LarkProfile::Recognition }, token_names: tokens });
-            return Ok(grammar);
-        }
+        Source::Lark(text) => return Ok(Grammar::new(GrammarSource::Lark(Arc::from(text)))),
         Source::Token(id) => return Ok(Grammar::exact_token(Token::new(id))),
         Source::Exact(e) => return Ok(Grammar::from_exact_tokens(decode_exact(e, vocabs)?)),
     };
@@ -438,7 +430,7 @@ mod tests {
         let v = Vocab::new(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
         module
-            .precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+            .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
             .unwrap();
         let mut m = read(&module.save());
         let inner = crate::import::compile_dynamic_named_single_with_backend(

@@ -989,10 +989,7 @@ fn terminal_ended_first_lark_event_matches_the_exact_oracle() {
     let case = case(0, 2, &[(0, &[-1, -2])]);
     reset_test_rescue_entries();
     let constraint = compile_with_te_first(
-        Grammar::from_lark_with(
-            "start: \"a\" <[1]>",
-            crate::LarkOptions::llm(),
-        ),
+        Grammar::from_lark("start: \"a\" <[1]>"),
         &vocab(),
         MaskStrategy::ParserDwa,
     )
@@ -1021,7 +1018,7 @@ fn rescue_lowering_equals_the_normal_static_route() {
         ),
         (
             "lark-event",
-            Grammar::from_lark_with("start: \"a\" <[1]>", crate::LarkOptions::llm()),
+            Grammar::from_lark("start: \"a\" <[1]>"),
             &v,
         ),
         (

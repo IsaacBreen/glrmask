@@ -127,7 +127,7 @@ impl NativeModule {
             let vocab = live(&vocab.inner)?.clone();
             let options = Self::options(Vec::new(), mode, boundary)?;
             let mut target = live(&self.inner)?;
-            target.module.precompile_with(&vocab, &options)?;
+            target.module.precompile_with(&vocab, options)?;
             target.revision += 1;
             Ok(())
         })
@@ -183,7 +183,7 @@ pub struct ModulePrecompileTask { module: g::Module, vocab: g::Vocab, owner: Arc
 impl Task for ModulePrecompileTask {
     type Output = g::Module;
     type JsValue = ();
-    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, &self.options)?; Ok(self.module.clone()) }) }
+    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, self.options.clone())?; Ok(self.module.clone()) }) }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<()> {
         call(|| {
             let mut target = live(&self.owner)?;

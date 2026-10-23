@@ -78,17 +78,16 @@ Exact-token events cannot be reproduced by committing their decoded bytes. Use `
 | `Grammar::from_ebnf(source)` | EBNF text |
 | `Grammar::from_glrm(source)` | Native GLRM text |
 | `Grammar::from_json_schema(source)` | JSON Schema encoded as JSON text |
-| `Grammar::from_lark(source, options)` | Lark text and an optional profile |
+| `Grammar::from_lark(source)` | Lark text |
 
 The constructors own their source text, so temporary strings need not outlive the returned grammar. Import capabilities and limitations are the same as the Rust core. See the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md). The binding does not add a full JSON Schema validator or a parse-tree API.
 
-Recognition is the default Lark profile. LLM extensions and named token atoms must be requested explicitly:
+Lark code uses one dialect; the GLRMask extensions are always available. A named token atom declares a token extern that is bound on the module:
 
 ```cpp
-glrmask::LarkOptions lark;
-lark.profile = glrmask::LarkProfile::Llm;
-lark.token_names["begin"] = {99};
-auto grammar = glrmask::Grammar::from_lark("start: <|begin|>", lark);
+auto grammar = glrmask::Grammar::from_lark("start: <|begin|>");
+auto module = glrmask::Module(grammar);
+module.bind("begin", vocab.tokens({99}));
 ```
 
 ## Modules and expressions
@@ -112,7 +111,7 @@ auto constraint = parent.compile(module_vocab, options);
 
 `bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
-`externs()` returns an `Externs` snapshot of `name`, `kind`, and optional `source_span`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile, plus root `end_tokens`; an option never downgrades a part that already has a static preparation:
+`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile, plus root `end_tokens`; an option never downgrades a part that already has a static preparation:
 
 ```cpp
 auto expression = glrmask::Expr::choice({

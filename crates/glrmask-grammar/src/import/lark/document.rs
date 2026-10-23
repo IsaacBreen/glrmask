@@ -4,17 +4,24 @@ use super::*;
 use std::collections::BTreeSet;
 use std::ops::Range;
 
-/// Lark dialect: recognition syntax or LLM extensions.
-///
-/// Named-token mappings are supplied separately through `LarkOptions`.
-#[derive(Debug,Clone,Copy,PartialEq,Eq,Default)]
-pub enum LarkProfile {
-    /// Standard Lark recognition.
-    #[default]
-    Recognition,
-    /// Lark plus GLRMask's LLM extensions.
-    Llm,
+/// A declaration written in a Lark source.
+#[derive(Debug,Clone,PartialEq,Eq)]
+pub struct LarkExtern {
+    /// Declared name.
+    pub name:String,
+    /// Declared kind.
+    pub kind:LarkExternKind,
 }
+
+/// The kind of a Lark declaration.
+#[derive(Debug,Clone,Copy,PartialEq,Eq)]
+pub enum LarkExternKind {
+    /// A token extern, written as a named special-token atom.
+    Token,
+    /// A grammar extern, written with `@name`.
+    Grammar,
+}
+
 #[derive(Debug,Clone,PartialEq,Eq)]
 pub enum LarkTokenSet {
     Ranges {ranges:Vec<(u32,u32)>,negate:bool},
@@ -28,23 +35,25 @@ pub struct LarkDocument {
     pub imports:BTreeSet<String>,
     pub events:Vec<(String,LarkTokenSet)>,
     pub schemas:Vec<(String,Range<usize>)>,
+    /// Extern declarations in source order.
+    pub externs:Vec<LarkExtern>,
     /// Original atom/declaration spans; repeated @imports retain their first use.
     pub source_spans:BTreeMap<String,SourceSpan>,
 }
 
-pub fn parse_lark_document(input:&str,profile:LarkProfile)->Result<LarkDocument,GlrMaskError> {
-    let mut lexer=Lexer::with_profile(input,profile);
+pub fn parse_lark_document(input:&str)->Result<LarkDocument,GlrMaskError> {
+    let mut lexer=Lexer::new(input);
     let tokens=lexer.tokenize().map_err(|e|e.at(SourceSpan::at(input,lexer.current_start,lexer.pos)))?;
     let mut spans=SourceSpan::tokens(input,&lexer.offsets);
     spans.push(SourceSpan::at(input,input.len(),input.len()));
-    let mut parser=Parser::new(tokens);parser.profile=profile;parser.spans=spans;
+    let mut parser=Parser::new(tokens);parser.spans=spans;
     let grammar=parser.parse_grammar().map_err(|e|parser.locate(e,parser.pos))?;
     let externs=parser.events.iter().map(|(name,_)|name.clone())
         .chain(parser.schemas.iter().map(|(name,_)|name.clone()))
         .chain(parser.imports.iter().map(|name|format!("@{name}"))).collect::<HashSet<_>>();
     let additional_ignores=parser.ignored.iter().skip(1).cloned().collect::<Vec<_>>();
     let grammar=normalize_lark_named_with_externals(grammar,&externs,&additional_ignores)?;
-    Ok(LarkDocument{grammar,additional_ignores,imports:parser.imports,events:parser.events,schemas:parser.schemas,source_spans:parser.source_spans})
+    Ok(LarkDocument{grammar,additional_ignores,imports:parser.imports,events:parser.events,schemas:parser.schemas,externs:parser.externs,source_spans:parser.source_spans})
 }
 
 impl LarkDocument {
@@ -120,10 +129,9 @@ fn rewrite(expr:&mut GrammarExpr,reference:&mut impl FnMut(&str)->Option<Grammar
 mod tests {
     use super::*;
     #[test]
-    fn profiles_and_opaque_atoms_are_explicit() {
+    fn opaque_atoms_are_explicit() {
         let source=r#"start: <[1,3-8]> <[^2]> <[*]> <|finish|> @payload %json {"type":"string","description":"}"}"#;
-        assert!(parse_lark_document(source,LarkProfile::Recognition).is_err());
-        let doc=parse_lark_document(source,LarkProfile::Llm).unwrap();
+        let doc=parse_lark_document(source).unwrap();
         assert_eq!(doc.events.len(),4);assert_eq!(doc.schemas.len(),1);
         assert!(doc.imports.contains("payload"));
         assert_eq!(&source[doc.schemas[0].1.clone()],r#"{"type":"string","description":"}"}"#);
@@ -133,12 +141,12 @@ mod tests {
         for s in ["start: <[8-3]>","start: <[1,]>","start: <[^*]>","start: <[4294967296]>",
                   "start: A\nA: <[1]>","start: A\nA: @child","start: A\nA: %json {}",
                   "start: item\nitem[lazy]: @child","start: <[1]>\n%ignore <[1]>"] {
-            assert!(parse_lark_document(s,LarkProfile::Llm).is_err(),"{s}");
+            assert!(parse_lark_document(s).is_err(),"{s}");
         }
     }
     #[test]
     fn same_rule_and_external_name_have_separate_coordinates() {
-        let doc=parse_lark_document("start: payload @payload\npayload: \"x\"",LarkProfile::Llm).unwrap();
+        let doc=parse_lark_document("start: payload @payload\npayload: \"x\"").unwrap();
         let grammar=doc.resolve_events(&HashMap::new());
         assert_eq!(grammar.rules[0].expr,GrammarExpr::Sequence(vec![GrammarExpr::Ref("$lark_rule_payload".into()),GrammarExpr::Ref("payload".into())]));
     }

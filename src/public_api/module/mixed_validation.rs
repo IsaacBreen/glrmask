@@ -196,7 +196,7 @@ fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -
         let mut module = node.kind.module();
         if precompiled.contains(&index) {
             module
-                .precompile_with(vocab, &CompileOptions::default().mask_strategy(PARSER_DWA))
+                .precompile_with(vocab, CompileOptions::default().mask_strategy(PARSER_DWA))
                 .unwrap_or_else(|error| {
                     panic!("{}: precompile node {index}: {error}", spec.name)
                 });

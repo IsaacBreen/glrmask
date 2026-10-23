@@ -77,7 +77,7 @@ pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
 pub use glrmask_vocab::{Token, ExactTokens, Vocab};
 pub use error::{Error, Result};
-pub use public_api::{Grammar, LarkOptions, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
+pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use public_api::{
@@ -91,7 +91,6 @@ pub use glrmask_grammar::__private::grammar::glrm::ExternalKind as ExternKind;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
-pub use glrmask_grammar::LarkProfile;
 
 /// A model token ID.
 pub type TokenId = u32;

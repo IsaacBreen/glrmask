@@ -1,47 +1,53 @@
-use glrmask::{BuildOptions,Constraint,Grammar,LarkOptions,MaskStrategy,PreparedGrammar,Token,Vocab};
+use glrmask::{BuildOptions,CompileOptions,Constraint,Grammar,MaskStrategy,Module,PreparedGrammar,Token,Vocab};
 const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || s.commit_token(id).is_err(){return false;}}s.is_accepting()}
 fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect())}
-fn llm(source:&str)->Grammar{Grammar::from_lark_with(source,LarkOptions::llm())}
+fn lark(source:&str)->Grammar{Grammar::from_lark(source)}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
     let v=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])],[5,7]);
     for (source,expected) in [("start: <[1,3,5-5]>",vec![1,3,5]),("start: <[^0,3]>",vec![1,5,7]),("start: <[*]>",vec![0,1,3,5,7])]{
         for mode in MODES{
-            let c=llm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([10])).unwrap();
+            let c=lark(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([10])).unwrap();
             assert_eq!((0..=10).filter(|&id|allowed(&c.start().mask(),id)).collect::<Vec<_>>(),expected,"{source} {mode:?}");
             for &id in &expected{assert!(accepts(&c,&[id]));}
             let loaded=Constraint::load(c.save()).unwrap();assert_eq!(loaded.start().mask(),c.start().mask());
         }
     }
-    assert!(llm("start: <[0-5]>").compile(&v).is_err());
-    assert!(Grammar::from_lark("start: <[1]>").compile(&v).is_err());
+    assert!(lark("start: <[0-5]>").compile(&v).is_err());
+    // Exact-token atoms are ordinary Lark syntax in the single dialect.
+    assert!(Grammar::from_lark("start: <[1]>").compile(&v).is_ok());
 }
 #[test]
 fn empty_event_set_is_not_epsilon() {
     let v=words(&["x","xx"]);
     for mode in MODES {
-        let c=llm("start: <[]> | \"x\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=lark("start: <[]> | \"x\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(!c.start().is_accepting());assert!(accepts(&c,&[0]));assert!(!accepts(&c,&[1]));
-        let c=llm("start: <[^0-1]> | \"x\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=lark("start: <[^0-1]> | \"x\"").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(!c.start().is_accepting());assert!(accepts(&c,&[0]));
     }
 }
 #[test]
-fn named_tokens_require_explicit_mapping_and_preserve_alias_identity() {
+fn named_tokens_are_token_externs_and_preserve_alias_identity() {
     let v=Vocab::new_with_exact_token_ids(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())],[4]);
-    assert!(llm("start: <|end|>").compile(&v).is_err());
+    let g=lark("start: <|end|>");
+    assert!(g.compile(&v).is_err());
+    let externs=g.externs();
+    assert_eq!(externs.len(),1);
+    assert_eq!(externs.get("end").unwrap().kind(),glrmask::ExternKind::Token);
     for mode in MODES {
-        let g=Grammar::from_lark_with("start: <|end|>",LarkOptions::llm().token("end",[1,4]));
-        let c=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let mut m=Module::new(&g);
+        m.bind("end",v.tokens([1,4]).unwrap()).unwrap();
+        let c=m.compile_with(&v,CompileOptions::default().mask_strategy(mode)).unwrap();
         assert!(!allowed(&c.start().mask(),0));assert!(allowed(&c.start().mask(),1));assert!(allowed(&c.start().mask(),4));
     }
 }
 #[test]
 fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
     let v=words(&["x","y","xy"]);
-    let g=llm("start: payload @payload\npayload: \"x\"");
+    let g=lark("start: payload @payload\npayload: \"x\"");
     assert_eq!(g.requirements().unwrap()[0].name(),"payload");
     let widened=g.bind_snapshot("payload",Token::new(0)).unwrap();
     for mode in MODES {
@@ -63,10 +69,10 @@ fn inline_json_is_equivalent_to_host_bound_isolated_schema() {
 start: "<" %json {"type":"string","const":"a b"} ">""#;
     let schema=r#"{"type":"string","const":"a b"}"#;
     let v=words(&["<",">","\"a b\"","<\"a b\">","< \"a b\" >","\"ab\"","<\"ab\">"]);
-    let host=llm("%ignore /[ ]+/\nstart: \"<\" @payload \">\"").bind_snapshot("payload",Grammar::from_json_schema(schema)).unwrap();
+    let host=lark("%ignore /[ ]+/\nstart: \"<\" @payload \">\"").bind_snapshot("payload",Grammar::from_json_schema(schema)).unwrap();
     for mode in MODES{
         let options=BuildOptions::default().optimization(mode);
-        let a=llm(source).compile_with_build_options(&v,options.clone()).unwrap();let b=host.compile_with_build_options(&v,options).unwrap();
+        let a=lark(source).compile_with_build_options(&v,options.clone()).unwrap();let b=host.compile_with_build_options(&v,options).unwrap();
         assert_eq!(a.start().mask(),b.start().mask());
         assert!(accepts(&a,&[3]));assert!(!accepts(&a,&[6]));
     }
@@ -75,13 +81,13 @@ start: "<" %json {"type":"string","const":"a b"} ">""#;
 fn lazy_regular_body_and_casefold_flags_have_exact_effects() {
     let v=words(&["a!","aa!","ABC","abc","a\nb"]);
     for mode in MODES{
-        let c=llm("start: word \"!\"\nword[lazy]: /a+/").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=lark("start: word \"!\"\nword[lazy]: /a+/").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(accepts(&c,&[0]));assert!(!accepts(&c,&[1]));
         let c=Grammar::from_lark("start: \"abc\"i | /a.b/s").compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         for id in [2,3,4]{assert!(accepts(&c,&[id]));}
     }
-    assert!(Grammar::from_lark("start[lazy]: /a+/").compile(&v).is_err());
-    assert!(llm("start: /a+?/").compile(&v).is_err());
+    assert!(Grammar::from_lark("start[lazy]: /a+/").compile(&v).is_ok());
+    assert!(lark("start: /a+?/").compile(&v).is_err());
 }
 
 #[test]

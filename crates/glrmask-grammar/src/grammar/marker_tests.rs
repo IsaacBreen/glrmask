@@ -64,12 +64,11 @@ fn markers_reject_invalid_ids_and_byte_terminal_contexts() {
 }
 
 #[test]
-fn ebnf_and_explicit_llm_lark_support_the_same_marker_atom() {
+fn ebnf_and_lark_support_the_same_marker_atom() {
     let ebnf = crate::parse_ebnf_to_named("root ::= @mark(7) \"a\" @mark(8)").unwrap();
     let flat = ast::lower(&ebnf).unwrap();
     assert_eq!(flat.terminals.iter().filter(|t| matches!(t, Terminal::MarkerProbe { .. })).count(), 2);
     let lark = "start: @mark(7) \"a\" @mark(8)";
-    assert!(crate::parse_lark_document(lark, crate::LarkProfile::default()).is_err());
-    let document = crate::parse_lark_document(lark, crate::LarkProfile::Llm).unwrap();
+    let document = crate::parse_lark_document(lark).unwrap();
     assert!(document.events.is_empty(), "markers must never declare vocabulary events");
 }

@@ -45,9 +45,11 @@
   `Auto`/`ParserDwa`/`TokenTrie`, and C/C++
   `..._AUTO`/`..._PARSER_DWA`/`..._TOKEN_TRIE`, with the
   fast-build/fast-runtime aliases retained.
-- `Externs` and `Extern` (`name`, `kind`, `span`) describe a module's declared
-  externs, with an `unbound()` view. `CompileOptions` carries `end_tokens`,
-  applied only to the root, alongside the two strategies.
+- `Grammar::externs` describes a source's declared externs and `Module::externs`
+  a module's, both in declaration order with an `unbound()` view. `Extern`
+  carries `name` and `kind`; source spans are no longer exposed. `CompileOptions`
+  carries `end_tokens`, applied only to the root, alongside the two strategies,
+  and applies to `Grammar::compile` as well as module compiles.
 - Saved modules preserve cold, open, partly compiled and mixed graphs,
   including exact vocabulary identity, bindings and retained work.
 - `Expr.choice`, `Expr.sequence` and `Expr.literal` compose grammars without
@@ -62,6 +64,12 @@
 - Grammar language: `extern` declarations are only allowed at the top level,
   inline grammars cannot refer to outer names, `use`, `export`, `import` and
   `super` are reserved, and `::` is invalid in extern names.
+- `Grammar` owns its source text and has no lifetime. Each format has one
+  constructor taking `impl AsRef<str>`; the `from_*_owned` constructors are gone.
+- The Lark frontend has one dialect: the exact-token, named-token, `@name`,
+  `%json` and `[lazy]` extensions are always available. `LarkOptions` and
+  `LarkProfile` are removed. A named token atom `<|name|>` declares a token
+  extern, bound like a GLRM token extern with `Module::bind(name, token_set)`.
 - Removed: `PreparedGrammar`, `link`, `requirements`, `Grammar::bind`,
   `Grammar::exact`, `Optimization`, `BoundaryTriggerDetail`, `UnboundExtern`,
   `with_options`/`set_options`, and Python `clone()`.

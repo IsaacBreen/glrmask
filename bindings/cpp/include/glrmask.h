@@ -78,11 +78,6 @@ enum {
     GLRMASK_JSON_SCHEMA=2,  ///< JSON Schema document.
     GLRMASK_LARK=3          ///< Lark source.
 };
-/// Lark dialects.
-enum {
-    GLRMASK_LARK_RECOGNITION=0,  ///< Standard Lark recognition.
-    GLRMASK_LARK_LLM=1           ///< Lark plus GLRMask's LLM extensions.
-};
 /// Extern slot kinds.
 enum {
     GLRMASK_EXTERN_TOKEN=0,    ///< A token-level slot.
@@ -113,16 +108,10 @@ typedef struct {
     uint32_t mask_strategy;          ///< GLRMASK_MASK_STRATEGY_* value; 0 selects Auto.
     uint32_t boundary_mask_strategy; ///< GLRMASK_BOUNDARY_MASK_STRATEGY_* value; 0 selects Auto.
 } glrmask_compile_options;
-/// One named Lark token atom mapped to original model token IDs.
-typedef struct { const char *name; size_t name_len; const uint32_t *ids; size_t ids_len; } glrmask_lark_token;
-/// Lark options. Set struct_size to sizeof(glrmask_lark_options).
-typedef struct { size_t struct_size; uint32_t profile; const glrmask_lark_token *tokens; size_t tokens_len; } glrmask_lark_options;
 /// A declared extern slot.
 typedef struct {
     const char *name; size_t name_len;  ///< Declared name (borrowed).
     uint32_t kind;                      ///< GLRMASK_EXTERN_TOKEN or GLRMASK_EXTERN_GRAMMAR.
-    uint32_t has_source_span;           ///< Nonzero when the span fields are valid.
-    uint64_t start_byte, end_byte, line, column;  ///< Half-open byte range and one-based line/scalar column.
 } glrmask_extern;
 /// A possible boundary observation.
 typedef struct { uint32_t id; uint64_t byte_offset; } glrmask_marker_event;
@@ -137,8 +126,6 @@ GLRMASK_API const char *glrmask_version(void);
 GLRMASK_API const char *glrmask_error_message(void);
 /// Root compile options with no end tokens and automatic strategies.
 GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
-/// Lark options using the recognition profile.
-GLRMASK_API glrmask_lark_options glrmask_default_lark_options(void);
 
 /// Creates a vocabulary from byte entries plus exact-only token IDs.
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry*,size_t,const uint32_t*,size_t,glrmask_vocab**);
@@ -164,12 +151,14 @@ GLRMASK_API glrmask_status glrmask_exact_tokens_ids(const glrmask_exact_tokens*,
 /// Copies normalized inclusive ranges. NULL output/capacity zero queries the count without expanding IDs.
 GLRMASK_API glrmask_status glrmask_exact_tokens_ranges(const glrmask_exact_tokens*,glrmask_token_range*,size_t,size_t*);
 
-/// Parses a grammar in the given format; lark_options is used only for GLRMASK_LARK.
-GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t,const char*,size_t,const glrmask_lark_options*,glrmask_grammar**);
+/// Parses a grammar in the given format.
+GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t,const char*,size_t,glrmask_grammar**);
 /// Clones a grammar handle.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar*,glrmask_grammar**);
 /// Frees a grammar handle.
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar*);
+/// Returns an owning view of the grammar's declared externs.
+GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar*,glrmask_externs**);
 /// Compiles a grammar against a vocabulary with root options.
 GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
 /// Precompiles a grammar against a vocabulary and returns a module; options may be NULL for defaults.

@@ -160,7 +160,7 @@ impl PyExactTokens {
 }
 
 #[derive(Clone, Copy)]
-enum SourceKind { Ebnf, Glrm, JsonSchema }
+enum SourceKind { Ebnf, Glrm, JsonSchema, Lark }
 
 /// Reusable source grammar without compilation settings or bindings.
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
@@ -175,6 +175,7 @@ impl PyGrammar {
             SourceKind::Ebnf => glrmask::Grammar::from_ebnf(source),
             SourceKind::Glrm => glrmask::Grammar::from_glrm(source),
             SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(source),
+            SourceKind::Lark => glrmask::Grammar::from_lark(source),
         };
         Self { inner }
     }
@@ -224,32 +225,19 @@ impl PyGrammar {
         Ok(Self::new(source, SourceKind::JsonSchema))
     }
 
-    /// The default `recognition` profile and the `llm` extension profile differ in accepted syntax. Named token atoms require explicit `token_names` mappings.
+    /// Named token atoms declare token externs; bind each through `Module.bind`.
     #[staticmethod]
-    #[pyo3(signature = (source, *, profile = "recognition", token_names = None))]
-    fn from_lark(
-        source: String,
-        profile: &str,
-        token_names: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let mut options = match profile {
-            "recognition" => glrmask::LarkOptions::default(),
-            "llm" => glrmask::LarkOptions::llm(),
-            _ => return Err(PyValueError::new_err("Lark profile must be 'recognition' or 'llm'")),
-        };
-        if let Some(names) = token_names {
-            for (name, value) in names.iter() {
-                let name: String = name.extract()?;
-                let ids = match value.extract::<u32>() {
-                    Ok(id) => vec![id],
-                    Err(_) => value.extract::<Vec<u32>>()?,
-                };
-                options = options.token(name, ids);
-            }
-        }
-        Ok(Self {
-            inner: glrmask::Grammar::from_lark_with(source, options),
-        })
+    fn from_lark(source: String) -> Self {
+        Self::new(source, SourceKind::Lark)
+    }
+
+    /// The grammar's declared externs, in declaration order.
+    #[getter]
+    fn externs(&self) -> PyResult<canonical::PyExterns> {
+        let inner = self.inner.clone();
+        let all: Vec<canonical::PyExtern> = inner.externs().iter().map(canonical::PyExtern::from).collect();
+        let unbound: Vec<canonical::PyExtern> = inner.externs().unbound().iter().map(canonical::PyExtern::from).collect();
+        Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
     /// Compile this grammar against the target vocabulary. Sugar for `Module(self, mask_strategy=..., boundary_mask_strategy=...).compile(vocab, end_tokens=...)`.
@@ -303,7 +291,7 @@ impl PyGrammar {
         let module = py
             .detach(move || {
                 let mut module = glrmask::Module::new(&grammar);
-                module.precompile_with(&vocab, &options)?;
+                module.precompile_with(&vocab, options)?;
                 Ok::<_, glrmask::Error>(module)
             })
             .map_err(api_error)?;

@@ -6,7 +6,7 @@ use module_api::NativeModule;
 use glrmask_binding_core::{self as core, glrmask as g};
 use napi::{bindgen_prelude::*, Env, Task, Unknown};
 use napi_derive::napi;
-use std::{collections::BTreeMap, ops::{Deref, DerefMut}, sync::{Arc, Mutex, MutexGuard}};
+use std::{ops::{Deref, DerefMut}, sync::{Arc, Mutex, MutexGuard}};
 
 fn error(e: core::Error) -> napi::Error {
     let code = match e.kind {
@@ -50,7 +50,6 @@ pub struct NativeRange { pub start: f64, pub end: f64 }
 pub struct NativeExtern {
     pub name: String,
     pub kind: String,
-    pub source_span: Option<Vec<f64>>,
 }
 
 pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec<NativeExtern> {
@@ -63,7 +62,6 @@ pub fn externs_to_native<'a>(values: impl IntoIterator<Item = g::Extern>) -> Vec
         NativeExtern {
             name: e.name().to_string(),
             kind: kind.into(),
-            source_span: e.span().map(|s| vec![s.start as f64, s.end as f64, s.line as f64, s.column as f64]),
         }
     }).collect()
 }
@@ -140,21 +138,13 @@ pub struct NativeGrammar { inner: Handle<g::Grammar> }
 #[napi]
 impl NativeGrammar {
     #[napi(factory)]
-    pub fn from_source(format: String, source: String, profile: Option<String>, token_names: Option<BTreeMap<String, Vec<f64>>>) -> napi::Result<Self> {
+    pub fn from_source(format: String, source: String) -> napi::Result<Self> {
         call(|| {
             let grammar = match format.as_str() {
                 "ebnf" => g::Grammar::from_ebnf(source),
                 "glrm" => g::Grammar::from_glrm(source),
                 "json-schema" => g::Grammar::from_json_schema(source),
-                "lark" => {
-                    let mut o = match profile.as_deref().unwrap_or("recognition") {
-                        "recognition" => g::LarkOptions::default(),
-                        "llm" => g::LarkOptions::llm(),
-                        _ => return Err(core::Error::invalid("Lark profile must be recognition or llm")),
-                    };
-                    for (name, values) in token_names.unwrap_or_default() { o = o.token(name, ids(values)?); }
-                    g::Grammar::from_lark_with(source, o)
-                }
+                "lark" => g::Grammar::from_lark(source),
                 _ => return Err(core::Error::invalid("unknown grammar source format")),
             }; Ok(Self { inner: Handle::new(grammar) })
         })
@@ -163,6 +153,10 @@ impl NativeGrammar {
     pub fn clone(&self) -> napi::Result<Self> { call(|| Ok(Self { inner: Handle::new(live(&self.inner)?.clone()) })) }
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
+    #[napi]
+    pub fn externs(&self) -> napi::Result<Vec<NativeExtern>> {
+        call(|| Ok(externs_to_native(live(&self.inner)?.externs().iter())))
+    }
     #[napi]
     pub fn compile_sync(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
         call(|| {
@@ -182,7 +176,7 @@ impl NativeGrammar {
     pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeModule> {
         call(|| {
             let mut m = g::Module::new(&*live(&self.inner)?);
-            m.precompile_with(&*live(&vocab.inner)?, &grammar_compile_options(Vec::new(), mode, boundary)?)?;
+            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(Vec::new(), mode, boundary)?)?;
             Ok(NativeModule::new(m))
         })
     }
@@ -269,7 +263,7 @@ pub struct GrammarPrecompileTask { module: g::Module, vocab: g::Vocab, options: 
 impl Task for GrammarPrecompileTask {
     type Output = g::Module;
     type JsValue = NativeModule;
-    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, &self.options)?; Ok(self.module.clone()) }) }
+    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, self.options.clone())?; Ok(self.module.clone()) }) }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeModule::new(value)) }
 }
 

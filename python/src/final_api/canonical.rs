@@ -2,13 +2,12 @@
 use super::*;
 use pyo3::exceptions::{PyKeyError, PyTypeError, PyValueError};
 
-/// One declared extern contract on a Module.
+/// One declared extern contract on a Grammar or Module.
 #[pyclass(name = "Extern", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PyExtern {
     pub(super) name: String,
     pub(super) kind: String,
-    pub(super) span: Option<(usize, usize, usize, usize)>,
 }
 
 #[pymethods]
@@ -23,16 +22,8 @@ impl PyExtern {
         &self.kind
     }
 
-    #[getter]
-    fn span(&self) -> Option<(usize, usize, usize, usize)> {
-        self.span
-    }
-
     fn __repr__(&self) -> String {
-        format!(
-            "Extern(name={:?}, kind={:?}, span={:?})",
-            self.name, self.kind, self.span
-        )
+        format!("Extern(name={:?}, kind={:?})", self.name, self.kind)
     }
 
     fn __eq__(&self, other: &Self) -> bool {
@@ -47,11 +38,9 @@ impl From<glrmask::Extern> for PyExtern {
             glrmask::ExternalKind::Grammar => "grammar".to_string(),
             _ => "grammar".to_string(),
         };
-        let span = e.span().map(|s| (s.start, s.end, s.line, s.column));
         Self {
             name: e.name().to_string(),
             kind,
-            span,
         }
     }
 }
@@ -424,7 +413,7 @@ impl PyModule {
         let mut next = target.snapshot();
         let next = py
             .detach(move || {
-                next.precompile_with(&vocab, &options)?;
+                next.precompile_with(&vocab, options)?;
                 Ok::<_, glrmask::Error>(next)
             })
             .map_err(api_error)?;
@@ -454,7 +443,6 @@ impl PyModule {
     #[getter]
     fn externs(slf: &Bound<'_, Self>) -> PyResult<PyExterns> {
         let snapshot = slf.borrow().snapshot();
-        snapshot.check_source().map_err(api_error)?;
         let all_externs: Vec<PyExtern> = snapshot.externs().iter().map(PyExtern::from).collect();
         let unbound_externs: Vec<PyExtern> = snapshot
             .externs()

@@ -167,16 +167,14 @@ def test_repeated_and_sparse_ids_are_deduplicated_without_id_sized_storage(mode)
     s.commit_token(1); assert events(s) == [(7, 1), (7, 2)]
 
 
-def test_lark_profile_is_explicit_and_ebnf_uses_the_same_marker_api():
+def test_lark_and_ebnf_use_the_same_marker_api():
     v = glrmask.Vocab.from_dict({b"a": 0})
     grammars = [glrmask.Grammar.from_ebnf('start ::= @mark(1) "a" @mark(2)'),
-                glrmask.Grammar.from_lark('start: @mark(1) "a" @mark(2)', profile="llm")]
+                glrmask.Grammar.from_lark('start: @mark(1) "a" @mark(2)')]
     for grammar in grammars:
         s = grammar.compile(v).start()
         assert events(s) == [(1, 0)]
         s.commit_token(0); assert events(s) == [(2, 1)]
-    with pytest.raises(ValueError):
-        glrmask.Grammar.from_lark('start: @mark(1) "a"').compile(v)
 
 
 @pytest.mark.parametrize("mode", MODES)

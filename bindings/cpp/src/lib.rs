@@ -20,23 +20,15 @@ pub struct glrmask_events(Vec<glrmask_marker_event>);
 pub struct glrmask_extern_item {
     pub name: String,
     pub kind: g::ExternKind,
-    pub span: Option<g::SourceSpan>,
 }
 pub struct glrmask_externs(Vec<glrmask_extern_item>);
 
 #[repr(C)] pub struct glrmask_vocab_entry { pub id: u32, pub bytes: *const u8, pub bytes_len: usize }
 #[repr(C)] #[derive(Clone, Copy)] pub struct glrmask_token_range { pub first: u32, pub last: u32 }
-#[repr(C)] pub struct glrmask_lark_token { pub name: *const c_char, pub name_len: usize, pub ids: *const u32, pub ids_len: usize }
-#[repr(C)] pub struct glrmask_lark_options { pub struct_size: usize, pub profile: u32, pub tokens: *const glrmask_lark_token, pub tokens_len: usize }
 #[repr(C)] pub struct glrmask_extern {
     pub name: *const c_char,
     pub name_len: usize,
     pub kind: u32,
-    pub has_source_span: u32,
-    pub start_byte: u64,
-    pub end_byte: u64,
-    pub line: u64,
-    pub column: u64,
 }
 #[repr(C)] pub struct glrmask_marker_event { pub id: u32, pub byte_offset: u64 }
 
@@ -77,30 +69,9 @@ unsafe fn produce<T>(out: *mut *mut T, f: impl FnOnce() -> Result<T>) -> Result<
     *out = Box::into_raw(Box::new(f()?)); Ok(())
 }
 
-unsafe fn lark_options(p: *const glrmask_lark_options) -> Result<g::LarkOptions> {
-    if p.is_null() { return Ok(g::LarkOptions::default()); }
-    let o = unsafe { read(p)? };
-    if o.struct_size != size_of::<glrmask_lark_options>() { return Err(Error::invalid("lark-options struct_size does not match ABI")); }
-    let mut result = match o.profile {
-        0 => g::LarkOptions::default(),
-        1 => g::LarkOptions::llm(),
-        _ => return Err(Error::invalid("unknown Lark profile")),
-    };
-    let mut names = std::collections::BTreeSet::new();
-    for t in unsafe { input(o.tokens, o.tokens_len)? } {
-        let name = unsafe { text(t.name, t.name_len)? }.to_owned();
-        if !names.insert(name.clone()) { return Err(Error::invalid("duplicate named Lark token")); }
-        result = result.token(name, unsafe { input(t.ids, t.ids_len)? }.iter().copied());
-    }
-    Ok(result)
-}
-
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_abi_version() -> u32 { 1 }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_version() -> *const c_char { concat!(env!("CARGO_PKG_VERSION"), "\0").as_ptr().cast() }
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_error_message() -> *const c_char { LAST_ERROR.with(|s| s.borrow().as_ref().map_or(c"".as_ptr(), |s| s.as_ptr())) }
-#[unsafe(no_mangle)] pub extern "C" fn glrmask_default_lark_options() -> glrmask_lark_options {
-    glrmask_lark_options { struct_size: size_of::<glrmask_lark_options>(), profile: 0, tokens: ptr::null(), tokens_len: 0 }
-}
 
 macro_rules! free {($name:ident,$ty:ty)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $name(p:*mut $ty) {
@@ -162,17 +133,26 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format: u32, source: *const c_char, n: usize, lark: *const glrmask_lark_options, out: *mut *mut glrmask_grammar) -> i32 {
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_source(format: u32, source: *const c_char, n: usize, out: *mut *mut glrmask_grammar) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let source = text(source, n)?.to_owned();
         let grammar = match format {
             0 => g::Grammar::from_ebnf(source),
             1 => g::Grammar::from_glrm(source),
             2 => g::Grammar::from_json_schema(source),
-            3 => g::Grammar::from_lark_with(source, lark_options(lark)?),
+            3 => g::Grammar::from_lark(source),
             _ => return Err(Error::invalid("unknown source format")),
         }; Ok(glrmask_grammar(grammar))
     }) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
+    ffi(|| unsafe {
+        let view = read(p)?.0.externs();
+        produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
+            name: e.name().to_string(),
+            kind: e.kind(),
+        }).collect())))
+    })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_compile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {
     ffi(|| unsafe { produce(out, || {
@@ -248,7 +228,7 @@ data!(glrmask_events_data, glrmask_events, glrmask_marker_event);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_externs_get(p: *const glrmask_externs, index: usize, out: *mut glrmask_extern) -> i32 {
     ffi(|| unsafe {
         let item = read(p)?.0.get(index).ok_or_else(|| Error::invalid("extern index out of range"))?;
-        let mut value = glrmask_extern {
+        *write(out)? = glrmask_extern {
             name: item.name.as_ptr().cast(),
             name_len: item.name.len(),
             kind: match item.kind {
@@ -256,20 +236,8 @@ data!(glrmask_events_data, glrmask_events, glrmask_marker_event);
                 g::ExternKind::Grammar => 1,
                 _ => 1,
             },
-            has_source_span: 0,
-            start_byte: 0,
-            end_byte: 0,
-            line: 0,
-            column: 0,
         };
-        if let Some(span) = item.span {
-            value.has_source_span = 1;
-            value.start_byte = span.start as u64;
-            value.end_byte = span.end as u64;
-            value.line = span.line as u64;
-            value.column = span.column as u64;
-        }
-        *write(out)? = value; Ok(())
+        Ok(())
     })
 }
 

@@ -15208,7 +15208,7 @@ mod dense_internal_token_mask_tests {
 mod boundary_token_trie_tests {
     use super::*;
     use crate::__private::VocabExt as _;
-    use crate::{BuildOptions, Grammar, LarkOptions, MaskStrategy, Vocab};
+    use crate::{BuildOptions, Grammar, MaskStrategy, Vocab};
 
     fn vocab() -> Vocab {
         let entries = [
@@ -15297,12 +15297,11 @@ mod boundary_token_trie_tests {
             .into();
         assert_matches_reference(&mut plain, "plain");
 
-        let mut ignored = Grammar::from_lark_with(
+        let mut ignored = Grammar::from_lark(
             r#"start: "a" "b"
 %ignore WS
 WS: /[ \t]+/
 "#,
-            LarkOptions::default(),
         )
         .compile_with_build_options(
             &vocab,

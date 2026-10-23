@@ -82,7 +82,7 @@ mod depth_tests {
         let native=format!("start root nt root={}\"x\"{}","(".repeat(1024),")".repeat(1024));
         let lark=format!("start: {}\"x\"{}","(".repeat(1024),")".repeat(1024));
         assert!(crate::grammar::glrm::ParsedComponent::parse_glrm(&native).unwrap_err().to_string().contains("nesting"));
-        assert!(crate::parse_lark_document(&lark,crate::LarkProfile::Recognition).unwrap_err().to_string().contains("nesting"));
+        assert!(crate::parse_lark_document(&lark).unwrap_err().to_string().contains("nesting"));
         let mut scope=String::from("start root nt root=\"x\"");
         for _ in 0..80 {scope=format!("start root grammar child {{ {scope} }} nt root=child");}
         assert!(crate::grammar::glrm::ParsedComponent::parse_glrm(&scope).unwrap_err().to_string().contains("nesting"));

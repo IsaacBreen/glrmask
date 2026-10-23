@@ -84,7 +84,6 @@ def test_externs_mapping_semantics():
     a = externs["A"]
     assert a.name == "A"
     assert a.kind == "token"
-    assert a.span is not None
 
     b = externs["B"]
     assert b.name == "B"

@@ -1,13 +1,15 @@
-# Lark recognition and LLM compatibility profiles
+# Lark dialect
 
 The Lark frontend lowers into GLRMask's shared component, lexical and exact-event
 representation. It does not have a separate masking engine or translate through
 GLRM text. It is a documented recognition dialect, not complete emulation of
 Python Lark, every lexer mode, or every llguidance/XGrammar extension.
 
-## Profiles
+## One dialect
 
-The public default is `recognition`:
+There is a single dialect. Standard recognition syntax and GLRMask's extensions
+share it; the extensions are additional syntax that standard Lark rejects, so a
+standard grammar parses to the same result either way.
 
 ```python
 import glrmask
@@ -19,21 +21,17 @@ start: "[" INT ("," INT)* "]"
 ''')
 ```
 
-Enable selected LLM extensions explicitly with `profile="llm"`. In Rust, use
-`Grammar::from_lark_with(source, LarkOptions::llm())`; a caller-supplied named-token
-map can be added with `LarkOptions::token(name, ids)`.
-
-| Feature | Recognition | LLM profile |
-|---|---|---|
-| Rules, terminals, literals, grouping, regular expressions, repetition | Yes | Yes |
-| Curated `%import common`, aliases and grouped imports | Yes | Yes |
-| Local `%ignore` with separate ignored-terminal identities | Yes | Yes |
-| Regular-body `[lazy]` | No | Yes |
-| Exact ID `<[123]>`, sets/ranges `<[1,3-8]>` | No | Yes |
-| Complement `<[^1,3-8]>`, wildcard `<[*]>` | No | Yes |
-| Explicitly resolved named special token `<|name|>` | No | Yes |
-| Host-bound grammar `@name` | No | Yes |
-| Isolated inline JSON Schema `%json { ... }` | No | Yes |
+| Feature | Supported |
+|---|---|
+| Rules, terminals, literals, grouping, regular expressions, repetition | Yes |
+| Curated `%import common`, aliases and grouped imports | Yes |
+| Local `%ignore` with separate ignored-terminal identities | Yes |
+| Regular-body `[lazy]` | Yes |
+| Exact ID `<[123]>`, sets/ranges `<[1,3-8]>` | Yes |
+| Complement `<[^1,3-8]>`, wildcard `<[*]>` | Yes |
+| Named special token `<|name|>` | Yes, as a token extern |
+| Host-bound grammar `@name` | Yes |
+| Isolated inline JSON Schema `%json { ... }` | Yes |
 
 ## Ordinary Lark support and explicit limits
 
@@ -67,7 +65,7 @@ endpoints; identical source notation is not a promise of identical segmentation.
 
 ## Whole-terminal shortest matching
 
-Select `profile="llm"` to use the nonstandard `[lazy]` annotation:
+Use the nonstandard `[lazy]` annotation for whole-terminal shortest matching:
 
 ```lark
 start: text "!"
@@ -90,12 +88,10 @@ Anchors, lookaround, backreferences and unsupported flags also fail explicitly.
 
 ```python
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"x", 4: b"", 5: b""})
-grammar = glrmask.Grammar.from_lark(
-    'start: <|begin|> <[^0-1]>',
-    profile="llm",
-    token_names={"begin": 1},
-)
-constraint = grammar.compile(vocab)
+grammar = glrmask.Grammar.from_lark('start: <|begin|> <[^0-1]>')
+module = glrmask.Module(grammar)
+module.bind("begin", vocab.tokens([1]))
+constraint = module.compile(vocab)
 state = constraint.start()
 assert not state.mask()[0] and state.mask()[1]
 state.commit_token(1)
@@ -109,7 +105,7 @@ not just IDs with nonempty text. Unknown positive IDs and ranges crossing undefi
 holes are errors. An empty resulting set is the empty language, not epsilon.
 The final root's separate end-token policy can reserve IDs from ordinary content.
 
-Named specials use only the caller's explicit map; no model-name heuristics,
+Named specials are token externs bound by the caller; no model-name heuristics,
 metadata guessing, decoded-spelling fallback or arbitrary alias choice occurs.
 Different frameworks can use the same notation but different name-resolution rules.
 
@@ -121,9 +117,7 @@ when the grammar permits both.
 ## Grammar and schema composition
 
 ```python
-grammar = glrmask.Grammar.from_lark(
-    'start: "<" @payload ">"', profile="llm",
-)
+grammar = glrmask.Grammar.from_lark('start: "<" @payload ">"')
 child = glrmask.Grammar.from_json_schema({"type": "null"})
 composed = glrmask.Module(grammar)
 composed.bind("payload", child)
@@ -148,8 +142,8 @@ Native GLRM intentionally has no `%json`, numeric-event or named-special literal
 
 ## Deliberately excluded features
 
-Neither profile supports capture annotations, parse-tree production, substring
+The dialect does not support capture annotations, parse-tree production, substring
 matching/generation, temperature, token or character/byte budgets, priorities, or
 special stop/suffix backtracking and capture-hiding controls. Unsupported semantic
-attributes are errors. A selected compatibility profile is not blanket permission
-to accept and ignore the rest of a foreign grammar dialect.
+attributes are errors. The extensions are not permission to accept and ignore the
+rest of a foreign grammar dialect.

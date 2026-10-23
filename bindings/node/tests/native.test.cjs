@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,Token,Grammar,Module,Constraint,ConstraintState,ExactTokens,MaskStrategy,BoundaryMaskStrategy,LarkProfile,GlrMaskError,version}=require('../index.cjs');
+const {Vocab,Token,Grammar,Module,Constraint,ConstraintState,ExactTokens,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[MaskStrategy.Auto, MaskStrategy.ParserDwa, MaskStrategy.TokenTrie, MaskStrategy.TokenClassTrie];
 const b=s=>Buffer.from(s);
@@ -104,8 +104,8 @@ test('an active JS timer continues during native compilation',{timeout:60000},as
 
 test('frontends and input validation preserve the public contracts',async()=>{
   const v=vocab();
-  for(const profile of Object.values(LarkProfile)) {
-    const c=await Grammar.fromLark('start: "a" "b"',{profile}).compile(v);const s=c.start();s.commitToken(31);assert.ok(s.isAccepting());
+  {
+    const c=await Grammar.fromLark('start: "a" "b"').compile(v);const s=c.start();s.commitToken(31);assert.ok(s.isAccepting());
   }
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
@@ -122,7 +122,6 @@ test('frontends and input validation preserve the public contracts',async()=>{
   await assert.rejects(simple().compile(v,{endTokens:[-1]}),RangeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
-  assert.throws(()=>Grammar.fromLark('start: "a"',{profile:'other'}),TypeError);
   await assert.rejects(Grammar.fromEbnf('this is not a grammar').compile(v));
 });
 
@@ -164,9 +163,13 @@ test('ESM and CommonJS share constructor identities',async()=>{
 test('named Lark special tokens use explicit mappings, not byte aliases',async()=>{
   const v=new Vocab([[0,b('a')],[1,b('a')]],{exactOnlyIds:[99]});
   for(const maskStrategy of strategies) {
-    const g=Grammar.fromLark('start: <|begin|> <|body|>',{profile:LarkProfile.Llm,tokenNames:{begin:99,body:[1]}});
-    const s=(await g.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));s.commitToken(99);
+    const g=Grammar.fromLark('start: <|begin|> <|body|>');
+    const m=new Module(g);
+    m.bind('begin',v.tokens([99]));m.bind('body',v.tokens([1]));
+    const s=(await m.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));s.commitToken(99);
     assert.ok(allowed(s.mask(),1));assert.ok(!allowed(s.mask(),0));s.commitToken(1);assert.ok(s.isAccepting());
+    assert.deepEqual(Array.from(g.externs.keys()),['begin','body']);
+    assert.equal(g.externs.get('begin').kind,'token');
   }
-  await assert.rejects(Grammar.fromLark('start: <|missing|>',{profile:LarkProfile.Llm}).compile(v));
+  await assert.rejects(Grammar.fromLark('start: <|missing|>').compile(v));
 });

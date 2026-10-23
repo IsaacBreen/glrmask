@@ -53,13 +53,6 @@ enum class BoundaryMaskStrategy : std::uint32_t {
     FastRuntime = ParserDwa
 };
 
-/// Lark dialect: recognition syntax or LLM extensions.
-enum class LarkProfile : std::uint32_t {
-    /// Standard Lark recognition.
-    Recognition = 0,
-    /// Lark plus GLRMask's LLM extensions.
-    Llm = 1
-};
 /// The kind of an extern slot.
 enum class ExternKind {
     /// A token-level slot.
@@ -84,26 +77,12 @@ struct Token {
     TokenId id;
     explicit Token(TokenId value) : id(value) {}
 };
-/// A half-open byte range in the original document, with a one-based line and column.
-struct SourceSpan {
-    /// Inclusive start byte offset.
-    std::uint64_t start_byte;
-    /// Exclusive end byte offset.
-    std::uint64_t end_byte;
-    /// One-based line of `start_byte`.
-    std::uint64_t line;
-    /// One-based Unicode-scalar column of `start_byte`.
-    std::uint64_t column;
-};
-
 /// A declared extern slot.
 struct Extern {
     /// The declared name.
     std::string name;
     /// The declared kind: token or grammar.
     ExternKind kind;
-    /// Source span of the declaration, when the frontend can locate it.
-    std::optional<SourceSpan> span;
 };
 
 /// A snapshot view of declared externs, in declaration order.
@@ -194,14 +173,6 @@ struct VocabEntry {
     VocabEntry(TokenId id_, std::string_view bytes_) : id(id_), bytes(bytes_.begin(), bytes_.end()) {}
 };
 
-/// Lark source options.
-struct LarkOptions {
-    /// Dialect: `Recognition` (default) or `Llm`.
-    LarkProfile profile = LarkProfile::Recognition;
-    /// Named token atoms mapped to original model token IDs.
-    std::map<std::string, std::vector<TokenId>> token_names;
-};
-
 namespace detail {
 inline void check(glrmask_status status) {
     if (status != GLRMASK_OK) throw Error(status, glrmask_error_message());
@@ -245,7 +216,6 @@ inline std::vector<Extern> take_externs(glrmask_externs* raw) {
         glrmask_extern value{}; check(glrmask_externs_get(raw, i, &value));
         Extern e; e.name.assign(value.name, value.name_len);
         e.kind = value.kind == GLRMASK_EXTERN_TOKEN ? ExternKind::Token : ExternKind::Grammar;
-        if (value.has_source_span) e.span = SourceSpan{value.start_byte, value.end_byte, value.line, value.column};
         result.push_back(std::move(e));
     }
     return result;
@@ -308,8 +278,8 @@ public:
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
-    static Grammar source(std::uint32_t format, std::string_view text, const glrmask_lark_options* options = nullptr) {
-        glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), options, &p)); return Grammar(p);
+    static Grammar source(std::uint32_t format, std::string_view text) {
+        glrmask_grammar* p = nullptr; detail::check(glrmask_grammar_from_source(format, text.data(), text.size(), &p)); return Grammar(p);
     }
 public:
     /// Creates a grammar from EBNF source text.
@@ -318,12 +288,13 @@ public:
     static Grammar from_glrm(std::string_view text) { return source(GLRMASK_GLRM, text); }
     /// Creates a grammar from a JSON Schema document.
     static Grammar from_json_schema(std::string_view text) { return source(GLRMASK_JSON_SCHEMA, text); }
-    /// Creates a grammar from Lark source with explicit options.
-    static Grammar from_lark(std::string_view text, const LarkOptions& options = {}) {
-        std::vector<glrmask_lark_token> names;
-        for (const auto& entry : options.token_names) names.push_back({entry.first.data(), entry.first.size(), entry.second.data(), entry.second.size()});
-        const glrmask_lark_options native{sizeof(glrmask_lark_options), static_cast<std::uint32_t>(options.profile), names.data(), names.size()};
-        return source(GLRMASK_LARK, text, &native);
+    /// Creates a grammar from Lark source; named token atoms declare token externs.
+    static Grammar from_lark(std::string_view text) { return source(GLRMASK_LARK, text); }
+    /// A snapshot view of the grammar's declared externs, in declaration order.
+    Externs externs() const {
+        glrmask_externs* p = nullptr;
+        detail::check(glrmask_grammar_externs(native_handle(), &p));
+        return Externs(detail::take_externs(p));
     }
     /// Compiles the grammar against `vocab`.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;

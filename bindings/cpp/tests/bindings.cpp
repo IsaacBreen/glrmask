@@ -174,9 +174,11 @@ void markers_and_frontends() {
         auto l = lm.compile(v, strategy_options(i)).start(); l.commit_token(31); CHECK(l.is_accepting());
     }
     Vocab special({{0,"a"},{1,"a"}}, {99});
-    LarkOptions named; named.profile = LarkProfile::Llm; named.token_names = {{"begin",{99}},{"body",{1}}};
     for (unsigned i=0; i<4; ++i) {
-        auto m = Module(Grammar::from_lark("start: <|begin|> <|body|>", named));
+        auto g = Grammar::from_lark("start: <|begin|> <|body|>");
+        auto m = Module(g);
+        m.bind("begin", special.tokens({99}));
+        m.bind("body", special.tokens({1}));
         auto state = m.compile(special, strategy_options(i)).start();
         CHECK(allowed(state.mask(),99)); state.commit_token(99);
         CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); state.commit_token(1); CHECK(state.is_accepting());
@@ -192,7 +194,7 @@ void threads_and_errors() {
     for (auto& thread : threads) thread.join(); CHECK(okay);
     std::size_t ignored = 0; CHECK(glrmask_vocab_len(nullptr, &ignored)==GLRMASK_INVALID_ARGUMENT);
     const std::string main_error = glrmask_error_message();
-    std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, nullptr, &p); }); other.join();
+    std::thread other([]{ glrmask_grammar* p = nullptr; const char invalid[] = {char(0xff)}; glrmask_grammar_from_source(0, invalid, 1, &p); }); other.join();
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_ARGUMENT);
     throws([&]{ Vocab overlap({{0,"a"}}, {0}); }, GLRMASK_INVALID_ARGUMENT);

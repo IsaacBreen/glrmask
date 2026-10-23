@@ -47,7 +47,7 @@ clone_handle!(glrmask_expr_clone, glrmask_expr);
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_precompile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_module) -> i32 {
     ffi(|| unsafe { produce(out, || {
         let mut module = g::Module::new(&read(p)?.0);
-        module.precompile_with(&read(v)?.0, &root_options(o)?)?;
+        module.precompile_with(&read(v)?.0, root_options(o)?)?;
         Ok(glrmask_module(module))
     }) })
 }
@@ -70,7 +70,7 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_exact_tokens, |t| g::Binding::f
     ffi(|| unsafe {
         let vocab = read(v)?.0.clone();
         let options = root_options(o)?;
-        write(p)?.0.precompile_with(&vocab, &options)?;
+        write(p)?.0.precompile_with(&vocab, options)?;
         Ok(())
     })
 }
@@ -91,7 +91,6 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_exact_tokens, |t| g::Binding::f
         produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-            span: e.span(),
         }).collect())))
     })
 }
@@ -102,7 +101,6 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_exact_tokens, |t| g::Binding::f
         produce(out, || Ok(glrmask_externs(view.iter().map(|e| glrmask_extern_item {
             name: e.name().to_string(),
             kind: e.kind(),
-            span: e.span(),
         }).collect())))
     })
 }

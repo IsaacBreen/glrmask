@@ -39,16 +39,6 @@ export type BoundaryMaskStrategy =
   | 'fast-runtime'
   | 'fast-build';
 
-/** Lark dialect: recognition syntax or LLM extensions. */
-export declare const LarkProfile: Readonly<{
-  /** Standard Lark recognition. */
-  Recognition: 'recognition';
-  /** Lark plus GLRMask's LLM extensions. */
-  Llm: 'llm';
-}>;
-/** A Lark dialect value. */
-export type LarkProfile = typeof LarkProfile[keyof typeof LarkProfile];
-
 /** Error codes carried by {@link GlrMaskError}. */
 export type ErrorCode = 'GLRMASK_INVALID_ARGUMENT' | 'GLRMASK_ENGINE_ERROR' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
 /** A native GLRMask failure. */
@@ -66,25 +56,12 @@ export interface TokenRange {
   /** Exclusive end token ID. */
   readonly end: number;
 }
-/** A half-open byte range in the original document, with a one-based line and column. */
-export interface SourceSpan {
-  /** Inclusive start byte offset. */
-  readonly startByte: number;
-  /** Exclusive end byte offset. */
-  readonly endByte: number;
-  /** One-based line of `startByte`. */
-  readonly line: number;
-  /** One-based Unicode-scalar column of `startByte`. */
-  readonly column: number;
-}
-/** A declared extern slot on a Module. */
+/** A declared extern slot on a Grammar or Module. */
 export interface Extern {
   /** The declared name. */
   readonly name: string;
   /** The declared kind: token or grammar. */
   readonly kind: 'token' | 'grammar';
-  /** Source span of the declaration, when the frontend can locate it. */
-  readonly span: SourceSpan | null;
 }
 /** A read-only map of declared externs, in declaration order. */
 export interface Externs extends ReadonlyMap<string, Extern> {
@@ -109,14 +86,6 @@ export interface SaveOptions {
   /** Omit the vocabulary; load with the exact original token-ID/byte mapping. */
   externalVocab?: boolean;
 }
-/** Lark source options. */
-export interface LarkOptions {
-  /** Dialect: `Recognition` (default) or `Llm`. */
-  profile?: LarkProfile;
-  /** Named token atoms mapped to original model token IDs; tokenizer spellings are never inferred. */
-  tokenNames?: Record<string, number | Iterable<number>>;
-}
-
 /** An original model token ID without vocabulary identity. Only ID membership is checked against the target vocabulary, so the same ID can refer to different bytes; use `vocab.tokens([id])` for a vocabulary-bound singleton. */
 export declare class Token {
   /** The original model token ID. */
@@ -190,8 +159,10 @@ export declare class Grammar implements Disposable {
   static fromGlrm(source: string): Grammar;
   /** Creates a grammar from JSON text or a JSON-serializable document; `format` is an annotation only. */
   static fromJsonSchema(schema: unknown): Grammar;
-  /** Creates a grammar from Lark source; named token atoms require explicit `tokenNames`. */
-  static fromLark(source: string, options?: LarkOptions): Grammar;
+  /** Creates a grammar from Lark source; named token atoms declare token externs. */
+  static fromLark(source: string): Grammar;
+  /** A read-only map of the grammar's declared externs, in declaration order. */
+  readonly externs: Externs;
   /** An independent handle. */
   copy(): Grammar;
   /** Retains vocabulary-specific compilation artifacts; equivalent to `new Module(this).precompile(vocab, ...)`. */

@@ -60,24 +60,23 @@ impl Module {
     pub fn load(bytes: &[u8], vocab: Option<&Vocab>) -> Result<Self>;
 }
 
-impl<'a> Grammar<'a> {
-    pub fn from_glrm(source: &'a str) -> Self;
-    pub fn from_ebnf(source: &'a str) -> Self;
-    pub fn from_json_schema(source: &'a str) -> Self;
-    pub fn from_lark(source: &'a str) -> Self;
-    pub fn from_lark_with(source: &'a str, options: LarkOptions) -> Self;
+impl Grammar {
+    pub fn from_glrm(source: impl AsRef<str>) -> Self;
+    pub fn from_ebnf(source: impl AsRef<str>) -> Self;
+    pub fn from_json_schema(source: impl AsRef<str>) -> Self;
+    pub fn from_lark(source: impl AsRef<str>) -> Self;
 
+    pub fn externs(&self) -> Externs<'_>;
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint>;
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint>;
     pub fn precompile(&self, vocab: &Vocab) -> Result<Module>;
-    pub fn precompile_with(&self, vocab: &Vocab, options: &CompileOptions) -> Result<Module>;
+    pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module>;
 }
 
 pub struct Extern { /* private fields */ }
 impl Extern {
     pub fn name(&self) -> &str;
     pub fn kind(&self) -> ExternKind;
-    pub fn span(&self) -> Option<SourceSpan>;
 }
 
 pub struct Externs<'a> { /* private fields */ }

@@ -63,8 +63,6 @@ const BoundaryMaskStrategy = Object.freeze({
   FastRuntime: 'parser-dwa',
 });
 
-const LarkProfile = Object.freeze({Recognition: 'recognition', Llm: 'llm'});
-
 function parseMaskStrategy(value) {
   if (value === undefined) return 0;
   if (typeof value !== 'string') throw new TypeError('maskStrategy must be a string');
@@ -137,16 +135,7 @@ class ExternsMap {
 }
 
 function formatExterns(raw, unboundSupplier) {
-  const items = raw.map(e => Object.freeze({
-    name: e.name,
-    kind: e.kind,
-    span: e.sourceSpan ? Object.freeze({
-      startByte: e.sourceSpan[0],
-      endByte: e.sourceSpan[1],
-      line: e.sourceSpan[2],
-      column: e.sourceSpan[3],
-    }) : null,
-  }));
+  const items = raw.map(e => Object.freeze({name: e.name, kind: e.kind}));
   return new ExternsMap(items, unboundSupplier);
 }
 
@@ -206,17 +195,10 @@ class Grammar extends Owned {
     const source = typeof schema === 'string' ? schema : JSON.stringify(schema);
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('json-schema', string(source, 'JSON Schema'))));
   }
-  static fromLark(source, options) {
-    const o = checkedOptions(options, ['profile', 'tokenNames']);
-    const profile = o.profile === undefined ? 'recognition' : o.profile;
-    if (profile !== 'recognition' && profile !== 'llm') throw new TypeError('Lark profile must be recognition or llm');
-    const names = Object.create(null);
-    if (o.tokenNames !== undefined) {
-      if (o.tokenNames === null || typeof o.tokenNames !== 'object' || Array.isArray(o.tokenNames)) throw new TypeError('tokenNames must be an object');
-      for (const [name, value] of Object.entries(o.tokenNames)) names[name] = typeof value === 'number' ? [tokenId(value)] : ids(value);
-    }
-    return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('lark', string(source), profile, names)));
+  static fromLark(source) {
+    return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('lark', string(source))));
   }
+  get externs() { return formatExterns(invoke(() => handle(this, Grammar).externs()), null); }
   copy() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
   precompileSync(vocab, options) {
     const s = compileSettings(options);
@@ -434,5 +416,5 @@ class ConstraintState extends Owned {
 
 module.exports = Object.freeze({
   Vocab, Token, ExactTokens, Grammar, Module, CompileOptions, Expr, Constraint, ConstraintState,
-  MaskStrategy, BoundaryMaskStrategy, LarkProfile, GlrMaskError, version: native.version(),
+  MaskStrategy, BoundaryMaskStrategy, GlrMaskError, version: native.version(),
 });

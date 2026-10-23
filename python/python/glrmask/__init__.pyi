@@ -166,7 +166,7 @@ class Vocab:
 
 @final
 class Extern:
-    """A declared extern slot on a `Module`."""
+    """A declared extern slot on a `Grammar` or `Module`."""
     @property
     def name(self) -> str:
         """The declared name."""
@@ -175,23 +175,16 @@ class Extern:
     def kind(self) -> Literal["token", "grammar"]:
         """The declared kind: token or grammar."""
         ...
-    @property
-    def span(self) -> Optional[tuple[int, int, int, int]]:
-        """Source span of the declaration, or `None`.
-
-        `(start_byte, end_byte, line, column)` in the declaring source; the byte interval is half-open and line and Unicode-scalar column are one-based.
-        """
-        ...
     def __repr__(self) -> str:
         """The debug representation."""
         ...
     def __eq__(self, other: object) -> bool:
-        """Compares name, kind, and span."""
+        """Compares name and kind."""
         ...
 
 @final
 class Externs(Mapping[str, Extern]):
-    """A view over a `Module`'s declared externs, in declaration order.
+    """A view over a `Grammar`'s or `Module`'s declared externs, in declaration order.
 
     Implements `collections.abc.Mapping`.
     """
@@ -334,16 +327,15 @@ class Grammar:
         """
         ...
     @staticmethod
-    def from_lark(
-        source: str,
-        *,
-        profile: Literal["recognition", "llm"] = "recognition",
-        token_names: Optional[dict[str, Union[int, Sequence[int]]]] = None,
-    ) -> Grammar:
+    def from_lark(source: str) -> Grammar:
         """Creates a grammar from Lark source.
 
-        `profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.
+        Named token atoms declare token externs; bind each through `Module.bind`.
         """
+        ...
+    @property
+    def externs(self) -> Externs:
+        """A view over the grammar's declared externs, in declaration order."""
         ...
     def precompile(
         self,

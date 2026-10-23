@@ -350,7 +350,6 @@ fn focused_5_externs_get_iter_order_len_unbound() {
     let b_ext = externs.get("b").expect("b must exist");
     assert_eq!(b_ext.name(), "b");
     assert_eq!(b_ext.kind(), ExternKind::Token);
-    assert!(b_ext.span().is_some());
 
     let a_ext = externs.get("a").expect("a must exist");
     assert_eq!(a_ext.name(), "a");
@@ -406,21 +405,21 @@ fn focused_7_boundary_level_minimum() {
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
     m.precompile_with(
         &v,
-        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
     )
     .unwrap();
 
     // Switching to the explicit static boundary keeps retained work valid.
     m.precompile_with(
         &v,
-        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
     )
     .unwrap();
 
     // Switching back to the token-trie boundary also keeps retained work valid.
     m.precompile_with(
         &v,
-        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+        CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
     )
     .unwrap();
 
@@ -438,7 +437,7 @@ fn focused_7_boundary_level_minimum() {
 fn focused_8_static_parts_are_never_downgraded() {
     let v = vocab();
     let mut leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    leaf.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
         .unwrap();
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
@@ -457,7 +456,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 1. Auto reuses retained ParserDwa
     let mut m_dwa = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_dwa.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+    m_dwa.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
         .unwrap();
     let c_dwa = m_dwa.compile(&v).unwrap();
     let mut s_dwa = c_dwa.start();
@@ -466,7 +465,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 2. Auto reuses retained TokenClassTrie
     let mut m_tct = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_tct.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+    m_tct.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
         .unwrap();
     let c_tct = m_tct.compile(&v).unwrap();
     let mut s_tct = c_tct.start();
@@ -475,7 +474,7 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
     let mut m_tt = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_tt.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+    m_tt.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
         .unwrap();
     // TokenTrie precompilation retains no work, so Auto builds ParserDwa.
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
@@ -567,7 +566,7 @@ fn focused_12_grammar_precompile_returns_a_module() {
     let configured = child
         .precompile_with(
             &v,
-            &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+            CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
         )
         .unwrap();
     let plain = Module::new(&child).compile(&v).unwrap();

@@ -92,7 +92,7 @@ fn requirement_coordinates_survive_preparation_and_save_load() {
 #[test]
 fn lark_requirements_and_cached_errors_retain_original_locations() {
     let source="// α\nstart: @payload @payload";
-    let g=Grammar::from_lark_with(source,glrmask::LarkOptions::llm());
+    let g=Grammar::from_lark(source);
     let r=g.requirements().unwrap().remove(0);let span=r.source_span.unwrap();
     assert_eq!(&source[span.start..span.end],"@payload");
     assert_eq!((span.line,span.column),(2,8));
@@ -103,7 +103,8 @@ fn lark_requirements_and_cached_errors_retain_original_locations() {
     assert_eq!(&invalid[span.start..span.end],")");
     assert_eq!(g.clone().requirements().unwrap_err().source_span(),Some(span));
     let unknown="start: <|unknown|>";
-    let g=Grammar::from_lark_with(unknown,glrmask::LarkOptions::llm());
+    let g=Grammar::from_lark(unknown);
+    assert!(g.prepare(&v).is_err(),"an unbound named token atom is an error");
     let span=g.prepare(&v).unwrap_err().source_span().unwrap();
     assert_eq!(&unknown[span.start..span.end],"<|unknown|>");
 }

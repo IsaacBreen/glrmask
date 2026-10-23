@@ -51,7 +51,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
     for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         let a = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
         let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\""));
-        b.precompile_with(&v, &CompileOptions::default().mask_strategy(mode)).unwrap();
+        b.precompile_with(&v, CompileOptions::default().mask_strategy(mode)).unwrap();
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
         let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
         host.bind("E", expr).unwrap();

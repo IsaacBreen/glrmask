@@ -21,17 +21,16 @@ Exact-token and end-token events must be committed with `commitToken`. `commitBy
 | `Grammar.fromEbnf(source)` | EBNF text |
 | `Grammar.fromGlrm(source)` | Native GLRM text |
 | `Grammar.fromJsonSchema(schema)` | JSON text or a JSON-serializable value |
-| `Grammar.fromLark(source, options?)` | Lark text and an optional profile |
+| `Grammar.fromLark(source)` | Lark text |
 
 Factories copy and own their source text. Frontend semantics and limitations match the Rust core; see the [GLRM reference](https://github.com/IsaacBreen/glrmask/blob/main/docs/glrm-format.md) and [Lark dialect](https://github.com/IsaacBreen/glrmask/blob/main/docs/lark-dialect.md). The JSON Schema importer is not a complete validator, and the addon does not expose parse trees.
 
-Recognition is the default Lark profile. LLM extensions and named atoms require an explicit map:
+Lark code uses one dialect; the GLRMask extensions are always available. A named token atom declares a token extern that is bound on the module:
 
 ```js
-const grammar = Grammar.fromLark('start: <|begin|>', {
-  profile: LarkProfile.Llm,
-  tokenNames: { begin: 99 },
-});
+const grammar = Grammar.fromLark('start: <|begin|>');
+const module = new Module(grammar);
+module.bind('begin', vocab.tokens([99]));
 ```
 
 ## Modules and expressions
@@ -58,7 +57,7 @@ const constraint = await parent.compile(moduleVocab, {
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`module.externs` is a read-only `Map`-like snapshot of `{name, kind, span}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{endTokens, maskStrategy, boundaryMaskStrategy}`:
+`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{endTokens, maskStrategy, boundaryMaskStrategy}`:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));

@@ -73,7 +73,7 @@ fn compile_options_apply_to_the_whole_compile_and_are_atomic() {
     let v = vocab();
     let mut child = Module::new(&a());
     child
-        .precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+        .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
         .unwrap();
     let _bytes = child.save();
 
@@ -163,7 +163,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
 fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
     let v = vocab();
     let mut leaf = Module::new(&a());
-    leaf.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+    leaf.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
         .unwrap();
     let leaf = Module::load(&leaf.save(), None).unwrap();
     assert!(accepts(&leaf.compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap(), &[1]));
@@ -242,7 +242,7 @@ fn local_modes_retain_actual_native_or_lr_storage_across_load() {
         let v = vocab();
         let mut module = Module::new(&a());
         module
-            .precompile_with(&v, &CompileOptions::default().mask_strategy(mode))
+            .precompile_with(&v, CompileOptions::default().mask_strategy(mode))
             .unwrap();
         let loaded = Module::load(&module.save(), Some(&v)).unwrap();
         assert!(accepts(
@@ -259,11 +259,11 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     let v = vocab();
     let mut root = Module::new(&Grammar::from_glrm(HOST));
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie);
-    root.precompile_with(&v, &trie).unwrap();
+    root.precompile_with(&v, trie.clone()).unwrap();
     let open = root.save();
 
     let mut leaf = Module::new(&a());
-    leaf.precompile_with(&v, &trie).unwrap();
+    leaf.precompile_with(&v, trie.clone()).unwrap();
     root.bind("child", &leaf).unwrap();
 
     for m in [root.clone(), Module::load(&root.save(), Some(&v)).unwrap()] {
@@ -279,7 +279,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     assert!(!accepts(&c, &[0, 1, 3]));
 
     let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
-    terminal.precompile_with(&v, &trie).unwrap();
+    terminal.precompile_with(&v, trie.clone()).unwrap();
     terminal.bind("mark", Token::new(99)).unwrap();
     let c = Module::load(&terminal.save(), None).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[99]));
@@ -294,7 +294,7 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
     let expr = Expr::sequence([Expr::from(a_mod), Expr::from(b_mod)]);
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie);
-    parent.precompile_with(&v, &trie).unwrap();
+    parent.precompile_with(&v, trie.clone()).unwrap();
     parent.bind("child", expr).unwrap();
     let c = Module::load(&parent.save(), None).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[0, 5, 3]));
@@ -305,7 +305,7 @@ fn token_trie_nullable_child_compiles_as_one_grammar() {
     let v = vocab();
     let mut root = Module::new(&Grammar::from_glrm(HOST));
     let mut child = Module::new(&Grammar::from_ebnf(r#"start ::= "" | "a""#));
-    child.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap();
+    child.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap();
     root.bind("child", child).unwrap();
     let c = root
         .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))

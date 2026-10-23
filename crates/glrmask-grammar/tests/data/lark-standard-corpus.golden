@@ -1,0 +1,336 @@
+== standard
+start: "a" "b"?
+-- result
+start start;
+
+nt start ::= "a" "b"?;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: A
+A: /a?/
+-- result
+start start;
+
+nt start ::= A;
+t A ::= /(?u-isx:a?)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "abc"i | /a.b/s
+-- result
+start start;
+
+nt start ::= /(?ui-sx:\x{61}\x{62}\x{63})/ | /(?us-ix:a.b)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+%ignore "a"
+%ignore "ab"
+start: "b"
+-- result
+start start;
+ignore $lark_ignore_0;
+
+nt start ::= "b";
+t $lark_ignore_0 ::= "a";
+t $lark_ignore_1 ::= "ab";
+
+ignores=["$lark_ignore_1"]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+%import common.INT -> N
+start: N
+-- result
+start start;
+
+t N ::= /(?u-isx:[0-9]+)/;
+nt start ::= N;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+%import common (INT, WS)
+%ignore WS
+start: "[" INT ("," INT)* "]"
+-- result
+start start;
+ignore $lark_ignore_0;
+
+t INT ::= /(?u-isx:[0-9]+)/;
+internal t WS ::= /(?u-isx:[ \t\x0c\r\n]+)/;
+nt start ::= "[" INT ("," INT)* "]";
+t $lark_ignore_0 ::= WS;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: INT
+INT: /[0-9]+/
+-- result
+start start;
+
+nt start ::= INT;
+t INT ::= /(?u-isx:[0-9]+)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "a"~3
+-- result
+start start;
+
+nt start ::= "a"{3};
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "α".."ω"
+-- result
+start start;
+
+nt start ::= /(?u-isx:[\x{3B1}-\x{3C9}])/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "a"
+%ignore /[ \t]/+
+-- result
+start start;
+ignore $lark_ignore_0;
+
+nt start ::= "a";
+t $lark_ignore_0 ::= /(?u-isx:[ \t])/+;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: word "!"
+word: /a+/
+-- result
+start start;
+
+nt start ::= word "!";
+nt word ::= /(?u-isx:a+)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "hello" " " "world"
+-- result
+start start;
+
+nt start ::= "hello" " " "world";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "<" ">"
+-- result
+start start;
+
+nt start ::= "<" ">";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: payload
+payload: "x"
+-- result
+start start;
+
+nt start ::= payload;
+nt payload ::= "x";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: A
+A: "a"
+B: "b"
+-- result
+start start;
+
+nt start ::= A;
+t A ::= "a";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "a" | "b"
+-- result
+start start;
+
+nt start ::= "a" | "b";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: "a" ("b" | "c")*
+-- result
+start start;
+
+nt start ::= "a" ("b" | "c")*;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: /[a-z]+/
+-- result
+start start;
+
+nt start ::= /(?u-isx:[a-z]+)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+start: ROOT
+ROOT: PREFIX SUFFIX
+PREFIX: "a"
+SUFFIX: "b"
+
+-- result
+start start;
+
+nt start ::= ROOT;
+t ROOT ::= PREFIX SUFFIX;
+internal t PREFIX ::= "a";
+internal t SUFFIX ::= "b";
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== standard
+%ignore /[ ]+/
+start: "<" ">"
+-- result
+start start;
+ignore $lark_ignore_0;
+
+nt start ::= "<" ">";
+t $lark_ignore_0 ::= /(?u-isx:[ ]+)/;
+
+ignores=[]
+imports={}
+events=[]
+schemas=0
+spans={}
+== rejected
+start.0: "a"
+-- result
+error: Grammar parse error at line 1, column 6 (bytes 5..6): Lark rule and terminal priorities are not supported
+== rejected
+start.-2: "a"
+-- result
+error: Grammar parse error at line 1, column 6 (bytes 5..6): Lark rule and terminal priorities are not supported
+== rejected
+start: A
+A.2: "a"
+-- result
+error: Grammar parse error at line 2, column 2 (bytes 10..11): Lark rule and terminal priorities are not supported
+== rejected
+%extend start: "x"
+start: "a"
+-- result
+error: Grammar parse error at line 1, column 1 (bytes 0..7): unsupported Lark directive %extend; directives are never silently ignored
+== rejected
+%unknown thing
+start: "a"
+-- result
+error: Grammar parse error at line 1, column 1 (bytes 0..8): unsupported Lark directive %unknown; directives are never silently ignored
+== rejected
+%import unknown.A
+start: A
+-- result
+error: Grammar parse error at line 1, column 16 (bytes 15..16): unsupported Lark import module "unknown"; only 'common' is supported
+== rejected
+start: .
+-- result
+error: Grammar parse error at line 1, column 9 (bytes 8..8): bare '.' is not a Lark atom; use /./ for a Unicode character
+== rejected
+other: "a"
+-- result
+error: Grammar parse error at line 1, column 11 (bytes 10..10): Lark grammar must define a rule named 'start'
+== rejected
+start: /a+?/
+-- result
+error: Grammar parse error at line 1, column 8 (bytes 7..12): reluctant regex quantifiers are unsupported; use the whole-terminal shortest operation or [lazy]
+== rejected
+start: /a+/q
+-- result
+error: Grammar parse error at line 1, column 8 (bytes 7..12): unsupported regex flag 'q'; supported flags are i, s, x, u
+== rejected
+start: "ab".."z"
+-- result
+error: Grammar parse error at line 1, column 17 (bytes 16..16): Lark literal ranges require single Unicode-scalar endpoints
+== rejected
+start: "a"~3..2
+-- result
+error: Grammar parse error at line 1, column 16 (bytes 15..15): repetition upper bound 2 is smaller than lower bound 3
+== rejected
+start: A
+A: B
+B: A
+
+-- result
+error: Grammar parse error: cyclic Lark terminal definition involving A
