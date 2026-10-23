@@ -16,10 +16,10 @@
 //!
 //! GLRMask has four core types:
 //!
-//! - `Grammar`: the source-language definition, without compilation settings.
-//! - `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
-//! - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
-//! - `ConstraintState`: the mutable state for a single generated sequence.
+//! - `Grammar`: a grammar, written as source text or built from an expression.
+//! - `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+//! - `Constraint`: a grammar compiled for a vocabulary, ready to use.
+//! - `ConstraintState`: the state of one generated sequence.
 //!
 //! # Quickstart
 //!
@@ -33,16 +33,14 @@
 //!     let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#);
 //!     let constraint = grammar.compile(&vocab)?;
 //!     let mut state = constraint.start();
-//!     for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {
-//!         assert_eq!(state.mask()[0] & 7, expected);
+//!     for token_id in 0..3 {
+//!         assert_eq!(state.mask()[0], 1 << token_id);
 //!         assert!(state.commit_token(token_id));
 //!     }
 //!     assert!(state.is_accepting());
 //!     Ok(())
 //! }
 //! ```
-//!
-//! Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.
 //!
 //! # Learn more
 //!

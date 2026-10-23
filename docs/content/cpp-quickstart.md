@@ -16,10 +16,8 @@ int main() {
              {0, 1}, {1, 2}, {2, 4}}) {
         state.fill_mask(mask);
         assert((mask[0] & 7) == expected);
-        state.commit_token(id);
+        assert(state.commit_token(id));
     }
     assert(state.is_accepting());
 }
 ```
-
-C++ masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.

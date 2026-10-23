@@ -112,8 +112,7 @@ are reserved.
 
 Rust `m.externs().unbound()` (Python: `m.externs.unbound`) reports unresolved
 externs. Rust `m.externs()` (Python: `m.externs`) reports all declared externs
-in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`,
-`span()`). Precompilation is allowed while externs remain open; final
+in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`). Precompilation is allowed while externs remain open; final
 `compile()` requires every declared extern to be bound.
 
 ### Persistence and root policy
@@ -136,11 +135,9 @@ not once per child. Final compilation handles outstanding work, so attaching a
 cold child never requires a separate manual precompilation step. Incompatible
 retained representations or targets produce errors, not implicit loss of work.
 
-Configure `end_tokens` on the final compile operation. Acceptance then means an
-end token has been committed; a complete grammar match alone is not acceptance. A
-configured end ID is admitted only once the grammar is complete. Commit the sampled
-end ID before ending the generation loop. Child components do not supply the
-enclosing generation's root termination policy.
+To require an end-of-sequence token, put it after the grammar with `Grammar::from_expr(Expr::sequence(...))`. The token is allowed once the grammar is complete. After it is committed the mask is empty. If the token has no bytes, add its ID with `with_special_tokens`.
+
+`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
 
 ### Lightweight expressions
 
@@ -162,8 +159,7 @@ operators add neither scope nor public path segments.
 forced ordinary text. It greedily chooses the longest admitted nonempty spelling,
 then the lowest original-ID alias. Exact-token events retain their IDs, and the
 query stops before root acceptance or an intermediate event opportunity that a
-greedy text token would cross. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
-and raises errors for typed proof/resource failures. The result is one canonical
+greedy text token would cross. It returns a list of token IDs in every language. The result is one canonical
 sequence, not an exhaustive tree of equivalent token histories. See
 [forcing contracts](docs/forcing.md).
 

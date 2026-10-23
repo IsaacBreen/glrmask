@@ -30,26 +30,27 @@ pub(crate) use stack::with_deep_stack;
 #[allow(unused_imports)]
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
-/// Mask computation strategy, trading build time against per-token latency.
+/// How masks are computed, trading compile time against mask speed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
-    /// Automatic selection: [`MaskStrategy::ParserDwa`], or the retained
-    /// [`MaskStrategy::TokenClassTrie`] when one is available.
+    /// [`ParserDwa`](Self::ParserDwa), unless the module was precompiled with
+    /// [`TokenClassTrie`](Self::TokenClassTrie). The default.
     #[default]
     Auto,
-    /// Static masks: slowest build, fastest per-token masks.
+    /// Precomputes masks: slowest compile, fastest masks.
     ParserDwa,
-    /// Trie walk per mask: fastest build.
+    /// Computes each mask by walking the vocabulary: fastest compile, slower masks.
     TokenTrie,
-    /// Trie walk over token equivalence classes.
+    /// Like [`TokenTrie`](Self::TokenTrie), but treats tokens the grammar cannot
+    /// tell apart as one.
     TokenClassTrie,
 }
 
 impl MaskStrategy {
-    /// Alias for [`MaskStrategy::TokenTrie`].
+    /// Same as [`TokenTrie`](Self::TokenTrie).
     pub const FAST_BUILD: Self = Self::TokenTrie;
-    /// Alias for [`MaskStrategy::ParserDwa`].
+    /// Same as [`ParserDwa`](Self::ParserDwa).
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
 
     pub(crate) fn key(self) -> u8 {
@@ -62,34 +63,31 @@ impl MaskStrategy {
     }
 }
 
-/// Boundary parser selection for crossings between composed grammars.
-///
-/// [`BoundaryMaskStrategy::ParserDwa`] installs the static boundary parser
-/// (faster crossings; an over-budget build returns [`Error::ResourceLimit`]
-/// with a `boundary_parser_dwa:` message). [`BoundaryMaskStrategy::TokenTrie`]
-/// keeps the segmented dynamic boundary and builds faster.
+/// How masks are computed where one grammar meets another.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
-    /// Automatic selection: [`BoundaryMaskStrategy::ParserDwa`], falling back
-    /// to [`BoundaryMaskStrategy::TokenTrie`] when the static boundary parser
-    /// declines on budget.
+    /// [`ParserDwa`](Self::ParserDwa), falling back to
+    /// [`TokenTrie`](Self::TokenTrie) when that would be too large. The default.
     #[default]
     Auto,
-    /// Static boundary parser; faster crossings.
+    /// Precomputes boundary masks: slower compile, faster masks.
+    ///
+    /// Fails with [`ErrorKind::ResourceLimit`](crate::ErrorKind::ResourceLimit) if
+    /// they would be too large.
     ParserDwa,
-    /// Segmented dynamic boundary token walk; faster build.
+    /// Computes boundary masks as needed: faster compile, slower masks.
     TokenTrie,
 }
 
 impl BoundaryMaskStrategy {
-    /// Alias for [`BoundaryMaskStrategy::TokenTrie`].
+    /// Same as [`TokenTrie`](Self::TokenTrie).
     pub const FAST_BUILD: Self = Self::TokenTrie;
-    /// Alias for [`BoundaryMaskStrategy::ParserDwa`].
+    /// Same as [`ParserDwa`](Self::ParserDwa).
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
 }
 
-/// A declared extern slot on a [`Module`].
+/// An extern declared by a grammar: a named slot to bind later.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extern {
     pub(crate) name: String,
@@ -101,13 +99,13 @@ impl Extern {
     pub fn name(&self) -> &str {
         &self.name
     }
-    /// The declared kind: token or grammar.
+    /// What the extern can be bound to.
     pub fn kind(&self) -> ExternKind {
         self.kind
     }
 }
 
-/// A view over a source's or module's declared externs, in declaration order.
+/// A grammar's or module's externs, in declaration order.
 #[derive(Debug, Clone)]
 pub struct Externs<'a> {
     pub(crate) source: ExternsSource<'a>,
@@ -136,7 +134,7 @@ impl ExternsSource<'_> {
 }
 
 impl<'a> Externs<'a> {
-    /// The extern declared as `name`, if any.
+    /// The extern named `name`, if any.
     pub fn get(&self, name: &str) -> Option<Extern> {
         let declared = self.source.declarations()?;
         if self.only_unbound && self.source.bound(name) {
@@ -149,7 +147,7 @@ impl<'a> Externs<'a> {
         })
     }
 
-    /// Number of externs in this view.
+    /// The number of externs.
     pub fn len(&self) -> usize {
         let Some(declared) = self.source.declarations() else { return 0; };
         if self.only_unbound {
@@ -159,12 +157,12 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// Whether this view contains no externs.
+    /// Whether there are no externs.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// The same view restricted to unresolved externs.
+    /// Only the externs that are not yet bound.
     pub fn unbound(&self) -> Externs<'a> {
         Externs {
             source: self.source.clone(),
@@ -172,7 +170,7 @@ impl<'a> Externs<'a> {
         }
     }
 
-    /// The externs in declaration order.
+    /// The externs, in declaration order.
     pub fn iter(&self) -> impl Iterator<Item = Extern> + '_ {
         let items: Vec<Extern> = match self.source.declarations() {
             Some(declared) => declared
@@ -357,10 +355,10 @@ fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
     Ok(())
 }
 
-/// The source-language definition, without compilation settings.
+/// A grammar, written as source text or built from an [`Expr`].
 ///
-/// Source text is parsed lazily, so parse errors surface at preparation or
-/// compilation.
+/// Source text is parsed on first use, so syntax errors appear when you bind or
+/// compile.
 #[derive(Debug, Clone)]
 pub struct Grammar {
     source: GrammarSource,
@@ -440,23 +438,23 @@ impl Grammar {
         grammar
     }
 
-    /// Creates a grammar from EBNF source text.
+    /// Creates a grammar from EBNF source.
     pub fn from_ebnf(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref()))) }
 
     /// Creates a grammar from Lark source.
+    ///
+    /// A token name such as `<|end|>` declares a token extern, which must be bound
+    /// before compiling.
     pub fn from_lark(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Lark(Arc::from(source.as_ref()))) }
 
 
     /// Creates a grammar from a JSON Schema document.
     ///
-    /// `format` is an annotation only, as in JSON Schema 2020-12; unrecognised
-    /// keywords are ignored and unsupported keywords are rejected.
+    /// Standard keywords that GLRMask does not support are an error. Unknown
+    /// keywords and `format` are ignored.
     pub fn from_json_schema(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source.as_ref()))) }
 
-    /// Creates a grammar from GLRM source.
-    ///
-    /// GLRM supports typed extern slots; bind them before compiling a runnable
-    /// root.
+    /// Creates a grammar from GLRM, GLRMask's native format.
     pub fn from_glrm(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Glrm(Arc::from(source.as_ref()))) }
 
     fn new(source: GrammarSource) -> Self {
@@ -589,7 +587,11 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, or `TokenSet`; token slots require a token set. Attached children are snapshots. Failed binds leave this handle unchanged.
+    /// Binds the extern `name` to `value`: a grammar, expression, token set or
+    /// token ID.
+    ///
+    /// Fails if `name` is undeclared or already bound, or if `value` is the wrong
+    /// kind for it.
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
@@ -662,9 +664,9 @@ impl Grammar {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
-    /// The source's declared externs, in declaration order.
+    /// The grammar's externs, in declaration order.
     ///
-    /// A source that fails to parse yields an empty view.
+    /// Empty if the source has a syntax error.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Grammar(self),
@@ -672,29 +674,27 @@ impl Grammar {
         }
     }
 
-    /// Compiles the grammar against `vocab`.
+    /// Compiles the grammar for `vocab`.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         Module::new(self).compile(vocab)
     }
 
-    /// Retains vocabulary-specific compilation artifacts and returns a module.
+    /// Compiles as much as possible for `vocab` now, and returns a [`Module`] that
+    /// keeps the work.
     ///
-    /// Equivalent to [`Module::new`] followed by [`Module::precompile`].
+    /// Externs may still be unbound.
     pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
         self.precompile_with(vocab, CompileOptions::default())
     }
 
-    /// Retains vocabulary-specific compilation artifacts using `options` and
-    /// returns a module.
-    ///
-    /// Equivalent to [`Module::new`] followed by [`Module::precompile_with`].
+    /// Like [`precompile`](Self::precompile), with `options`.
     pub fn precompile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Module> {
         let mut module = Module::new(self);
         module.precompile_with(vocab, options)?;
         Ok(module)
     }
 
-    /// Compiles the grammar against `vocab` with root compile options.
+    /// Compiles the grammar for `vocab` with `options`.
     pub fn compile_with(
         &self,
         vocab: &Vocab,
@@ -1146,6 +1146,12 @@ impl Grammar {
         Ok(constraint)
     }
 
+    /// Creates a grammar from an expression.
+    ///
+    /// Use it to require an end token after a grammar:
+    /// `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(eos_id)]))`.
+    ///
+    /// The end token must be in the vocabulary; see [`Vocab::with_special_tokens`].
     pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
         let expr = expr.into();
         Self::from_expr_ref(&expr)

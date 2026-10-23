@@ -18,10 +18,10 @@ python -m pip install glrmask
 
 GLRMask has four core types:
 
-- `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
-- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: a grammar, written as source text or built from an expression.
+- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `ConstraintState`: the state of one generated sequence.
 
 ## Quickstart
 
@@ -36,11 +36,9 @@ for token_id, expected in [(0, [True, False, False]),
                            (1, [False, True, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
-    state.commit_token(token_id)
+    assert state.commit_token(token_id)
 assert state.is_accepting()
 ```
-
-Python masks are NumPy Boolean arrays indexed by original model token ID.
 
 ## Learn more
 

@@ -1070,7 +1070,11 @@ impl PyDynamicConstraintState {
             .with_dependent(|_owner, state| state.is_accepting())
     }
 
-    /// TODO(docs)
+    /// Whether nothing more can be committed.
+    ///
+    /// This is true when the sequence is finished, for example after its end token, and after a failed commit. `is_accepting` tells the two apart.
+    ///
+    /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
     fn is_terminated(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_terminated())
@@ -1184,7 +1188,11 @@ impl PyConstraintState {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
     }
 
-    /// TODO(docs)
+    /// Whether nothing more can be committed.
+    ///
+    /// This is true when the sequence is finished, for example after its end token, and after a failed commit. `is_accepting` tells the two apart.
+    ///
+    /// A complete match is not terminated if more input could follow, such as whitespace the grammar ignores.
     fn is_terminated(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_terminated())
     }

@@ -6076,10 +6076,9 @@ impl Constraint {
         restore_boundary_candidate_summary(metadata.boundary_candidate_summary, self).map(Some)
     }
 
-    /// Serializes the constraint without embedding the vocabulary.
+    /// Saves the constraint as bytes, without the vocabulary.
     ///
-    /// Load with [`Self::load`] and the exact original vocabulary.
-    /// Artifact compatibility across GLRMask releases is not guaranteed.
+    /// Bytes saved by one GLRMask version may not load in another.
     pub fn save(&self) -> Vec<u8> {
         crate::with_deep_stack(|| self.save_artifact())
     }
@@ -7100,11 +7099,10 @@ impl Constraint {
         bytes
     }
 
-    /// Deserializes a constraint saved with [`Self::save`].
+    /// Loads a constraint saved with [`save`](Self::save).
     ///
-    /// `vocab` must be the exact vocabulary the constraint was compiled
-    /// against; the stored fingerprint covers the ID-to-bytes mapping and the
-    /// special token IDs.
+    /// `vocab` must be the vocabulary it was compiled for; a different one is an
+    /// error.
     pub fn load<'b>(
         bytes: impl Into<Cow<'b, [u8]>>,
         vocab: &crate::Vocab,

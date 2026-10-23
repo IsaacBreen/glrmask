@@ -109,7 +109,7 @@ def full_guide():
         '### Native C++ and Node.js\n\n' + read('native-bindings'),
         '## Usage\n\n' + read('usage'),
         quickstart('python', '### Python quickstart'), quickstart('rust', '### Rust quickstart'),
-        reference, '## How it works\n\n' + read('how-it-works'),
+        reference, read('design-principles'), '## How it works\n\n' + read('how-it-works'),
     ]) + '\n'
 
 

@@ -22,10 +22,10 @@ Produce the tarball as described in [Building from source](#building-from-source
 
 GLRMask has four core types:
 
-- `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
-- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: a grammar, written as source text or built from an expression.
+- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `ConstraintState`: the state of one generated sequence.
 
 ## Quickstart
 
@@ -46,12 +46,10 @@ const mask = new Uint32Array(constraint.maskLength);
 for (const [id, expected] of [[0, 1], [1, 2], [2, 4]]) {
   state.fillMask(mask);
   assert.equal(mask[0] & 7, expected);
-  state.commitToken(id);
+  assert.equal(state.commitToken(id), true);
 }
 assert.equal(state.isAccepting(), true);
 ```
-
-Masks are packed `Uint32Array` bitsets in original token-ID space. Bit `id % 32` of word `Math.floor(id / 32)` indicates whether that token is allowed.
 
 ## Learn more
 
@@ -116,7 +114,7 @@ const constraint = await parent.compile(moduleVocab, {
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{endTokens, maskStrategy, boundaryMaskStrategy}`:
+`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{maskStrategy, boundaryMaskStrategy}`:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));
@@ -151,9 +149,9 @@ A failed `commitToken`, `commitBytes` or `commitTokens` throws and leaves the st
 
 ## End tokens
 
-`isAccepting()` means the input so far is a complete match. With root `endTokens` configured, it becomes true only once an end token is committed. Without end tokens it reports a complete grammar match, which may still permit more input.
+`isAccepting()` means the input so far is a complete match, which may still allow more input. `isTerminated()` says whether anything more can be committed.
 
-An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root and is not inherited by embedded children.
+After an end token added with `Expr.sequence` is committed, or after a commit fails, the mask is empty and no further commit succeeds.
 
 ## Persistence
 

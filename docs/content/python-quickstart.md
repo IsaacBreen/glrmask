@@ -9,8 +9,6 @@ for token_id, expected in [(0, [True, False, False]),
                            (1, [False, True, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
-    state.commit_token(token_id)
+    assert state.commit_token(token_id)
 assert state.is_accepting()
 ```
-
-Python masks are NumPy Boolean arrays indexed by original model token ID.

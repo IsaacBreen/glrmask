@@ -10385,10 +10385,10 @@ pub(crate) struct LateGrammarSlot {
     pub(crate) terminal_id: TerminalID,
 }
 
-/// A fully runnable grammar compiled against a specific vocabulary.
+/// A grammar compiled for a vocabulary, ready to constrain generation.
 ///
-/// Immutable and safe to share; each [`Constraint::start`] creates independent
-/// mutable state.
+/// Share one between threads, and call [`start`](Constraint::start) for each
+/// sequence.
 #[derive(Debug, Clone)]
 pub struct Constraint {
     /// Final generation policy, not part of the embeddable compiled body.

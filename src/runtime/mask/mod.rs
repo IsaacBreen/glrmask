@@ -8545,10 +8545,11 @@ impl<'a> ConstraintState<'a> {
         returned_profile
     }
 
-    /// The current allowed-token mask.
+    /// The tokens allowed next, as a bitset.
     ///
-    /// Bit `token_id % 32` of word `token_id / 32` is set for each allowed
-    /// original model token ID, including any accepted root end tokens.
+    /// Token `id` is allowed when bit `id % 32` of word `id / 32` is set. No bits
+    /// are set when nothing can follow: the sequence is complete, or a commit
+    /// failed.
     pub fn mask(&self) -> Vec<u32> {
         let mut buf = vec![0u32; self.constraint.mask_len()];
         self.fill_mask(&mut buf);
@@ -8828,13 +8829,11 @@ impl<'a> ConstraintState<'a> {
         Some(shadow)
     }
 
-    /// Writes the current mask into `buf`.
-    ///
-    /// Uses the same packed layout as [`Self::mask`]; extra words are cleared.
+    /// Writes the mask into `buf`, setting any extra words to zero.
     ///
     /// # Panics
     ///
-    /// Panics if `buf` has fewer than [`Constraint::mask_len`] words.
+    /// Panics if `buf` is shorter than [`Constraint::mask_len`].
     pub fn fill_mask(&self, buf: &mut [u32]) {
         assert!(buf.len() >= self.constraint.mask_len(), "mask buffer is smaller than constraint mask");
         if self.terminated {

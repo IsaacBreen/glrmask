@@ -56,7 +56,7 @@ auto constraint = parent.compile(module_vocab, options);
 
 `bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
-`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile, plus root `end_tokens`; an option never downgrades a part that already has a static preparation:
+`externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile; an option never downgrades a part that already has a static preparation:
 
 ```cpp
 auto expression = glrmask::Expr::choice({
@@ -93,9 +93,9 @@ A failed `commit_token`, `commit_bytes` or `commit_tokens` returns `glrmask::Err
 
 ## End tokens
 
-`is_accepting()` means the input so far is a complete match. With root `end_tokens` configured in `CompileOptions`, it becomes true only once an end token is committed. Without end tokens it reports a complete grammar match, which may still permit more input.
+`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
 
-An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root; embedded child modules do not inherit it.
+After an end token added with `Expr::sequence` is committed, or after a commit fails, the mask is empty and no further commit succeeds.
 
 ## Persistence
 

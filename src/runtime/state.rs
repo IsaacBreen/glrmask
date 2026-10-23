@@ -514,7 +514,9 @@ impl CommitBuffers {
     }
 }
 
-/// The mutable state for a single generated sequence.
+/// The state of one generated sequence.
+///
+/// Clone it to try tokens without changing the original.
 pub struct ConstraintState<'a> {
     pub(crate) terminated: bool,
     pub(crate) markers: Option<Box<crate::runtime::markers::MarkerState>>,
@@ -580,11 +582,9 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Whether the input so far is a complete match.
+    /// Whether the input committed so far is a complete match for the grammar.
     ///
-    /// With end tokens configured, this becomes true only once an end token is
-    /// committed. Without them it reports a complete grammar match, which may
-    /// still admit further tokens.
+    /// More input may still be allowed; see [`is_terminated`](Self::is_terminated).
     pub fn is_accepting(&self) -> bool {
         if !self.constraint.end_tokens.is_empty() {
             return self.terminated;
@@ -592,7 +592,14 @@ impl<'a> ConstraintState<'a> {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
 
-    /// TODO(docs)
+    /// Whether nothing more can be committed.
+    ///
+    /// This is true when the sequence is finished, for example after its end token,
+    /// and after a failed commit. [`is_accepting`](Self::is_accepting) tells the two
+    /// apart.
+    ///
+    /// A complete match is not terminated if more input could follow, such as
+    /// whitespace the grammar ignores.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
         if self.terminated {
@@ -655,13 +662,11 @@ impl<'a> ConstraintState<'a> {
         grouped.into_iter().collect()
     }
 
-    /// A read-only prefix of library-canonical forced output.
+    /// The tokens that must come next, without committing them.
     ///
-    /// Forced ordinary text uses the longest admitted nonempty token spelling,
-    /// then the lowest original token ID; exact-token events retain their IDs.
-    /// The query stops at root acceptance, byte/event ambiguity, unstable
-    /// canonical tokenization, or a proof limit. It may build full masks; the
-    /// state is unchanged.
+    /// Stops where more than one token could follow, or after 10,000 tokens or
+    /// bytes. When forced text could be tokenized in several ways, the longest
+    /// token is chosen at each step.
     pub fn forced_tokens(&self) -> Vec<u32> {
         super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
     }

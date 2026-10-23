@@ -11,8 +11,7 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 
 /// Options for compiling a grammar or module.
 ///
-/// The strategy settings apply to the whole compile, including every composed
-/// child.
+/// They apply to every part of the compile, including bound grammars.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
@@ -21,26 +20,27 @@ pub struct CompileOptions {
 }
 
 impl CompileOptions {
-    /// Sets the mask computation strategy for the whole compile.
+    /// Sets how masks are computed. Defaults to [`MaskStrategy::Auto`].
     ///
-    /// [`MaskStrategy::Auto`] (the default) uses any retained static
-    /// preparation and otherwise builds [`MaskStrategy::ParserDwa`]. A part
-    /// that already has a static preparation is never downgraded: with
-    /// [`MaskStrategy::TokenTrie`], precompiled parts stay static and only the
-    /// other modules compile dynamically.
+    /// Precompiled parts keep their precompiled masks.
     pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
         self.mask_strategy = strategy;
         self
     }
 
-    /// Sets the boundary parser strategy for the whole compile.
+    /// Sets how masks are computed where one grammar meets another.
+    ///
+    /// Defaults to [`BoundaryMaskStrategy::Auto`].
     pub fn boundary_mask_strategy(mut self, strategy: BoundaryMaskStrategy) -> Self {
         self.boundary_mask_strategy = strategy;
         self
     }
 }
 
-/// A typed value that can be bound to an unresolved module extern.
+/// A value that can be bound to an extern.
+///
+/// Converted automatically from a [`Module`], [`Grammar`], [`Expr`], [`TokenSet`]
+/// or token ID.
 pub struct Binding(pub(crate) BindingKind);
 
 #[derive(Debug, Clone)]
@@ -66,9 +66,9 @@ pub(crate) enum BoundValue {
     TokenSet(TokenSet),
 }
 
-/// A reusable grammar with bindings and any retained compilation work.
+/// A grammar plus its extern bindings and any precompiled work.
 ///
-/// May still have unresolved externs.
+/// Externs can stay unbound until [`compile`](Self::compile).
 #[derive(Debug, Clone)]
 pub struct Module {
     pub(crate) node: Arc<Node>,
@@ -241,7 +241,7 @@ impl Grammar {
 }
 
 impl Module {
-    /// Wraps a source grammar in a module.
+    /// Creates a module from `grammar`.
     pub fn new(grammar: &Grammar) -> Self {
         fn convert(grammar: &Grammar, cache: &mut HashMap<usize, Module>) -> Module {
             if let Some(module) = grammar.module_snapshot.get() { return module.clone(); }
@@ -273,11 +273,10 @@ impl Module {
         convert(grammar, &mut HashMap::new())
     }
 
-    /// A view over the module's declared externs, in declaration order.
+    /// The module's externs, in declaration order.
     ///
-    /// A source that fails to parse yields an empty view; [`bind`](Self::bind),
-    /// [`precompile`](Self::precompile) and [`compile`](Self::compile) report
-    /// the parse error.
+    /// Empty if the source has a syntax error; [`bind`](Self::bind) and
+    /// [`compile`](Self::compile) report it.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),
@@ -292,9 +291,11 @@ impl Module {
         self.node.source.declarations().map(|_| ())
     }
 
-    /// Binds the extern `name` to a module, expression, or token set.
+    /// Binds the extern `name` to `value`: a module, grammar, expression, token
+    /// set or token ID.
     ///
-    /// Fails if the extern is undeclared or already bound.
+    /// Fails if `name` is undeclared or already bound, or if `value` is the wrong
+    /// kind for it. A token extern takes only a token set or token ID.
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
         let next = self.bound(name, value.into())?;
         *self = next;
@@ -473,20 +474,15 @@ impl Module {
         Ok(())
     }
 
-    /// Retains vocabulary-specific compilation artifacts for every module in
-    /// this assembly with default options.
+    /// Compiles as much as possible for `vocab` now, so later compiles are fast.
     ///
-    /// Modules resolved to [`MaskStrategy::TokenTrie`] retain no work and are
-    /// compiled from source by [`Self::compile`].
+    /// Externs may still be unbound. The work is kept in the module and included
+    /// by [`save`](Self::save).
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
         self.precompile_with(vocab, CompileOptions::default())
     }
 
-    /// Retains vocabulary-specific compilation artifacts for every module in
-    /// this assembly using `options`.
-    ///
-    /// The options decide which static parts are built and stored. Modules
-    /// resolved to [`MaskStrategy::TokenTrie`] retain no work.
+    /// Like [`precompile`](Self::precompile), with `options`.
     pub fn precompile_with(&mut self, vocab: &Vocab, options: CompileOptions) -> Result<()> {
         with_deep_stack(|| self.precompile_on_stack(vocab, &options, true, false))
     }
@@ -785,12 +781,14 @@ impl Module {
         }
     }
 
-    /// Compiles the module assembly against `vocab` with default options.
+    /// Compiles the module for `vocab`, reusing any precompiled work.
+    ///
+    /// Every extern must be bound.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, CompileOptions::default())
     }
 
-    /// Compiles the module assembly against `vocab` with root compile options.
+    /// Like [`compile`](Self::compile), with `options`.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
         with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))
     }
@@ -1123,10 +1121,15 @@ impl Module {
         Ok(grammar)
     }
 
-    /// Serializes the module assembly and any retained precompiled artifacts.
+    /// Saves the module, including precompiled work, as bytes.
+    ///
+    /// The vocabulary is not included. Bytes saved by one GLRMask version may not
+    /// load in another.
     pub fn save(&self) -> Vec<u8> { with_deep_stack(|| artifact::save(self)) }
-    /// Deserializes a module assembly. Retained work is checked against the
-    /// vocabulary supplied to [`Self::compile`] or [`Self::precompile`].
+    /// Loads a module saved with [`save`](Self::save).
+    ///
+    /// Precompiled work applies only to the vocabulary it was built for;
+    /// compiling with a different one is an error.
     pub fn load<'b>(bytes: impl Into<std::borrow::Cow<'b, [u8]>>) -> Result<Self> {
         with_deep_stack(|| artifact::load(bytes.into().as_ref(), None))
     }

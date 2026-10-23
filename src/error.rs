@@ -16,9 +16,9 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
     catch_internal_invariant(f).and_then(|result| result)
 }
 
-/// A parse, build, artifact, or sequence-state failure.
+/// A GLRMask error.
 ///
-/// Source coordinates are included when the frontend can locate them.
+/// Errors in grammar source include their location when known.
 #[derive(ThisError, Debug, Clone)]
 #[error("{kind}")]
 #[non_exhaustive]
@@ -27,11 +27,11 @@ pub struct Error {
     span: Option<glrmask_grammar::SourceSpan>,
 }
 
-/// The kind of a [`Error`].
+/// The kind of an [`Error`].
 #[derive(ThisError, Debug, Clone)]
 #[non_exhaustive]
 pub enum ErrorKind {
-    /// The grammar source could not be parsed.
+    /// The grammar source has a syntax error.
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
 
@@ -39,19 +39,20 @@ pub enum ErrorKind {
     #[error("Compilation error: {0}")]
     Compilation(String),
 
-    /// An internal compiler invariant was violated, which indicates a bug.
+    /// A bug in GLRMask; please report it.
     #[error("Internal compiler invariant violated: {0}")]
     InternalInvariant(String),
 
-    /// A build exceeded a resource budget.
+    /// Compiling exceeded a resource limit.
     #[error("Resource limit exceeded: {0}")]
     ResourceLimit(String),
 
-    /// The requested strategy cannot represent this grammar exactly.
+    /// The chosen strategy cannot handle this grammar.
     #[error("Strategy unsupported: {0}")]
     StrategyUnsupported(String),
 
-    /// An artifact could not be serialized or loaded.
+    /// Saved bytes could not be loaded: they are corrupt, from another GLRMask
+    /// version, or for a different vocabulary.
     #[error("Serialization error: {0}")]
     Serialization(String),
 }
@@ -96,12 +97,12 @@ impl Error {
         Self { kind, span: None }
     }
 
-    /// The failure kind.
+    /// What kind of error this is.
     pub fn kind(&self) -> &ErrorKind {
         &self.kind
     }
 
-    /// Original source coordinates when the frontend can identify them exactly.
+    /// Where in the grammar source the error is, if known.
     pub fn source_span(&self) -> Option<glrmask_grammar::SourceSpan> {
         self.span
     }
@@ -157,9 +158,7 @@ impl Error {
 
 pub type GlrMaskError = Error;
 
-/// A GLRMask operation result.
-///
-/// [`Error::source_span`] exposes available source coordinates.
+/// A result with a GLRMask [`Error`].
 pub type Result<T> = std::result::Result<T, Error>;
 
 impl From<glrmask_grammar::Error> for Error {

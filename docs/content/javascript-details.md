@@ -57,7 +57,7 @@ const constraint = await parent.compile(moduleVocab, {
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{endTokens, maskStrategy, boundaryMaskStrategy}`:
+`grammar.externs` and `module.externs` are read-only `Map`-like snapshots of `{name, kind}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{maskStrategy, boundaryMaskStrategy}`:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));
@@ -92,9 +92,9 @@ A failed `commitToken`, `commitBytes` or `commitTokens` throws and leaves the st
 
 ## End tokens
 
-`isAccepting()` means the input so far is a complete match. With root `endTokens` configured, it becomes true only once an end token is committed. Without end tokens it reports a complete grammar match, which may still permit more input.
+`isAccepting()` means the input so far is a complete match, which may still allow more input. `isTerminated()` says whether anything more can be committed.
 
-An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root and is not inherited by embedded children.
+After an end token added with `Expr.sequence` is committed, or after a commit fails, the mask is empty and no further commit succeeds.
 
 ## Persistence
 

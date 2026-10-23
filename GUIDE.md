@@ -121,10 +121,10 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
-- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: a grammar, written as source text or built from an expression.
+- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `ConstraintState`: the state of one generated sequence.
 
 ### Python quickstart
 
@@ -139,11 +139,9 @@ for token_id, expected in [(0, [True, False, False]),
                            (1, [False, True, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
-    state.commit_token(token_id)
+    assert state.commit_token(token_id)
 assert state.is_accepting()
 ```
-
-Python masks are NumPy Boolean arrays indexed by original model token ID.
 
 ### Rust quickstart
 
@@ -157,16 +155,14 @@ fn main() -> glrmask::Result<()> {
     let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#);
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
-    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {
-        assert_eq!(state.mask()[0] & 7, expected);
+    for token_id in 0..3 {
+        assert_eq!(state.mask()[0], 1 << token_id);
         assert!(state.commit_token(token_id));
     }
     assert!(state.is_accepting());
     Ok(())
 }
 ```
-
-Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.
 
 ### Isolated components and typed bindings
 
@@ -282,8 +278,7 @@ are reserved.
 
 Rust `m.externs().unbound()` (Python: `m.externs.unbound`) reports unresolved
 externs. Rust `m.externs()` (Python: `m.externs`) reports all declared externs
-in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`,
-`span()`). Precompilation is allowed while externs remain open; final
+in declaration order. Introspection uses the `Extern` type (`name()`, `kind()`). Precompilation is allowed while externs remain open; final
 `compile()` requires every declared extern to be bound.
 
 ### Persistence and root policy
@@ -306,11 +301,9 @@ not once per child. Final compilation handles outstanding work, so attaching a
 cold child never requires a separate manual precompilation step. Incompatible
 retained representations or targets produce errors, not implicit loss of work.
 
-Configure `end_tokens` on the final compile operation. Acceptance then means an
-end token has been committed; a complete grammar match alone is not acceptance. A
-configured end ID is admitted only once the grammar is complete. Commit the sampled
-end ID before ending the generation loop. Child components do not supply the
-enclosing generation's root termination policy.
+To require an end-of-sequence token, put it after the grammar with `Grammar::from_expr(Expr::sequence(...))`. The token is allowed once the grammar is complete. After it is committed the mask is empty. If the token has no bytes, add its ID with `with_special_tokens`.
+
+`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
 
 ### Lightweight expressions
 
@@ -332,8 +325,7 @@ operators add neither scope nor public path segments.
 forced ordinary text. It greedily chooses the longest admitted nonempty spelling,
 then the lowest original-ID alias. Exact-token events retain their IDs, and the
 query stops before root acceptance or an intermediate event opportunity that a
-greedy text token would cross. Rust returns `Result<Vec<u32>>`; Python returns `list[int]`
-and raises errors for typed proof/resource failures. The result is one canonical
+greedy text token would cross. It returns a list of token IDs in every language. The result is one canonical
 sequence, not an exhaustive tree of equivalent token histories. See
 [forcing contracts](docs/forcing.md).
 
@@ -408,6 +400,38 @@ sampling annotations and grammar token/character budgets are not supported.
 Unsupported semantic features produce errors rather than being silently discarded.
 The Lark frontend does not claim Python regex endpoint ordering or compatibility
 with every Python Lark lexer mode.
+
+## Design principles
+
+GLRMask has a deliberately small API. These principles explain what it leaves out, and why.
+
+### End tokens are yours
+
+GLRMask has no end-token option. What a model's end token means depends on your application: stop generating, call a tool, or start the next turn. GLRMask doesn't decide that for you.
+
+To require an end token after a grammar, put it in the grammar: `Grammar::from_expr(Expr::sequence([Expr::from(grammar), Expr::from(eos_id)]))`. GLRMask recognises this shape and compiles it with no extra work, so it is as fast as the grammar on its own.
+
+### Masks are optional
+
+You never need a mask to drive a state. Commits check every input, `is_accepting` says whether the input so far is complete, and `is_terminated` says whether anything more can be committed. A mask is how you sample only allowed tokens, if you want to.
+
+Without masks, you can use rejection sampling: clone the state, commit the sampled token, and if the commit fails, sample again from the clone.
+
+### Commits say whether they worked
+
+`commit_token` and `commit_bytes` return `true` if the input was allowed and `false` if it wasn't. There is nothing else to report, so there is no error type.
+
+A token ID outside the vocabulary is just not allowed. This matters because a model's logits are often padded past the end of its vocabulary, and a sampler can pick a padded ID.
+
+### A failed commit ends the state
+
+After a commit returns `false`, the state allows nothing more: `is_terminated` is `true`, `is_accepting` is `false`, and the mask is empty. If your code ignores a failed commit, the empty mask catches the mistake at the next step. Otherwise the state would silently drift out of step with the generated text.
+
+To try alternatives, clone the state before committing.
+
+### The API grows only by adding
+
+GLRMask leaves a feature out until it is clearly needed. Adding a function later breaks nobody. Removing one breaks everyone who used it.
 
 ## How it works
 

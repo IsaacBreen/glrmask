@@ -3903,16 +3903,21 @@ impl<'a> DynamicConstraintState<'a> {
         crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
-    /// Whether the input so far is a complete match.
+    /// Whether the input committed so far is a complete match for the grammar.
     ///
-    /// With end tokens configured, this becomes true only once an end token is
-    /// committed. Without them it reports a complete grammar match, which may
-    /// still admit further tokens.
+    /// More input may still be allowed; see [`is_terminated`](Self::is_terminated).
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }
 
-    /// TODO(docs)
+    /// Whether nothing more can be committed.
+    ///
+    /// This is true when the sequence is finished, for example after its end token,
+    /// and after a failed commit. [`is_accepting`](Self::is_accepting) tells the two
+    /// apart.
+    ///
+    /// A complete match is not terminated if more input could follow, such as
+    /// whitespace the grammar ignores.
     #[must_use]
     pub fn is_terminated(&self) -> bool {
         self.alternatives.iter().all(ConstraintState::is_terminated)

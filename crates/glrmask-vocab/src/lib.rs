@@ -7,11 +7,10 @@ use std::fmt;
 use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// A set of model token IDs.
+/// A set of token IDs.
 ///
-/// Stored as normalized, disjoint, ascending inclusive ranges. Membership is
-/// checked against the target vocabulary at compile, precompile or link time.
-/// An empty set matches nothing.
+/// In a grammar, it matches any one of its tokens. Every ID must be in the
+/// vocabulary.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct TokenSet {
     ranges: Arc<[(u32, u32)]>,
@@ -31,16 +30,12 @@ impl fmt::Debug for TokenSet {
 }
 
 impl TokenSet {
-    /// Creates a set from `ids`; duplicates are ignored.
+    /// Creates a set from `ids`.
     pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
         Self::from_pairs(ids.into_iter().map(|id| (id, id)))
     }
 
-    /// Creates a set from inclusive or exclusive token-ID ranges.
-    ///
-    /// Overlapping or adjacent ranges merge. Empty or reversed ranges
-    /// contribute nothing; an unbounded start means 0 and an unbounded end
-    /// means [`u32::MAX`].
+    /// Creates a set from ranges of IDs, such as `0..10` or `0..=9`.
     pub fn from_ranges<R: RangeBounds<u32>>(
         ranges: impl IntoIterator<Item = R>,
     ) -> Self {
@@ -93,10 +88,10 @@ impl From<u32> for TokenSet {
 
 use range_set_blaze::RangeSetBlaze;
 
-/// The model vocabulary a constraint is compiled against.
+/// A model's vocabulary: each token ID and its bytes.
 ///
-/// Entries map model token IDs to exact byte sequences. Token IDs may be
-/// sparse; masks use the original model token IDs.
+/// Use each token's exact bytes, not its display form: `b" hello"`, not
+/// `"Ġhello"`. IDs need not be contiguous.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
     /// Model token IDs which are valid for token-set bindings but have no
@@ -177,7 +172,7 @@ impl Clone for Vocab {
 }
 
 impl Vocab {
-    /// Creates a vocabulary from `(token_id, token_bytes)` pairs.
+    /// Creates a vocabulary from `(id, bytes)` pairs.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
         let entries: Arc<BTreeMap<u32, Vec<u8>>> = Arc::new(entries.into_iter().collect());
         let max_token_byte_len = OnceLock::new();
@@ -193,11 +188,10 @@ impl Vocab {
         vocab
     }
 
-    /// Adds model token IDs that have no byte spelling but are valid for
-    /// token-set bindings.
+    /// Adds tokens that have no bytes, such as end-of-sequence or tool-call
+    /// tokens.
     ///
-    /// This suits integrations that distinguish control or tool tokens from
-    /// text tokens.
+    /// They can be used in token sets but never match text.
     pub fn with_special_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         {
             let entries = Arc::make_mut(&mut self.entries);
@@ -373,14 +367,12 @@ impl Vocab {
         }
     }
 
-    /// The exact byte spelling, or `None` for unknown and special IDs.
+    /// The bytes of a token, or `None` for special and unknown IDs.
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }
 
-    /// Byte-backed token IDs and their exact byte sequences, in ID order.
-    ///
-    /// Special IDs are omitted.
+    /// Each token ID and its bytes, in ID order. Special tokens are skipped.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()

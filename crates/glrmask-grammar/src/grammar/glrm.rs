@@ -907,15 +907,12 @@ pub struct GlrmWithExternalSubgrammars {
     pub placeholders: Vec<ExternalSubgrammarPlaceholder>,
 }
 
-/// The kind of an extern slot.
-///
-/// Token values can fill either kind; a general grammar cannot fill a token
-/// slot.
+/// What an extern can be bound to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternKind {
-    /// A token-level slot, bound to a token set.
+    /// A token set or token ID.
     Token,
-    /// A grammar-level slot, bound to a grammar.
+    /// A grammar, module, expression, token set or token ID.
     Grammar,
     /// Historical source-only union port. New source should declare a kind.
     #[doc(hidden)]

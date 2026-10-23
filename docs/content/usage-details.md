@@ -75,8 +75,7 @@ declines on budget.
 
 These strategies are compile settings, supplied on the compile call (in Python:
 keyword arguments to `compile` and `precompile`). One value applies to the whole
-compile, including every composed child. `CompileOptions::end_tokens` applies to
-the root compile call only; `precompile_with` accepts the same options so that
+compile, including every composed child. `precompile_with` accepts the same options so that
 precompilation decides which static parts are built. A part that already has a
 static preparation is never downgraded: with `TokenTrie`, precompiled parts stay
 static and only the other modules compile dynamically, with no new static work:
@@ -87,8 +86,7 @@ static and only the other modules compile dynamically, with no new static work:
 let constraint = grammar.compile_with(
     vocab,
     CompileOptions::default()
-        .mask_strategy(MaskStrategy::FAST_RUNTIME)
-        .end_tokens([99]),
+        .mask_strategy(MaskStrategy::FAST_RUNTIME),
 )?;
 # let _ = constraint;
 # Ok(())
@@ -97,11 +95,9 @@ let constraint = grammar.compile_with(
 
 ### Completion and forcing
 
-Set `end_tokens` on the final compile call. `is_accepting()` then becomes true
-only after an end token has been committed; a complete grammar match alone is not
-acceptance. Commit the sampled end token before stopping. Without end tokens,
-`is_accepting()` means the current output is a complete match, possibly with valid
-continuations.
+To require an end-of-sequence token, put it after the grammar with `Grammar::from_expr(Expr::sequence(...))`. The token is allowed once the grammar is complete. After it is committed the mask is empty. If the token has no bytes, add its ID with `with_special_tokens`.
+
+`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
 
 The read-only `forced_tokens()` query returns a safe library-canonical prefix of
 genuinely forced ordinary text. It uses the longest admitted nonempty spelling

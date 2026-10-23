@@ -1,17 +1,14 @@
 //! Original UTF-8 source coordinates, independent of transformed grammar nodes.
-/// A half-open byte range in the original document, with a one-based line and
-/// column.
-///
-/// Columns count Unicode scalars, not UTF-8 bytes; source is never normalized.
+/// A location in grammar source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceSpan {
-    /// Inclusive start byte offset.
+    /// Byte offset of the first byte.
     pub start: usize,
-    /// Exclusive end byte offset.
+    /// Byte offset just past the last byte.
     pub end: usize,
-    /// One-based line of `start`.
+    /// Line of `start`, counting from 1.
     pub line: usize,
-    /// One-based scalar column of `start`.
+    /// Column of `start`, counting characters from 1.
     pub column: usize,
 }
 impl std::fmt::Display for SourceSpan {

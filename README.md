@@ -125,10 +125,10 @@ Native bindings are available for C++ and JavaScript/TypeScript on Node.js. The 
 
 GLRMask has four core types:
 
-- `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
-- `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
-- `ConstraintState`: the mutable state for a single generated sequence.
+- `Grammar`: a grammar, written as source text or built from an expression.
+- `Module`: a grammar plus its extern bindings and any precompiled work. Can be saved and loaded.
+- `Constraint`: a grammar compiled for a vocabulary, ready to use.
+- `ConstraintState`: the state of one generated sequence.
 
 ### Python quickstart
 
@@ -143,11 +143,9 @@ for token_id, expected in [(0, [True, False, False]),
                            (1, [False, True, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
-    state.commit_token(token_id)
+    assert state.commit_token(token_id)
 assert state.is_accepting()
 ```
-
-Python masks are NumPy Boolean arrays indexed by original model token ID.
 
 ### Rust quickstart
 
@@ -161,16 +159,14 @@ fn main() -> glrmask::Result<()> {
     let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#);
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
-    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {
-        assert_eq!(state.mask()[0] & 7, expected);
+    for token_id in 0..3 {
+        assert_eq!(state.mask()[0], 1 << token_id);
         assert!(state.commit_token(token_id));
     }
     assert!(state.is_accepting());
     Ok(())
 }
 ```
-
-Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed.
 
 ### Composition and reusable grammars
 
@@ -249,8 +245,7 @@ declines on budget.
 
 These strategies are compile settings, supplied on the compile call (in Python:
 keyword arguments to `compile` and `precompile`). One value applies to the whole
-compile, including every composed child. `CompileOptions::end_tokens` applies to
-the root compile call only; `precompile_with` accepts the same options so that
+compile, including every composed child. `precompile_with` accepts the same options so that
 precompilation decides which static parts are built. A part that already has a
 static preparation is never downgraded: with `TokenTrie`, precompiled parts stay
 static and only the other modules compile dynamically, with no new static work:
@@ -261,8 +256,7 @@ static and only the other modules compile dynamically, with no new static work:
 let constraint = grammar.compile_with(
     vocab,
     CompileOptions::default()
-        .mask_strategy(MaskStrategy::FAST_RUNTIME)
-        .end_tokens([99]),
+        .mask_strategy(MaskStrategy::FAST_RUNTIME),
 )?;
 # let _ = constraint;
 # Ok(())
@@ -271,11 +265,9 @@ let constraint = grammar.compile_with(
 
 ### Completion and forcing
 
-Set `end_tokens` on the final compile call. `is_accepting()` then becomes true
-only after an end token has been committed; a complete grammar match alone is not
-acceptance. Commit the sampled end token before stopping. Without end tokens,
-`is_accepting()` means the current output is a complete match, possibly with valid
-continuations.
+To require an end-of-sequence token, put it after the grammar with `Grammar::from_expr(Expr::sequence(...))`. The token is allowed once the grammar is complete. After it is committed the mask is empty. If the token has no bytes, add its ID with `with_special_tokens`.
+
+`is_accepting()` means the input so far is a complete match, which may still allow more input. `is_terminated()` says whether anything more can be committed.
 
 The read-only `forced_tokens()` query returns a safe library-canonical prefix of
 genuinely forced ordinary text. It uses the longest admitted nonempty spelling
