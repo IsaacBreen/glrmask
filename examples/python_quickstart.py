@@ -10,13 +10,12 @@ import glrmask
 
 llm = Llama(model_path="model.gguf", logits_all=True)
 vocab = glrmask.Vocab.from_llama_cpp(llm)
-end_token_ids = vocab.llama_cpp_end_token_ids
-
 schema = '{"type":"string","enum":["positive","negative","neutral"]}'
-constraint = glrmask.Grammar.from_json_schema(schema).compile(
-    vocab,
-    end_tokens=end_token_ids,
-)
+grammar = glrmask.Grammar.from_expr(glrmask.Expr.sequence(
+    glrmask.Grammar.from_json_schema(schema),
+    glrmask.TokenSet(vocab.llama_cpp_end_token_ids),
+))
+constraint = grammar.compile(vocab)
 state = constraint.start()
 
 get_logits = lambda: llm.scores[llm.n_tokens - 1]
@@ -34,10 +33,10 @@ for _ in range(64):
 
     token = sample(logits)
     llm.eval([token])
-    state.commit_token(token)
+    assert state.commit_token(token)
     generated.append(token)
 
-    if state.is_accepting():
+    if state.is_terminated():
         break
 
 print(llm.detokenize(generated).decode())

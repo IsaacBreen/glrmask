@@ -43,9 +43,7 @@ constraint = module.compile(vocab, mask_strategy=MaskStrategy.FAST_RUNTIME)
 One strategy value applies to the whole compile, including every composed
 child. An attached child must have all of its own externs resolved before
 attachment. Implicit modules (a bare `Grammar` or `Expr` passed as a binding)
-are compiled with the same options as the rest of the assembly. `end_tokens`
-also comes from `CompileOptions` (Python: `end_tokens` keyword) and applies only
-to that root compilation.
+are compiled with the same options as the rest of the assembly.
 
 ## Open preparation and late binding
 

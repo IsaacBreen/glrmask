@@ -181,9 +181,11 @@ fn check(
             .commit_bytes(&[*b]));
     }
     let complete = expected.iter().any(|w| !apply(done, w).is_empty());
-    assert_eq!(
-        state.is_accepting(),
-        complete,
+    assert!(!state.is_accepting(),
+        "completion case{case} {representation} prefix{prefix:?} words{expected:?} completion={done:?}"
+    );
+    let mut eos = state.clone();
+    assert_eq!(eos.commit_token(255) && eos.is_accepting(), complete,
         "completion case{case} {representation} prefix{prefix:?} words{expected:?} completion={done:?}"
     );
     let mut mask = vec![0; c.mask_len()];
@@ -205,9 +207,11 @@ fn check(
             let next_complete = next_words.iter().any(|w| !apply(done, w).is_empty());
             let mut next_state = state.clone();
             assert!(next_state.commit_token(*id));
-            assert_eq!(
-                next_state.is_accepting(),
-                next_complete,
+            assert!(!next_state.is_accepting(),
+                "token-commit completion case{case} {representation} prefix{prefix:?} token{id}"
+            );
+            let mut eos = next_state.clone();
+            assert_eq!(eos.commit_token(255) && eos.is_accepting(), next_complete,
                 "token-commit completion case{case} {representation} prefix{prefix:?} token{id}"
             );
             let next_mask = next_state.mask();
@@ -540,9 +544,11 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                 for b in &prefix {
                     assert!(st.commit_bytes(&[*b]));
                 }
-                assert_eq!(
-                    st.is_accepting(),
-                    complete,
+                assert!(!st.is_accepting(),
+                    "completion case{case} {name} prefix{prefix:?} done{done:?}"
+                );
+                let mut eos = st.clone();
+                assert_eq!(eos.commit_token(255) && eos.is_accepting(), complete,
                     "completion case{case} {name} prefix{prefix:?} done{done:?}"
                 );
                 let mask = st.mask();
@@ -559,9 +565,11 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                         let expected_complete = recognize(&patterns, &ts, &done, &next_prefix).1;
                         let mut next_state = st.clone();
                         assert!(next_state.commit_token(*id));
-                        assert_eq!(
-                            next_state.is_accepting(),
-                            expected_complete,
+                        assert!(!next_state.is_accepting(),
+                            "model-token completion case{case} {name} prefix{prefix:?} token{id}"
+                        );
+                        let mut eos = next_state.clone();
+                        assert_eq!(eos.commit_token(255) && eos.is_accepting(), expected_complete,
                             "model-token completion case{case} {name} prefix{prefix:?} token{id}"
                         );
                         let next_mask = next_state.mask();

@@ -177,7 +177,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
         for mode in MODES {
             let compiled=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
-            for c in [compiled.clone(),Constraint::load(compiled.save(), &vocab()).unwrap(),
+            for c in [compiled.clone(),
                 Constraint::load(compiled.save(),&v).unwrap()] {
                 for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
                     let mut a=c.start();let mut expected=reference.start();
@@ -190,7 +190,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                 let mut a=c.start();
                 assert!(allowed(&a.mask(),3));assert!(allowed(&a.mask(),7));
                 assert!(!allowed(&a.mask(),8));assert!(!allowed(&a.mask(),9));
-                assert!(a.commit_token(7));assert!(a.is_accepting());
+                assert!(a.commit_token(7));assert!(!a.is_accepting());
                 assert!(allowed(&a.mask(),100));assert!(a.commit_token(100));assert!(a.is_accepting()); assert!(a.mask().iter().all(|&w|w==0));
                 for invalid in [8,9,11] {
                     let mut a=c.start();let mut expected=reference.start();

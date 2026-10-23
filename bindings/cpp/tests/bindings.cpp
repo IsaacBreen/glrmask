@@ -250,7 +250,8 @@ void emit_parity() {
             if (step) { CHECK(s.commit_token(step-1)); std::cout << ','; }
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
             for (std::size_t j=0; j<mask_words.size(); ++j) { if (j) std::cout << ','; std::cout << mask_words[j]; }
-            std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false") << '}';
+            std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false")
+                      << ",\"terminated\":" << (s.is_terminated()?"true":"false") << '}';
         } std::cout << "]}";
     } std::cout << "]\n";
 }

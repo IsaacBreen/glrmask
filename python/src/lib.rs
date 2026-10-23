@@ -611,7 +611,9 @@ impl PyVocab {
         })
     }
 
-    /// Extract the byte vocabulary from a llama-cpp-python `Llama`. EOG, control, unused and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.
+    /// Creates a vocabulary from a llama-cpp-python `Llama` model.
+    ///
+    /// Tokens with no text, such as control and end-of-generation tokens, become special tokens.
     #[staticmethod]
     fn from_llama_cpp(llm: &Bound<'_, PyAny>) -> PyResult<Self> {
         let (vocab, llama_cpp_end_token_ids) = llama_cpp_to_vocab(llm)?;
@@ -621,7 +623,7 @@ impl PyVocab {
         })
     }
 
-    /// EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling or linking.
+    /// The model's end-of-generation token IDs. Put them in a `TokenSet` after the grammar to require one.
     #[getter]
     fn llama_cpp_end_token_ids(&self) -> Vec<u32> {
         self.llama_cpp_end_token_ids.clone()

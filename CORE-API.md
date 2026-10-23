@@ -35,9 +35,8 @@ impl BoundaryMaskStrategy {
 // Compile settings
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
-pub struct CompileOptions { /* private end_tokens and strategies */ }
+pub struct CompileOptions { /* private strategies */ }
 impl CompileOptions {
-    pub fn end_tokens(self, ids: impl IntoIterator<Item = u32>) -> Self;
     pub fn mask_strategy(self, strategy: MaskStrategy) -> Self;
     pub fn boundary_mask_strategy(self, strategy: BoundaryMaskStrategy) -> Self;
 }
@@ -105,7 +104,6 @@ impl Expr {
 - `boundary_mask_strategy` is a minimum: raising it builds more later; lowering it never removes built metadata, and the best metadata built is always used.
 - `MaskStrategy` explicit requests (`ParserDwa`, `TokenTrie`, `TokenClassTrie`) never fall back silently. If the engine cannot handle the grammar, compilation errors explicitly; `Auto` may fall back to `TokenTrie`.
 - `TokenTrie` compiles the whole composition from source, so `precompile` retains no work for it.
-- `end_tokens` is configured via `CompileOptions` (`CompileOptions::default().end_tokens(...)`). It applies only to the root of that `compile` call and is not inherited by children.
 
 ### Binding and composition
 - `Module::bind` mutates `self` atomically: on error the module is unchanged.
