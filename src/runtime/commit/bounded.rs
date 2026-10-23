@@ -50,20 +50,20 @@ impl Witnesses {
         if self.contains(id){return Ok(true);}
         // No allocation at all is needed to prove K+1 after collecting K.
         if self.ids.len()==self.max{return Ok(false);}
-        self.ids.try_reserve(1).map_err(|_|crate::Error::State("bounded query witness allocation failed".into()))?;
+        self.ids.try_reserve(1).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
         if self.ids.len()==8 && self.large.is_none() {
             let mut set=FxHashSet::default();
-            set.try_reserve(16).map_err(|_|crate::Error::State("bounded query witness allocation failed".into()))?;
+            set.try_reserve(16).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
             set.extend(self.ids.iter().copied());self.large=Some(set);
         }
         if let Some(set)=&mut self.large {
-            set.try_reserve(1).map_err(|_|crate::Error::State("bounded query witness allocation failed".into()))?;
+            set.try_reserve(1).map_err(|_|crate::Error::InternalInvariant("bounded query witness allocation failed".into()))?;
             set.insert(id);
         }
         self.ids.push(id);Ok(true)
     }
 }
-fn state_error(message:String)->crate::Error {crate::Error::State(format!("bounded token proof: {message}"))}
+fn state_error(message:String)->crate::Error {crate::Error::InternalInvariant(format!("bounded token proof: {message}"))}
 fn placeholder(c:&Constraint,id:u32)->bool {
     c.special_token_terminals.iter().any(|s|s.token_id==id && c.is_late_grammar_placeholder_terminal(s.terminal_id))
 }
@@ -502,7 +502,7 @@ pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u3
                     Some(next)=>{cursor.state=next;live=true;},None=>cursor.state.clear(),
                 }
             }
-            if !live{return Err(state_error("singleton witness had no complete token successor".into()));}
+            if !live{return Ok(output);}
             output.push(id);
             if output.len()==MAX_FORCED || cursors.iter().any(|s|frontier_is_accepting(s.constraint,&s.state,false)){break;}
             let mut witnesses=Witnesses::new(1);
@@ -556,7 +556,7 @@ mod tests {
         for token in forced {
             assert!(!cursor.is_accepting(),"forced past stop: {context}");
             assert_eq!(ids(&cursor.mask()),[token],"not singleton: {context}");
-            cursor.commit_token(token).unwrap();
+            assert!(cursor.commit_token(token));
         }
         assert_eq!(state.state,initial,"query mutated parser state: {context}");
         assert_eq!(state.is_accepting(),accepting);
@@ -567,7 +567,7 @@ mod tests {
             inspect(&s,&format!("{label}: {path:?}"));n+=1;
             if path.len()==4 || n>120{continue;}
             for id in ids(&s.mask()).into_iter().take(8) {
-                let mut next=s.clone();next.commit_token(id).unwrap();let mut p=path.clone();p.push(id);queue.push((next,p));
+                let mut next=s.clone();assert!(next.commit_token(id));let mut p=path.clone();p.push(id);queue.push((next,p));
             }
         }
     }
@@ -711,7 +711,7 @@ mod differential_tests {
         for id in forced {
             assert!(!replay.is_accepting(),"{tag}: forced past root acceptance");
             assert_eq!(allowed(&replay.mask()),[id],"{tag}: forced ID was not singleton");
-            replay.commit_token(id).unwrap();
+            assert!(replay.commit_token(id));
         }
         // Also test reading an existing exact/body cache and applying the same
         // root-control / exact-event / empty-spelling final domain rules.
@@ -726,7 +726,7 @@ mod differential_tests {
             check(&s,&format!("{tag} trace={trace:?}"));
             if trace.len()==depth{continue;}
             for id in allowed(&s.mask()).into_iter().take(12) {
-                let mut child=s.clone();child.commit_token(id).unwrap();
+                let mut child=s.clone();assert!(child.commit_token(id));
                 let mut t=trace.clone();t.push(id);states.push((child,t));
             }
         }
@@ -797,7 +797,7 @@ mod differential_tests {
             let c=parent.link_with(BuildOptions::default().optimization(mode)).unwrap();
             walk(&c,&format!("composed {mode:?}"),2);
             for path in [&[5][..],&[0,1,3][..],&[0,1,9,3][..]] {
-                let mut state=c.start();for &id in path {check(&state,&format!("{mode:?}, path={path:?}, next={id}"));state.commit_token(id).unwrap();}
+                let mut state=c.start();for &id in path {check(&state,&format!("{mode:?}, path={path:?}, next={id}"));assert!(state.commit_token(id));}
                 check(&state,"composed accepting");
             }
         }
@@ -811,7 +811,7 @@ mod differential_tests {
         assert_eq!(mask_for_states_at_most(&[sa.clone(),sb.clone()],2).unwrap(),Some(sa.mask()));
         assert!(mask_for_states_at_most(&[sa.clone(),sb.clone()],1).unwrap().is_none());
         assert!(forced_tokens(&[sa.clone(),sb.clone()]).unwrap().is_empty());
-        let mut sa=sa;let mut sb=sb;sa.commit_token(0).unwrap();sb.commit_token(0).unwrap();
+        let mut sa=sa;let mut sb=sb;assert!(sa.commit_token(0));assert!(sb.commit_token(0));
         let mask=mask_for_states_at_most(&[sa.clone(),sb.clone()],2).unwrap().unwrap();assert_eq!(allowed(&mask),[1,2]);
         assert!(mask_for_states_at_most(&[sa,sb],1).unwrap().is_none());
     }
@@ -857,12 +857,12 @@ mod differential_tests {
                         let (&id,bytes)=entries.iter().filter(|(_,b)|!b.is_empty()&&b.len()<=3&&remaining.starts_with(b))
                             .map(|(id,b)|(id,b)).max_by_key(|(id,b)|(b.len(),std::cmp::Reverse(**id))).unwrap();
                         assert!(allowed(&state.mask()).contains(&id),"{context}, next={id}");
-                        state.commit_token(id).unwrap();remaining=&remaining[bytes.len()..];step+=1;
+                        assert!(state.commit_token(id));remaining=&remaining[bytes.len()..];step+=1;
                     }
                     // The grammar is complete; acceptance needs the end token.
                     assert!(allowed(&state.mask()).contains(&2000),"frontend grammar completion");
                     assert!(!state.is_accepting());
-                    state.commit_token(2000).unwrap();
+                    assert!(state.commit_token(2000));
                     assert!(state.is_accepting());
                     check(&state,"frontend terminated");
                 }

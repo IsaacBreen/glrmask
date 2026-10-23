@@ -61,7 +61,9 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
                 if !mask.get(id as usize / 32).is_some_and(|word| word & (1 << (id % 32)) != 0) {
                     return Ok(false);
                 }
-                state.commit_token(id).map_err(|error| error.to_string())?;
+                if !state.commit_token(id) {
+                    return Ok(false);
+                }
                 if state.mask().iter().all(|word| *word == 0) {
                     return Err("mask allowed a token whose commit rejected the state".to_string());
                 }

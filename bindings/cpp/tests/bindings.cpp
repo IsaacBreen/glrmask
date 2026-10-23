@@ -45,9 +45,9 @@ void basic() {
         std::vector<TokenId> short_buffer(1, 123); throws([&]{ s.fill_mask(short_buffer); }, GLRMASK_BUFFER_TOO_SMALL);
         CHECK(short_buffer[0]==123); CHECK(s.mask()==initial);
         auto copy = s; c.dispose(); g.dispose(); v.dispose();
-        s.commit_token(31); CHECK(s.is_accepting()); CHECK(!copy.is_accepting());
-        copy.commit_token(0); CHECK(copy.forced_tokens()==std::vector<TokenId>{1});
-        CHECK(!copy.is_accepting()); copy.commit_token(1); CHECK(copy.is_accepting());
+        CHECK(s.commit_token(31)); CHECK(s.is_accepting()); CHECK(!copy.is_accepting());
+        CHECK(copy.commit_token(0)); CHECK(copy.forced_tokens()==std::vector<TokenId>{1});
+        CHECK(!copy.is_accepting()); CHECK(copy.commit_token(1)); CHECK(copy.is_accepting());
         auto moved = std::move(copy); throws([&]{ copy.mask(); }, GLRMASK_CLOSED); CHECK(moved.is_accepting());
         s.dispose(); s.dispose(); throws([&]{ s.mask(); }, GLRMASK_CLOSED);
     }
@@ -63,23 +63,23 @@ void exact_and_unicode() {
         auto c = m.compile(v, strategy_options(i));
         auto s = c.start();
         CHECK(allowed(s.mask(),0)); CHECK(allowed(s.mask(),31));
-        s.commit_bytes(first); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
-        s.commit_bytes(last); CHECK(s.is_accepting());
+        CHECK(s.commit_bytes(first)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
+        CHECK(s.commit_bytes(last)); CHECK(s.is_accepting());
 
         auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root = T;)");
         auto em = Module(host);
         em.bind("T", TokenSet({31}));
         auto exact = em.compile(v, strategy_options(i));
         CHECK(allowed(exact.start().mask(),31)); CHECK(!allowed(exact.start().mask(),32));
-        auto e = exact.start(); e.commit_token(31); CHECK(e.is_accepting());
+        auto e = exact.start(); CHECK(e.commit_token(31)); CHECK(e.is_accepting());
 
         auto rm = Module(host);
         rm.bind("T", TokenSet({40}));
-        auto raw = rm.compile(v, strategy_options(i)).start(); raw.commit_token(40); CHECK(raw.is_accepting());
+        auto raw = rm.compile(v, strategy_options(i)).start(); CHECK(raw.commit_token(40)); CHECK(raw.is_accepting());
 
         auto cm = Module(host);
         cm.bind("T", TokenSet({99}));
-        auto control = cm.compile(v, strategy_options(i)).start(); control.commit_token(99); CHECK(control.is_accepting());
+        auto control = cm.compile(v, strategy_options(i)).start(); CHECK(control.commit_token(99)); CHECK(control.is_accepting());
     }
     auto merged = TokenSet::from_ranges({{31,32},{32,32}});
     auto duplicate = TokenSet({31,31,32});
@@ -87,21 +87,23 @@ void exact_and_unicode() {
     auto empty = TokenSet::from_ranges({{5,5}});
     Vocab maximum({}, {0xffffffff});
     auto high = TokenSet::from_ranges({{0xffffffff, 0xffffffff}});
-    auto none = TokenSet({});
+    auto none = TokenSet(std::vector<TokenId>{});
     (void)merged; (void)duplicate; (void)high; (void)none; (void)reversed; (void)empty;
 }
 
 void end_tokens() {
     Vocab v({{0,"a"}}, {99});
     for (unsigned i=0; i<4; ++i) {
-        CompileOptions o({99});
+        CompileOptions o;
         o.mask_strategy = static_cast<MaskStrategy>(i);
-        auto m = Module(Grammar::from_ebnf(R"(start ::= "a")"));
+        auto m = Module(Grammar::from_expr(Expr::sequence({
+            Grammar::from_ebnf(R"(start ::= "a")"), TokenSet({99})
+        })));
         auto s = m.compile(v, o).start();
-        CHECK(!allowed(s.mask(),99)); s.commit_token(0); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),99));
-        s.commit_token(99); CHECK(s.is_accepting());
+        CHECK(!allowed(s.mask(),99)); CHECK(s.commit_token(0)); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),99));
+        CHECK(s.commit_token(99)); CHECK(s.is_accepting());
         const auto m_words = s.mask(); CHECK(std::all_of(m_words.begin(), m_words.end(), [](auto w){ return w==0; }));
-        CHECK(ConstraintState(s).is_accepting()); throws([&]{ s.commit_token(99); });
+        CHECK(ConstraintState(s).is_accepting()); CHECK(!s.commit_token(99));
     }
 }
 
@@ -111,7 +113,7 @@ void composition_and_persistence() {
     auto host_mod = Module(host);
     auto ext = host_mod.externs();
     CHECK(ext.size()==1 && ext[0].name=="child");
-    CHECK(ext[0].kind==ExternKind::Grammar && ext[0].span.has_value());
+    CHECK(ext[0].kind==ExternKind::Grammar);
     CHECK(host_mod.externs().unbound().size()==1);
 
     auto a = Grammar::from_ebnf(R"(start ::= "a")");
@@ -138,7 +140,7 @@ void composition_and_persistence() {
     Module ap(a); ap.precompile(v);
     lp.bind("child", ap);
     const auto prepared_bytes = lp.save(); lp.dispose(); ap.dispose();
-    auto restored = Module::load(prepared_bytes, &v);
+    auto restored = Module::load(prepared_bytes);
     CHECK(restored.externs().unbound().empty());
 
     for (unsigned i=0; i<2; ++i) {
@@ -152,11 +154,9 @@ void composition_and_persistence() {
         CHECK(allowed(rc.start().mask(),5) && !allowed(rc.start().mask(),4));
         CHECK(pc.start().mask()==lc.start().mask());
 
-        auto saved = lc.save(); auto loaded = Constraint::load(saved); CHECK(loaded.start().mask()==lc.start().mask());
-        auto external = lc.save(true); throws([&]{ Constraint::load(external); });
-        CHECK(Constraint::load(external, &v).start().mask()==lc.start().mask());
+        auto saved = lc.save(); auto loaded = Constraint::load(saved, v); CHECK(loaded.start().mask()==lc.start().mask());
         Vocab wrong({{0,"wrong"},{1,"a"},{2,"b"},{3,"y"},{4,"xay"},{5,"xby"}});
-        throws([&]{ Constraint::load(external, &wrong); });
+        throws([&]{ Constraint::load(saved, wrong); });
     }
 }
 
@@ -167,12 +167,12 @@ void markers_and_frontends() {
         auto m = Module(g);
         auto c = m.compile(v, strategy_options(i)); CHECK(c.marker_ids()==std::vector<TokenId>({10,20,30}));
         auto s = c.start(); CHECK(s.marker_events().size()==1 && s.marker_events()[0].byte_offset==0);
-        s.commit_token(31); const auto events = s.marker_events();
+        CHECK(s.commit_token(31)); const auto events = s.marker_events();
         CHECK(events.size()==2 && events[0].id==20 && events[0].byte_offset==1 && events[1].id==30 && events[1].byte_offset==2);
         CHECK(ConstraintState(s).marker_events().size()==2);
-        auto load = Constraint::load(c.save()); CHECK(load.marker_ids()==c.marker_ids());
+        auto load = Constraint::load(c.save(), v); CHECK(load.marker_ids()==c.marker_ids());
         auto lm = Module(Grammar::from_lark("start: \"a\" \"b\""));
-        auto l = lm.compile(v, strategy_options(i)).start(); l.commit_token(31); CHECK(l.is_accepting());
+        auto l = lm.compile(v, strategy_options(i)).start(); CHECK(l.commit_token(31)); CHECK(l.is_accepting());
     }
     Vocab special({{0,"a"},{1,"a"}}, {99});
     for (unsigned i=0; i<4; ++i) {
@@ -181,17 +181,17 @@ void markers_and_frontends() {
         m.bind("begin", TokenSet({99}));
         m.bind("body", TokenSet({1}));
         auto state = m.compile(special, strategy_options(i)).start();
-        CHECK(allowed(state.mask(),99)); state.commit_token(99);
-        CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); state.commit_token(1); CHECK(state.is_accepting());
+        CHECK(allowed(state.mask(),99)); CHECK(state.commit_token(99));
+        CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); CHECK(state.commit_token(1)); CHECK(state.is_accepting());
     }
     Vocab json({{0,"null"},{1,"true"}});
     auto js = Module(Grammar::from_json_schema(R"({"type":"null"})")).compile(json).start();
-    CHECK(allowed(js.mask(),0) && !allowed(js.mask(),1)); js.commit_token(0); CHECK(js.is_accepting());
+    CHECK(allowed(js.mask(),0) && !allowed(js.mask(),1)); CHECK(js.commit_token(0)); CHECK(js.is_accepting());
 }
 
 void threads_and_errors() {
     auto v = vocabulary(); auto c = simple().compile(v); std::atomic<bool> okay{true}; std::vector<std::thread> threads;
-    for (int i=0; i<4; ++i) threads.emplace_back([&]{ try { for (int j=0; j<8; ++j) { auto s = c.start(); s.commit_token(31); if (!s.is_accepting()) okay=false; } } catch(...) { okay=false; } });
+    for (int i=0; i<4; ++i) threads.emplace_back([&]{ try { for (int j=0; j<8; ++j) { auto s = c.start(); CHECK(s.commit_token(31)); if (!s.is_accepting()) okay=false; } } catch(...) { okay=false; } });
     for (auto& thread : threads) thread.join(); CHECK(okay);
     std::size_t ignored = 0; CHECK(glrmask_vocab_len(nullptr, &ignored)==GLRMASK_INVALID_ARGUMENT);
     const std::string main_error = glrmask_error_message();
@@ -225,9 +225,9 @@ int thread_stack_probe(std::size_t stack_bytes) {
         try {
             for (auto& constraint : *p.constraints) for (int j=0; j<8; ++j) {
                 auto s = constraint.start(); CHECK(allowed(s.mask(), 31));
-                auto snapshot = s; s.commit_token(31); CHECK(s.is_accepting());
-                snapshot.commit_token(0); CHECK(snapshot.forced_tokens()==std::vector<TokenId>{1});
-                snapshot.commit_token(1); CHECK(snapshot.is_accepting());
+                auto snapshot = s; CHECK(s.commit_token(31)); CHECK(s.is_accepting());
+                CHECK(snapshot.commit_token(0)); CHECK(snapshot.forced_tokens()==std::vector<TokenId>{1});
+                CHECK(snapshot.commit_token(1)); CHECK(snapshot.is_accepting());
             }
             p.okay = true;
         }
@@ -246,7 +246,7 @@ void emit_parity() {
         auto m = Module(simple());
         auto s = m.compile(v, strategy_options(i)).start();
         for (unsigned step=0; step<3; ++step) {
-            if (step) { s.commit_token(step-1); std::cout << ','; }
+            if (step) { CHECK(s.commit_token(step-1)); std::cout << ','; }
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
             for (std::size_t j=0; j<mask_words.size(); ++j) { if (j) std::cout << ','; std::cout << mask_words[j]; }
             std::cout << "],\"accepting\":" << (s.is_accepting()?"true":"false") << '}';
@@ -266,12 +266,12 @@ void artifacts(const std::filesystem::path& directory, bool check) {
         for (bool external : {false, true}) {
             const auto path = directory/((check?"node-":"cpp-")+std::string(external?"external-":"mode-")+std::to_string(i)+".glr");
             if (check) {
-                auto loaded = Constraint::load(read_bytes(path), external?&v:nullptr);
+                auto loaded = Constraint::load(read_bytes(path), v);
                 CHECK(loaded.start().mask()==c.start().mask());
-                auto s = loaded.start(); s.commit_token(31); CHECK(s.is_accepting());
+                auto s = loaded.start(); CHECK(s.commit_token(31)); CHECK(s.is_accepting());
             }
             else {
-                const auto bytes = c.save(external); std::ofstream out(path, std::ios::binary);
+                const auto bytes = c.save(); std::ofstream out(path, std::ios::binary);
                 out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
                 CHECK(out.good());
             }
@@ -294,18 +294,18 @@ void canonical_modules() {
         static_cast<unsigned>(MaskStrategy::TokenClassTrie), BoundaryMaskStrategy::TokenTrie);
     child.precompile(v, child_options); parent.bind("child", child);
 
-    auto loaded = Module::load(parent.save(), &v);
+    auto loaded = Module::load(parent.save());
     CHECK(loaded.externs().unbound().empty());
     CHECK(original.externs().unbound().at(0).name=="child");
     CHECK(loaded.externs().at(0).name=="child");
 
     // Retained work survives without storing per-module settings.
     auto child_bytes = child.save();
-    auto child_loaded = Module::load(child_bytes, &v);
+    auto child_loaded = Module::load(child_bytes);
     CHECK(child_loaded.externs().empty());
 
     auto state = loaded.compile(v, child_options).start(); loaded.dispose(); parent.dispose(); child.dispose();
-    state.commit_token(3); CHECK(state.is_accepting());
+    CHECK(state.commit_token(3)); CHECK(state.is_accepting());
 
     bool failed = false; try { original.bind("missing", Grammar::from_ebnf("start ::= \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);
     CHECK(original.externs().unbound().at(0).name=="child");
@@ -327,14 +327,14 @@ void canonical_modules() {
     auto host2 = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = child;");
     auto m_expr = Module(host2);
     m_expr.bind("child", expr);
-    auto c = m_expr.compile(v); auto s = c.start(); s.commit_token(3); CHECK(s.is_accepting());
+    auto c = m_expr.compile(v); auto s = c.start(); CHECK(s.commit_token(3)); CHECK(s.is_accepting());
 
     // Expr literal
     auto lit = Expr::literal("xay");
     auto m_lit = Module(host2);
     m_lit.bind("child", lit);
     auto c_lit = m_lit.compile(v);
-    auto s_lit = c_lit.start(); s_lit.commit_token(3); CHECK(s_lit.is_accepting());
+    auto s_lit = c_lit.start(); CHECK(s_lit.commit_token(3)); CHECK(s_lit.is_accepting());
 
     // Externs ordering and unbound view
     auto multi = Grammar::from_glrm("glrm 1; start start; extern token first; extern grammar second; extern token third; nt start = first second third;");
@@ -360,7 +360,7 @@ void canonical_modules() {
     auto precompiled_state = open_host.compile(
         v, strategy_options(static_cast<unsigned>(MaskStrategy::TokenTrie))).start();
     CHECK(allowed(precompiled_state.mask(), 3));
-    precompiled_state.commit_token(3); CHECK(precompiled_state.is_accepting());
+    CHECK(precompiled_state.commit_token(3)); CHECK(precompiled_state.is_accepting());
 }
 
 int main(int argc, char** argv) {

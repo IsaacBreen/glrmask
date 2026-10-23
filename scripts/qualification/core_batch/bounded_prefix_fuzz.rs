@@ -36,7 +36,7 @@ fn main() {
           let loaded=Constraint::load(c.save(), &vocab).unwrap();
           for (is_loaded,c) in [(false,&c),(true,&loaded)] {
             for prefix in &prefixes {
-              let mut state=c.start();if state.commit_bytes(prefix).is_err(){continue;}
+              let mut state=c.start();if !state.commit_bytes(prefix){continue;}
               let actual=state.forced_tokens().unwrap_or_else(|e|panic!("g{gno} {mode:?} dense={dense} loaded={is_loaded} prefix={prefix:?}: {e}"));
               let expected=state.forced_canonical_reference();
               assert_eq!(actual,expected,"g{gno} {mode:?} dense={dense} loaded={is_loaded} prefix={prefix:?}");
@@ -50,8 +50,8 @@ fn main() {
       for mode in [Optimization::FastBuild,Optimization::Balanced,Optimization::FastRuntime] {
         let c=g.compile_with(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         for prefix in &prefixes {
-          let mut state=c.start();if state.commit_bytes(prefix).is_err(){continue;}
-          assert_eq!(state.forced_tokens().unwrap(),state.forced_canonical_reference(),"event branch {mode:?} prefix={prefix:?}");checked+=1;
+          let mut state=c.start();if !state.commit_bytes(prefix){continue;}
+          assert_eq!(state.forced_tokens(),state.forced_canonical_reference(),"event branch {mode:?} prefix={prefix:?}");checked+=1;
         }
       }
     }

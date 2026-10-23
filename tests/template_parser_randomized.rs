@@ -177,9 +177,8 @@ fn check(
 ) {
     let mut state = c.start();
     for b in prefix {
-        state
-            .commit_bytes(&[*b])
-            .unwrap_or_else(|e| panic!("case{case} {representation} prefix{prefix:?}: {e}"));
+        assert!(state
+            .commit_bytes(&[*b]));
     }
     let complete = expected.iter().any(|w| !apply(done, w).is_empty());
     assert_eq!(
@@ -205,7 +204,7 @@ fn check(
             let next_words = advance(ts, expected, bytes);
             let next_complete = next_words.iter().any(|w| !apply(done, w).is_empty());
             let mut next_state = state.clone();
-            next_state.commit_token(*id).unwrap();
+            assert!(next_state.commit_token(*id));
             assert_eq!(
                 next_state.is_accepting(),
                 next_complete,
@@ -233,7 +232,7 @@ fn check(
         }
     }
     if complete {
-        state.commit_token(255).unwrap();
+        assert!(state.commit_token(255));
         state.fill_mask(&mut mask);
         assert!(mask.iter().all(|x| *x == 0), "terminated mask");
     }
@@ -539,7 +538,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                 assert_eq!(c.parser_backend(), ParserBackend::TemplateDfa);
                 let mut st = c.start();
                 for b in &prefix {
-                    st.commit_bytes(&[*b]).unwrap();
+                    assert!(st.commit_bytes(&[*b]));
                 }
                 assert_eq!(
                     st.is_accepting(),
@@ -559,7 +558,7 @@ fn verify_overlapping_programs(offset: u64, count: u64, repeats: bool) {
                         next_prefix.extend(word);
                         let expected_complete = recognize(&patterns, &ts, &done, &next_prefix).1;
                         let mut next_state = st.clone();
-                        next_state.commit_token(*id).unwrap();
+                        assert!(next_state.commit_token(*id));
                         assert_eq!(
                             next_state.is_accepting(),
                             expected_complete,

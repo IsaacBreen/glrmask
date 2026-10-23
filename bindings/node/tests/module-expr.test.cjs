@@ -1,20 +1,18 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,TokenSet,Grammar,Module,CompileOptions,Expr,MaskStrategy,BoundaryMaskStrategy}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,MaskStrategy,BoundaryMaskStrategy}=require('../index.cjs');
 const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]],{specialTokenIds:[63]});
 const source=(text='a')=>Grammar.fromEbnf(`start ::= "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
 const mark=()=>Grammar.fromGlrm('glrm 1; start start; extern token MARK; nt start = MARK;');
 const allowed=(s,id)=>(s.mask()[id>>>5] & (1<<(id&31)))!==0;
-function accept(module,v,ids){const s=module.compileSync(v).start();for(const id of ids){assert.ok(allowed(s,id));s.commitToken(id);}assert.ok(s.isAccepting());}
+function accept(module,v,ids){const s=module.compileSync(v).start();for(const id of ids){assert.ok(allowed(s,id));assert.ok(s.commitToken(id));}assert.ok(s.isAccepting());}
 
 test('Module: copy and root-only final options',()=>{
   const v=vocab(),original=new Module(host());
-  assert.equal(BoundaryMaskStrategy.FastRuntime,BoundaryMaskStrategy.ParserDwa);
-  assert.equal(BoundaryMaskStrategy.FastBuild,BoundaryMaskStrategy.TokenTrie);
 
-  const configured=original.copy();
+  const configured=original.clone();
   const child=new Module(source());
   assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie}),undefined);
   accept(child,v,[1]);
@@ -24,12 +22,11 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const options=new CompileOptions({endTokens:[63],maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
-  assert.equal(options.maskStrategy,MaskStrategy.TokenClassTrie);
-  assert.equal(options.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
-  const state=configured.compileSync(v,options).start();
-  assert.ok(!allowed(state,63));state.commitToken(4);assert.ok(!state.isAccepting());assert.ok(allowed(state,63));state.commitToken(63);assert.ok(state.isAccepting());assert.ok(state.mask().every(w=>w===0));
-  assert.throws(()=>new CompileOptions({bogus:true}),TypeError);
+  const options={maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie};
+  const root=Grammar.fromExpr(Expr.sequence(configured,new TokenSet([63])));
+  const state=root.compileSync(v,options).start();
+  assert.ok(!allowed(state,63));assert.ok(state.commitToken(4));assert.ok(!state.isAccepting());assert.ok(allowed(state,63));assert.ok(state.commitToken(63));assert.ok(state.isAccepting());assert.ok(state.mask().every(w=>w===0));
+  assert.throws(()=>configured.compileSync(v,{bogus:true}),TypeError);
 });
 
 test('Grammar: precompile returns a bindable Module with retained work',async()=>{
@@ -39,14 +36,14 @@ test('Grammar: precompile returns a bindable Module with retained work',async()=
   assert.ok(parent instanceof Module);
   parent.bind('child',child.precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa}));
   const state=parent.compileSync(v).start();
-  assert.ok(allowed(state,4));state.commitToken(4);assert.ok(state.isAccepting());
+  assert.ok(allowed(state,4));assert.ok(state.commitToken(4));assert.ok(state.isAccepting());
 
   const reference=new Module(host());reference.bind('child',new Module(source()));reference.precompileSync(v);
   assert.deepEqual(Array.from(parent.compileSync(v).start().mask()),Array.from(reference.compileSync(v).start().mask()));
   assert.equal(parent.compileSync(v).start().isAccepting(),reference.compileSync(v).start().isAccepting());
 
   // The asynchronous spelling returns the same bindable Module.
-  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.FastBuild});
+  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
   assert.ok(asyncParent instanceof Module);
   asyncParent.bind('child',await child.precompile(v));
   accept(asyncParent,v,[4]);
@@ -70,14 +67,11 @@ test('Module: retained work round-trips without stored settings',()=>{
   accept(loaded,v,[1]);
 });
 
-test('Module: legacy boundary strategy strings remain accepted',()=>{
+test('Module: legacy boundary strategy strings are rejected',()=>{
   const v=vocab();
-  for (const input of ['fast-runtime','fast-build']) {
-    const m=new Module(source());
-    m.precompileSync(v,{boundaryMaskStrategy:input});
-    accept(m,v,[1]);
+  for (const input of ['fast-runtime','fast-build','dynamic']) {
+    assert.throws(()=>new Module(source()).precompileSync(v,{boundaryMaskStrategy:input}),TypeError);
   }
-  assert.throws(()=>new Module(source()).precompileSync(v,{boundaryMaskStrategy:'dynamic'}),TypeError);
 });
 
 test('Module: rebinding error, :: error and open-child error',()=>{
@@ -154,7 +148,7 @@ test('Module: raw source attachment, failure survival and target identity',()=>{
   const wrong=new Module(source());wrong.precompileSync(vocab(true));
   assert.throws(()=>parent.bind('child',wrong));assert.deepEqual(parent.saveSync(),bytes);
   assert.throws(()=>parent.precompileSync(vocab(true)));assert.deepEqual(parent.saveSync(),bytes);
-  assert.throws(()=>Module.loadSync(bytes,vocab(true)));
+  Module.loadSync(bytes,vocab(true));
   const loaded=Module.loadSync(bytes);loaded.bind('child',source());accept(loaded,v,[4]);
   const snapshot=loaded.saveSync();assert.throws(()=>loaded.bind('child',source('b')));assert.deepEqual(loaded.saveSync(),snapshot);
   const token=new Module(mark());assert.throws(()=>token.bind('MARK',source()));assert.equal(token.externs.unbound.get('MARK').name,'MARK');

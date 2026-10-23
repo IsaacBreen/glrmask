@@ -52,7 +52,7 @@ def test_source_child_uses_immutable_bind_and_compiled_child_is_rejected():
     mask = np.asarray(state.mask())
     assert mask.dtype == np.bool_
     assert mask[4]
-    state.commit_token(4)
+    assert state.commit_token(4)
     assert accepting(state)
     with pytest.raises((ValueError, RuntimeError)):
         parent.compile(v)
@@ -74,7 +74,7 @@ def test_module_save_load_remains_open_and_immutable():
         with pytest.raises((ValueError, RuntimeError)):
             open_mod.compile(v)
     with pytest.raises((ValueError, RuntimeError)):
-        glrmask.Constraint.load(artifact)
+        glrmask.Constraint.load(artifact, v)
 
 
 def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
@@ -93,7 +93,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     for mode in [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]:
         m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
-        impossible = m.compile(v, end_tokens=[127], mask_strategy=mode)
+        impossible = glrmask.Grammar.from_expr(glrmask.Expr.sequence(m, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.forced_tokens() == [] and state.forced_tokens() == []
@@ -113,10 +113,10 @@ def test_nested_path_and_open_child_are_rejected():
     c = parent.compile(v)
     state = c.start()
     assert not state.mask()[4]
-    state.commit_token(0)
+    assert state.commit_token(0)
     assert state.mask()[7] and not state.mask()[1]
-    state.commit_token(7)
-    state.commit_token(3)
+    assert state.commit_token(7)
+    assert state.commit_token(3)
     assert accepting(state)
 
 
@@ -131,7 +131,7 @@ def test_precompiled_module_with_precompiled_child():
     state = parent.compile(v).start()
     for token in [0, 7, 3]:
         assert state.mask()[token]
-        state.commit_token(token)
+        assert state.commit_token(token)
     assert accepting(state)
 
 
@@ -142,7 +142,7 @@ def test_state_retains_constraint_after_python_owner_is_collected():
     del constraint, v
     gc.collect()
     assert state.mask()[1]
-    state.commit_token(1)
+    assert state.commit_token(1)
     assert accepting(state)
 
 
@@ -174,20 +174,20 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
     mode = getattr(glrmask.MaskStrategy, mode_name)
     child_mod = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
-    child = child_mod.compile(v, end_tokens=[127], mask_strategy=mode)
-    child = glrmask.Constraint.load(child.save())
+    child = glrmask.Grammar.from_expr(glrmask.Expr.sequence(child_mod, glrmask.TokenSet([127]))).compile(v, mask_strategy=mode)
+    child = glrmask.Constraint.load(child.save(), v)
     own_state = child.start()
     assert not own_state.mask()[127]
-    own_state.commit_token(1)
+    assert own_state.commit_token(1)
     assert not accepting(own_state) and own_state.mask()[127]
     parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
-    c = parent_mod.compile(v, end_tokens=[63], mask_strategy=mode)
+    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(parent_mod, glrmask.TokenSet([63]))).compile(v, mask_strategy=mode)
     state = c.start()
     assert state.mask()[4]
-    state.commit_token(4)
+    assert state.commit_token(4)
     assert not accepting(state)
     assert state.mask()[63] and not state.mask()[127]
-    state.commit_token(63)
+    assert state.commit_token(63)
     assert accepting(state)
     assert not np.any(state.mask())

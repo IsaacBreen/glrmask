@@ -8836,8 +8836,8 @@ mod tests {
         assert_eq!(expected.is_accepting(), actual.is_accepting());
         assert!(!actual.is_accepting());
         for token in [1, 7, 11, 11] {
-            expected.commit_token(token).unwrap();
-            actual.commit_token(token).unwrap();
+            assert!(expected.commit_token(token));
+            assert!(actual.commit_token(token));
             assert_eq!(expected.mask(), actual.mask());
             assert_eq!(expected.is_accepting(), actual.is_accepting());
         }
@@ -8871,8 +8871,8 @@ mod tests {
             assert_eq!(expected.mask(), actual.mask());
             assert_eq!(expected.is_accepting(), actual.is_accepting());
             for token in tokens {
-                expected.commit_token(token).unwrap();
-                actual.commit_token(token).unwrap();
+                assert!(expected.commit_token(token));
+                assert!(actual.commit_token(token));
                 assert_eq!(expected.mask(), actual.mask());
                 assert_eq!(expected.is_accepting(), actual.is_accepting());
             }
@@ -8954,13 +8954,13 @@ mod tests {
         assert_eq!(original.start().mask(), loaded.start().mask());
         let mut expected = original.start();
         let mut actual = loaded.start();
-        expected.commit_token(0).expect("compiled key prefix must commit");
-        actual.commit_token(0).expect("loaded key prefix admitted by the mask must commit");
+        assert!(expected.commit_token(0), "compiled key prefix must commit");
+        assert!(actual.commit_token(0), "loaded key prefix admitted by the mask must commit");
         assert_eq!(expected.mask(), actual.mask());
         // Complete {"a": "x", "b": "x"}, checking every next-token mask.
         for token in [3, 5, 8, 6, 4, 5, 8, 7] {
-            expected.commit_token(token).unwrap();
-            actual.commit_token(token).unwrap();
+            assert!(expected.commit_token(token));
+            assert!(actual.commit_token(token));
             assert_eq!(expected.mask(), actual.mask());
         }
         assert!(expected.is_accepting());
@@ -8996,8 +8996,8 @@ mod tests {
             let mut actual = again.start();
             for &id in path {
                 assert_eq!(expected.mask(), actual.mask());
-                expected.commit_token(id).unwrap();
-                actual.commit_token(id).unwrap();
+                assert!(expected.commit_token(id));
+                assert!(actual.commit_token(id));
             }
             assert_eq!(expected.mask(), actual.mask(), "after {path:?}");
             assert_eq!(expected.is_accepting(), actual.is_accepting());
@@ -9227,8 +9227,8 @@ mod tests {
         let mut current_state = current.start();
         let mut loaded_state = loaded.start();
         assert_eq!(current_state.mask(), loaded_state.mask());
-        current_state.commit_token(2).unwrap();
-        loaded_state.commit_token(2).unwrap();
+        assert!(current_state.commit_token(2));
+        assert!(loaded_state.commit_token(2));
         assert_eq!(current_state.is_accepting(), loaded_state.is_accepting());
         assert!(current_state.is_accepting());
     }
@@ -9399,8 +9399,8 @@ mod tests {
         let mut expected = current.start();
         let mut actual = loaded.start();
         assert_eq!(actual.mask(), expected.mask());
-        expected.commit_token(2).unwrap();
-        actual.commit_token(2).unwrap();
+        assert!(expected.commit_token(2));
+        assert!(actual.commit_token(2));
         assert_eq!(actual.is_accepting(), expected.is_accepting());
         assert!(actual.is_accepting());
     }
@@ -9432,8 +9432,8 @@ mod tests {
         let compare_mask = |prefix: &[u8]| {
             let mut expected = constraint.start();
             let mut actual = loaded.start();
-            expected.commit_bytes(prefix).unwrap();
-            actual.commit_bytes(prefix).unwrap();
+            assert!(expected.commit_bytes(prefix));
+            assert!(actual.commit_bytes(prefix));
             assert_eq!(actual.mask(), expected.mask(), "prefix length {}", prefix.len());
         };
         compare_mask(b"\"x:");
@@ -9444,17 +9444,17 @@ mod tests {
 
         let mut expected = constraint.start();
         let mut actual = loaded.start();
-        expected.commit_bytes(&at_max).unwrap();
-        actual.commit_bytes(&at_max).unwrap();
-        expected.commit_bytes(b"\"").unwrap();
-        actual.commit_bytes(b"\"").unwrap();
+        assert!(expected.commit_bytes(&at_max));
+        assert!(actual.commit_bytes(&at_max));
+        assert!(expected.commit_bytes(b"\""));
+        assert!(actual.commit_bytes(b"\""));
         assert!(expected.is_accepting());
         assert!(actual.is_accepting());
 
         let mut over_max = b"\"x:".to_vec();
         over_max.extend(std::iter::repeat_n(b'a', 4_999));
-        assert!(constraint.start().commit_bytes(&over_max).is_err());
-        assert!(loaded.start().commit_bytes(&over_max).is_err());
+        assert!(!constraint.start().commit_bytes(&over_max));
+        assert!(!loaded.start().commit_bytes(&over_max));
 
         let mut corrupted = saved;
         let marker = corrupted
@@ -9481,14 +9481,14 @@ mod tests {
         let mut expected = baseline.start();
         let mut actual = packed.start();
         assert_eq!(actual.mask(), expected.mask());
-        expected.commit_token(0).unwrap();
-        actual.commit_token(0).unwrap();
+        assert!(expected.commit_token(0));
+        assert!(actual.commit_token(0));
         assert_eq!(actual.mask(), expected.mask());
 
         let loaded = Constraint::load(packed.save(), &crate::public_api::constraint_vocab(&packed)).unwrap();
         let mut loaded_state = loaded.start();
         assert_eq!(loaded_state.mask(), baseline.start().mask());
-        loaded_state.commit_token(0).unwrap();
+        assert!(loaded_state.commit_token(0));
         assert_eq!(loaded_state.mask(), expected.mask());
     }
 
@@ -9671,8 +9671,8 @@ mod tests {
         let mut expected = constraint.start();
         let mut actual = loaded.start();
         assert_eq!(actual.mask(), expected.mask());
-        expected.commit_token(0).unwrap();
-        actual.commit_token(0).unwrap();
+        assert!(expected.commit_token(0));
+        assert!(actual.commit_token(0));
         assert_eq!(actual.mask(), expected.mask());
     }
 
@@ -9833,8 +9833,8 @@ mod tests {
             let mut restored = loaded.start();
             for token in tokens {
                 assert_eq!(reference.mask(), restored.mask());
-                reference.commit_token(token).unwrap();
-                restored.commit_token(token).unwrap();
+                assert!(reference.commit_token(token));
+                assert!(restored.commit_token(token));
             }
             assert_eq!(reference.mask(), restored.mask());
             assert!(restored.is_accepting());
@@ -10161,8 +10161,8 @@ mod tests {
         let mut expected = constraint.start();
         for token in [0, 1] {
             assert_eq!(actual.mask(), expected.mask());
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.mask(), expected.mask());
         assert!(actual.is_accepting());
@@ -10214,8 +10214,8 @@ mod tests {
         let mut expected = constraint.start();
         for token in [0, 1] {
             assert_eq!(actual.mask(), expected.mask());
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.mask(), expected.mask());
         assert!(actual.is_accepting());
@@ -10252,8 +10252,8 @@ mod tests {
         let mut expected = constraint.start();
         for token in [0, 1] {
             assert_eq!(actual.mask(), expected.mask());
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.mask(), expected.mask());
         assert!(actual.is_accepting());

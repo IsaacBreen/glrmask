@@ -63,7 +63,7 @@ def test_json_schema_constructor_accepts_text_and_objects():
         c = glrmask.Grammar.from_json_schema(schema).compile(v)
         s = c.start()
         assert s.mask()[0] and not s.mask()[1]
-        s.commit_token(0)
+        assert s.commit_token(0)
         assert s.is_accepting()
 
 
@@ -94,7 +94,7 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
 
 def test_oversized_and_undersized_mask_buffers_and_state_termination():
     v = vocab()
-    c = glrmask.Grammar.from_ebnf('start ::= "a"').compile(v, end_tokens=[130])
+    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a"'), glrmask.TokenSet([130]))).compile(v)
     s = c.start()
     with pytest.raises(ValueError):
         s.fill_mask(np.zeros(1, dtype=np.int32))
@@ -103,16 +103,12 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     assert words[-2:].tolist() == [0, 0]
     assert not s.is_accepting() and not (not s.mask().any())
     assert s.mask()[0]
-    s.commit_token(0)
+    assert s.commit_token(0)
     assert s.mask()[130]
-    s.commit_token(130)
+    assert s.commit_token(130)
     assert s.is_accepting() and not np.any(s.mask())
-    with pytest.raises(ValueError):
-        s.commit_token(0)
-    with pytest.raises(ValueError):
-        s.commit_bytes(b'a')
-
-
+    assert not s.commit_token(0)
+    assert not s.commit_bytes(b'a')
 def test_description_owns_source_bindings_after_collection():
     v = vocab()
     parent = glrmask.Grammar.from_glrm('glrm 1; start start; extern grammar C; nt start = C;')
@@ -125,17 +121,17 @@ def test_description_owns_source_bindings_after_collection():
 
 def test_artifact_ownership_and_existing_vocab_validation():
     v = vocab()
-    c = glrmask.Grammar.from_ebnf('start ::= "a"').compile(v, end_tokens=[130])
+    c = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a"'), glrmask.TokenSet([130]))).compile(v)
     raw = c.save()
     assert isinstance(raw, bytes)
     del c
     gc.collect()
     c = glrmask.Constraint.load(raw, vocab=v)
     s = c.start()
-    s.commit_token(0)
+    assert s.commit_token(0)
     assert s.mask()[130]
     with pytest.raises(ValueError):
-        glrmask.Constraint.load(raw[:-1])
+        glrmask.Constraint.load(raw[:-1], v)
     other = glrmask.Vocab.from_id_to_bytes({0: b'changed'})
     with pytest.raises(ValueError):
         glrmask.Constraint.load(raw, vocab=other)

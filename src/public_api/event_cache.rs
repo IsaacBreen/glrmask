@@ -69,8 +69,8 @@ mod tests {
         assert!(Arc::ptr_eq(&a,&b));
         let mut state=a.start();
         assert!(state.mask()[0]&(1<<17)!=0);
-        assert!(state.commit_bytes(b"x").is_err());
-        let mut state=a.start();state.commit_token(17).unwrap();assert!(state.is_accepting());
+        assert!(!state.commit_bytes(b"x"));
+        let mut state=a.start();assert!(state.commit_token(17));assert!(state.is_accepting());
     }
     #[test]
     fn native_and_lr_event_adapters_have_separate_shared_slots() {
@@ -86,8 +86,8 @@ mod tests {
         }
         assert_eq!(native.start().mask(),lr.start().mask());
         for compiled in [native,lr] {
-            let mut state=compiled.start();state.commit_token(29).unwrap();assert!(state.is_accepting());
-            assert!(compiled.start().commit_bytes(b"x").is_err());
+            let mut state=compiled.start();assert!(state.commit_token(29));assert!(state.is_accepting());
+            assert!(!compiled.start().commit_bytes(b"x"));
         }
     }
 

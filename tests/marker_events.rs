@@ -20,7 +20,7 @@ fn equivalent_replay(a: &Constraint, b: &Constraint, tokens: &[u32]) {
     assert_eq!(a.mask(), b.mask());
     if compare_events { assert_eq!(a.marker_events(), b.marker_events()); }
     for &token in tokens {
-        assert_eq!(a.commit_token(token).is_ok(), b.commit_token(token).is_ok());
+        assert_eq!(a.commit_token(token), b.commit_token(token));
         assert_eq!(a.mask(), b.mask());
         assert_eq!(a.is_accepting(), b.is_accepting());
         assert_eq!((a.mask().iter().all(|word| *word == 0)), (b.mask().iter().all(|word| *word == 0)));
@@ -77,7 +77,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
             for value in [&linked,&loaded,&external] {
                 assert_eq!(value.marker_ids(), linked.marker_ids());
                 equivalent_replay(&linked,value,&[6]);
-                let mut state=value.start();state.commit_token(6).unwrap();assert!(state.is_accepting());
+                let mut state=value.start();assert!(state.commit_token(6));assert!(state.is_accepting());
                 assert_eq!(batch(&state), vec![(10, 1), (20, 2), (30, 3), (50, 4)],
                     "child={child_mode:?} link={mode:?}");
             }
@@ -88,7 +88,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
             assert_eq!(outer.marker_ids().len(),7);
             let outer = Constraint::load(outer.save(), &vocab).unwrap();
             assert_eq!(outer.marker_ids().len(),7);
-            let mut state=outer.start();state.commit_token(7).unwrap();assert!(state.is_accepting());
+            let mut state=outer.start();assert!(state.commit_token(7));assert!(state.is_accepting());
             assert_eq!(batch(&state), vec![(40, 1), (10, 2), (20, 3), (30, 4), (50, 5), (70, 6)]);
         }
     }
@@ -129,7 +129,7 @@ fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
         for tokens in [&[0,1,1,2][..], &[3][..]] {
             let mut state = constraint.start();
             let mut events = batch(&state);
-            for &token in tokens { state.commit_token(token).unwrap(); events.extend(batch(&state)); }
+            for &token in tokens { assert!(state.commit_token(token)); events.extend(batch(&state)); }
             assert_eq!(events, vec![(1,1),(1,2),(1,3)], "{mode:?} {tokens:?}");
             assert!(state.is_accepting());
         }
@@ -150,7 +150,7 @@ fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
         let repeat = Constraint::load(repeat.save(), &vocab).unwrap();
         let mut state = repeat.start();
         assert_eq!(batch(&state), vec![(7,0)]);
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert!(state.is_accepting());
         assert!(state.marker_events().is_empty());
     }
@@ -164,7 +164,7 @@ fn recursive_and_repeated_components_keep_positions_without_capture_pairing() {
         let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
         for tokens in [&[0,0,1,1][..], &[2][..]] {
             let mut state = constraint.start(); let mut events=batch(&state);
-            for &token in tokens { state.commit_token(token).unwrap(); events.extend(batch(&state)); }
+            for &token in tokens { assert!(state.commit_token(token)); events.extend(batch(&state)); }
             assert_eq!(events, vec![(1,1),(1,2),(2,3),(2,4)], "{mode:?} {tokens:?}");
             assert!(state.is_accepting());
         }

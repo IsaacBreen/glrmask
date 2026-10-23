@@ -117,7 +117,7 @@ fn assert_allowed(state: &ConstraintState<'_>, expected: &[usize]) {
 
 fn commit_each_token(state: &mut ConstraintState<'_>, tokens: &[u32]) {
     for &token in tokens {
-        state.commit_token(token).unwrap();
+        assert!(state.commit_token(token));
     }
 }
 
@@ -130,18 +130,18 @@ fn assert_accepts_tokens(constraint: &Constraint, tokens: &[u32]) {
 fn assert_rejects_token(constraint: &Constraint, prefix: &[u32], token: u32) {
     let mut state = constraint.start();
     commit_each_token(&mut state, prefix);
-    assert!(state.commit_token(token).is_err());
+    assert!(!state.commit_token(token));
 }
 
 fn assert_accepts_bytes(constraint: &Constraint, bytes: &[u8]) {
     let mut state = constraint.start();
-    state.commit_bytes(bytes).unwrap();
+    assert!(state.commit_bytes(bytes));
     assert!(state.is_accepting());
 }
 
 fn assert_rejects_bytes(constraint: &Constraint, bytes: &[u8]) {
     let mut state = constraint.start();
-    assert!(state.commit_bytes(bytes).is_err());
+    assert!(!state.commit_bytes(bytes));
 }
 
 #[test]
@@ -162,11 +162,11 @@ fn lark_direct_unicode_uses_original_utf8_bytes() {
     assert_eq!(allowed(&dynamic_constraint.start().mask()), vec![0, 1, 2, 3]);
 
     let mut static_state = static_constraint.start();
-    static_state.commit_token(3).unwrap();
+    assert!(static_state.commit_token(3));
     assert!(static_state.is_accepting());
 
     let mut dynamic_state = dynamic_constraint.start();
-    dynamic_state.commit_token(3).unwrap();
+    assert!(dynamic_state.commit_token(3));
     assert!(dynamic_state.is_accepting());
 }
 
@@ -201,7 +201,7 @@ fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
             "static constraint {index}",
         );
         let mut state = constraint.start();
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
     }
 
@@ -217,7 +217,7 @@ fn ebnf_and_glrm_direct_unicode_use_original_utf8_bytes() {
             "dynamic constraint {index}",
         );
         let mut state = constraint.start();
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
     }
 }
@@ -246,7 +246,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
     ] {
         assert_eq!(allowed(&constraint.start().mask()), vec![0, 1, 2]);
         let mut state = constraint.start();
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert!(state.is_accepting());
     }
 
@@ -257,7 +257,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
     ] {
         assert_eq!(allowed(&constraint.start().mask()), vec![3, 4, 5, 6]);
         let mut state = constraint.start();
-        state.commit_token(6).unwrap();
+        assert!(state.commit_token(6));
         assert!(state.is_accepting());
     }
 
@@ -275,7 +275,7 @@ fn unicode_regex_scalars_ranges_and_classes_are_runtime_safe() {
     let dynamic = DynamicConstraint::compile(glrmask::Grammar::lark("start: /[😀]|—+/"), &vocab).unwrap();
     assert_eq!(allowed(&dynamic.start().mask()), vec![0, 1, 2, 3, 4, 5, 6]);
     let mut state = dynamic.start();
-    state.commit_token(6).unwrap();
+    assert!(state.commit_token(6));
     assert!(state.is_accepting());
 }
 
@@ -338,7 +338,7 @@ fn unicode_escape_spellings_preserve_runtime_prefixes() {
         vec![8, 9, 10, 11, 12, 13, 14]
     );
     let mut state = dynamic.start();
-    state.commit_token(14).unwrap();
+    assert!(state.commit_token(14));
     assert!(state.is_accepting());
 }
 
@@ -348,7 +348,7 @@ fn max_paths_and_stacks(constraint: &Constraint, text: &str) -> (usize, usize) {
     let mut max_stacks = stack_count(&state);
 
     for &byte in text.as_bytes() {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
         max_paths = max_paths.max(state.parser_path_count(1_000_000));
         max_stacks = max_stacks.max(stack_count(&state));
     }
@@ -381,10 +381,10 @@ fn ebnf_masks_and_commits() {
     let mut state = constraint.start();
     assert_allowed(&state, &[0]);
 
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert_allowed(&state, &[1, 2]);
 
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
     assert!(state.is_accepting());
     assert_rejects_token(&constraint, &[0], 0);
 }
@@ -414,9 +414,9 @@ fn lark_literals_choices_and_terminals() {
 
     let mut state = constraint.start();
     assert_allowed(&state, &[0, 1]);
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert_allowed(&state, &[2]);
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
     assert!(state.is_accepting());
 }
 
@@ -674,20 +674,20 @@ fn json_schema_optional_label_with_additional_tail_reaches_multiple_gss_paths() 
     );
     let mut state = constraint.start();
 
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert_eq!(unique_parser_path_count(&state), 1);
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert_eq!(unique_parser_path_count(&state), 1);
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
     assert_eq!(unique_parser_path_count(&state), 1);
-    state.commit_token(3).unwrap();
+    assert!(state.commit_token(3));
 
     let stacks = state.debug_parser_stacks();
     assert_eq!(unique_parser_path_count(&state), 2, "{stacks:?}");
 
     // Preserve the public semantic oracle as well as the exact internal-path
     // regression above: the multi-path witness must remain completable.
-    state.commit_token(4).unwrap();
+    assert!(state.commit_token(4));
     assert!(state.is_accepting());
 }
 
@@ -713,8 +713,8 @@ fn json_schema_open_object_required_fixed_property_remains_mandatory_with_ap_tai
 fn json_schema_rejects_invalid_utf8_in_string() {
     let constraint = byte_schema(r#"{"type":"string"}"#);
     let mut state = constraint.start();
-    state.commit_bytes(&[b'"']).unwrap();
-    assert!(state.commit_bytes(&[0xff]).is_err());
+    assert!(state.commit_bytes(&[b'"']));
+    assert!(!state.commit_bytes(&[0xff]));
 }
 
 #[test]
@@ -724,7 +724,7 @@ fn json_schema_uri_format_default_mode_accepts_basic_uri() {
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
-    state.commit_bytes(br#""https://example.com""#).unwrap();
+    assert!(state.commit_bytes(br#""https://example.com""#));
     assert!(state.is_accepting());
 }
 
@@ -735,7 +735,7 @@ fn json_schema_uri_format_structured_mode_accepts_basic_uri() {
 
     let constraint = byte_schema(r#"{"type":"string","format":"uri"}"#);
     let mut state = constraint.start();
-    state.commit_bytes(br#""https://example.com""#).unwrap();
+    assert!(state.commit_bytes(br#""https://example.com""#));
     assert!(state.is_accepting());
 }
 
@@ -842,14 +842,14 @@ fn json_schema_number_multiple_of_001_accepts_two_decimal_places() {
 fn json_schema_number_multiple_of_001_rejects_three_decimal_places() {
     let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(b"1.234").is_err());
+    assert!(!state.commit_bytes(b"1.234"));
 }
 
 #[test]
 fn json_schema_number_multiple_of_001_rejects_extra_significant_digits() {
     let constraint = byte_schema(r#"{"type":"number","multipleOf":0.01}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(b"1.001").is_err());
+    assert!(!state.commit_bytes(b"1.001"));
 }
 
 #[test]
@@ -868,7 +868,7 @@ fn json_schema_number_multiple_of_05_accepts_half_steps() {
 fn json_schema_number_multiple_of_05_rejects_non_half_steps() {
     let constraint = byte_schema(r#"{"type":"number","multipleOf":0.5}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(b"1.2").is_err());
+    assert!(!state.commit_bytes(b"1.2"));
 }
 
 #[test]
@@ -885,7 +885,7 @@ fn json_schema_number_multiple_of_10_rejects_non_multiple() {
         r#"{"type":"array","items":{"type":"number","multipleOf":10},"minItems":1,"maxItems":1}"#,
     );
     let mut state = constraint.start();
-    assert!(state.commit_bytes(b"[21]").is_err());
+    assert!(!state.commit_bytes(b"[21]"));
 }
 
 #[test]
@@ -909,33 +909,32 @@ fn json_schema_pattern_with_max_length_token_mask_rejects_overlong_identifier() 
     );
 
     let mut token_state = token_constraint.start();
-    token_state.commit_bytes(br#"{"name": ""#).unwrap();
+    assert!(token_state.commit_bytes(br#"{"name": ""#));
     assert_eq!(allowed(&token_state.mask()), vec![1]);
 
     let mut overlong_token_state = token_constraint.start();
-    overlong_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(overlong_token_state.commit_token(0).is_err());
+    assert!(overlong_token_state.commit_bytes(br#"{"name": ""#));
+    assert!(!overlong_token_state.commit_token(0));
 
     let mut allowed_token_state = token_constraint.start();
-    allowed_token_state.commit_bytes(br#"{"name": ""#).unwrap();
-    allowed_token_state.commit_token(1).unwrap();
+    assert!(allowed_token_state.commit_bytes(br#"{"name": ""#));
+    assert!(allowed_token_state.commit_token(1));
 
     let mut token_prefix_state = token_constraint.start();
-    token_prefix_state.commit_bytes(br#"{"name": ""#).unwrap();
-    assert!(token_prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
+    assert!(token_prefix_state.commit_bytes(br#"{"name": ""#));
+    assert!(!token_prefix_state.commit_bytes(b"OptionsItemSelected"));
 
     let constraint = byte_schema(
         schema_text,
     );
 
     let mut prefix_state = constraint.start();
-    prefix_state.commit_bytes(br#"{"name": "#).unwrap();
-    assert!(prefix_state.commit_bytes(b"OptionsItemSelected").is_err());
+    assert!(prefix_state.commit_bytes(br#"{"name": "#));
+    assert!(!prefix_state.commit_bytes(b"OptionsItemSelected"));
 
     let mut state = constraint.start();
-    assert!(state
-        .commit_bytes(br#"{"name": "OptionsItemSelected"}"#)
-        .is_err());
+    assert!(!state
+        .commit_bytes(br#"{"name": "OptionsItemSelected"}"#));
 }
 
 #[test]
@@ -948,12 +947,12 @@ fn json_schema_pattern_with_s_separator_accepts_tab_and_formfeed_prefixes() {
     );
 
     let mut tab_state = constraint.start();
-    tab_state.commit_bytes(br#"""#).unwrap();
-    tab_state.commit_bytes(br#"\t"#).unwrap();
+    assert!(tab_state.commit_bytes(br#"""#));
+    assert!(tab_state.commit_bytes(br#"\t"#));
 
     let mut formfeed_state = constraint.start();
-    formfeed_state.commit_bytes(br#"""#).unwrap();
-    formfeed_state.commit_bytes(br#"\f"#).unwrap();
+    assert!(formfeed_state.commit_bytes(br#"""#));
+    assert!(formfeed_state.commit_bytes(br#"\f"#));
 
     assert_accepts_bytes(&constraint, br#""\tKONG_A=x""#);
     assert_accepts_bytes(&constraint, br#""\fKONG_A=x""#);
@@ -987,7 +986,7 @@ fn json_schema_optional_decimal_pattern_rejects_backslash_prefix_token() {
     assert_accepts_bytes(&constraint, br#""123.45""#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""\\"#).is_err());
+    assert!(!state.commit_bytes(br#""\\"#));
 }
 
 #[test]
@@ -996,8 +995,8 @@ fn json_schema_pattern_accepts_decoded_quote_string() {
     assert_accepts_bytes(&constraint, br#""\"""#);
 
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
-    assert!(state.commit_bytes(b"\"").is_err());
+    assert!(state.commit_bytes(b"\""));
+    assert!(!state.commit_bytes(b"\""));
 }
 
 #[test]
@@ -1011,11 +1010,11 @@ fn json_schema_pattern_accepts_decoded_backslash_incrementally() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^[\\\\]+$"}"#);
     let mut state = constraint.start();
 
-    state.commit_bytes(b"\"").unwrap();
-    state.commit_bytes(b"\\").unwrap();
-    state.commit_bytes(b"\\").unwrap();
+    assert!(state.commit_bytes(b"\""));
+    assert!(state.commit_bytes(b"\\"));
+    assert!(state.commit_bytes(b"\\"));
     assert!(allowed(&state.mask()).contains(&(b'"' as usize)));
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
     assert!(state.is_accepting());
 }
 
@@ -1027,9 +1026,9 @@ fn json_schema_pattern_accepts_decoded_backslash_fused_token() {
     );
     let mut state = constraint.start();
 
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask()).contains(&1));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }
 
@@ -1041,9 +1040,9 @@ fn json_schema_pattern_range_accepts_backslash_fused_token() {
     );
     let mut state = constraint.start();
 
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask()).contains(&1));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }
 
@@ -1052,7 +1051,7 @@ fn json_schema_pattern_accepts_decoded_newline_escape_spellings() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^\\n$"}"#);
     assert_accepts_bytes(&constraint, br#""\n""#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""\u000A""#).is_err());
+    assert!(!state.commit_bytes(br#""\u000A""#));
 }
 
 #[test]
@@ -1066,7 +1065,7 @@ fn json_schema_pattern_rejects_extra_separator_in_dimensions_string() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""1920x108x0""#).is_err());
+    assert!(!state.commit_bytes(br#""1920x108x0""#));
 }
 
 #[test]
@@ -1074,15 +1073,15 @@ fn json_schema_pattern_dimensions_prefix_rejects_second_separator_token() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^[0-9]+x[0-9]+$"}"#);
     let mut state = constraint.start();
 
-    state.commit_bytes(br#""1920x108"#).unwrap();
+    assert!(state.commit_bytes(br#""1920x108"#));
     let mask = allowed(&state.mask());
     assert!(mask.contains(&(b'0' as usize)));
     assert!(!mask.contains(&(b'x' as usize)));
-    assert!(state.commit_bytes(b"x").is_err());
+    assert!(!state.commit_bytes(b"x"));
 
     let mut ok_state = constraint.start();
-    ok_state.commit_bytes(br#""1920x108"#).unwrap();
-    ok_state.commit_bytes(b"0").unwrap();
+    assert!(ok_state.commit_bytes(br#""1920x108"#));
+    assert!(ok_state.commit_bytes(b"0"));
 }
 
 #[test]
@@ -1091,8 +1090,8 @@ fn json_schema_dot_pattern_rejects_invalid_utf8_bytes() {
     assert_accepts_bytes(&constraint, br#""a""#);
 
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
-    assert!(state.commit_bytes(&[0xff]).is_err());
+    assert!(state.commit_bytes(b"\""));
+    assert!(!state.commit_bytes(&[0xff]));
 }
 
 #[test]
@@ -1100,7 +1099,7 @@ fn json_schema_suffix_dot_pattern_allows_valid_utf8_lead_byte_token() {
     let constraint = byte_schema(r#"{"type":"string","pattern":"^.*.txt$"}"#);
 
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
     assert!(allowed(&state.mask()).contains(&0xd3));
 }
 
@@ -1112,7 +1111,7 @@ fn json_schema_pattern_properties_accepts_encoded_quote_key() {
     assert_accepts_bytes(&constraint, br#"{"\"": 1}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"": 1}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"": 1}"#));
 }
 
 #[test]
@@ -1128,7 +1127,7 @@ fn json_schema_pattern_properties_match_decoded_fixed_quote_key() {
     assert_accepts_bytes(&constraint, br#"{"\"": 2}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"\"": 1}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"\"": 1}"#));
 }
 
 #[test]
@@ -1142,10 +1141,10 @@ fn json_schema_pattern_properties_do_not_reaccept_declared_key() {
         }"#,
     );
     let mut event_state = constraint.start();
-    assert!(event_state.commit_bytes(br#"{"kind": "event"}"#).is_err());
+    assert!(!event_state.commit_bytes(br#"{"kind": "event"}"#));
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"kind": 1}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"kind": 1}"#));
 }
 
 #[test]
@@ -1161,7 +1160,7 @@ fn json_schema_additional_properties_exclude_pattern_matched_keys() {
     assert_accepts_bytes(&constraint, br#"{"y": 1}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"x1": 1}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"x1": 1}"#));
 }
 
 #[test]
@@ -1185,7 +1184,7 @@ fn json_schema_additional_property_pattern_addback_does_not_reaccept_declared_ke
 
     assert_accepts_bytes(&constraint, br#"{"x_key": 123}"#);
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"applicationId": 123}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"applicationId": 123}"#));
 }
 
 #[test]
@@ -1236,7 +1235,7 @@ fn json_schema_additional_property_pattern_addback_restores_globally_excluded_pa
     assert_accepts_bytes(&constraint, br#"{"b": {"x1": "ok"}}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"b": {"x1": 1}}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"b": {"x1": 1}}"#));
 }
 
 #[test]
@@ -1265,7 +1264,7 @@ fn json_schema_open_anyof_variant_additional_properties_allow_other_variant_keys
     assert_accepts_bytes(&constraint, br#"{"b": []}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"[]"#).is_err());
+    assert!(!state.commit_bytes(br#"[]"#));
 }
 
 #[test]
@@ -1281,10 +1280,10 @@ fn json_schema_number_multiple_of_keeps_exclusive_maximum() {
     assert_accepts_bytes(&constraint, br#"20"#);
 
     let mut too_large = constraint.start();
-    assert!(too_large.commit_bytes(br#"600"#).is_err());
+    assert!(!too_large.commit_bytes(br#"600"#));
 
     let mut boundary = constraint.start();
-    assert!(boundary.commit_bytes(br#"100"#).is_err());
+    assert!(!boundary.commit_bytes(br#"100"#));
 }
 
 #[test]
@@ -1302,7 +1301,7 @@ fn json_schema_object_property_untyped_numeric_assertions_allow_non_numbers() {
     assert_accepts_bytes(&constraint, br#"{"size": "free"}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"size": 100001}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"size": 100001}"#));
 }
 
 #[test]
@@ -1320,7 +1319,7 @@ fn json_schema_object_property_untyped_string_assertions_allow_non_strings() {
     assert_accepts_bytes(&constraint, br#"{"name": []}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"name": "example.csv"}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"name": "example.csv"}"#));
 }
 
 #[test]
@@ -1342,16 +1341,15 @@ fn json_schema_object_property_untyped_array_assertions_allow_non_arrays() {
     assert_accepts_bytes(&constraint, br#"{"dataFormats": "anything"}"#);
 
     let mut invalid_item = constraint.start();
-    assert!(invalid_item.commit_bytes(br#"{"dataFormats": ["text/plain"]}"#).is_err());
+    assert!(!invalid_item.commit_bytes(br#"{"dataFormats": ["text/plain"]}"#));
 
     let mut too_many_items = constraint.start();
-    assert!(too_many_items
-        .commit_bytes(br#"{"dataFormats": ["application/json", "application/json"]}"#)
-        .is_err());
+    assert!(!too_many_items
+        .commit_bytes(br#"{"dataFormats": ["application/json", "application/json"]}"#));
 
     let mut state = constraint.start();
-    state.commit_bytes(br#"{"dataFormats":"#).unwrap();
-    state.commit_bytes(b" true").unwrap();
+    assert!(state.commit_bytes(br#"{"dataFormats":"#));
+    assert!(state.commit_bytes(b" true"));
 }
 
 #[test]
@@ -1367,7 +1365,7 @@ fn json_schema_additional_property_required_only_key_does_not_fall_back_through_
     assert_accepts_bytes(&constraint, br#"{"id": "ok"}"#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#"{"id": 1}"#).is_err());
+    assert!(!state.commit_bytes(br#"{"id": 1}"#));
 }
 
 #[test]
@@ -1376,7 +1374,7 @@ fn json_schema_const_quote_reencodes_literal() {
     assert_accepts_bytes(&constraint, br#""\"""#);
 
     let mut state = constraint.start();
-    assert!(state.commit_bytes(br#""\\""#).is_err());
+    assert!(!state.commit_bytes(br#""\\""#));
 }
 
 #[test]
@@ -1393,8 +1391,8 @@ fn json_schema_pattern_and_date_format_annotation_accepts_invalid_month_token() 
     assert_accepts_bytes(&constraint, br#""2023-93""#);
 
     let mut state = constraint.start();
-    state.commit_bytes(br#""2023-"#).unwrap();
-    state.commit_bytes(b"93\"").unwrap();
+    assert!(state.commit_bytes(br#""2023-"#));
+    assert!(state.commit_bytes(b"93\""));
     assert!(state.is_accepting());
     assert_rejects_bytes(&constraint, br#""2023-aa""#);
 }
@@ -1413,11 +1411,11 @@ fn nullable_repeat_alternative_accepts_nonempty_branch_before_nullable_suffix() 
         with_stable_ti_env(|| Constraint::compile(glrmask::Grammar::glrm(grammar), &tiny_vocab).unwrap());
 
     let mut empty_host = constraint.start();
-    empty_host.commit_bytes(b"aa").unwrap();
+    assert!(empty_host.commit_bytes(b"aa"));
     assert!(empty_host.is_accepting());
 
     let mut single_repeat_host = constraint.start();
-    single_repeat_host.commit_bytes(b"aba").unwrap();
+    assert!(single_repeat_host.commit_bytes(b"aba"));
     assert!(single_repeat_host.is_accepting());
 }
 
@@ -1426,12 +1424,12 @@ fn commit_bytes_and_repeated_commit_token_agree() {
     let constraint = ebnf(&["a", "b", "ab"], r#"start ::= "a" "b" | "ab""#);
 
     let mut by_tokens = constraint.start();
-    by_tokens.commit_token(0).unwrap();
-    by_tokens.commit_token(1).unwrap();
+    assert!(by_tokens.commit_token(0));
+    assert!(by_tokens.commit_token(1));
     assert!(by_tokens.is_accepting());
 
     let mut by_bytes = constraint.start();
-    by_bytes.commit_bytes(b"ab").unwrap();
+    assert!(by_bytes.commit_bytes(b"ab"));
     assert!(by_bytes.is_accepting());
 }
 
@@ -1441,8 +1439,8 @@ fn forced_reports_deterministic_prefix() {
     let mut state = constraint.start();
     assert_eq!(state.forced_canonical_reference(), vec![0, 1]); // acceptance competes with the optional c
 
-    state.commit_token(0).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(0));
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }
 
@@ -1468,15 +1466,15 @@ fn special_token_vocab() -> Vocab {
 fn assert_special_token_sequence(constraint: &Constraint) {
     let mut state = constraint.start();
     assert_eq!(allowed(&state.mask()), vec![0]);
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert_eq!(allowed(&state.mask()), vec![7]);
 
     let mut by_bytes = state.clone();
-    assert!(by_bytes.commit_bytes(b"SPECIAL").is_err());
+    assert!(!by_bytes.commit_bytes(b"SPECIAL"));
 
-    state.commit_token(7).unwrap();
+    assert!(state.commit_token(7));
     assert_eq!(allowed(&state.mask()), vec![1]);
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }
 
@@ -1520,11 +1518,11 @@ fn byte_less_special_token_extends_mask_token_space() {
     assert_eq!(constraint.mask_len(), 4);
     let mut state = constraint.start();
     assert_eq!(allowed(&state.mask()), vec![100]);
-    state.commit_token(100).unwrap();
+    assert!(state.commit_token(100));
     assert!(state.is_accepting());
 
     let mut unknown = constraint.start();
-    assert!(unknown.commit_token(101).is_err());
+    assert!(!unknown.commit_token(101));
 }
 
 #[test]
@@ -1543,7 +1541,7 @@ fn grammar_def_json_supports_special_token_terminals() {
     .unwrap();
     assert_eq!(allowed(&constraint.start().mask()), vec![100]);
     let mut state = constraint.start();
-    state.commit_token(100).unwrap();
+    assert!(state.commit_token(100));
     assert!(state.is_accepting());
 }
 
@@ -1562,22 +1560,22 @@ fn special_token_static_dynamic_and_serialized_constraints_agree() {
     let mut static_state = constraint.start();
     let mut dynamic_state = dynamic.start();
     assert_eq!(static_state.mask(), dynamic_state.mask());
-    static_state.commit_token(0).unwrap();
-    dynamic_state.commit_token(0).unwrap();
+    assert!(static_state.commit_token(0));
+    assert!(dynamic_state.commit_token(0));
     assert_eq!(static_state.mask(), dynamic_state.mask());
     assert_eq!(allowed(&static_state.mask()), vec![7]);
-    static_state.commit_token(7).unwrap();
-    dynamic_state.commit_token(7).unwrap();
+    assert!(static_state.commit_token(7));
+    assert!(dynamic_state.commit_token(7));
     assert_eq!(static_state.mask(), dynamic_state.mask());
 
     let loaded = Constraint::load(&constraint.save(), &vocab).unwrap();
     assert_special_token_sequence(&loaded);
     let dynamic_loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
     let mut dynamic_loaded_state = dynamic_loaded.start();
-    dynamic_loaded_state.commit_token(0).unwrap();
+    assert!(dynamic_loaded_state.commit_token(0));
     assert_eq!(allowed(&dynamic_loaded_state.mask()), vec![7]);
-    dynamic_loaded_state.commit_token(7).unwrap();
-    dynamic_loaded_state.commit_token(1).unwrap();
+    assert!(dynamic_loaded_state.commit_token(7));
+    assert!(dynamic_loaded_state.commit_token(1));
     assert!(dynamic_loaded_state.is_accepting());
 }
 
@@ -1596,16 +1594,16 @@ fn named_special_terminal_and_explicit_end_token_are_parser_controlled() {
 
     let mut state = constraint.start();
     assert_eq!(allowed(&state.mask()), vec![0]);
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(!state.is_accepting());
     assert_eq!(allowed(&state.mask()), vec![100]);
-    state.commit_token(100).unwrap();
+    assert!(state.commit_token(100));
     assert!(state.is_accepting());
 
     let mut dynamic_state = dynamic.start();
-    dynamic_state.commit_token(0).unwrap();
+    assert!(dynamic_state.commit_token(0));
     assert_eq!(allowed(&dynamic_state.mask()), vec![100]);
-    dynamic_state.commit_token(100).unwrap();
+    assert!(dynamic_state.commit_token(100));
     assert!(dynamic_state.is_accepting());
 }
 
@@ -1626,17 +1624,17 @@ fn special_token_commit_unions_special_and_byte_paths() {
     });
 
     let mut byte_only_at_position = constraint.start();
-    byte_only_at_position.commit_token(0).unwrap();
+    assert!(byte_only_at_position.commit_token(0));
     assert_eq!(allowed(&byte_only_at_position.mask()), vec![7]);
-    byte_only_at_position.commit_token(7).unwrap();
+    assert!(byte_only_at_position.commit_token(7));
     assert_eq!(allowed(&byte_only_at_position.mask()), vec![1]);
-    byte_only_at_position.commit_token(1).unwrap();
+    assert!(byte_only_at_position.commit_token(1));
     assert!(byte_only_at_position.is_accepting());
 
     let mut both_paths = constraint.start();
-    both_paths.commit_token(7).unwrap();
+    assert!(both_paths.commit_token(7));
     assert_eq!(allowed(&both_paths.mask()), vec![7]);
-    both_paths.commit_token(7).unwrap();
+    assert!(both_paths.commit_token(7));
     assert!(both_paths.is_accepting());
 }
 
@@ -1693,11 +1691,11 @@ fn special_token_atoms_compose_in_parser_choices_and_repetition() {
 
     let mut state = constraint.start();
     assert_eq!(allowed(&state.mask()), vec![100, 101]);
-    state.commit_token(101).unwrap();
+    assert!(state.commit_token(101));
     assert!(state.is_accepting());
     assert_eq!(allowed(&state.mask()), vec![100, 101]);
-    state.commit_token(100).unwrap();
-    state.commit_token(101).unwrap();
+    assert!(state.commit_token(100));
+    assert!(state.commit_token(101));
     assert!(state.is_accepting());
 }
 
@@ -1757,11 +1755,11 @@ fn isolated_and_monolithic_lexer_partitions_are_end_to_end_equivalent() {
                 let isolated_result = next_isolated.commit_token(token);
                 let monolithic_result = next_monolithic.commit_token(token);
                 assert_eq!(
-                    isolated_result.is_ok(),
-                    monolithic_result.is_ok(),
+                    isolated_result,
+                    monolithic_result,
                     "commit result differed for token {token} after path {path:?}",
                 );
-                if isolated_result.is_ok() {
+                if isolated_result {
                     let mut next_path = path.clone();
                     next_path.push(token);
                     next.push((next_isolated, next_monolithic, next_path));
@@ -1789,7 +1787,7 @@ fn assert_partitioned_runtime_matches_dynamic(
         for (partitioned_state, path) in frontier {
             let mut dynamic_state = dynamic.start();
             for &token in &path {
-                dynamic_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
             }
             assert_eq!(
                 partitioned_state.mask(),
@@ -1811,16 +1809,16 @@ fn assert_partitioned_runtime_matches_dynamic(
                 let partitioned_result = next_partitioned.commit_token(token);
                 let mut next_dynamic = dynamic.start();
                 for &token in &path {
-                    next_dynamic.commit_token(token).unwrap();
+                    assert!(next_dynamic.commit_token(token));
                 }
                 let dynamic_result = next_dynamic.commit_token(token);
                 assert_eq!(
-                    partitioned_result.is_ok(),
+                    partitioned_result,
                     expected_allowed,
                     "commit result disagreed with mask for token {token} after path {path:?}\ngrammar:\n{grammar}",
                 );
                 assert_eq!(
-                    dynamic_result.is_ok(),
+                    dynamic_result,
                     expected_allowed,
                     "DynamicConstraint commit result disagreed with mask for token {token} after path {path:?}\ngrammar:\n{grammar}",
                 );
@@ -1927,8 +1925,8 @@ fn residual_terminal_continuation_survives_across_vocab_tokens() {
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
 
-    state.commit_token(1).unwrap(); // "b"
-    state.commit_token(3).unwrap(); // "ab"; bytes "bab" = B("ba") B("b")
+    assert!(state.commit_token(1)); // "b"
+    assert!(state.commit_token(3)); // "ab"; bytes "bab" = B("ba") B("b")
 
     let mask = state.mask();
     assert!(
@@ -2016,9 +2014,9 @@ fn partitioned_repeat_continuation_survives_ignore_prefixed_token() {
     let mut monolithic_state = monolithic.start();
 
     for token in [0, 6, 16] {
-        partitioned_state.commit_token(token).unwrap();
-        dynamic_state.commit_token(token).unwrap();
-        monolithic_state.commit_token(token).unwrap();
+        assert!(partitioned_state.commit_token(token));
+        assert!(dynamic_state.commit_token(token));
+        assert!(monolithic_state.commit_token(token));
     }
 
     assert_eq!(partitioned_state.mask(), monolithic_state.mask());
@@ -2052,8 +2050,8 @@ fn nullable_terminal_root_loop_is_preserved_by_isolated_partitions() {
         let mut isolated_state = isolated.start();
         let mut monolithic_state = monolithic.start();
         for &token in token_path {
-            isolated_state.commit_token(token).unwrap();
-            monolithic_state.commit_token(token).unwrap();
+            assert!(isolated_state.commit_token(token));
+            assert!(monolithic_state.commit_token(token));
             assert_eq!(isolated_state.mask(), monolithic_state.mask());
             assert_eq!(isolated_state.is_accepting(), monolithic_state.is_accepting());
         }
@@ -2071,7 +2069,7 @@ fn plan_style_mask_buffer_matches_mask() {
     assert_eq!(buffer, state.mask());
     assert_allowed(&state, &[0]);
 
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     state.fill_mask(&mut buffer);
     assert_eq!(buffer, state.mask());
     assert_allowed(&state, &[1]);
@@ -2128,7 +2126,7 @@ fn json_schema_kubernetes_container_ports_prefix_has_single_stack_path() {
         Constraint::compile(glrmask::Grammar::json_schema(K8S_ORDERED_PORTS_SCHEMA_FRAGMENT), &bytes_vocab()).unwrap()
     });
     let mut state = constraint.start();
-    state.commit_bytes(K8S_ORDERED_PORTS_PREFIX).unwrap();
+    assert!(state.commit_bytes(K8S_ORDERED_PORTS_PREFIX));
 
     let stacks = state.debug_parser_stacks();
     let mut stack_values = stacks
@@ -2154,7 +2152,7 @@ fn direct_glrm_minimized_lowered_schema_has_two_stack_split() {
 
     let mut state = constraint.start();
     for &byte in b"dab" {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
     }
     let stacks = state.debug_parser_stacks();
     let path_count = state.parser_path_count(10);
@@ -2187,7 +2185,7 @@ fn direct_glrm_minimized_lowered_schema_collapses_when_tail_token_differs() {
 
     let mut state = constraint.start();
     for &byte in b"dab" {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
     }
     let stacks = state.debug_parser_stacks();
 
@@ -2231,7 +2229,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
     let observe = |constraint: &Constraint, sequence: &[u32]| {
         let mut state = constraint.start();
         for &token in sequence {
-            if state.commit_token(token).is_err() {
+            if !state.commit_token(token) {
                 return None;
             }
         }
@@ -2253,7 +2251,7 @@ fn terminal_interchangeability_minimal_two_byte_counterexample_matches_baseline(
         let prefix = vec![b'a'; prefix_len];
         let observe_bytes = |constraint: &Constraint| {
             let mut state = constraint.start();
-            if state.commit_bytes(&prefix).is_err() {
+            if !state.commit_bytes(&prefix) {
                 return None;
             }
             Some((state.is_accepting(), allowed(&state.mask())))
@@ -2300,7 +2298,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
     let observe = |constraint: &Constraint, sequence: &[u32]| {
         let mut state = constraint.start();
         for &token in sequence {
-            if state.commit_token(token).is_err() {
+            if !state.commit_token(token) {
                 return None;
             }
         }
@@ -2322,7 +2320,7 @@ fn strict_terminal_interchangeability_reference_matches_baseline_l2p_artifact() 
         let prefix = vec![b'a'; prefix_len];
         let observe_bytes = |constraint: &Constraint| {
             let mut state = constraint.start();
-            if state.commit_bytes(&prefix).is_err() {
+            if !state.commit_bytes(&prefix) {
                 return None;
             }
             Some((state.is_accepting(), allowed(&state.mask())))
@@ -2442,45 +2440,49 @@ fn every_failed_commit_returns_err_and_kills_the_state() {
     };
     // Unknown ID.
     let mut state = constraint.start();
-    assert!(state.commit_token(99).is_err());
+    assert!(!state.commit_token(99));
     dead(&state);
-    assert!(state.commit_token(0).is_err());
+    assert!(!state.commit_token(0));
     // Forbidden ID.
     let mut state = constraint.start();
-    assert!(state.commit_token(1).is_err());
+    assert!(!state.commit_token(1));
     dead(&state);
-    assert!(state.commit_token(0).is_err());
+    assert!(!state.commit_token(0));
     // Bytes with no viable continuation.
     let mut state = constraint.start();
-    assert!(state.commit_bytes(b"z").is_err());
+    assert!(!state.commit_bytes(b"z"));
     dead(&state);
-    assert!(state.commit_bytes(b"a").is_err());
+    assert!(!state.commit_bytes(b"a"));
     // commit_tokens stops at the first failure and leaves the state dead.
     let mut state = constraint.start();
-    assert!(state.commit_tokens(&[0, 1, 0]).is_err());
+    assert!(!state.commit_tokens(&[0, 1, 0]));
     dead(&state);
-    assert!(state.commit_tokens(&[0]).is_err());
+    assert!(!state.commit_tokens(&[0]));
 }
 
 #[test]
 fn commit_tokens_commits_in_order_and_post_end_commits_error() {
     let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())])
         .with_special_tokens([7]);
-    let constraint = glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)
-        .compile_with(&vocab, glrmask::CompileOptions::default().end_tokens([7]))
-        .unwrap();
+    let constraint = glrmask::Grammar::from_expr(glrmask::Expr::sequence([
+        glrmask::Expr::from(glrmask::Grammar::ebnf(r#"start ::= "a" "b""#)),
+        glrmask::Expr::from(glrmask::TokenSet::new([7])),
+    ]))
+    .unwrap()
+    .compile(&vocab)
+    .unwrap();
     let mut state = constraint.start();
-    state.commit_tokens(&[0, 1, 7]).unwrap();
+    assert!(state.commit_tokens(&[0, 1, 7]));
     assert!(state.is_accepting());
     // After an end token every commit errors and the state is dead.
-    assert!(state.commit_token(0).is_err());
+    assert!(!state.commit_token(0));
     assert!(state.mask().iter().all(|word| *word == 0));
     assert!(!state.is_accepting());
     // A disallowed end token is an error too.
     let mut early = constraint.start();
-    assert!(early.commit_token(7).is_err());
+    assert!(!early.commit_token(7));
     assert!(!early.is_accepting());
-    assert!(early.commit_token(0).is_err());
+    assert!(!early.commit_token(0));
 }
 
 #[test]

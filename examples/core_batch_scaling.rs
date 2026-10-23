@@ -92,7 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for &threads in &workers {
         rows.push(measure("independent_tiny_compile", 0, threads, (jobs/4).max(1), || {
             let c=tiny.compile_with_build_options(&v,options.clone())?;
-            let mut s=c.start();s.commit_token(0)?;s.commit_token(1)?;
+            let mut s=c.start();assert!(s.commit_token(0));assert!(s.commit_token(1));
             assert!(s.is_accepting());black_box(c);Ok(())
         })?);
     }
@@ -101,7 +101,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     for &threads in &workers {
         rows.push(measure("relink_four_events",4,threads,(jobs/4).max(1),|| {
             let c=p.link_with(options.clone())?;let mut s=c.start();
-            for _ in 0..4{s.commit_token(2)?;}assert!(s.is_accepting());black_box(c);Ok(())
+            for _ in 0..4{assert!(s.commit_token(2));}assert!(s.is_accepting());black_box(c);Ok(())
         })?);
     }
     println!("{}",serde_json::to_string_pretty(&json!({"kind":"glrm-core-batch-native-scaling-v1",

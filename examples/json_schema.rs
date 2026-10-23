@@ -22,7 +22,7 @@ fn main() {
     )
     .unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(br#"{"ok": true}"#).unwrap();
+    assert!(state.commit_bytes(br#"{"ok": true}"#));
 
     assert!(state.is_accepting());
     println!("accepted: {{\"ok\": true}}");

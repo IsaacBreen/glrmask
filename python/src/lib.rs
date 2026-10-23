@@ -591,20 +591,22 @@ impl PyVocab {
 
     /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
     #[staticmethod]
-    fn from_dict(token_to_id: &Bound<'_, PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (token_to_id, *, special_tokens = None))]
+    fn from_dict(token_to_id: &Bound<'_, PyDict>, special_tokens: Option<Vec<u32>>) -> PyResult<Self> {
         let vocab = dict_to_vocab(token_to_id)?;
         Ok(Self {
-            inner: vocab,
+            inner: vocab.with_special_tokens(special_tokens.unwrap_or_default()),
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
 
     /// Use the tokenizer’s exact decoded bytes, including partial UTF-8 sequences, rather than display spellings.
     #[staticmethod]
-    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>) -> PyResult<Self> {
+    #[pyo3(signature = (id_to_bytes, *, special_tokens = None))]
+    fn from_id_to_bytes(id_to_bytes: &Bound<'_, PyDict>, special_tokens: Option<Vec<u32>>) -> PyResult<Self> {
         let vocab = id_to_bytes_dict_to_vocab(id_to_bytes)?;
         Ok(Self {
-            inner: vocab,
+            inner: vocab.with_special_tokens(special_tokens.unwrap_or_default()),
             llama_cpp_end_token_ids: Vec::new(),
         })
     }
@@ -967,15 +969,21 @@ pub struct PyDynamicConstraintState {
 
 #[pymethods]
 impl PyDynamicConstraintState {
-    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
+    fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
+            .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
-    /// Commits model token IDs in order. A disallowed event raises an error and rejects the state.
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
+    /// Commits one model token event; returns false when it is disallowed.
+    fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
+            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
+    }
+
+    /// Commits model token IDs in order; returns false at the first disallowed event.
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
+        self.inner
+            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
     }
 
 
@@ -1052,11 +1060,11 @@ impl PyDynamicConstraintState {
 
     /// Locally inevitable original token IDs, without choosing an encoding.
     /// Pure query; proof/resource errors propagate and no full mask is built.
-    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+    fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
         py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
-            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
+    /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     fn is_accepting(&self) -> bool {
         self.inner
             .with_dependent(|_owner, state| state.is_accepting())
@@ -1097,7 +1105,7 @@ impl PyConstraintState {
     }
 
     /// Independent snapshot at the current prefix.
-    fn clone(&self) -> Self {
+    fn copy(&self) -> Self {
         let mut inner = OwnedState::from_arc(self.inner.borrow_owner().clone());
         self.inner.with_dependent(|_, source| {
             inner.with_dependent_mut(|_, destination| {
@@ -1106,6 +1114,8 @@ impl PyConstraintState {
         });
         Self { inner, max_token: self.max_token }
     }
+
+    fn __copy__(&self) -> Self { self.copy() }
 
 
     /// New Boolean array indexed by original token ID. `size` must cover the constraint’s entire ID range; extra positions are false. Includes the root end-token policy.
@@ -1140,27 +1150,30 @@ impl PyConstraintState {
         Ok(())
     }
 
-    /// Unknown IDs raise an error. Forbidden IDs reject the state and may also raise an error; subsequent masks are zero. An allowed end token terminates the sequence; later commits raise an error.
-    /// Commits model token IDs in order. A disallowed event raises an error and rejects the state.
-    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> PyResult<()> {
+    /// Commits one model token event; returns false when it is disallowed.
+    fn commit_token(&mut self, token_id: u32) -> bool {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_tokens(&token_ids)))
+            .with_dependent_mut(|_owner, state| state.commit_token(token_id))
     }
 
+    /// Commits model token IDs in order; returns false at the first disallowed event.
+    fn commit_tokens(&mut self, token_ids: Vec<u32>) -> bool {
+        self.inner
+            .with_dependent_mut(|_owner, state| state.commit_tokens(&token_ids))
+    }
 
     /// Advance by raw bytes rather than model token events. This does not substitute for committing exact-token or end-token events.
-    fn commit_bytes(&mut self, data: &[u8]) -> PyResult<()> {
+    fn commit_bytes(&mut self, data: &[u8]) -> bool {
         self.inner
-            .with_dependent_mut(|_owner, state| string_result(state.commit_bytes(data)))
+            .with_dependent_mut(|_owner, state| state.commit_bytes(data))
     }
 
     /// Read-only lookahead of up to 10,000 inevitable original IDs. Stops when the root can accept or multiple IDs are possible, including byte aliases. Does not commit or construct a full mask; proof/resource failures raise errors.
-    fn forced_tokens(&self,py:Python<'_>)->PyResult<Vec<u32>> {
+    fn forced_tokens(&self,py:Python<'_>)->Vec<u32> {
         py.detach(||self.inner.with_dependent(|_owner,state|state.forced_tokens()))
-            .map_err(|error|PyValueError::new_err(error.to_string()))
     }
 
-    /// The current prefix is a complete grammar match; further tokens may still be allowed. This alone does not commit an end token.
+    /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     fn is_accepting(&self) -> bool {
         self.inner.with_dependent(|_owner, state| state.is_accepting())
     }

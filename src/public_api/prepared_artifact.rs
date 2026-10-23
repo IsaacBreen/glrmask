@@ -18,12 +18,12 @@ struct Definition {
 }
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
 enum SlotKind { Token, Grammar, LegacyGeneric }
-impl From<ExternalKind> for SlotKind {
-    fn from(kind: ExternalKind) -> Self {
-        match kind { ExternalKind::Token => Self::Token, ExternalKind::Grammar => Self::Grammar, ExternalKind::LegacyGeneric => Self::LegacyGeneric }
+impl From<ExternKind> for SlotKind {
+    fn from(kind: ExternKind) -> Self {
+        match kind { ExternKind::Token => Self::Token, ExternKind::Grammar => Self::Grammar, ExternKind::LegacyGeneric => Self::LegacyGeneric }
     }
 }
-impl From<SlotKind> for ExternalKind {
+impl From<SlotKind> for ExternKind {
     fn from(kind: SlotKind) -> Self {
         match kind { SlotKind::Token => Self::Token, SlotKind::Grammar => Self::Grammar, SlotKind::LegacyGeneric => Self::LegacyGeneric }
     }

@@ -51,16 +51,12 @@ const MaskStrategy = Object.freeze({
   ParserDwa: 'parser-dwa',
   TokenTrie: 'token-trie',
   TokenClassTrie: 'token-class-trie',
-  FastBuild: 'token-trie',
-  FastRuntime: 'parser-dwa',
 });
 
 const BoundaryMaskStrategy = Object.freeze({
   Auto: 'auto',
   ParserDwa: 'parser-dwa',
   TokenTrie: 'token-trie',
-  FastBuild: 'token-trie',
-  FastRuntime: 'parser-dwa',
 });
 
 function parseMaskStrategy(value) {
@@ -69,13 +65,9 @@ function parseMaskStrategy(value) {
   switch (value.toLowerCase()) {
     case 'auto': return 0;
     case 'parser-dwa':
-    case 'parser_dwa':
-    case 'fast-runtime':
-    case 'fast_runtime': return 1;
+    case 'parser_dwa': return 1;
     case 'token-trie':
-    case 'token_trie':
-    case 'fast-build':
-    case 'fast_build': return 2;
+    case 'token_trie': return 2;
     case 'token-class-trie':
     case 'token_class_trie': return 3;
     default: throw new TypeError(`Unknown maskStrategy: ${value}`);
@@ -97,13 +89,9 @@ function parseBoundaryMaskStrategy(value) {
   switch (value.toLowerCase()) {
     case 'auto': return 0;
     case 'parser-dwa':
-    case 'parser_dwa':
-    case 'fast-runtime':
-    case 'fast_runtime': return 1;
+    case 'parser_dwa': return 1;
     case 'token-trie':
-    case 'token_trie':
-    case 'fast-build':
-    case 'fast_build': return 2;
+    case 'token_trie': return 2;
     default: throw new TypeError(`Unknown boundaryMaskStrategy: ${value}`);
   }
 }
@@ -130,7 +118,7 @@ class ExternsMap {
   values() { return this._map.values(); }
   entries() { return this._map.entries(); }
   [Symbol.iterator]() { return this._map.entries(); }
-  forEach(callback, thisArg) { this._map.forEach(callback, thisArg); }
+  forEach(callback, thisArg) { this._map.forEach((v, k) => callback.call(thisArg, v, k, this)); }
   get unbound() { return this._unboundFn ? this._unboundFn() : this; }
 }
 
@@ -162,8 +150,7 @@ class Vocab extends Owned {
     super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes, special)));
   }
   get size() { return invoke(() => handle(this, Vocab).size); }
-  copy() { return wrap(Vocab, invoke(() => handle(this, Vocab).clone())); }
-  clone() { return this.copy(); }
+  clone() { return wrap(Vocab, invoke(() => handle(this, Vocab).clone())); }
 }
 
 class TokenSet extends Owned {
@@ -180,8 +167,7 @@ class TokenSet extends Owned {
     });
     return wrap(TokenSet, invoke(() => native.NativeTokenSet.fromRanges(ranges)));
   }
-  copy() { return wrap(TokenSet, invoke(() => handle(this, TokenSet).clone())); }
-  clone() { return this.copy(); }
+  clone() { return wrap(TokenSet, invoke(() => handle(this, TokenSet).clone())); }
   equals(other) {
     if (!(other instanceof TokenSet) || !handles.has(other)) return false;
     return invoke(() => handle(this, TokenSet).equals(handle(other, TokenSet)));
@@ -201,7 +187,23 @@ class Grammar extends Owned {
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('lark', string(source))));
   }
   get externs() { return formatExterns(invoke(() => handle(this, Grammar).externs()), null); }
-  copy() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
+  clone() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
+  static fromExpr(value) {
+    let expr;
+    if (value instanceof Expr) expr = handle(value, Expr);
+    else if (value instanceof Grammar) expr = invoke(() => native.NativeExpr.fromGrammar(handle(value, Grammar)));
+    else if (value instanceof TokenSet) expr = invoke(() => native.NativeExpr.fromTokenSet(handle(value, TokenSet)));
+    else throw new TypeError('Grammar.fromExpr requires Expr, Grammar, or TokenSet');
+    return wrap(Grammar, invoke(() => native.NativeGrammar.fromExpr(expr)));
+  }
+  bind(name, value) {
+    const target = handle(this, Grammar);
+    if (value instanceof Grammar) return invoke(() => target.bindGrammar(name, handle(value, Grammar)));
+    if (value instanceof Expr) return invoke(() => target.bindExpr(name, handle(value, Expr)));
+    if (value instanceof TokenSet) return invoke(() => target.bindTokens(name, handle(value, TokenSet)));
+    if (typeof value === 'number') return invoke(() => target.bindToken(name, tokenId(value)));
+    throw new TypeError('Grammar.bind requires Grammar, Expr, Token or TokenSet');
+  }
   precompileSync(vocab, options) {
     const s = compileSettings(options);
     return wrap(Module, invoke(() => handle(this, Grammar).precompileSync(handle(vocab, Vocab), s.mode, s.boundary)));
@@ -214,7 +216,7 @@ class Grammar extends Owned {
     const s = compileSettings(options);
     const mod = new Module(this);
     try {
-      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary)));
     } finally {
       mod.dispose();
     }
@@ -223,34 +225,16 @@ class Grammar extends Owned {
     const s = compileSettings(options);
     const mod = new Module(this);
     try {
-      return wrap(Constraint, await invokeAsync(() => handle(mod, Module).compile(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+      return wrap(Constraint, await invokeAsync(() => handle(mod, Module).compile(handle(vocab, Vocab), s.mode, s.boundary)));
     } finally {
       mod.dispose();
     }
   }
 }
 
-class CompileOptions {
-  constructor(options) {
-    const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
-    this.endTokens = Object.freeze(o.endTokens === undefined ? [] : ids(o.endTokens));
-    this.maskStrategy = formatMaskStrategy(parseMaskStrategy(o.maskStrategy));
-    this.boundaryMaskStrategy = formatBoundaryMaskStrategy(parseBoundaryMaskStrategy(o.boundaryMaskStrategy));
-    Object.freeze(this);
-  }
-  _settings() {
-    return {
-      end: this.endTokens,
-      mode: parseMaskStrategy(this.maskStrategy),
-      boundary: parseBoundaryMaskStrategy(this.boundaryMaskStrategy),
-    };
-  }
-}
 function compileSettings(options) {
-  if (options instanceof CompileOptions) return options._settings();
-  const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
+  const o = checkedOptions(options, ['maskStrategy', 'boundaryMaskStrategy']);
   return {
-    end: o.endTokens === undefined ? [] : ids(o.endTokens),
     mode: parseMaskStrategy(o.maskStrategy),
     boundary: parseBoundaryMaskStrategy(o.boundaryMaskStrategy),
   };
@@ -293,7 +277,7 @@ class Expr extends Owned {
     }
     return wrap(Expr, invoke(() => native.NativeExpr.literal(buf)));
   }
-  copy() { return wrap(Expr, invoke(() => handle(this, Expr).clone())); }
+  clone() { return wrap(Expr, invoke(() => handle(this, Expr).clone())); }
 }
 
 class Module extends Owned {
@@ -303,7 +287,7 @@ class Module extends Owned {
     super(key, invoke(() => native.NativeModule.fromGrammar(handle(value, Grammar))));
   }
 
-  copy() { return wrap(Module, invoke(() => handle(this, Module).clone())); }
+  clone() { return wrap(Module, invoke(() => handle(this, Module).clone())); }
 
   _bindSingle(name, value) {
     string(name, 'binding name');
@@ -328,7 +312,7 @@ class Module extends Owned {
   bind(nameOrBindings, value) {
     if (arguments.length === 1 && typeof nameOrBindings === 'object' && nameOrBindings !== null && !(nameOrBindings instanceof String)) {
       const entries = Object.entries(nameOrBindings);
-      const snapshot = this.copy();
+      const snapshot = this.clone();
       for (const [k, v] of entries) {
         snapshot._bindSingle(k, v);
       }
@@ -359,11 +343,11 @@ class Module extends Owned {
 
   compileSync(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.mode, s.boundary)));
   }
   async compile(vocab, options) {
     const s = compileSettings(options);
-    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.mode, s.boundary)));
   }
 
   saveSync() { return invoke(() => handle(this, Module).saveSync()); }
@@ -379,8 +363,7 @@ class Module extends Owned {
 
 class Constraint extends Owned {
   get maskLength() { return invoke(() => handle(this, Constraint).maskLen); }
-  copy() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
-  clone() { return this.copy(); }
+  clone() { return wrap(Constraint, invoke(() => handle(this, Constraint).clone())); }
   start() { return wrap(ConstraintState, invoke(() => handle(this, Constraint).start())); }
   markerIds() { return invoke(() => handle(this, Constraint).markerIds()); }
   saveSync() { return invoke(() => handle(this, Constraint).saveSync()); }
@@ -389,31 +372,31 @@ class Constraint extends Owned {
     bytes(data); return wrap(Constraint, invoke(() => native.loadConstraintSync(data, handle(vocab, Vocab))));
   }
   static async load(data, vocab) {
-    bytes(data); return wrap(Constraint, await invokeAsync(() => native.loadConstraint(data, handle(vocab, Vocab))));
+    bytes(data); const copy = Uint8Array.from(data);
+    return wrap(Constraint, await invokeAsync(() => native.loadConstraint(copy, handle(vocab, Vocab))));
   }
 }
 
 class ConstraintState extends Owned {
   get maskLength() { return invoke(() => handle(this, ConstraintState).maskLen); }
-  copy() { return wrap(ConstraintState, invoke(() => handle(this, ConstraintState).clone())); }
-  clone() { return this.copy(); }
+  clone() { return wrap(ConstraintState, invoke(() => handle(this, ConstraintState).clone())); }
   mask() { return invoke(() => handle(this, ConstraintState).mask()); }
   fillMask(output) {
     if (!types.isUint32Array(output)) throw new TypeError('fillMask requires a Uint32Array');
     invoke(() => handle(this, ConstraintState).fillMask(output));
   }
-  commitToken(id) { tokenId(id); invoke(() => handle(this, ConstraintState).commitToken(id)); }
+  commitToken(id) { tokenId(id); return invoke(() => handle(this, ConstraintState).commitToken(id)); }
   commitTokens(ids) {
     const words = ids instanceof Uint32Array ? ids : Uint32Array.from(ids, tokenId);
-    invoke(() => handle(this, ConstraintState).commitTokens(words));
+    return invoke(() => handle(this, ConstraintState).commitTokens(words));
   }
-  commitBytes(data) { bytes(data); invoke(() => handle(this, ConstraintState).commitBytes(data)); }
+  commitBytes(data) { bytes(data); return invoke(() => handle(this, ConstraintState).commitBytes(data)); }
   isAccepting() { return invoke(() => handle(this, ConstraintState).isAccepting()); }
   forcedTokens() { return invoke(() => handle(this, ConstraintState).forcedTokens()); }
   markerEvents() { return invoke(() => handle(this, ConstraintState).markerEvents()); }
 }
 
 module.exports = Object.freeze({
-  Vocab, TokenSet, Grammar, Module, CompileOptions, Expr, Constraint, ConstraintState,
+  Vocab, TokenSet, Grammar, Module, Expr, Constraint, ConstraintState,
   MaskStrategy, BoundaryMaskStrategy, GlrMaskError, version: native.version(),
 });

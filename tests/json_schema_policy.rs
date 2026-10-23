@@ -12,7 +12,7 @@ fn check(schema: Value, examples: &[(&str, bool)]) {
             for byte in text.bytes() {
                 let mask = state.mask();
                 if mask.get(byte as usize/32).is_none_or(|m| m & (1 << (byte as usize%32)) == 0) { possible = false; break; }
-                state.commit_token(u32::from(byte)).unwrap();
+                assert!(state.commit_token(u32::from(byte)));
             }
             assert_eq!(possible && state.is_accepting(), *expected, "{schema} {text} {mode:?}");
         }

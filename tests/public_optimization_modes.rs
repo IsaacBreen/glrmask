@@ -22,23 +22,22 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
             Constraint::load(compiled.save(), &v).unwrap()] {
             for prefix in [b"".as_slice(),b"(",b"()",b"()(" ] {
                 let mut a = c.start(); let mut r = reference.start();
-                a.commit_bytes(prefix).unwrap(); r.commit_bytes(prefix).unwrap();
+                assert!(a.commit_bytes(prefix)); assert!(r.commit_bytes(prefix));
                 assert_eq!(a.mask(), r.mask(), "{mode:?} after {prefix:?}");
                 assert_eq!(a.is_accepting(), r.is_accepting());
                 assert_eq!(a.forced_canonical_reference(), r.forced_canonical_reference());
-                assert_eq!(allowed(&a.mask(),100), a.is_accepting());
+                let eos_allowed = allowed(&a.mask(), 100);
+                assert_eq!(eos_allowed, allowed(&r.mask(), 100));
                 assert!(!allowed(&a.mask(),25));
                 let snapshot = a.clone();
-                a.commit_token(100).unwrap();
-                if r.is_accepting() {
-                    assert!(a.is_accepting()); assert!(!(a.mask().iter().all(|word| *word == 0)));
-                } else { assert!((a.mask().iter().all(|word| *word == 0))); assert!(!a.is_accepting()); }
+                assert_eq!(a.commit_token(100), eos_allowed);
+                assert_eq!(a.is_accepting(), eos_allowed);
                 assert!(a.mask().iter().all(|&w|w==0));
                 a = snapshot;
                 assert_eq!(a.mask(), r.mask(), "clone restores prior state");
                 let actual_reject = a.commit_token(20);
                 let expected_reject = r.commit_token(20);
-                assert_eq!(actual_reject.is_err(), expected_reject.is_err());
+                assert_eq!(!actual_reject, !expected_reject);
                 assert!((a.mask().iter().all(|word| *word == 0))); assert!(!a.is_accepting());
             }
         }
@@ -55,16 +54,16 @@ fn force_and_exact_token_aliases_agree_across_modes() {
         let mut a = c.start(); let mut r = reference.start();
         assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference());
         assert_eq!(a.mask(),r.mask());
-        a.commit_token(15).unwrap(); r.commit_token(15).unwrap();
+        assert!(a.commit_token(15)); assert!(r.commit_token(15));
         assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference()); assert_eq!(a.mask(),r.mask());
-        a.commit_token(2).unwrap(); assert!(a.is_accepting());
+        assert!(a.commit_token(2)); assert!(a.is_accepting());
     }
     let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
         .bind_snapshot("MARK", glrmask::TokenSet::from(15)).unwrap();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
         let mut a = c.start(); assert!(allowed(&a.mask(),15)); assert!(!allowed(&a.mask(),0));
-        a.commit_token(15).unwrap(); assert!(a.is_accepting());
+        assert!(a.commit_token(15)); assert!(a.is_accepting());
     }
 }
 
@@ -90,7 +89,7 @@ fn compare_prefixes(actual:&Constraint, expected:&Constraint, ids:&[u32], depth:
     let mut pending=vec![Vec::new()];
     while let Some(prefix)=pending.pop() {
         let mut a=actual.start();let mut b=expected.start();
-        for &id in &prefix { a.commit_token(id).unwrap();b.commit_token(id).unwrap(); }
+        for &id in &prefix { assert!(a.commit_token(id));assert!(b.commit_token(id)); }
         assert_eq!(a.mask(),b.mask(),"after {prefix:?}");
         assert_eq!(a.is_accepting(),b.is_accepting());
         assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
@@ -146,17 +145,17 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
         Constraint::load(actual.save(),&v).unwrap()] {
         for n in [0,1,15,29,30] {
             let prefix=vec![b'a';n]; let mut a=c.start();let mut o=oracle.start();
-            a.commit_bytes(&prefix).unwrap();o.commit_bytes(&prefix).unwrap();
+            assert!(a.commit_bytes(&prefix));assert!(o.commit_bytes(&prefix));
             assert_eq!(a.mask(),o.mask(),"after {n} a bytes");
             assert_eq!(a.is_accepting(),o.is_accepting());assert_eq!(a.forced_canonical_reference(),o.forced_canonical_reference());
             let snapshot=a.clone();
-            if n==30 { a.commit_token(1).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !(a.mask().iter().all(|word| *word == 0))); assert!(a.mask().iter().all(|&w|w==0)); }
+            if n==30 { assert!(a.commit_token(1));
+                assert!(allowed(&a.mask(),100));assert!(a.commit_token(100));assert!(a.is_accepting()); assert!(a.mask().iter().all(|&w|w==0)); }
             assert_eq!(snapshot.mask(),o.mask());
         }
         for n in [29,31] {
             let mut state=c.start();let mut invalid=vec![b'a';n];invalid.push(b'b');
-            assert!(state.commit_bytes(&invalid).is_err());assert!((state.mask().iter().all(|word| *word == 0)));
+            assert!(!state.commit_bytes(&invalid));assert!((state.mask().iter().all(|word| *word == 0)));
         }
     }
 }
@@ -182,7 +181,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                 Constraint::load(compiled.save(),&v).unwrap()] {
                 for prefix in [Vec::new(),vec![b'a'],vec![b'a';n-1],vec![b'a';n],word(n)] {
                     let mut a=c.start();let mut expected=reference.start();
-                    a.commit_bytes(&prefix).unwrap();expected.commit_bytes(&prefix).unwrap();
+                    assert!(a.commit_bytes(&prefix));assert!(expected.commit_bytes(&prefix));
                     assert_eq!(a.mask(),expected.mask(),"{mode:?}, length {n}, prefix {prefix:?}");
                     assert_eq!(a.is_accepting(),expected.is_accepting());
                     assert_eq!(a.forced_canonical_reference(),expected.forced_canonical_reference());
@@ -191,11 +190,11 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
                 let mut a=c.start();
                 assert!(allowed(&a.mask(),3));assert!(allowed(&a.mask(),7));
                 assert!(!allowed(&a.mask(),8));assert!(!allowed(&a.mask(),9));
-                a.commit_token(7).unwrap();assert!(a.is_accepting());
-                assert!(allowed(&a.mask(),100));a.commit_token(100).unwrap();assert!(a.is_accepting() && !(a.mask().iter().all(|word| *word == 0))); assert!(a.mask().iter().all(|&w|w==0));
+                assert!(a.commit_token(7));assert!(a.is_accepting());
+                assert!(allowed(&a.mask(),100));assert!(a.commit_token(100));assert!(a.is_accepting()); assert!(a.mask().iter().all(|&w|w==0));
                 for invalid in [8,9,11] {
                     let mut a=c.start();let mut expected=reference.start();
-                    assert_eq!(a.commit_token(invalid).is_err(),expected.commit_token(invalid).is_err());
+                    assert_eq!(!a.commit_token(invalid),!expected.commit_token(invalid));
                     assert!((a.mask().iter().all(|word| *word == 0)));assert!(!a.is_accepting());
                 }
             }
@@ -208,6 +207,6 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
     let v=Vocab::new(vec![(3,word)]);
     for mode in MODES {
         let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
-        let mut a=c.start();assert_eq!(a.mask(),vec![8]);a.commit_token(3).unwrap();assert!(a.is_accepting());
+        let mut a=c.start();assert_eq!(a.mask(),vec![8]);assert!(a.commit_token(3));assert!(a.is_accepting());
     }
 }

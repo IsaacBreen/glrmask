@@ -2,7 +2,7 @@
 
 //! Native Node-API bindings. Public JS classes live in index.cjs.
 mod arrays;
-use module_api::NativeModule;
+use module_api::{NativeExpr, NativeModule};
 use glrmask_binding_core::{self as core, glrmask as g};
 use napi::{bindgen_prelude::*, Env, Task, Unknown};
 use napi_derive::napi;
@@ -125,9 +125,8 @@ impl NativeTokenSet {
     pub fn to_string(&self) -> napi::Result<String> { call(|| Ok(format!("{:?}", *live(&self.inner)?))) }
 }
 
-fn grammar_compile_options(end: Vec<f64>, mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
+fn grammar_compile_options(mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
     Ok(core::compile_options(
-        ids(end)?,
         core::mask_strategy(id(mode)?)?,
         core::boundary_mask_strategy(id(boundary)?)?,
     ))
@@ -157,26 +156,46 @@ impl NativeGrammar {
     pub fn externs(&self) -> napi::Result<Vec<NativeExtern>> {
         call(|| Ok(externs_to_native(live(&self.inner)?.externs().iter())))
     }
+    #[napi(factory)]
+    pub fn from_expr(value: &NativeExpr) -> napi::Result<Self> {
+        call(|| Ok(Self { inner: Handle::new(g::Grammar::from_expr(live(&value.inner)?.clone())?) }))
+    }
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
+    pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
+        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+    }
+    #[napi]
+    pub fn bind_expr(&self, name: String, value: &NativeExpr) -> napi::Result<()> {
+        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+    }
+    #[napi]
+    pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
+        call(|| { live(&self.inner)?.bind(name, g::TokenSet::from(id(value)?))?; Ok(()) })
+    }
+    #[napi]
+    pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
+        call(|| { live(&self.inner)?.bind(name, live(&value.inner)?.clone())?; Ok(()) })
+    }
+    #[napi]
+    pub fn compile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            let options = grammar_compile_options(end, mode, boundary)?;
+            let options = grammar_compile_options(mode, boundary)?;
             Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, options)?)) })
         })
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<AsyncTask<CompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<CompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(end, mode, boundary)? }))
+            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary)? }))
         })
     }
     #[napi]
     pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeModule> {
         call(|| {
             let mut m = g::Module::new(&*live(&self.inner)?);
-            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(Vec::new(), mode, boundary)?)?;
+            m.precompile_with(&*live(&vocab.inner)?, grammar_compile_options(mode, boundary)?)?;
             Ok(NativeModule::new(m))
         })
     }
@@ -184,7 +203,7 @@ impl NativeGrammar {
     pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<GrammarPrecompileTask>> {
         call(|| {
             let m = g::Module::new(&*live(&self.inner)?);
-            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(Vec::new(), mode, boundary)? }))
+            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(mode, boundary)? }))
         })
     }
 }
@@ -230,13 +249,13 @@ impl NativeState {
         call(|| arrays::with_words(&env, &output, |out| live(&self.inner)?.fill_mask(out)))
     }
     #[napi]
-    pub fn commit_token(&self, value: f64) -> napi::Result<()> { call(|| live(&self.inner)?.commit_token(id(value)?)) }
+    pub fn commit_token(&self, value: f64) -> napi::Result<bool> { call(|| live(&self.inner)?.commit_token(id(value)?)) }
     #[napi]
-    pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<()> {
+    pub fn commit_tokens(&self, ids: Uint32Array) -> napi::Result<bool> {
         call(|| live(&self.inner)?.commit_tokens(ids.as_ref()))
     }
     #[napi]
-    pub fn commit_bytes(&self, env: Env, bytes: Unknown<'_>) -> napi::Result<()> {
+    pub fn commit_bytes(&self, env: Env, bytes: Unknown<'_>) -> napi::Result<bool> {
         call(|| arrays::with_bytes(&env, &bytes, |bytes| live(&self.inner)?.commit_bytes(bytes)))
     }
     #[napi]

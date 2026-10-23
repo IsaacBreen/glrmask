@@ -609,18 +609,18 @@ fn validate_dynamic_link_artifact(
         let reload_commit = reload_state.commit_bytes(prefix);
         let reference_commit = reference_state.commit_bytes(prefix);
         assert_eq!(
-            fast_commit.is_ok(),
-            reference_commit.is_ok(),
+            fast_commit,
+            reference_commit,
             "optimized/reference prefix acceptance differs at {index}: {:?}",
             String::from_utf8_lossy(prefix),
         );
         assert_eq!(
-            reload_commit.is_ok(),
-            fast_commit.is_ok(),
+            reload_commit,
+            fast_commit,
             "optimized reload prefix acceptance differs at {index}: {:?}",
             String::from_utf8_lossy(prefix),
         );
-        if fast_commit.is_ok() {
+        if fast_commit {
             let fast_mask = fast_state.mask();
             let reload_mask = reload_state.mask();
             let reference_mask = reference_state.mask();
@@ -756,7 +756,7 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
         // (consuming identical draws) but their timings are discarded.
         let record = only_scenario.map_or(true, |only| only == scenario);
         let mut state = constraint.start();
-        if !prefix.is_empty() && state.commit_bytes(prefix).is_err() {
+        if !prefix.is_empty() && !state.commit_bytes(prefix) {
             eprintln!("[tbm] which={which} prefix={:?} rejected; skipping scenario", String::from_utf8_lossy(prefix));
             continue;
         }
@@ -774,10 +774,10 @@ fn cmd_tbm(cache_dir: &Path, vocab: &Vocab, which: &str, steps: usize) {
             if record && trace {
                 trace_tokens.push(token);
             }
-            if let Err(error) = state.commit_token(token) {
+            if !state.commit_token(token) {
                 if record {
                     admitted_but_rejected += 1;
-                    eprintln!("[tbm] which={which} scenario={scenario} step={step} prefix={:?} mask-admitted token={token} COMMIT-REJECTED: {error}; ending scenario", String::from_utf8_lossy(prefix));
+                    eprintln!("[tbm] which={which} scenario={scenario} step={step} prefix={:?} mask-admitted token={token} COMMIT-REJECTED; ending scenario", String::from_utf8_lossy(prefix));
                     if trace {
                         eprintln!("[tbm] trace scenario={scenario} tokens={trace_tokens:?}");
                     }
@@ -909,7 +909,7 @@ fn cmd_diff_masks(cache_dir: &Path, vocab: &Vocab, prefix: &str, tokens_csv: &st
     let composed = load_constraint(&cache_dir.join("composed-latest.bin"), vocab);
     let mut state = composed.start();
     if !prefix.is_empty() {
-        state.commit_bytes(prefix.as_bytes()).expect("prefix commit");
+        assert!(state.commit_bytes(prefix.as_bytes()), "prefix commit");
     }
     let tokens: Vec<u32> = if tokens_csv.is_empty() {
         Vec::new()
@@ -917,8 +917,8 @@ fn cmd_diff_masks(cache_dir: &Path, vocab: &Vocab, prefix: &str, tokens_csv: &st
         tokens_csv.split(',').map(|t| t.trim().parse().unwrap()).collect()
     };
     for (step, token) in tokens.iter().enumerate() {
-        if let Err(error) = state.commit_token(*token) {
-            println!("[diff-masks] replay stopped: step={step} token={token} rejected: {error}");
+        if !state.commit_token(*token) {
+            println!("[diff-masks] replay stopped: step={step} token={token} rejected");
             return;
         }
     }
@@ -1219,12 +1219,12 @@ fn cmd_prefix_diff(
                 mark(&format!("commit done prefix consumed={consumed} global={global_index}"));
             }
             assert_eq!(
-                r_static.is_ok(),
-                r_dynamic.is_ok(),
+                r_static,
+                r_dynamic,
                 "prefix commit divergence scenario={scenario} consumed={consumed}",
             );
             assert!(
-                r_static.is_ok(),
+                r_static,
                 "prefix commit must succeed scenario={scenario} consumed={consumed}",
             );
             if global_index < 8 {
@@ -1304,14 +1304,14 @@ fn cmd_prefix_diff(
             mark(&format!("commit start continuation step={continuation_steps} token={token}"));
             let r_static = st_static.commit_token(token);
             let r_dynamic = st_dynamic.commit_token(token);
-            mark(&format!("commit done continuation step={continuation_steps} token={token} static_ok={} dynamic_ok={}", r_static.is_ok(), r_dynamic.is_ok()));
+            mark(&format!("commit done continuation step={continuation_steps} token={token} static_ok={} dynamic_ok={}", r_static, r_dynamic));
             assert_eq!(
-                r_static.is_ok(),
-                r_dynamic.is_ok(),
+                r_static,
+                r_dynamic,
                 "commit divergence scenario={scenario} step={continuation_steps} token={token}",
             );
             assert!(
-                r_static.is_ok(),
+                r_static,
                 "chosen ordinary token commit must succeed scenario={scenario} step={continuation_steps} token={token}: static={r_static:?} dynamic={r_dynamic:?}",
             );
             let t0 = Instant::now();
@@ -1559,8 +1559,8 @@ fn cmd_trace_replay(
             assert_eq!(m_fresh, m_re, "prepare verify {backend} initial mask differs");
             for (i, token) in first_ids.iter().take(4).enumerate() {
                 assert!(mask_admits_token(&m_fresh, *token), "prepare verify {backend} token {token} not admitted at {i}");
-                st_fresh.commit_token(*token).expect("fresh commit");
-                st_re.commit_token(*token).expect("reload commit");
+                assert!(st_fresh.commit_token(*token), "fresh commit");
+                assert!(st_re.commit_token(*token), "reload commit");
                 m_fresh = st_fresh.mask();
                 m_re = st_re.mask();
                 assert_eq!(m_fresh, m_re, "prepare verify {backend} mask differs at commit {i}");
@@ -1619,8 +1619,8 @@ fn cmd_trace_replay(
             for (pi, token) in ids[..trace_start].iter().enumerate() {
                 let m = st_static.mask();
                 assert!(mask_admits_token(&m, *token), "prefix token {token} not admitted at {pi}");
-                st_static.commit_token(*token).unwrap_or_else(|e| panic!("prefix static commit failed at {pi}: {e:?}"));
-                st_dynamic.commit_token(*token).unwrap_or_else(|e| panic!("prefix dynamic commit failed at {pi}: {e:?}"));
+                assert!(st_static.commit_token(*token));
+                assert!(st_dynamic.commit_token(*token));
             }
             // Mask at chunk start (after prefix), then one per chunk commit.
             let mut positions: Vec<serde_json::Value> = Vec::with_capacity(count + 1);
@@ -1646,11 +1646,11 @@ fn cmd_trace_replay(
                 let global = trace_start + k;
                 assert!(mask_admits_token(&m_static, *token), "chunk token {token} not admitted at global {global}");
                 let c0 = Instant::now();
-                st_static.commit_token(*token).unwrap_or_else(|e| panic!("chunk static commit failed at {global}: {e:?}"));
+                assert!(st_static.commit_token(*token));
                 us = c0.elapsed().as_secs_f64() * 1e6;
                 op_us.push(serde_json::json!({"op": "static-commit", "global_index": global, "us": us}));
                 let c0 = Instant::now();
-                st_dynamic.commit_token(*token).unwrap_or_else(|e| panic!("chunk dynamic commit failed at {global}: {e:?}"));
+                assert!(st_dynamic.commit_token(*token));
                 us = c0.elapsed().as_secs_f64() * 1e6;
                 op_us.push(serde_json::json!({"op": "dynamic-commit", "global_index": global, "us": us}));
                 let t0 = Instant::now();
@@ -1724,13 +1724,12 @@ fn cmd_trace_replay(
             let us = c0.elapsed().as_secs_f64() * 1e6;
             dynamic_commit_ns.push(us * 1e3);
             timed("dynamic-commit", label, index, *token, us);
-            match (r_static, r_dynamic) {
-                (Ok(()), Ok(())) => {}
-                (a, b) => panic!(
+            if !r_static || !r_dynamic {
+                panic!(
                     "TRACE_MISMATCH trace={label} index={index} token={token} static={} dynamic={}",
-                    a.map(|_| "ok").unwrap_or("ERR"),
-                    b.map(|_| "ok").unwrap_or("ERR"),
-                ),
+                    if r_static { "ok" } else { "ERR" },
+                    if r_dynamic { "ok" } else { "ERR" },
+                );
             }
             total_commits += 1;
             progress("mask", label, index, *token);

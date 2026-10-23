@@ -111,7 +111,7 @@ fn measure_max_counts_for_text(constraint: &Constraint, text: &str) -> (usize, u
     let mut max_stacks = live_stack_count(&state);
 
     for &byte in text.as_bytes() {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
         max_paths = max_paths.max(state.parser_path_count(1_000_000));
         max_stacks = max_stacks.max(live_stack_count(&state));
     }
@@ -128,7 +128,7 @@ fn first_final_max_location(
     let mut first_final_max = None;
 
     for (byte_index, &byte) in text.as_bytes().iter().enumerate() {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
         let paths = state.parser_path_count(1_000_000);
         if paths > max_paths {
             max_paths = paths;

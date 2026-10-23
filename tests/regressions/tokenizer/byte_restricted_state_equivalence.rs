@@ -33,8 +33,8 @@ fn byte_restricted_state_equivalence_must_admit_a_cross_partition_partial_token(
         contains(&state.mask(), 0),
         "the token '{{\"' must be admitted because a later token 'a' completes A"
     );
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(contains(&state.mask(), 1));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }

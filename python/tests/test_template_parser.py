@@ -41,6 +41,9 @@ def link_module(module, vocab, **options):
     if isinstance(module, GrammarCalls): module = module.grammar
     if "optimization" in options:
         options["mask_strategy"] = options.pop("optimization")
+    end = options.pop("end_tokens", None)
+    if end is not None:
+        module = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet(end)))
     return module.compile(vocab, **options)
 
 def grammar_from_ebnf(source): return GrammarCalls(glrmask.Grammar.from_ebnf(source))
@@ -113,11 +116,9 @@ def depth_after(word, depth=0, ignore_whitespace=True):
 
 def representations(constraint, vocab):
     raw = constraint.save()
-    loaded = glrmask.Constraint.load(raw)
+    loaded = glrmask.Constraint.load(raw, vocab)
     assert loaded.save() == raw
     external = constraint.save()
-    with pytest.raises(ValueError):
-        glrmask.Constraint.load(external)
     return [constraint, loaded, glrmask.Constraint.load(external, vocab=vocab)]
 
 
@@ -133,8 +134,8 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
         assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
         for prefix in [b"", b"(", b"()", b"(()", b"((()))", b"()("]:
             left, right = reference.start(), compiled.start()
-            left.commit_bytes(prefix)
-            right.commit_bytes(prefix)
+            assert left.commit_bytes(prefix)
+            assert right.commit_bytes(prefix)
             assert np.array_equal(left.mask(), right.mask())
             assert left.is_accepting() == right.is_accepting()
             depth = depth_after(prefix, ignore_whitespace=False)
@@ -146,8 +147,8 @@ def test_python_builtin_template_backend_is_default_and_survives_reload(mode):
                 assert bool(right.mask()[token_id]) == (expected is not None), (prefix, word)
                 if expected is not None:
                     branch = compiled.start()
-                    branch.commit_bytes(prefix)
-                    branch.commit_token(token_id)
+                    assert branch.commit_bytes(prefix)
+                    assert branch.commit_token(token_id)
                     assert branch.is_accepting() == (expected == 0)
     assert reference.save() == reference_bytes
 
@@ -161,8 +162,7 @@ def test_python_data_only_program_matches_literal_language(mode, as_json):
     # The implementation owns the validated program, not the mutable mapping.
     definition["terminals"].clear()
     words, vocab = words_and_vocab()
-    compiled = program.compile(vocab, [b"(", b")", "[ ]+"], ignore_terminal=2,
-                               optimization=mode, end_tokens=[64])
+    compiled = program.compile(vocab, [b"(", b")", "[ ]+"], ignore_terminal=2, optimization=mode, end_tokens=[64])
     del program, definition
     gc.collect()
     for compiled in representations(compiled, vocab):
@@ -172,7 +172,7 @@ def test_python_data_only_program_matches_literal_language(mode, as_json):
             prefix = prefixes.pop()
             depth = depth_after(prefix)
             state = compiled.start()
-            state.commit_bytes(prefix)
+            assert state.commit_bytes(prefix)
             assert not state.is_accepting()
             mask = state.mask()
             for token_id, word in enumerate(words):
@@ -235,15 +235,15 @@ def test_python_prepared_composition_uses_native_defaults(mode):
                 assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
                 for prefix in [b"", b"a"]:
                     state = compiled.start()
-                    state.commit_bytes(prefix)
+                    assert state.commit_bytes(prefix)
                     assert state.is_accepting() == (prefix == b"a")
                     for token_id, word in tokens.items():
                         expected = b"a".startswith(prefix + word)
                         assert bool(state.mask()[token_id]) == expected, (prefix, word)
                         if expected:
                             branch = compiled.start()
-                            branch.commit_bytes(prefix)
-                            branch.commit_token(token_id)
+                            assert branch.commit_bytes(prefix)
+                            assert branch.commit_token(token_id)
                             assert branch.is_accepting() == (prefix + word == b"a")
 
 
@@ -261,10 +261,10 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
         assert np.array_equal(state.mask(), np.array([True, False, False, True, True, False, False]))
         for token in [3, 4]:
             state = compiled.start()
-            state.commit_token(token)
+            assert state.commit_token(token)
             assert not state.is_accepting()
             assert state.mask()[6]
-            state.commit_token(6)
+            assert state.commit_token(6)
             assert state.is_accepting() and not state.mask().any()
             assert not state.mask().any()
 
@@ -302,26 +302,23 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
         assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
         state = compiled.start()
         assert state.mask()[3]
-        state.commit_token(3)
+        assert state.commit_token(3)
         assert not state.is_accepting() and state.mask()[8]
-        state.commit_token(8)
+        assert state.commit_token(8)
         assert state.is_accepting() and not state.mask().any()
         assert not state.mask().any()
 
         for count in [0, 1, 31, 4996, 4997, 4998]:
             state = compiled.start()
-            state.commit_bytes(b'p"x:' + b"a" * count)
+            assert state.commit_bytes(b'p"x:' + b"a" * count)
             mask = state.mask()
             for token, payload_size in [(5, 1), (6, 3)]:
                 assert bool(mask[token]) == (2 + count + payload_size <= 5000), (count, token)
             assert mask[7]  # Completing the URI and returning to the parent.
-            state.commit_token(7)
+            assert state.commit_token(7)
             assert not state.is_accepting()
         state = compiled.start()
-        with pytest.raises(ValueError):
-            state.commit_bytes(b'p"x:' + b"a" * 4999)
-
-
+        assert not state.commit_bytes(b'p"x:' + b"a" * 4999)
 @pytest.mark.parametrize("backend", [None, glrmask._internal.ParserBackend.TEMPLATE_DFA])
 @pytest.mark.parametrize("mode", [glrmask.MaskStrategy.FAST_RUNTIME, glrmask.MaskStrategy.TOKEN_CLASS_TRIE])
 def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, mode):
@@ -344,7 +341,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
             assert glrmask._internal.parser_backend(compiled) == glrmask._internal.ParserBackend.TEMPLATE_DFA
             for prefix in [b"", b"x", b"xa", b"xy", b"xay"]:
                 state = compiled.start()
-                state.commit_bytes(prefix)
+                assert state.commit_bytes(prefix)
                 mask = state.mask()
                 assert not state.is_accepting()
                 assert bool(mask[8]) == (prefix in language)
@@ -355,10 +352,10 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                     assert bool(mask[token_id]) == expected, (backend, mode, prefix, word)
                     if expected:
                         branch = compiled.start()
-                        branch.commit_bytes(prefix)
-                        branch.commit_token(token_id)
+                        assert branch.commit_bytes(prefix)
+                        assert branch.commit_token(token_id)
                         assert not branch.is_accepting()
                 if prefix in language:
-                    state.commit_token(8)
+                    assert state.commit_token(8)
                     assert state.is_accepting() and not state.mask().any()
                     assert not state.mask().any()

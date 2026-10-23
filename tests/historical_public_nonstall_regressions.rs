@@ -5,7 +5,7 @@
 //! feed styles: whole bytes, individual bytes, tokens, and paired tokens.
 //! Frozen archive SHA256 1c3d4ba6453af11d0f39ea16029105a0a4d159d05e20956ef97153489deee9e3.
 
-use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
+use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
     let vocab = Vocab::new(vec![
@@ -19,13 +19,13 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: {e:?}"));
         let mut state = c.start();
-        assert!(state.commit_bytes(bytes).is_ok(), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
+        assert!(state.commit_bytes(bytes), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
         assert!(state.is_accepting(), "seed {seed} mode {mode:?} did not accept {bytes:?}");
         // The historical source harness also checked incremental byte and
         // token feeds. Exercise those separately from whole-string commitment.
         let mut byte_state = c.start();
         for &byte in bytes {
-            assert!(byte_state.commit_bytes(&[byte]).is_ok(), "seed {seed} mode {mode:?} byte {byte:?}");
+            assert!(byte_state.commit_bytes(&[byte]), "seed {seed} mode {mode:?} byte {byte:?}");
         }
         assert!(byte_state.is_accepting(), "seed {seed} mode {mode:?} byte-by-byte acceptance");
         let mut token_state = c.start();
@@ -33,7 +33,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             let token = u32::from(byte - b'a');
             assert!((token_state.mask()[0] & (1u32 << token)) != 0,
                 "seed {seed} mode {mode:?}: expected token {token} absent from mask");
-            assert!(token_state.commit_token(token).is_ok(),
+            assert!(token_state.commit_token(token),
                 "seed {seed} mode {mode:?}: token {token} falsely rejected");
         }
         assert!(token_state.is_accepting(), "seed {seed} mode {mode:?}: token acceptance");
@@ -51,7 +51,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             let (token, consumed) = pair_token.map_or((u32::from(bytes[at] - b'a'), 1), |token| (token, 2));
             assert!((pair_state.mask()[0] & (1u32 << token)) != 0,
                 "seed {seed} mode {mode:?}: expected paired token {token} absent from mask");
-            assert!(pair_state.commit_token(token).is_ok(),
+            assert!(pair_state.commit_token(token),
                 "seed {seed} mode {mode:?}: paired token {token} falsely rejected");
             at += consumed;
         }
@@ -123,7 +123,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                         }
                         let original_cfg_viable = viable.iter().any(|p| p.as_bytes() == prefix);
                         let mut state = c.start();
-                        let committed = state.commit_bytes(&prefix).is_ok();
+                        let committed = state.commit_bytes(&prefix);
                         assert_eq!(committed, original_cfg_viable,
                             "seed {seed} mode {mode:?}: prefix viability for {prefix:?}");
                         if committed {
@@ -132,8 +132,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                             // source-CFG prefix, not only complete witnesses.
                             let mut separately_fed = c.start();
                             for &byte in &prefix {
-                                separately_fed.commit_token(u32::from(byte - b'a'))
-                                    .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} token-feed prefix {prefix:?}: {e:?}"));
+                                assert!(separately_fed.commit_token(u32::from(byte - b'a')));
                             }
                             assert_eq!(state.is_accepting(), separately_fed.is_accepting(),
                                 "seed {seed} mode {mode:?} byte/token prefix acceptance {prefix:?}");
@@ -150,11 +149,9 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                                     "seed {seed} mode {mode:?} mask token {id} after {prefix:?}");
                                 if actual_allowed {
                                     let mut by_token = state.clone();
-                                    by_token.commit_token(id as u32)
-                                        .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} allowed token {id} after {prefix:?}: {e:?}"));
+                                    assert!(by_token.commit_token(id as u32));
                                     let mut by_bytes = c.start();
-                                    by_bytes.commit_bytes(&extended)
-                                        .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?} viable extended prefix {extended:?}: {e:?}"));
+                                    assert!(by_bytes.commit_bytes(&extended));
                                     assert_eq!(by_token.is_accepting(), by_bytes.is_accepting(),
                                         "seed {seed} mode {mode:?} token-vs-byte continuation acceptance {extended:?}");
                                     assert_eq!(by_token.mask(), by_bytes.mask(),
@@ -174,7 +171,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                     }
                     let accepted_by_original_cfg = expected.iter().any(|x| x.as_bytes() == word);
                     let mut query = c.start();
-                    let observed = query.commit_bytes(&word).is_ok() && query.is_accepting();
+                    let observed = query.commit_bytes(&word) && query.is_accepting();
                     assert_eq!(observed, accepted_by_original_cfg,
                         "seed {seed} mode {mode:?} unexpected recognition for {word:?}");
                     if accepted_by_original_cfg {
@@ -185,9 +182,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                             let token = u32::from(next_byte - b'a');
                             assert_ne!(incremental.mask()[0] & (1u32 << token), 0,
                                 "seed {seed} mode {mode:?} missing valid token {token} after a prefix of {word:?}");
-                            incremental.commit_token(token).unwrap_or_else(|e| {
-                                panic!("seed {seed} mode {mode:?} invalid token commit on {word:?}: {e:?}")
-                            });
+                            assert!(incremental.commit_token(token));
                         }
                         assert!(incremental.is_accepting(),
                             "seed {seed} mode {mode:?} token-path completion missing for {word:?}");
@@ -199,12 +194,13 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             // With an explicitly configured EOS token that is absent from
             // the vocabulary, stop admission must agree with the ORIGINAL
             // source grammar's acceptance (not merely with the fast parser).
-            let eos_module = Module::new(&grammar);
+            let eos_module = Grammar::from_expr(Expr::sequence([
+                Expr::from(grammar.clone()),
+                Expr::from(TokenSet::new([99])),
+            ]))
+            .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS construction: {e:?}"));
             let with_eos = eos_module
-                .compile_with(
-                    &vocab,
-                    CompileOptions::default().end_tokens([99]).mask_strategy(mode),
-                )
+                .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
             let reloaded_eos = glrmask::Constraint::load(with_eos.save(), &vocab)
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));
@@ -221,7 +217,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                         }
                         let expected_accepts = expected.iter().any(|x| x.as_bytes() == word);
                         let mut state = eos_constraint.start();
-                        let admitted = state.commit_bytes(&word).is_ok();
+                        let admitted = state.commit_bytes(&word);
                         assert_eq!(admitted && state.is_accepting(), expected_accepts,
                             "seed {seed} mode {mode:?} EOS grammar acceptance for {word:?}");
                         if admitted {
@@ -230,7 +226,7 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
                             assert_eq!(eos_is_allowed, expected_accepts,
                                 "seed {seed} mode {mode:?} EOS mask for {word:?}");
                             if expected_accepts {
-                                state.commit_token(99).expect("allowed EOS must commit");
+                                assert!(state.commit_token(99), "allowed EOS must commit");
                                 assert!(state.is_accepting());
                                 assert!(state.mask().iter().all(|&w| w == 0),
                                     "seed {seed} mode {mode:?} EOS did not terminate generation");

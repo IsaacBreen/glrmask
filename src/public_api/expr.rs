@@ -87,7 +87,7 @@ impl Expr {
         fn walk(
             expr: &Expr,
             leaves: &mut Vec<(String, Binding)>,
-            externs: &mut Vec<(String, ExternalKind)>,
+            externs: &mut Vec<(String, ExternKind)>,
             depth: usize,
             count: &mut usize,
         ) -> Result<crate::grammar::ast::GrammarExpr> {
@@ -99,8 +99,8 @@ impl Expr {
                 ExprNode::Leaf(leaf) => {
                     let name = format!("leaf{}", leaves.len());
                     let (kind, binding) = match leaf {
-                        ExprLeaf::Module(m) => (ExternalKind::Grammar, Binding::from(m.clone())),
-                        ExprLeaf::TokenSet(t) => (ExternalKind::Token, Binding::from(t.clone())),
+                        ExprLeaf::Module(m) => (ExternKind::Grammar, Binding::from(m.clone())),
+                        ExprLeaf::TokenSet(t) => (ExternKind::Token, Binding::from(t.clone())),
                     };
                     externs.push((name.clone(), kind));
                     leaves.push((name.clone(), binding));

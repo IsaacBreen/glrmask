@@ -284,8 +284,8 @@ mod synthetic_state_facade_tests {
         let mut static_state = constraint.start();
         let mut dynamic_state = dynamic.start();
         for token in 0..=5 {
-            static_state.commit_token(token).expect("static prefix token");
-            dynamic_state.commit_token(token).expect("dynamic prefix token");
+            assert!(static_state.commit_token(token), "static prefix token");
+            assert!(dynamic_state.commit_token(token), "dynamic prefix token");
         }
 
         let static_mask = static_state.mask();
@@ -296,12 +296,10 @@ mod synthetic_state_facade_tests {
             0,
             "five-byte non-whitespace token must remain live after minLength is reached",
         );
-        static_state
-            .commit_token(6)
-            .expect("a token admitted by the exact language must commit statically");
-        dynamic_state
-            .commit_token(6)
-            .expect("a token admitted by the exact language must commit dynamically");
+        assert!(static_state
+            .commit_token(6), "a token admitted by the exact language must commit statically");
+        assert!(dynamic_state
+            .commit_token(6), "a token admitted by the exact language must commit dynamically");
         assert_eq!(static_state.mask(), dynamic_state.mask());
     }
 
@@ -327,16 +325,16 @@ mod synthetic_state_facade_tests {
         let mut dynamic_state = dynamic.start();
 
         assert_eq!(static_state.mask(), dynamic_state.mask());
-        static_state.commit_token(0).expect("opening quote");
-        dynamic_state.commit_token(0).expect("opening quote");
+        assert!(static_state.commit_token(0), "opening quote");
+        assert!(dynamic_state.commit_token(0), "opening quote");
         for chunk in 0..20 {
             assert_eq!(
                 static_state.mask(),
                 dynamic_state.mask(),
                 "mask mismatch before four-byte chunk {chunk}",
             );
-            static_state.commit_token(3).expect("four a bytes");
-            dynamic_state.commit_token(3).expect("four a bytes");
+            assert!(static_state.commit_token(3), "four a bytes");
+            assert!(dynamic_state.commit_token(3), "four a bytes");
         }
         assert_eq!(static_state.mask(), dynamic_state.mask());
         let mask = static_state.mask();
@@ -344,8 +342,8 @@ mod synthetic_state_facade_tests {
         assert_eq!(mask[0] & (1 << 1), 0, "65th a must be rejected");
         assert_eq!(mask[0] & (1 << 2), 0, "66th a must be rejected");
         assert_eq!(mask[0] & (1 << 3), 0, "68th a must be rejected");
-        static_state.commit_token(0).expect("closing quote");
-        dynamic_state.commit_token(0).expect("closing quote");
+        assert!(static_state.commit_token(0), "closing quote");
+        assert!(dynamic_state.commit_token(0), "closing quote");
         assert_eq!(static_state.is_accepting(), dynamic_state.is_accepting());
         assert_eq!(static_state.mask(), dynamic_state.mask());
     }
@@ -370,12 +368,12 @@ mod synthetic_state_facade_tests {
         let mut static_state = constraint.start();
         let mut dynamic_state = dynamic.start();
 
-        static_state.commit_token(0).expect("opening quote");
-        dynamic_state.commit_token(0).expect("opening quote");
+        assert!(static_state.commit_token(0), "opening quote");
+        assert!(dynamic_state.commit_token(0), "opening quote");
         for chunk in 0..20 {
             assert_eq!(static_state.mask(), dynamic_state.mask(), "chunk {chunk}");
-            static_state.commit_token(2).expect("four a bytes");
-            dynamic_state.commit_token(2).expect("four a bytes");
+            assert!(static_state.commit_token(2), "four a bytes");
+            assert!(dynamic_state.commit_token(2), "four a bytes");
         }
 
         let at_short_limit = static_state.mask();
@@ -389,8 +387,8 @@ mod synthetic_state_facade_tests {
 
         for chunk in 20..40 {
             assert_eq!(static_state.mask(), dynamic_state.mask(), "chunk {chunk}");
-            static_state.commit_token(2).expect("long terminal continuation");
-            dynamic_state.commit_token(2).expect("long terminal continuation");
+            assert!(static_state.commit_token(2), "long terminal continuation");
+            assert!(dynamic_state.commit_token(2), "long terminal continuation");
         }
         let at_long_limit = static_state.mask();
         assert_eq!(at_long_limit, dynamic_state.mask());

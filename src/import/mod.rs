@@ -2169,7 +2169,7 @@ mod tests {
 
     fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
         let mut state = constraint.start();
-        state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        state.commit_bytes(bytes) && state.is_accepting()
     }
 
     fn assert_native_import_compiler_policy(
@@ -2430,13 +2430,13 @@ mod tests {
         let mut state = constraint.start();
         assert!(!token_allowed(&state.mask(), 100));
         assert!(!token_allowed(&state.mask(), 101));
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert!(!state.is_accepting());
         let mask = state.mask();
         assert!(token_allowed(&mask, 100));
         assert!(token_allowed(&mask, 101));
         assert_eq!(state.forced_canonical_reference(), Vec::<u32>::new());
-        state.commit_token(100).unwrap();
+        assert!(state.commit_token(100));
         assert!(state.is_accepting());
     }
 
@@ -2451,9 +2451,9 @@ mod tests {
         .unwrap();
 
         let mut state = constraint.start();
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert_eq!(state.forced_canonical_reference(), vec![100]);
-        state.commit_token(100).unwrap();
+        assert!(state.commit_token(100));
         assert!(state.is_accepting());
     }
 
@@ -2469,10 +2469,10 @@ mod tests {
 
         let mut state = constraint.start();
         assert_eq!(state.forced_canonical_reference(), vec![100, 100]);
-        state.commit_token(100).unwrap();
+        assert!(state.commit_token(100));
         assert!(!state.is_accepting());
         assert_eq!(state.forced_canonical_reference(), vec![100]);
-        state.commit_token(100).unwrap();
+        assert!(state.commit_token(100));
         assert!(state.is_accepting());
     }
 
@@ -2577,7 +2577,7 @@ mod tests {
             "uniform scoped ignore should remain a global ignore terminal",
         );
         let mut state = constraint.start();
-        state.commit_bytes(b"  < a   b >  ").unwrap();
+        assert!(state.commit_bytes(b"  < a   b >  "));
         assert!(state.is_accepting());
     }
 
@@ -2613,7 +2613,7 @@ mod tests {
 
         assert!(constraint.ignore_terminal.is_some());
         let mut state = constraint.start();
-        state.commit_bytes(b" < [ x ] > ").unwrap();
+        assert!(state.commit_bytes(b" < [ x ] > "));
         assert!(state.is_accepting());
     }
 
@@ -2644,7 +2644,7 @@ mod tests {
             "different scoped ignores must retain explicit scope-local lowering",
         );
         let mut state = constraint.start();
-        state.commit_bytes(b" <\ta\t\tb\t> ").unwrap();
+        assert!(state.commit_bytes(b" <\ta\t\tb\t> "));
         assert!(state.is_accepting());
     }
 
@@ -2670,7 +2670,7 @@ mod tests {
 
         assert!(constraint.ignore_terminal.is_none());
         let mut state = constraint.start();
-        state.commit_bytes(b" <ab> ").unwrap();
+        assert!(state.commit_bytes(b" <ab> "));
         assert!(state.is_accepting());
     }
 
@@ -2713,8 +2713,8 @@ mod tests {
             let mut expected = inline.start();
             for token_id in sequence {
                 assert_eq!(actual.mask(), expected.mask());
-                actual.commit_token(token_id).unwrap();
-                expected.commit_token(token_id).unwrap();
+                assert!(actual.commit_token(token_id));
+                assert!(expected.commit_token(token_id));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting());
@@ -2754,8 +2754,8 @@ mod tests {
         let mut expected = inline.start();
         for token_id in [3, 1, 2] {
             assert_eq!(actual.mask(), expected.mask());
-            actual.commit_token(token_id).unwrap();
-            expected.commit_token(token_id).unwrap();
+            assert!(actual.commit_token(token_id));
+            assert!(expected.commit_token(token_id));
         }
         assert!(actual.is_accepting());
         assert!(expected.is_accepting());
@@ -2829,8 +2829,8 @@ mod tests {
         let bytes = b" <\ta\t\tb\t> ";
         let mut actual = composed.start();
         let mut expected = inline.start();
-        actual.commit_bytes(bytes).unwrap();
-        expected.commit_bytes(bytes).unwrap();
+        assert!(actual.commit_bytes(bytes));
+        assert!(expected.commit_bytes(bytes));
         assert!(actual.is_accepting());
         assert!(expected.is_accepting());
     }
@@ -2853,7 +2853,7 @@ mod tests {
             .bind_grammar("child", child.clone())
             .expect("the retained external slot must remain bindable");
         let mut state = late_bound.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert!(state.is_accepting());
 
         let duplicate = Constraint::from_glrm_grammar_with_subgrammars(
@@ -2899,9 +2899,9 @@ mod tests {
         .unwrap();
 
         let mut state = composed.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(2).unwrap();
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(2));
+        assert!(state.commit_token(1));
         assert!(state.is_accepting());
     }
 
@@ -2943,12 +2943,12 @@ mod tests {
 
         for constraint in [&composed, &loaded] {
             let mut state = constraint.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             for _ in 0..2 {
                 let mask = state.mask();
                 assert_ne!(mask[0] & (1 << 1), 0, "end token missing from cached mask");
             }
-            state.commit_token(1).unwrap();
+            assert!(state.commit_token(1));
             assert!(state.is_accepting());
         }
     }

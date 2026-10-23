@@ -53,7 +53,7 @@ fn prepare(g:&Grammar,v:&Vocab)->glrmask::Result<Prepared>{
 }
 fn mask_trace(c:&Constraint,ids:&[u32])->u64{
     let mut s=c.start();let mut h=0xcbf29ce484222325u64;
-    for (step,&id) in ids.iter().enumerate() {let m=s.mask();assert!(m[id as usize/32]&(1<<(id%32))!=0,"trace step {step} ID {id} rejected");for word in m {h=(h^u64::from(word)).wrapping_mul(0x100000001b3);}s.commit_token(id).unwrap();}
+    for (step,&id) in ids.iter().enumerate() {let m=s.mask();assert!(m[id as usize/32]&(1<<(id%32))!=0,"trace step {step} ID {id} rejected");for word in m {h=(h^u64::from(word)).wrapping_mul(0x100000001b3);}assert!(s.commit_token(id));}
     assert!(s.is_accepting());h
 }
 // Optional untimed full-word oracle: unlike fingerprints, this permits
@@ -64,7 +64,7 @@ fn capture_masks(c: &Constraint, ids: &[u32]) -> Value {
     let mut masks = Vec::with_capacity(ids.len() + 1);
     for &id in ids {
         masks.push(state.mask());
-        state.commit_token(id).unwrap();
+        assert!(state.commit_token(id));
     }
     masks.push(state.mask());
     assert!(state.is_accepting());
@@ -94,7 +94,7 @@ fn run(case:&str,text:&str,mode:MaskStrategy,n:usize,reps:usize)->Result<Value,B
         for &id in &ids {
             let (_,t)=time(||s.fill_mask(black_box(&mut output)));masks.push(t);
             assert!(output[id as usize/32]&(1<<(id%32))!=0);
-            let (r,t)=time(||s.commit_token(black_box(id)));r?;commits.push(t);
+            let (r,t)=time(||s.commit_token(black_box(id)));assert!(r);commits.push(t);
         }
         total.push(begin.elapsed().as_secs_f64()*1e9);assert!(s.is_accepting());
     }

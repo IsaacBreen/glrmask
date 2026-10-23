@@ -644,7 +644,7 @@ impl<'a> ConstraintState<'a> {
     /// The query stops at root acceptance, byte/event ambiguity, unstable
     /// canonical tokenization, or a proof limit. It may build full masks; the
     /// state is unchanged.
-    pub fn forced_tokens(&self) -> crate::Result<Vec<u32>> {
+    pub fn forced_tokens(&self) -> Vec<u32> {
         super::commit::forcing_reference::force_result(std::slice::from_ref(self), None)
     }
 

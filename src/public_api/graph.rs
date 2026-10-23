@@ -173,7 +173,7 @@ pub(super) struct Summary {
     requirements_cache: Arc<OnceLock<Result<Arc<[Requirement]>>>>,
 }
 impl Summary {
-    fn new(kinds:&BTreeMap<String,ExternalKind>,spans:&BTreeMap<String,glrmask_grammar::SourceSpan>)->Self {
+    fn new(kinds:&BTreeMap<String,ExternKind>,spans:&BTreeMap<String,glrmask_grammar::SourceSpan>)->Self {
         Self {
             local:kinds.iter().map(|(name,&kind)| (name.clone(),Arc::new(Requirement {
                 path:name.split("::").map(str::to_owned).collect(),kind,source_span:spans.get(name).copied(),

@@ -81,12 +81,12 @@ fn hash_collision_merge_keeps_exact_masks_commits_and_loaded_language() {
         let loaded = crate::Constraint::load(constraint.save(), &vocab).unwrap();
         for (variant, c) in [("built", &constraint), ("loaded", &loaded)] {
             for (prefix, expected) in prefixes.iter().zip(&expected_masks) {
-                let mut state = c.start(); state.commit_bytes(prefix).unwrap();
+                let mut state = c.start(); assert!(state.commit_bytes(prefix));
                 assert_eq!(state.is_accepting(), words.contains(prefix), "{mode}/{variant} EOF {prefix:?}");
                 assert_eq!(&state.mask(), expected, "{mode}/{variant} mask {prefix:?}");
                 for (token, bytes) in token_bytes.iter().enumerate() {
                     if expected[token / 32] & (1 << (token % 32)) == 0 { continue; }
-                    let mut branch = state.clone(); branch.commit_token(token as u32).unwrap();
+                    let mut branch = state.clone(); assert!(branch.commit_token(token as u32));
                     let mut extended = prefix.clone(); extended.extend(bytes);
                     assert_eq!(branch.is_accepting(), words.contains(&extended),
                         "{mode}/{variant} token commit {prefix:?}+{bytes:?}");
@@ -94,7 +94,7 @@ fn hash_collision_merge_keeps_exact_masks_commits_and_loaded_language() {
             }
             for word in &invalid {
                 let mut state = c.start();
-                assert!(state.commit_bytes(word).is_err() || !state.is_accepting(),
+                assert!(!state.commit_bytes(word) || !state.is_accepting(),
                     "{mode}/{variant} false acceptance {word:?}");
             }
         }

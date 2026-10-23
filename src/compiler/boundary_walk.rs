@@ -4506,11 +4506,11 @@ mod tests {
                 let mut module_trial = module_state.clone();
                 let mut prepared_trial = prepared_state.clone();
                 assert!(
-                    module_trial.commit_token(id).is_err(),
+                    !module_trial.commit_token(id),
                     "module accepted invalid token {id} at position {positions}",
                 );
                 assert!(
-                    prepared_trial.commit_token(id).is_err(),
+                    !prepared_trial.commit_token(id),
                     "prepared accepted invalid token {id} at position {positions}",
                 );
             }
@@ -4531,8 +4531,8 @@ mod tests {
                         &text[offset..(offset + 40).min(text.len())],
                     )
                 });
-            module_state.commit_token(id).expect("module commit");
-            prepared_state.commit_token(id).expect("prepared commit");
+            assert!(module_state.commit_token(id), "module commit");
+            assert!(prepared_state.commit_token(id), "prepared commit");
             offset += len;
             positions += 1;
         }
@@ -4804,11 +4804,11 @@ mod tests {
                 let r_dyn = st_dyn.commit_bytes(&[byte]);
                 let r_static = st_static.commit_bytes(&[byte]);
                 assert_eq!(
-                    r_dyn.is_ok(),
-                    r_static.is_ok(),
+                    r_dyn,
+                    r_static,
                     "commit divergence scenario={scenario} consumed={consumed}",
                 );
-                if r_dyn.is_err() {
+                if !r_dyn {
                     break;
                 }
                 check(&mut st_dyn, &mut st_static, scenario, consumed + 1);
@@ -5046,14 +5046,14 @@ mod tests {
             let r_dyn = st_dyn.commit_bytes(&[byte]);
             let r_static = st_static.commit_bytes(&[byte]);
             assert_eq!(
-                r_dyn.is_ok(),
-                r_static.is_ok(),
+                r_dyn,
+                r_static,
                 "commit divergence scenario={scenario} consumed={consumed}",
             );
             // Strict: every commit in the validated fixture must succeed
             // (stronger than the original both-error break).
             assert!(
-                r_dyn.is_ok(),
+                r_dyn,
                 "strict window: commit must succeed scenario={scenario} consumed={consumed}",
             );
             if want.contains(&(consumed + 1)) {
@@ -5232,19 +5232,19 @@ mod tests {
             path.push(token);
             let r_dyn = st_dyn.commit_token(token);
             let r_other = st_other.commit_token(token);
-            if r_dyn.is_ok() != r_other.is_ok() {
+            if r_dyn != r_other {
                 mismatches += 1;
                 if first.is_none() {
                     first = Some(format!(
                         "commit step={} token={token} dyn_ok={} other_ok={}",
                         step + 1,
-                        r_dyn.is_ok(),
-                        r_other.is_ok(),
+                        r_dyn,
+                        r_other,
                     ));
                 }
                 break;
             }
-            if r_dyn.is_err() {
+            if !r_dyn {
                 break;
             }
             check(&mut st_dyn, &mut st_other, step + 1, &mut first);
@@ -5717,9 +5717,9 @@ mod tests {
             let mut st_dyn = dynamic.start();
             let mut st_splice = splice_static.start();
             let mut st_provider = provider_static.start();
-            st_dyn.commit_token(commit).unwrap();
-            st_splice.commit_token(commit).unwrap();
-            st_provider.commit_token(commit).unwrap();
+            assert!(st_dyn.commit_token(commit));
+            assert!(st_splice.commit_token(commit));
+            assert!(st_provider.commit_token(commit));
             let mask_dyn = st_dyn.mask();
             let mask_splice = st_splice.mask();
             let mask_provider = st_provider.mask();
@@ -6133,10 +6133,10 @@ mod tests {
             let mut direct = dynamic.start();
             let mut loaded = reloaded.start();
             for &token in &prefix {
-                expected.commit_token(token).unwrap();
-                actual.commit_token(token).unwrap();
-                direct.commit_token(token).unwrap();
-                loaded.commit_token(token).unwrap();
+                assert!(expected.commit_token(token));
+                assert!(actual.commit_token(token));
+                assert!(direct.commit_token(token));
+                assert!(loaded.commit_token(token));
             }
             let mask = expected.mask();
             assert_eq!(actual.mask(), mask, "static prefix {prefix:?}");
@@ -6299,8 +6299,8 @@ mod tests {
         for (commit, fused, sibling, site) in [(2u32, 0u32, 1u32, "L"), (3u32, 1u32, 0u32, "R")] {
             let mut st_dyn = dynamic.start();
             let mut st_static = installed.start();
-            st_dyn.commit_token(commit).unwrap();
-            st_static.commit_token(commit).unwrap();
+            assert!(st_dyn.commit_token(commit));
+            assert!(st_static.commit_token(commit));
             let mask_dyn = st_dyn.mask();
             let mask_static = st_static.mask();
             assert!(admits(&mask_dyn, fused), "dynamic admits fused {fused} after {site}");
@@ -6317,7 +6317,7 @@ mod tests {
             let mut trapped = Vec::new();
             for (commit, fused, _) in [(2u32, 0u32, "L"), (3u32, 1u32, "R")] {
                 let mut st = installed.start();
-                st.commit_token(commit).unwrap();
+                assert!(st.commit_token(commit));
                 trapped.push((fused, st.mask()));
             }
             trapped
@@ -6335,7 +6335,7 @@ mod tests {
         .expect("install empty");
         for (commit, fused, site) in [(2u32, 0u32, "L"), (3u32, 1u32, "R")] {
             let mut st = ablated.start();
-            st.commit_token(commit).unwrap();
+            assert!(st.commit_token(commit));
             assert!(
                 !admits(&st.mask(), fused),
                 "ablated composition must lose fused token {fused} after {site}",
@@ -6407,7 +6407,7 @@ mod tests {
             let mut actual = linked.start();
             for token in path.iter().copied() {
                 assert_eq!(actual.mask(), expected.mask(), "before {token} in {path:?}");
-                assert_eq!(actual.commit_token(token).is_ok(), expected.commit_token(token).is_ok());
+                assert_eq!(actual.commit_token(token), expected.commit_token(token));
             }
             assert_eq!(actual.mask(), expected.mask(), "prefix {path:?}");
             assert_eq!(actual.is_accepting(), expected.is_accepting(), "EOF prefix {path:?}");
@@ -7100,7 +7100,7 @@ mod tests {
                     ok = false;
                     break;
                 }
-                if st.commit_token(token).is_err() {
+                if !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -7137,7 +7137,7 @@ mod tests {
         for node in &nodes {
             let mut st = installed.start();
             for &token in &node.path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             let actual = st.mask();
             if actual != node.mask {
@@ -7161,7 +7161,7 @@ mod tests {
         ] {
             let mut st = installed.start();
             for &token in &prefix {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             let mask = st.mask();
             assert!(admits(&mask, fused), "nested admits {fused} after {site}mgm");
@@ -7169,14 +7169,14 @@ mod tests {
         }
         {
             let mut st = installed.start();
-            st.commit_token(L).unwrap();
+            assert!(st.commit_token(L));
             assert!(admits(&st.mask(), M), "nested admits m after L");
             assert!(admits(&st.mask(), MG), "nested admits mg after L");
             assert!(!admits(&st.mask(), RM), "nested rejects Rm after L");
         }
         {
             let mut st = installed.start();
-            st.commit_token(LM).unwrap();
+            assert!(st.commit_token(LM));
             assert!(admits(&st.mask(), GM), "nested admits gm after Lm");
             assert!(!admits(&st.mask(), GX), "nested rejects gx after Lm");
         }
@@ -7217,8 +7217,8 @@ mod tests {
                     diverged = true;
                     break;
                 }
-                st_dyn.commit_token(token).expect("dynamic replay");
-                st_abl.commit_token(token).expect("ablated replay");
+                assert!(st_dyn.commit_token(token), "dynamic replay");
+                assert!(st_abl.commit_token(token), "ablated replay");
                 assert!(
                     is_subset(&st_abl.mask(), &st_dyn.mask()),
                     "ablated masks must be subsets at path {:?}",

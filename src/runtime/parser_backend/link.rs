@@ -352,7 +352,7 @@ mod candidate_tests {
             .deferred_boundary_summary.get().is_some());
         let mut state = linked.start();
         let _ = state.mask();
-        state.commit_bytes(b"xa").unwrap();
+        assert!(state.commit_bytes(b"xa"));
         let _ = state.mask();
         assert!(linked.boundary_candidate_summary.get().is_none(),
             "current masks and commits must not request the wrapper's future outward proof");

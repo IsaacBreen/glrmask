@@ -249,8 +249,7 @@ start: "{" obj_ord_0_0_nc "}"
 
     let c = Constraint::compile(glrmask::Grammar::lark(lark), &vocab).unwrap();
     let mut s = c.start();
-    s.commit_bytes(b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \"")
-        .unwrap();
+    assert!(s.commit_bytes(b"{\"certificationConditions\": \"This device is certified for use in the United States.\", \"certificationDate\": \"2022-01-01\", \"certificationExpiration\": \"2027-01-01\", \"certificationId\": \"DA-123456\", \"frn\": \"0012345678\", \"sasPhase\": \""));
 
     let mask = s.mask();
     assert!(token_allowed(&mask, 17), "token '2' must be allowed at the sasPhase prefix");

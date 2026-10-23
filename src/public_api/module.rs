@@ -11,25 +11,16 @@ thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Ce
 
 /// Options for compiling a grammar or module.
 ///
-/// `end_tokens` applies only to the top-level sequence. The strategy settings
-/// apply to the whole compile, including every composed child.
+/// The strategy settings apply to the whole compile, including every composed
+/// child.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
-    pub(crate) end_tokens: Vec<u32>,
     pub(crate) mask_strategy: MaskStrategy,
     pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
 }
 
 impl CompileOptions {
-    /// Sets the accepted end-of-sequence token IDs.
-    ///
-    /// They are allowed only at acceptance and must be committed before stopping.
-    pub fn end_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
-        self.end_tokens = ids.into_iter().collect();
-        self
-    }
-
     /// Sets the mask computation strategy for the whole compile.
     ///
     /// [`MaskStrategy::Auto`] (the default) uses any retained static
@@ -748,6 +739,52 @@ impl Module {
         Ok(prepared)
     }
 
+    /// Recognizes the root shorthand `Sequence([body, end-token set])` and
+    /// returns the body module with the sorted end-token IDs.
+    fn end_token_root(&self) -> Result<Option<(Module, Vec<u32>)>> {
+        self.end_token_root_at(0)
+    }
+
+    fn end_token_root_at(&self, depth: usize) -> Result<Option<(Module, Vec<u32>)>> {
+        if depth > 8 {
+            return Ok(None);
+        }
+        let Some(body) = self.node.source.single_rule_body() else {
+            return Ok(None);
+        };
+        match body {
+            crate::grammar::ast::GrammarExpr::Sequence(parts) if parts.len() == 2 => {
+                let (crate::grammar::ast::GrammarExpr::Ref(a), crate::grammar::ast::GrammarExpr::Ref(b)) =
+                    (&parts[0], &parts[1])
+                else {
+                    return Ok(None);
+                };
+                let (Some(BoundValue::Module(body)), Some(BoundValue::TokenSet(tokens))) =
+                    (self.node.bindings.get(a), self.node.bindings.get(b))
+                else {
+                    return Ok(None);
+                };
+                let mut ids: Vec<u32> = tokens
+                    .range_pairs()
+                    .iter()
+                    .flat_map(|&(start, end)| start..=end)
+                    .collect();
+                ids.sort_unstable();
+                if ids.is_empty() {
+                    return Ok(None);
+                }
+                Ok(Some((body.clone(), ids)))
+            }
+            crate::grammar::ast::GrammarExpr::Ref(name) => {
+                match self.node.bindings.get(name) {
+                    Some(BoundValue::Module(body)) => body.end_token_root_at(depth + 1),
+                    _ => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Compiles the module assembly against `vocab` with default options.
     pub fn compile(&self, vocab: &Vocab) -> Result<RuntimeConstraint> {
         self.compile_with(vocab, CompileOptions::default())
@@ -755,12 +792,17 @@ impl Module {
 
     /// Compiles the module assembly against `vocab` with root compile options.
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
-        with_deep_stack(|| self.compile_with_on_stack(vocab, options))
+        with_deep_stack(|| self.compile_with_on_stack(vocab, options, &[]))
     }
 
-    fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions) -> Result<RuntimeConstraint> {
+    fn compile_with_on_stack(&self, vocab: &Vocab, options: CompileOptions, end_tokens: &[u32]) -> Result<RuntimeConstraint> {
         if let Some(slot) = self.externs().unbound().iter().next() {
             return Err(error(format!("extern {:?} is unbound", slot.name())));
+        }
+        if end_tokens.is_empty()
+            && let Some((body, ids)) = self.end_token_root()?
+        {
+            return body.compile_with_on_stack(vocab, options, &ids);
         }
         self.validate_targets(Some(vocab))?;
         self.validate_retained_vocab(vocab)?;
@@ -789,7 +831,7 @@ impl Module {
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
         if token_trie {
             let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?;
-            let result = result.with_end_tokens(&options.end_tokens)?;
+            let result = result.with_end_tokens(end_tokens)?;
             crate::compiler::terminal_ended_rescue::report_route(
                 experiment.report_route,
                 crate::compiler::terminal_ended_rescue::Route::Normal,
@@ -815,7 +857,7 @@ impl Module {
                 let mut constraint =
                     crate::compiler::terminal_ended_rescue::rescue(&source, vocab)?;
                 apply_final_boundary_trigger(&mut constraint, target_boundary())?;
-                constraint.with_end_tokens(&options.end_tokens)
+                constraint.with_end_tokens(end_tokens)
             };
             if te_first {
                 match try_rescue() {
@@ -834,7 +876,7 @@ impl Module {
             let build = |mixed: bool| {
                 let mut prepared = self.clone();
                 let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
-                let end_tokens = options.end_tokens.clone();
+                let end_tokens = end_tokens.to_vec();
                 let compile_options = options.clone();
                 budget.install(move || {
                     crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
@@ -917,7 +959,7 @@ impl Module {
                         if let Ok(grammar) = self.flatten_source() {
                             let constraint = grammar
                                 .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?
-                                .with_end_tokens(&options.end_tokens)?;
+                                .with_end_tokens(end_tokens)?;
                             route =
                                 crate::compiler::terminal_ended_rescue::Route::TokenTrieFallback;
                             return Ok(constraint);
@@ -1292,9 +1334,9 @@ mod precompile_boundary_tests {
             if depth == 0 { return; }
             for token in a.mask() {
                 let mut next_a = a.clone();
-                if next_a.commit_token(token).is_err() { continue; }
+                if !next_a.commit_token(token) { continue; }
                 let mut next_b = b.clone();
-                next_b.commit_token(token).expect("same masks accept the same token");
+                assert!(next_b.commit_token(token), "same masks accept the same token");
                 compare(&next_a, &next_b, depth - 1);
             }
         }
@@ -1311,9 +1353,9 @@ mod precompile_boundary_tests {
         });
         for token in tokens {
             let mut next_a = a.clone();
-            next_a.commit_token(token).expect("masked token commits");
+            assert!(next_a.commit_token(token), "masked token commits");
             let mut next_b = b.clone();
-            next_b.commit_token(token).expect("same masks accept the same token");
+            assert!(next_b.commit_token(token), "same masks accept the same token");
             same_language(&next_a, &next_b, depth - 1);
         }
     }
@@ -1411,7 +1453,7 @@ mod grammar_precompile_tests {
         parent.bind("child", module).expect("bind child");
         let composed = parent.compile(&vocab).expect("compile composed modules");
         let mut state = composed.start();
-        assert!(state.commit_token(4).is_ok());
+        assert!(state.commit_token(4));
         assert!(state.is_accepting());
 
         let mut reference_parent = Module::new(&Grammar::from_glrm(HOST));
@@ -1464,12 +1506,11 @@ mod boundary_gate_tests {
             }
             let mut next_gated = gated.clone();
             let mut next_ungated = ungated.clone();
-            if next_gated.commit_token(token).is_err() {
+            if !next_gated.commit_token(token) {
                 continue;
             }
-            next_ungated
-                .commit_token(token)
-                .expect("ungated commit must accept a gated token");
+            assert!(next_ungated
+                .commit_token(token), "ungated commit must accept a gated token");
             walk(&mut next_gated, &mut next_ungated, depth - 1);
         }
     }
@@ -1590,8 +1631,8 @@ mod boundary_strategy_tests {
             let mut a = static_boundary.start();
             let mut b = token_trie.start();
             for &token in prefix {
-                a.commit_token(token).unwrap();
-                b.commit_token(token).unwrap();
+                assert!(a.commit_token(token));
+                assert!(b.commit_token(token));
             }
             assert_eq!(a.mask(), b.mask(), "mask mismatch after {prefix:?}");
         }
@@ -1660,8 +1701,8 @@ mod boundary_error_tests {
         let mut auto_state = auto.start();
         let mut trie_state = token_trie.start();
         assert_eq!(auto_state.mask(), trie_state.mask());
-        auto_state.commit_token(0).unwrap();
-        trie_state.commit_token(0).unwrap();
+        assert!(auto_state.commit_token(0));
+        assert!(trie_state.commit_token(0));
         assert_eq!(auto_state.mask(), trie_state.mask());
     }
 }

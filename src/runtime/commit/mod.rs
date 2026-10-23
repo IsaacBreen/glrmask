@@ -9116,25 +9116,29 @@ impl<'a> ConstraintState<'a> {
 
     /// Commits one model token event.
     ///
-    /// Returns an error if the token is not allowed; the state is then
-    /// unusable, so clone it first to try a token speculatively.
+    /// Returns false when the token is not allowed; the state is then unusable,
+    /// so clone it first to try a token speculatively.
+    #[must_use]
     pub fn commit_token(
         &mut self,
         token_id: u32,
-    ) -> crate::Result<()> {
-        self.commit_token_raw(token_id).map_err(crate::Error::State)
+    ) -> bool {
+        self.commit_token_raw(token_id).is_ok()
     }
 
     /// Commits model token events in order, stopping at the first disallowed
     /// event.
     ///
-    /// Returns an error if a token is not allowed; the state is then unusable,
+    /// Returns false when a token is not allowed; the state is then unusable,
     /// so clone it first to try tokens speculatively.
-    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> crate::Result<()> {
+    #[must_use]
+    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
         for &token_id in token_ids {
-            self.commit_token(token_id)?;
+            if !self.commit_token(token_id) {
+                return false;
+            }
         }
-        Ok(())
+        true
     }
 
     /// Return Some when root termination policy handles this commitment.
@@ -9427,10 +9431,11 @@ impl<'a> ConstraintState<'a> {
     /// Commits raw bytes rather than a model token event.
     ///
     /// Does not substitute for committing exact-token or end-token events.
-    /// Returns an error if the bytes are not allowed; the state is then
-    /// unusable, so clone it first to try bytes speculatively.
-    pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
-        self.commit_bytes_raw(bytes).map_err(crate::Error::State)
+    /// Returns false if the bytes are not allowed; the state is then unusable,
+    /// so clone it first to try bytes speculatively.
+    #[must_use]
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.commit_bytes_raw(bytes).is_ok()
     }
 
     pub(crate) fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -9530,7 +9535,7 @@ mod tests {
                             for (token, _) in constraint.token_bytes_iter() {
                                 if !token_in_mask(&mask, token) { continue; }
                                 let mut advanced = state.clone();
-                                advanced.commit_token(token).unwrap();
+                                assert!(advanced.commit_token(token));
                                 next.push(advanced);
                             }
                         }
@@ -9590,7 +9595,7 @@ mod tests {
         "#), &vocab).unwrap();
         for constraint in [&compiled, &Constraint::load(compiled.save(), &vocab).unwrap()] {
             let mut state = constraint.start();
-            state.commit_bytes(b"ab").unwrap();
+            assert!(state.commit_bytes(b"ab"));
             let mut reference = state.state.clone();
             assert!(commit_token_no_fast_path_reference(constraint, &mut reference, 1).is_ok());
             let mut actual = state.state.clone();
@@ -9637,9 +9642,9 @@ mod tests {
                         let mut reference = before.clone();
                         assert!(commit_token_no_fast_path_reference(constraint, &mut reference, token).is_ok(),
                             "general queue must retain unfinished ignore token={token}");
-                        actual.commit_token(token).unwrap();
+                        assert!(actual.commit_token(token));
                         assert_commit_fast_path_equivalence(constraint, before, token, &actual.state, true);
-                        for byte in fragments[token as usize] { bytewise.commit_bytes(&[*byte]).unwrap(); }
+                        for byte in fragments[token as usize] { assert!(bytewise.commit_bytes(&[*byte])); }
                         assert_eq!(actual.mask(), bytewise.mask(), "token-vs-byte prefix token={token}");
                     }
                     assert!(actual.is_accepting());
@@ -9670,7 +9675,7 @@ mod tests {
             for constraint in [&outer, &loaded] {
                 for prefix in ["", "[", "[a", "[ab", "[ab]", "[ab]!", "[ ", "[]"] {
                     let mut state = constraint.start();
-                    if state.commit_bytes(prefix.as_bytes()).is_err() {continue;}
+                    if !state.commit_bytes(prefix.as_bytes()) {continue;}
                     let runtime = state.constraint;
                     let count = runtime_terminal_count(runtime);
                     for (_, gss) in state.state.iter() {
@@ -9714,7 +9719,7 @@ mod tests {
         .unwrap();
 
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
 
         // Populate the ordinary per-sequence mask cache while inside A. A
         // further `a` is an exact lexer self-loop: no parser terminal is
@@ -9727,7 +9732,7 @@ mod tests {
             assert_eq!(cache.as_ref().unwrap().generation, before_generation);
         }
 
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert_eq!(state.generation, before_generation + 1);
         assert_eq!(before_state, state.state);
         {
@@ -9739,7 +9744,7 @@ mod tests {
 
         // Completing A and advancing the parser must invalidate the cached
         // generation. The following mask is therefore recomputed for B.
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         {
             let cache = state.mask_cache.lock().unwrap();
             assert_ne!(cache.as_ref().unwrap().generation, state.generation);
@@ -9766,13 +9771,13 @@ mod tests {
         // byte changes the exact symbolic residual coordinate while the parser
         // has not seen a terminal boundary and the finite vocabulary-horizon
         // mask coordinate remains unchanged.
-        state.commit_token(0).unwrap(); // opening quote
-        state.commit_token(1).unwrap(); // first interior 'a'
+        assert!(state.commit_token(0)); // opening quote
+        assert!(state.commit_token(1)); // first interior 'a'
         let cached_mask = state.mask();
         let before_generation = state.generation;
         let before_state = state.state.clone();
 
-        state.commit_token(1).unwrap(); // second interior 'a'
+        assert!(state.commit_token(1)); // second interior 'a'
         assert_ne!(before_state, state.state, "test must exercise a changed exact lexer state");
         assert!(
             state.dynamic_mask_projection_state_eq(&before_state, &state.state),
@@ -9832,7 +9837,7 @@ mod tests {
         ] {
             let mut state = bound.start();
             for &token in path {
-                state.commit_token(token).unwrap();
+                assert!(state.commit_token(token));
             }
 
             let mut batch_candidates = bound.token_bytes_iter().collect::<Vec<_>>();
@@ -10033,7 +10038,7 @@ mod tests {
         }
         for (token, _) in constraint.token_bytes_iter() {
             let admitted = state.mask()[token as usize / 32] & (1 << (token % 32)) != 0;
-            assert_eq!(state.clone().commit_token(token).is_ok(), admitted, "token={token}");
+            assert_eq!(state.clone().commit_token(token), admitted, "token={token}");
         }
     }
 
@@ -10076,7 +10081,7 @@ mod tests {
             &std::env::var("GLRMASK_DEBUG_VOCAB").expect("GLRMASK_DEBUG_VOCAB"));
         let constraint = Constraint::load(&bytes, &vocab).unwrap();
         let mut state = constraint.start();
-        state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
+        assert!(state.commit_bytes(b"const x = tools.tool_0({})"));
         eprintln!("STACKS {:?}", state.debug_parser_stacks());
         for (_, gss) in state.state.iter() {
             let all = BitSet::all(constraint.parser_terminal_count() as usize + 1);
@@ -10306,8 +10311,8 @@ mod tests {
             let mut fs = full.start();
             let mut hs = fast.start();
             if !prefix.is_empty() {
-                fs.commit_bytes(prefix).unwrap();
-                hs.commit_bytes(prefix).unwrap();
+                assert!(fs.commit_bytes(prefix));
+                assert!(hs.commit_bytes(prefix));
             }
             let fm = fs.mask();
             let started = Instant::now();
@@ -10476,13 +10481,13 @@ mod tests {
                 .collect::<BTreeSet<_>>(),
             BTreeSet::from([0, 1]),
         );
-        state.commit_token(0).unwrap();
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(2));
         assert!(state.is_accepting());
 
         let loaded = Constraint::load(&constraint.save(), &crate::public_api::constraint_vocab(&constraint)).unwrap();
         let mut loaded_state = loaded.start();
-        loaded_state.commit_token(1).unwrap();
+        assert!(loaded_state.commit_token(1));
         assert!(loaded_state.is_accepting());
     }
 
@@ -10501,7 +10506,7 @@ mod tests {
         .unwrap();
 
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert!(
             state.state.has_duplicate_keys(),
             "the bounded runtime should retain the completed alternatives separately"
@@ -10532,15 +10537,15 @@ mod tests {
         .unwrap();
 
         let mut flat = constraint.start();
-        flat.commit_token(0).unwrap();
+        assert!(flat.commit_token(0));
         assert!(flat.state.has_duplicate_keys());
 
         let mut normalized = flat.clone();
         normalized.state.normalize_duplicate_keys();
         assert_eq!(flat.mask(), normalized.mask());
 
-        flat.commit_token(100).unwrap();
-        normalized.commit_token(100).unwrap();
+        assert!(flat.commit_token(100));
+        assert!(normalized.commit_token(100));
         assert!(flat.is_accepting());
         assert!(normalized.is_accepting());
         assert_eq!(
@@ -10643,7 +10648,7 @@ mod tests {
 
         let mut states = vec![constraint.start()];
         let mut after_a = constraint.start();
-        after_a.commit_token(0).unwrap();
+        assert!(after_a.commit_token(0));
         states.push(after_a);
 
         for state in states {
@@ -10767,7 +10772,7 @@ nt start ::= item item? item?;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
 
         let tokenizer_state = constraint.runtime_commit_initial_state();
         // This test exercises the GSS pruning primitive itself, so cross the
@@ -10828,9 +10833,9 @@ nt start ::= item item? item?;
         .unwrap();
 
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(1).unwrap();
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(1));
+        assert!(state.commit_token(2));
 
         let mask = state.mask();
         let allowed = |token: u32| {
@@ -10840,9 +10845,9 @@ nt start ::= item item? item?;
         assert!(!allowed(4), "the consumed ID cannot also satisfy the next ID");
         assert!(!allowed(5), "a prefix of %= cannot follow until a new ID is consumed");
         let mut probe = state.clone();
-        assert!(probe.commit_token(4).is_err());
+        assert!(!probe.commit_token(4));
         let mut probe = state.clone();
-        assert!(probe.commit_token(5).is_err());
+        assert!(!probe.commit_token(5));
     }
 
     #[test]
@@ -10883,22 +10888,22 @@ nt start ::= item item? item?;
 
         let mut expected = body.start();
         for token in [0, 1, 2] {
-            expected.commit_token(token).unwrap();
+            assert!(expected.commit_token(token));
         }
         let expected_mask = expected.mask();
         for constraint in [&bound, &loaded] {
             let mut state = constraint.start();
             for token in [0, 1, 2] {
-                state.commit_token(token).unwrap();
+                assert!(state.commit_token(token));
             }
             assert_eq!(state.mask(), expected_mask);
             assert!(state.state.iter().any(|(_, gss)| {
                 !gss.all_accs_satisfy(|td: &TerminalsDisallowed| td.is_empty())
             }));
             let mut probe = state.clone();
-            assert!(probe.commit_token(4).is_err());
+            assert!(!probe.commit_token(4));
             let mut probe = state.clone();
-            assert!(probe.commit_token(5).is_err());
+            assert!(!probe.commit_token(5));
         }
     }
 
@@ -10991,7 +10996,7 @@ nt start ::= item item? item?;
 
                                 if depth < 4 {
                                     let mut advanced = state.clone();
-                                    if advanced.commit_bytes(bytes).is_ok() {
+                                    if advanced.commit_bytes(bytes) {
                                         let mut next_path = path.clone();
                                         next_path.push(token_id);
                                         next.push((advanced, next_path));
@@ -11026,7 +11031,7 @@ nt start ::= item item? item?;
         };
 
         let mut state = constraint.start();
-        assert!(state.commit_token(1).is_err());
+        assert!(!state.commit_token(1));
         assert_failed(&state);
 
         let mut state = constraint.start();
@@ -11042,7 +11047,7 @@ nt start ::= item item? item?;
         assert_failed(&state);
 
         let mut state = constraint.start();
-        assert!(state.commit_bytes(b"b").is_err());
+        assert!(!state.commit_bytes(b"b"));
         assert_failed(&state);
     }
 
@@ -11152,9 +11157,9 @@ nt start ::= item item? item?;
 
         let mut actual = start.clone();
         actual.state = state;
-        actual.commit_bytes(b"a").unwrap();
+        assert!(actual.commit_bytes(b"a"));
         let mut expected = start;
-        expected.commit_bytes(b"a").unwrap();
+        assert!(expected.commit_bytes(b"a"));
         assert_eq!(canonical_commit_state(&actual.state), canonical_commit_state(&expected.state));
         assert_eq!(actual.mask(), expected.mask());
         assert_eq!(actual.is_accepting(), expected.is_accepting());

@@ -28,14 +28,13 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
     for constraint in [compiled, loaded]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True), (b"()(", False)]:
             state = constraint.start()
-            state.commit_bytes(prefix)
+            assert state.commit_bytes(prefix)
             assert state.is_accepting() == accepting
             for _ in range(2):
                 mask = state.mask()
                 assert not mask[25] and not mask[26]
                 assert mask[0] and mask[15]  # Sparse IDs with duplicate bytes.
-            with pytest.raises(ValueError):
-                state.commit_token(25)
+            assert not state.commit_token(25)
             assert (not state.mask().any())
     for changed in [{**TOKENS, 0: b"["}, {**TOKENS, 20: b"y"},
                     {key: value for key, value in TOKENS.items() if key != 15},
@@ -58,23 +57,22 @@ def test_dynamic_wrapper_empty_alias_masks_and_exact_external_vocab(monkeypatch,
                                   glrmask.MaskStrategy.FAST_RUNTIME])
 def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
     vocab = glrmask.Vocab.from_id_to_bytes(TOKENS)
-    compiled = glrmask.Grammar.from_ebnf(SOURCE).compile(vocab, mask_strategy=mode, end_tokens=[26])
-    for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf(SOURCE), glrmask.TokenSet([26]))).compile(vocab, mask_strategy=mode)
+    for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
             state = constraint.start()
-            state.commit_bytes(prefix)
+            assert state.commit_bytes(prefix)
             for _ in range(2):
                 assert not state.mask()[25]
                 assert bool(state.mask()[26]) == accepting
             if accepting:
                 assert not state.is_accepting()
-                state.commit_token(26)
+                assert state.commit_token(26)
                 assert state.is_accepting() and not state.mask().any()
                 assert not state.mask().any()
             else:
-                with pytest.raises(ValueError):
-                    state.commit_token(26)
+                assert not state.commit_token(26)
                 assert (not state.mask().any()) and not state.is_accepting()
                 assert not state.mask().any()
 
@@ -89,17 +87,16 @@ def test_dynamic_profiled_wrapper_preserves_empty_eos(monkeypatch, flag, partiti
     constraint = DynamicConstraint.load(bytes(raw), vocab)
     for prefix, accepting in [(b"", True), (b"(", False), (b"()", True)]:
         state = constraint.start()
-        state.commit_bytes(prefix)
+        assert state.commit_bytes(prefix)
         assert not state.mask()[25]
         assert bool(state.mask()[26]) == accepting
         if accepting:
-            state.commit_token(26)
+            assert state.commit_token(26)
             assert not state.mask().any()
         else:
             # The legacy Dynamic source-end-token wrapper rejects early EOS
             # with an error; the public root-end policy above returns Ok.
-            with pytest.raises(ValueError):
-                state.commit_token(26)
+            assert not state.commit_token(26)
             assert (not state.mask().any())
 
 
@@ -113,7 +110,7 @@ def test_dynamic_empty_exact_special_id_remains_live(monkeypatch, flag):
     for constraint in [compiled, DynamicConstraint.load(bytes(compiled.save()), vocab)]:
         state = constraint.start()
         assert not state.mask()[25]
-        state.commit_token(0)
+        assert state.commit_token(0)
         assert state.mask()[25] and not state.mask()[26]
-        state.commit_token(25)
+        assert state.commit_token(25)
         assert state.is_accepting()

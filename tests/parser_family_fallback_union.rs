@@ -17,13 +17,13 @@ fn cross_lexeme_vocabulary_token_does_not_hide_valid_comma() {
             let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
             for artifact in [&constraint, &loaded] {
             let mut state = artifact.start();
-            state.commit_bytes(PREFIX).unwrap();
+            assert!(state.commit_bytes(PREFIX));
             let mask = state.mask();
             let reference = state.fill_mask_dynamic_vec();
             assert_ne!(reference[0] & 1, 0, "independent native-parser reference must admit comma");
             assert_ne!(mask[0] & 1, 0, "adding {:?} must not remove comma in {:?}", additional, optimization);
             assert_eq!(mask, reference, "mask/reference parity for {:?} in {:?}", additional, optimization);
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             }
         }
     }

@@ -32,7 +32,7 @@ fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
                             linked.save(), &vocab).unwrap());
                         for c in [&linked, &loaded].into_iter().chain(external.as_ref()) {
                             for prefix in [b"".as_slice(), b"x", b"xy", b"xa", b"xay"] {
-                                let mut state = c.start(); state.commit_bytes(prefix).unwrap();
+                                let mut state = c.start(); assert!(state.commit_bytes(prefix));
                                 assert_eq!(state.is_accepting(), words.contains(&prefix));
                                 let mask = state.mask();
                                 for (id, bytes) in &tokens {
@@ -43,7 +43,7 @@ fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
                                     assert_eq!(actual, expected, "source={source_index} backend={backend:?} \
                                         child={child_mode:?} link={link_mode:?} prefix={prefix:?} token={bytes:?}");
                                     if actual {
-                                        let mut branch = state.clone(); branch.commit_token(*id).unwrap();
+                                        let mut branch = state.clone(); assert!(branch.commit_token(*id));
                                         assert_eq!(branch.is_accepting(), words.contains(&word.as_slice()));
                                     }
                                 }
@@ -295,14 +295,14 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
         assert_static_boundaries(c);
         for count in [0usize, 1, 2, 7, 31, 65, 128] {
             let prefix = format!("x{}", "a".repeat(count)).into_bytes();
-            let mut state = c.start(); state.commit_bytes(&prefix).unwrap(); assert!(!state.is_accepting());
+            let mut state = c.start(); assert!(state.commit_bytes(&prefix)); assert!(!state.is_accepting());
             let mask = state.mask();
             for (id, bytes) in &tokens {
                 let mut candidate = prefix.clone(); candidate.extend(bytes);
                 let actual = mask.get(*id as usize / 32).is_some_and(|word| word & (1 << (*id % 32)) != 0);
                 assert_eq!(actual, viable(&candidate), "prefix_len={} token={bytes:?}", prefix.len());
             }
-            state.commit_bytes(b"y").unwrap(); assert!(state.is_accepting());
+            assert!(state.commit_bytes(b"y")); assert!(state.is_accepting());
         }
     }
 }
@@ -359,9 +359,9 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
                     if outer_mode == MaskStrategy::ParserDwa { assert_static_boundaries(&linked); }
                     for constraint in [&linked, &loaded, &external] {
                         for &prefix in &prefixes {
-                            let mut reference = oracle.start(); reference.commit_bytes(prefix).unwrap();
+                            let mut reference = oracle.start(); assert!(reference.commit_bytes(prefix));
                             let expected = reference.mask();
-                            let mut state = constraint.start(); state.commit_bytes(prefix).unwrap();
+                            let mut state = constraint.start(); assert!(state.commit_bytes(prefix));
                             assert_eq!(state.mask(), expected,
                                 "leaf={leaf_mode:?} middle={middle_mode:?} outer={outer_mode:?} prefix={prefix:?}");
                             assert_eq!(state.is_accepting(), words.contains(&prefix));
@@ -371,7 +371,7 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
                                 let bit = expected[*id as usize / 32] & (1 << (*id % 32)) != 0;
                                 assert_eq!(bit, viable, "independent finite language: prefix={prefix:?} token={bytes:?}");
                                 let mut endpoint = state.clone();
-                                assert_eq!(endpoint.commit_token(*id).is_ok(), viable,
+                                assert_eq!(endpoint.commit_token(*id), viable,
                                     "mask/commit endpoint: prefix={prefix:?} token={bytes:?}");
                                 if viable { assert_eq!(endpoint.is_accepting(), words.contains(&word.as_slice())); }
                             }
@@ -404,10 +404,10 @@ fn scoped_ignores_match_the_independent_lr_composition() {
     }
     prefixes.extend([b"~x_a_by~".to_vec(), b"x_a~by".to_vec(), b"x~a_by".to_vec(), b"x__a__b__y".to_vec()]);
     for prefix in prefixes {
-        let mut reference = lr.start(); let valid = reference.commit_bytes(&prefix).is_ok();
+        let mut reference = lr.start(); let valid = reference.commit_bytes(&prefix);
         for constraint in [&candidate, &loaded, &external] {
             let mut state = constraint.start();
-            assert_eq!(state.commit_bytes(&prefix).is_ok(), valid, "ignore prefix {prefix:?}");
+            assert_eq!(state.commit_bytes(&prefix), valid, "ignore prefix {prefix:?}");
             if valid {
                 assert_eq!(state.is_accepting(), reference.is_accepting(), "ignore completion {prefix:?}");
                 assert_eq!(state.mask(), reference.mask(), "ignore mask {prefix:?}");
@@ -431,14 +431,14 @@ fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
     let loaded = Constraint::load(result.save(), &vocab).unwrap();
     for c in [&result, &loaded] {
         for (special, letter) in [(600, b'a'), (601, b'b')] {
-            let mut state = c.start(); state.commit_bytes(b"x").unwrap();
+            let mut state = c.start(); assert!(state.commit_bytes(b"x"));
             let allowed = |mask: &[u32], token: u32| mask[token as usize / 32] & (1 << (token % 32)) != 0;
             let mask = state.mask(); assert!(allowed(&mask, special)); assert!(!allowed(&mask, 602)); assert!(!allowed(&mask, 700));
-            state.commit_token(special).unwrap(); state.commit_bytes(&[letter, b'y']).unwrap(); assert!(state.is_accepting());
-            assert!(allowed(&state.mask(), 700)); state.commit_token(700).unwrap();
-            assert!(state.is_accepting() && !(state.mask().iter().all(|word| *word == 0)));
+            assert!(state.commit_token(special)); assert!(state.commit_bytes(&[letter, b'y']));
+            assert!(allowed(&state.mask(), 700)); assert!(state.commit_token(700));
+            
             assert!(state.mask().iter().all(|&w| w == 0));
-            assert!(state.commit_token(special).is_err());
+            assert!(!state.commit_token(special));
         }
     }
 }
@@ -519,7 +519,7 @@ fn assert_language(constraint: &Constraint, tokens: &[(u32, Vec<u8>)], words: &[
     }
     for prefix in prefixes {
         let mut state = constraint.start();
-        state.commit_bytes(&prefix).unwrap();
+        assert!(state.commit_bytes(&prefix));
         assert_eq!(state.is_accepting(), words.contains(&prefix.as_slice()), "completion {prefix:?}");
         let mask = state.mask();
         for (id, bytes) in tokens {
@@ -529,8 +529,8 @@ fn assert_language(constraint: &Constraint, tokens: &[(u32, Vec<u8>)], words: &[
             assert_eq!(actual, expected, "prefix={prefix:?}, token={bytes:?}, id={id}, report={report}");
             if actual {
                 let mut replay = constraint.start();
-                replay.commit_bytes(&prefix).unwrap();
-                replay.commit_token(*id).unwrap_or_else(|error| panic!("prefix={prefix:?} token={bytes:?} id={id}: {error}"));
+                assert!(replay.commit_bytes(&prefix));
+                assert!(replay.commit_token(*id));
                 assert_eq!(replay.is_accepting(), words.contains(&candidate.as_slice()), "commit {candidate:?}");
             }
         }

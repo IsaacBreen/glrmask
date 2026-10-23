@@ -58,7 +58,7 @@ fn assert_token_allowed_after_prefix(schema: &str, prefix: &[u8], token: &[u8]) 
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), "expected token {:?} to be allowed after prefix {:?}", token, prefix);
 }
@@ -67,7 +67,7 @@ fn assert_token_rejected_after_prefix(schema: &str, prefix: &[u8], token: &[u8])
     let _compat = EnvVarGuard::set("GLRMASK_LLGUIDANCE_COMPAT", "1");
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
     let mask = state.mask();
     assert!(
         !token_allowed(&mask, 0),

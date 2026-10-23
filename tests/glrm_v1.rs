@@ -35,17 +35,17 @@ fn assert_static_xy_matches(reference: &Constraint, candidate: &Constraint) {
     assert_eq!(candidate_state.mask(), reference_state.mask());
     assert!(allowed(&candidate_state.mask(), 2));
     assert!(!allowed(&candidate_state.mask(), 3));
-    candidate_state.commit_token(2).unwrap();
-    reference_state.commit_token(2).unwrap();
+    assert!(candidate_state.commit_token(2));
+    assert!(reference_state.commit_token(2));
     assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
 
     let mut reference_state = reference.start();
     let mut candidate_state = candidate.start();
-    candidate_state.commit_token(0).unwrap();
-    reference_state.commit_token(0).unwrap();
+    assert!(candidate_state.commit_token(0));
+    assert!(reference_state.commit_token(0));
     assert_eq!(candidate_state.mask(), reference_state.mask());
-    candidate_state.commit_token(1).unwrap();
-    reference_state.commit_token(1).unwrap();
+    assert!(candidate_state.commit_token(1));
+    assert!(reference_state.commit_token(1));
     assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
 }
 
@@ -55,17 +55,17 @@ fn assert_dynamic_xy_matches(reference: &Constraint, candidate: &DynamicConstrai
     assert_eq!(candidate_state.mask(), reference_state.mask());
     assert!(allowed(&candidate_state.mask(), 2));
     assert!(!allowed(&candidate_state.mask(), 3));
-    candidate_state.commit_token(2).unwrap();
-    reference_state.commit_token(2).unwrap();
+    assert!(candidate_state.commit_token(2));
+    assert!(reference_state.commit_token(2));
     assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
 
     let mut reference_state = reference.start();
     let mut candidate_state = candidate.start();
-    candidate_state.commit_token(0).unwrap();
-    reference_state.commit_token(0).unwrap();
+    assert!(candidate_state.commit_token(0));
+    assert!(reference_state.commit_token(0));
     assert_eq!(candidate_state.mask(), reference_state.mask());
-    candidate_state.commit_token(1).unwrap();
-    reference_state.commit_token(1).unwrap();
+    assert!(candidate_state.commit_token(1));
+    assert!(reference_state.commit_token(1));
     assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
 }
 
@@ -75,8 +75,8 @@ fn assert_static_xyz_matches(reference: &Constraint, candidate: &Constraint) {
         let mut candidate_state = candidate.start();
         for &token in tokens {
             assert_eq!(candidate_state.mask(), reference_state.mask());
-            candidate_state.commit_token(token).unwrap();
-            reference_state.commit_token(token).unwrap();
+            assert!(candidate_state.commit_token(token));
+            assert!(reference_state.commit_token(token));
         }
         assert_eq!(candidate_state.is_accepting(), reference_state.is_accepting());
     }
@@ -102,16 +102,16 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 0));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask(), 7));
     assert!(!allowed(&state.mask(), 1));
 
     let mut by_bytes = state.clone();
-    assert!(by_bytes.commit_bytes(b"SPECIAL").is_err());
+    assert!(!by_bytes.commit_bytes(b"SPECIAL"));
 
-    state.commit_token(7).unwrap();
+    assert!(state.commit_token(7));
     assert!(allowed(&state.mask(), 1));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 }
 
@@ -134,8 +134,8 @@ fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
         assert!(allowed(&static_state.mask(), 100));
         assert!(allowed(&static_state.mask(), 101));
         assert_eq!(static_state.mask(), dynamic_state.mask());
-        static_state.commit_token(token).unwrap();
-        dynamic_state.commit_token(token).unwrap();
+        assert!(static_state.commit_token(token));
+        assert!(dynamic_state.commit_token(token));
         assert!(static_state.is_accepting());
         assert!(dynamic_state.is_accepting());
     }
@@ -177,7 +177,7 @@ nt start = CONTROL payload;
         for _ in 0..2 {
             assert!(!state.is_accepting());
             assert!(allowed(&state.mask(), 7));
-            state.commit_token(7).unwrap();
+            assert!(state.commit_token(7));
         }
         assert!(state.is_accepting());
     }
@@ -194,8 +194,8 @@ nt start = CONTROL payload;
     let mut dynamic_state = dynamic_open.start();
     assert_eq!(static_state.mask(), dynamic_state.mask());
     assert!(allowed(&static_state.mask(), 7));
-    static_state.commit_token(7).unwrap();
-    dynamic_state.commit_token(7).unwrap();
+    assert!(static_state.commit_token(7));
+    assert!(dynamic_state.commit_token(7));
     assert!(!static_state.is_accepting());
     assert!(!dynamic_state.is_accepting());
 }
@@ -219,14 +219,14 @@ nt start = "a" SPECIAL | "x" "a" "z";
         .unwrap();
 
     let mut byte_path = constraint.start();
-    byte_path.commit_token(0).unwrap();
-    byte_path.commit_token(7).unwrap();
-    byte_path.commit_token(1).unwrap();
+    assert!(byte_path.commit_token(0));
+    assert!(byte_path.commit_token(7));
+    assert!(byte_path.commit_token(1));
     assert!(byte_path.is_accepting());
 
     let mut mixed_path = constraint.start();
-    mixed_path.commit_token(7).unwrap();
-    mixed_path.commit_token(7).unwrap();
+    assert!(mixed_path.commit_token(7));
+    assert!(mixed_path.commit_token(7));
     assert!(mixed_path.is_accepting());
 }
 
@@ -244,13 +244,13 @@ fn exact_tokens_survive_static_and_dynamic_serialization() {
     let compiled = spec.compile().unwrap();
     let loaded = Constraint::load(&compiled.save(), &vocab).unwrap();
     let mut state = loaded.start();
-    state.commit_token(100).unwrap();
+    assert!(state.commit_token(100));
     assert!(state.is_accepting());
 
     let compiled = spec.compile_dynamic().unwrap();
     let loaded = DynamicConstraint::load(&compiled.save(), &vocab).unwrap();
     let mut state = loaded.start();
-    state.commit_token(100).unwrap();
+    assert!(state.commit_token(100));
     assert!(state.is_accepting());
 }
 
@@ -514,9 +514,9 @@ fn dynamic_boundary_cross_prefilter_preserves_scoped_ignore_paths() {
         for &token in tokens {
             assert_eq!(actual.mask(), expected.mask(), "bound mask before {tokens:?}");
             assert_eq!(restored.mask(), expected.mask(), "loaded mask before {tokens:?}");
-            actual.commit_token(token).unwrap();
-            restored.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(restored.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.is_accepting(), expected.is_accepting(), "bound {tokens:?}");
         assert_eq!(restored.is_accepting(), expected.is_accepting(), "loaded {tokens:?}");
@@ -596,10 +596,10 @@ nt document = MARK payload;
         for token in [55, 56] {
             let mut static_state = static_parent.start();
             let mut dynamic_state = dynamic_parent.start();
-            static_state.commit_token(0).unwrap();
-            dynamic_state.commit_token(0).unwrap();
-            static_state.commit_token(token).unwrap();
-            dynamic_state.commit_token(token).unwrap();
+            assert!(static_state.commit_token(0));
+            assert!(dynamic_state.commit_token(0));
+            assert!(static_state.commit_token(token));
+            assert!(dynamic_state.commit_token(token));
             assert!(static_state.is_accepting());
             assert!(dynamic_state.is_accepting());
         }
@@ -628,8 +628,8 @@ fn loaded_direct_regular_dynamic_child_remains_composable() {
     for token in [0, 1] {
         let mut static_state = static_parent.start();
         let mut dynamic_state = dynamic_parent.start();
-        static_state.commit_token(token).unwrap();
-        dynamic_state.commit_token(token).unwrap();
+        assert!(static_state.commit_token(token));
+        assert!(dynamic_state.commit_token(token));
         assert!(static_state.is_accepting());
         assert!(dynamic_state.is_accepting());
     }
@@ -653,8 +653,8 @@ fn grammar_can_bind_source_subgrammar_before_target_selection() {
     for token in [0, 1] {
         let mut static_state = static_constraint.start();
         let mut dynamic_state = dynamic_constraint.start();
-        static_state.commit_token(token).unwrap();
-        dynamic_state.commit_token(token).unwrap();
+        assert!(static_state.commit_token(token));
+        assert!(dynamic_state.commit_token(token));
         assert!(static_state.is_accepting());
         assert!(dynamic_state.is_accepting());
     }
@@ -685,8 +685,8 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
     let constraint = parent.bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     let mut state = constraint.start();
-    state.commit_token(7).unwrap();
-    state.commit_token(8).unwrap();
+    assert!(state.commit_token(7));
+    assert!(state.commit_token(8));
     assert!(state.is_accepting());
 }
 
@@ -728,7 +728,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .compile()
         .unwrap();
     let mut state = source_bound.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(state.is_accepting());
 
     let child_spec = ConstraintSpec::builder(source_child, &vocab)
@@ -764,7 +764,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .link()
         .unwrap();
     let mut state = fully_bound.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(state.is_accepting());
 
     let dynamic_fully_bound = open
@@ -773,7 +773,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
         .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie))
         .unwrap();
     let mut state = dynamic_fully_bound.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(state.is_accepting());
 
     let unresolved_token_child = Grammar::glrm(
@@ -826,7 +826,7 @@ nt start = WORD;
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 0));
     assert!(allowed(&state.mask(), 1));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(state.is_accepting());
 }
 
@@ -886,7 +886,7 @@ nt start = WORD;
     let mut left = plain.start();
     let mut right = hinted.start();
     assert_eq!(left.mask(), right.mask());
-    left.commit_token(1).unwrap();
-    right.commit_token(1).unwrap();
+    assert!(left.commit_token(1));
+    assert!(right.commit_token(1));
     assert_eq!(left.mask(), right.mask());
 }

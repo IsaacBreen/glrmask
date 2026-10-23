@@ -190,7 +190,7 @@ fn staged_parser_preparation_preserves_runtime_finalization_order_and_view_ident
         for bytes in [b"".as_slice(), b"a", b"(a)", b"((a))", b"b", b" "] {
             let mut a = candidate.start();
             let mut b = constraint.start();
-            assert_eq!(a.commit_bytes(bytes).is_ok(), b.commit_bytes(bytes).is_ok());
+            assert_eq!(a.commit_bytes(bytes), b.commit_bytes(bytes));
             assert_eq!(a.is_accepting(), b.is_accepting());
             let mut left = vec![0; candidate.mask_len()];
             let mut right = vec![0; constraint.mask_len()];
@@ -457,21 +457,21 @@ fn native_rewrite_preserves_nullable_recursive_masks_commits_and_persistence() {
             for depth in [0usize, 1, 2, 8, 64] {
                 let prefix = vec![b'a'; depth];
                 let mut state = constraint.start();
-                state.commit_bytes(&prefix).unwrap();
-                assert_eq!(state.is_accepting(), depth == 0);
+                assert!(state.commit_bytes(&prefix));
+                assert_eq!(state.mask().get(2).is_some_and(|word| word & 1 != 0), depth == 0);
                 let mut mask = vec![0; constraint.mask_len()];
                 state.fill_mask(&mut mask);
                 assert_eq!(mask[0] & 1 != 0, true);
                 assert_eq!(mask[0] & 2 != 0, depth != 0);
                 assert_eq!(mask[2] & 1 != 0, depth == 0);
-                state.commit_bytes(&vec![b'b'; depth]).unwrap();
-                assert!(state.is_accepting());
-                state.commit_token(64).unwrap();
+                assert!(state.commit_bytes(&vec![b'b'; depth]));
+                assert!(state.mask().get(2).is_some_and(|word| word & 1 != 0));
+                assert!(state.commit_token(64));
                 state.fill_mask(&mut mask);
                 assert!(mask.iter().all(|word| *word == 0));
             }
             let mut rejected = constraint.start();
-            assert!(rejected.commit_bytes(b"b").is_err());
+            assert!(!rejected.commit_bytes(b"b"));
             assert!((rejected.mask().iter().all(|word| *word == 0)));
         }
     }

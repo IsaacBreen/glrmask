@@ -861,7 +861,7 @@ fn build_decomposed(grammar: &GrammarDef, vocab: &Vocab) -> DecomposedBuild {
 
 fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
     let mut state = constraint.start();
-    state.commit_bytes(bytes).is_ok() && state.is_accepting()
+    state.commit_bytes(bytes) && state.is_accepting()
 }
 
 fn token_allowed(mask: &[u32], token: u32) -> bool {
@@ -915,12 +915,10 @@ fn verify_sampled_reachable_masks(
             let mut monolithic_state = monolithic.start();
             let mut decomposed_state = decomposed.start();
             for &token in path {
-                monolithic_state
-                    .commit_token(token)
-                    .unwrap_or_else(|error| panic!("monolithic rejected sampled path {path:?}: {error}"));
-                decomposed_state
-                    .commit_token(token)
-                    .unwrap_or_else(|error| panic!("decomposed rejected sampled path {path:?}: {error}"));
+                assert!(monolithic_state
+                    .commit_token(token));
+                assert!(decomposed_state
+                    .commit_token(token));
             }
             let monolithic_mask = monolithic_state.mask();
             let decomposed_mask = decomposed_state.mask();
@@ -948,12 +946,12 @@ fn verify_sampled_reachable_masks(
                 let monolithic_result = next_monolithic.commit_token(token);
                 let decomposed_result = next_decomposed.commit_token(token);
                 assert_eq!(
-                    decomposed_result.is_ok(),
-                    monolithic_result.is_ok(),
+                    decomposed_result,
+                    monolithic_result,
                     "commit result mismatch for token {token} after sampled path {path:?}",
                 );
                 checked_commits += 1;
-                if monolithic_result.is_ok() {
+                if monolithic_result {
                     let mut extended = path.clone();
                     extended.push(token);
                     next.insert(extended);

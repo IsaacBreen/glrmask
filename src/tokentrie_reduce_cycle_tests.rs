@@ -251,7 +251,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
         for prefix in &words {
             if !expected_viable[prefix] {
                 assert!(
-                    constraint.start().commit_bytes(prefix).is_err(),
+                    !constraint.start().commit_bytes(prefix),
                     "{mode:?} accepted non-viable prefix {prefix:?}"
                 );
                 continue;
@@ -261,9 +261,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
             // its mask depend only on the committed bytes, not on how the test
             // enumerated them.
             let mut byte_state = constraint.start();
-            byte_state.commit_bytes(prefix).unwrap_or_else(|error| {
-                panic!("{mode:?} rejected viable byte prefix {prefix:?}: {error:?}")
-            });
+            assert!(byte_state.commit_bytes(prefix));
             let byte_mask = byte_state.mask().to_vec();
             let expected = &expected_masks[prefix];
             for token in 0..TOKEN_BYTES.len() {
@@ -283,9 +281,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
             // (greedy longest match) and require the identical mask/language.
             let mut token_state = constraint.start();
             for token in tokenize(prefix) {
-                token_state.commit_token(token).unwrap_or_else(|error| {
-                    panic!("{mode:?} rejected viable token {token} in {prefix:?}: {error:?}")
-                });
+                assert!(token_state.commit_token(token));
             }
             assert_eq!(
                 token_state.mask(),

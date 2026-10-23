@@ -36,7 +36,7 @@ fn check(c: &Constraint, vocab: &[(u32, Vec<u8>)], words: &[Vec<u8>]) {
     assert_eq!(c.parser_backend(), ParserBackend::TemplateDfa);
     assert!(!c.table.is_present());
     for prefix in prefixes {
-        let mut state = c.start(); state.commit_bytes(&prefix).unwrap();
+        let mut state = c.start(); assert!(state.commit_bytes(&prefix));
         assert_eq!(state.is_accepting(), words.contains(&prefix));
         let mask = state.mask();
         for (id, bytes) in vocab {
@@ -45,7 +45,7 @@ fn check(c: &Constraint, vocab: &[(u32, Vec<u8>)], words: &[Vec<u8>]) {
             let actual = mask[*id as usize / 32] & (1 << (*id % 32)) != 0;
             assert_eq!(actual, expected, "prefix={prefix:?} token={bytes:?}");
             if actual {
-                let mut branch = state.clone(); branch.commit_token(*id).unwrap();
+                let mut branch = state.clone(); assert!(branch.commit_token(*id));
                 assert_eq!(branch.is_accepting(), words.contains(&extended));
             }
         }

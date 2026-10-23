@@ -35,11 +35,11 @@ fn schema(words: usize) -> String {
 
 fn assert_last_word_masks(constraint: &Constraint, words: usize) {
     let mut state = constraint.start();
-    state.commit_token(0).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(0));
+    assert!(state.commit_token(1));
     for _ in 1..words {
         assert!(allowed(&state.mask(), 2), "the next word still fits");
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
     }
     let mask = state.mask();
     for id in [2, 4, 5] {
@@ -50,13 +50,13 @@ fn assert_last_word_masks(constraint: &Constraint, words: usize) {
     for id in [1, 3, 6, 7] {
         assert!(allowed(&mask, id), "legal final-word continuation missing: {id}");
         let mut next = state.clone();
-        next.commit_token(id).unwrap();
+        assert!(next.commit_token(id));
         assert!(allowed(&next.mask(), 0));
-        next.commit_token(0).unwrap();
+        assert!(next.commit_token(0));
         assert!(next.is_accepting());
     }
     assert!(allowed(&mask, 0));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(state.is_accepting());
 }
 
@@ -92,14 +92,14 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
         let mut state = bound.start();
         for id in [8, 10] {
             assert!(allowed(&state.mask(), id));
-            state.commit_token(id).unwrap();
+            assert!(state.commit_token(id));
         }
         for id in [2, 4, 5] {
             assert!(!allowed(&state.mask(), id), "bound child offered separator {id}");
         }
         for id in [0, 9] {
             assert!(allowed(&state.mask(), id));
-            state.commit_token(id).unwrap();
+            assert!(state.commit_token(id));
         }
         assert!(state.is_accepting());
 
@@ -110,14 +110,14 @@ fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
         let mut state = nested.start();
         for id in [8, 8, 10] {
             assert!(allowed(&state.mask(), id));
-            state.commit_token(id).unwrap();
+            assert!(state.commit_token(id));
         }
         for id in [2, 4, 5] {
             assert!(!allowed(&state.mask(), id), "nested child offered separator {id}");
         }
         for id in [0, 9, 9] {
             assert!(allowed(&state.mask(), id));
-            state.commit_token(id).unwrap();
+            assert!(state.commit_token(id));
         }
         assert!(state.is_accepting());
     }

@@ -89,7 +89,7 @@ nt start ::= 'if' '(' 'true' ')' ;
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
 
     let mask = state.mask();
     assert!(
@@ -97,7 +97,7 @@ nt start ::= 'if' '(' 'true' ')' ;
         "token b\" (\" should be admitted after b\"if\" because it is WS followed by '('"
     );
 
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
 }
 
 #[test]
@@ -122,19 +122,19 @@ nt start ::= 'a' ;
         token_allowed(&separate_token_state.mask(), 0),
         "an initial ignore token must be admitted by the parser DWA"
     );
-    separate_token_state.commit_token(0).unwrap();
+    assert!(separate_token_state.commit_token(0));
     assert!(
         token_allowed(&separate_token_state.mask(), 1),
         "committing the initial ignore token must leave the parser ready for 'a'"
     );
-    separate_token_state.commit_token(1).unwrap();
+    assert!(separate_token_state.commit_token(1));
 
     let mut combined_token_state = constraint.start();
     assert!(
         token_allowed(&combined_token_state.mask(), 2),
         "a token beginning with ignore then 'a' must survive post-TI ignore epsilon conversion"
     );
-    combined_token_state.commit_token(2).unwrap();
+    assert!(combined_token_state.commit_token(2));
 }
 
 #[test]
@@ -165,11 +165,11 @@ nt start ::= item item? item?;
         "four items must not be admitted by a grammar capped at three"
     );
 
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
     let after_two = state.mask();
     assert!(token_allowed(&after_two, 0));
     assert!(token_allowed(&after_two, 1));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
 }
 
 fn byte_vocab_with_separator_token() -> (Vocab, u32) {
@@ -201,7 +201,7 @@ t json_char ::= /(?:[\x20-\x21\x23-\x5B\x5D-\x7E]|[\xC2-\xDF][\x80-\xBF]|\xE0[\x
 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(grammar), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"a").unwrap();
+    assert!(state.commit_bytes(b"\"a"));
 
     // Control: this handcrafted GLRM still admits the token.
     assert!(token_allowed(&state.mask(), token_id as usize));
@@ -325,10 +325,10 @@ fn optional_choice_allows_viable_prefix_before_required_suffix() {
     assert!(token_allowed(&mask, token_b as usize));
     assert!(token_allowed(&mask, token_ab as usize));
 
-    state.commit_token(token_a).unwrap();
+    assert!(state.commit_token(token_a));
     let mask = state.mask();
     assert!(token_allowed(&mask, token_b as usize));
-    state.commit_token(token_b).unwrap();
+    assert!(state.commit_token(token_b));
 }
 
 #[test]
@@ -356,10 +356,10 @@ fn chunk16_bounded_service_name_allows_spaces_token_after_open_quote() {
     assert_eq!(parser["backend"], "acyclic-template-dfa");
     assert_eq!(parser["lr_table_present"], false, "native runtime retained LR storage: {parser}");
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
 
     assert!(token_allowed(&state.mask(), 0));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
 }
 
 #[test]
@@ -402,7 +402,7 @@ fn minimized_sp343_separator_wave_matches_profile_oracle() {
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
 
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
 
     assert_eq!(
         unique_parser_stack_count(&state),
@@ -469,7 +469,7 @@ fn sp343_delete_only_subset_separator_wave_matches_cfa_oracle() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
 
     assert!(token_allowed(&state.mask(), separator_token_id as usize));
     assert_eq!(
@@ -539,12 +539,12 @@ fn kb304_nullable_enum_bare_quote_requires_canonical_separator_space() {
     let canonical_prefix = br#"{"apiVersion": "#;
 
     let mut no_space_quote_state = constraint.start();
-    no_space_quote_state.commit_bytes(invalid_prefix).unwrap();
-    let no_space_quote_accepts = no_space_quote_state.commit_bytes(token_bytes).is_ok();
+    assert!(no_space_quote_state.commit_bytes(invalid_prefix));
+    let no_space_quote_accepts = no_space_quote_state.commit_bytes(token_bytes);
 
     let mut no_space_full_state = constraint.start();
-    no_space_full_state.commit_bytes(invalid_prefix).unwrap();
-    let no_space_full_accepts = no_space_full_state.commit_bytes(br#""v1""#).is_ok();
+    assert!(no_space_full_state.commit_bytes(invalid_prefix));
+    let no_space_full_accepts = no_space_full_state.commit_bytes(br#""v1""#);
 
     assert!(
         !no_space_quote_accepts,
@@ -556,24 +556,24 @@ fn kb304_nullable_enum_bare_quote_requires_canonical_separator_space() {
     );
 
     let mut mask_state = constraint.start();
-    mask_state.commit_bytes(canonical_prefix).unwrap();
+    assert!(mask_state.commit_bytes(canonical_prefix));
     let mask_contains = token_allowed(&mask_state.mask(), token_id as usize);
 
     let mut bytes_state = constraint.start();
-    bytes_state.commit_bytes(canonical_prefix).unwrap();
-    let commit_bytes_accepts = bytes_state.commit_bytes(token_bytes).is_ok();
+    assert!(bytes_state.commit_bytes(canonical_prefix));
+    let commit_bytes_accepts = bytes_state.commit_bytes(token_bytes);
 
     let mut token_state = constraint.start();
-    token_state.commit_bytes(canonical_prefix).unwrap();
-    let commit_token_accepts = token_state.commit_token(token_id).is_ok();
+    assert!(token_state.commit_bytes(canonical_prefix));
+    let commit_token_accepts = token_state.commit_token(token_id);
 
     let mut full_value_state = constraint.start();
-    full_value_state.commit_bytes(canonical_prefix).unwrap();
-    let commit_full_accepts = full_value_state.commit_bytes(br#""v1""#).is_ok();
+    assert!(full_value_state.commit_bytes(canonical_prefix));
+    let commit_full_accepts = full_value_state.commit_bytes(br#""v1""#);
 
     let mut null_state = constraint.start();
-    null_state.commit_bytes(canonical_prefix).unwrap();
-    let commit_null_accepts = null_state.commit_bytes(b"null").is_ok();
+    assert!(null_state.commit_bytes(canonical_prefix));
+    let commit_null_accepts = null_state.commit_bytes(b"null");
 
     eprintln!(
         "kb304 canonical separator truth table: \
@@ -638,5 +638,5 @@ nt S ::= X X "!";
     assert!(!token_allowed(&mask, INVALID as usize));
 
     let mut byte_state = constraint.start();
-    assert!(byte_state.commit_bytes(b"aaa").is_err());
+    assert!(!byte_state.commit_bytes(b"aaa"));
 }

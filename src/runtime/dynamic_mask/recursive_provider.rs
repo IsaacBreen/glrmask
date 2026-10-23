@@ -657,7 +657,7 @@ mod epsilon_reset_boundary_tests {
             for constraint in [&bound, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix).unwrap();
+                    assert!(state.commit_bytes(prefix));
                     let (reference, _) = mask_with_budget(&state, 0);
                     for budget in [1, 4] {
                         let (actual, proved) = mask_with_budget(&state, budget);
@@ -741,7 +741,7 @@ mod closed_admission_support_tests {
             for constraint in [&bound, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix).unwrap();
+                    assert!(state.commit_bytes(prefix));
                     let (reference, _) = mask_with_policy(&state, false);
                     let (actual, queries) = mask_with_policy(&state, true);
                     total_queries += queries;

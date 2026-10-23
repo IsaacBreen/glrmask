@@ -19,11 +19,11 @@ def test_basic_masking_lifecycle():
     s = c.start()
 
     assert s.mask().tolist() == [True, False, False]
-    s.commit_token(0)
+    assert s.commit_token(0)
     assert s.mask().tolist() == [False, True, False]
-    s.commit_token(1)
+    assert s.commit_token(1)
     assert s.mask().tolist() == [False, False, True]
-    s.commit_token(2)
+    assert s.commit_token(2)
     assert s.is_accepting()
 
 

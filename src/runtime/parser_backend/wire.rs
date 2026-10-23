@@ -223,7 +223,7 @@ mod tests {
         decode(&wire).unwrap().install(&mut section_owned).unwrap();
         assert_eq!(section_owned.start().mask(), original.start().mask());
         let mut state = section_owned.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert!(state.is_accepting());
     }
 }

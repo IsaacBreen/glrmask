@@ -69,8 +69,8 @@ fn check_prefixes(reference: &Constraint, candidate: &Constraint) {
                 break;
             };
             assert_eq!(
-                a.commit_bytes(&[byte]).is_ok(),
-                b.commit_bytes(&[byte]).is_ok()
+                a.commit_bytes(&[byte]),
+                b.commit_bytes(&[byte])
             );
             if a.mask().iter().all(|word| *word == 0) {
                 break;
@@ -186,8 +186,8 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
         assert_eq!(loaded.parser_backend(), backend);
         let mut left = fresh.start();
         let mut right = loaded.start();
-        left.commit_bytes(literal.as_bytes()).unwrap();
-        right.commit_bytes(literal.as_bytes()).unwrap();
+        assert!(left.commit_bytes(literal.as_bytes()));
+        assert!(right.commit_bytes(literal.as_bytes()));
         assert_eq!(left.is_accepting(), right.is_accepting());
         assert!(left.is_accepting());
         let mut a = vec![0; fresh.mask_len()];

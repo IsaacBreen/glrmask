@@ -19,9 +19,11 @@ def _prepare_glrm(source, vocab, *, subgrammars=None):
 
 def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, mask_strategy=None):
     kwargs = {}
-    if end_tokens is not None:
-        kwargs["end_tokens"] = end_tokens
     m = _prepare_glrm(source, vocab, subgrammars=subgrammars)
+    if end_tokens is not None:
+        m = glrmask.Grammar.from_expr(
+            glrmask.Expr.sequence(m, glrmask.TokenSet(end_tokens))
+        )
     if mask_strategy is not None:
         kwargs["mask_strategy"] = mask_strategy
     return m.compile(vocab, **kwargs)
@@ -65,8 +67,8 @@ def test_from_glrm_grammar_binds_typed_external_subgrammar() -> None:
     actual = composed.start()
     expected = inline.start()
     assert actual.mask().tolist() == expected.mask().tolist()
-    actual.commit_token(2)
-    expected.commit_token(2)
+    assert actual.commit_token(2)
+    assert expected.commit_token(2)
     assert actual.is_accepting()
     assert expected.is_accepting()
 
@@ -109,12 +111,12 @@ def test_external_subgrammar_matches_monolithic_across_token_boundary() -> None:
     expected = monolithic.start()
     actual = composed.start()
     assert actual.mask().tolist() == expected.mask().tolist()
-    actual.commit_token(0)
-    expected.commit_token(0)
+    assert actual.commit_token(0)
+    assert expected.commit_token(0)
     assert actual.mask().tolist() == expected.mask().tolist()
     assert actual.mask().tolist()[1]
-    actual.commit_token(1)
-    expected.commit_token(1)
+    assert actual.commit_token(1)
+    assert expected.commit_token(1)
     assert actual.is_accepting()
     assert expected.is_accepting()
 
@@ -157,8 +159,8 @@ def test_external_subgrammar_matches_monolithic_for_nullable_child() -> None:
         actual = composed.start()
         for token in sequence:
             assert actual.mask().tolist() == expected.mask().tolist()
-            actual.commit_token(token)
-            expected.commit_token(token)
+            assert actual.commit_token(token)
+            assert expected.commit_token(token)
         assert actual.is_accepting()
         assert expected.is_accepting()
 
@@ -211,8 +213,8 @@ def test_nested_nullable_external_subgrammar_survives_save_load() -> None:
         actual = composed.start()
         for token in sequence:
             assert actual.mask().tolist() == expected.mask().tolist()
-            actual.commit_token(token)
-            expected.commit_token(token)
+            assert actual.commit_token(token)
+            assert expected.commit_token(token)
         assert actual.is_accepting()
         assert expected.is_accepting()
 
@@ -266,8 +268,8 @@ def test_external_subgrammar_handles_ignore_inside_fused_boundary_token() -> Non
         actual = composed.start()
         for token in sequence:
             assert actual.mask().tolist() == expected.mask().tolist()
-            actual.commit_token(token)
-            expected.commit_token(token)
+            assert actual.commit_token(token)
+            assert expected.commit_token(token)
         assert actual.is_accepting()
         assert expected.is_accepting()
 
@@ -318,8 +320,8 @@ def test_same_compiled_child_can_fill_two_external_subgrammars() -> None:
         actual = composed.start()
         for token in sequence:
             assert actual.mask().tolist() == expected.mask().tolist()
-            actual.commit_token(token)
-            expected.commit_token(token)
+            assert actual.commit_token(token)
+            assert expected.commit_token(token)
         assert actual.is_accepting()
         assert expected.is_accepting()
 
@@ -351,7 +353,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
     for sequence in ([0], [1, 2, 3]):
         state = composed.start()
         for token in sequence:
-            state.commit_token(token)
+            assert state.commit_token(token)
         assert state.is_accepting()
         mask = state.mask(end_token + 1)
         assert not mask[end_token]
@@ -361,7 +363,7 @@ def test_external_subgrammar_acceptance_supports_caller_end_policy() -> None:
 
     loaded = glrmask.Constraint.load(composed.save(), vocab)
     loaded_state = loaded.start()
-    loaded_state.commit_token(0)
+    assert loaded_state.commit_token(0)
     assert loaded_state.is_accepting()
 
 def test_manual_subgrammar_composition_api_is_not_exposed() -> None:
@@ -398,21 +400,21 @@ def test_compiled_parent_can_be_cached_and_rebound() -> None:
     with_b = _bound_snapshot(parent, "payload", child_b).compile(vocab)
 
     state = with_a.start()
-    state.commit_token(0)
-    state.commit_token(2)
-    state.commit_token(1)
+    assert state.commit_token(0)
+    assert state.commit_token(2)
+    assert state.commit_token(1)
     assert state.is_accepting()
 
     state = with_b.start()
-    state.commit_token(0)
-    state.commit_token(3)
-    state.commit_token(1)
+    assert state.commit_token(0)
+    assert state.commit_token(3)
+    assert state.commit_token(1)
     assert state.is_accepting()
 
     loaded_parent = glrmask.Module.load(parent.save())
     loaded_with_a = _bound_snapshot(loaded_parent, "payload", child_a).compile(vocab)
     state = loaded_with_a.start()
-    state.commit_token(0)
-    state.commit_token(2)
-    state.commit_token(1)
+    assert state.commit_token(0)
+    assert state.commit_token(2)
+    assert state.commit_token(1)
     assert state.is_accepting()

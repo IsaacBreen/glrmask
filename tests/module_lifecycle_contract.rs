@@ -41,7 +41,7 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
     assert_ne!(first.compile(&v).unwrap().start().mask(), second.compile(&v).unwrap().start().mask());
     let root = first.compile(&v).unwrap();
     let mut state = root.start();
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(2));
     assert!(state.is_accepting());
 }
 
@@ -61,7 +61,7 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
             .unwrap();
         let mut state = root.start();
         assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert!(state.is_accepting());
     }
 }
@@ -87,19 +87,22 @@ fn compile_options_never_invalidate_retained_work() {
 
     let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;"));
     parent.bind("VALUE", &leaf).unwrap();
-    let root = parent
-        .compile_with(
-            &v,
-            CompileOptions::default()
-                .end_tokens([5])
-                .mask_strategy(MaskStrategy::ParserDwa)
-                .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
-        )
-        .unwrap();
+    let root = Grammar::from_expr(Expr::sequence([
+        Expr::from(parent),
+        Expr::from(TokenSet::new([5])),
+    ]))
+    .unwrap()
+    .compile_with(
+        &v,
+        CompileOptions::default()
+            .mask_strategy(MaskStrategy::ParserDwa)
+            .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+    )
+    .unwrap();
     let mut state = root.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     // Grammar complete, but acceptance needs the configured end token.
     assert!(!state.is_accepting());
-    state.commit_token(5).unwrap();
+    assert!(state.commit_token(5));
     assert!(state.is_accepting());
 }

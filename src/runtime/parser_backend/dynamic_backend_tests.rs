@@ -61,8 +61,8 @@ fn assert_pair_trace(
     assert_eq!(left_mask, right_mask, "initial mask parity");
     for &token in trace {
         assert!(allowed(&left_mask, token), "positive token {token} must be admitted");
-        a.commit_token(token).unwrap_or_else(|err| panic!("left rejected {token}: {err:?}"));
-        b.commit_token(token).unwrap_or_else(|err| panic!("right rejected {token}: {err:?}"));
+        assert!(a.commit_token(token));
+        assert!(b.commit_token(token));
         left_mask.fill(0);
         right_mask.fill(0);
         a.fill_mask(&mut left_mask);
@@ -74,8 +74,8 @@ fn assert_pair_trace(
     assert_eq!(allowed(&left_mask, END_TOKEN), final_accepting,
         "end token must be admitted only at grammar completion");
     if final_accepting {
-        a.commit_token(END_TOKEN).expect("left end token commit");
-        b.commit_token(END_TOKEN).expect("right end token commit");
+        assert!(a.commit_token(END_TOKEN), "left end token commit");
+        assert!(b.commit_token(END_TOKEN), "right end token commit");
         assert!(a.is_accepting(), "left end token must accept");
         assert!(b.is_accepting(), "right end token must accept");
     }
@@ -109,10 +109,8 @@ fn assert_positive_trace(source: &str, trace: &[u32], final_accepting: bool) {
             allowed(&left_mask, token),
             "explicit LR mask must allow positive trace token {token} for {source:?}",
         );
-        left.commit_token(token)
-            .unwrap_or_else(|err| panic!("explicit LR must accept token {token} for {source:?}: {err:?}"));
-        right.commit_token(token)
-            .unwrap_or_else(|err| panic!("native must accept token {token} for {source:?}: {err:?}"));
+        assert!(left.commit_token(token));
+        assert!(right.commit_token(token));
     }
     left_mask.fill(0);
     right_mask.fill(0);
@@ -132,8 +130,8 @@ fn assert_positive_trace(source: &str, trace: &[u32], final_accepting: bool) {
         "native end-token admission mismatch for {source:?}",
     );
     if final_accepting {
-        left.commit_token(END_TOKEN).expect("explicit LR end token commit");
-        right.commit_token(END_TOKEN).expect("native end token commit");
+        assert!(left.commit_token(END_TOKEN), "explicit LR end token commit");
+        assert!(right.commit_token(END_TOKEN), "native end token commit");
         assert!(left.is_accepting(), "explicit LR must accept its end token for {source:?}");
         assert!(right.is_accepting(), "native must accept its end token for {source:?}");
     }
@@ -155,8 +153,8 @@ fn assert_parity_trace(source: &str, trace: &[u32]) {
         left.fill_mask(&mut left_mask);
         right.fill_mask(&mut right_mask);
         assert_eq!(left_mask, right_mask, "mask parity before {token}");
-        let left_ok = left.commit_token(token).is_ok();
-        let right_ok = right.commit_token(token).is_ok();
+        let left_ok = left.commit_token(token);
+        let right_ok = right.commit_token(token);
         assert_eq!(left_ok, right_ok, "commit parity for token {token}");
         assert_eq!(left.is_accepting(), right.is_accepting(), "acceptance parity for {token}");
     }
@@ -173,16 +171,16 @@ fn acyclic_positive_trace_and_end_token() {
     let mut state = lr.start();
     assert!(!state.is_accepting());
     assert!(!allowed(&state.mask(), END_TOKEN), "end token must not be allowed before completion");
-    state.commit_token(0).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(0));
+    assert!(state.commit_token(1));
     // The grammar is complete, but acceptance needs the end token.
     assert!(!state.is_accepting());
     assert!(allowed(&state.mask(), END_TOKEN), "end token must be allowed at completion");
-    state.commit_token(END_TOKEN).expect("end token commit at completion");
+    assert!(state.commit_token(END_TOKEN), "end token commit at completion");
     assert!(state.is_accepting());
     // Root termination policy: the mask becomes empty and further commits fail.
     assert_eq!(state.mask(), vec![0u32; lr.mask_len()]);
-    assert!(state.commit_token(0).is_err(), "commit after termination must fail");
+    assert!(!state.commit_token(0), "commit after termination must fail");
 
     // Committing an end token before grammar completion never reaches acceptance.
     let mut early = lr.start();
@@ -233,8 +231,8 @@ fn known_invalid_commit_drives_fail_state_like_native() {
     let mut left = lr.start();
     let mut right = native.start();
     // Token 1 ("b") is known but not a valid first token.
-    let left_result = left.commit_token(1).is_ok();
-    let right_result = right.commit_token(1).is_ok();
+    let left_result = left.commit_token(1);
+    let right_result = right.commit_token(1);
     assert_eq!(left_result, right_result, "commit result must match native");
     assert_eq!(
         left.mask(),
@@ -263,7 +261,7 @@ fn unknown_token_id_is_rejected_and_kills_the_state() {
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
         assert!(
-            state.commit_token(UNKNOWN).is_err(),
+            !state.commit_token(UNKNOWN),
             "unknown token ID must be rejected",
         );
         assert!(state.mask().iter().all(|word| *word == 0), "a failed commit kills the state");
@@ -271,8 +269,8 @@ fn unknown_token_id_is_rejected_and_kills_the_state() {
     }
     let mut left = lr.start();
     let mut right = native.start();
-    assert_eq!(left.commit_token(UNKNOWN).is_err(), right.commit_token(UNKNOWN).is_err());
-    assert_eq!(left.commit_token(0).is_err(), right.commit_token(0).is_err());
+    assert_eq!(!left.commit_token(UNKNOWN), !right.commit_token(UNKNOWN));
+    assert_eq!(!left.commit_token(0), !right.commit_token(0));
     assert_eq!(left.mask(), right.mask());
 }
 
@@ -405,7 +403,7 @@ fn nullable_ignore_and_loaded_prefixes_preserve_completion() {
     }
     for trace in [&[][..], &[1][..], &[2][..], &[1, 2, 1][..], &[2, 1, 3, 1][..]] {
         let mut a = lr.start(); let mut b = native.start();
-        for &id in trace { a.commit_token(id).unwrap(); b.commit_token(id).unwrap(); }
+        for &id in trace { assert!(a.commit_token(id)); assert!(b.commit_token(id)); }
         assert_eq!(a.mask(), b.mask(), "ignore trace {trace:?}");
         assert_eq!(a.is_accepting(), b.is_accepting(), "ignore trace {trace:?}");
     }
@@ -423,10 +421,10 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
         let mut state = constraint.start();
         assert!(allowed(&state.mask(), 9));
         assert!(!allowed(&state.mask(), 11));
-        state.commit_token(9).unwrap();
+        assert!(state.commit_token(9));
         assert!(state.is_accepting());
         let mut rejected = constraint.start();
-        assert!(rejected.commit_token(11).is_err());
+        assert!(!rejected.commit_token(11));
         assert!((rejected.mask().iter().all(|word| *word == 0)));
     }
 }
@@ -449,12 +447,12 @@ fn focused_dynamic_empty_token_and_external_identity_regression() {
         for compiled in [&dynamic, &self_loaded, &external_loaded] {
             for prefix in [b"".as_slice(), b"(", b"()", b"()("] {
                 let mut state = compiled.start();
-                state.commit_bytes(prefix).unwrap();
+                assert!(state.commit_bytes(prefix));
                 for _ in 0..2 { // Repeat the query to exercise the mask cache.
                     assert!(!allowed(&state.mask(), 25), "{backend:?} {prefix:?}");
                     assert!(!allowed(&state.mask(), 26));
                 }
-                assert!(state.commit_token(25).is_err());
+                assert!(!state.commit_token(25));
                 assert!((state.mask().iter().all(|word| *word == 0)));
             }
         }
@@ -501,18 +499,18 @@ fn focused_public_empty_token_policy_preserves_empty_eos_across_reload() {
             &Constraint::load(compiled.save(), &vocab).unwrap(),
             &Constraint::load(compiled.save(), &vocab).unwrap()] {
             for (prefix, accepting) in [(b"".as_slice(),true),(b"(",false),(b"()",true)] {
-                let mut state = constraint.start();state.commit_bytes(prefix).unwrap();
+                let mut state = constraint.start();assert!(state.commit_bytes(prefix));
                 for _ in 0..2 {
                     assert!(!allowed(&state.mask(),25));
                     assert_eq!(allowed(&state.mask(),26),accepting);
                 }
                 if accepting {
-                    state.commit_token(26).unwrap();assert!(state.terminated);
+                    assert!(state.commit_token(26));assert!(state.terminated);
                     assert!(state.mask().iter().all(|&word| word==0));
                 } else {
-                    // Established root EOS API returns Ok while rejecting an
-                    // early end token; the mask and resulting state are exact.
-                    state.commit_token(26).unwrap();
+                    // An early end token is a failed commit; the mask and
+                    // resulting state are exact.
+                    assert!(!state.commit_token(26));
                     assert!((state.mask().iter().all(|word| *word == 0)));assert!(!state.terminated);
                 }
             }
@@ -535,8 +533,8 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
         for constraint in [&compiled,&Constraint::load(compiled.save(), &vocab).unwrap(),
             &Constraint::load(compiled.save(),&vocab).unwrap()] {
             let mut state=constraint.start();assert!(!allowed(&state.mask(),25));
-            state.commit_token(0).unwrap();assert!(allowed(&state.mask(),25));
-            assert!(!allowed(&state.mask(),26));state.commit_token(25).unwrap();
+            assert!(state.commit_token(0));assert!(allowed(&state.mask(),25));
+            assert!(!allowed(&state.mask(),26));assert!(state.commit_token(25));
             assert!(state.is_accepting());
         }
     }
@@ -570,7 +568,7 @@ fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
                 assert!(allowed(&mask, 0));
                 for id in [7, 31, 512] { assert!(!allowed(&mask, id)); }
             }
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             assert!(state.is_accepting());
             for id in [7, 31, 512] { assert!(!allowed(&state.mask(), id)); }
         }

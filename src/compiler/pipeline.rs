@@ -7634,7 +7634,7 @@ mod caller_execution_tests {
         pool.install(|| (0..12).into_par_iter().for_each(|_| {
             let c=g.compile_with_build_options(&v,opts.clone()).unwrap();
             assert_eq!(c.start().mask(),expected);
-            let mut s=c.start();s.commit_token(2).unwrap();assert!(s.is_accepting());
+            let mut s=c.start();assert!(s.commit_token(2));assert!(s.is_accepting());
         }));
     }
 }

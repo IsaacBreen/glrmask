@@ -32,7 +32,7 @@ fn integer_multiple_exact_public_masks_and_artifact_roundtrip() {
                         assert_eq!(allowed(&mask, id), valid, "divisor={divisor}, minimum={minimum:?}, value={value}");
                         if valid {
                             let mut state = instance.start();
-                            state.commit_token(id as u32).unwrap();
+                            assert!(state.commit_token(id as u32));
                             assert!(state.is_accepting());
                         }
                     }
@@ -52,11 +52,11 @@ fn integer_multiple_exact_large_divisor_is_bounded_or_explicitly_unsupported() {
         .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     for id in [0, 1] {
         let mut state = bounded.start();
-        state.commit_token(id).unwrap();
+        assert!(state.commit_token(id));
         assert!(state.is_accepting());
     }
     let mut state = bounded.start();
-    if state.commit_token(2).is_ok() {
+    if state.commit_token(2) {
         assert!(!state.is_accepting());
     }
 }

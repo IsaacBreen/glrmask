@@ -40,7 +40,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
         let bound=Constraint::load(fs::read(&file)?,&vocab)?;
         for prefix in prefixes {
             eprintln!("MASK_BEGIN {name} {prefix:?}");
-            let mut template=bound.start();template.commit_bytes(prefix.as_bytes())?;
+            let mut template=bound.start();assert!(template.commit_bytes(prefix.as_bytes()));
             let expected=template.mask();
             let allowed:u32=expected.iter().map(|w|w.count_ones()).sum();
             let hash=expected.iter().fold(0xcbf29ce484222325u64,|h,&w|(h^w as u64).wrapping_mul(0x100000001b3));

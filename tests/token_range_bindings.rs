@@ -9,7 +9,7 @@ fn allowed(mask: &[u32], token: u32) -> bool {
 
 fn assert_mask(constraint: &Constraint, prefix: &[u32], domain: u32, expected: impl Fn(u32) -> bool) {
     let mut state = constraint.start();
-    for &token in prefix { state.commit_token(token).unwrap(); }
+    for &token in prefix { assert!(state.commit_token(token)); }
     let mask = state.mask();
     for token in 0..domain {
         assert_eq!(allowed(&mask, token), expected(token), "prefix={prefix:?}, token={token}");
@@ -36,13 +36,13 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
         assert!(constraint.start().forced_canonical_reference().is_empty(), "a multi-token set is not forced");
         for id in [5, 6, 18, 31, 33, 48, 63] {
             let mut state = constraint.start();
-            state.commit_token(id).unwrap();
+            assert!(state.commit_token(id));
             // The event completes the grammar; acceptance needs the end token.
             assert!(!state.is_accepting(), "{mode:?}, {id}");
             let mask = state.mask();
             assert!(allowed(&mask, 95));
             assert_eq!(mask.iter().map(|w| w.count_ones()).sum::<u32>(), 1);
-            state.commit_token(95).unwrap();
+            assert!(state.commit_token(95));
             assert!(state.is_accepting(), "{mode:?}, {id}");
             assert!(state.mask().iter().all(|word| *word == 0));
         }
@@ -69,8 +69,8 @@ fn overlapping_ranges_query_each_terminal_not_a_representative_token() {
         for first in [10, 20, 25, 30] {
             assert_mask(&constraint, &[first], 100, |id| (20..=40).contains(&id));
             let mut state = constraint.start();
-            state.commit_token(first).unwrap();
-            state.commit_token(40).unwrap();
+            assert!(state.commit_token(first));
+            assert!(state.commit_token(40));
             assert!(state.is_accepting());
         }
     }
@@ -97,7 +97,7 @@ fn repeated_ranges_and_compiled_open_slots_roundtrip() {
             .link_with(options).unwrap();
         assert_mask(&outer, &[0], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
         let mut state = outer.start();
-        for id in [0, 120, 5, 1] { state.commit_token(id).unwrap(); }
+        for id in [0, 120, 5, 1] { assert!(state.commit_token(id)); }
         assert!(state.is_accepting());
         let outer_loaded = Constraint::load(&outer.save(), &vocab).unwrap();
         assert_mask(&outer_loaded, &[0, 120], 128, |id| (5..=15).contains(&id) || (100..=120).contains(&id));
@@ -161,7 +161,7 @@ fn full_128k_and_nearly_full_vocabularies_compile_and_mask_compactly() {
                 assert_eq!(allowed(&mask, id), excluded != Some(id));
                 if excluded != Some(id) {
                     let mut state = constraint.start();
-                    state.commit_token(id).unwrap();
+                    assert!(state.commit_token(id));
                     assert!(state.is_accepting());
                 }
             }
@@ -209,17 +209,17 @@ fn exact_ranges_interact_with_byte_alternatives_without_cross_boundary_aliases()
             assert_mask(&constraint, &[0, exact], 20,
                 |id| id == 1 || id == 7 || (exact >= 10 && id == 2));
             let mut state = constraint.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             let mut independent = state.clone();
             let before = independent.mask();
-            state.commit_token(exact).unwrap();
+            assert!(state.commit_token(exact));
             assert_eq!(independent.mask(), before);
             // Byte aliases outside the set are not accepted as exact IDs.
-            assert!(independent.commit_token(6).is_err());
-            state.commit_token(1).unwrap();
+            assert!(!independent.commit_token(6));
+            assert!(state.commit_token(1));
             assert_eq!(state.is_accepting(), exact <= 12);
             if exact >= 10 {
-                state.commit_token(1).unwrap();
+                assert!(state.commit_token(1));
                 assert!(state.is_accepting());
             }
         }
@@ -241,11 +241,11 @@ fn ranges_preserve_forcing_and_reserved_end_token_policy() {
         assert_mask(&repeated, &[7, 9], 16, |id| id == 8);
         let mut early = repeated.start();
         // An end token before a complete match is a failed commit.
-        assert!(early.commit_token(8).is_err());
+        assert!(!early.commit_token(8));
         assert!(!early.is_accepting());
         assert!(early.mask().iter().all(|&word| word == 0));
         let mut state = repeated.start();
-        for id in [7, 9, 8] { state.commit_token(id).unwrap(); }
+        for id in [7, 9, 8] { assert!(state.commit_token(id)); }
         assert!(state.is_accepting());
         assert!(state.mask().iter().all(|&word| word == 0));
     }
@@ -283,10 +283,12 @@ fn ambiguous_exact_and_byte_choices_do_not_admit_a_third_token() {
             for constraint in [constraint.clone(), Constraint::load(&constraint.save(), &vocab).unwrap()] {
                 assert_mask(&constraint, &[0, 0], 16, |id| id == 15);
                 let mut state = constraint.start();
-                state.commit_token(0).unwrap();
-                state.commit_token(0).unwrap();
-                assert!(state.is_accepting());
-                assert!(state.commit_token(0).is_err(), "{mode:?}");
+                assert!(state.commit_token(0));
+                assert!(state.commit_token(0));
+                assert!(allowed(&state.mask(), 15), "{mode:?}");
+                assert!(state.commit_token(15));
+                assert!(state.mask().iter().all(|word| *word == 0), "{mode:?}");
+                assert!(!state.commit_token(0), "{mode:?}");
             }
         }
     }

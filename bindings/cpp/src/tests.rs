@@ -15,7 +15,6 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             let rust_g = g::Grammar::from_ebnf(source);
             let rust_m = g::Module::new(&rust_g);
             let rust_options = core::compile_options(
-                Vec::new(),
                 core::mask_strategy(strategy).unwrap(),
                 g::BoundaryMaskStrategy::Auto,
             );
@@ -25,8 +24,6 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
             assert_eq!(glrmask_module_new(grammar, &mut module), 0);
             let options = glrmask_compile_options {
                 struct_size: size_of::<glrmask_compile_options>(),
-                end_tokens: ptr::null(),
-                end_tokens_len: 0,
                 mask_strategy: strategy,
                 boundary_mask_strategy: 0,
             };
@@ -42,7 +39,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
                 let mut accepting = 99;
                 assert_eq!(glrmask_state_is_accepting(state, &mut accepting), 0);
                 assert_eq!(accepting != 0, reference.is_accepting());
-                if let Some(token) = token { assert_eq!(glrmask_state_commit_token(state, token), 0); reference.commit_token(token).unwrap(); }
+                if let Some(token) = token { assert_eq!(glrmask_state_commit_token(state, token), 0); assert!(reference.commit_token(token)); }
             }
             glrmask_state_free(state);
         }
@@ -66,7 +63,7 @@ fn invalid_foreign_lengths_and_null_outputs_fail_before_access() {
 fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<*const u8>(), 8);
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
-    assert_eq!(size_of::<glrmask_compile_options>(), 32);
+    assert_eq!(size_of::<glrmask_compile_options>(), 16);
     assert_eq!(size_of::<glrmask_extern>(), 24);
     assert_eq!(size_of::<glrmask_marker_event>(), 16);
     assert_eq!(offset_of!(glrmask_marker_event, byte_offset), 8);
@@ -92,8 +89,6 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         assert_eq!(glrmask_module_new(child, &mut prepared), 0);
         let parse_options = glrmask_compile_options {
             struct_size: size_of::<glrmask_compile_options>(),
-            end_tokens: ptr::null(),
-            end_tokens_len: 0,
             mask_strategy: 1,
             boundary_mask_strategy: 0,
         };

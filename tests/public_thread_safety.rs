@@ -25,7 +25,7 @@ fn scoped_threads_share_module_snapshots_without_mutating_the_source() {
                 local.bind("item", Grammar::from_ebnf(format!("start ::= {text:?}"))).unwrap();
                 let constraint = local.compile(vocab).unwrap();
                 let mut state = constraint.start();
-                state.commit_token(id).unwrap();
+                assert!(state.commit_token(id));
                 assert!(state.is_accepting());
             });
         }

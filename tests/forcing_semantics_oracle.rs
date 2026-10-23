@@ -102,7 +102,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
         for canonical in [true,false] {
             let expected = reference_force(words.clone(), entries, canonical);
             let got = if canonical {
-                let public=state.forced_tokens().expect("canonical forcing query failed");
+                let public=state.forced_tokens();
                 assert_eq!(public,state.forced_canonical_reference(),"public/reference divergence: {label}; trace={trace:?}");
                 public
             } else { state.forced_token_ids_reference() };
@@ -124,7 +124,7 @@ fn check_states(c: &Constraint, language: &Residuals, entries: &[Entry], label: 
             assert_eq!(bit(&original_mask,entry.id), !expected.is_empty(),
                 "{label}; trace={trace:?}, next={}",entry.id);
             if !expected.is_empty() {
-                let mut next=state.clone(); next.commit_token(entry.id).unwrap();
+                let mut next=state.clone(); assert!(next.commit_token(entry.id));
                 let mut history=trace.clone();history.push(entry.id);
                 pending.push_back((next,expected,history));
             }
@@ -245,8 +245,8 @@ fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
                 assert!(!bit(&s.mask(),highest)); assert!(!bit(&s.mask(),highest-1));
                 assert!(s.forced_canonical_reference().is_empty());
                 for id in [0,2,3] {assert!(bit(&s.mask(),id));}
-                s.commit_token(3).unwrap();
-                assert_eq!(s.forced_token_ids_reference(),[1]);s.commit_token(1).unwrap();assert!(s.is_accepting());
+                assert!(s.commit_token(3));
+                assert_eq!(s.forced_token_ids_reference(),[1]);assert!(s.commit_token(1));assert!(s.is_accepting());
             }
         }
     }

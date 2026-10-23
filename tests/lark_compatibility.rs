@@ -1,7 +1,7 @@
 use glrmask::{BuildOptions,CompileOptions,Constraint,Grammar,MaskStrategy,Module,PreparedGrammar,TokenSet,Vocab};
 const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
-fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || s.commit_token(id).is_err(){return false;}}s.is_accepting()}
+fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || !s.commit_token(id){return false;}}s.is_accepting()}
 fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect())}
 fn lark(source:&str)->Grammar{Grammar::from_lark(source)}
 #[test]

@@ -52,7 +52,7 @@ def test_child_and_sibling_snapshots_survive_later_edits():
     assert state.forced_tokens() == [17, 29]
     for token in state.forced_tokens():
         assert state.mask()[token]
-        state.commit_token(token)
+        assert state.commit_token(token)
     assert state.is_accepting()
     assert not hasattr(state, "forced")
     assert not hasattr(state, "forced_token_ids")
@@ -72,13 +72,12 @@ def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
         a = m1.compile(v, mask_strategy=mode)
         b = m2.compile(v, mask_strategy=mode)
         assert np.array_equal(a.start().mask(), b.start().mask())
-        for constraint in [a, b, glrmask.Constraint.load(b.save())]:
+        for constraint in [a, b, glrmask.Constraint.load(b.save(), v)]:
             assert constraint.start().mask()[17]
             state = constraint.start()
-            with pytest.raises(ValueError):
-                state.commit_bytes(b"a")
+            assert not state.commit_bytes(b"a")
             state = constraint.start()
-            state.commit_token(17)
+            assert state.commit_token(17)
             assert state.is_accepting()
 
 
@@ -87,12 +86,12 @@ def test_canonical_forcing_is_read_only_and_stops_at_acceptance(mode):
     v = vocab()
     state = glrmask.Grammar.from_ebnf('r ::= "ab"').compile(v, mask_strategy=mode).start()
     assert state.forced_tokens() == [2]  # longest spelling of the forced bytes
-    state.commit_token(0)
+    assert state.commit_token(0)
     assert state.forced_tokens() == [1]
     before = state.mask().copy()
     assert state.forced_tokens() == [1]
     assert np.array_equal(before, state.mask())
-    state.commit_token(1)
+    assert state.commit_token(1)
     assert state.is_accepting() and state.forced_tokens() == []
 
 
@@ -105,7 +104,7 @@ def test_independent_parallel_mutation_keeps_shared_template_open():
         request = template.copy()
         token = 17 if index % 2 == 0 else 29
         request.bind("M", glrmask.TokenSet([token]))
-        compiled = request.compile(v, end_tokens=None)
+        compiled = request.compile(v)
         return compiled.start().forced_tokens(), token
 
     with ThreadPoolExecutor(max_workers=8) as workers:

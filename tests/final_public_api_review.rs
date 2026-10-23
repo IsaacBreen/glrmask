@@ -20,8 +20,8 @@ fn compare_prefixes(actual: &Constraint, expected: &Constraint, ids: &[u32], dep
         let mut a = actual.start();
         let mut e = expected.start();
         for &id in &prefix {
-            a.commit_token(id).unwrap();
-            e.commit_token(id).unwrap();
+            assert!(a.commit_token(id));
+            assert!(e.commit_token(id));
         }
         assert_eq!(a.mask(), e.mask(), "mask differs after {prefix:?}");
         assert_eq!(a.is_accepting(), e.is_accepting(), "acceptance differs after {prefix:?}");
@@ -235,21 +235,20 @@ fn review_end_tokens_are_root_only_and_survive_root_roundtrip() {
     for standalone in [&child, &loaded] {
         let mut state = standalone.start();
         assert!(!allowed(&state.mask(), 127));
-        state.commit_token(1).unwrap();
-        assert!(state.is_accepting());
+        assert!(state.commit_token(1));
         assert!(allowed(&state.mask(), 127));
-        state.commit_token(127).unwrap();
+        assert!(state.commit_token(127));
         assert!(state.mask().iter().all(|w| *w == 0));
     }
     let actual = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &PreparedGrammar::load(prepared.save(), &vocab()).unwrap()).unwrap()
         .link_with(BuildOptions::default().end_tokens([63])).unwrap();
     let mut state = actual.start();
     assert!(allowed(&state.mask(), 4), "embedding imports body, not the child's EOS language");
-    state.commit_token(0).unwrap(); state.commit_token(1).unwrap();
+    assert!(state.commit_token(0)); assert!(state.commit_token(1));
     assert!(!allowed(&state.mask(), 127));
     assert!(!allowed(&state.mask(), 63));
     assert!(allowed(&state.mask(), 3));
-    state.commit_token(3).unwrap();
+    assert!(state.commit_token(3));
     assert!(!allowed(&state.mask(), 127));
     assert!(allowed(&state.mask(), 63));
 }
@@ -263,10 +262,10 @@ fn review_root_end_policy_does_not_erase_grammar_level_exact_tokens() {
     assert!(allowed(&standalone.start().mask(),63));
     let actual = Grammar::from_glrm(OUTER).prepare(&v).unwrap().bind_snapshot("middle", &child).unwrap().link().unwrap();
     let mut state = actual.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask(), 63), "explicit grammar-level token is retained when root EOS is removed");
     assert!(!allowed(&state.mask(), 127));
-    state.commit_token(63).unwrap(); state.commit_token(3).unwrap();
+    assert!(state.commit_token(63)); assert!(state.commit_token(3));
     assert!(state.is_accepting());
 }
 

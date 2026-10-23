@@ -69,14 +69,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut state = constraint.start();
         for &token in &trace.token_ids {
             if force_dynamic { mask = state.fill_mask_dynamic_vec(); } else { state.fill_mask(&mut mask); }
-            state.commit_token(token)?;
+            assert!(state.commit_token(token));
         }
         if force_dynamic { mask = state.fill_mask_dynamic_vec(); } else { state.fill_mask(&mut mask); }
     }
     let mut template = constraint.start();
     for &token in &traces[selected].token_ids[..step] {
         if force_dynamic { mask = template.fill_mask_dynamic_vec(); } else { template.fill_mask(&mut mask); }
-        template.commit_token(token)?;
+        assert!(template.commit_token(token));
     }
     eprintln!("STATE trace={selected} step={step} roots={} paths={}",
         template.parser_root_count(), template.parser_path_count(100_000));

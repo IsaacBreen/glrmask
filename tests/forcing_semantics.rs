@@ -17,7 +17,7 @@ fn replay(state: &glrmask::ConstraintState<'_>, ids: &[u32]) {
     for &id in ids {
         assert!(!next.is_accepting(), "forced beyond an accepting boundary");
         assert!(allows(&next.mask(),id), "forcing selected an unadmitted ID {id}");
-        next.commit_token(id).unwrap();assert_live(&next);
+        assert!(next.commit_token(id));assert_live(&next);
     }
     assert_eq!(state.mask(),before,"forcing/replay mutated source state");
 }
@@ -26,7 +26,7 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     let state = constraint.start();
     let before = state.mask();
     let accepted = state.is_accepting();
-    let ids = state.forced_tokens().expect("canonical forcing query failed");
+    let ids = state.forced_tokens();
     assert_eq!(ids,state.forced_canonical_reference(),"public forcing diverged from canonical reference");
     assert_eq!(state.mask(), before, "forcing mutated the source mask");
     assert_eq!(state.is_accepting(), accepted);
@@ -35,7 +35,7 @@ fn checked_force(constraint: &Constraint) -> Vec<u32> {
     for &id in &ids {
         assert!(!replay.is_accepting(), "forced past an accepting token boundary");
         assert!(allows(&replay.mask(), id), "forced ID {id} is excluded by the authoritative mask");
-        replay.commit_token(id).unwrap();
+        assert!(replay.commit_token(id));
         assert_live(&replay);
     }
     ids
@@ -86,7 +86,7 @@ fn singleton_mixed_id_keeps_ordinary_and_exact_successors() {
             .bind_snapshot("MARK",TokenSet::new([10])).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         assert_eq!(checked_force(&c), [10], "{mode:?}");
-        let mut after=c.start();after.commit_token(10).unwrap();
+        let mut after=c.start();assert!(after.commit_token(10));
         assert!(allows(&after.mask(),11));assert!(allows(&after.mask(),12));
         assert!(after.forced_canonical_reference().is_empty());
     }
@@ -136,7 +136,7 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
             let mask=guarded.start().mask();
             assert!(allows(&mask,0) && allows(&mask,1));
             let mut event_path=guarded.start();
-            for id in [0,9,2] { assert!(allows(&event_path.mask(),id));event_path.commit_token(id).unwrap(); }
+            for id in [0,9,2] { assert!(allows(&event_path.mask(),id));assert!(event_path.commit_token(id)); }
             assert!(event_path.is_accepting());
         }
     }
@@ -256,7 +256,7 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
         assert_eq!(state.forced_canonical_reference(),[2]);
         assert!(state.forced_token_ids_reference().is_empty());
         assert_eq!(state.mask(),before);
-        let mut cursor=state.clone();cursor.commit_token(0).unwrap();
+        let mut cursor=state.clone();assert!(cursor.commit_token(0));
         assert_eq!(cursor.forced_token_ids_reference(),[1]);
         let loaded=Constraint::load(&c.save(), &vocab).unwrap();
         assert!(loaded.start().forced_token_ids_reference().is_empty());
@@ -274,7 +274,7 @@ fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
         assert_eq!(state.forced_token_ids_reference(),[9,0]);
         assert_eq!(state.mask(),mask);
         let mut replay=state.clone();
-        for id in state.forced_token_ids_reference() {assert!(allows(&replay.mask(),id));replay.commit_token(id).unwrap();}
+        for id in state.forced_token_ids_reference() {assert!(allows(&replay.mask(),id));assert!(replay.commit_token(id));}
         assert!(replay.is_accepting());assert!(replay.forced_token_ids_reference().is_empty());
     }
 }
@@ -288,15 +288,15 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
         .bind_snapshot("MARK",TokenSet::new([0])).unwrap();
     for mode in MODES {
         let c=ordinary.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
-        let mut s=c.start();s.commit_token(0).unwrap();
+        let mut s=c.start();assert!(s.commit_token(0));
         assert_eq!(s.forced_canonical_reference(),[1,2]);assert_eq!(s.forced_token_ids_reference(),[1,2]);
         replay(&s,&s.forced_canonical_reference());
         let c=dual.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
-        let mut s=c.start();assert!(s.forced_canonical_reference().is_empty());s.commit_token(0).unwrap();
+        let mut s=c.start();assert!(s.forced_canonical_reference().is_empty());assert!(s.commit_token(0));
         assert!(allows(&s.mask(),1));assert!(allows(&s.mask(),3));
         assert!(s.forced_canonical_reference().is_empty());assert!(s.forced_token_ids_reference().is_empty());
         for path in [&[1,2][..],&[3][..]] {
-            let mut t=s.clone();for id in path {t.commit_token(*id).unwrap();}assert!(t.is_accepting());
+            let mut t=s.clone();for id in path {assert!(t.commit_token(*id));}assert!(t.is_accepting());
         }
     }
 }
@@ -316,11 +316,11 @@ fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
             let mut s=c.start();
             for id in path {
                 replay(&s,&s.forced_canonical_reference());replay(&s,&s.forced_token_ids_reference());
-                assert!(allows(&s.mask(),*id),"{mode:?}, path={path:?}, id={id}");s.commit_token(*id).unwrap();
+                assert!(allows(&s.mask(),*id),"{mode:?}, path={path:?}, id={id}");assert!(s.commit_token(*id));
             }
             assert!(s.is_accepting(),"{mode:?}, path={path:?}");assert!(s.forced_canonical_reference().is_empty());
         }
-        let mut s=c.start();s.commit_token(0).unwrap();s.commit_token(1).unwrap();
+        let mut s=c.start();assert!(s.commit_token(0));assert!(s.commit_token(1));
         assert!(allows(&s.mask(),9));assert!(allows(&s.mask(),3));
         assert!(s.forced_canonical_reference().is_empty(),"byte proof must stop before optional exact event");
         assert!(!allows(&s.mask(),6),"child's space ignore must not allow arbitrary whitespace");

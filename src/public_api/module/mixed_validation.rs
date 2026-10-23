@@ -263,13 +263,11 @@ fn compare_exhaustive(
     let mut visited = 1;
     for token in allowed_tokens(&reference_mask) {
         let mut next_reference = reference.clone();
-        next_reference
-            .commit_token(token)
-            .unwrap_or_else(|error| panic!("{label}: reference rejected admitted token {token}: {error}"));
+        assert!(next_reference
+            .commit_token(token));
         let mut next_candidate = candidate.clone();
-        next_candidate
-            .commit_token(token)
-            .unwrap_or_else(|error| panic!("{label}: candidate rejected admitted token {token}: {error}"));
+        assert!(next_candidate
+            .commit_token(token));
         visited += compare_exhaustive(&next_reference, &next_candidate, depth - 1, label);
     }
     visited

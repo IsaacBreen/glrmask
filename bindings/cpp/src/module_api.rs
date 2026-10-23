@@ -6,8 +6,6 @@ pub struct glrmask_module(pub(super) g::Module);
 pub struct glrmask_expr(pub(super) g::Expr);
 #[repr(C)] pub struct glrmask_compile_options {
     pub struct_size: usize,
-    pub end_tokens: *const u32,
-    pub end_tokens_len: usize,
     pub mask_strategy: u32,
     pub boundary_mask_strategy: u32,
 }
@@ -19,7 +17,6 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     let o = unsafe { read(p)? };
     if o.struct_size != size_of::<glrmask_compile_options>() { return Err(Error::invalid("compile-options struct_size does not match ABI")); }
     Ok(core::compile_options(
-        unsafe { input(o.end_tokens, o.end_tokens_len)? }.to_vec(),
         core::mask_strategy(o.mask_strategy)?,
         core::boundary_mask_strategy(o.boundary_mask_strategy)?,
     ))
@@ -28,8 +25,6 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_default_compile_options() -> glrmask_compile_options {
     glrmask_compile_options {
         struct_size: size_of::<glrmask_compile_options>(),
-        end_tokens: ptr::null(),
-        end_tokens_len: 0,
         mask_strategy: 0,
         boundary_mask_strategy: 0,
     }

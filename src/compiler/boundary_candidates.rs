@@ -1760,9 +1760,9 @@ mod preparation_tests {
         let root = crate::Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
             .prepare(&vocab).unwrap().bind_snapshot("middle", &loaded).unwrap()
             .link_with(options).unwrap();
-        let mut state = root.start(); state.commit_bytes(b"X").unwrap();
+        let mut state = root.start(); assert!(state.commit_bytes(b"X"));
         assert_ne!(state.mask()[0] & (1 << 2), 0);
-        state.commit_token(2).unwrap(); assert!(state.is_accepting());
+        assert!(state.commit_token(2)); assert!(state.is_accepting());
     }
 
     #[test]

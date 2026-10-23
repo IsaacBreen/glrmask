@@ -72,14 +72,14 @@ fn test_required_propagated_through_anyof_base_merge() {
     // Valid: `{"image": "x"}` — image is present (required + first in order).
     let valid = b"{\"image\": \"x\"}";
     for &byte in valid.iter() {
-        state.commit_bytes(&[byte]).unwrap();
+        assert!(state.commit_bytes(&[byte]));
     }
     assert!(state.is_accepting());
 
     // After `{"image": "x", "`, kaniko should be allowed (variant 1
     // allows it after image in declaration order).
     let mut state2 = constraint.start();
-    state2.commit_bytes(b"{\"image\": \"x\", \"").unwrap();
+    assert!(state2.commit_bytes(b"{\"image\": \"x\", \""));
     let mask2 = state2.mask();
     let k_id = b'k' as usize;
     assert!(
@@ -89,7 +89,7 @@ fn test_required_propagated_through_anyof_base_merge() {
 
     // After `{"image": "x"}`, closing brace IS allowed (required image present).
     let mut state3 = constraint.start();
-    state3.commit_bytes(b"{\"image\": \"x\"").unwrap();
+    assert!(state3.commit_bytes(b"{\"image\": \"x\""));
     let mask3 = state3.mask();
     let close_brace_id = b'}' as usize;
     assert!(
@@ -100,7 +100,7 @@ fn test_required_propagated_through_anyof_base_merge() {
     // After `{"`, `k` (kaniko) should NOT be allowed — image must appear
     // first in ordered grammar since it's declared before kaniko.
     let mut state5 = constraint.start();
-    state5.commit_bytes(b"{\"").unwrap();
+    assert!(state5.commit_bytes(b"{\""));
     let mask5 = state5.mask();
     let k_id = b'k' as usize;
     assert!(

@@ -39,7 +39,7 @@ fn immutable_source_and_compiled_bindings_cross_token_boundaries() {
     for c in [c1, c2] {
         let mut s = c.start();
         assert!(allowed(&s.mask(), 4));
-        s.commit_token(4).unwrap();
+        assert!(s.commit_token(4));
         assert!(s.is_accepting());
     }
     assert!(Module::new(&parent).compile(&v).is_err());
@@ -78,11 +78,11 @@ fn source_exact_token_identity_is_not_bytes() {
     let c = m.compile(&v).unwrap();
     let mut s = c.start();
     assert!(!allowed(&s.mask(), 4));
-    s.commit_token(0).unwrap();
+    assert!(s.commit_token(0));
     assert!(allowed(&s.mask(), 7));
     assert!(!allowed(&s.mask(), 1));
-    s.commit_token(7).unwrap();
-    s.commit_token(3).unwrap();
+    assert!(s.commit_token(7));
+    assert!(s.commit_token(3));
     assert!(s.is_accepting());
 }
 
@@ -103,8 +103,8 @@ fn compiled_exact_token_bind_matches_source_at_every_step() {
     let mut b = expected.start();
     for id in [0, 7, 3] {
         assert_eq!(a.mask(), b.mask(), "before {id}");
-        a.commit_token(id).unwrap();
-        b.commit_token(id).unwrap();
+        assert!(a.commit_token(id));
+        assert!(b.commit_token(id));
         assert_eq!(a.is_accepting(), b.is_accepting());
     }
     assert_eq!(a.mask(), b.mask());
@@ -120,7 +120,7 @@ fn unbound_exact_token_survives_save_load() {
     loaded.bind("MARK", TokenSet::from(7)).unwrap();
     let c = loaded.compile(&v).unwrap();
     let mut s = c.start();
-    s.commit_token(0).unwrap();
+    assert!(s.commit_token(0));
     assert!(allowed(&s.mask(), 7));
     assert!(!allowed(&s.mask(), 1));
 }
@@ -137,11 +137,11 @@ fn token_membership_and_compiled_vocabulary_are_validated() {
     widened.bind("child", TokenSet::from(7)).unwrap();
     let c = widened.compile(&v).unwrap();
     let mut state = c.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask(), 7));
     assert!(!allowed(&state.mask(), 1));
-    state.commit_token(7).unwrap();
-    state.commit_token(3).unwrap();
+    assert!(state.commit_token(7));
+    assert!(state.commit_token(3));
     assert!(state.is_accepting());
 
     let mut child = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
@@ -178,7 +178,11 @@ fn artifact_kinds_and_corrupt_module_headers_are_rejected() {
 fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
     let v = vocab();
     let module = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    let mut constraint = module.compile_with(&v, CompileOptions::default().end_tokens([130, 255])).unwrap();
+    let root = Grammar::from_expr(Expr::sequence([
+        Expr::from(module.clone()),
+        Expr::from(TokenSet::new([130, 255])),
+    ])).unwrap();
+    let mut constraint = root.compile(&v).unwrap();
     for _ in 0..4 {
         assert_eq!(constraint.mask_len(), 8);
         let mut state = constraint.start();
@@ -187,53 +191,61 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert_eq!(&buffer[..8], state.mask());
         assert_eq!(&buffer[8..], &[0, 0]);
         assert!(!allowed(&state.mask(), 130));
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         // Grammar complete, but acceptance needs an end token.
         assert!(!state.is_accepting());
         assert!(allowed(&state.mask(), 130));
         assert!(allowed(&state.mask(), 255));
         let mut other = state.clone();
-        state.commit_token(130).unwrap();
+        assert!(state.commit_token(130));
         assert!(state.is_accepting());
         assert_eq!(state.mask(), vec![0; 8]);
         assert!(state.forced_canonical_reference().is_empty());
-        assert!(state.commit_token(1).is_err());
-        assert!(state.commit_bytes(b"a").is_err());
+        assert!(!state.commit_token(1));
+        assert!(!state.commit_bytes(b"a"));
         assert!(!other.is_accepting());
         assert!(allowed(&other.mask(), 130));
         assert!(allowed(&other.mask(), 255));
-        other.commit_token(255).unwrap();
+        assert!(other.commit_token(255));
         assert!(other.is_accepting());
         assert_eq!(other.mask(), vec![0; 8]);
-        assert!(other.commit_token(1).is_err());
+        assert!(!other.commit_token(1));
         constraint = Constraint::load(constraint.save(), &v).unwrap();
     }
     assert_eq!(module.compile(&v).unwrap().mask_len(), 1);
-    let policy_b = module.compile_with(&v, CompileOptions::default().end_tokens([63])).unwrap();
+    let root_b = Grammar::from_expr(Expr::sequence([
+        Expr::from(module.clone()),
+        Expr::from(TokenSet::new([63])),
+    ])).unwrap();
+    let policy_b = root_b.compile(&v).unwrap();
     assert_eq!(policy_b.mask_len(), 2);
 }
 
 #[test]
 fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
     let v = vocab();
-    let constraint = Grammar::from_ebnf(r#"start ::= "a""#)
-        .compile_with(&v, CompileOptions::default().end_tokens([7])).unwrap();
+    let constraint = Grammar::from_expr(Expr::sequence([
+        Expr::from(Grammar::from_ebnf(r#"start ::= "a""#)),
+        Expr::from(TokenSet::new([7])),
+    ])).unwrap().compile(&v).unwrap();
     let mut state = constraint.start();
     assert!(allowed(&state.mask(), 1));
     assert!(!allowed(&state.mask(), 7));
     // An end token before a complete match is a failed commit.
-    assert!(state.commit_token(7).is_err());
+    assert!(!state.commit_token(7));
     assert!(state.mask().iter().all(|word| *word == 0));
     assert!(!state.is_accepting());
     let mut valid = constraint.start();
-    valid.commit_token(1).unwrap();
+    assert!(valid.commit_token(1));
     assert!(allowed(&valid.mask(), 7));
-    valid.commit_token(7).unwrap();
+    assert!(valid.commit_token(7));
     assert!(valid.is_accepting());
     assert!(valid.mask().iter().all(|word| *word == 0));
-    assert!(valid.commit_token(1).is_err());
-    assert!(Grammar::from_ebnf(r#"start ::= "a""#)
-        .compile_with(&v, CompileOptions::default().end_tokens([7, 7])).is_err());
+    assert!(!valid.commit_token(1));
+    assert!(Grammar::from_expr(Expr::sequence([
+        Expr::from(Grammar::from_ebnf(r#"start ::= "a""#)),
+        Expr::from(TokenSet::new([7, 7])),
+    ])).is_ok());
 }
 
 #[test]
@@ -248,19 +260,19 @@ fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
     let constraint = loaded_open.compile(&vocab).unwrap();
 
     let mut state = constraint.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask(), 2));
     assert!(!allowed(&state.mask(), 77));
-    state.commit_token(2).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(2));
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 
     let loaded = Constraint::load(constraint.save(), &vocab).unwrap();
     let mut state = loaded.start();
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
     assert!(allowed(&state.mask(), 2));
-    state.commit_token(2).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(2));
+    assert!(state.commit_token(1));
     assert!(state.is_accepting());
 
     let missing_domain = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]);
@@ -456,7 +468,7 @@ fn focused_9_auto_reusing_retained_engine() {
         .unwrap();
     let c_dwa = m_dwa.compile(&v).unwrap();
     let mut s_dwa = c_dwa.start();
-    s_dwa.commit_token(1).unwrap();
+    assert!(s_dwa.commit_token(1));
     assert!(s_dwa.is_accepting());
 
     // 2. Auto reuses retained TokenClassTrie
@@ -465,7 +477,7 @@ fn focused_9_auto_reusing_retained_engine() {
         .unwrap();
     let c_tct = m_tct.compile(&v).unwrap();
     let mut s_tct = c_tct.start();
-    s_tct.commit_token(1).unwrap();
+    assert!(s_tct.commit_token(1));
     assert!(s_tct.is_accepting());
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
@@ -478,7 +490,7 @@ fn focused_9_auto_reusing_retained_engine() {
     let c = parent.compile(&v).unwrap();
     let mut s = c.start();
     assert!(allowed(&s.mask(), 4)); // "xay" token matches host "x" child "a" host "y"
-    s.commit_token(4).unwrap();
+    assert!(s.commit_token(4));
     assert!(s.is_accepting());
 }
 
@@ -493,7 +505,7 @@ fn focused_10_expr_empty_choice_one_part_literal_token_leaf() {
     let c_ec = m_ec.compile(&v).unwrap();
     assert!(!c_ec.start().is_accepting());
     assert!(c_ec.start().mask().iter().all(|&w| w == 0));
-    assert!(c_ec.start().commit_token(0).is_err());
+    assert!(!c_ec.start().commit_token(0));
 
     // 2. One-part choice simplifies to that part
     let single_choice = Expr::choice([Expr::from(Grammar::from_ebnf(r#"start ::= "a""#))]);
@@ -547,7 +559,7 @@ fn focused_12_grammar_precompile_returns_a_module() {
     let c = module.compile(&v).unwrap();
     let mut s = c.start();
     assert!(allowed(&s.mask(), 4), "xay must compose the precompiled child");
-    s.commit_token(4).unwrap();
+    assert!(s.commit_token(4));
     assert!(s.is_accepting());
 
     // Masks equal the explicit Module::new + bind + precompile path.

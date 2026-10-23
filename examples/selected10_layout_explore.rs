@@ -344,7 +344,7 @@ fn write_exact_mask_trace(composed: &Constraint, path: &Path, steps_per_scenario
     let mut rng = 0x9e37_79b9_7f4a_7c15u64;
     for (scenario, prefix) in scenarios.iter().enumerate() {
         let mut state = composed.start();
-        if !prefix.is_empty() && state.commit_bytes(prefix).is_err() {
+        if !prefix.is_empty() && !state.commit_bytes(prefix) {
             // A schema/layout may not admit the generic object-opening probe.
             // Record that fact identically in both implementations and move on.
             file.write_all(&(scenario as u32).to_le_bytes()).unwrap();
@@ -387,10 +387,8 @@ fn write_exact_mask_trace(composed: &Constraint, path: &Path, steps_per_scenario
             }
             let token = chosen.expect("nonempty mask had no selectable token");
             file.write_all(&token.to_le_bytes()).unwrap();
-            if let Err(error) = state.commit_token(token) {
-                panic!(
-                    "mask-trace commit rejected scenario={scenario} step={step} token={token}: {error}"
-                );
+            if !state.commit_token(token) {
+                panic!("mask-trace commit rejected scenario={scenario} step={step} token={token}");
             }
         }
     }
@@ -483,7 +481,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
             b"const x = tools.tool_0({".as_slice(),
         ] {
             let mut probe = composed.start();
-            probe.commit_bytes(prefix).unwrap_or_else(|error| panic!("selected10 prefix {prefix:?} rejected: {error}"));
+            assert!(probe.commit_bytes(prefix));
             let mask = probe.mask();
             std::hint::black_box(mask);
         }
@@ -495,13 +493,11 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
                 b"const x = tools.tool_0({}".as_slice(),
             ] {
                 let mut probe = composed.start();
-                probe.commit_bytes(prefix).unwrap_or_else(|error| {
-                    panic!("selected10 extra boundary prefix {prefix:?} rejected: {error}")
-                });
+                assert!(probe.commit_bytes(prefix));
                 std::hint::black_box(probe.mask());
             }
         }
-        state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
+        assert!(state.commit_bytes(b"const x = tools.tool_0({})"));
         std::hint::black_box(state.mask());
 
         if std::env::var_os("SELECTED10_PROFILE_MASK_TIMING").is_some() {
@@ -512,7 +508,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
                 let mut timings = Vec::with_capacity(128);
                 for _ in 0..128 {
                     let mut probe = composed.start();
-                    probe.commit_bytes(prefix).unwrap();
+                    assert!(probe.commit_bytes(prefix));
                     let mut mask = vec![0u32; (vocab.max_token_id() as usize + 32) / 32];
                     timings.push(probe.fill_mask_timed_ns(&mut mask));
                     std::hint::black_box(mask);
@@ -545,8 +541,8 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
             ] {
                 let mut before = composed.start();
                 let mut after = loaded.start();
-                before.commit_bytes(prefix).unwrap();
-                after.commit_bytes(prefix).unwrap();
+                assert!(before.commit_bytes(prefix));
+                assert!(after.commit_bytes(prefix));
                 assert_eq!(
                     before.mask(),
                     after.mask(),

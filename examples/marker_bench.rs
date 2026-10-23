@@ -44,7 +44,7 @@ fn measure(c: &Constraint, sequence: &[u32], samples: usize, rounds: usize) -> R
     let mut mask=vec![0; c.mask_len()];
     for _ in 0..4 {
         let mut state=c.start();
-        for &token in sequence { state.fill_mask(&mut mask);assert!(mask[token as usize/32]&(1<<(token%32))!=0);state.commit_token(token)?; }
+        for &token in sequence { state.fill_mask(&mut mask);assert!(mask[token as usize/32]&(1<<(token%32))!=0);assert!(state.commit_token(token)); }
         assert!(state.is_accepting());
     }
     let mut commits=Vec::with_capacity(samples);let mut masks=Vec::with_capacity(samples);
@@ -54,14 +54,14 @@ fn measure(c: &Constraint, sequence: &[u32], samples: usize, rounds: usize) -> R
         for _ in 0..rounds {
             let mut state=c.start();
             let started=Instant::now();
-            for &token in sequence { black_box(state.commit_token(black_box(token)))?; }
+            for &token in sequence { assert!(state.commit_token(black_box(token))); }
             commit_ns+=started.elapsed().as_nanos();black_box(&state);
             let mut state=c.start();
             // Every next mask follows a real commit, so this does not benchmark
             // repeatedly retrieving the same already-cached initial mask.
             let total_start=Instant::now();
             for &token in sequence {
-                state.commit_token(token)?;
+                assert!(state.commit_token(token));
                 let start=Instant::now();state.fill_mask(black_box(&mut mask));mask_ns+=start.elapsed().as_nanos();
                 black_box(&mask);
             }

@@ -225,7 +225,7 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
                 prefix.truncate(depth);
                 prefix.extend_from_slice(suffix);
                 let mut state = constraint.start();
-                state.commit_bytes(&prefix).unwrap();
+                assert!(state.commit_bytes(&prefix));
 
                 let expected = expected_mask(&vocab, &prefix, constraint.mask_len());
                 let mut actual = vec![0u32; constraint.mask_len()];
@@ -239,7 +239,7 @@ fn full_masks_commits_rejections_and_completion_survive_all_dynamic_formats() {
                     let (admitted, accepting) = byte_oracle(&extension);
                     let mut branch = state.clone();
                     let result = branch.commit_token(id);
-                    assert_eq!(result.is_ok(), admitted, "token {id}");
+                    assert_eq!(result, admitted, "token {id}");
                     if admitted {
                         assert_eq!(branch.is_accepting(), accepting);
                         let mut after = vec![0u32; constraint.mask_len()];
@@ -298,7 +298,7 @@ fn canonical_and_static_public_routes_keep_complete_mask_words() {
             );
             for prefix in [b"".as_slice(), b"!!", b"!!x", b"!!x;"] {
                 let mut state = constraint.start();
-                state.commit_bytes(prefix).unwrap();
+                assert!(state.commit_bytes(prefix));
                 assert_eq!(
                     state.mask(),
                     expected_mask(&vocab, prefix, constraint.mask_len()),

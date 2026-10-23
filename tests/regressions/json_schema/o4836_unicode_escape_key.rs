@@ -73,9 +73,9 @@ fn o4836_pattern_property_key_allows_partial_unicode_escape_token() {
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
 
     let mut token_state = constraint.start();
-    token_state.commit_bytes(prefix).unwrap();
+    assert!(token_state.commit_bytes(prefix));
     assert!(token_allowed(&token_state.mask(), 0));
-    token_state.commit_token(0).unwrap();
+    assert!(token_state.commit_token(0));
 }
 
 #[test]
@@ -86,9 +86,9 @@ fn string_rejects_partial_unicode_escape_token_like_llguidance_native() {
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
 
     let mut token_state = constraint.start();
-    token_state.commit_bytes(b"\"").unwrap();
+    assert!(token_state.commit_bytes(b"\""));
     assert!(!token_allowed(&token_state.mask(), 0));
-    assert!(token_state.commit_token(0).is_err());
+    assert!(!token_state.commit_token(0));
 }
 
 #[test]
@@ -102,7 +102,7 @@ fn string_mask_allows_bare_unicode_escape_prefix_token_but_rejects_partial_hex_t
     .unwrap();
 
     let mut token_state = constraint.start();
-    token_state.commit_bytes(b"\"").unwrap();
+    assert!(token_state.commit_bytes(b"\""));
     let mask = token_state.mask();
     assert!(token_allowed(&mask, 0));
     assert!(!token_allowed(&mask, 1));
@@ -118,7 +118,7 @@ fn unrestricted_object_key_rejects_partial_unicode_escape_token_like_llguidance_
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab(&[token])).unwrap();
 
     let mut token_state = constraint.start();
-    token_state.commit_bytes(prefix).unwrap();
+    assert!(token_state.commit_bytes(prefix));
     assert!(!token_allowed(&token_state.mask(), 0));
-    assert!(token_state.commit_token(0).is_err());
+    assert!(!token_state.commit_token(0));
 }

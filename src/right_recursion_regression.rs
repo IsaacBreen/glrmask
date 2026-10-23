@@ -105,7 +105,7 @@ fn minimal_right_recursion_grammar_compiles_and_masks_match_the_language() {
             let mut state = constraint.start();
             let mut accepted_prefix = true;
             for &token in &word {
-                if state.commit_token(token).is_err() {
+                if !state.commit_token(token) {
                     accepted_prefix = false;
                     break;
                 }

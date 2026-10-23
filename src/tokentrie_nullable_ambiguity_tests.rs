@@ -45,9 +45,9 @@ fn tokentrie_nullable_ambiguity_mask_and_byte_commit_terminate() {
     let outcome = within_deadline("TokenTrie mask/commit after one 'a'", || {
         let constraint = token_trie();
         let mut state = constraint.start();
-        state.commit_token(0).expect("commit first 'a'");
+        assert!(state.commit_token(0), "commit first 'a'");
         let mask = state.mask();
-        state.commit_bytes(b"a").expect("commit second 'a'");
+        assert!(state.commit_bytes(b"a"), "commit second 'a'");
         (mask, state.is_accepting())
     });
     assert!(
@@ -90,11 +90,11 @@ fn tokentrie_masks_match_parser_dwa_for_nullable_ambiguity() {
                     diffs.push((prefix.clone(), a, b));
                     break;
                 }
-                if left.commit_bytes(&[byte]).is_err() {
-                    assert!(right.commit_bytes(&[byte]).is_err(), "rejection disagreement {prefix:?}");
+                if !left.commit_bytes(&[byte]) {
+                    assert!(!right.commit_bytes(&[byte]), "rejection disagreement {prefix:?}");
                     break;
                 }
-                right.commit_bytes(&[byte]).expect("ParserDwa must accept what TokenTrie accepts");
+                assert!(right.commit_bytes(&[byte]), "ParserDwa must accept what TokenTrie accepts");
                 prefix.push(byte);
             }
             assert_eq!(left.is_accepting(), right.is_accepting(), "acceptance disagreement {prefix:?}");

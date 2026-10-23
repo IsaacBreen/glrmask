@@ -19,14 +19,14 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
     .unwrap();
 
     let mut bytes_state = constraint.start();
-    bytes_state.commit_bytes(SNOWPLOW_PREFIX_BYTES).unwrap();
+    assert!(bytes_state.commit_bytes(SNOWPLOW_PREFIX_BYTES));
     let bytes_mask = bytes_state.mask();
     assert!(token_allowed(&bytes_mask, 15));
     let bytes_stacks = bytes_state.debug_parser_stacks();
 
     let mut replay_state = constraint.start();
     for &token_id in SNOWPLOW_REPLAY_IDS {
-        replay_state.commit_token(token_id).unwrap();
+        assert!(replay_state.commit_token(token_id));
     }
     let replay_mask = replay_state.mask();
     assert!(token_allowed(&replay_mask, 15));
@@ -39,13 +39,13 @@ fn snowplow_hostname_replay_mask_includes_token_15() {
     assert_eq!(bytes_stacks, replay_stacks);
 
     let mut replay_commit_bytes = replay_state.clone();
-    replay_commit_bytes.commit_bytes(b"0").unwrap();
+    assert!(replay_commit_bytes.commit_bytes(b"0"));
 
     let mut replay_commit_token = replay_state.clone();
-    replay_commit_token.commit_token(15).unwrap();
+    assert!(replay_commit_token.commit_token(15));
 
     let mut bytes_commit = bytes_state.clone();
-    bytes_commit.commit_bytes(b"0").unwrap();
+    assert!(bytes_commit.commit_bytes(b"0"));
 
     let committed_mask = bytes_commit.mask();
     assert_eq!(committed_mask, replay_commit_bytes.mask());

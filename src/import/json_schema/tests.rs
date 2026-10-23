@@ -770,7 +770,7 @@ fn schema_mask_allows_token_after_prefix(
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
     let mut state = constraint.start();
-    state.commit_bytes(prefix).expect("prefix should be accepted");
+    assert!(state.commit_bytes(prefix), "prefix should be accepted");
     let mask = state.mask();
     let word = token_id as usize / 32;
     let bit = token_id as usize % 32;
@@ -792,7 +792,7 @@ fn schema_accepts_bytes(schema: &serde_json::Value, input: &[u8]) -> bool {
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
     let mut state = constraint.start();
-    state.commit_bytes(input).is_ok() && state.is_accepting()
+    state.commit_bytes(input) && state.is_accepting()
 }
 
 #[test]
@@ -942,7 +942,7 @@ fn parser_path_count_after_bytes(schema: &serde_json::Value, input: &[u8], limit
     let lowered = lower(&grammar).expect("schema grammar should lower");
     let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
     let mut state = constraint.start();
-    state.commit_bytes(input).expect("input should be accepted");
+    assert!(state.commit_bytes(input), "input should be accepted");
     assert!(state.is_accepting(), "input should finish the schema");
     state.parser_path_count(limit)
 }
@@ -1612,15 +1612,15 @@ fn llguidance_compat_patterned_string_non_whitespace_unicode_escape_progression(
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
 
     let mut state = constraint.start();
-    state.commit_bytes(b"\"Benef").expect("prefix should be accepted");
+    assert!(state.commit_bytes(b"\"Benef"), "prefix should be accepted");
     let mask = state.mask();
     assert!(mask_contains(&mask, json_u), r#"expected \\u after \"Benef"#);
     assert!(!mask_contains(&mask, json_u_b), r#"\\uB must be rejected"#);
     assert!(!mask_contains(&mask, json_u_c), r#"\\uC must be rejected"#);
 
     let mut post_u = constraint.start();
-    post_u.commit_bytes(b"\"Benef").expect("prefix should be accepted");
-    post_u.commit_token(json_u).expect(r#"\\u token should be accepted"#);
+    assert!(post_u.commit_bytes(b"\"Benef"), "prefix should be accepted");
+    assert!(post_u.commit_token(json_u));
     let post_u_mask = post_u.mask();
     assert!(mask_contains(&post_u_mask, zero), "0 must be admitted after \\u");
     assert!(!mask_contains(&post_u_mask, upper_b), "B must remain rejected after \\u");
@@ -1645,7 +1645,7 @@ fn mre_llguidance_compat_non_whitespace_subtraction_mask_gap() {
 
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
     let mut state = constraint.start();
-    state.commit_bytes(b"\"a").expect("prefix should be accepted");
+    assert!(state.commit_bytes(b"\"a"), "prefix should be accepted");
     let mask = state.mask();
 
     // Regression check: after subtraction/helper lowering fixes, this
@@ -1669,7 +1669,7 @@ fn mask_does_not_enable_json_u_by_runtime_patch() {
     let vocab = Vocab::new(entries);
     let constraint = crate::compiler::compile_owned(lowered, &vocab);
     let mut state = constraint.start();
-    state.commit_bytes(br#"""#).expect("opening quote should be accepted");
+    assert!(state.commit_bytes(br#"""#), "opening quote should be accepted");
 
     let mask = state.mask();
     assert!(mask_contains(&mask, json_backslash_token), r#"\\ should be grammar-admissible"#);
@@ -2817,7 +2817,7 @@ fn additional_properties_factoring_native_and_jsonschema_agree_on_plain_ascii() 
     let vocab = byte_vocab();
     fn accepts(constraint: &DynamicConstraint, instance: &[u8]) -> (bool, bool) {
         let mut state = constraint.start();
-        let ok = state.commit_bytes(instance).is_ok();
+        let ok = state.commit_bytes(instance);
         (ok, ok && state.is_accepting())
     }
     let samples: [(&str, &[u8]); 6] = [
@@ -4827,12 +4827,12 @@ fn complex_anchored_pattern_split_matches_monolithic_masks() {
             let split_result = split_state.commit_token(token);
             let monolithic_result = monolithic_state.commit_token(token);
             assert_eq!(
-                split_result.is_ok(),
-                monolithic_result.is_ok(),
+                split_result,
+                monolithic_result,
                 "commit mismatch walk={walk} step={step} token={token}"
             );
-            split_result.expect("selected split token should commit");
-            monolithic_result.expect("selected monolithic token should commit");
+            assert!(split_result, "selected split token should commit");
+            assert!(monolithic_result, "selected monolithic token should commit");
         }
     }
     assert!(compared >= 64, "expected a nontrivial differential sweep");
@@ -9732,7 +9732,7 @@ fn unbounded_string_length_lowering_respects_generic_quote_merge_policy() {
         let constraint = crate::compiler::compile_owned(lowered, &byte_vocab());
         let accepts = |input: &[u8]| {
             let mut state = constraint.start();
-            state.commit_bytes(input).is_ok() && state.is_accepting()
+            state.commit_bytes(input) && state.is_accepting()
         };
         assert!(accepts(br#"{"value": "////////////////////"}"#));
         assert!(!accepts(br#"{"value": "///////////////////"}"#));

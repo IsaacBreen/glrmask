@@ -216,7 +216,7 @@ fn every_compact_graph_phase_and_link_rejects_out_of_bounds_fields() {
                 false
             );
             let mut state = good.start();
-            state.commit_token(2).unwrap();
+            assert!(state.commit_token(2));
             assert!(state.is_accepting());
         }
     }
@@ -266,7 +266,7 @@ fn external_binding_accepts_reordered_identical_mapping_but_not_id_changes() {
         let good = Constraint::load(bytes.clone(), &reversed).unwrap();
         assert_eq!(good.parser_backend(), ParserBackend::TemplateDfa);
         let mut state = good.start();
-        state.commit_token(11).unwrap(); // duplicate token bytes, distinct token ID
+        assert!(state.commit_token(11)); // duplicate token bytes, distinct token ID
         assert!(state.is_accepting());
         assert_eq!(good.save(), bytes);
         assert!(Constraint::load(bytes, &remapped).is_err());

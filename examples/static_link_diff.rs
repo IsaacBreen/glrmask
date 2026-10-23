@@ -186,19 +186,19 @@ fn main() {
         for (consumed, &byte) in prefix.iter().enumerate() {
             let r_static = st_static.commit_bytes(&[byte]);
             let r_dynamic = st_dynamic.commit_bytes(&[byte]);
-            if r_static.is_ok() != r_dynamic.is_ok() {
+            if r_static != r_dynamic {
                 mismatches += 1;
                 if first_mismatch.is_none() {
                     first_mismatch = Some((
                         scenario,
                         consumed,
-                        format!("prefix-commit-divergence static_ok={} dynamic_ok={}", r_static.is_ok(), r_dynamic.is_ok()),
+                        format!("prefix-commit-divergence static_ok={} dynamic_ok={}", r_static, r_dynamic),
                     ));
                 }
                 alive = false;
                 break;
             }
-            if r_dynamic.is_err() {
+            if !r_dynamic {
                 alive = false;
                 break;
             }
@@ -223,18 +223,18 @@ fn main() {
             let Some(token) = choose_token(&last_dynamic_mask, &mut rng) else { break };
             let r_static = st_static.commit_token(token);
             let r_dynamic = st_dynamic.commit_token(token);
-            if r_static.is_ok() != r_dynamic.is_ok() {
+            if r_static != r_dynamic {
                 mismatches += 1;
                 if first_mismatch.is_none() {
                     first_mismatch = Some((
                         scenario,
                         prefix.len() + step,
-                        format!("token-commit-divergence token={token} static_ok={} dynamic_ok={}", r_static.is_ok(), r_dynamic.is_ok()),
+                        format!("token-commit-divergence token={token} static_ok={} dynamic_ok={}", r_static, r_dynamic),
                     ));
                 }
                 break;
             }
-            if r_dynamic.is_err() {
+            if !r_dynamic {
                 break;
             }
             last_dynamic_mask = check_position(

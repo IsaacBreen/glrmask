@@ -54,9 +54,8 @@ fn glrm_unicode_escape_progression_accepts_bare_u_without_full_vocab_continuatio
     let constraint = Constraint::compile(glrmask::Grammar::glrm(GLRM_UNICODE_ESCAPE_PROGRESS_MRE), &vocab).unwrap();
     let mut state = constraint.start();
 
-    state
-        .commit_bytes(br#"\u"#)
-        .expect(r#"byte commits may leave a live language prefix even without a complete vocab continuation"#);
+    assert!(state
+        .commit_bytes(br#"\u"#));
 }
 
 #[test]
@@ -65,9 +64,8 @@ fn glrm_unicode_escape_progression_accepts_bare_u_with_only_dead_continuation() 
     let constraint = Constraint::compile(glrmask::Grammar::glrm(GLRM_UNICODE_ESCAPE_PROGRESS_MRE), &vocab).unwrap();
     let mut state = constraint.start();
 
-    state
-        .commit_bytes(br#"\u"#)
-        .expect(r#"byte commits may leave a live language prefix even when current vocab continuations are dead"#);
+    assert!(state
+        .commit_bytes(br#"\u"#));
 }
 
 #[test]
@@ -99,7 +97,6 @@ fn structured_glrm_trailing_backslash_byte_prefix_is_accepted() {
     let constraint = Constraint::compile(glrmask::Grammar::glrm(GLRM_TRAILING_BACKSLASH_ONE_TOKEN_MRE), &vocab).unwrap();
     let mut state = constraint.start();
 
-    state
-        .commit_bytes(b" \"\\")
-        .expect(r#"byte commits may leave a trailing partial escape prefix"#);
+    assert!(state
+        .commit_bytes(b" \"\\"));
 }

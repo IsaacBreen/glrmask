@@ -37,9 +37,9 @@ macro_rules! measure {
         let c = &$constraint;
         for &(prefix_name, prefix) in $prefixes {
             let mut template = c.start();
-            template.commit_bytes(prefix).expect("fixture prefix");
+            assert!(template.commit_bytes(prefix), "fixture prefix");
             let mut oracle = $reference.start();
-            oracle.commit_bytes(prefix).expect("oracle prefix");
+            assert!(oracle.commit_bytes(prefix), "oracle prefix");
             let expected = oracle.mask();
             assert_eq!(template.mask(), expected, "{} / {} exact oracle", $name, prefix_name);
             let token = expected.iter().enumerate().find_map(|(i, &w)| {
@@ -59,7 +59,7 @@ macro_rules! measure {
                 state.fill_mask(black_box(&mut out));
                 let mask_end = Instant::now();
                 if let Some(token) = token {
-                    state.commit_token(black_box(token)).expect("mask/commit agreement");
+                    assert!(state.commit_token(black_box(token)), "mask/commit agreement");
                 }
                 let commit_end = Instant::now();
                 assert_eq!(out, expected, "{} / {} timed mask", $name, prefix_name);

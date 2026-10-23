@@ -54,10 +54,6 @@ pub enum ErrorKind {
     /// An artifact could not be serialized or loaded.
     #[error("Serialization error: {0}")]
     Serialization(String),
-
-    /// A token or byte commit was rejected by the sequence state.
-    #[error("Constraint state error: {0}")]
-    State(String),
 }
 
 #[allow(non_snake_case)]
@@ -94,11 +90,6 @@ impl Error {
     /// An artifact could not be serialized or loaded.
     pub(crate) fn Serialization(message: String) -> Self {
         Self::new(ErrorKind::Serialization(message))
-    }
-
-    /// A token or byte commit was rejected by the sequence state.
-    pub(crate) fn State(message: String) -> Self {
-        Self::new(ErrorKind::State(message))
     }
 
     fn new(kind: ErrorKind) -> Self {

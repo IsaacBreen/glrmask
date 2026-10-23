@@ -1795,19 +1795,19 @@ mod tests {
                 state.fill_mask(&mut mask);
                 assert_eq!(mask, expected, "depth={depth}: unary prefix");
                 assert!(!state.is_accepting());
-                state.commit_token(b'!' as u32).unwrap();
+                assert!(state.commit_token(b'!' as u32));
             }
             state.fill_mask(&mut mask);
             assert_eq!(mask, expected, "depth={depth}: atom");
-            state.commit_token(b'x' as u32).unwrap();
+            assert!(state.commit_token(b'x' as u32));
             expected.fill(0);
             expected[b';' as usize / 32] |= 1 << (b';' % 32);
             state.fill_mask(&mut mask);
             assert_eq!(mask, expected, "depth={depth}: terminator");
             assert!(!state.is_accepting());
             let mut rejected = state.clone();
-            assert!(rejected.commit_token(b'!' as u32).is_err());
-            state.commit_token(b';' as u32).unwrap();
+            assert!(!rejected.commit_token(b'!' as u32));
+            assert!(state.commit_token(b';' as u32));
             assert!(state.is_accepting());
             state.fill_mask(&mut mask);
             assert!(mask.iter().all(|&word| word == 0), "depth={depth}: complete");
@@ -1853,7 +1853,7 @@ mod tests {
             for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
                 for depth in [0, 1, 17, 257] {
                     let mut state = constraint.start();
-                    for _ in 0..depth { state.commit_token(b'!' as u32).unwrap(); }
+                    for _ in 0..depth { assert!(state.commit_token(b'!' as u32)); }
                     let mut mask = vec![0; 8]; state.fill_mask(&mut mask);
                     assert_eq!(mask, expected, "{optimization:?} {representation} depth={depth}");
                     if !state.is_accepting() { errors.push(format!("{optimization:?} {representation} depth={depth}: should accept")); }
@@ -1866,7 +1866,7 @@ mod tests {
         for (representation, constraint) in [("direct", compiled), ("self", loaded), ("external", external)] {
             for depth in [0, 1, 17, 257] {
                 let mut state = constraint.start();
-                for _ in 0..depth { state.commit_token(b'!' as u32).unwrap(); }
+                for _ in 0..depth { assert!(state.commit_token(b'!' as u32)); }
                 let mut mask = vec![0; 8]; state.fill_mask(&mut mask);
                 assert_eq!(mask, expected, "dynamic {representation} depth={depth}");
                 if !state.is_accepting() { errors.push(format!("dynamic {representation} depth={depth}: should accept")); }
@@ -1892,10 +1892,10 @@ mod tests {
                 let mut mask = vec![0; 8];
                 state.fill_mask(&mut mask); assert_eq!(mask, initial);
                 assert!(state.is_accepting());
-                state.commit_token(b'!' as u32).unwrap();
+                assert!(state.commit_token(b'!' as u32));
                 state.fill_mask(&mut mask); assert_eq!(mask, after_bang);
                 assert!(!state.is_accepting());
-                state.commit_token(b'x' as u32).unwrap();
+                assert!(state.commit_token(b'x' as u32));
                 assert!(state.is_accepting());
                 state.fill_mask(&mut mask); assert!(mask.iter().all(|&word| word == 0));
             }
@@ -1908,10 +1908,10 @@ mod tests {
             let mut mask = vec![0; 8];
             state.fill_mask(&mut mask); assert_eq!(mask, initial);
             assert!(state.is_accepting());
-            state.commit_token(b'!' as u32).unwrap();
+            assert!(state.commit_token(b'!' as u32));
             state.fill_mask(&mut mask); assert_eq!(mask, after_bang);
             assert!(!state.is_accepting());
-            state.commit_token(b'x' as u32).unwrap();
+            assert!(state.commit_token(b'x' as u32));
             assert!(state.is_accepting());
             state.fill_mask(&mut mask); assert!(mask.iter().all(|&word| word == 0));
         }

@@ -21,18 +21,18 @@ fn main() {
     // recursive level or b can begin closing the current one.
     assert!(token_allowed(&state.mask(), 0));
     assert!(!token_allowed(&state.mask(), 1));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
 
     assert!(token_allowed(&state.mask(), 0));
     assert!(token_allowed(&state.mask(), 1));
-    state.commit_token(0).unwrap();
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(0));
+    assert!(state.commit_token(1));
 
     // Once closing has begun, another a would produce a^2 b a..., which cannot
     // be completed to a string in a^n b^n.
     assert!(!token_allowed(&state.mask(), 0));
     assert!(token_allowed(&state.mask(), 1));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
 
     assert!(state.is_accepting());
     println!("accepted: aabb");

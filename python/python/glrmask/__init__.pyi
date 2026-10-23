@@ -31,7 +31,7 @@ for token_id, expected in [(0, [True, False, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
     state.commit_token(token_id)
-assert state.is_accepting()
+assert not state.mask().any()
 ```
 
 Python masks are NumPy Boolean arrays indexed by original model token ID.
@@ -106,14 +106,14 @@ class Vocab:
     Entries map model token IDs to exact token bytes. Token IDs may be sparse; masks use the original model token IDs.
     """
     @staticmethod
-    def from_dict(token_to_id: dict[Union[str, bytes], int]) -> Vocab:
+    def from_dict(token_to_id: dict[Union[str, bytes], int], *, special_tokens: Optional[Sequence[int]] = None) -> Vocab:
         """Creates a vocabulary from `{token: id}`.
 
         String tokens are UTF-8 encoded and byte tokens are used verbatim; IDs must be unsigned 32-bit integers.
         """
         ...
     @staticmethod
-    def from_id_to_bytes(id_to_bytes: dict[int, bytes]) -> Vocab:
+    def from_id_to_bytes(id_to_bytes: dict[int, bytes], *, special_tokens: Optional[Sequence[int]] = None) -> Vocab:
         """Creates a vocabulary from `{token_id: bytes}`.
 
         Use the tokenizer's exact decoded bytes, including partial UTF-8 sequences, not display spellings.
@@ -242,13 +242,12 @@ class Module:
         self,
         vocab: Vocab,
         *,
-        end_tokens: Optional[Sequence[int]] = None,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
     ) -> Constraint:
         """Compiles the module assembly against `vocab`.
 
-        Requires every extern to be bound; `end_tokens` are admitted once the grammar is complete and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
+        Requires every extern to be bound. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
         """
         ...
     @property
@@ -323,7 +322,6 @@ class Grammar:
         self,
         vocab: Vocab,
         *,
-        end_tokens: Optional[Sequence[int]] = None,
         mask_strategy: MaskStrategy = MaskStrategy.AUTO,
         boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
     ) -> Constraint:
@@ -331,6 +329,13 @@ class Grammar:
 
         Equivalent to `Module(self).compile(vocab, ...)`.
         """
+        ...
+    @staticmethod
+    def from_expr(expr: Union[Expr, Grammar, TokenSet]) -> Grammar:
+        """Builds a source grammar from an expression."""
+        ...
+    def bind(self, name: str, value: Union[Grammar, Expr, TokenSet]) -> None:
+        """Binds one declared extern."""
         ...
     def __copy__(self) -> Grammar:
         """An independent handle."""
@@ -377,7 +382,10 @@ class ConstraintState:
         Sorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.
         """
         ...
-    def clone(self) -> ConstraintState:
+    def copy(self) -> ConstraintState:
+        """An independent snapshot at the current prefix."""
+        ...
+    def __copy__(self) -> ConstraintState:
         """An independent snapshot at the current prefix."""
         ...
     def mask(self, size: Optional[int] = None) -> NDArray[np.bool_]:
@@ -392,23 +400,14 @@ class ConstraintState:
         The array must hold at least `Constraint.mask_len()` words; extra words are cleared.
         """
         ...
-    def commit_token(self, token_id: int) -> None:
-        """Commits one model token event.
-
-        Returns an error if the token is not allowed; the state is then unusable, so clone it first to try a token speculatively.
-        """
+    def commit_token(self, token_id: int) -> bool:
+        """Commits one model token event; returns false when it is disallowed."""
         ...
-    def commit_tokens(self, token_ids: Sequence[int]) -> None:
-        """Commits model token IDs in order.
-
-        Stops with an error at the first disallowed token; the state is then unusable.
-        """
+    def commit_tokens(self, token_ids: Sequence[int]) -> bool:
+        """Commits model token IDs in order; returns false at the first disallowed event."""
         ...
-    def commit_bytes(self, data: bytes) -> None:
-        """Commits raw bytes rather than a model token event.
-
-        Does not substitute for committing a token-set or end-token event.
-        """
+    def commit_bytes(self, data: bytes) -> bool:
+        """Commits raw bytes rather than a model token event; returns false when disallowed."""
         ...
     def is_accepting(self) -> bool:
         """Whether the input so far is a complete match.

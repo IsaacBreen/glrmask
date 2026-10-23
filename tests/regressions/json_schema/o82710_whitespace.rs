@@ -57,7 +57,7 @@ fn assert_token_in_mask(schema: &str, prefix: &[u8], tokens: &[&[u8]], token_id:
     let vocab = vocab(tokens);
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
     assert!(
         token_allowed(&state.mask(), token_id),
         "token {token_id} should be present in mask"
@@ -79,9 +79,9 @@ fn o82710_string_prefix_commits_disputed_single_token() {
     let vocab = vocab(&[b"');?>\""]);
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(string_schema()), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(&string_prefix()).unwrap();
+    assert!(state.commit_bytes(&string_prefix()));
     assert!(token_allowed(&state.mask(), 0));
-    state.commit_token(0).unwrap();
+    assert!(state.commit_token(0));
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn json_schema_pattern_s_accepts_ecma_unicode_whitespace_string() {
     let vocab = vocab(&["\"".as_bytes(), "\u{3000}".as_bytes()]);
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes("\"\u{3000}\"".as_bytes()).unwrap();
+    assert!(state.commit_bytes("\"\u{3000}\"".as_bytes()));
     assert!(state.is_accepting());
 }
 
@@ -114,6 +114,6 @@ fn json_schema_pattern_s_accepts_llguidance_nel_whitespace_string() {
     let vocab = vocab(&["\"".as_bytes(), "\u{0085}".as_bytes()]);
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(pattern_whitespace_schema()), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes("\"\u{0085}\"".as_bytes()).unwrap();
+    assert!(state.commit_bytes("\"\u{0085}\"".as_bytes()));
     assert!(state.is_accepting());
 }

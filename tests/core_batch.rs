@@ -27,8 +27,8 @@ fn source_and_prepared_children_are_snapshots_not_live_handles() {
     let mut loaded=PreparedGrammar::load(open.save(), &v).unwrap();
     loaded.bind("RIGHT::MARK",TokenSet::from(29)).unwrap();
     let c=loaded.link_with(options()).unwrap();let mut s=c.start();
-    assert_ne!(s.mask()[0]&(1<<17),0);s.commit_token(17).unwrap();
-    assert_ne!(s.mask()[0]&(1<<29),0);s.commit_token(29).unwrap();assert!(s.is_accepting());
+    assert_ne!(s.mask()[0]&(1<<17),0);assert!(s.commit_token(17));
+    assert_ne!(s.mask()[0]&(1<<29),0);assert!(s.commit_token(29));assert!(s.is_accepting());
     assert_eq!(open.requirements().unwrap().len(),1);
 }
 #[test]
@@ -43,8 +43,8 @@ fn event_values_widen_to_grammar_but_grammars_do_not_narrow_to_token_ports() {
         let x=a.compile_with_build_options(&v,opt.clone()).unwrap();let y=b.link_with(opt).unwrap();
         assert_eq!(x.start().mask(),y.start().mask(),"{mode:?}");
         for c in [&x,&y] {
-            let mut s=c.start();assert!(s.commit_bytes(b"x").is_err());
-            let mut s=c.start();s.commit_token(17).unwrap();assert!(s.is_accepting());
+            let mut s=c.start();assert!(!s.commit_bytes(b"x"));
+            let mut s=c.start();assert!(s.commit_token(17));assert!(s.is_accepting());
         }
     }
     let mut t=Grammar::from_glrm("extern token VALUE start root nt root=VALUE");
@@ -63,7 +63,7 @@ fn independent_concurrent_specializations_do_not_share_mutations() {
             let mut request=p.clone();let id=if i%2==0{17}else{29};
             request.bind("MARK",TokenSet::from(id)).unwrap();
             let c=request.link_with(options()).unwrap();let mut s=c.start();
-            s.commit_token(id).unwrap();assert!(s.is_accepting());
+            assert!(s.commit_token(id));assert!(s.is_accepting());
         })}).collect::<Vec<_>>();
         for job in jobs {job.join().unwrap();}
     });

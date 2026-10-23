@@ -14,7 +14,7 @@ def accepts(constraint, value):
     for byte in json.dumps(value, ensure_ascii=False).encode():
         if not state.mask()[byte]:
             return False
-        state.commit_token(byte)
+        assert state.commit_token(byte)
     return state.is_accepting()
 
 

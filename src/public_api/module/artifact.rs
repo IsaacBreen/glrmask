@@ -276,7 +276,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 if matches!(module.node.source.source, GrammarSource::Lark(_)) {
                     for (name, _) in &module.node.source.lark_document().map_err(|e| err(e.to_string()))?.schemas {
                         if engine != MaskStrategy::TokenTrie.key() {
-                            expected.insert(name.clone(), ExternalKind::Grammar);
+                            expected.insert(name.clone(), ExternKind::Grammar);
                             generated.insert(name.clone());
                         }
                     }

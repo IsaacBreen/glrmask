@@ -61,7 +61,7 @@ fn commit_tokens(
         let mut state = constraint.start();
         for &token in tokens {
             let _ = state.mask();
-            if state.commit_token(token).is_err() {
+            if !state.commit_token(token) {
                 tx.send(None).ok();
                 return;
             }

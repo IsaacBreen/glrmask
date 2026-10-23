@@ -111,9 +111,9 @@ fn main() -> Result<()> {
         let constraint = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(optimization))?;
         let mut state = constraint.start();
         assert_eq!(state.mask()[0] & (1 << 4), 0, "empty parentheses are not in this grammar");
-        state.commit_token(3)?; assert!(state.is_accepting());
+        assert!(state.commit_token(3)); assert!(state.is_accepting());
         let loaded = Constraint::load(constraint.save(), &vocab)?;
-        let mut state = loaded.start(); state.commit_bytes(b"((((a))))")?; assert!(state.is_accepting());
+        let mut state = loaded.start(); assert!(state.commit_bytes(b"((((a))))")); assert!(state.is_accepting());
         println!("{optimization:?}: recursive public constructor and saved template program passed");
     }
     Ok(())
@@ -142,8 +142,8 @@ mod tests {
             let c = parser.compile_with(&vocab, TemplateBuildOptions::default().optimization(mode)).unwrap();
             for c in [&c, &Constraint::load(c.save(), &vocab).unwrap()] {
                 let mut state = c.start(); assert_eq!(state.mask()[0], 0b011001);
-                state.commit_token(0).unwrap(); assert_eq!(state.mask()[0], 0b000110);
-                for end in [1, 2] { let mut branch = state.clone(); branch.commit_token(end).unwrap(); assert!(branch.is_accepting()); }
+                assert!(state.commit_token(0)); assert_eq!(state.mask()[0], 0b000110);
+                for end in [1, 2] { let mut branch = state.clone(); assert!(branch.commit_token(end)); assert!(branch.is_accepting()); }
             }
         }
     }

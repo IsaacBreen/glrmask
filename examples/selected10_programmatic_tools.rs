@@ -282,7 +282,7 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
             b"const x = tools.tool_0({".as_slice(),
         ] {
             let mut probe = composed.start();
-            probe.commit_bytes(prefix).unwrap_or_else(|error| panic!("selected10 prefix {prefix:?} rejected: {error}"));
+            assert!(probe.commit_bytes(prefix));
             std::hint::black_box(probe.mask());
         }
         if std::env::var_os("SELECTED10_EXTRA_BOUNDARY_PROBES").is_some() {
@@ -293,13 +293,11 @@ fn bench(cache_dir: &Path, vocab: &Vocab, runs: usize, save_output: bool) {
                 b"const x = tools.tool_0({}".as_slice(),
             ] {
                 let mut probe = composed.start();
-                probe.commit_bytes(prefix).unwrap_or_else(|error| {
-                    panic!("selected10 extra boundary prefix {prefix:?} rejected: {error}")
-                });
+                assert!(probe.commit_bytes(prefix));
                 std::hint::black_box(probe.mask());
             }
         }
-        state.commit_bytes(b"const x = tools.tool_0({})").unwrap();
+        assert!(state.commit_bytes(b"const x = tools.tool_0({})"));
         std::hint::black_box(state.mask());
 
         let save_started = Instant::now();

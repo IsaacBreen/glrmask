@@ -339,7 +339,7 @@ mod tests {
             let mut balance = 0i32;
             for committed in [None, Some(0u32), Some(1u32)] {
                 if let Some(token) = committed {
-                    state.commit_token(token).unwrap();
+                    assert!(state.commit_token(token));
                     balance += if token == 0 { 1 } else { -1 };
                 }
                 state.fill_mask(&mut mask);
@@ -557,7 +557,7 @@ mod tests {
                     let mut mask = vec![0; constraint.mask_len()];
                     state.fill_mask(&mut mask);
                     assert_ne!(mask[0] & 1, 0);
-                    state.commit_token(0).unwrap();
+                    assert!(state.commit_token(0));
                     assert!(state.is_accepting());
                 }
                 assert!(

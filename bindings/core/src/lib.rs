@@ -91,12 +91,10 @@ pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> 
 }
 
 pub fn compile_options(
-    end_tokens: Vec<u32>,
     mask_strategy: glrmask::MaskStrategy,
     boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
 ) -> glrmask::CompileOptions {
     glrmask::CompileOptions::default()
-        .end_tokens(end_tokens)
         .mask_strategy(mask_strategy)
         .boundary_mask_strategy(boundary_mask_strategy)
 }
@@ -154,11 +152,11 @@ impl State {
         }
         self.read(|s| { s.fill_mask(output); Ok(()) })
     }
-    pub fn commit_token(&mut self, id: u32) -> Result<()> { self.write(|s| Ok(s.commit_token(id)?)) }
-    pub fn commit_tokens(&mut self, ids: &[u32]) -> Result<()> { self.write(|s| Ok(s.commit_tokens(ids)?)) }
-    pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<()> { self.write(|s| Ok(s.commit_bytes(bytes)?)) }
+    pub fn commit_token(&mut self, id: u32) -> Result<bool> { self.write(|s| Ok(s.commit_token(id))) }
+    pub fn commit_tokens(&mut self, ids: &[u32]) -> Result<bool> { self.write(|s| Ok(s.commit_tokens(ids))) }
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> Result<bool> { self.write(|s| Ok(s.commit_bytes(bytes))) }
     pub fn is_accepting(&self) -> Result<bool> { self.read(|s| Ok(s.is_accepting())) }
-    pub fn forced_tokens(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.forced_tokens()?)) }
+    pub fn forced_tokens(&self) -> Result<Vec<u32>> { self.read(|s| Ok(s.forced_tokens())) }
     pub fn marker_events(&self) -> Result<Vec<glrmask::MarkerEvent>> { self.read(|s| Ok(s.marker_events().to_vec())) }
 }
 
@@ -172,7 +170,6 @@ mod tests {
             let grammar = glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"");
             let module = glrmask::Module::new(&grammar);
             let options = compile_options(
-                Vec::new(),
                 mask_strategy(mode).unwrap(),
                 glrmask::BoundaryMaskStrategy::Auto,
             );
@@ -181,7 +178,7 @@ mod tests {
             let mut a = State::start(c).unwrap();
             assert_eq!(a.mask().unwrap(), expected);
             let b = a.try_clone().unwrap();
-            a.commit_token(31).unwrap();
+            assert!(a.commit_token(31));
             assert!(a.is_accepting().unwrap());
             assert!(!b.is_accepting().unwrap());
             let mut words = [u32::MAX;3];

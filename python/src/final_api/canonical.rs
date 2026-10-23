@@ -34,8 +34,8 @@ impl PyExtern {
 impl From<glrmask::Extern> for PyExtern {
     fn from(e: glrmask::Extern) -> Self {
         let kind = match e.kind() {
-            glrmask::ExternalKind::Token => "token".to_string(),
-            glrmask::ExternalKind::Grammar => "grammar".to_string(),
+            glrmask::ExternKind::Token => "token".to_string(),
+            glrmask::ExternKind::Grammar => "grammar".to_string(),
             _ => "grammar".to_string(),
         };
         Self {
@@ -144,7 +144,7 @@ impl Drop for PyExpr {
     }
 }
 
-fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Expr> {
+pub(super) fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Expr> {
     if value.is_instance_of::<pyo3::types::PyString>() {
         return Err(PyTypeError::new_err(
             "plain strings are not accepted as Expr parts; use Expr.literal(...)",
@@ -299,6 +299,25 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     ))
 }
 
+pub(super) fn bind_grammar(
+    grammar: &mut glrmask::Grammar,
+    name: &str,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    if let Ok(g) = value.extract::<PyRef<'_, PyGrammar>>() {
+        return grammar.bind(name, g.inner.clone()).map_err(api_error);
+    }
+    if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
+        return grammar.bind(name, e.inner.clone()).map_err(api_error);
+    }
+    if let Ok(t) = value.extract::<PyRef<'_, PyTokenSet>>() {
+        return grammar.bind(name, t.inner.clone()).map_err(api_error);
+    }
+    Err(PyTypeError::new_err(
+        "Grammar.bind accepts Grammar, Expr, or TokenSet",
+    ))
+}
+
 pub(super) fn compile_options(
     mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
     boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
@@ -415,19 +434,17 @@ impl PyModule {
         Ok(())
     }
 
-    #[pyo3(signature = (vocab, *, end_tokens = None, mask_strategy = None, boundary_mask_strategy = None))]
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
-        end_tokens: Option<Vec<u32>>,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
-        let options = compile_options(mask_strategy, boundary_mask_strategy)
-            .end_tokens(end_tokens.unwrap_or_default());
+        let options = compile_options(mask_strategy, boundary_mask_strategy);
         let constraint = py
             .detach(move || snapshot.compile_with(&vocab, options))
             .map_err(api_error)?;

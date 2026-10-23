@@ -3734,8 +3734,8 @@ mod parser_replacement_compile_tests {
                 assert_eq!(a, b, "mask before token {token}");
                 assert_eq!(left.is_accepting(), right.is_accepting());
                 assert_ne!(a[token as usize / 32] & (1 << (token % 32)), 0);
-                left.commit_token(token).unwrap();
-                right.commit_token(token).unwrap();
+                assert!(left.commit_token(token));
+                assert!(right.commit_token(token));
             }
             assert!(left.is_accepting());
             assert!(right.is_accepting());
@@ -3760,8 +3760,9 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
     /// Advance the state by raw bytes.
-    pub fn commit_bytes(&mut self, bytes: &[u8]) -> crate::Result<()> {
-        self.commit_bytes_raw(bytes).map_err(crate::Error::State)
+    #[must_use]
+    pub fn commit_bytes(&mut self, bytes: &[u8]) -> bool {
+        self.commit_bytes_raw(bytes).is_ok()
     }
 
     fn commit_bytes_raw(&mut self, bytes: &[u8]) -> Result<(), String> {
@@ -3769,7 +3770,8 @@ impl<'a> DynamicConstraintState<'a> {
     }
 
     /// Advance the state by one model token ID.
-    pub fn commit_token(&mut self, token_id: u32) -> crate::Result<()> {
+    #[must_use]
+    pub fn commit_token(&mut self, token_id: u32) -> bool {
         if self
             .alternatives
             .iter()
@@ -3777,20 +3779,21 @@ impl<'a> DynamicConstraintState<'a> {
         {
             // An unknown ID is a failed commit: the state is dead.
             self.alternatives.clear();
-            return Err(crate::Error::State(format!(
-                "commit_token: token_id {token_id} not in vocabulary or special-token terminals"
-            )));
+            return false;
         }
-        self.commit_token_raw(token_id).map_err(crate::Error::State)
+        self.commit_token_raw(token_id).is_ok()
     }
 
     /// Advance the state by a batch of model token IDs in order. A disallowed
-    /// event returns an error and rejects the state.
-    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> crate::Result<()> {
+    /// event returns false and rejects the state.
+    #[must_use]
+    pub fn commit_tokens(&mut self, token_ids: &[u32]) -> bool {
         for &token_id in token_ids {
-            self.commit_token(token_id)?;
+            if !self.commit_token(token_id) {
+                return false;
+            }
         }
-        Ok(())
+        true
     }
 
     fn commit_token_raw(&mut self, token_id: u32) -> Result<(), String> {
@@ -3883,7 +3886,7 @@ impl<'a> DynamicConstraintState<'a> {
     /// Return a read-only prefix of library-canonical forced output.
     /// Ordinary text uses longest admitted spelling and lowest-ID alias
     /// selection; exact-token events retain their IDs.
-    pub fn forced_tokens(&self)->crate::Result<Vec<u32>> {
+    pub fn forced_tokens(&self)->Vec<u32> {
         crate::runtime::force_for_states_result(&self.alternatives,Some(true))
     }
     pub(crate) fn mask_if_at_most(&self,max_allowed:usize)->crate::Result<Option<Vec<u32>>> {
@@ -3907,6 +3910,10 @@ impl<'a> DynamicConstraintState<'a> {
     /// still admit further tokens.
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
+    }
+
+    pub(crate) fn frontier_complete(&self) -> bool {
+        self.alternatives.iter().any(ConstraintState::frontier_complete)
     }
 
     /// Return the allowed-token mask as a packed `u32` bitset.
@@ -4028,11 +4035,11 @@ mod tests {
         let mut dynamic_state = dynamic.start();
 
         assert_eq!(normal_state.mask(), dynamic_state.mask());
-        normal_state.commit_token(3).unwrap();
-        dynamic_state.commit_token(3).unwrap();
+        assert!(normal_state.commit_token(3));
+        assert!(dynamic_state.commit_token(3));
         assert_eq!(normal_state.mask(), dynamic_state.mask());
-        normal_state.commit_token(1).unwrap();
-        dynamic_state.commit_token(1).unwrap();
+        assert!(normal_state.commit_token(1));
+        assert!(dynamic_state.commit_token(1));
         assert_eq!(normal_state.is_accepting(), dynamic_state.is_accepting());
         assert_eq!(normal_state.mask(), dynamic_state.mask());
     }
@@ -4075,7 +4082,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(accepts(br#"["a", "bb"]"#));
         assert!(!accepts(br#"[""]"#));
@@ -4110,12 +4117,10 @@ mod tests {
                 token_allowed(&dynamic_mask, token),
                 "fixture token {token} must be admitted at step {step}",
             );
-            dynamic_state
-                .commit_token(token)
-                .unwrap_or_else(|error| panic!("dynamic commit failed at step {step}: {error}"));
-            loaded_state
-                .commit_token(token)
-                .unwrap_or_else(|error| panic!("loaded commit failed at step {step}: {error}"));
+            assert!(dynamic_state
+                .commit_token(token));
+            assert!(loaded_state
+                .commit_token(token));
         }
         assert_eq!(dynamic_state.is_accepting(), loaded_state.is_accepting());
         assert_eq!(dynamic_state.mask(), loaded_state.mask());
@@ -4181,7 +4186,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(accepts(br#""aa""#));
         assert!(!accepts(br#""\u0061\u0061""#));
@@ -4232,7 +4237,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(!accepts(br#""a""#));
         assert!(accepts(br#""aa""#));
@@ -4301,7 +4306,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(!accepts(br#""aa""#));
         assert!(accepts(br#""aaa""#));
@@ -4348,7 +4353,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(!accepts(br#""a""#));
         assert!(accepts(br#""aa""#));
@@ -4488,7 +4493,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(!accepts(br#""aa""#));
         assert!(accepts(br#""aaa""#));
@@ -4539,7 +4544,7 @@ mod tests {
 
         let accepts = |bytes: &[u8]| {
             let mut state = dynamic.start();
-            state.commit_bytes(bytes).is_ok() && state.is_accepting()
+            state.commit_bytes(bytes) && state.is_accepting()
         };
         assert!(!accepts("\"é\"".as_bytes()));
         assert!(accepts("\"éé\"".as_bytes()));
@@ -4654,8 +4659,8 @@ mod tests {
 
         let mut original_state = constraint.start();
         let mut loaded_state = loaded.start();
-        original_state.commit_token(4).unwrap();
-        loaded_state.commit_token(4).unwrap();
+        assert!(original_state.commit_token(4));
+        assert!(loaded_state.commit_token(4));
         assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
         assert_eq!(original_state.mask(), loaded_state.mask());
     }
@@ -4891,9 +4896,9 @@ mod tests {
             let mut original = constraint.start();
             let mut loaded_state = loaded.start();
             let mut transferred_state = transferred.start();
-            original.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
-            transferred_state.commit_token(token).unwrap();
+            assert!(original.commit_token(token));
+            assert!(loaded_state.commit_token(token));
+            assert!(transferred_state.commit_token(token));
             assert_eq!(loaded_state.is_accepting(), original.is_accepting());
             assert_eq!(transferred_state.is_accepting(), original.is_accepting());
             assert_eq!(loaded_state.mask(), original.mask());
@@ -5189,8 +5194,8 @@ mod tests {
 
         let mut state = constraint.start();
         let mut oracle_state = oracle.start();
-        state.commit_token(2).unwrap(); // "abb" = "a" + "bb"
-        oracle_state.commit_token(2).unwrap();
+        assert!(state.commit_token(2)); // "abb" = "a" + "bb"
+        assert!(oracle_state.commit_token(2));
         assert!(state.is_accepting());
         let after = state.mask();
         assert_eq!(after, oracle_state.mask());
@@ -5224,11 +5229,11 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut ordinary_state = ordinary.start();
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
-        dynamic_state.commit_token(2).unwrap();
-        ordinary_state.commit_token(2).unwrap();
+        assert!(dynamic_state.commit_token(2));
+        assert!(ordinary_state.commit_token(2));
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
-        dynamic_state.commit_token(1).unwrap();
-        ordinary_state.commit_token(1).unwrap();
+        assert!(dynamic_state.commit_token(1));
+        assert!(ordinary_state.commit_token(1));
         assert_eq!(dynamic_state.is_accepting(), ordinary_state.is_accepting());
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
     }
@@ -5262,8 +5267,8 @@ mod tests {
 
         let mut original_state = constraint.start();
         let mut loaded_state = loaded.start();
-        original_state.commit_token(2).unwrap();
-        loaded_state.commit_token(2).unwrap();
+        assert!(original_state.commit_token(2));
+        assert!(loaded_state.commit_token(2));
         assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
         assert_eq!(original_state.mask(), loaded_state.mask());
     }
@@ -5397,8 +5402,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [3, 4, 1, 2] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -5410,8 +5415,8 @@ mod tests {
 
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
-        original_state.commit_token(0).unwrap();
-        loaded_state.commit_token(0).unwrap();
+        assert!(original_state.commit_token(0));
+        assert!(loaded_state.commit_token(0));
         assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
         assert_eq!(loaded_state.mask(), original_state.mask());
     }
@@ -5470,8 +5475,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [1u32, 2, 3] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert!(!dynamic_state.is_accepting());
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
@@ -5492,8 +5497,8 @@ mod tests {
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
         for token in [1u32, 2, 3] {
-            original_state.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(loaded_state.commit_token(token));
             assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
             assert_eq!(loaded_state.mask(), original_state.mask());
         }
@@ -5560,8 +5565,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [1u32, 2, 3] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -5573,8 +5578,8 @@ mod tests {
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
         for token in [1u32, 2, 3] {
-            original_state.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(loaded_state.commit_token(token));
             assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
             assert_eq!(loaded_state.mask(), original_state.mask());
         }
@@ -5632,8 +5637,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [2u32, 1, 0] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -5651,8 +5656,8 @@ mod tests {
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
         for token in [2u32, 1, 0] {
-            original_state.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(loaded_state.commit_token(token));
             assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
             assert_eq!(loaded_state.mask(), original_state.mask());
         }
@@ -5720,8 +5725,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [2u32, 1, 0] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -5844,8 +5849,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -5907,8 +5912,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -5959,8 +5964,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6033,9 +6038,9 @@ mod tests {
         assert!(!allowed(2), "entering the giant x* branches can never reach a common suffix");
 
         let mut rejected = dynamic.start();
-        assert!(rejected.commit_token(0).is_err());
+        assert!(!rejected.commit_token(0));
         let mut accepted = dynamic.start();
-        accepted.commit_token(1).unwrap();
+        assert!(accepted.commit_token(1));
         assert!(accepted.is_accepting());
 
         let loaded = DynamicConstraint::load(&dynamic.save(), &vocab).unwrap();
@@ -6084,8 +6089,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6165,8 +6170,8 @@ mod tests {
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
         for token in [0, 2, 3] {
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -6223,8 +6228,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6349,8 +6354,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6360,7 +6365,7 @@ mod tests {
         let loaded = DynamicConstraint::load(&saved, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), dynamic.start().mask());
         let mut loaded_state = loaded.start();
-        loaded_state.commit_token(0).unwrap();
+        assert!(loaded_state.commit_token(0));
         assert!(loaded_state.is_accepting());
     }
 
@@ -6410,8 +6415,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6488,8 +6493,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -6498,8 +6503,8 @@ mod tests {
         let mut dynamic_boundary = dynamic.start();
         let mut oracle_boundary = oracle.start();
         for _ in 0..49 {
-            dynamic_boundary.commit_token(1).unwrap();
-            oracle_boundary.commit_token(1).unwrap();
+            assert!(dynamic_boundary.commit_token(1));
+            assert!(oracle_boundary.commit_token(1));
         }
         assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
         assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
@@ -6510,16 +6515,16 @@ mod tests {
         // the required trailing 'b' is included.
         let mut dynamic_overrun = dynamic_boundary.clone();
         let mut oracle_overrun = oracle_boundary.clone();
-        assert!(dynamic_overrun.commit_token(1).is_err());
-        assert!(oracle_overrun.commit_token(1).is_err());
+        assert!(!dynamic_overrun.commit_token(1));
+        assert!(!oracle_overrun.commit_token(1));
 
-        dynamic_boundary.commit_token(0).unwrap();
-        oracle_boundary.commit_token(0).unwrap();
+        assert!(dynamic_boundary.commit_token(0));
+        assert!(oracle_boundary.commit_token(0));
         assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
         assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
         assert!(!dynamic_boundary.is_accepting());
-        dynamic_boundary.commit_token(2).unwrap();
-        oracle_boundary.commit_token(2).unwrap();
+        assert!(dynamic_boundary.commit_token(2));
+        assert!(oracle_boundary.commit_token(2));
         assert!(dynamic_boundary.is_accepting());
         assert_eq!(dynamic_boundary.is_accepting(), oracle_boundary.is_accepting());
         assert_eq!(dynamic_boundary.mask(), oracle_boundary.mask());
@@ -6534,9 +6539,9 @@ mod tests {
         let mut loaded_state = loaded.start();
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
-        loaded_state.commit_token(3).unwrap();
-        dynamic_state.commit_token(3).unwrap();
-        oracle_state.commit_token(3).unwrap();
+        assert!(loaded_state.commit_token(3));
+        assert!(dynamic_state.commit_token(3));
+        assert!(oracle_state.commit_token(3));
         assert!(loaded_state.is_accepting());
         assert_eq!(loaded_state.is_accepting(), dynamic_state.is_accepting());
         assert_eq!(loaded_state.is_accepting(), oracle_state.is_accepting());
@@ -6597,8 +6602,8 @@ mod tests {
         assert_eq!(dynamic.start().mask(), oracle.start().mask());
         let mut dynamic_state = dynamic.start();
         let mut oracle_state = oracle.start();
-        dynamic_state.commit_token(2).unwrap();
-        oracle_state.commit_token(2).unwrap();
+        assert!(dynamic_state.commit_token(2));
+        assert!(oracle_state.commit_token(2));
         assert!(dynamic_state.is_accepting());
         assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
         assert_eq!(dynamic_state.mask(), oracle_state.mask());
@@ -6830,8 +6835,8 @@ mod tests {
         for token in [0u32, 1, 2, 3, 4] {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -6842,8 +6847,8 @@ mod tests {
         for token in [0u32, 1] {
             let mut original_state = dynamic.start();
             let mut loaded_state = loaded.start();
-            original_state.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(loaded_state.commit_token(token));
             assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
             assert_eq!(original_state.mask(), loaded_state.mask());
         }
@@ -6861,8 +6866,8 @@ mod tests {
         for token in [0u32, 1] {
             let mut original_state = dynamic.start();
             let mut transferred_state = transferred.start();
-            original_state.commit_token(token).unwrap();
-            transferred_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(transferred_state.commit_token(token));
             assert_eq!(
                 original_state.is_accepting(),
                 transferred_state.is_accepting()
@@ -6941,8 +6946,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -7023,8 +7028,8 @@ mod tests {
         for token in 0u32..=4 {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
-            dynamic_state.commit_token(token).unwrap();
-            oracle_state.commit_token(token).unwrap();
+            assert!(dynamic_state.commit_token(token));
+            assert!(oracle_state.commit_token(token));
             assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
             assert_eq!(dynamic_state.mask(), oracle_state.mask());
         }
@@ -7033,8 +7038,8 @@ mod tests {
         assert_eq!(dynamic.start().mask(), loaded.start().mask());
         let mut original_state = dynamic.start();
         let mut loaded_state = loaded.start();
-        original_state.commit_token(3).unwrap();
-        loaded_state.commit_token(3).unwrap();
+        assert!(original_state.commit_token(3));
+        assert!(loaded_state.commit_token(3));
         assert_eq!(original_state.is_accepting(), loaded_state.is_accepting());
         assert_eq!(original_state.mask(), loaded_state.mask());
     }
@@ -7091,8 +7096,8 @@ mod tests {
             let mut dynamic_state = dynamic.start();
             let mut oracle_state = oracle.start();
             for token in sequence {
-                dynamic_state.commit_token(token).unwrap();
-                oracle_state.commit_token(token).unwrap();
+                assert!(dynamic_state.commit_token(token));
+                assert!(oracle_state.commit_token(token));
                 assert_eq!(dynamic_state.is_accepting(), oracle_state.is_accepting());
                 assert_eq!(dynamic_state.mask(), oracle_state.mask());
             }
@@ -7363,7 +7368,7 @@ mod tests {
                 }
                 let results: Vec<bool> = states
                     .iter_mut()
-                    .map(|state| state.commit_token(token).is_ok())
+                    .map(|state| state.commit_token(token))
                     .collect();
                 for (index, result) in results.iter().enumerate().skip(1) {
                     assert_eq!(
@@ -7415,7 +7420,7 @@ mod tests {
             for path in [vec![0u32, 1, 2, 3, 4, 5], vec![0, 1, 2, 3, 4, 6]] {
                 let mut state = artifact.start();
                 for &token in &path {
-                    state.commit_token(token).unwrap();
+                    assert!(state.commit_token(token));
                 }
                 assert!(state.is_accepting(), "{label} must accept {path:?}");
             }
@@ -7425,17 +7430,17 @@ mod tests {
                 "{label} must not accept the empty prefix"
             );
             assert!(
-                state.commit_token(1).is_err(),
+                !state.commit_token(1),
                 "{label} must reject a leading b"
             );
             let mut state = artifact.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             assert!(
                 !state.is_accepting(),
                 "{label} must not accept the proper prefix [a]"
             );
             assert!(
-                state.commit_token(0).is_err(),
+                !state.commit_token(0),
                 "{label} must reject the aa divergence"
             );
         }
@@ -7538,9 +7543,9 @@ mod tests {
                 expected,
                 "transfer load before token {token}"
             );
-            original_state.commit_token(token).unwrap();
-            loaded_state.commit_token(token).unwrap();
-            transferred_state.commit_token(token).unwrap();
+            assert!(original_state.commit_token(token));
+            assert!(loaded_state.commit_token(token));
+            assert!(transferred_state.commit_token(token));
         }
         assert_eq!(loaded_state.mask(), original_state.mask());
         assert_eq!(transferred_state.mask(), original_state.mask());
@@ -7750,12 +7755,12 @@ nt start ::= A;
         assert!(!constraint.uses_dynamic_runtime());
         let mut state = constraint.start();
 
-        state.commit_token(0).unwrap();
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(1));
         assert_ne!(state.mask()[0] & (1 << 2), 0);
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert_ne!(state.mask()[0] & (1 << 3), 0);
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
     }
 
@@ -7780,21 +7785,21 @@ nt start ::= A;
         assert_eq!(static_state.forced_canonical_reference(), dynamic_state.forced_canonical_reference());
 
         for token in [3, 3] {
-            static_state.commit_token(token).unwrap();
-            dynamic_state.commit_token(token).unwrap();
+            assert!(static_state.commit_token(token));
+            assert!(dynamic_state.commit_token(token));
             assert_eq!(static_state.mask(), dynamic_state.mask());
             assert_eq!(static_state.is_accepting(), dynamic_state.is_accepting());
         }
 
         let before_third = static_state.mask();
         let checkpoint = static_state.clone();
-        static_state.commit_token(0).unwrap();
-        dynamic_state.commit_token(0).unwrap();
+        assert!(static_state.commit_token(0));
+        assert!(dynamic_state.commit_token(0));
         let after_third = static_state.mask();
         assert_eq!(after_third, dynamic_state.mask());
         static_state = checkpoint;
         assert_eq!(static_state.mask(), before_third);
-        static_state.commit_token(0).unwrap();
+        assert!(static_state.commit_token(0));
         assert_eq!(static_state.mask(), after_third);
 
         let loaded = crate::Constraint::load(&constraint.save(), &vocab).unwrap();
@@ -7803,8 +7808,8 @@ nt start ::= A;
         let mut original_state = constraint.start();
         assert_eq!(loaded_state.mask(), original_state.mask());
         for token in [3, 3, 0] {
-            loaded_state.commit_token(token).unwrap();
-            original_state.commit_token(token).unwrap();
+            assert!(loaded_state.commit_token(token));
+            assert!(original_state.commit_token(token));
             assert_eq!(loaded_state.mask(), original_state.mask());
             assert_eq!(loaded_state.is_accepting(), original_state.is_accepting());
         }

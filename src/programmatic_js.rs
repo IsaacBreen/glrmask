@@ -388,7 +388,7 @@ mod tests {
 
     fn accepts_bytes(constraint: &Constraint, bytes: &[u8]) -> bool {
         let mut state = constraint.start();
-        state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        state.commit_bytes(bytes) && state.is_accepting()
     }
 
     #[test]
@@ -639,8 +639,8 @@ mod tests {
                     "static vs dynamic mask mismatch before step {index} ({:?})",
                     std::str::from_utf8(step).unwrap_or("<binary>"),
                 );
-                let a_ok = a.commit_bytes(step).is_ok();
-                let b_ok = b.commit_bytes(step).is_ok();
+                let a_ok = a.commit_bytes(step);
+                let b_ok = b.commit_bytes(step);
                 if !a_ok || !b_ok {
                     stopped = Some(index);
                     break;
@@ -708,9 +708,8 @@ mod tests {
         let value_slot_prefix = b"tools.lookup({\"customer_id\": ";
         for (label, constraint) in [("static", &production_static), ("dynamic", &dynamic)] {
             let mut state = constraint.start();
-            state
-                .commit_bytes(value_slot_prefix)
-                .expect("value-slot prefix must commit");
+            assert!(state
+                .commit_bytes(value_slot_prefix));
             assert!(
                 state.mask().first().is_some_and(|word| word & 1 != 0),
                 "{label}: token 0 (`tools`) must be allowed at the value slot",
@@ -818,8 +817,8 @@ mod tests {
                 "serde roundtrip mask mismatch while committing accepted input",
             );
             assert_eq!(
-                before.commit_bytes(step).is_ok(),
-                after.commit_bytes(step).is_ok(),
+                before.commit_bytes(step),
+                after.commit_bytes(step),
                 "serde roundtrip commit divergence on accepted input",
             );
         }
@@ -832,8 +831,8 @@ mod tests {
                 rejected_after.mask(),
                 "serde roundtrip mask mismatch on rejected input",
             );
-            let a = rejected_before.commit_bytes(step).is_ok();
-            let b = rejected_after.commit_bytes(step).is_ok();
+            let a = rejected_before.commit_bytes(step);
+            let b = rejected_after.commit_bytes(step);
             assert_eq!(a, b, "serde roundtrip commit divergence on rejected input");
             if !a {
                 break;
@@ -876,9 +875,8 @@ mod tests {
             .expect("explicit backend schema composition must succeed");
 
             let mut state = composed.start();
-            state
-                .commit_bytes(value_slot_prefix)
-                .expect("value-slot prefix must commit");
+            assert!(state
+                .commit_bytes(value_slot_prefix));
             assert!(
                 state.mask().first().is_some_and(|word| word & 1 != 0),
                 "{label}: token 0 (`tools`) must be allowed at the value slot",
@@ -886,19 +884,18 @@ mod tests {
             value_slot_masks.push(state.mask());
 
             let mut toolsx = composed.start();
-            assert!(toolsx.commit_bytes(value_slot_prefix).is_ok());
-            assert!(toolsx.commit_bytes(b"tools").is_ok());
-            assert!(toolsx.commit_bytes(b"x").is_ok());
-            assert!(toolsx.commit_bytes(b"}").is_ok());
+            assert!(toolsx.commit_bytes(value_slot_prefix), "value-slot prefix must commit");
+            assert!(toolsx.commit_bytes(b"tools"));
+            assert!(toolsx.commit_bytes(b"x"));
+            assert!(toolsx.commit_bytes(b"}"));
             assert!(toolsx.is_accepting(), "{label}: `toolsx` value must be accepted");
 
             let mut tools_id = composed.start();
-            tools_id
-                .commit_bytes(value_slot_prefix)
-                .expect("value-slot prefix must commit");
-            let reached_accepting = tools_id.commit_bytes(b"tools").is_ok()
-                && tools_id.commit_bytes(b".id").is_ok()
-                && tools_id.commit_bytes(b"}").is_ok()
+            assert!(tools_id
+                .commit_bytes(value_slot_prefix));
+            let reached_accepting = tools_id.commit_bytes(b"tools")
+                && tools_id.commit_bytes(b".id")
+                && tools_id.commit_bytes(b"}")
                 && tools_id.is_accepting();
             assert!(
                 !reached_accepting,

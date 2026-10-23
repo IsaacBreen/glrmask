@@ -89,7 +89,7 @@ fn measure_arm(constraint: &Constraint, arm: &str, repeat: Option<usize>,
             state.fill_mask(&mut mask);
             let mask_ns = mask_started.elapsed().as_nanos();
             let tbm_ns = started.elapsed().as_nanos();
-            if let Some(result) = commit_result { result?; }
+            if let Some(result) = commit_result { if !result { return Err("commit rejected".into()); } }
             let hash = mask_hash(&mask);
             assert_eq!((hash, state.is_accepting()), expected[index][step],
                 "isolated arm={arm} trace={index} step={step}");
@@ -100,7 +100,7 @@ fn measure_arm(constraint: &Constraint, arm: &str, repeat: Option<usize>,
             }
         }
         let eof = [b"<|end".as_slice(), b"oftext|>"].concat();
-        state.commit_bytes(&eof)?; assert!(state.is_accepting());
+        assert!(state.commit_bytes(&eof)); assert!(state.is_accepting());
     }
     csv.flush()?;
     eprintln!("ISOLATED arm={arm} repeat={repeat:?} positions=11767");
@@ -270,7 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             writeln!(csv, "{index},{step},{},{inline_ns},{},{},{},{hash:016x}", token.map(|id| id.to_string()).unwrap_or_default(), times[0], times[1], times[2])?;
             if let Some(token) = token {
                 assert_ne!(mask[token as usize / 32] & (1 << (token % 32)), 0, "canonical token not admitted");
-                oracle.commit_token(token)?; fresh.commit_token(token)?; reloaded.commit_token(token)?; ext.commit_token(token)?;
+                assert!(oracle.commit_token(token)); assert!(fresh.commit_token(token)); assert!(reloaded.commit_token(token)); assert!(ext.commit_token(token));
             }
             samples += 1;
             if step % 512 == 0 { csv.flush()?; eprintln!("TRACE {index} {}/{}", step, trace.token_ids.len()); }
@@ -281,11 +281,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // rather than silently dropping a failing end-of-program assertion.
         let eof = [b"<|end".as_slice(), b"oftext|>"].concat();
         assert!(!oracle.is_accepting(), "the canonical trajectory omits its literal EOF");
-        oracle.commit_bytes(&eof)?;
+        assert!(oracle.commit_bytes(&eof));
         oracle.fill_mask(&mut reference_mask);
         assert!(oracle.is_accepting(), "the canonical program plus its explicit EOF must accept");
         for state in [&mut fresh, &mut reloaded, &mut ext] {
-            state.commit_bytes(&eof)?; state.fill_mask(&mut mask);
+            assert!(state.commit_bytes(&eof)); state.fill_mask(&mut mask);
             assert!(state.is_accepting()); assert_eq!(mask, reference_mask);
         }
         expected.push(trace_expected);

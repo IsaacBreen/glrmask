@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,TokenSet,Grammar,Module,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Expr,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[MaskStrategy.Auto, MaskStrategy.ParserDwa, MaskStrategy.TokenTrie, MaskStrategy.TokenClassTrie];
 const b=s=>Buffer.from(s);
@@ -24,31 +24,31 @@ for(const maskStrategy of strategies) {
     const short=new Uint32Array([123]);
     assert.throws(()=>s.fillMask(short),e=>e.code==='GLRMASK_BUFFER_TOO_SMALL');assert.equal(short[0],123);
     const copy=s.clone();c.dispose();g.dispose();v.dispose();closed(()=>c.start());
-    s.commitToken(31);assert.ok(s.isAccepting());assert.ok(!copy.isAccepting());
-    copy.commitToken(0);assert.deepEqual(Array.from(copy.forcedTokens()),[1]);assert.ok(!copy.isAccepting());
-    copy.commitToken(1);assert.ok(copy.isAccepting());
+    assert.ok(s.commitToken(31));assert.ok(s.isAccepting());assert.ok(!copy.isAccepting());
+    assert.ok(copy.commitToken(0));assert.deepEqual(Array.from(copy.forcedTokens()),[1]);assert.ok(!copy.isAccepting());
+    assert.ok(copy.commitToken(1));assert.ok(copy.isAccepting());
     s.dispose();s.dispose();closed(()=>s.mask());closed(()=>s.commitToken(0));
     copy[Symbol.dispose]();closed(()=>copy.isAccepting());
   });
   test(`${maskStrategy}: raw bytes, partial UTF-8 and exact-only events`,()=>{
-    const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],{exactOnlyIds:[99]});
+    const v=new Vocab([[0,Buffer.from([0xc3])],[1,Buffer.from([0xa9])],[31,b('é')],[32,b('é')],[40,Buffer.from([0,255])]],{specialTokenIds:[99]});
     const c=Grammar.fromEbnf('start ::= "é"').compileSync(v,{maskStrategy}),s=c.start();
-    assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));s.commitBytes(Buffer.from([0xc3]));
-    assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));s.commitBytes(Buffer.from([0xa9]));assert.ok(s.isAccepting());
+    assert.ok(allowed(s.mask(),0));assert.ok(allowed(s.mask(),31));assert.ok(s.commitBytes(Buffer.from([0xc3])));
+    assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));assert.ok(s.commitBytes(Buffer.from([0xa9])));assert.ok(s.isAccepting());
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
     for(const id of [31,40,99]) {
       const m=new Module(host);
       m.bind('T',new TokenSet([id]));
       const e=m.compileSync(v,{maskStrategy}).start();
-      assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));e.commitToken(id);assert.ok(e.isAccepting());
+      assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));assert.ok(e.commitToken(id));assert.ok(e.isAccepting());
     }
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
     const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
-    const s=Grammar.fromEbnf('start ::= "a"').compileSync(v,{maskStrategy,endTokens:[99]}).start();
-    assert.ok(!allowed(s.mask(),99));s.commitToken(0);assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
-    s.commitToken(99);assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
-    assert.ok(s.clone().isAccepting());assert.throws(()=>s.commitToken(99));
+    const s=Grammar.fromExpr(Expr.sequence(Grammar.fromEbnf('start ::= "a"'),new TokenSet([99]))).compileSync(v,{maskStrategy}).start();
+    assert.ok(!allowed(s.mask(),99));assert.ok(s.commitToken(0));assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
+    assert.ok(s.commitToken(99));assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
+    assert.ok(s.clone().isAccepting());assert.equal(s.commitToken(99),false);
   });
   test(`${maskStrategy}: synchronous and asynchronous persistence`,async()=>{
     const v=vocab(),c=await simple().compile(v,{maskStrategy});
@@ -57,9 +57,9 @@ for(const maskStrategy of strategies) {
     const copied=Buffer.from(bytes);const pending=Constraint.load(bytes,v);bytes.fill(0);
     assert.deepEqual((await pending).start().mask(),expected);
     assert.deepEqual(Constraint.loadSync(copied,v).start().mask(),expected);
-    assert.deepEqual((await Constraint.load(bytes,v)).start().mask(),expected);
+    assert.deepEqual((await Constraint.load(copied,v)).start().mask(),expected);
     const wrong=new Vocab([[0,b('WRONG')],[1,b('b')],[31,b('ab')],[32,b('a')],[65,b('z')]]);
-    await assert.rejects(Constraint.load(bytes,wrong));
+    await assert.rejects(Constraint.load(copied,wrong));
     assert.throws(()=>Constraint.loadSync(bytes));
     const saving=c.save();c.dispose();assert.ok((await saving).length>0);
     assert.throws(()=>Constraint.loadSync(Buffer.from('not an artifact')));
@@ -68,7 +68,7 @@ for(const maskStrategy of strategies) {
     const v=vocab(),g=Grammar.fromGlrm('glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);');
     const c=await g.compile(v,{maskStrategy});assert.deepEqual(Array.from(c.markerIds()),[10,20,30]);
     const s=c.start();assert.deepEqual(s.markerEvents(),[{id:10,byteOffset:0n}]);
-    s.commitToken(31);const expected=[{id:20,byteOffset:1n},{id:30,byteOffset:2n}];
+    assert.ok(s.commitToken(31));const expected=[{id:20,byteOffset:1n},{id:30,byteOffset:2n}];
     assert.deepEqual(s.markerEvents(),expected);assert.deepEqual(s.clone().markerEvents(),expected);
     assert.deepEqual((await Constraint.load(await c.save(),v)).markerIds(),c.markerIds());
   });
@@ -81,8 +81,8 @@ test('token sets normalize ranges and expose no inspection accessors',()=>{
   const copy=t.clone();t.dispose();assert.equal(copy.toString(),'TokenSet[31..=32]');
   const empty=new TokenSet([]);assert.equal(empty.toString(),'TokenSet[]');
   assert.ok(new TokenSet([7,7,3]).equals(new TokenSet([3,7])));
-  assert.equal(TokenSet.fromRanges([{start:32,end:31}]).toString(),'TokenSet[]');
-  assert.equal(TokenSet.fromRanges([{start:5,end:5}]).toString(),'TokenSet[]');
+  assert.throws(()=>TokenSet.fromRanges([{start:32,end:31}]),RangeError);
+  assert.throws(()=>TokenSet.fromRanges([{start:5,end:5}]),RangeError);
   const high=new Vocab([],{specialTokenIds:[0xffffffff]});
   assert.equal(high.size,0);
   assert.equal(TokenSet.fromRanges([{start:0xffffffff,end:4294967296}]).toString(),'TokenSet[4294967295..=4294967295]');
@@ -107,7 +107,7 @@ test('an active JS timer continues during native compilation',{timeout:60000},as
 test('frontends and input validation preserve the public contracts',async()=>{
   const v=vocab();
   {
-    const c=await Grammar.fromLark('start: "a" "b"').compile(v);const s=c.start();s.commitToken(31);assert.ok(s.isAccepting());
+    const c=await Grammar.fromLark('start: "a" "b"').compile(v);const s=c.start();assert.ok(s.commitToken(31));assert.ok(s.isAccepting());
   }
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
@@ -121,7 +121,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{optimisation:'auto'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'bogus'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
-  await assert.rejects(simple().compile(v,{endTokens:[-1]}),RangeError);
+  assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
   await assert.rejects(Grammar.fromEbnf('this is not a grammar').compile(v));
@@ -129,12 +129,13 @@ test('frontends and input validation preserve the public contracts',async()=>{
 
 test('raw native arguments reject truncation and unsafe typed-array backing',()=>{
   const v=raw.NativeVocab.fromEntries([0,1,31],[b('a'),b('b'),b('ab')],[]);
-  const g=raw.NativeGrammar.fromSource('ebnf','start ::= "a" "b"');const s=g.compileSync(v,[],0,0).start();
+  const g=raw.NativeGrammar.fromSource('ebnf','start ::= "a" "b"');const s=g.compileSync(v,0,0).start();
   const initial=s.mask();
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
-    assert.throws(()=>s.commitToken(bad),/GLRMASK_INVALID_ARGUMENT/);
-    assert.throws(()=>new TokenSet([bad]),/GLRMASK_INVALID_ARGUMENT/);
-    assert.throws(()=>g.compileSync(v,[],bad,0),/GLRMASK_INVALID_ARGUMENT/);
+    const badArg=e=>e instanceof RangeError || /GLRMASK_INVALID_ARGUMENT/.test(String(e));
+    assert.throws(()=>s.commitToken(bad),badArg);
+    assert.throws(()=>new TokenSet([bad]),badArg);
+    assert.throws(()=>g.compileSync(v,bad,0),badArg);
   }
   assert.deepEqual(s.mask(),initial);
   const sharedWords=new Uint32Array(new SharedArrayBuffer(16));
@@ -154,7 +155,7 @@ test('garbage collection cannot invalidate a retained state or materialized mask
   assert.equal(typeof global.gc,'function','run tests with --expose-gc');
   function stateOnly(){const v=vocab(),g=simple(),c=g.compileSync(v);return c.start();}
   const s=stateOnly(),mask=s.mask();global.gc();global.gc();
-  assert.ok(allowed(mask,31));s.commitToken(31);assert.ok(s.isAccepting());
+  assert.ok(allowed(mask,31));assert.ok(s.commitToken(31));assert.ok(s.isAccepting());
   const kept=s.clone();s.dispose();global.gc();assert.ok(kept.isAccepting());assert.ok(allowed(mask,31));
 });
 
@@ -168,8 +169,8 @@ test('named Lark special tokens use explicit mappings, not byte aliases',async()
     const g=Grammar.fromLark('start: <|begin|> <|body|>');
     const m=new Module(g);
     m.bind('begin',new TokenSet([99]));m.bind('body',new TokenSet([1]));
-    const s=(await m.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));s.commitToken(99);
-    assert.ok(allowed(s.mask(),1));assert.ok(!allowed(s.mask(),0));s.commitToken(1);assert.ok(s.isAccepting());
+    const s=(await m.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));assert.ok(s.commitToken(99));
+    assert.ok(allowed(s.mask(),1));assert.ok(!allowed(s.mask(),0));assert.ok(s.commitToken(1));assert.ok(s.isAccepting());
     assert.deepEqual(Array.from(g.externs.keys()),['begin','body']);
     assert.equal(g.externs.get('begin').kind,'token');
   }

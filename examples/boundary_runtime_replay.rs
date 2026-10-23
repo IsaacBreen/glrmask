@@ -96,7 +96,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
         if profile_step.is_some() && trace_id!=profile_trace {
             if profile_previous_traces && trace_id<profile_trace {
                 let mut prior=dynamic_constraint.start();
-                for &token in &trace.token_ids {prior.fill_mask(&mut b_mask);prior.commit_token(token)?;}
+                for &token in &trace.token_ids {prior.fill_mask(&mut b_mask);assert!(prior.commit_token(token));}
                 prior.fill_mask(&mut b_mask);
             }
             continue;
@@ -111,7 +111,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
                         a.fill_mask(&mut a_mask); b.fill_mask(&mut b_mask);
                         assert_eq!(a_mask,b_mask,"profile history must remain exact");
                     }
-                    let token=trace.token_ids[step];a.commit_token(token)?;b.commit_token(token)?;continue;
+                    let token=trace.token_ids[step];assert!(a.commit_token(token));assert!(b.commit_token(token));continue;
                 }
                 a.fill_mask(&mut a_mask);
                 eprintln!("PROFILE_ROOTS trace={trace_id} step={step} prior_masks={profile_previous_masks} roots={} paths={}",b.parser_root_count(),b.parser_path_count(4096));
@@ -145,9 +145,9 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
             let token=trace.token_ids.get(step).copied();
             let (ca,cb)=if let Some(token)=token {
                 assert!(a_mask[token as usize/32]&(1<<(token%32))!=0,"trace token not admitted");
-                let t=Instant::now();let ra=a.commit_token(token);let ca=t.elapsed().as_nanos();
-                let t=Instant::now();let rb=b.commit_token(token);let cb=t.elapsed().as_nanos();
-                ra?;rb?;(ca.to_string(),cb.to_string())
+                let t=Instant::now();let ra= a.commit_token(token);let ca=t.elapsed().as_nanos();
+                let t=Instant::now();let rb= b.commit_token(token);let cb=t.elapsed().as_nanos();
+                assert!(ra);assert!(rb);(ca.to_string(),cb.to_string())
             } else {(String::new(),String::new())};
             assert_eq!(a_boundary.dynamic_calls, 0, "static reference must not invoke DynamicDirect");
             writeln!(out,"{trace_id},{step},{},{a_ns},{b_ns},{ca},{cb},{hash:016x},{a_cpu},{b_cpu},{},{},{},{}",token.map(|t|t.to_string()).unwrap_or_default(),a_boundary.dispatch_ns,b_boundary.dispatch_ns,b_boundary.dynamic_ns,b_boundary.dynamic_calls)?;

@@ -249,6 +249,20 @@ impl PyGrammar {
         Self::new(source, SourceKind::Lark)
     }
 
+    /// Builds a source grammar from an `Expr`, `Grammar`, or `TokenSet`.
+    #[staticmethod]
+    fn from_expr(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let expr = canonical::extract_expr_part(value)?;
+        Ok(Self {
+            inner: glrmask::Grammar::from_expr(expr).map_err(api_error)?,
+        })
+    }
+
+    /// Binds one declared extern. Accepts `Grammar`, `Expr`, or `TokenSet`.
+    fn bind(&mut self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        canonical::bind_grammar(&mut self.inner, name, value)
+    }
+
     /// The grammar's declared externs, in declaration order.
     #[getter]
     fn externs(&self) -> PyResult<canonical::PyExterns> {
@@ -258,13 +272,12 @@ impl PyGrammar {
         Ok(canonical::PyExterns { entries: all, unbound_entries: Some(unbound) })
     }
 
-    /// Compile this grammar against the target vocabulary. Sugar for `Module(self, mask_strategy=..., boundary_mask_strategy=...).compile(vocab, end_tokens=...)`.
-    #[pyo3(signature = (vocab, *, end_tokens = None, mask_strategy = None, boundary_mask_strategy = None))]
+    /// Compile this grammar against the target vocabulary. Sugar for `Module(self, mask_strategy=..., boundary_mask_strategy=...).compile(vocab)`.
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
-        end_tokens: Option<Vec<u32>>,
         mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
         boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
@@ -281,7 +294,6 @@ impl PyGrammar {
             .unwrap_or(PyBoundaryMaskStrategy::AUTO)
             .into();
         let options = glrmask::CompileOptions::default()
-            .end_tokens(end_tokens.unwrap_or_default())
             .mask_strategy(mask_strategy)
             .boundary_mask_strategy(boundary_mask_strategy);
         py.detach(move || {

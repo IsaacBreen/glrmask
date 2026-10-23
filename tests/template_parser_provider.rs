@@ -34,11 +34,11 @@ fn reconverging_push_and_pop_languages_remain_shared_across_reload() {
             let mut state=constraint.start();let mut mask=vec![0;constraint.mask_len()];
             state.fill_mask(&mut mask);assert_eq!(mask[0]&63,21);assert!(state.is_accepting());
             for (token,expected,complete) in [(0,31,false),(0,63,false),(1,31,false),(1,21,true)] {
-                state.commit_token(token).unwrap();state.fill_mask(&mut mask);
+                assert!(state.commit_token(token));state.fill_mask(&mut mask);
                 assert_eq!(mask[0]&63,expected,"depth={depth} token={token}");
                 assert_eq!(state.is_accepting(),complete);
             }
-            state.commit_token(2).unwrap();state.fill_mask(&mut mask);
+            assert!(state.commit_token(2));state.fill_mask(&mut mask);
             assert!(state.is_accepting());assert_eq!(mask[0]&63,21);
         }
     }
@@ -76,7 +76,7 @@ fn check_all_prefixes(c:&Constraint) {
         for bits in 0..(1<<length) {
             let prefix=(0..length).map(|i|if bits & (1<<i)==0 {b'('} else {b')'}).collect::<Vec<_>>();
             let Some(d)=depth(&prefix,0) else {continue;};
-            let mut state=c.start(); state.commit_bytes(&prefix).unwrap();
+            let mut state=c.start(); assert!(state.commit_bytes(&prefix));
             // Acceptance needs the configured end token, never just completion.
             assert!(!state.is_accepting(),"unexpected acceptance at {prefix:?}");
             let mut mask=vec![0;c.mask_len()]; state.fill_mask(&mut mask);
@@ -101,11 +101,11 @@ fn data_only_recursive_parser_matches_independent_prefix_oracle_and_roundtrips()
     let wrong=Vocab::new(vec![(0,b"different".to_vec()),(64,Vec::new())]);
     assert!(Constraint::load(external.clone(),&wrong).is_err());
     let restored=Constraint::load(external,&v).unwrap();check_all_prefixes(&restored);
-    let mut s=c.start();assert!(s.commit_bytes(b")").is_err());assert!((s.mask().iter().all(|word| *word == 0)));
-    let mut s=c.start();s.commit_token(64).unwrap();
-    assert!(s.is_accepting() && !(s.mask().iter().all(|word| *word == 0)));
+    let mut s=c.start();assert!(!s.commit_bytes(b")"));assert!((s.mask().iter().all(|word| *word == 0)));
+    let mut s=c.start();assert!(s.commit_token(64));
+    
     assert!(s.mask().iter().all(|&w| w == 0));
-    assert!(s.commit_token(64).is_err());
+    assert!(!s.commit_token(64));
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn explicit_dead_edge_shadows_default_in_a_user_supplied_program() {
     let l=LexerDefinition::new(vec![TerminalPattern::literal(b"a".to_vec()),TerminalPattern::literal(b"b".to_vec())]);
     let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ba".to_vec()),(3,b"ab".to_vec())]);
     let c=p.compile(&l,&v).unwrap();let mut s=c.start();let mut m=vec![0;c.mask_len()];s.fill_mask(&mut m);
-    assert_eq!(m[0]&15,0b0110);s.commit_token(1).unwrap();s.fill_mask(&mut m);assert_eq!(m[0]&15,1);
+    assert_eq!(m[0]&15,0b0110);assert!(s.commit_token(1));s.fill_mask(&mut m);assert_eq!(m[0]&15,1);
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn builtin_parser_default_and_explicit_selection_are_native_across_loading() {
     for compiled in [&ordinary,&explicit] {
         for form in native_representations(compiled,&v) {
             assert_finite_language(&form,&v,&[b"a",b"ab"]);
-            let mut state=form.start();state.commit_bytes(b"ab").unwrap();assert!(state.is_accepting());
+            let mut state=form.start();assert!(state.commit_bytes(b"ab"));assert!(state.is_accepting());
         }
     }
     assert_eq!(ordinary.save(),ordinary_bytes,"another compilation must not mutate an existing constraint");
@@ -201,7 +201,7 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
     let mut prefixes=std::collections::BTreeSet::new();
     for word in language {for length in 0..=word.len() {prefixes.insert(word[..length].to_vec());}}
     for prefix in prefixes {
-        let mut state=compiled.start();state.commit_bytes(&prefix).unwrap();
+        let mut state=compiled.start();assert!(state.commit_bytes(&prefix));
         assert_eq!(state.is_accepting(),language.contains(&prefix.as_slice()),"completion at {prefix:?}");
         let mut mask=vec![0;compiled.mask_len()];state.fill_mask(&mut mask);
         for (token,bytes) in vocab.iter() {
@@ -210,7 +210,7 @@ fn assert_finite_language(compiled:&Constraint,vocab:&Vocab,language:&[&[u8]]) {
             let allowed=mask[token as usize/32]&(1u32<<(token%32))!=0;
             assert_eq!(allowed,expected,"prefix={prefix:?} token={token} bytes={bytes:?}");
             if expected {
-                let mut branch=compiled.start();branch.commit_bytes(&prefix).unwrap();branch.commit_token(token).unwrap();
+                let mut branch=compiled.start();assert!(branch.commit_bytes(&prefix));assert!(branch.commit_token(token));
                 assert_eq!(branch.is_accepting(),language.contains(&next.as_slice()));
             }
         }
@@ -241,7 +241,7 @@ fn bounded_fast_build_selection_supports_all_builtin_source_frontends() {
             for &byte in word.as_bytes() {
                 assert_eq!(candidate.mask(),reference.mask());
                 assert_eq!(candidate.is_accepting(),reference.is_accepting());
-                candidate.commit_bytes(&[byte]).unwrap();reference.commit_bytes(&[byte]).unwrap();
+                assert!(candidate.commit_bytes(&[byte]));assert!(reference.commit_bytes(&[byte]));
             }
             assert!(candidate.is_accepting());assert_eq!(candidate.mask(),reference.mask());
         }
@@ -256,7 +256,7 @@ fn source_and_precompiled_composition_use_native_defaults() {
     let bound=parent.clone().bind_snapshot("child",&child).unwrap();
     let template=bound.compile_with_build_options(&v,BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     assert_eq!(template.parser_backend(),ParserBackend::TemplateDfa);
-    let mut state=template.start();state.commit_bytes(b"xa").unwrap();assert!(state.is_accepting());
+    let mut state=template.start();assert!(state.commit_bytes(b"xa"));assert!(state.is_accepting());
     let ordinary=bound.compile(&v).unwrap();
     let child=child.compile(&v).unwrap();let child_bytes=child.save();
     let module=parent.prepare(&v).unwrap().bind_snapshot("child",&child).unwrap();
@@ -338,7 +338,7 @@ fn exponentially_many_custom_push_outputs_remain_runnable_after_roundtrip() {
         let mut state = parser.start(); let mut mask = vec![0; parser.mask_len()];
         for _ in 0..3 {
             state.fill_mask(&mut mask); assert_eq!(mask[0] & 7, 3);
-            state.commit_token(0).unwrap(); assert!(state.is_accepting());
+            assert!(state.commit_token(0)); assert!(state.is_accepting());
         }
     }
 }
@@ -369,7 +369,7 @@ fn epsilon_read_links_apply_after_popping_the_last_concrete_symbol() {
                     for byte in bytes {count=if *byte==b'a'{count.checked_sub(1)?}else{count+1};}Some(count)
                 };
                 let Some(count)=advance(&prefix,1)else{continue;};
-                let mut state=constraint.start();state.commit_bytes(&prefix).unwrap();
+                let mut state=constraint.start();assert!(state.commit_bytes(&prefix));
                 assert!(state.is_accepting());let mut mask=vec![0;constraint.mask_len()];state.fill_mask(&mut mask);
                 for (i,word) in words.iter().enumerate() {
                     assert_eq!(mask[i/32]&(1<<(i%32))!=0,advance(word.as_bytes(),count).is_some(),
@@ -413,7 +413,7 @@ fn dynamic_mask_diagnostics_do_not_request_an_lr_table() {
         for byte in br#"{"key": "a", "value": "b"}"# {
             let token = u32::from(*byte-32);
             assert!(mask[token as usize/32] & (1u32<<(token%32)) != 0);
-            state.commit_token(token).unwrap();
+            assert!(state.commit_token(token));
             state.fill_mask(&mut mask);
         }
         assert!(state.is_accepting());
@@ -443,7 +443,7 @@ fn table_free_metadata_queries_preserve_counts_across_reloads() {
                 report["stack_symbol_count"].as_u64().unwrap());
             assert!(ConstraintExt::num_tokenizer_states(constraint) > 0);
             let mut state = constraint.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             assert!(state.is_accepting());
         }
     }

@@ -519,8 +519,8 @@ mod tests {
                             a.fill_mask(&mut actual_mask);b.fill_mask(&mut expected_mask);
                             assert_eq!(actual_mask,expected_mask,"nullable={nullable} word={word:?} prefix={prefix}");
                             assert_eq!(a.is_accepting(),b.is_accepting());assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
-                            if prefix<word.len() {assert_eq!(a.commit_bytes(&word[prefix..prefix+1]).is_ok(),
-                                b.commit_bytes(&word[prefix..prefix+1]).is_ok());}
+                            if prefix<word.len() {assert_eq!(a.commit_bytes(&word[prefix..prefix+1]),
+                                b.commit_bytes(&word[prefix..prefix+1]));}
                         }
                     }
                     if depth<4 {for byte in [b'x',b'a',b'y',b'b'] {let mut following=word.clone();following.push(byte);next.push(following);}}
@@ -600,8 +600,8 @@ mod tests {
                     assert_eq!(actual.is_accepting(),expected.is_accepting());
                     assert_eq!((actual.mask().iter().all(|word| *word == 0)),(expected.mask().iter().all(|word| *word == 0)));
                     if prefix < text.len() {
-                        assert_eq!(actual.commit_bytes(&text[prefix..prefix+1]).is_ok(),
-                            expected.commit_bytes(&text[prefix..prefix+1]).is_ok());
+                        assert_eq!(actual.commit_bytes(&text[prefix..prefix+1]),
+                            expected.commit_bytes(&text[prefix..prefix+1]));
                     }
                 }
             }
@@ -625,6 +625,6 @@ mod tests {
             assert!(Arc::ptr_eq(body, &component.constraint));
         }
         assert_eq!(bytes, c.save());
-        let mut state = c.start(); state.commit_token(3).unwrap(); assert!(state.is_accepting());
+        let mut state = c.start(); assert!(state.commit_token(3)); assert!(state.is_accepting());
     }
 }

@@ -42,15 +42,15 @@ fn compare(reference: &Constraint, candidate: &Constraint, tokens: &[(u32, Vec<u
     check_static(candidate);
     for prefix in prefixes {
         let mut left = reference.start(); let mut right = candidate.start();
-        assert_eq!(left.commit_bytes(prefix).is_ok(), right.commit_bytes(prefix).is_ok(), "prefix len={}", prefix.len());
+        assert_eq!(left.commit_bytes(prefix), right.commit_bytes(prefix), "prefix len={}", prefix.len());
         let expected = left.mask();
         assert_eq!(expected, right.mask(), "mask prefix len={}", prefix.len());
         assert_eq!(left.is_accepting(), right.is_accepting(), "completion len={}", prefix.len());
         for (id, spelling) in tokens {
             if !expected.get(*id as usize / 32).is_some_and(|word| word & (1 << (*id % 32)) != 0) { continue; }
             let mut a = left.clone(); let mut b = right.clone();
-            a.commit_token(*id).unwrap_or_else(|error| panic!("dynamic reference rejected admitted token={id} spelling={spelling:?} prefix_len={} prefix_head={:?}: {error}", prefix.len(), &prefix[..prefix.len().min(24)]));
-            b.commit_token(*id).unwrap_or_else(|error| panic!("token={id} prefix_len={}: {error}", prefix.len()));
+            assert!(a.commit_token(*id));
+            assert!(b.commit_token(*id));
             assert_eq!(a.is_accepting(), b.is_accepting(), "token={id} prefix_len={}", prefix.len());
             assert_eq!(a.mask(), b.mask(), "successor token={id} prefix_len={}", prefix.len());
         }
@@ -92,7 +92,7 @@ fn strict_static_virtual_uri_child_crossings_and_reloads() {
     let external = Constraint::load(candidate.save(), &vocab).unwrap();
     for c in [&candidate, &loaded, &external] { compare(&reference, c, &tokens, &prefixes); }
     let mut too_long = b"p\"x:".to_vec(); too_long.extend(std::iter::repeat_n(b'a', 4999));
-    assert!(candidate.start().commit_bytes(&too_long).is_err());
+    assert!(!candidate.start().commit_bytes(&too_long));
 }
 
 #[test]
@@ -117,11 +117,11 @@ fn virtual_children_remain_exact_when_nested_repeated_and_terminated() {
     let mut prefixes = (0..=word.len()).map(|len| word[..len].to_vec()).collect::<Vec<_>>();
     let mut near_end = b"xp\"x:a\"q.p\"x:".to_vec(); near_end.extend(std::iter::repeat_n(b'a', 4998)); prefixes.push(near_end);
     verify_forms(&reference, &candidate, &vocab, &tokens, &prefixes);
-    let mut state = candidate.start(); state.commit_token(310).unwrap();
-    assert!(state.is_accepting()); state.commit_token(1000).unwrap();
-    assert!(state.is_accepting() && !(state.mask().iter().all(|word| *word == 0)));
+    let mut state = candidate.start(); assert!(state.commit_token(310));
+    assert!(state.commit_token(1000));
+    
     assert!(state.mask().iter().all(|&w| w == 0));
-    assert!(state.commit_token(310).is_err());
+    assert!(!state.commit_token(310));
 }
 
 #[test]
@@ -234,7 +234,7 @@ fn malformed_projected_observation_offsets_are_rejected_on_load() {
     }
     assert!(corrupted_fingerprint, "virtual child must supply an observation fingerprint to corrupt");
     let loaded = Constraint::load(saved, &vocab).unwrap();
-    let mut state = loaded.start(); state.commit_token(3).unwrap(); assert!(state.is_accepting());
+    let mut state = loaded.start(); assert!(state.commit_token(3)); assert!(state.is_accepting());
 }
 
 #[test]
@@ -267,7 +267,7 @@ fn virtual_repeat_observations_preserve_literal_lower_and_upper_bounds() {
         }
         verify_forms(&reference, &candidate, &vocab, &tokens, &prefixes);
         for prefix in &prefixes {
-            let mut state = candidate.start(); state.commit_bytes(prefix).unwrap();
+            let mut state = candidate.start(); assert!(state.commit_bytes(prefix));
             let mask = state.mask();
             for (id, bytes) in &tokens {
                 let mut word = prefix.clone(); word.extend(bytes);
@@ -281,7 +281,7 @@ fn virtual_repeat_observations_preserve_literal_lower_and_upper_bounds() {
             }
         }
         let mut too_long = vec![b'p']; too_long.extend(std::iter::repeat_n(b'a', maximum + 1));
-        assert!(candidate.start().commit_bytes(&too_long).is_err(), "regex={regex}");
+        assert!(!candidate.start().commit_bytes(&too_long), "regex={regex}");
     }
 }
 
@@ -309,11 +309,11 @@ fn unsupported_general_virtual_projection_fails_without_changing_dynamic_languag
     for c in [&dynamic, &loaded] {
         for count in [0usize, 1, 2, 31, 65] {
             let mut prefix = vec![b'p']; prefix.extend(std::iter::repeat_n(b'a', count));
-            let mut state = c.start(); state.commit_bytes(&prefix).unwrap();
+            let mut state = c.start(); assert!(state.commit_bytes(&prefix));
             let mask = state.mask();
             assert_eq!(mask[0] & (1 << 3) != 0, count >= 1);
             assert_ne!(mask[0] & (1 << 4), 0);
-            state.commit_token(4).unwrap(); assert!(state.is_accepting());
+            assert!(state.commit_token(4)); assert!(state.is_accepting());
         }
     }
 }
@@ -380,7 +380,7 @@ mod product_review {
         for (representation, c) in [("dynamic", &dynamic), ("static", &candidate),
             ("self-contained", &loaded), ("external-vocabulary", &external)] {
             for prefix in &prefixes {
-                let mut state = c.start(); state.commit_bytes(prefix)?;
+                let mut state = c.start(); assert!(state.commit_bytes(prefix));
                 assert_eq!(state.is_accepting(), prefix.ends_with(b"q"));
                 let mask = state.mask();
                 for (id, token) in &tokens {
@@ -389,7 +389,7 @@ mod product_review {
                     let actual = mask.get(*id as usize / 32).is_some_and(|w| w & (1 << (*id % 32)) != 0);
                     assert_eq!(actual, expected, "representation={representation} prefix_len={} token={token:?}", prefix.len());
                     if actual {
-                        let mut branch = state.clone(); branch.commit_token(*id)?;
+                        let mut branch = state.clone(); assert!(branch.commit_token(*id));
                         assert_eq!(branch.is_accepting(), word.ends_with(b"q"));
                     }
                     comparisons += 1;

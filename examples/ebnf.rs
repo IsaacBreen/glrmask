@@ -22,9 +22,9 @@ fn main() {
     let mut state = constraint.start();
     assert!(token_allowed(&state.mask(), 0));
 
-    state.commit_token(0).unwrap();
-    state.commit_token(1).unwrap();
-    state.commit_token(2).unwrap();
+    assert!(state.commit_token(0));
+    assert!(state.commit_token(1));
+    assert!(state.commit_token(2));
 
     assert!(state.is_accepting());
     println!("accepted: hello world");

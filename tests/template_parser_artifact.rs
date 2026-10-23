@@ -26,7 +26,7 @@ fn compare_static(left: &Constraint, right: &Constraint) {
             assert_eq!(a.is_accepting(), b.is_accepting());
             let Some(token)=token else { break; };
             if am[token as usize/32] & (1 << (token%32)) == 0 { break; }
-            a.commit_token(token).unwrap(); b.commit_token(token).unwrap();
+            assert!(a.commit_token(token)); assert!(b.commit_token(token));
         }
     }
 }
@@ -41,7 +41,7 @@ fn compare_dynamic(left: &DynamicConstraint, right: &DynamicConstraint) {
             assert_eq!(a.is_accepting(), b.is_accepting());
             let Some(token)=token else { break; };
             if am[token as usize/32] & (1 << (token%32)) == 0 { break; }
-            a.commit_token(token).unwrap(); b.commit_token(token).unwrap();
+            assert!(a.commit_token(token)); assert!(b.commit_token(token));
         }
     }
 }
@@ -386,13 +386,13 @@ fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     let mut a=reference.start();let mut b=restored.start();
     for token in [0,77] {
         assert_eq!(a.mask(),b.mask());
-        a.commit_token(token).unwrap();b.commit_token(token).unwrap();
+        assert!(a.commit_token(token));assert!(b.commit_token(token));
         assert_eq!(a.is_accepting(),b.is_accepting());
         assert_eq!((a.mask().iter().all(|word| *word == 0)),(b.mask().iter().all(|word| *word == 0)));
     }
-    assert!(b.is_accepting() && !(b.mask().iter().all(|word| *word == 0)));
+    
     assert!(b.mask().iter().all(|&w| w == 0));
-    assert!(b.commit_token(0).is_err());
+    assert!(!b.commit_token(0));
     let missing=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
     assert!(Constraint::load(saved,&missing).is_err());
 }

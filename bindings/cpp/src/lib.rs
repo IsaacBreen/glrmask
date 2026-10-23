@@ -42,6 +42,16 @@ fn ffi(f: impl FnOnce() -> Result<()>) -> i32 {
         }
     }
 }
+fn commit_ffi(f: impl FnOnce() -> Result<bool>) -> i32 {
+    match core::guarded(f) {
+        Ok(true) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 0 }
+        Ok(false) => { LAST_ERROR.with(|s| { s.borrow_mut().take(); }); 6 }
+        Err(e) => {
+            LAST_ERROR.with(|s| *s.borrow_mut() = Some(CString::new(e.message.replace('\0', "\\0")).unwrap_or_default()));
+            e.kind as i32
+        }
+    }
+}
 fn valid<T>(p: *const T) -> Result<()> {
     if p.is_null() { return Err(Error::invalid("null pointer")); }
     if p.addr() % align_of::<T>() != 0 { return Err(Error::invalid("misaligned pointer")); }
@@ -131,6 +141,21 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
         }; Ok(glrmask_grammar(grammar))
     }) })
 }
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_from_expr(expr: *const crate::module_api::glrmask_expr, out: *mut *mut glrmask_grammar) -> i32 {
+    ffi(|| unsafe { produce(out, || Ok(glrmask_grammar(g::Grammar::from_expr(read(expr)?.0.clone())?))) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_grammar(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_grammar) -> i32 {
+    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_expr(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const crate::module_api::glrmask_expr) -> i32 {
+    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_token(p: *mut glrmask_grammar, name: *const c_char, n: usize, id: u32) -> i32 {
+    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, g::TokenSet::from(id))?; Ok(()) })
+}
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_bind_tokens(p: *mut glrmask_grammar, name: *const c_char, n: usize, child: *const glrmask_token_set) -> i32 {
+    ffi(|| unsafe { write(p)?.0.bind(text(name, n)?, read(child)?.0.clone())?; Ok(()) })
+}
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_externs(p: *const glrmask_grammar, out: *mut *mut glrmask_externs) -> i32 {
     ffi(|| unsafe {
         let view = read(p)?.0.externs();
@@ -179,16 +204,16 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { read(p)?.0.fill_mask(output(out, n)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_token(p: *mut glrmask_state, id: u32) -> i32 {
-    ffi(|| unsafe { write(p)?.0.commit_token(id) })
+    commit_ffi(|| unsafe { Ok(write(p)?.0.commit_token(id)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_tokens(p: *mut glrmask_state, ids: *const u32, n: usize) -> i32 {
-    ffi(|| unsafe {
+    commit_ffi(|| unsafe {
         let ids = if n == 0 { &[] } else if ids.is_null() { return Err(Error::invalid("token ID array is null")); } else { std::slice::from_raw_parts(ids, n) };
-        write(p)?.0.commit_tokens(ids)
+        Ok(write(p)?.0.commit_tokens(ids)?)
     })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_commit_bytes(p: *mut glrmask_state, bytes: *const u8, n: usize) -> i32 {
-    ffi(|| unsafe { write(p)?.0.commit_bytes(input(bytes, n)?) })
+    commit_ffi(|| unsafe { Ok(write(p)?.0.commit_bytes(input(bytes, n)?)?) })
 }
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_state_is_accepting(p: *const glrmask_state, out: *mut u32) -> i32 {
     ffi(|| unsafe { *write(out)? = u32::from(read(p)?.0.is_accepting()?); Ok(()) })

@@ -138,11 +138,11 @@ fn mb_run_scoped_ignore_variant(
         let token = *token;
         let spelling = String::from_utf8_lossy(bytes).into_owned();
         let mut static_state = composed_static.start();
-        let static_ok = static_state.commit_token(token).is_ok();
+        let static_ok = static_state.commit_token(token);
         let mut dynamic_state = composed_dynamic.start();
-        let dynamic_ok = dynamic_state.commit_token(token).is_ok();
+        let dynamic_ok = dynamic_state.commit_token(token);
         let mut inline_state = inline.start();
-        let inline_ok = inline_state.commit_token(token).is_ok();
+        let inline_ok = inline_state.commit_token(token);
         eprintln!(
             "[min-repro] token {token} {spelling:?} start_allows static={} dynamic={} inline={} | commit static={static_ok} dynamic={dynamic_ok} inline={inline_ok} | accept static={} dynamic={} inline={}",
             static_bits.contains(&token),
@@ -680,7 +680,7 @@ fn minimal_scoped_ignore_byte_level_control_sequence() {
             let mut state = constraint.start();
             let mut committed = true;
             for &token in sequence {
-                if state.commit_token(token).is_err() {
+                if !state.commit_token(token) {
                     committed = false;
                     break;
                 }
@@ -741,9 +741,9 @@ fn minimal_scoped_visible_parent_component_overadmits_after_partial_ignore() {
         "[min-repro-visible] start static={static_start:?} dynamic={dynamic_start:?} inline={inline_start:?}"
     );
 
-    static_state.commit_token(0).unwrap();
-    dynamic_state.commit_token(0).unwrap();
-    inline_state.commit_token(0).unwrap();
+    assert!(static_state.commit_token(0));
+    assert!(dynamic_state.commit_token(0));
+    assert!(inline_state.commit_token(0));
     let static_after = mb_scoped_mask_bits(&static_state.mask());
     let dynamic_after = mb_scoped_mask_bits(&dynamic_state.mask());
     let inline_after = mb_scoped_mask_bits(&inline_state.mask());
@@ -820,9 +820,9 @@ fn test_scoped_ignore_vocab_mixed_first_byte_and_distinct_equivalent_bytes() {
     assert_eq!(dynamic_start, inline_start, "dynamic start mask matches inline oracle");
 
     // Commit separate prefix token 'X' (token 2)
-    static_state.commit_token(2).unwrap();
-    dynamic_state.commit_token(2).unwrap();
-    inline_state.commit_token(2).unwrap();
+    assert!(static_state.commit_token(2));
+    assert!(dynamic_state.commit_token(2));
+    assert!(inline_state.commit_token(2));
 
     let static_after_x = mb_scoped_mask_bits(&static_state.mask());
     let dynamic_after_x = mb_scoped_mask_bits(&dynamic_state.mask());
@@ -864,7 +864,7 @@ fn test_three_level_nested_scopes() {
     match outer_composed {
         Ok(composed) => {
             let mut state = composed.start();
-            assert!(state.commit_token(0).is_ok());
+            assert!(state.commit_token(0));
         }
         Err(err) => {
             eprintln!("[three-level-nested] static composition blocked by entry collision: {err}");

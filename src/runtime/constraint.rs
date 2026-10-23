@@ -12688,6 +12688,12 @@ impl Constraint {
             .unwrap_or(0)
     }
 
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn has_child_components(&self) -> bool {
+        self.has_recursive_segmented_parser_tree() || !self.late_grammar_slots.is_empty()
+    }
+
     pub(crate) fn body_mask_len(&self) -> usize {
         self.body_max_original_token_id()
             .map(|token_id| (token_id as usize / 32) + 1)
@@ -14932,13 +14938,13 @@ mod dense_internal_token_mask_tests {
                         assert_eq!(mask, reference.mask());
                         assert_eq!(actual.is_accepting(), reference.is_accepting());
                         if !allowed {
-                            assert!(actual.commit_token(token).is_err());
-                            assert!(reference.commit_token(token).is_err());
+                            assert!(!actual.commit_token(token));
+                            assert!(!reference.commit_token(token));
                             assert_eq!((actual.mask().iter().all(|word| *word == 0)), (reference.mask().iter().all(|word| *word == 0)));
                             break;
                         }
-                        actual.commit_token(token).unwrap();
-                        reference.commit_token(token).unwrap();
+                        assert!(actual.commit_token(token));
+                        assert!(reference.commit_token(token));
                         committed += 1;
                         assert_eq!(actual.is_accepting(), committed == 2);
                         assert_eq!(actual.mask(), reference.mask());

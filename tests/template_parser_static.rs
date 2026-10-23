@@ -100,8 +100,8 @@ fn recursive_static_parser_matches_literal_prefix_oracle_in_all_artifact_forms()
                     continue;
                 };
                 let mut state = c.start();
-                state.commit_bytes(&prefix).unwrap();
-                assert_eq!(state.is_accepting(), depth == 0);
+                assert!(state.commit_bytes(&prefix));
+                assert_eq!(state.mask().get(2).is_some_and(|word| word & 1 != 0), depth == 0);
                 let mask = state.mask();
                 for (id, word) in words.iter().enumerate() {
                     assert_eq!(
@@ -114,7 +114,7 @@ fn recursive_static_parser_matches_literal_prefix_oracle_in_all_artifact_forms()
             }
         }
         let mut rejected = c.start();
-        assert!(rejected.commit_bytes(b")").is_err());
+        assert!(!rejected.commit_bytes(b")"));
         assert!((rejected.mask().iter().all(|word| *word == 0)));
     }
 }
@@ -142,7 +142,7 @@ fn static_default_keeps_explicit_dead_shadowing_across_substitution() {
     for c in representations(&compile_static(&p, &l, &v), &v) {
         let mut s = c.start();
         assert_eq!(s.mask()[0] & 15, 6);
-        s.commit_token(1).unwrap();
+        assert!(s.commit_token(1));
         assert_eq!(s.mask()[0] & 15, 1);
     }
 }
@@ -189,7 +189,7 @@ fn static_read_epsilon_links_work_on_empty_stack() {
                     continue;
                 };
                 let mut s = c.start();
-                s.commit_bytes(&prefix).unwrap();
+                assert!(s.commit_bytes(&prefix));
                 assert!(s.is_accepting());
                 let mask = s.mask();
                 for (id, word) in words.iter().enumerate() {
@@ -246,7 +246,7 @@ fn repeated_read_labels_preserve_the_same_concrete_top() {
         let mut s = c.start();
         for _ in 0..10 {
             assert_eq!(s.mask()[0] & 15, 11);
-            s.commit_token(1).unwrap();
+            assert!(s.commit_token(1));
             assert!(s.is_accepting());
         }
     }
@@ -289,7 +289,7 @@ fn static_compilation_keeps_exponential_push_languages_as_graphs() {
         let mut s = c.start();
         for _ in 0..3 {
             assert_eq!(s.mask()[0] & 7, 3);
-            s.commit_token(0).unwrap();
+            assert!(s.commit_token(0));
             assert!(s.is_accepting());
         }
     }
@@ -315,7 +315,7 @@ fn identity_after_final_pop_does_not_recreate_bottom_symbol_in_static_masks() {
         for prefix in [vec![1], vec![2], vec![1, 0], vec![5, 2]] {
             let mut s = c.start();
             for token in &prefix {
-                s.commit_token(*token).unwrap();
+                assert!(s.commit_token(*token));
             }
             assert_eq!(s.mask()[0] & 63, 33, "prefix={prefix:?}");
         }
@@ -359,7 +359,7 @@ fn partial_utf8_and_duplicate_model_tokens_use_the_same_static_lexer() {
         let mut todo = vec![(Vec::<u32>::new(), Vec::<u8>::new())];
         while let Some((prefix, bytes)) = todo.pop() {
             let mut s = c.start();
-            for token in &prefix { s.commit_token(*token).unwrap(); }
+            for token in &prefix { assert!(s.commit_token(*token)); }
             assert_eq!(s.is_accepting(), language(&bytes).unwrap());
             let mask = s.mask();
             for (id, piece) in pieces.iter().enumerate() {

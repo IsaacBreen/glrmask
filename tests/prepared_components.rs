@@ -1,4 +1,4 @@
-use glrmask::{BuildOptions, Constraint, ExternalKind, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
+use glrmask::{BuildOptions, Constraint, ExternKind, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
 const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
 const LEAF:&str="extern token MARK start body nt body=\"x\" MARK";
 const PAIR:&str="extern grammar LEFT extern grammar RIGHT start root nt root=LEFT \"|\" RIGHT";
@@ -7,10 +7,10 @@ fn allowed(mask:&[u32],id:u32)->bool {mask.get(id as usize/32).is_some_and(|w|w&
 fn check_pair(c:&Constraint) {
     let mut s=c.start();
     for (id,next) in [(0,vec![4]),(4,vec![1]),(1,vec![0,2]),(2,vec![5])] {
-        assert!(allowed(&s.mask(),id),"missing next event {id}");s.commit_token(id).unwrap();
+        assert!(allowed(&s.mask(),id),"missing next event {id}");assert!(s.commit_token(id));
         let mask=s.mask();let actual=(0..6).filter(|&i|allowed(&mask,i)).collect::<Vec<_>>();assert_eq!(actual,next,"after {id}");
     }
-    s.commit_token(5).unwrap();assert!(s.is_accepting());
+    assert!(s.commit_token(5));assert!(s.is_accepting());
 }
 #[test]
 fn typed_source_ports_reject_wrong_kind_at_binding() {
@@ -19,7 +19,7 @@ fn typed_source_ports_reject_wrong_kind_at_binding() {
     let widened=grammar.bind_snapshot("LEFT",TokenSet::from(4)).unwrap();
     assert_eq!(widened.requirements().unwrap().iter().map(|r|r.name()).collect::<Vec<_>>(),["RIGHT"]);
     assert_eq!(grammar.requirements().unwrap().len(),2);
-    let requirements=token.requirements().unwrap();assert_eq!(requirements[0].kind,ExternalKind::Token);
+    let requirements=token.requirements().unwrap();assert_eq!(requirements[0].kind,ExternKind::Token);
     assert_eq!(requirements[0].name(),"MARK");
     assert!(token.bind_snapshot("MARK",TokenSet::new([4])).is_ok());
 }
@@ -51,7 +51,7 @@ fn explicit_exact_adapter_has_event_not_spelling_semantics() {
     for mode in MODES {
         let c=host.bind_snapshot("VALUE",&event).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         let mask=c.start().mask();assert!(!allowed(&mask,0));assert!(allowed(&mask,2));assert!(allowed(&mask,4));assert!(!allowed(&mask,5));
-        for id in [2,4] {let mut s=c.start();s.commit_token(id).unwrap();assert!(s.is_accepting());}
+        for id in [2,4] {let mut s=c.start();assert!(s.commit_token(id));assert!(s.is_accepting());}
     }
     let other=Vocab::new(vec![(0,b"different".to_vec()),(1,b"|".to_vec()),(2,b"x".to_vec())]);
     assert!(event.prepare(&other).is_err(), "ID 4 is absent from the target vocabulary");
@@ -62,7 +62,7 @@ fn unused_parameters_still_belong_to_the_interface() {
     assert!(g.compile(&v).is_err());
     let prepared=g.prepare(&v).unwrap();assert!(prepared.link().is_err());
     let c=prepared.bind_snapshot("UNUSED",TokenSet::from(4)).unwrap().link().unwrap();
-    let mut s=c.start();s.commit_token(0).unwrap();assert!(s.is_accepting());
+    let mut s=c.start();assert!(s.commit_token(0));assert!(s.is_accepting());
 }
 #[test]
 fn inline_and_attached_paths_have_the_same_scope_rules() {

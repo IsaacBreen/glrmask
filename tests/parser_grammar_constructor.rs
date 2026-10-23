@@ -93,7 +93,7 @@ fn check_words(c: &Constraint, vocab: &[Vec<u8>], language: &[&[u8]]) {
     let mut prefixes = BTreeSet::new();
     for word in language { for length in 0..=word.len() { prefixes.insert(word[..length].to_vec()); } }
     for prefix in prefixes {
-        let mut state = c.start(); state.commit_bytes(&prefix).unwrap();
+        let mut state = c.start(); assert!(state.commit_bytes(&prefix));
         // Acceptance needs the configured end token, never just completion.
         assert!(!state.is_accepting(), "unexpected acceptance at {prefix:?}");
         let mask = state.mask();
@@ -102,7 +102,7 @@ fn check_words(c: &Constraint, vocab: &[Vec<u8>], language: &[&[u8]]) {
             assert_eq!(bit(&mask, token as u32), language.iter().any(|word| word.starts_with(&extension)),
                 "prefix={prefix:?} token={bytes:?}");
             if bit(&mask, token as u32) {
-                let mut replay = c.start(); replay.commit_bytes(&prefix).unwrap(); replay.commit_token(token as u32).unwrap();
+                let mut replay = c.start(); assert!(replay.commit_bytes(&prefix)); assert!(replay.commit_token(token as u32));
                 assert!(!replay.is_accepting(), "unexpected acceptance at {extension:?}");
             }
         }
@@ -176,7 +176,7 @@ fn zero_terminal_epsilon_and_empty_languages_are_distinct() {
         for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
             let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization).end_tokens([512])).unwrap();
             for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
-                let state = c.start(); assert_eq!(state.is_accepting(), accepts);
+                let state = c.start();
                 let mask = state.mask(); assert_eq!(bit(&mask, 512), accepts);
                 assert!((0..138).all(|token| !bit(&mask, token)));
             }
@@ -212,7 +212,7 @@ fn all_source_frontends_reach_the_public_constructor() {
     for (source, word) in sources {
         for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = source.compile_with_parser(&v, &finite_compiler, TemplateBuildOptions::default().optimization(optimization)).unwrap();
-            let mut state = c.start(); state.commit_bytes(word).unwrap(); assert!(state.is_accepting());
+            let mut state = c.start(); assert!(state.commit_bytes(word)); assert!(state.is_accepting());
         }
     }
 }
@@ -227,9 +227,9 @@ fn exact_token_binding_is_not_its_vocabulary_byte_spelling() {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for c in [&c, &Constraint::load(c.save(), &v).unwrap()] {
             let mut state = c.start(); let mask = state.mask(); assert!(bit(&mask, 70)); assert!(!bit(&mask, 0));
-            state.commit_token(70).unwrap(); assert!(!state.is_accepting()); assert!(bit(&state.mask(), 1));
-            state.commit_token(1).unwrap(); assert!(state.is_accepting());
-            let mut wrong = c.start(); assert!(wrong.commit_token(0).is_err());
+            assert!(state.commit_token(70)); assert!(!state.is_accepting()); assert!(bit(&state.mask(), 1));
+            assert!(state.commit_token(1)); assert!(state.is_accepting());
+            let mut wrong = c.start(); assert!(!wrong.commit_token(0));
         }
     }
 }
@@ -296,9 +296,9 @@ fn ignores_internal_lexical_helpers_and_partition_conflicts_remain_host_owned() 
     for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
         let c = parser.compile_with(&v, TemplateBuildOptions::default().optimization(optimization)).unwrap();
         for word in [b"a".as_slice(), b" a", b"a ", b"  a  "] {
-            let mut state = c.start(); state.commit_bytes(word).unwrap(); assert!(state.is_accepting(), "{word:?}");
+            let mut state = c.start(); assert!(state.commit_bytes(word)); assert!(state.is_accepting(), "{word:?}");
         }
-        let mut state = c.start(); state.commit_bytes(b" ").unwrap(); assert!(!state.is_accepting());
+        let mut state = c.start(); assert!(state.commit_bytes(b" ")); assert!(!state.is_accepting());
         assert!(bit(&state.mask(), b'a' as u32)); assert!(!bit(&state.mask(), b'b' as u32));
     }
     let mut private_reference = source.clone(); private_reference.rules[0].expr = reference("LETTER");
@@ -358,7 +358,7 @@ fn required_nullable_separated_items_match_the_existing_grammar_semantics() {
                 words.sort(); words.dedup();
                 for word in words {
                     let mut a = reference.start(); let mut b = c.start();
-                    let accepted_a = a.commit_bytes(&word).is_ok(); let accepted_b = b.commit_bytes(&word).is_ok();
+                    let accepted_a = a.commit_bytes(&word); let accepted_b = b.commit_bytes(&word);
                     assert_eq!(accepted_a, accepted_b, "prefix {word:?}");
                     if accepted_a { assert_eq!(a.is_accepting(), b.is_accepting(), "word {word:?}");
                         assert_eq!(a.mask(), b.mask(), "word={word:?} allow_empty={allow_empty}"); }

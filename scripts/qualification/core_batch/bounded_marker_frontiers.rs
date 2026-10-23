@@ -20,20 +20,20 @@ fn main(){
     for c in [&c,&loaded]{
      for ids in [&[][..],&[0][..],&[0,1][..],&[0,2][..],&[0,3][..],&[0,3,1][..]]{
       let mut state=c.start();let mut alive=true;
-      for &id in ids{if state.commit_token(id).is_err(){alive=false;break;}}
+      for &id in ids{if !state.commit_token(id){alive=false;break;}}
       if !alive{continue;}
       let before=state.marker_events().to_vec();let accepting=state.is_accepting();
-      let actual=state.forced_tokens().unwrap();assert_eq!(before,state.marker_events(),"query modified event batch {mode:?}");
+      let actual=state.forced_tokens();assert_eq!(before,state.marker_events(),"query modified event batch {mode:?}");
       assert_eq!(accepting,state.is_accepting());assert_eq!(actual,state.forced_canonical_reference());
-      let mut reference=state.clone();for id in actual{state.commit_token(id).unwrap();reference.commit_token(id).unwrap();assert_eq!(state.marker_events(),reference.marker_events());}
+      let mut reference=state.clone();for id in actual{assert!(state.commit_token(id));assert!(reference.commit_token(id));assert_eq!(state.marker_events(),reference.marker_events());}
       assert_eq!(state.mask(),reference.mask());queries+=1;
      }
     }
    }
    let mut g=Grammar::from_glrm("extern token E start root nt root=@mark(0) \"a\" @mark(1) E @mark(2) \"b\" @mark(3)");g.bind("E",TokenSet::from(9000)).unwrap();
-   let c=g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();let mut state=c.start();state.commit_token(0).unwrap();
-   let before=state.marker_events().to_vec();let forced=state.forced_tokens().unwrap();assert_eq!(forced,state.forced_canonical_reference());assert_eq!(before,state.marker_events());
-   assert_eq!(forced,vec![9000,1]);for id in forced{state.commit_token(id).unwrap();}assert!(state.is_accepting());queries+=1;
+   let c=g.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();let mut state=c.start();assert!(state.commit_token(0));
+   let before=state.marker_events().to_vec();let forced=state.forced_tokens();assert_eq!(forced,state.forced_canonical_reference());assert_eq!(before,state.marker_events());
+   assert_eq!(forced,vec![9000,1]);for id in forced{assert!(state.commit_token(id));}assert!(state.is_accepting());queries+=1;
   }
  }
  println!("PASS {queries} marker+bounded-query snapshots (all4modes,loaded,aliases,ignore,shortest,event-only IDs); markers never published by queries");

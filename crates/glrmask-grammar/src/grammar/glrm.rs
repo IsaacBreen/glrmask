@@ -403,7 +403,7 @@ fn dump_parsed_scope_v1(
     for subgrammar in &scope.subgrammars {
         match &subgrammar.body {
             ParsedSubgrammarBody::External(kind) => {
-                let tag=match kind {ExternalKind::Token=>"token ",ExternalKind::Grammar=>"grammar ",ExternalKind::LegacyGeneric=>""};
+                let tag=match kind {ExternKind::Token=>"token ",ExternKind::Grammar=>"grammar ",ExternKind::LegacyGeneric=>""};
                 push_indented_line(out, indent, &format!("extern {tag}{}",source_identifier(&subgrammar.name)));
             }
             ParsedSubgrammarBody::Inline(child) => {
@@ -912,7 +912,7 @@ pub struct GlrmWithExternalSubgrammars {
 /// Token values can fill either kind; a general grammar cannot fill a token
 /// slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExternalKind {
+pub enum ExternKind {
     /// A token-level slot, bound to a token set.
     Token,
     /// A grammar-level slot, bound to a grammar.
@@ -925,7 +925,7 @@ pub enum ExternalKind {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GlrmExternalDeclarations {
     pub names: Vec<String>,
-    pub kinds: BTreeMap<String, ExternalKind>,
+    pub kinds: BTreeMap<String, ExternKind>,
     pub spans: BTreeMap<String, SourceSpan>,
 }
 
@@ -1146,7 +1146,7 @@ where F: Fn(&str) -> Result<ParsedGlrmScope, GlrMaskError> {
             format!("{prefix}::{}", subgrammar.name)
         };
         if matches!(subgrammar.body, ParsedSubgrammarBody::External(_)) {
-            if matches!(subgrammar.body,ParsedSubgrammarBody::External(ExternalKind::Token)) {
+            if matches!(subgrammar.body,ParsedSubgrammarBody::External(ExternKind::Token)) {
                 return Err(err(&format!("external token {path:?} requires an exact-token binding, not a child grammar")));
             }
             let mut child_scope = resolve(&path)?;
@@ -1632,7 +1632,7 @@ struct ParsedSubgrammar {
 #[derive(Debug, Clone)]
 enum ParsedSubgrammarBody {
     Inline(ParsedGlrmScope),
-    External(ExternalKind),
+    External(ExternKind),
 }
 
 #[derive(Debug, Clone)]
@@ -1692,7 +1692,7 @@ fn bind_external_terminals(
                 else { format!("{prefix}::{}", declaration.name) };
             match &mut declaration.body {
                 ParsedSubgrammarBody::External(kind) if names.contains(path.as_str()) => {
-                    if *kind==ExternalKind::Grammar {
+                    if *kind==ExternKind::Grammar {
                         return Err(err(&format!("external grammar {path:?} requires a grammar; use Grammar::exact for intentional exact-event adaptation")));
                     }
                     scope.external_terminals.push(ParsedExternalTerminal {
@@ -1824,11 +1824,11 @@ fn collect_external_spans(scope:&ParsedGlrmScope)->BTreeMap<String,SourceSpan> {
     let mut spans=BTreeMap::new();walk(scope,"",&mut spans);spans
 }
 
-fn collect_external_kinds(scope: &ParsedGlrmScope) -> BTreeMap<String,ExternalKind> {
-    fn walk(scope:&ParsedGlrmScope,prefix:&str,out:&mut BTreeMap<String,ExternalKind>) {
+fn collect_external_kinds(scope: &ParsedGlrmScope) -> BTreeMap<String,ExternKind> {
+    fn walk(scope:&ParsedGlrmScope,prefix:&str,out:&mut BTreeMap<String,ExternKind>) {
         for external in &scope.external_terminals {
             let path=if prefix.is_empty(){external.name.clone()}else{format!("{prefix}::{}",external.name)};
-            out.insert(path,ExternalKind::Token);
+            out.insert(path,ExternKind::Token);
         }
         for child in &scope.subgrammars {
             let path=if prefix.is_empty(){child.name.clone()}else{format!("{prefix}::{}",child.name)};
@@ -2148,17 +2148,17 @@ impl GlrmParser {
                                     return Err(err("'::' is not valid in extern names"));
                                 }
                                 let (name, is_escaped) = self.expect_ident_token()?;
-                                (ExternalKind::Token, name, is_escaped)
+                                (ExternKind::Token, name, is_escaped)
                             }
                             "grammar" if !first_escaped => {
                                 if matches!(self.peek(), Tok::Colon) {
                                     return Err(err("'::' is not valid in extern names"));
                                 }
                                 let (name, is_escaped) = self.expect_ident_token()?;
-                                (ExternalKind::Grammar, name, is_escaped)
+                                (ExternKind::Grammar, name, is_escaped)
                             }
                             _ if self.strict_native => return Err(err("external declarations require 'extern token NAME' or 'extern grammar NAME'")),
-                            _ => (ExternalKind::LegacyGeneric, first, first_escaped),
+                            _ => (ExternKind::LegacyGeneric, first, first_escaped),
                         };
                         self.check_declared_name(&name, is_escaped)?;
                         if matches!(self.peek(), Tok::Colon) || name.contains("::") {
@@ -4139,7 +4139,7 @@ mod tests {
         let nested = "glrm 1; start s; g child = { start x; extern item; nt x = item; }; nt s = child;";
         assert!(external_declarations(nested).unwrap_err().to_string().contains("extern declarations are only allowed at the top level"));
         assert!(from_glrm_with_external_terminals(nested, &[("child::item", &[7])]).is_err());
-        for (typed,kind) in [("extern token item;",ExternalKind::Token),("extern grammar item;",ExternalKind::Grammar)] {
+        for (typed,kind) in [("extern token item;",ExternKind::Token),("extern grammar item;",ExternKind::Grammar)] {
             let source = format!("glrm 1; start s; {typed} nt s = item;");
             assert_eq!(external_declarations(&source).unwrap().kinds["item"],kind);
             assert!(format_glrm_v1(&source).unwrap().contains(typed.trim_end_matches(';')));
@@ -5414,7 +5414,7 @@ nt main = sub;
         assert!(err5.contains("'::' is not valid in extern names"), "{err5}");
 
         let g = from_glrm("glrm 1; start s; nt s = \"a\";").unwrap();
-        let err_comp = ParsedComponent::from_named(g, &[("a::b".to_string(), ExternalKind::Token)])
+        let err_comp = ParsedComponent::from_named(g, &[("a::b".to_string(), ExternKind::Token)])
             .unwrap_err()
             .to_string();
         assert!(err_comp.contains("'::' is not valid in extern names"), "{err_comp}");

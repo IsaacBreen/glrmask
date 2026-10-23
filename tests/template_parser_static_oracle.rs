@@ -35,7 +35,7 @@ fn program(a: StackTemplate, b: StackTemplate, completion: StackTemplate) -> Par
 fn mask(c: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
     let mut state = c.start();
     for &token in prefix {
-        state.commit_token(token).unwrap();
+        assert!(state.commit_token(token));
     }
     let mut words = vec![0; c.mask_len()];
     state.fill_mask(&mut words);

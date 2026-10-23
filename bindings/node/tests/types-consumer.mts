@@ -1,8 +1,8 @@
-import {Vocab, Grammar, Module, Expr, MaskStrategy, Constraint, type GrammarCompileOptions} from '@glrmask/node';
+import {Vocab, Grammar, Module, Expr, MaskStrategy, Constraint, type CompileOptions} from '@glrmask/node';
 import api = require('@glrmask/node');
 const v = new Vocab([[0, new TextEncoder().encode('a')]]);
 const sameVocab: api.Vocab = v;
-const options: GrammarCompileOptions = {maskStrategy: MaskStrategy.ParserDwa};
+const options: CompileOptions = {maskStrategy: MaskStrategy.ParserDwa};
 const c = await Grammar.fromJsonSchema({type: 'string'}).compile(v, options);
 const bytes = await c.save(); const loaded = await Constraint.load(bytes);
 const words: Uint32Array = loaded.start().mask();

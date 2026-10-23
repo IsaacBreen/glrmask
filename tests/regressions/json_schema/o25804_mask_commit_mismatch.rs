@@ -41,15 +41,15 @@ fn minimized_vocab() -> Vocab {
 
 fn assert_quote_mask_commit_alignment(constraint: &Constraint) {
     let mut base = constraint.start();
-    base.commit_bytes(PREFIX).unwrap();
+    assert!(base.commit_bytes(PREFIX));
 
     let mask_has_quote = token_allowed(&base.mask(), QUOTE_TOKEN_ID);
 
     let mut commit_token_state = base.clone();
-    let commit_token_ok = commit_token_state.commit_token(QUOTE_TOKEN_ID).is_ok();
+    let commit_token_ok = commit_token_state.commit_token(QUOTE_TOKEN_ID);
 
     let mut commit_bytes_state = base.clone();
-    let commit_bytes_ok = commit_bytes_state.commit_bytes(QUOTE_TOKEN_BYTES).is_ok();
+    let commit_bytes_ok = commit_bytes_state.commit_bytes(QUOTE_TOKEN_BYTES);
 
     assert!(
         mask_has_quote && commit_token_ok && commit_bytes_ok,

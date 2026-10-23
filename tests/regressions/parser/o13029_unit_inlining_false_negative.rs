@@ -27,15 +27,15 @@ fn origin_dependent_unit_reduce_singleton_pushes_preserve_string_branch_context(
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(MINIMIZED_SCHEMA), &byte_vocab_with_disputed_token()).unwrap();
 
     let mut base = constraint.start();
-    base.commit_bytes(PREFIX).unwrap();
+    assert!(base.commit_bytes(PREFIX));
 
     let mask_has_token = token_allowed(&base.mask(), DISPUTED_TOKEN_ID);
 
     let mut commit_token_state = base.clone();
-    let commit_token_ok = commit_token_state.commit_token(DISPUTED_TOKEN_ID).is_ok();
+    let commit_token_ok = commit_token_state.commit_token(DISPUTED_TOKEN_ID);
 
     let mut commit_bytes_state = base.clone();
-    let commit_bytes_ok = commit_bytes_state.commit_bytes(DISPUTED_TOKEN_BYTES).is_ok();
+    let commit_bytes_ok = commit_bytes_state.commit_bytes(DISPUTED_TOKEN_BYTES);
 
     assert!(
         mask_has_token && commit_token_ok && commit_bytes_ok,

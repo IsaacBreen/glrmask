@@ -221,9 +221,8 @@ fn allowed(mask: &[u32], token: usize) -> bool {
 fn fill_mask(constraint: &Constraint, prefix: &[u32]) -> (Vec<u32>, bool) {
     let mut state = constraint.start();
     for &token in prefix {
-        state
-            .commit_token(token)
-            .unwrap_or_else(|error| panic!("commit failed at {prefix:?}: {error}"));
+        assert!(state
+            .commit_token(token));
     }
     let mut mask = vec![0u32; constraint.mask_len()];
     state.fill_mask(&mut mask);
@@ -315,12 +314,7 @@ fn check_exact_oracle_with_tokens(constraint: &Constraint, case: &Case, tokens: 
             let mut next = prefix.clone();
             next.extend_from_slice(token_bytes);
             let mut committed = state.clone();
-            committed.commit_token(token as u32).unwrap_or_else(|error| {
-                panic!(
-                    "commit failed at {:?}: {error}",
-                    String::from_utf8_lossy(&prefix)
-                )
-            });
+            assert!(committed.commit_token(token as u32));
             queue.push_back((committed, next));
         }
         checked += 1;

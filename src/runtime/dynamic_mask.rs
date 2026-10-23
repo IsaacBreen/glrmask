@@ -10403,7 +10403,7 @@ mod tests {
                     }
                     assert_eq!(a.full_walk_token_markers(),b.full_walk_token_markers());
                     for prefix in [b"".as_slice(),b"P",b"Pa",b"Pab",b"Pac",b"PabQ"] {
-                        let mut state=c.start();state.commit_bytes(prefix).unwrap();
+                        let mut state=c.start();assert!(state.commit_bytes(prefix));
                         let mut x=vec![0;c.mask_len()];let mut y=x.clone();
                         assert!(try_fill_recursive_mask_with_vocab(&state,&mut x,&a).unwrap());
                         assert!(try_fill_recursive_mask_with_vocab(&state,&mut y,&b).unwrap());
@@ -10467,7 +10467,7 @@ mod tests {
             }
             for prefix in ["", "X", "Xa", "Xaa", "Xaab", "Xaac", "Xaab!", "Xaac?"] {
                 let mut state = constraint.start();
-                state.commit_bytes(prefix.as_bytes()).unwrap();
+                assert!(state.commit_bytes(prefix.as_bytes()));
                 let mut owners = BTreeSet::new();
                 for gss in state.state.values() {
                     for top in gss.peek_values() {
@@ -10487,7 +10487,7 @@ mod tests {
                 for &id in &ids {
                     if token_allowed(&expected, id) {
                         let mut branch = state.clone();
-                        branch.commit_token(id).unwrap();
+                        assert!(branch.commit_token(id));
                     }
                 }
             }
@@ -10515,7 +10515,7 @@ mod tests {
         let bound = parent.bind_grammar_dynamic_boundary("child",child).unwrap();
         let prepared = PreparedMaskVocabulary::new(&bound,&ids).unwrap();
         let filtered = PreparedMaskVocabulary::new(&bound,&ids).unwrap();
-        let mut state = bound.start(); state.commit_bytes(b"X").unwrap();
+        let mut state = bound.start(); assert!(state.commit_bytes(b"X"));
         let mut full = vec![0;bound.mask_len()];
         state.fill_recursive_mask_by_exact_full_walk(&mut full);
         let mut seed=0xb3ea1935u32;
@@ -10556,7 +10556,7 @@ mod tests {
                 source, &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("leaf", child).unwrap();
             for prefix in [b"".as_slice(),b"P",b"Pa",b"Pab",b"Pac",b"PabQ"] {
-                let mut state = bound.start(); state.commit_bytes(prefix).unwrap();
+                let mut state = bound.start(); assert!(state.commit_bytes(prefix));
                 let reference = PreparedMaskVocabulary::new_with_policy(&bound, &ids, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
                 let reusable = PreparedMaskVocabulary::new_with_policy(&bound, &ids, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
                 for seed in 0..7u32 {
@@ -10640,7 +10640,7 @@ mod tests {
                     let mut candidate = dynamic.inner.start();
                     let reference_result = reference.commit_bytes(prefix);
                     let candidate_result = candidate.commit_bytes(prefix);
-                    assert_eq!(reference_result.is_ok(), candidate_result.is_ok(),
+                    assert_eq!(reference_result, candidate_result,
                         "commit status differs for {prefix:?}: {grammar}");
                     let reference_mask = reference.mask();
                     let candidate_mask = direct_mask(&candidate);
@@ -10703,7 +10703,7 @@ mod tests {
                     assert_eq!(owned.token_ids(canonical),borrowed.token_ids(canonical));
                 }
                 for prefix in ["","X","Xa","Xa!"] {
-                    let mut state=constraint.start();state.commit_bytes(prefix.as_bytes()).unwrap();
+                    let mut state=constraint.start();assert!(state.commit_bytes(prefix.as_bytes()));
                     let mut a=vec![0;constraint.mask_len()];let mut b=a.clone();
                     assert_eq!(try_fill_recursive_mask_with_vocab(&state,&mut a,&owned).unwrap(),
                         try_fill_recursive_mask_with_vocab(&state,&mut b,&borrowed).unwrap());
@@ -10742,7 +10742,7 @@ mod tests {
                     assert_eq!(owned.token_ids(canonical),borrowed.token_ids(canonical));
                 }
                 for prefix in ["","X","Xa","Xa!"] {
-                    let mut state=constraint.start();state.commit_bytes(prefix.as_bytes()).unwrap();
+                    let mut state=constraint.start();assert!(state.commit_bytes(prefix.as_bytes()));
                     let mut a=vec![0;constraint.mask_len()];let mut b=a.clone();
                     assert_eq!(try_fill_recursive_mask_with_vocab(&state,&mut a,&owned).unwrap(),
                         try_fill_recursive_mask_with_vocab(&state,&mut b,&borrowed).unwrap());
@@ -10767,7 +10767,7 @@ mod tests {
             let bound=parent.bind_grammar_dynamic_boundary("child",child).unwrap();
             let loaded=Constraint::load(bound.save(), &vocab).unwrap();
             for constraint in [&bound,&loaded] {
-                let mut state=constraint.start();state.commit_bytes(b"P").unwrap();
+                let mut state=constraint.start();assert!(state.commit_bytes(b"P"));
                 for id in [1,2,3,4] {
                     for depth in [1,2] {
                         let domain=PureMaskByteDomain::for_ids_with_depth(constraint,&[id],depth).unwrap();
@@ -10852,7 +10852,7 @@ mod tests {
             let prepared = PreparedMaskVocabulary::new_with_policy(
                 constraint, &domain, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
             assert!(prepared.vocab.get().is_none());
-            let mut state = constraint.start(); state.commit_bytes(b"P").unwrap();
+            let mut state = constraint.start(); assert!(state.commit_bytes(b"P"));
             let mut mask = vec![0; constraint.mask_len()];
             assert!(prepared.or_mask(&state, &mut mask).unwrap());
             assert!(mask.iter().all(|&word| word == 0));
@@ -10864,7 +10864,7 @@ mod tests {
                 called.set(true); PreparedMaskVocabulary::make_vocab(constraint, &domain)
             }).unwrap());
             assert!(!called.get(), "supplier callback must not run for a dead domain");
-            state.commit_bytes(b"x").unwrap();
+            assert!(state.commit_bytes(b"x"));
             assert!(prepared.or_mask(&state, &mut mask).unwrap());
             assert!(token_allowed(&mask, 2) && token_allowed(&mask, 7));
             assert!(prepared.vocab.get().is_some(), "first live prefix must resolve the same base");
@@ -10907,7 +10907,7 @@ mod tests {
                 let actual = PreparedMaskVocabulary::new_with_policy(
                     constraint, &domain, PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
                 for prefix in [b"".as_slice(), b"P", b"Px", b"Pxa", b"Pxa!"] {
-                    let mut state = constraint.start(); state.commit_bytes(prefix).unwrap();
+                    let mut state = constraint.start(); assert!(state.commit_bytes(prefix));
                     for seed in 0..16u32 {
                         let mut a = vec![0; constraint.mask_len()];
                         for &id in &[0u32, 1, 2, 3, 5, 7, 8, 9, 20, 9001] {
@@ -10922,7 +10922,7 @@ mod tests {
                     }
                 }
             }
-            let mut state = constraint.start(); state.commit_bytes(b"P").unwrap();
+            let mut state = constraint.start(); assert!(state.commit_bytes(b"P"));
             let prepared = PreparedMaskVocabulary::new_with_policy(constraint, &[2, 7, 9001],
                 PreparedVocabularyPolicy::DeadHeadPreflight).unwrap();
             let mut mask = vec![0; constraint.mask_len()];
@@ -10954,7 +10954,7 @@ mod tests {
                 let prepared = PreparedMaskVocabulary::new(constraint, &domain).unwrap();
                 for prefix in ["", "X", "Xa", "Xaa", "Xa!"] {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix.as_bytes()).unwrap();
+                    assert!(state.commit_bytes(prefix.as_bytes()));
                     let mut full = vec![0; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut full);
                     for baseline in [vec![0; full.len()], full.clone()] {
@@ -10985,7 +10985,7 @@ mod tests {
                 &format!("glrm 1; start child; nt child = {word:?};")), &vocab).unwrap();
             let bound = parent.bind_grammar_dynamic_boundary("child", child).unwrap();
             let prepared = PreparedMaskVocabulary::new(&bound, &[1,3,4]).unwrap();
-            let mut state = bound.start(); state.commit_bytes(b"X").unwrap();
+            let mut state = bound.start(); assert!(state.commit_bytes(b"X"));
             for _ in 0..3 {
                 let mut actual = vec![0; bound.mask_len()];
                 prepared.or_mask(&state, &mut actual).unwrap();
@@ -11011,7 +11011,7 @@ mod tests {
         for domain in [vec![0,7,31],vec![0,31,40],vec![7],vec![2,7,40]] {
             let prepared=PreparedMaskVocabulary::new(&bound,&domain).unwrap();
             for prefix in ["", "X", "Xa", "Xa!"] {
-                let mut state=bound.start();state.commit_bytes(prefix.as_bytes()).unwrap();
+                let mut state=bound.start();assert!(state.commit_bytes(prefix.as_bytes()));
                 let mut full=vec![0;bound.mask_len()];state.fill_recursive_mask_by_exact_full_walk(&mut full);
                 let mut expected=vec![0;full.len()];for &id in &domain {
                     expected[id as usize/32]|=full[id as usize/32]&(1<<(id%32));
@@ -11230,7 +11230,7 @@ mod tests {
             ] {
                 for prefix in &prefixes {
                     let mut state = constraint.start_dynamic();
-                    state.commit_bytes(prefix).unwrap();
+                    assert!(state.commit_bytes(prefix));
                     let mut reference = vec![0u32; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut reference);
                     let mut shared = vec![0u32; constraint.mask_len()];
@@ -11336,7 +11336,7 @@ mod tests {
         .bind_grammar_dynamic_boundary("middle", middle)
         .unwrap();
         let mut state = bound.start_dynamic();
-        state.commit_bytes(b"X[a").unwrap();
+        assert!(state.commit_bytes(b"X[a"));
         let (hash, query) = dynamic_mask_lookup_query(&state).expect("recursive key");
         let key = query.to_owned_state_key();
         assert!(matches!(
@@ -11356,7 +11356,7 @@ mod tests {
         assert_recursive_persistent_roundtrip(&state);
         let loaded = Constraint::load(bound.save(), &vocab).unwrap();
         let mut loaded_state = loaded.start_dynamic();
-        loaded_state.commit_bytes(b"X[a").unwrap();
+        assert!(loaded_state.commit_bytes(b"X[a"));
         assert_recursive_persistent_roundtrip(&loaded_state);
 
         // A colliding hash is only a bucket hint; exact equality remains
@@ -11384,7 +11384,7 @@ mod tests {
         assert!(dynamic_mask_lookup_query(&too_deep).is_none(),
             "a depth-limited key must decline rather than cache a truncated stack");
 
-        state.commit_bytes(b"b").unwrap();
+        assert!(state.commit_bytes(b"b"));
         let (next_hash, next_query) =
             dynamic_mask_lookup_query(&state).expect("next recursive key");
         assert!(
@@ -11409,8 +11409,8 @@ mod tests {
         let bound_b = parent.bind_grammar_dynamic_boundary("child", b).unwrap();
         let mut state_a = bound_a.start_dynamic();
         let mut state_b = bound_b.start_dynamic();
-        state_a.commit_bytes(b"X").unwrap();
-        state_b.commit_bytes(b"X").unwrap();
+        assert!(state_a.commit_bytes(b"X"));
+        assert!(state_b.commit_bytes(b"X"));
         for _ in 0..3 {
             assert_recursive_persistent_roundtrip(&state_a);
             assert_recursive_persistent_roundtrip(&state_b);
@@ -11458,7 +11458,7 @@ mod tests {
             for constraint in [&composed, &loaded] {
                 for prefix in &prefixes {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix.as_bytes()).unwrap();
+                    assert!(state.commit_bytes(prefix.as_bytes()));
                     let mut expected = vec![0;constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                     let mut actual = vec![0;expected.len()];
@@ -11496,13 +11496,13 @@ mod tests {
         )
         .unwrap();
         let mut state = dynamic.inner.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(1));
         let exact_before = state.state.clone();
         let key_before = dynamic_mask_state_key(&state).expect("cache key before commit");
         let mask_before = direct_mask(&state);
 
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_ne!(exact_before, state.state, "test must change the exact lexer coordinate");
         let key_after = dynamic_mask_state_key(&state).expect("cache key after commit");
         assert_eq!(
@@ -11604,7 +11604,7 @@ mod tests {
         )
         .unwrap();
         let mut state = dynamic.inner.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         for step in [1, 2, 3, 1, 2] {
             let _ = state.commit_token(step % 4);
             let (query_hash, query) = dynamic_mask_lookup_query(&state).expect("query");
@@ -11656,7 +11656,7 @@ mod tests {
         let schema = r#"{"anyOf":[{"type":"object","properties":{"a":{"type":"integer"}}},{"type":"object","properties":{"b":{"type":"boolean"}}}]}"#;
         let dynamic = DynamicConstraint::from_json_schema(schema, &vocab).unwrap();
         let mut state = dynamic.inner.start();
-        state.commit_token(0).unwrap(); // "{"
+        assert!(state.commit_token(0)); // "{"
         let (query_hash, query) = dynamic_mask_lookup_query(&state).expect("query");
         let owned_key = dynamic_mask_state_key(&state).expect("state key");
         let owned_hash = crate::runtime::artifact::dynamic_mask_state_key_hash(&owned_key);
@@ -11687,8 +11687,8 @@ mod tests {
             &vocab,
         ).unwrap();
         let mut state = dynamic.inner.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(1));
 
         let iters = 20_000;
 
@@ -11779,7 +11779,7 @@ mod tests {
                 for (token_id, bytes) in constraint.token_bytes_iter() {
                     let expected = token_allowed(&static_mask, token_id);
                     let mut advanced = state.clone();
-                    let accepted = advanced.commit_bytes(bytes).is_ok();
+                    let accepted = advanced.commit_bytes(bytes);
                     assert_eq!(
                         accepted, expected,
                         "static mask/commit mismatch during dynamic sweep: {context} depth={depth} path={path:?} token={token_id}"
@@ -11966,7 +11966,7 @@ nt start ::= A | B | A A | A B | B A | B B;
         for (token_id, _) in dynamic.inner.token_bytes_iter() {
             let expected = token_allowed(&mask, token_id);
             let mut advanced = state.clone();
-            let accepted = advanced.commit_token(token_id).is_ok();
+            let accepted = advanced.commit_token(token_id);
             assert_eq!(accepted, expected, "token={token_id}");
         }
     }
@@ -12060,7 +12060,7 @@ nt start ::= A;
         for (token_id, _) in dynamic.inner.token_bytes_iter() {
             let expected = token_allowed(&mask, token_id);
             let mut advanced = state.clone();
-            assert_eq!(advanced.commit_token(token_id).is_ok(), expected, "token={token_id}");
+            assert_eq!(advanced.commit_token(token_id), expected, "token={token_id}");
         }
     }
 
@@ -12087,11 +12087,11 @@ nt start ::= A B | A;
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
 
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 2));
 
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12135,7 +12135,7 @@ nt start ::= A B;
         assert!(token_allowed(&mask, 7));
         assert!(token_allowed(&mask, 12));
 
-        state.commit_token(7).unwrap();
+        assert!(state.commit_token(7));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&direct_mask(&state), 1));
     }
@@ -12162,11 +12162,11 @@ nt start ::= A B;
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
 
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12212,8 +12212,8 @@ nt start ::= item item? item?;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(16).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(16));
 
         assert_dynamic_parity(&state);
         assert!(token_allowed(&direct_mask(&state), 0));
@@ -12242,14 +12242,14 @@ nt start ::= item item? item?;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
-        state.commit_token(4).unwrap();
+        assert!(state.commit_token(0));
+        assert!(state.commit_token(4));
 
         let static_mask = state.mask();
         let dynamic_mask = direct_mask(&state);
 
         let mut probe = state.clone();
-        assert!(probe.commit_bytes(b"b").is_ok());
+        assert!(probe.commit_bytes(b"b"));
         assert!(
             token_allowed(&static_mask, 1),
             "static mask must admit b because a-ab = B WS A"
@@ -12391,7 +12391,7 @@ nt start ::= A B C | B A C | A C | B C;
                     continue;
                 }
                 let mut next = state.clone();
-                next.commit_token(token_id).unwrap();
+                assert!(next.commit_token(token_id));
                 visit(next, depth + 1);
             }
         }
@@ -12426,7 +12426,7 @@ nt start ::= A A;
                     continue;
                 }
                 let mut next = state.clone();
-                next.commit_token(token_id).unwrap();
+                assert!(next.commit_token(token_id));
                 visit(next, depth + 1);
             }
         }
@@ -12450,11 +12450,11 @@ nt start ::= A A;
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert_dynamic_parity(&state);
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_dynamic_parity(&state);
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12479,10 +12479,10 @@ nt start ::= U* 'a';
         assert!(token_allowed(&state.mask(), 0));
         assert!(token_allowed(&state.mask(), 1));
 
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 2));
-        state.commit_token(2).unwrap();
+        assert!(state.commit_token(2));
     }
 
     #[test]
@@ -12504,7 +12504,7 @@ nt start ::= U* 'a';
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
         for bytes in [b"1".as_slice(), b".".as_slice(), b"2".as_slice(), b"e".as_slice(), b"-".as_slice(), b"3".as_slice()] {
-            state.commit_bytes(bytes).unwrap();
+            assert!(state.commit_bytes(bytes));
             assert_dynamic_parity(&state);
         }
         assert!(state.is_accepting());
@@ -12529,7 +12529,7 @@ nt start ::= A C | B D;
 "#;
         let constraint = Constraint::from_glrm_grammar(grammar, &vocab).unwrap();
         let mut state = constraint.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
 
         let paths = state
             .state
@@ -12541,7 +12541,7 @@ nt start ::= A C | B D;
 
         assert_dynamic_parity(&state);
         assert!(token_allowed(&direct_mask(&state), 1));
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12637,19 +12637,19 @@ nt start ::= A;
 
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
         assert!(!token_allowed(&dynamic_state.mask(), 5));
-        dynamic_state.commit_token(2).unwrap(); // consume three a's
-        ordinary_state.commit_token(2).unwrap();
+        assert!(dynamic_state.commit_token(2)); // consume three a's
+        assert!(ordinary_state.commit_token(2));
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
         assert!(token_allowed(&dynamic_state.mask(), 0));
         assert!(token_allowed(&dynamic_state.mask(), 1));
         assert!(!token_allowed(&dynamic_state.mask(), 2));
 
-        dynamic_state.commit_token(1).unwrap(); // reach the exact upper bound
-        ordinary_state.commit_token(1).unwrap();
+        assert!(dynamic_state.commit_token(1)); // reach the exact upper bound
+        assert!(ordinary_state.commit_token(1));
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
         assert!(dynamic_state.is_accepting());
         assert!(!token_allowed(&dynamic_state.mask(), 0));
-        assert!(dynamic_state.clone().commit_token(0).is_err());
+        assert!(!dynamic_state.clone().commit_token(0));
     }
 
     #[test]
@@ -12705,11 +12705,11 @@ nt start ::= B A;
         assert!(token_allowed(&dynamic_state.mask(), 5));
         assert!(!token_allowed(&dynamic_state.mask(), 6));
 
-        dynamic_state.commit_token(0).unwrap();
-        ordinary_state.commit_token(0).unwrap();
+        assert!(dynamic_state.commit_token(0));
+        assert!(ordinary_state.commit_token(0));
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
-        dynamic_state.commit_token(3).unwrap();
-        ordinary_state.commit_token(3).unwrap();
+        assert!(dynamic_state.commit_token(3));
+        assert!(ordinary_state.commit_token(3));
         assert_eq!(dynamic_state.mask(), ordinary_state.mask());
     }
 
@@ -12827,7 +12827,7 @@ nt start ::= A;
         // the next mask exercises the delayed-terminal exclusion table that is
         // derived from the sole global-L1 transition.
         let mut after_a = constraint.start();
-        after_a.commit_token(0).unwrap();
+        assert!(after_a.commit_token(0));
         assert!(after_a.is_accepting());
         assert!(after_a.state.values().any(|gss| {
             !gss.all_accs_satisfy(|excluded: &TerminalsDisallowed| excluded.is_empty())
@@ -12869,10 +12869,10 @@ nt start ::= A B;
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
-        state.commit_token(1).unwrap();
+        assert!(state.commit_token(1));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12896,11 +12896,11 @@ nt start ::= A;
 
         let mut state = constraint.start();
         assert_dynamic_parity(&state);
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         assert_dynamic_parity(&state);
         assert!(token_allowed(&state.mask(), 3));
         assert!(!token_allowed(&state.mask(), 4));
-        state.commit_token(3).unwrap();
+        assert!(state.commit_token(3));
         assert!(state.is_accepting());
         assert_dynamic_parity(&state);
     }
@@ -12944,7 +12944,7 @@ nt start ::= A;
             for constraint in [&composed, &loaded] {
                 for prefix in ["X", "Xa", "Xaa"] {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix.as_bytes()).unwrap();
+                    assert!(state.commit_bytes(prefix.as_bytes()));
                     let mut expected = vec![0; constraint.mask_len()];
                     state.fill_recursive_mask_by_exact_full_walk(&mut expected);
                     for capacity in [0, 1, 2, 16, 2048] {
@@ -12999,7 +12999,7 @@ nt start ::= A;
             assert_eq!(constraint.lazy_dynamic_mask_vocab.get().is_some(), was_lazy);
             for prefix in ["", "X", "Xa", "Xa!"] {
                 let mut state = constraint.start();
-                state.commit_bytes(prefix.as_bytes()).unwrap();
+                assert!(state.commit_bytes(prefix.as_bytes()));
                 let mut oracle = vec![0; constraint.mask_len()];
                 state.fill_recursive_mask_by_exact_full_walk(&mut oracle);
                 let mut actual = vec![u32::MAX; oracle.len()];
@@ -13018,7 +13018,7 @@ nt start ::= A;
             let mut state = constraint.start();
             for token in [1, 7, 2, 3] {
                 assert!(token_allowed(&state.mask(), token));
-                state.commit_token(token).unwrap();
+                assert!(state.commit_token(token));
             }
             assert!(state.is_accepting());
         }

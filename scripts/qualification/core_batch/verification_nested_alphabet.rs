@@ -2,14 +2,14 @@
 //! No private metadata assumptions; no performance claims.
 use glrmask::{BuildOptions,Constraint,Grammar,Optimization,Token,Vocab};
 fn examine(c:&Constraint,prefix:&[u8],n:&mut usize) {
-    let mut state=c.start();if state.commit_bytes(prefix).is_err(){return;}
+    let mut state=c.start();if !state.commit_bytes(prefix){return;}
     let before=state.marker_events().to_vec();let accepting=state.is_accepting();
     // Cold forcing first, full-mask oracle only afterwards.
     let got=state.forced_tokens().unwrap_or_else(|e|panic!("prefix {prefix:?}: {e}"));
     let expected=state.forced_canonical_reference();assert_eq!(got,expected,"prefix={prefix:?}");
     assert_eq!(before,state.marker_events());assert_eq!(accepting,state.is_accepting());
-    let full=state.mask();assert_eq!(state.forced_tokens().unwrap(),expected);assert_eq!(state.mask(),full);
-    let mut cursor=state.clone();for id in got{assert!(!cursor.is_accepting());let m=cursor.mask();assert_eq!(m.iter().map(|v|v.count_ones()).sum::<u32>(),1);cursor.commit_token(id).unwrap();}
+    let full=state.mask();assert_eq!(state.forced_tokens(),expected);assert_eq!(state.mask(),full);
+    let mut cursor=state.clone();for id in got{assert!(!cursor.is_accepting());let m=cursor.mask();assert_eq!(m.iter().map(|v|v.count_ones()).sum::<u32>(),1);assert!(cursor.commit_token(id));}
     *n+=1;
 }
 fn main(){
@@ -45,7 +45,7 @@ fn main(){
         let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",TokenSet::from(9000)).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar C start r nt r=\"A\" C \"B\"");parent.bind("C",&child).unwrap();
         let c=parent.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
-        for c in [&c,&Constraint::load(c.save(), &vocab).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}
+        for c in [&c,&Constraint::load(c.save(), &vocab).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());assert!(s.commit_token(id));n+=1;}assert!(s.is_accepting());}
         }
     }
     println!("PASS {n} nested/nullable/ignore/Unicode/shortest/alias/exact-event frontier comparisons across {compiled} compiled cases and all 4 modes, each source + loaded");

@@ -3,7 +3,7 @@ const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {specialTok
 const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
 const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromEbnf('start ::= "a"');
-const c = g.compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie, endTokens: [99]});
+const c = api.Grammar.fromExpr(api.Expr.sequence(g, new api.TokenSet([99]))).compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie});
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);
 const accepted: boolean = s.isAccepting(); const markers: api.MarkerEvent[] = s.markerEvents();
 const offset: bigint|undefined = markers[0]?.byteOffset;
@@ -28,8 +28,8 @@ const module = new api.Module(g);
 const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');
 module.precompileSync(v, {maskStrategy: api.MaskStrategy.TokenClassTrie});
-const independent: api.Module = module.copy();
-const result: api.Constraint = independent.compileSync(v, new api.CompileOptions({endTokens:[99], maskStrategy: api.MaskStrategy.TokenClassTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa}));
+const independent: api.Module = module.clone();
+const result: api.Constraint = independent.compileSync(v, {maskStrategy: api.MaskStrategy.TokenClassTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa});
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule, v);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');

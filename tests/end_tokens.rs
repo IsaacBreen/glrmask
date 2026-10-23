@@ -9,8 +9,8 @@ fn termination_is_caller_policy_after_acceptance() {
 
     let mut static_state = static_constraint.start();
     let mut dynamic_state = dynamic_constraint.start();
-    static_state.commit_token(0).unwrap();
-    dynamic_state.commit_token(0).unwrap();
+    assert!(static_state.commit_token(0));
+    assert!(dynamic_state.commit_token(0));
     assert!(static_state.is_accepting());
     assert!(dynamic_state.is_accepting());
 
@@ -60,7 +60,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             assert!(!allowed(&state.mask(), 1));
             assert!(!allowed(&state.mask(), 99));
 
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             // The grammar is complete after "a", but with end tokens configured
             // acceptance needs the EOS commit. Both "b" and EOS 99 are allowed.
             assert!(!state.is_accepting());
@@ -68,7 +68,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             assert!(allowed(&state.mask(), 99));
 
             // Commit EOS 99
-            state.commit_token(99).unwrap();
+            assert!(state.commit_token(99));
             assert!(state.is_accepting());
             assert!(state.mask().iter().all(|&w| w == 0));
 
@@ -77,22 +77,22 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             let mut clone = state.clone();
             assert!(clone.is_accepting());
             assert!(clone.mask().iter().all(|&w| w == 0));
-            assert!(state.commit_token(1).is_err());
-            assert!(state.commit_bytes(b"b").is_err());
-            assert!(clone.commit_token(1).is_err());
-            assert!(clone.commit_bytes(b"b").is_err());
+            assert!(!state.commit_token(1));
+            assert!(!state.commit_bytes(b"b"));
+            assert!(!clone.commit_token(1));
+            assert!(!clone.commit_bytes(b"b"));
         }
 
         // Path 2: Continue through "b" after "a", then commit EOS 99
         {
             let mut state = constraint.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             assert!(!state.is_accepting());
             assert!(allowed(&state.mask(), 1));
             assert!(allowed(&state.mask(), 99));
 
             // Continue through "b"
-            state.commit_token(1).unwrap();
+            assert!(state.commit_token(1));
             assert!(!state.is_accepting());
             assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(!allowed(&state.mask(), 0));
@@ -100,7 +100,7 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             assert!(allowed(&state.mask(), 99));
 
             // Commit EOS 99
-            state.commit_token(99).unwrap();
+            assert!(state.commit_token(99));
             assert!(state.is_accepting());
             assert!(state.mask().iter().all(|&w| w == 0));
 
@@ -109,11 +109,11 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             let mut clone = state.clone();
             assert!(clone.is_accepting());
             assert!(clone.mask().iter().all(|&w| w == 0));
-            assert!(state.commit_token(0).is_err());
-            assert!(state.commit_token(1).is_err());
-            assert!(state.commit_bytes(b"a").is_err());
-            assert!(clone.commit_token(0).is_err());
-            assert!(clone.commit_bytes(b"a").is_err());
+            assert!(!state.commit_token(0));
+            assert!(!state.commit_token(1));
+            assert!(!state.commit_bytes(b"a"));
+            assert!(!clone.commit_token(0));
+            assert!(!clone.commit_bytes(b"a"));
         }
     }
 }

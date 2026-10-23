@@ -21,7 +21,7 @@ def accepts(module, v, ids):
     state = module.compile(v).start()
     for token in ids:
         assert state.mask()[token]
-        state.commit_token(token)
+        assert state.commit_token(token)
     assert state.is_accepting()
 
 
@@ -47,7 +47,7 @@ def test_compile_options_and_helpers():
         boundary_mask_strategy=g.BoundaryMaskStrategy.TOKEN_TRIE,
     ).start()
     assert state.mask()[1]
-    state.commit_token(1)
+    assert state.commit_token(1)
     assert state.is_accepting()
     accepts(module, v, [1])
 
@@ -58,11 +58,11 @@ def test_local_precompilation_and_root_only_compile():
     assert child.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE) is None
     parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
-    state = parent.compile(v, end_tokens=[63], mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE).start()
+    state = g.Grammar.from_expr(g.Expr.sequence(parent, g.TokenSet([63]))).compile(v, mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE).start()
     assert not state.mask()[63]
-    state.commit_token(4)
+    assert state.commit_token(4)
     assert not state.is_accepting() and state.mask()[63]
-    state.commit_token(63)
+    assert state.commit_token(63)
     assert state.is_accepting() and not state.mask().any()
     for keyword in ['optimization', 'boundary_trigger']:
         with pytest.raises(TypeError):
@@ -136,7 +136,7 @@ def test_grammar_precompile_returns_a_module():
     module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA))
     state = module.compile(v).start()
     assert state.mask()[4]
-    state.commit_token(4)
+    assert state.commit_token(4)
     assert state.is_accepting()
 
     # Masks equal the explicit Module(grammar) + bind + precompile path.
@@ -163,8 +163,7 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
     with pytest.raises(ValueError):
         parent.precompile(vocab(True))
     assert parent.save() == before
-    with pytest.raises(ValueError):
-        g.Module.load(before)
+    assert g.Module.load(before) is not None
     for data in [b'', b'GLRASM01bad', before[:-1]]:
         with pytest.raises(ValueError):
             g.Module.load(data)
@@ -185,7 +184,7 @@ def test_expression_union_sequence_and_module_binding():
     parent.bind('E', expr)
     state = parent.compile(v).start()
     assert state.mask()[0] and state.mask()[2]
-    state.commit_token(2)
+    assert state.commit_token(2)
     assert state.is_accepting()
 
     host = g.Module(g.Grammar.from_glrm(HOST))
@@ -200,7 +199,7 @@ def test_expression_whole_token_crosses_boundaries():
     parent.bind('S', expr)
     state = parent.compile(v).start()
     assert state.mask()[4]
-    state.commit_token(4)
+    assert state.commit_token(4)
     assert state.is_accepting()
 
 

@@ -42,15 +42,15 @@ fn probe(
         let mut template = constraint.start();
         let mut oracle = reference.start();
         for &token in tokens {
-            template.commit_token(token).unwrap();
-            oracle.commit_token(token).unwrap();
+            assert!(template.commit_token(token));
+            assert!(oracle.commit_token(token));
         }
         let expected = oracle.mask();
         assert_eq!(template.mask(), expected, "{name}/{label}: complete oracle mask");
         // Independent endpoint oracle. Not included in any timing window.
         for &token in token_ids {
             let mut endpoint = template.clone();
-            assert_eq!(bit(&expected, token), endpoint.commit_token(token).is_ok(),
+            assert_eq!(bit(&expected, token), endpoint.commit_token(token),
                        "{name}/{label}: pointwise endpoint {token}");
         }
         let selected = token_ids.iter().copied().find(|&id| bit(&expected, id));
@@ -63,7 +63,7 @@ fn probe(
             let begin = Instant::now();
             state.fill_mask(black_box(&mut out));
             let mask_end = Instant::now();
-            if let Some(token) = selected { state.commit_token(black_box(token)).unwrap(); }
+            if let Some(token) = selected { assert!(state.commit_token(black_box(token))); }
             let commit_end = Instant::now();
             assert_eq!(out, expected, "{name}/{label}: timed mask");
             if sample >= 5 {
@@ -144,7 +144,7 @@ fn main() {
         let prefixes = [("root", vec![]), ("declaration", vec![t("@"), t(" double")]),
                         ("excluded", vec![t("@"), t(" double"), t("Quote")])];
         let mut excluded = bound.start();
-        for &token in &prefixes[2].1 { excluded.commit_token(token).unwrap(); }
+        for &token in &prefixes[2].1 { assert!(excluded.commit_token(token)); }
         assert!(!bit(&excluded.mask(), t("=")));
         assert!(!bit(&excluded.mask(), t("%")));
         probe("exclusion_static", &bound, &body, &prefixes, &ids, repeats);

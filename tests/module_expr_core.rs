@@ -26,7 +26,7 @@ fn b() -> Grammar {
 fn accepts(c: &glrmask::Constraint, ids: &[u32]) -> bool {
     let mut s = c.start();
     for &id in ids {
-        if s.commit_token(id).is_err() {
+        if !s.commit_token(id) {
             return false;
         }
     }
@@ -128,7 +128,7 @@ fn empty_operators_have_explicit_behavior() {
     let choice_constraint = host_choice.compile(&v).unwrap();
     assert!(!choice_constraint.start().is_accepting());
     assert!(choice_constraint.start().mask().iter().all(|&w| w == 0));
-    assert!(choice_constraint.start().commit_token(0).is_err());
+    assert!(!choice_constraint.start().commit_token(0));
 }
 
 #[test]
@@ -177,12 +177,17 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
 fn final_end_tokens_are_root_only() {
     let v = vocab();
     let m = Module::new(&a());
-    let c = m.compile_with(&v, CompileOptions::default().end_tokens([99])).unwrap();
+    let root = Grammar::from_expr(Expr::sequence([
+        Expr::from(m.clone()),
+        Expr::from(TokenSet::new([99])),
+    ]))
+    .unwrap();
+    let c = root.compile(&v).unwrap();
     let mut state = c.start();
     assert!(!allowed(&state.mask(), 99));
-    state.commit_token(1).unwrap();
+    assert!(state.commit_token(1));
     assert!(allowed(&state.mask(), 99));
-    state.commit_token(99).unwrap();
+    assert!(state.commit_token(99));
 }
 
 #[test]

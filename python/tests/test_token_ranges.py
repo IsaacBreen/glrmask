@@ -66,11 +66,11 @@ def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     for first in (10, 20, 30):
         state = c.start()
         assert accepted_ids(state) == set(range(10, 31))
-        state.commit_token(first)
+        assert state.commit_token(first)
         assert accepted_ids(state) == set(range(20, 41)) | set(range(70, 81))
-        state.commit_token(80)
+        assert state.commit_token(80)
         assert state.is_accepting()
-    loaded = glrmask.Constraint.load(c.save())
+    loaded = glrmask.Constraint.load(c.save(), v)
     assert accepted_ids(loaded.start()) == set(range(10, 31))
 
 
@@ -103,7 +103,7 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
         assert bool(mask[n - 1])
         if excluded is not None:
             assert not bool(mask[excluded])
-        state.commit_token(n - 1)
+        assert state.commit_token(n - 1)
         assert state.is_accepting()
 
 
@@ -151,7 +151,7 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
                 states = [actual.start(), expected.start()]
                 for state in states:
                     for token in prefix:
-                        state.commit_token(token)
+                        assert state.commit_token(token)
                 masks = [accepted_ids(state) for state in states]
                 assert masks[0] == masks[1], (mode, deferred, expression, prefix, masks)
                 assert states[0].is_accepting() == states[1].is_accepting(), (expression, prefix)
@@ -169,10 +169,10 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = _bound_snapshot(grammar, "A", glrmask.TokenSet(range(6)) if compact else glrmask.TokenSet([0]))
     grammar = _bound_snapshot(grammar, "B", glrmask.TokenSet(range(3, 10)) if compact else glrmask.TokenSet([1]))
-    constraint = grammar.compile(v, end_tokens=[15], mask_strategy=mode)
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(grammar, glrmask.TokenSet([15]))).compile(v, mask_strategy=mode)
     state = constraint.start()
-    state.commit_token(0)
-    state.commit_token(0)
+    assert state.commit_token(0)
+    assert state.commit_token(0)
     # The grammar is complete; acceptance needs the end token.
     assert not state.is_accepting()
     assert accepted_ids(state) == {15}
@@ -188,12 +188,11 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     module = _bound_snapshot(_bound_snapshot(grammar, "A", glrmask.TokenSet(a)), "B", glrmask.TokenSet(b))
-    constraint = module.compile(v, end_tokens=[15], mask_strategy=mode)
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(module, glrmask.TokenSet([15]))).compile(v, mask_strategy=mode)
     state = constraint.start()
-    state.commit_token(0)
-    state.commit_token(0)
+    assert state.commit_token(0)
+    assert state.commit_token(0)
     # The grammar is complete; acceptance needs the end token.
     assert not state.is_accepting()
     assert accepted_ids(state) == {15}
-    with pytest.raises(ValueError):
-        state.commit_token(0)
+    assert not state.commit_token(0)

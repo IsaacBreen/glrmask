@@ -40,25 +40,24 @@ def test_parser_machinery_is_only_available_in_internal_namespace():
                                   glrmask.MaskStrategy.FAST_RUNTIME])
 def test_save_flag_preserves_default_and_external_roundtrips(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"ab", 2: b"b", 3: b""})
-    constraint = glrmask.Grammar.from_ebnf('start ::= "a" "b"?').compile(
-        vocab, mask_strategy=mode, end_tokens=[3])
+    constraint = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet([3]))).compile(vocab, mask_strategy=mode)
     assert not hasattr(constraint, "save_with_external_vocab")
     self_contained = constraint.save()
     assert self_contained == constraint.save()
     external = constraint.save()
     assert external == constraint.save()
-    for restored in [glrmask.Constraint.load(self_contained),
+    for restored in [glrmask.Constraint.load(self_contained, vocab),
                      glrmask.Constraint.load(external, vocab)]:
         for prefix in [b"", b"a", b"ab"]:
             expected = constraint.start()
             actual = restored.start()
-            expected.commit_bytes(prefix)
-            actual.commit_bytes(prefix)
+            assert expected.commit_bytes(prefix)
+            assert actual.commit_bytes(prefix)
             assert np.array_equal(expected.mask(), actual.mask())
             assert expected.is_accepting() == actual.is_accepting()
             if actual.mask()[3]:
                 assert not actual.is_accepting()
-                actual.commit_token(3)
+                assert actual.commit_token(3)
                 assert actual.is_accepting() and not actual.mask().any()
                 assert not actual.mask().any()
     wrong_vocab = glrmask.Vocab.from_id_to_bytes({0: b"b", 1: b"ab", 2: b"a", 3: b""})
@@ -82,8 +81,8 @@ def test_boundary_option_is_eager_and_does_not_change_masks(mode):
         saved = requested.save()
         for prefix in [b"", b"a", b"ab"]:
             a, b = requested.start(), plain.start()
-            a.commit_bytes(prefix)
-            b.commit_bytes(prefix)
+            assert a.commit_bytes(prefix)
+            assert b.commit_bytes(prefix)
             assert np.array_equal(a.mask(), b.mask())
             assert a.is_accepting() == b.is_accepting()
         assert requested.save() == saved
@@ -115,32 +114,29 @@ def test_acceptance_allows_continuation_and_caller_tracks_eos(mode):
     assert hasattr(glrmask.ConstraintState, "is_accepting")
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 1: b"b"})
     end_token_ids = {130}
-    compiled = glrmask.Grammar.from_ebnf('start ::= "a" "b"?').compile(
-        vocab, mask_strategy=mode, end_tokens=list(end_token_ids))
-    for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
+    compiled = glrmask.Grammar.from_expr(glrmask.Expr.sequence(glrmask.Grammar.from_ebnf('start ::= "a" "b"?'), glrmask.TokenSet(list(end_token_ids)))).compile(vocab, mask_strategy=mode)
+    for constraint in [compiled, glrmask.Constraint.load(compiled.save(), vocab),
                        glrmask.Constraint.load(compiled.save(), vocab)]:
         state = constraint.start()
         assert not hasattr(state, "is_terminated")
         assert not state.is_accepting() and not (not state.mask().any())
         assert not state.mask()[130]
-        state.commit_token(0)
+        assert state.commit_token(0)
         # The grammar is complete; acceptance needs the end token.
         assert not state.is_accepting() and not (not state.mask().any())
         assert state.mask()[1] and state.mask()[130]
         for sequence in [(130,), (1, 130)]:
-            branch = state.clone()
+            branch = state.copy()
             for token_id in sequence:
                 assert branch.mask()[token_id]
-                branch.commit_token(token_id)
+                assert branch.commit_token(token_id)
                 if token_id in end_token_ids:
                     break
-            for ended in [branch, branch.clone()]:
+            for ended in [branch, branch.copy()]:
                 assert ended.is_accepting() and not ended.mask().any()
                 assert not ended.mask().any()
                 assert ended.forced_tokens() == []
-                with pytest.raises(ValueError, match="already terminated"):
-                    ended.commit_token(0)
-                with pytest.raises(ValueError, match="already terminated"):
-                    ended.commit_bytes(b"a")
-                assert ended.is_accepting() and not ended.mask().any()
+                assert not ended.commit_token(0)
+                assert not ended.commit_bytes(b"a")
+                assert not ended.is_accepting() and not ended.mask().any()
             assert not state.is_accepting() and state.mask()[1] and state.mask()[130]

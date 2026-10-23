@@ -2132,7 +2132,7 @@ mod tests {
                 assert!(state.try_fill_mask_from_cache(&mut cached));
                 assert_eq!(cached, mask);
                 let before = state.state.clone();
-                state.commit_token(token).unwrap();
+                assert!(state.commit_token(token));
                 if before == state.state {
                     assert!(state.try_fill_mask_from_cache(&mut cached));
                     unchanged_cache_reuses += 1;
@@ -2143,7 +2143,7 @@ mod tests {
             }
             assert!(unchanged_cache_reuses > 0, "fixture must exercise a repeated-state cache hit");
             assert!(state.is_accepting());
-            assert!(state.commit_token(0).is_err());
+            assert!(!state.commit_token(0));
             assert!(state.mask().iter().all(|&word| word == 0), "failed commit invalidates cache");
             assert_eq!(state.mask(), state.clone().mask());
         }
@@ -2261,8 +2261,8 @@ mod tests {
         let mut expected = monolithic.start();
         for prefix_token in [None, Some(0), Some(1)] {
             if let Some(token) = prefix_token {
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             let mut fallback = vec![0u32; poisoned.body_mask_len()];
             actual.fill_recursive_mask_by_exact_full_walk(&mut fallback);
@@ -2400,23 +2400,23 @@ mod tests {
                 };
                 for prefix in [b"".as_slice(), b"X", b"X[", b"X[a", b"X[a]", b"X[a]!"] {
                     let mut state = constraint.start();
-                    state.commit_bytes(prefix).unwrap();
+                    assert!(state.commit_bytes(prefix));
                     check(&state);
                 }
                 for special in [11, 9001] {
                     let mut state = constraint.start();
-                    state.commit_bytes(b"X[").unwrap();
+                    assert!(state.commit_bytes(b"X["));
                     let mask = state.mask();
                     assert_ne!(mask[special / 32] & (1 << (special % 32)), 0);
                     assert_eq!(mask[0] & (1 << 12), 0, "byte alias has no special route");
-                    state.commit_token(special as u32).unwrap();
+                    assert!(state.commit_token(special as u32));
                     check(&state);
-                    state.commit_bytes(b"]!").unwrap();
+                    assert!(state.commit_bytes(b"]!"));
                     check(&state);
                 }
                 if nullable {
                     let mut state = constraint.start();
-                    state.commit_bytes(b"X[]!").unwrap();
+                    assert!(state.commit_bytes(b"X[]!"));
                     check(&state);
                 }
             }
@@ -2459,7 +2459,7 @@ mod tests {
             assert_ne!(alphabet[b'a' as usize], alphabet[b']' as usize]);
             for prefix in [b"".as_slice(), b"X", b"X[", b"X[a", b"X[abc", b"X[abc]", b"X[abc]!"] {
                 let mut state = bound.start();
-                state.commit_bytes(prefix).unwrap();
+                assert!(state.commit_bytes(prefix));
                 let expected = recursive_unpruned_reference(&state);
                 for budget in [0, 2, 256] {
                     let mut actual = vec![0u32; bound.mask_len()];
@@ -2621,7 +2621,7 @@ mod tests {
         .expect("literal-choice terminal should compile");
 
         let mut state = constraint.start();
-        state.commit_token(0).expect("opening quote should commit");
+        assert!(state.commit_token(0), "opening quote should commit");
 
         let mut static_mask = vec![0u32; constraint.body_mask_len()];
         state.fill_mask(&mut static_mask);
@@ -2795,9 +2795,8 @@ mod tests {
                             continue;
                         }
                         let mut advanced = state.clone();
-                        advanced
-                            .commit_bytes(bytes)
-                            .expect("dynamically admitted token must commit");
+                        assert!(advanced
+                            .commit_bytes(bytes), "dynamically admitted token must commit");
                         let mut next_path = path.clone();
                         next_path.push(token);
                         next.push((advanced, next_path));
@@ -2844,9 +2843,8 @@ mod tests {
                 assert_eq!(first, expected);
                 assert_eq!(second, expected, "same-state cache hit changed the mask");
             }
-            state
-                .commit_bytes(bytes)
-                .expect("test sequence should remain valid");
+            assert!(state
+                .commit_bytes(bytes), "test sequence should remain valid");
             if index == 1 {
                 checkpoint = Some(state.clone());
             }

@@ -9,7 +9,7 @@ fn main() -> Result<()> {
     let mut state = constraint.start();
     assert_eq!(state.marker_events(), &[MarkerEvent { id: 10, byte_offset: 0 }]);
     println!("initial: {:?}", state.marker_events());
-    state.commit_token(0)?;
+    assert!(state.commit_token(0));
     assert_eq!(state.marker_events(), &[
         MarkerEvent { id: 20, byte_offset: 5 },
         MarkerEvent { id: 30, byte_offset: 10 },

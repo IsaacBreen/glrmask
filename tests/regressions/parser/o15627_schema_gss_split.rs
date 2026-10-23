@@ -62,7 +62,7 @@ fn unique_stack_count(state: &ConstraintState<'_>) -> usize {
 fn o15627_schema_prefix_has_single_unique_gss_path_at_next_key_quote() {
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(O15627_SCHEMA_MRE), &bytes_vocab()).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(O15627_PREFIX).unwrap();
+    assert!(state.commit_bytes(O15627_PREFIX));
 
     let stacks = state.debug_parser_stacks();
     assert!(

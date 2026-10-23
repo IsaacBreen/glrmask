@@ -209,16 +209,16 @@ fn commit_selected(
 }
 
 pub(crate) fn force(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
-    force_result(states, dynamic).unwrap_or_default()
+    force_result(states, dynamic)
 }
 
-/// Public-query adapter for the canonical reference implementation. Catch only
-/// the library's typed resource limit; arbitrary bugs still propagate.
+/// Public-query adapter for the canonical reference implementation. A proof or
+/// resource limit returns the empty prefix.
 pub(crate) fn force_result(
     states: &[ConstraintState<'_>], dynamic: Option<bool>,
-) -> crate::Result<Vec<u32>> {
+) -> Vec<u32> {
     glrmask_invariant::__private::catch_compilation_resource_limit(|| force_inner(states, dynamic))
-        .map_err(|message| crate::Error::State(format!("forced token proof: {message}")))
+        .unwrap_or_default()
 }
 
 /// Strict token-ID forcing: no canonical spelling selection. Each next ID is
@@ -338,9 +338,9 @@ mod tests {
         for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
             let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
-            assert_eq!(baseline.start().forced_tokens().unwrap(),[1],"{mode:?}");
+            assert_eq!(baseline.start().forced_tokens(),[1],"{mode:?}");
             let event=guarded.compile_with_build_options(&vocab,options).unwrap();
-            assert!(event.start().forced_tokens().unwrap().is_empty(),"{mode:?}");
+            assert!(event.start().forced_tokens().is_empty(),"{mode:?}");
         }
     }
 

@@ -29,7 +29,7 @@ fn main() {
             let c=instance.link_with(BuildOptions::default().optimization(Optimization::FastBuild)).unwrap();
             let mut state=c.start();let mask=state.mask();
             assert_eq!(mask.iter().map(|w|w.count_ones() as usize).sum::<usize>(),128);
-            state.commit_token(1).unwrap();assert!(state.is_accepting());
+            assert!(state.commit_token(1));assert!(state.is_accepting());
         }));
         eprintln!("DONE threads={threads} round={round} ms={:.3}",started.elapsed().as_secs_f64()*1000.0);
     }

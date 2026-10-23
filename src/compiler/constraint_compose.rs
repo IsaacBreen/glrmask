@@ -23650,9 +23650,9 @@ mod tests {
             ("segmented_dynamic", &segmented_dynamic),
         ] {
             let mut state = constraint.start();
-            assert!(state.commit_bytes(b"Xa").is_ok(), "{name} rejected fused Xa");
-            assert!(state.commit_bytes(b"b").is_ok(), "{name} rejected b");
-            assert!(state.commit_bytes(b"!").is_ok(), "{name} rejected !");
+            assert!(state.commit_bytes(b"Xa"), "{name} rejected fused Xa");
+            assert!(state.commit_bytes(b"b"), "{name} rejected b");
+            assert!(state.commit_bytes(b"!"), "{name} rejected !");
             assert!(state.is_accepting(), "{name} did not accept Xab!");
         }
         assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
@@ -23915,8 +23915,8 @@ mod tests {
 
         let mut inline_state = inline.start();
         let mut segmented_state = segmented.start();
-        assert!(inline_state.commit_bytes(b"<ab>").is_ok());
-        assert!(segmented_state.commit_bytes(b"<ab>").is_ok());
+        assert!(inline_state.commit_bytes(b"<ab>"));
+        assert!(segmented_state.commit_bytes(b"<ab>"));
         assert!(inline_state.is_accepting());
         assert!(segmented_state.is_accepting());
         assert_constraints_mask_equivalent_on_reachable_prefixes_labeled(
@@ -24210,7 +24210,7 @@ table: &child_tables[index],
             8,
         );
         let mut actual = runtime_composed.start();
-        actual.commit_token(0).unwrap();
+        assert!(actual.commit_token(0));
         assert!(actual.is_accepting());
 
     }
@@ -24329,7 +24329,7 @@ table: &child_tables[index],
             .unwrap();
 
         let mut state = composed.start();
-        state.commit_token(0).unwrap();
+        assert!(state.commit_token(0));
         let explicitly_disabled = std::env::var("GLRMASK_COMPOSE_RUNTIME_LEXER_PRODUCT")
             .ok()
             .is_some_and(|value| {
@@ -24368,9 +24368,9 @@ table: &child_tables[index],
 
         for suffix in [[1, 2, 3], [1, 2, 4]] {
             let mut cursor = composed.start();
-            cursor.commit_token(0).unwrap();
+            assert!(cursor.commit_token(0));
             for token in suffix {
-                cursor.commit_token(token).unwrap();
+                assert!(cursor.commit_token(token));
             }
             assert!(cursor.is_accepting());
         }
@@ -24457,7 +24457,7 @@ table: &child_tables[index],
             for constraint in [&outer, &outer_loaded] {
                 let mut state = constraint.start();
                 for &byte in bytes {
-                    state.commit_token(byte as u32).unwrap();
+                    assert!(state.commit_token(byte as u32));
                 }
                 assert!(state.is_accepting(), "recomposed runtime-product child rejected {bytes:?}");
             }
@@ -24947,13 +24947,13 @@ table: &child_table,
 
     fn assert_accepts(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
-        state.commit_bytes(bytes).unwrap();
+        assert!(state.commit_bytes(bytes));
         assert!(state.is_accepting(), "expected {:?} to finish", bytes);
     }
 
     fn assert_rejects(constraint: &Constraint, bytes: &[u8]) {
         let mut state = constraint.start();
-        let accepted = state.commit_bytes(bytes).is_ok() && state.is_accepting();
+        let accepted = state.commit_bytes(bytes) && state.is_accepting();
         assert!(!accepted, "expected {:?} to reject", bytes);
     }
 
@@ -25053,12 +25053,8 @@ table: &child_table,
                 let mut actual_state = actual.start();
                 let mut expected_state = expected.start();
                 for &token in &prefix {
-                    actual_state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("{tag}actual rejected reachable prefix {prefix:?}: {error}")
-                    });
-                    expected_state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("{tag}expected rejected its own reachable prefix {prefix:?}: {error}")
-                    });
+                    assert!(actual_state.commit_token(token));
+                    assert!(expected_state.commit_token(token));
                 }
 
                 let actual_mask = actual_state.mask();
@@ -25265,15 +25261,15 @@ table: &child_table,
         let mut static_state = static_owned.start();
         let mut dynamic_state = dynamic_owned.start();
         assert_eq!(static_state.mask(), dynamic_state.mask(), "start masks must agree");
-        assert!(static_state.commit_bytes(b"ab").is_ok(), "static must accept the cross-boundary token");
-        assert!(dynamic_state.commit_bytes(b"ab").is_ok(), "dynamic must accept the cross-boundary token");
+        assert!(static_state.commit_bytes(b"ab"), "static must accept the cross-boundary token");
+        assert!(dynamic_state.commit_bytes(b"ab"), "dynamic must accept the cross-boundary token");
         assert_eq!(
             static_state.mask(),
             dynamic_state.mask(),
             "masks after the cross-boundary token must agree",
         );
-        assert!(static_state.commit_bytes(b"cd").is_ok());
-        assert!(dynamic_state.commit_bytes(b"cd").is_ok());
+        assert!(static_state.commit_bytes(b"cd"));
+        assert!(dynamic_state.commit_bytes(b"cd"));
         assert!(static_state.is_accepting() && dynamic_state.is_accepting());
     }
 
@@ -25788,18 +25784,10 @@ table: &child_table,
                     expected_mask,
                     "mask mismatch before token {token} in sequence {sequence:?}",
                 );
-                actual.commit_token(token).unwrap_or_else(|error| {
-                    panic!("composed rejected token {token} in {sequence:?}: {error}")
-                });
-                dynamic.commit_token(token).unwrap_or_else(|error| {
-                    panic!("dynamic composed rejected token {token} in {sequence:?}: {error}")
-                });
-                cached.commit_token(token).unwrap_or_else(|error| {
-                    panic!("prepared-cache composed rejected token {token} in {sequence:?}: {error}")
-                });
-                expected.commit_token(token).unwrap_or_else(|error| {
-                    panic!("monolithic rejected token {token} in {sequence:?}: {error}")
-                });
+                assert!(actual.commit_token(token));
+                assert!(dynamic.commit_token(token));
+                assert!(cached.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.mask(), expected.mask());
             assert_eq!(dynamic.mask(), expected.mask());
@@ -25894,8 +25882,8 @@ table: &child_table,
         // parent's "!").
         let mut static_inside_child = composed_static.start();
         let mut oracle_inside_child = source_oracle.start();
-        static_inside_child.commit_token(2).unwrap();
-        oracle_inside_child.commit_token(2).unwrap();
+        assert!(static_inside_child.commit_token(2));
+        assert!(oracle_inside_child.commit_token(2));
         assert!(token_allowed(&static_inside_child.mask(), 3));
         assert!(token_allowed(&oracle_inside_child.mask(), 3));
         assert!(!static_inside_child.is_accepting());
@@ -26114,14 +26102,14 @@ table: &child_table,
             let mut dynamic = composed_dynamic.start();
             let mut loaded_state = loaded.start();
             let mut reference = monolithic.start();
-            assert_eq!(actual.commit_token(token).is_ok(), expected, "token {token}");
-            assert_eq!(dynamic.commit_token(token).is_ok(), expected, "dynamic token {token}");
+            assert_eq!(actual.commit_token(token), expected, "token {token}");
+            assert_eq!(dynamic.commit_token(token), expected, "dynamic token {token}");
             assert_eq!(
-                loaded_state.commit_token(token).is_ok(),
+                loaded_state.commit_token(token),
                 expected,
                 "loaded token {token}",
             );
-            assert_eq!(reference.commit_token(token).is_ok(), expected, "reference token {token}");
+            assert_eq!(reference.commit_token(token), expected, "reference token {token}");
             assert_eq!(actual.is_accepting(), expected, "token {token}");
             assert_eq!(dynamic.is_accepting(), expected, "dynamic token {token}");
             assert_eq!(loaded_state.is_accepting(), expected, "loaded token {token}");
@@ -26291,10 +26279,10 @@ table: &child_table,
                 assert_eq!(actual.mask(), expected.mask(), "mask before {sequence:?} token {token}");
                 assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask before {sequence:?} token {token}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask before {sequence:?} token {token}");
-                actual.commit_token(token).unwrap();
-                dynamic.commit_token(token).unwrap();
-                restored.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(dynamic.commit_token(token));
+                assert!(restored.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting(), "composed incomplete for {sequence:?}");
             assert!(dynamic.is_accepting(), "dynamic composed incomplete for {sequence:?}");
@@ -26311,16 +26299,16 @@ table: &child_table,
             let mut restored = scoped_oracle_test_start(&loaded);
             let mut expected = scoped_oracle_test_start(&monolithic);
             for &token in &sequence[..sequence.len() - 1] {
-                actual.commit_token(token).unwrap();
-                dynamic.commit_token(token).unwrap();
-                restored.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(dynamic.commit_token(token));
+                assert!(restored.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             let token = *sequence.last().unwrap();
-            let expected_result = expected.commit_token(token).is_ok();
-            assert_eq!(actual.commit_token(token).is_ok(), expected_result);
-            assert_eq!(dynamic.commit_token(token).is_ok(), expected_result);
-            assert_eq!(restored.commit_token(token).is_ok(), expected_result);
+            let expected_result = expected.commit_token(token);
+            assert_eq!(actual.commit_token(token), expected_result);
+            assert_eq!(dynamic.commit_token(token), expected_result);
+            assert_eq!(restored.commit_token(token), expected_result);
             assert!(!expected_result, "invalid scoped sequence {sequence:?} was accepted");
         }
 
@@ -26379,9 +26367,9 @@ table: &child_table,
             for &token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "outer mask before {sequence:?} token {token}");
                 assert_eq!(dynamic.mask(), expected.mask(), "outer dynamic mask before {sequence:?} token {token}");
-                actual.commit_token(token).unwrap();
-                dynamic.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(dynamic.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting(), "outer incomplete for {sequence:?}");
             assert!(dynamic.is_accepting(), "outer dynamic incomplete for {sequence:?}");
@@ -26391,8 +26379,8 @@ table: &child_table,
         let mut actual = scoped_oracle_test_start(&outer);
         let mut dynamic = scoped_oracle_test_start(&outer_dynamic);
         let mut expected = scoped_oracle_test_start(&outer_monolithic);
-        assert_eq!(actual.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
-        assert_eq!(dynamic.commit_token(23).is_ok(), expected.commit_token(23).is_ok());
+        assert_eq!(actual.commit_token(23), expected.commit_token(23));
+        assert_eq!(dynamic.commit_token(23), expected.commit_token(23));
         assert!(!expected.is_accepting());
     }
 
@@ -26527,9 +26515,7 @@ table: &child_table,
                 assert_eq!(masks[1], masks[3], "dynamic mask before {sequence:?} token {token}");
                 assert_eq!(masks[2], masks[3], "loaded mask before {sequence:?} token {token}");
                 for state in states.iter_mut() {
-                    state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("valid sequence {sequence:?} rejected at {token}: {error}")
-                    });
+                    assert!(state.commit_token(token));
                 }
             }
             for (label, state) in
@@ -26546,7 +26532,7 @@ table: &child_table,
             let mut rejects = Vec::new();
             for mut state in make_states() {
                 rejects.push(replay_first_rejection(
-                    &mut |token| state.commit_token(token).is_ok(),
+                    &mut |token| state.commit_token(token),
                     sequence,
                 ));
             }
@@ -26720,9 +26706,7 @@ table: &child_table,
                 assert_eq!(masks[0], masks[3], "static/inline mask before {sequence:?} token {token}");
                 assert_eq!(masks[2], masks[3], "loaded/inline mask before {sequence:?} token {token}");
                 for state in states.iter_mut() {
-                    state.commit_token(token).unwrap_or_else(|error| {
-                        panic!("valid exclusion sequence {sequence:?} rejected at {token}: {error}")
-                    });
+                    assert!(state.commit_token(token));
                 }
             }
             for (label, state) in
@@ -26735,9 +26719,7 @@ table: &child_table,
         // and assert acceptance (Xaba! is valid).
         for mut state in make_states() {
             for &token in &[6u32, 2, 1] {
-                state.commit_token(token).unwrap_or_else(|error| {
-                    panic!("Xab extension rejected at {token}: {error}")
-                });
+                assert!(state.commit_token(token));
             }
             assert!(state.is_accepting(), "Xaba! must complete");
         }
@@ -26746,7 +26728,7 @@ table: &child_table,
             let mut rejects = Vec::new();
             for mut state in make_states() {
                 rejects.push(replay_first_rejection(
-                    &mut |token| state.commit_token(token).is_ok(),
+                    &mut |token| state.commit_token(token),
                     sequence,
                 ));
             }
@@ -26869,14 +26851,14 @@ table: &child_table,
 
         let mut actual = composed.start();
         let mut reference = monolithic.start();
-        actual.commit_token(0).unwrap();
-        reference.commit_token(0).unwrap();
+        assert!(actual.commit_token(0));
+        assert!(reference.commit_token(0));
         assert!(token_allowed(&actual.mask(), 1));
         assert!(token_allowed(&reference.mask(), 1));
-        actual.commit_token(1).unwrap();
-        reference.commit_token(1).unwrap();
-        actual.commit_token(2).unwrap();
-        reference.commit_token(2).unwrap();
+        assert!(actual.commit_token(1));
+        assert!(reference.commit_token(1));
+        assert!(actual.commit_token(2));
+        assert!(reference.commit_token(2));
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
 
@@ -26884,14 +26866,14 @@ table: &child_table,
         // by enter-RIGHT, and must preserve that scope across the token.
         let mut actual = composed.start();
         let mut reference = monolithic.start();
-        actual.commit_token(0).unwrap();
-        reference.commit_token(0).unwrap();
+        assert!(actual.commit_token(0));
+        assert!(reference.commit_token(0));
         assert!(token_allowed(&actual.mask(), 3));
         assert!(token_allowed(&reference.mask(), 3));
-        actual.commit_token(3).unwrap();
-        reference.commit_token(3).unwrap();
-        actual.commit_token(2).unwrap();
-        reference.commit_token(2).unwrap();
+        assert!(actual.commit_token(3));
+        assert!(reference.commit_token(3));
+        assert!(actual.commit_token(2));
+        assert!(reference.commit_token(2));
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
 
@@ -26902,16 +26884,16 @@ table: &child_table,
         // relations.
         let mut actual = composed.start();
         let mut reference = monolithic.start();
-        actual.commit_token(0).unwrap();
-        reference.commit_token(0).unwrap();
+        assert!(actual.commit_token(0));
+        assert!(reference.commit_token(0));
         assert!(token_allowed(&actual.mask(), 10));
         assert!(token_allowed(&reference.mask(), 10));
-        actual.commit_token(10).unwrap();
-        reference.commit_token(10).unwrap();
-        actual.commit_token(1).unwrap();
-        reference.commit_token(1).unwrap();
-        actual.commit_token(2).unwrap();
-        reference.commit_token(2).unwrap();
+        assert!(actual.commit_token(10));
+        assert!(reference.commit_token(10));
+        assert!(actual.commit_token(1));
+        assert!(reference.commit_token(1));
+        assert!(actual.commit_token(2));
+        assert!(reference.commit_token(2));
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
 
@@ -26966,14 +26948,14 @@ table: &child_table,
 
         let mut actual = composed.start();
         let mut reference = monolithic.start();
-        actual.commit_token(0).unwrap();
-        reference.commit_token(0).unwrap();
+        assert!(actual.commit_token(0));
+        assert!(reference.commit_token(0));
         assert!(token_allowed(&actual.mask(), 1));
         assert!(token_allowed(&reference.mask(), 1));
-        actual.commit_token(1).unwrap();
-        reference.commit_token(1).unwrap();
-        actual.commit_token(2).unwrap();
-        reference.commit_token(2).unwrap();
+        assert!(actual.commit_token(1));
+        assert!(reference.commit_token(1));
+        assert!(actual.commit_token(2));
+        assert!(reference.commit_token(2));
         assert!(actual.is_accepting());
         assert!(reference.is_accepting());
 
@@ -27058,10 +27040,10 @@ table: &child_table,
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
                 assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask mismatch before token {token}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask mismatch before token {token}");
-                actual.commit_token(token).unwrap();
-                dynamic.commit_token(token).unwrap();
-                restored.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(dynamic.commit_token(token));
+                assert!(restored.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting());
             assert!(dynamic.is_accepting());
@@ -27139,9 +27121,9 @@ table: &child_table,
                     expected.mask(),
                     "loaded-child nested mask mismatch before token {token}"
                 );
-                actual.commit_token(token).unwrap();
-                restored_actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(restored_actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting());
             assert!(restored_actual.is_accepting());
@@ -27337,10 +27319,10 @@ table: &child_table,
         .constraint;
 
         let mut composed_bytes = composed.start();
-        composed_bytes.commit_bytes(b"[a|b|c]").unwrap();
+        assert!(composed_bytes.commit_bytes(b"[a|b|c]"));
         assert!(composed_bytes.is_accepting());
         let mut monolithic_bytes = monolithic.start();
-        monolithic_bytes.commit_bytes(b"[a|b|c]").unwrap();
+        assert!(monolithic_bytes.commit_bytes(b"[a|b|c]"));
         assert!(monolithic_bytes.is_accepting());
 
         assert_constraints_equivalent_on_reachable_prefixes(
@@ -27350,7 +27332,7 @@ table: &child_table,
             7,
         );
         let mut fused = composed.start();
-        fused.commit_token(0).unwrap();
+        assert!(fused.commit_token(0));
         assert!(fused.is_accepting());
     }
 
@@ -27404,15 +27386,15 @@ table: &child_table,
             assert!(!token_allowed(&actual.mask(), PLACEHOLDER_TOKEN));
             for token in content {
                 assert_eq!(actual.mask(), expected.mask());
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.mask(), expected.mask());
             assert!(token_allowed(&actual.mask(), END_TOKEN));
             assert!(!token_allowed(&actual.mask(), PLACEHOLDER_TOKEN));
             assert_eq!(actual.forced_canonical_reference(), vec![END_TOKEN]);
-            actual.commit_token(END_TOKEN).unwrap();
-            expected.commit_token(END_TOKEN).unwrap();
+            assert!(actual.commit_token(END_TOKEN));
+            assert!(expected.commit_token(END_TOKEN));
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
         }
@@ -27420,9 +27402,9 @@ table: &child_table,
         let loaded = Constraint::load(&composed.save(), &vocab).unwrap();
         assert_eq!(loaded.embedded_end_token_ids(), vec![END_TOKEN]);
         let mut loaded_state = loaded.start();
-        loaded_state.commit_token(0).unwrap();
+        assert!(loaded_state.commit_token(0));
         assert_eq!(loaded_state.forced_canonical_reference(), vec![END_TOKEN]);
-        loaded_state.commit_token(END_TOKEN).unwrap();
+        assert!(loaded_state.commit_token(END_TOKEN));
         assert!(loaded_state.is_accepting());
     }
 
@@ -27472,13 +27454,13 @@ table: &child_table,
             let mut expected = monolithic.start();
             for token in content {
                 assert_eq!(actual.mask(), expected.mask());
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.mask(), expected.mask());
             assert_eq!(actual.forced_canonical_reference(), vec![SPECIAL_TOKEN]);
-            actual.commit_token(SPECIAL_TOKEN).unwrap();
-            expected.commit_token(SPECIAL_TOKEN).unwrap();
+            assert!(actual.commit_token(SPECIAL_TOKEN));
+            assert!(expected.commit_token(SPECIAL_TOKEN));
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
         }
@@ -27531,8 +27513,8 @@ table: &child_table,
             let mut expected = monolithic.start();
             for token in sequence {
                 assert_eq!(actual.mask(), expected.mask());
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
@@ -27627,8 +27609,8 @@ table: &child_table,
             let mut expected = monolithic.start();
             for token in sequence {
                 assert_eq!(actual.mask(), expected.mask());
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
@@ -27775,8 +27757,8 @@ table: &child_table,
                 expected.mask(),
                 "mask mismatch before offset {offset}, byte {byte:?}",
             );
-            actual.commit_bytes(&[byte]).unwrap();
-            expected.commit_bytes(&[byte]).unwrap();
+            assert!(actual.commit_bytes(&[byte]));
+            assert!(expected.commit_bytes(&[byte]));
         }
         assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
         assert_eq!(actual.is_accepting(), expected.is_accepting());
@@ -27791,9 +27773,9 @@ table: &child_table,
             b"<ab><ab>!".as_slice(),
         ] {
             let mut expected = monolithic.start();
-            let expected_accepts = expected.commit_bytes(bytes).is_ok() && expected.is_accepting();
+            let expected_accepts = expected.commit_bytes(bytes) && expected.is_accepting();
             let mut actual = composed.start();
-            let actual_accepts = actual.commit_bytes(bytes).is_ok() && actual.is_accepting();
+            let actual_accepts = actual.commit_bytes(bytes) && actual.is_accepting();
             assert_eq!(actual_accepts, expected_accepts, "language mismatch for {bytes:?}");
         }
         assert_accepts(&composed, valid);
@@ -27890,8 +27872,8 @@ table: &child_table,
                 expected.mask(),
                 "mask mismatch before offset {offset}, byte {byte:?}",
             );
-            actual.commit_bytes(&[byte]).unwrap();
-            expected.commit_bytes(&[byte]).unwrap();
+            assert!(actual.commit_bytes(&[byte]));
+            assert!(expected.commit_bytes(&[byte]));
         }
         assert_eq!(actual.mask(), expected.mask(), "final mask mismatch");
         assert_eq!(actual.is_accepting(), expected.is_accepting());
@@ -27917,8 +27899,8 @@ table: &child_table,
                     expected.mask(),
                     "segmented dynamic mask mismatch before offset {offset}, byte {byte:?}",
                 );
-                actual.commit_bytes(&[byte]).unwrap();
-                expected.commit_bytes(&[byte]).unwrap();
+                assert!(actual.commit_bytes(&[byte]));
+                assert!(expected.commit_bytes(&[byte]));
             }
             assert_eq!(actual.mask(), expected.mask(), "segmented dynamic final mask mismatch");
             assert_eq!(actual.is_accepting(), expected.is_accepting());
@@ -28021,8 +28003,8 @@ table: &child_table,
                             expected.mask(),
                             "hybrid component {static_component} mismatch before {tokens:?} token {token}",
                         );
-                        actual.commit_token(token).unwrap();
-                        expected.commit_token(token).unwrap();
+                        assert!(actual.commit_token(token));
+                        assert!(expected.commit_token(token));
                     }
                     assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
                     assert!(actual.is_accepting(), "{tokens:?}");
@@ -28153,8 +28135,8 @@ table: &child_table,
         let mut actual = composed.start();
         for token in [0, 1, 3] {
             assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.is_accepting(), expected.is_accepting());
         assert!(actual.is_accepting());
@@ -28245,8 +28227,8 @@ table: &child_table,
                 expected_separate.mask(),
                 "separate-token mask mismatch before token {token}",
             );
-            actual_separate.commit_token(token).unwrap();
-            expected_separate.commit_token(token).unwrap();
+            assert!(actual_separate.commit_token(token));
+            assert!(expected_separate.commit_token(token));
         }
         assert!(actual_separate.is_accepting());
         assert!(expected_separate.is_accepting());
@@ -28255,8 +28237,8 @@ table: &child_table,
         let mut actual = composed.start();
         for token in [0, 1, 2, 3] {
             assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
         assert_eq!(actual.is_accepting(), expected.is_accepting());
         assert!(actual.is_accepting());
@@ -28350,9 +28332,9 @@ table: &child_table,
                     mono.mask(),
                     "dynamic mask mismatch before token {token} in {sequence:?}",
                 );
-                static_state.commit_token(token).unwrap();
-                dynamic_state.commit_token(token).unwrap();
-                mono.commit_token(token).unwrap();
+                assert!(static_state.commit_token(token));
+                assert!(dynamic_state.commit_token(token));
+                assert!(mono.commit_token(token));
             }
             assert_eq!(static_state.is_accepting(), mono.is_accepting());
             assert!(static_state.is_accepting());
@@ -28367,7 +28349,7 @@ table: &child_table,
                 let mut state = constraint.start();
                 let mut committed = true;
                 for token in &sequence {
-                    if state.commit_token(*token).is_err() {
+                    if !state.commit_token(*token) {
                         committed = false;
                         break;
                     }
@@ -28437,8 +28419,8 @@ table: &child_table,
                         expected.mask(),
                         "mask mismatch before token {token}",
                     );
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 assert_eq!(actual.is_accepting(), expected.is_accepting());
                 assert!(actual.is_accepting());
@@ -28561,10 +28543,10 @@ table: &child_table,
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before byte {byte:?}");
                 assert_eq!(dynamic.mask(), expected.mask(), "dynamic mask mismatch before byte {byte:?}");
                 assert_eq!(restored.mask(), expected.mask(), "loaded mask mismatch before byte {byte:?}");
-                actual.commit_token(byte as u32).unwrap();
-                dynamic.commit_token(byte as u32).unwrap();
-                restored.commit_token(byte as u32).unwrap();
-                expected.commit_token(byte as u32).unwrap();
+                assert!(actual.commit_token(byte as u32));
+                assert!(dynamic.commit_token(byte as u32));
+                assert!(restored.commit_token(byte as u32));
+                assert!(expected.commit_token(byte as u32));
             }
             assert!(actual.is_accepting());
             assert!(dynamic.is_accepting());
@@ -28652,8 +28634,8 @@ table: &child_table,
             let mut actual = composed.start();
             for token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting());
@@ -28745,8 +28727,8 @@ table: &child_table,
             let mut actual = composed.start();
             for token in sequence {
                 assert_eq!(actual.mask(), expected.mask(), "mask mismatch before token {token}");
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting());
             assert!(actual.is_accepting());
@@ -28962,7 +28944,7 @@ table: &child_table,
                     ok = false;
                     break;
                 }
-                if st.commit_token(token).is_err() {
+                if !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -28985,7 +28967,7 @@ table: &child_table,
         for node in &nodes {
             let mut st = outer_static.start();
             for &token in &node.path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             let actual = st.mask();
             if actual != node.mask {
@@ -29005,7 +28987,7 @@ table: &child_table,
         ] {
             let mut st = outer_static.start();
             for &token in &prefix {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             let mask = st.mask();
             assert!(admits(&mask, fused), "nested admits {fused} after {site}mgm");
@@ -29013,7 +28995,7 @@ table: &child_table,
         }
         {
             let mut st = outer_static.start();
-            st.commit_token(L).unwrap();
+            assert!(st.commit_token(L));
             assert!(admits(&st.mask(), M), "nested admits m after L");
             assert!(admits(&st.mask(), MG), "nested admits mg after L");
             assert!(!admits(&st.mask(), RM), "nested rejects Rm after L");
@@ -29034,12 +29016,12 @@ table: &child_table,
                 if !admits(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
                 assert!(
                     is_subset(&abl_st.mask(), &dyn_st.mask()),
                     "shard-less mask must stay a subset of the reference",
@@ -29074,11 +29056,11 @@ table: &child_table,
                 let r_static = st_static.commit_bytes(&prefix[consumed..consumed + 1]);
                 let r_dyn = st_dyn.commit_bytes(&prefix[consumed..consumed + 1]);
                 assert_eq!(
-                    r_static.is_ok(),
-                    r_dyn.is_ok(),
+                    r_static,
+                    r_dyn,
                     "{name}: commit divergence scenario={scenario} consumed={consumed}",
                 );
-                if r_static.is_err() {
+                if !r_static {
                     break;
                 }
                 consumed += 1;
@@ -29118,12 +29100,12 @@ table: &child_table,
                 let r_static = st_static.commit_token(path[step]);
                 let r_dyn = st_dyn.commit_token(path[step]);
                 assert_eq!(
-                    r_static.is_ok(),
-                    r_dyn.is_ok(),
+                    r_static,
+                    r_dyn,
                     "{name}: commit divergence scenario={scenario} step={step} token={}",
                     path[step],
                 );
-                if r_static.is_err() {
+                if !r_static {
                     break;
                 }
                 step += 1;
@@ -29360,7 +29342,7 @@ table: &child_table,
                         admits_token(&st.mask(), token),
                         "floor-flag token {token} admitted",
                     );
-                    st.commit_token(token).expect("floor-flag commit");
+                    assert!(st.commit_token(token), "floor-flag commit");
                 }
                 let masks = [
                     states[0].mask(),
@@ -29991,11 +29973,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage3.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage3.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -30017,7 +29999,7 @@ table: &child_table,
             let mut st = stage3_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -30036,7 +30018,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage3.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -30060,12 +30042,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -30398,11 +30380,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage2.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage2.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -30424,7 +30406,7 @@ table: &child_table,
             let mut st = stage2_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -30443,7 +30425,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage2.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -30467,12 +30449,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -30704,11 +30686,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage2.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage2.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -30726,12 +30708,12 @@ table: &child_table,
         for path in [vec![L, X, Y, X], vec![R, Y, Y]] {
             let mut st = stage2_dyn.start();
             for &token in &path {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             assert!(st.is_accepting(), "oracle must accept {path:?}");
             let mut st = stage2.start();
             for &token in &path {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             assert!(st.is_accepting(), "static must accept {path:?}");
         }
@@ -30741,7 +30723,7 @@ table: &child_table,
             let mut st = stage2_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -30760,7 +30742,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage2.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -30787,12 +30769,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -31098,11 +31080,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage3.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage3.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -31119,12 +31101,12 @@ table: &child_table,
         for path in [vec![L, X, Y, Z, X], vec![R, Y, Z, Y]] {
             let mut st = stage3_dyn.start();
             for &token in &path {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             assert!(st.is_accepting(), "oracle must accept {path:?}");
             let mut st = stage3.start();
             for &token in &path {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             assert!(st.is_accepting(), "static must accept {path:?}");
         }
@@ -31134,7 +31116,7 @@ table: &child_table,
             let mut st = stage3_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -31153,7 +31135,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage3.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -31180,12 +31162,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -31508,11 +31490,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage2.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage2.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -31529,7 +31511,7 @@ table: &child_table,
         for path in [vec![L, SP, X, Z, X], vec![R, SP, Y, Y]] {
             let mut st = stage2_dyn.start();
             for &token in &path {
-                st.commit_token(token).unwrap();
+                assert!(st.commit_token(token));
             }
             assert!(st.is_accepting(), "oracle must accept spaced {path:?}");
         }
@@ -31539,7 +31521,7 @@ table: &child_table,
             let mut st = stage2_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -31558,7 +31540,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage2.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -31582,12 +31564,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -31909,11 +31891,11 @@ table: &child_table,
         ] {
             let mut st_fused = stage2.start();
             for &token in &fused {
-                st_fused.commit_token(token).unwrap();
+                assert!(st_fused.commit_token(token));
             }
             let mut st_single = stage2.start();
             for &token in &single {
-                st_single.commit_token(token).unwrap();
+                assert!(st_single.commit_token(token));
             }
             assert_eq!(
                 st_fused.mask(),
@@ -31934,7 +31916,7 @@ table: &child_table,
             let mut st = stage2_dyn.start();
             let mut ok = true;
             for &token in path {
-                if !admits_token(&st.mask(), token) || st.commit_token(token).is_err() {
+                if !admits_token(&st.mask(), token) || !st.commit_token(token) {
                     ok = false;
                     break;
                 }
@@ -31953,7 +31935,7 @@ table: &child_table,
         for (path, mask) in &nodes {
             let mut st = stage2.start();
             for &token in path {
-                st.commit_token(token).expect("static replay");
+                assert!(st.commit_token(token), "static replay");
             }
             if st.mask() != *mask {
                 mismatches += 1;
@@ -31977,12 +31959,12 @@ table: &child_table,
                 if !admits_token(&dyn_st.mask(), token) {
                     break;
                 }
-                dyn_st.commit_token(token).unwrap();
+                assert!(dyn_st.commit_token(token));
                 if !admits_token(&abl_st.mask(), token) {
                     strict += 1;
                     break;
                 }
-                abl_st.commit_token(token).unwrap();
+                assert!(abl_st.commit_token(token));
             }
         }
         assert!(strict >= 1, "ablation must lose at least one admission");
@@ -32250,9 +32232,9 @@ table: &child_table,
                     expected.mask(),
                     "round-tripped mask mismatch before token {token}",
                 );
-                actual.commit_token(token).unwrap();
-                roundtripped.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(roundtripped.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert!(actual.is_accepting());
             assert!(roundtripped.is_accepting());
@@ -32260,8 +32242,8 @@ table: &child_table,
         }
 
         let mut crossed = composed.start();
-        crossed.commit_token(0).unwrap();
-        assert!(crossed.commit_token(3).is_err() || !crossed.is_accepting());
+        assert!(crossed.commit_token(0));
+        assert!(!crossed.commit_token(3) || !crossed.is_accepting());
     }
 
     fn sizeable_json_schema(prefix: &str, choices: usize) -> String {
@@ -36346,7 +36328,7 @@ table: &dispatch.table,
         ) {
             let started = Instant::now();
             let mut dyn_state = dyn_constraint.start();
-            dyn_state.commit_bytes(core_prefix).expect("dynamic commit prefix");
+            assert!(dyn_state.commit_bytes(core_prefix), "dynamic commit prefix");
             assert!(!(dyn_state.mask().iter().all(|word| *word == 0)), "dynamic rejected prefix");
             let mask = dyn_state.mask();
             let mut dyn_tokens = BTreeSet::new();
@@ -36361,7 +36343,7 @@ table: &dispatch.table,
             let live_for = |solo: &Constraint, prefix: &[u8], offset: u32, commit: &[bool]| -> Vec<bool> {
                 let mut live_commit = vec![false; commit.len()];
                 let mut solo_state = solo.start();
-                if solo_state.commit_bytes(prefix).is_err() || (solo_state.mask().iter().all(|word| *word == 0)) {
+                if !solo_state.commit_bytes(prefix) || (solo_state.mask().iter().all(|word| *word == 0)) {
                     return live_commit;
                 }
                 for (local, _) in solo_state.state.entries.iter() {
@@ -36476,12 +36458,12 @@ table: &dispatch.table,
             // crossing (core-solo or disp-solo alone)? Both-no = composed-only
             // admission = TRUE crossing missed by the walk (blocker candidate).
             let mut core_solo_state = core.start();
-            let core_solo_ok = core_solo_state.commit_bytes(core_prefix).is_ok()
+            let core_solo_ok = core_solo_state.commit_bytes(core_prefix)
                 && !(core_solo_state.mask().iter().all(|word| *word == 0));
             let core_solo_mask =
                 core_solo_ok.then(|| core_solo_state.mask()).unwrap_or_default();
             let mut disp_solo_state = dispatch.start();
-            let disp_solo_ok = disp_solo_state.commit_bytes(disp_prefix).is_ok()
+            let disp_solo_ok = disp_solo_state.commit_bytes(disp_prefix)
                 && !(disp_solo_state.mask().iter().all(|word| *word == 0));
             let disp_solo_mask =
                 disp_solo_ok.then(|| disp_solo_state.mask()).unwrap_or_default();
@@ -38054,7 +38036,7 @@ table: &dispatch.table,
         call_states.truncate(3);
         eprintln!(
             "RST core_prefix commit_ok={} rejected={} live_local={:?} call_states={call_states:?}",
-            commit_result.is_ok(),
+            commit_result,
             (core_state.mask().iter().all(|word| *word == 0)),
             core_state.state.entries.iter().map(|(local, _)| local).collect::<Vec<_>>(),
         );
@@ -38063,7 +38045,7 @@ table: &dispatch.table,
         }));
         eprintln!(
             "RST core_prefix sentinel_128300_commit={:?}",
-            sentinel_result.as_ref().map(|result| result.is_ok()),
+            sentinel_result.as_ref().map(|result| *result),
         );
 
         // (c) Vocabulary search for crossing-shaped candidates.
@@ -38244,7 +38226,7 @@ table: &dispatch.table,
         .constraint;
         for prefix in [b"const x = tools".as_slice(), b"const x = tools.tool_5({".as_slice()] {
             let mut dyn_state = dyn_composed.start();
-            dyn_state.commit_bytes(prefix).expect("dynamic commit prefix");
+            assert!(dyn_state.commit_bytes(prefix), "dynamic commit prefix");
             let mask = dyn_state.mask();
             let admits = |token: u32| -> bool {
                 mask.get((token / 32) as usize)

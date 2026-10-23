@@ -116,7 +116,7 @@ fn main() -> Result<()> {
                 let byte = &document.as_bytes()[prefix_len - 1..prefix_len];
                 let a_result = a.commit_bytes(byte);
                 let b_result = b.commit_bytes(byte);
-                if a_result.is_ok() != b_result.is_ok() {
+                if a_result != b_result {
                     return Err(format!("byte commit result differs: {label} prefix={prefix_len} original={a_result:?} reparsed={b_result:?}").into());
                 }
                 byte_commit_checks += 1;
@@ -172,8 +172,8 @@ fn main() -> Result<()> {
     for (index, prefix) in frontiers.into_iter().enumerate() {
         let mut a = original.start();
         let mut b = reparsed.start();
-        a.commit_bytes(prefix.as_bytes())?;
-        b.commit_bytes(prefix.as_bytes())?;
+        assert!(a.commit_bytes(prefix.as_bytes()));
+        assert!(b.commit_bytes(prefix.as_bytes()));
         if (a.mask().iter().all(|word| *word == 0)) || (b.mask().iter().all(|word| *word == 0)) || a.is_accepting() != b.is_accepting() {
             return Err(format!("independent branch frontier is invalid: {prefix:?}").into());
         }
@@ -192,18 +192,18 @@ fn main() -> Result<()> {
             // scratch caches or prior token branch into the next commitment.
             let mut fresh_a = original.start();
             let mut fresh_b = reparsed.start();
-            fresh_a.commit_bytes(prefix.as_bytes())?;
-            fresh_b.commit_bytes(prefix.as_bytes())?;
+            assert!(fresh_a.commit_bytes(prefix.as_bytes()));
+            assert!(fresh_b.commit_bytes(prefix.as_bytes()));
             let a_result = fresh_a.commit_token(token_id as u32);
             let b_result = fresh_b.commit_token(token_id as u32);
-            if a_result.is_ok() != b_result.is_ok()
+            if a_result != b_result
                 || (fresh_a.mask().iter().all(|word| *word == 0)) != (fresh_b.mask().iter().all(|word| *word == 0))
                 || fresh_a.is_accepting() != fresh_b.is_accepting()
                 || fresh_a.mask() != fresh_b.mask()
             {
                 return Err(format!("token branch differs: frontier={index} token={token_id} original={a_result:?} reparsed={b_result:?}").into());
             }
-            if a_result.is_err() || (fresh_a.mask().iter().all(|word| *word == 0)) {
+            if !a_result || (fresh_a.mask().iter().all(|word| *word == 0)) {
                 return Err(format!("admitted token rejected: frontier={index} token={token_id} result={a_result:?}").into());
             }
             admitted += 1;

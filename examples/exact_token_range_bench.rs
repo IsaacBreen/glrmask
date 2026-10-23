@@ -109,7 +109,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrate
         let (mut state, start_ns) = timed(|| constraint.start());
         let (_, mask_ns) = timed(|| state.fill_mask(black_box(&mut mask)));
         let (result, commit_ns) = timed(|| state.commit_token(black_box(n - 1)));
-        result?;
+        assert!(result);
         let total_ns = ns(total_started.elapsed());
         assert!(state.is_accepting());
         black_box(&mask);
@@ -161,7 +161,7 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskStrategy, mixed: b
     let mut check = constraint.start();
     for _ in 0..2 {
         assert_eq!(check.mask().iter().map(|word| word.count_ones() as u64).sum::<u64>(), u64::from(n));
-        check.commit_token(n - 1)?;
+        assert!(check.commit_token(n - 1));
     }
     assert!(check.is_accepting());
     assert!(check.mask().iter().all(|&word| word == 0));
@@ -180,12 +180,12 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskStrategy, mixed: b
         let (_, elapsed) = timed(|| state.fill_mask(black_box(&mut mask)));
         first_masks.push(elapsed);
         let (result, elapsed) = timed(|| state.commit_token(black_box(n - 1)));
-        result?;
+        assert!(result);
         first_commits.push(elapsed);
         let (_, elapsed) = timed(|| state.fill_mask(black_box(&mut mask)));
         second_masks.push(elapsed);
         let (result, elapsed) = timed(|| state.commit_token(black_box(n - 1)));
-        result?;
+        assert!(result);
         second_commits.push(elapsed);
         totals.push(ns(begin.elapsed()));
         assert!(state.is_accepting());

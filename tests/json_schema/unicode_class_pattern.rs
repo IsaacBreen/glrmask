@@ -50,7 +50,7 @@ fn unicode_class_pattern_preserves_ascii_and_non_ascii_entries() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(&schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_e0_allowed = (mask[224 / 32] >> (224 % 32)) & 1 != 0;
@@ -60,16 +60,16 @@ fn unicode_class_pattern_preserves_ascii_and_non_ascii_entries() {
     assert!(is_e0_allowed, "glrmask should allow the non-ASCII lead byte 0xe0");
 
     let mut state_token_a = state.clone();
-    state_token_a.commit_token(65).unwrap();
+    assert!(state_token_a.commit_token(65));
 
     let mut state_token_e0 = state.clone();
-    state_token_e0.commit_token(224).unwrap();
+    assert!(state_token_e0.commit_token(224));
 
     let mut state_bytes_a = state.clone();
-    state_bytes_a.commit_bytes(b"A").unwrap();
+    assert!(state_bytes_a.commit_bytes(b"A"));
 
     let mut state_bytes_e0 = state.clone();
-    state_bytes_e0.commit_bytes(&[224]).unwrap();
+    assert!(state_bytes_e0.commit_bytes(&[224]));
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn unicode_class_pattern_preserves_explicit_superscript_two_in_mixed_class() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
@@ -100,16 +100,16 @@ fn unicode_class_pattern_preserves_explicit_superscript_two_in_mixed_class() {
     );
 
     let mut state_token_a = state.clone();
-    state_token_a.commit_token(65).unwrap();
+    assert!(state_token_a.commit_token(65));
 
     let mut state_token_c2 = state.clone();
-    state_token_c2.commit_token(194).unwrap();
+    assert!(state_token_c2.commit_token(194));
 
     let mut state_bytes_a = state.clone();
-    state_bytes_a.commit_bytes(b"A").unwrap();
+    assert!(state_bytes_a.commit_bytes(b"A"));
 
     let mut state_bytes_c2 = state.clone();
-    state_bytes_c2.commit_bytes(&[194]).unwrap();
+    assert!(state_bytes_c2.commit_bytes(&[194]));
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn unicode_class_pattern_keeps_generic_digit_shorthand_ascii_only() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
@@ -142,16 +142,16 @@ fn unicode_class_pattern_keeps_generic_digit_shorthand_ascii_only() {
     );
 
     let mut state_token_a = state.clone();
-    state_token_a.commit_token(65).unwrap();
+    assert!(state_token_a.commit_token(65));
 
     let mut state_token_5 = state.clone();
-    state_token_5.commit_token(53).unwrap();
+    assert!(state_token_5.commit_token(53));
 
     let mut state_bytes_a = state.clone();
-    state_bytes_a.commit_bytes(b"A").unwrap();
+    assert!(state_bytes_a.commit_bytes(b"A"));
 
     let mut state_bytes_5 = state.clone();
-    state_bytes_5.commit_bytes(b"5").unwrap();
+    assert!(state_bytes_5.commit_bytes(b"5"));
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_inside_class() 
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
@@ -204,7 +204,7 @@ fn unicode_class_pattern_keeps_generic_word_shorthand_ascii_only_outside_class()
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
@@ -239,7 +239,7 @@ fn unicode_class_pattern_preserves_explicit_fullwidth_digit_range_in_mixed_class
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let is_a_allowed = (mask[65 / 32] >> (65 % 32)) & 1 != 0;
@@ -252,16 +252,16 @@ fn unicode_class_pattern_preserves_explicit_fullwidth_digit_range_in_mixed_class
     );
 
     let mut state_token_a = state.clone();
-    state_token_a.commit_token(65).unwrap();
+    assert!(state_token_a.commit_token(65));
 
     let mut state_token_ef = state.clone();
-    state_token_ef.commit_token(239).unwrap();
+    assert!(state_token_ef.commit_token(239));
 
     let mut state_bytes_a = state.clone();
-    state_bytes_a.commit_bytes(b"A").unwrap();
+    assert!(state_bytes_a.commit_bytes(b"A"));
 
     let mut state_bytes_ef = state.clone();
-    state_bytes_ef.commit_bytes(&[239]).unwrap();
+    assert!(state_bytes_ef.commit_bytes(&[239]));
 }
 
 #[test]
@@ -284,7 +284,7 @@ fn non_whitespace_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
@@ -294,7 +294,7 @@ fn non_whitespace_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
     assert!(allows_escape, "glrmask should allow a valid non-whitespace BMP unicode escape");
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u00B2"#).unwrap();
+    assert!(committed.commit_bytes(br#"\u00B2"#));
 }
 
 #[test]
@@ -315,7 +315,7 @@ fn mixed_word_whitespace_class_accepts_bmp_unicode_escape_for_nbsp() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
@@ -325,7 +325,7 @@ fn mixed_word_whitespace_class_accepts_bmp_unicode_escape_for_nbsp() {
     assert!(allows_escape, "glrmask should allow a valid NBSP unicode escape for \\s");
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u00A0"#).unwrap();
+    assert!(committed.commit_bytes(br#"\u00A0"#));
 }
 
 #[test]
@@ -346,7 +346,7 @@ fn negated_ascii_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
@@ -356,7 +356,7 @@ fn negated_ascii_class_accepts_unicode_escape_prefix_and_valid_bmp_escape() {
     assert!(allows_escape, "glrmask should allow a valid BMP unicode escape in the negated class");
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u00B2"#).unwrap();
+    assert!(committed.commit_bytes(br#"\u00B2"#));
 }
 
 #[test]
@@ -374,7 +374,7 @@ fn literal_prefix_pattern_accepts_unicode_escape_for_printable_bmp_character() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     let allows_prefix = (mask[0 / 32] >> (0 % 32)) & 1 != 0;
@@ -384,7 +384,7 @@ fn literal_prefix_pattern_accepts_unicode_escape_for_printable_bmp_character() {
     assert!(allows_escape, "glrmask should allow a printable literal via unicode escape spelling");
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u004BONG_"#).unwrap();
+    assert!(committed.commit_bytes(br#"\u004BONG_"#));
 }
 
 fn token_allowed(mask: &[u32], id: usize) -> bool {
@@ -418,7 +418,7 @@ fn non_whitespace_class_native_mode_accepts_canonical_and_control_escape_but_rej
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), "native \\S should allow canonical 'A'");
@@ -430,22 +430,22 @@ fn non_whitespace_class_native_mode_accepts_canonical_and_control_escape_but_rej
     assert!(!token_allowed(&mask, 6), "native \\S should reject the whitespace escape \\u0020");
 
     let mut committed = state.clone();
-    committed.commit_bytes(b"A").unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(b"A"));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u0001"#).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(br#"\u0001"#));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes("\u{00b2}".as_bytes()).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes("\u{00b2}".as_bytes()));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u00B2"#).is_err(), "native \\S should not commit \\u00B2");
+    assert!(!rejected.commit_bytes(br#"\u00B2"#), "native \\S should not commit \\u00B2");
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u0020"#).is_err(), "native \\S should not commit \\u0020");
+    assert!(!rejected.commit_bytes(br#"\u0020"#), "native \\S should not commit \\u0020");
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn mixed_word_whitespace_class_native_mode_accepts_canonical_and_tab_escape_but_
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), "native [\\w\\s-] should allow canonical 'A'");
@@ -485,23 +485,23 @@ fn mixed_word_whitespace_class_native_mode_accepts_canonical_and_tab_escape_but_
     assert!(token_allowed(&mask, 6), "native [\\w\\s-] should allow raw NBSP bytes");
 
     let mut committed = state.clone();
-    committed.commit_bytes(b"A").unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(b"A"));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes(b" ").unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(b" "));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u0009"#).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(br#"\u0009"#));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes("\u{00a0}".as_bytes()).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes("\u{00a0}".as_bytes()));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u00A0"#).is_err(), "native [\\w\\s-] should not commit \\u00A0");
+    assert!(!rejected.commit_bytes(br#"\u00A0"#), "native [\\w\\s-] should not commit \\u00A0");
 }
 
 #[test]
@@ -531,7 +531,7 @@ fn negated_ascii_class_native_mode_enforces_negation_across_escape_spellings() {
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), "native negated class should allow canonical 'a'");
@@ -545,22 +545,22 @@ fn negated_ascii_class_native_mode_enforces_negation_across_escape_spellings() {
     assert!(token_allowed(&mask, 8), "native negated class should allow the permitted escape \\u0061");
 
     let mut committed = state.clone();
-    committed.commit_bytes(b"a").unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(b"a"));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u0001"#).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(br#"\u0001"#));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes(br#"\u0061"#).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(br#"\u0061"#));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u00B2"#).is_err(), "native negated class should not commit \\u00B2");
+    assert!(!rejected.commit_bytes(br#"\u00B2"#), "native negated class should not commit \\u00B2");
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u0041"#).is_err(), "native negated class should not commit \\u0041");
+    assert!(!rejected.commit_bytes(br#"\u0041"#), "native negated class should not commit \\u0041");
 }
 
 #[test]
@@ -585,7 +585,7 @@ fn mixed_ascii_non_ascii_class_native_mode_accepts_raw_superscript_two_but_rejec
 
     let constraint = Constraint::compile(glrmask::Grammar::json_schema(schema), &vocab).unwrap();
     let mut state = constraint.start();
-    state.commit_bytes(b"\"").unwrap();
+    assert!(state.commit_bytes(b"\""));
 
     let mask = state.mask();
     assert!(token_allowed(&mask, 0), "native mixed class should allow canonical 'A'");
@@ -594,13 +594,13 @@ fn mixed_ascii_non_ascii_class_native_mode_accepts_raw_superscript_two_but_rejec
     assert!(!token_allowed(&mask, 3), "native mixed class should reject bare \\u when no escape remains valid");
 
     let mut committed = state.clone();
-    committed.commit_bytes(b"A").unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes(b"A"));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut committed = state.clone();
-    committed.commit_bytes("\u{00b2}".as_bytes()).unwrap();
-    committed.commit_bytes(b"\"").unwrap();
+    assert!(committed.commit_bytes("\u{00b2}".as_bytes()));
+    assert!(committed.commit_bytes(b"\""));
 
     let mut rejected = state.clone();
-    assert!(rejected.commit_bytes(br#"\u00B2"#).is_err(), "native mixed class should not commit \\u00B2");
+    assert!(!rejected.commit_bytes(br#"\u00B2"#), "native mixed class should not commit \\u00B2");
 }

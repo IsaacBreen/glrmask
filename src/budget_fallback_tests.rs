@@ -219,12 +219,7 @@ fn check_exact_oracle(constraint: &Constraint, case: Case) {
             let mut next = prefix.clone();
             next.extend_from_slice(token_bytes);
             let mut committed = state.clone();
-            committed.commit_token(token as u32).unwrap_or_else(|error| {
-                panic!(
-                    "commit failed at {:?}: {error}",
-                    String::from_utf8_lossy(&prefix)
-                )
-            });
+            assert!(committed.commit_token(token as u32));
             queue.push_back((committed, next));
         }
         checked += 1;

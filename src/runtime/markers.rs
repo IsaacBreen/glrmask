@@ -469,7 +469,7 @@ mod tests {
             assert_eq!(observations(&state), [0], "initial {mode:?}");
             assert_eq!(state.mask(), reference.mask(), "initial mask {mode:?}");
             for (token, marker) in [(0, 7), (1, 42)] {
-                state.commit_token(token).unwrap(); reference.commit_token(token).unwrap();
+                assert!(state.commit_token(token)); assert!(reference.commit_token(token));
                 let before = state.state.clone();
                 assert_eq!(observations(&state), [marker], "{mode:?} token {token}");
                 assert_eq!(state.state, before, "marker query mutated the parser");
@@ -516,7 +516,7 @@ mod tests {
                         let (left,right) = if seed % 2 == 0 {
                             (observed.commit_token(token as u32),silent.commit_token(token as u32))
                         } else { (observed.commit_bytes(pieces[token]),silent.commit_bytes(pieces[token])) };
-                        assert_eq!(left.is_ok(),right.is_ok());
+                        assert_eq!(left,right);
                         assert_eq!(observed.state,silent.state,"observer changed frontier: {mode:?} {source} seed {seed} step {step}");
                         assert_eq!(observed.is_accepting(),silent.is_accepting());
                         // Independent reference: query the ordinary parser,
@@ -538,7 +538,7 @@ mod tests {
                             assert!(seen.insert((event.id,event.byte_offset)),"duplicate marker across batches");
                         }
                         comparisons += 1;
-                        if left.is_err() { break; }
+                        if !left { break; }
                     }
                 }
             }

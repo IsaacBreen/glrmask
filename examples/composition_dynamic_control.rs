@@ -60,19 +60,19 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
         }
         let (composed,ordinary)=built.unwrap();
         for prefix in prefixes {
-            let mut a=composed.start(); a.commit_bytes(prefix.as_bytes())?;
-            let mut b=ordinary.start(); b.commit_bytes(prefix.as_bytes())?;
+            let mut a=composed.start(); assert!(a.commit_bytes(prefix.as_bytes()));
+            let mut b=ordinary.start(); assert!(b.commit_bytes(prefix.as_bytes()));
             let expected=a.mask(); assert_eq!(expected,b.mask(),"{name} at {prefix:?}");
             assert_eq!(a.is_accepting(),b.is_accepting());
             let token=expected.iter().enumerate().find_map(|(i,w)|(*w!=0).then(||i as u32*32+w.trailing_zeros()));
             for (backend,c) in [("composed",&composed),("ordinary",&ordinary)] {
                 let mut masks=Vec::new();let mut commits=Vec::new();let mut tbms=Vec::new();
                 for rep in 0..repeats+4 {
-                    let mut s=c.start(); s.commit_bytes(prefix.as_bytes())?;
+                    let mut s=c.start(); assert!(s.commit_bytes(prefix.as_bytes()));
                     let mut output=vec![0;expected.len()];
                     let t=Instant::now();s.fill_mask(black_box(&mut output));let mask_ns=t.elapsed().as_nanos() as u64;
                     assert_eq!(output,expected,"{name}/{backend}/{prefix:?}");
-                    let commit_ns=if let Some(tid)=token {let t=Instant::now();s.commit_token(black_box(tid))?;t.elapsed().as_nanos() as u64} else {0};
+                    let commit_ns=if let Some(tid)=token {let t=Instant::now();assert!(s.commit_token(black_box(tid)));t.elapsed().as_nanos() as u64} else {0};
                     if rep>=4 {masks.push(mask_ns);commits.push(commit_ns);tbms.push(mask_ns+commit_ns);}
                 }
                 rows.push(serde_json::json!({"case":name,"backend":backend,"prefix":prefix,"mask":stats(&masks),"commit":stats(&commits),"tbm":stats(&tbms),

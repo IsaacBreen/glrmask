@@ -38,7 +38,7 @@ macro_rules! measure {
         let constraint = &$constraint;
         for &(prefix_name, prefix) in $prefixes {
             let mut setup = constraint.start();
-            setup.commit_bytes(prefix).expect("valid fixture prefix");
+            assert!(setup.commit_bytes(prefix), "valid fixture prefix");
             let expected = setup.mask();
             let allowed = expected.iter().map(|word| word.count_ones()).sum();
             let hash = expected.iter().fold(0xcbf29ce484222325u64, |hash, &word| {
@@ -52,12 +52,12 @@ macro_rules! measure {
             let mut tbms = Vec::new();
             for i in 0..($repeats + 2) {
                 let mut state = constraint.start();
-                state.commit_bytes(prefix).expect("replay prefix");
+                assert!(state.commit_bytes(prefix), "replay prefix");
                 let t0 = Instant::now();
                 state.fill_mask(black_box(&mut output));
                 let t1 = Instant::now();
                 if let Some(token) = token {
-                    state.commit_token(black_box(token)).expect("mask/commit agreement");
+                    assert!(state.commit_token(black_box(token)), "mask/commit agreement");
                 }
                 let t2 = Instant::now();
                 assert_eq!(output, expected, "stable complete mask for {} / {}", $name, prefix_name);

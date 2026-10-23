@@ -105,7 +105,7 @@ fn main() {
 
     for (prefix_index, prefix) in prefixes.iter().enumerate() {
         let mut template = constraint.start();
-        if !prefix.is_empty() && template.commit_bytes(prefix).is_err() {
+        if !prefix.is_empty() && !template.commit_bytes(prefix) {
             eprintln!("SKIP prefix_index={prefix_index} prefix={:?}", String::from_utf8_lossy(prefix));
             continue;
         }
@@ -123,7 +123,7 @@ fn main() {
             state.fill_mask(black_box(&mut out));
             let mask_done = Instant::now();
             if let Some(token) = selected {
-                state.commit_token(black_box(token)).expect("mask/commit disagreement");
+                assert!(state.commit_token(black_box(token)), "mask/commit disagreement");
             }
             let commit_done = Instant::now();
             assert_eq!(out, expected, "unstable mask at prefix {prefix_index}");

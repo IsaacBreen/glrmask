@@ -36,11 +36,11 @@ impl ParsedComponent {
 
     /// Construct a component from another frontend's AST. Its lexical identity,
     /// start and ignore remain scoped; no conversion through GLRM source occurs.
-    pub fn from_named(grammar: NamedGrammar, externs: &[(String,ExternalKind)]) -> Result<Self,GlrMaskError> {
+    pub fn from_named(grammar: NamedGrammar, externs: &[(String,ExternKind)]) -> Result<Self,GlrMaskError> {
         Self::from_named_with_ignores(grammar,externs,&[])
     }
 
-    pub fn from_named_with_ignores(grammar:NamedGrammar,externs:&[(String,ExternalKind)],additional_ignores:&[String])->Result<Self,GlrMaskError> {
+    pub fn from_named_with_ignores(grammar:NamedGrammar,externs:&[(String,ExternKind)],additional_ignores:&[String])->Result<Self,GlrMaskError> {
         for (name, _) in externs {
             if name.contains("::") {
                 return Err(err("'::' is not valid in extern names"));
@@ -89,6 +89,23 @@ impl ParsedComponent {
     }
 
     pub fn declarations(&self) -> &GlrmExternalDeclarations { &self.declarations }
+
+    /// The body of a sole nonterminal rule that is also the start rule, when
+    /// the component has no lexical directives that could make lowering differ.
+    pub fn single_rule_body(&self) -> Option<&GrammarExpr> {
+        if self.scope.rules.len() != 1
+            || self.scope.ignore.is_some()
+            || !self.scope.extra_ignores.is_empty()
+            || !self.scope.lexer_partitions.is_empty()
+            || !self.scope.lexer_literal_partitions.is_empty()
+            || self.scope.default_lexer_partition.is_some()
+            || self.scope.all_literals_partition.is_some()
+        {
+            return None;
+        }
+        let rule = self.scope.rules.first()?;
+        (!rule.is_terminal && !rule.is_internal && rule.name == self.scope.start).then_some(&rule.expr)
+    }
 
     /// Bind exact events structurally. Other dependencies stay open.
     pub fn with_tokens(&self, bindings:&[(&str,&[(u32,u32)])]) -> Result<Self,GlrMaskError> {

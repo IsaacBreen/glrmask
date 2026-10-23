@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, OnceLock};
 use snapshot_map::SnapshotMap as OrdMap;
-use crate::grammar::glrm::{ExternalKind, GlrmExternalDeclarations, ParsedComponent};
+use crate::grammar::glrm::{ExternKind, GlrmExternalDeclarations, ParsedComponent};
 use glrmask_grammar::{LarkDocument,LarkExternKind,LarkTokenSet};
 use std::time::Instant;
 
@@ -93,7 +93,7 @@ impl BoundaryMaskStrategy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Extern {
     pub(crate) name: String,
-    pub(crate) kind: ExternalKind,
+    pub(crate) kind: ExternKind,
 }
 
 impl Extern {
@@ -102,7 +102,7 @@ impl Extern {
         &self.name
     }
     /// The declared kind: token or grammar.
-    pub fn kind(&self) -> ExternalKind {
+    pub fn kind(&self) -> ExternKind {
         self.kind
     }
 }
@@ -279,7 +279,7 @@ pub struct PreparedGrammar {
     event_adapters: Arc<event_cache::ExactAdapterCache>,
     boundary_trigger: BoundaryTriggerDetail,
     /// Authored interface, independent of optimization and runtime reachability.
-    slot_kinds: Arc<BTreeMap<String, ExternalKind>>,
+    slot_kinds: Arc<BTreeMap<String, ExternKind>>,
     slot_spans: Arc<BTreeMap<String,glrmask_grammar::SourceSpan>>,
     /// Vocabulary-free artifact bytes retained by a deferred Module load.
     /// `compile`/`precompile` rehydrates from these with the supplied vocabulary.
@@ -297,7 +297,7 @@ pub type UnlinkedConstraint = PreparedGrammar;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Requirement {
     pub path: Vec<String>,
-    pub kind: ExternalKind,
+    pub kind: ExternKind,
     pub source_span: Option<glrmask_grammar::SourceSpan>,
 }
 impl Requirement {
@@ -336,10 +336,10 @@ pub(crate) trait IntoUnlinkedValue<'a> {
     fn into_unlinked_value(self) -> UnlinkedValue<'a>;
 }
 
-fn lark_declarations(document:&LarkDocument)->impl Iterator<Item=(String,ExternalKind)>+'_ {
+fn lark_declarations(document:&LarkDocument)->impl Iterator<Item=(String,ExternKind)>+'_ {
     document.externs.iter().map(|e|(e.name.clone(),match e.kind {
-        LarkExternKind::Token=>ExternalKind::Token,
-        LarkExternKind::Grammar=>ExternalKind::Grammar,
+        LarkExternKind::Token=>ExternKind::Token,
+        LarkExternKind::Grammar=>ExternKind::Grammar,
     }))
 }
 
@@ -350,8 +350,8 @@ fn attached_path<'n,T:Clone>(name:&'n str, bindings:&OrdMap<String,T>) -> Option
         (!tail.is_empty() && bindings.contains_key(head)).then_some((head,tail))
     })
 }
-fn check_binding_kind(name:&str,kind:ExternalKind,grammar:bool)->Result<()> {
-    if matches!((kind,grammar),(ExternalKind::Token,true)) {
+fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
+    if matches!((kind,grammar),(ExternKind::Token,true)) {
         return Err(Error::Compilation(format!("external {name:?} expects {kind:?}; a general grammar cannot fill an atomic token port")));
     }
     Ok(())
@@ -463,6 +463,10 @@ impl Grammar {
         Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, lark_document:Arc::new(OnceLock::new()) }
     }
 
+    pub(crate) fn single_rule_body(&self) -> Option<&crate::grammar::ast::GrammarExpr> {
+        self.component().ok()?.single_rule_body()
+    }
+
     fn component(&self) -> Result<&ParsedComponent> {
         self.parsed_component.get_or_init(|| match &self.source {
             GrammarSource::Glrm(source) => ParsedComponent::parse_glrm(source).map_err(Into::into),
@@ -517,7 +521,7 @@ impl Grammar {
         }
         let named=document.resolve_events(&values);
         let externs=lark_declarations(document)
-            .chain(document.schemas.iter().map(|(name,_)|(name.clone(),ExternalKind::Grammar))).collect::<Vec<_>>();
+            .chain(document.schemas.iter().map(|(name,_)|(name.clone(),ExternKind::Grammar))).collect::<Vec<_>>();
         let mut resolved=Self::new(GrammarSource::Constructed);
         let spans=externs.iter().filter_map(|(name,_)|document.source_spans.get(name).map(|span|(name.clone(),*span))).collect();
         let _=resolved.parsed_component.set(ParsedComponent::from_named_with_ignores(named,&externs,&document.resolved_additional_ignores())
@@ -586,8 +590,6 @@ impl Grammar {
     }
 
     /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, or `TokenSet`; token slots require a token set. Attached children are snapshots. Failed binds leave this handle unchanged.
-    #[cfg(any(test, feature = "internal-api"))]
-    #[doc(hidden)]
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
@@ -636,7 +638,7 @@ impl Grammar {
             .map_err(|e|e.with_source_span(declared.spans.get(name).copied()))?;
         // A one-event value is a lossless grammar-fragment widening. Preserve
         // the independently scoped child boundary, not a decoded-byte alias.
-        if declared.kinds[name]==ExternalKind::Grammar {
+        if declared.kinds[name]==ExternKind::Grammar {
             value=match value {
                 GrammarValue::TokenSet(tokens)=>GrammarValue::Source(Arc::new(Self::from_token_set(tokens))),
                 other=>other,
@@ -1144,7 +1146,12 @@ impl Grammar {
         Ok(constraint)
     }
 
-    pub(crate) fn from_expr(expr: &Expr) -> Result<Grammar> {
+    pub fn from_expr(expr: impl Into<Expr>) -> Result<Grammar> {
+        let expr = expr.into();
+        Self::from_expr_ref(&expr)
+    }
+
+    pub(crate) fn from_expr_ref(expr: &Expr) -> Result<Grammar> {
         let module = Module::from_expr(expr)?;
         module.to_source()
     }
@@ -1195,12 +1202,12 @@ impl IntoGrammarValue for u32 {
 
 impl IntoGrammarValue for Expr {
     fn into_grammar_value(self)->Result<GrammarValue> {
-        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(&self)?)))
+        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr_ref(&self)?)))
     }
 }
 impl IntoGrammarValue for &Expr {
     fn into_grammar_value(self)->Result<GrammarValue> {
-        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(self)?)))
+        Ok(GrammarValue::Source(Arc::new(Grammar::from_expr_ref(self)?)))
     }
 }
 
@@ -3172,7 +3179,7 @@ mod tests {
             let mut next = Vec::new();
             for prefix in prefixes {
                 let mut a = left.start(); let mut b = right.start();
-                for &token in &prefix { a.commit_token(token).unwrap(); b.commit_token(token).unwrap(); }
+                for &token in &prefix { assert!(a.commit_token(token)); assert!(b.commit_token(token)); }
                 let before_a = a.mask(); let before_b = b.mask();
                 assert_eq!(before_a, before_b, "mask at {prefix:?}");
                 assert_eq!(a.is_accepting(), b.is_accepting());
@@ -3180,12 +3187,12 @@ mod tests {
                 // complete, and committing it makes the state accepting.
                 let mut eof = a.clone();
                 let allowed_eof = token_allowed(&before_a, 99);
-                assert_eq!(eof.commit_token(99).is_ok(), allowed_eof, "root EOF policy");
+                assert_eq!(eof.commit_token(99), allowed_eof, "root EOF policy");
                 if allowed_eof { assert!(eof.is_accepting()); }
                 for token in (0..=8).chain([99]) {
                     let mut trial_a = a.clone(); let mut trial_b = b.clone();
-                    let ok_a = trial_a.commit_token(token).is_ok();
-                    let ok_b = trial_b.commit_token(token).is_ok();
+                    let ok_a = trial_a.commit_token(token);
+                    let ok_b = trial_b.commit_token(token);
                     assert_eq!(ok_a, ok_b, "commit {token} at {prefix:?}");
                     assert_eq!(trial_a.mask(), trial_b.mask());
                     assert_eq!(trial_a.is_accepting(), trial_b.is_accepting());
@@ -3492,8 +3499,8 @@ mod tests {
         for token in [0u32, 1, 2, 3, 4, 5] {
             let mut ordinary_state = ordinary.start();
             let mut optimized_state = optimized.start();
-            ordinary_state.commit_token(token).unwrap();
-            optimized_state.commit_token(token).unwrap();
+            assert!(ordinary_state.commit_token(token));
+            assert!(optimized_state.commit_token(token));
             assert_eq!(ordinary_state.is_accepting(), optimized_state.is_accepting());
             assert_eq!(ordinary_state.mask(), optimized_state.mask(), "token {token}");
         }
@@ -3540,16 +3547,16 @@ mod tests {
         for open in [1u32, 5] {
             let mut ordinary_state = ordinary.start();
             let mut optimized_state = optimized.start();
-            ordinary_state.commit_token(open).unwrap();
-            optimized_state.commit_token(open).unwrap();
+            assert!(ordinary_state.commit_token(open));
+            assert!(optimized_state.commit_token(open));
             assert_eq!(ordinary_state.is_accepting(), optimized_state.is_accepting());
             assert_eq!(ordinary_state.mask(), optimized_state.mask());
         }
 
         let mut ordinary_done = ordinary.start();
         let mut optimized_done = optimized.start();
-        ordinary_done.commit_token(3).unwrap();
-        optimized_done.commit_token(3).unwrap();
+        assert!(ordinary_done.commit_token(3));
+        assert!(optimized_done.commit_token(3));
         assert!(ordinary_done.is_accepting());
         assert!(optimized_done.is_accepting());
         assert_eq!(ordinary_done.mask(), optimized_done.mask());
@@ -3561,7 +3568,7 @@ mod tests {
         let loaded = DynamicConstraint::load_with_vocab(&saved, &vocab).unwrap();
         assert_eq!(loaded.start().mask(), optimized.start().mask());
         let mut loaded_done = loaded.start();
-        loaded_done.commit_token(3).unwrap();
+        assert!(loaded_done.commit_token(3));
         assert!(loaded_done.is_accepting());
     }
 
@@ -3600,8 +3607,8 @@ mod tests {
             let mut ordinary_state = ordinary.start();
             let mut optimized_state = optimized.start();
             for &token in &prefix {
-                ordinary_state.commit_token(token).unwrap();
-                optimized_state.commit_token(token).unwrap();
+                assert!(ordinary_state.commit_token(token));
+                assert!(optimized_state.commit_token(token));
             }
 
             assert_eq!(
@@ -3759,8 +3766,8 @@ mod tests {
 
         let mut ordinary_state = ordinary.start();
         let mut optimized_state = optimized.start();
-        ordinary_state.commit_token(0).unwrap();
-        optimized_state.commit_token(0).unwrap();
+        assert!(ordinary_state.commit_token(0));
+        assert!(optimized_state.commit_token(0));
         assert_eq!(ordinary_state.mask(), optimized_state.mask());
     }
 
@@ -4241,7 +4248,7 @@ mod tests {
             );
 
             let mut state = loaded.start();
-            state.commit_token(2).unwrap();
+            assert!(state.commit_token(2));
             assert!(state.is_accepting());
 
             let mut live_state = bound.start();
@@ -4252,8 +4259,8 @@ mod tests {
                     live_state.mask(),
                     "all-static segmented state changed after round-trip before token {token} (dynamic_boundary={dynamic_boundary})",
                 );
-                live_state.commit_token(token).unwrap();
-                loaded_state.commit_token(token).unwrap();
+                assert!(live_state.commit_token(token));
+                assert!(loaded_state.commit_token(token));
             }
             assert_eq!(loaded_state.is_accepting(), live_state.is_accepting());
             assert!(loaded_state.is_accepting());
@@ -4301,7 +4308,7 @@ mod tests {
                 "composed dynamic transfer changed initial mask (dynamic_boundary={dynamic_boundary})",
             );
             let mut state = loaded.start();
-            state.commit_token(2).unwrap();
+            assert!(state.commit_token(2));
             assert!(state.is_accepting());
         }
     }
@@ -4429,8 +4436,8 @@ mod tests {
                     expected.mask(),
                     "Exact-trigger dynamic boundary mismatch before {tokens:?} token {token}",
                 );
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert!(actual.is_accepting(), "{tokens:?}");
@@ -4506,8 +4513,8 @@ mod tests {
                     expected.mask(),
                     "control-bearing Exact trigger mismatch before {tokens:?} token {token}",
                 );
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert!(actual.is_accepting(), "{tokens:?}");
@@ -4615,8 +4622,8 @@ mod tests {
         let mut expected = reference.start();
         for token in [0, 1] {
             assert_eq!(actual.mask(), expected.mask());
-            actual.commit_token(token).unwrap();
-            expected.commit_token(token).unwrap();
+            assert!(actual.commit_token(token));
+            assert!(expected.commit_token(token));
         }
 
         if !explicitly_disabled
@@ -4803,8 +4810,8 @@ mod tests {
                 let mut actual = constraint.start();
                 let mut expected = monolithic.start();
                 for &token in &path {
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 let actual_mask = actual.mask();
                 let expected_mask = expected.mask();
@@ -4841,8 +4848,8 @@ mod tests {
             let mut expected = monolithic.start();
             for &token in tokens {
                 assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert!(actual.is_accepting(), "{tokens:?}");
@@ -4906,8 +4913,8 @@ mod tests {
                 let mut expected = monolithic.start();
                 for &token in tokens {
                     assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
                 assert!(actual.is_accepting(), "{tokens:?}");
@@ -4938,15 +4945,15 @@ mod tests {
         assert_no_materialized_outer_table(&mut no_outer_table);
         for constraint in [&bound, &loaded, &no_outer_table] {
             let mut state = constraint.start();
-            state.commit_token(0).unwrap();
+            assert!(state.commit_token(0));
             let mask = state.mask();
             assert_ne!(mask[100 / 32] & (1u32 << (100 % 32)), 0);
 
-            state.commit_token(100).unwrap();
+            assert!(state.commit_token(100));
             let mask = state.mask();
             assert_ne!(mask[1 / 32] & (1u32 << (1 % 32)), 0);
 
-            state.commit_token(1).unwrap();
+            assert!(state.commit_token(1));
             assert!(state.is_accepting());
         }
     }
@@ -5012,12 +5019,12 @@ mod tests {
             let mut reference = inline.start();
             assert_eq!(state.mask(), reference.mask());
             assert!(token_allowed(&state.mask(), 9));
-            state.commit_token(9).unwrap();
-            reference.commit_token(9).unwrap();
+            assert!(state.commit_token(9));
+            assert!(reference.commit_token(9));
             assert_eq!(state.mask(), reference.mask());
             assert!(token_allowed(&state.mask(), 10));
-            state.commit_token(10).unwrap();
-            reference.commit_token(10).unwrap();
+            assert!(state.commit_token(10));
+            assert!(reference.commit_token(10));
             assert_eq!(state.mask(), reference.mask());
             assert_eq!(state.is_accepting(), reference.is_accepting());
             assert!(state.is_accepting());
@@ -5026,14 +5033,14 @@ mod tests {
             let mut exact_bytes = b"X\"x:".to_vec();
             exact_bytes.extend(std::iter::repeat_n(b'a', 4998));
             exact_bytes.extend_from_slice(b"\"!");
-            exact.commit_bytes(&exact_bytes).unwrap();
+            assert!(exact.commit_bytes(&exact_bytes));
             assert!(exact.is_accepting());
 
             let mut over = constraint.start();
             let mut over_bytes = b"X\"x:".to_vec();
             over_bytes.extend(std::iter::repeat_n(b'a', 4999));
             over_bytes.extend_from_slice(b"\"!");
-            assert!(over.commit_bytes(&over_bytes).is_err());
+            assert!(!over.commit_bytes(&over_bytes));
         }
     }
 
@@ -5153,8 +5160,8 @@ mod tests {
                 let mut actual = actual_constraint.start();
                 let mut expected = expected_constraint.start();
                 for &token in &path {
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 let actual_mask = actual.mask();
                 let expected_mask = expected.mask();
@@ -5194,8 +5201,8 @@ mod tests {
                 let mut expected = monolithic.start();
                 for &token in tokens {
                     assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
                 assert!(actual.is_accepting(), "{tokens:?}");
@@ -5255,8 +5262,8 @@ mod tests {
                 let mut expected = monolithic.start();
                 for &token in tokens {
                     assert_eq!(actual.mask(), expected.mask(), "before {tokens:?} token {token}");
-                    actual.commit_token(token).unwrap();
-                    expected.commit_token(token).unwrap();
+                    assert!(actual.commit_token(token));
+                    assert!(expected.commit_token(token));
                 }
                 assert_eq!(actual.is_accepting(), expected.is_accepting(), "{tokens:?}");
                 assert!(actual.is_accepting(), "{tokens:?}");
@@ -5758,13 +5765,13 @@ mod tests {
             let mut split = constraint.start();
             for token in [0, 1, 2, 3] {
                 assert_ne!(split.mask()[0] & (1 << token), 0);
-                split.commit_token(token).unwrap();
+                assert!(split.commit_token(token));
             }
             assert!(split.is_accepting());
 
             let mut fused = constraint.start();
             assert_ne!(fused.mask()[0] & (1 << 4), 0);
-            fused.commit_token(4).unwrap();
+            assert!(fused.commit_token(4));
             assert!(fused.is_accepting());
         }
     }
@@ -5923,9 +5930,9 @@ mod tests {
                     expected.mask(),
                     "restored static shards differ before {tokens:?} token {token}",
                 );
-                sharded.commit_token(token).unwrap();
-                restored.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(sharded.commit_token(token));
+                assert!(restored.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             assert_eq!(sharded.is_accepting(), expected.is_accepting(), "{tokens:?}");
             assert_eq!(restored.is_accepting(), expected.is_accepting(), "{tokens:?}");
@@ -6050,8 +6057,8 @@ mod tests {
             let mut expected = monolithic.start();
             assert_eq!(actual.mask(), expected.mask(), "{kind} initial mask");
             for token in [1, 0, 2, 3, 1, 4] {
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
                 assert_eq!(actual.mask(), expected.mask(), "after token {token}");
             }
             assert!(actual.is_accepting());
@@ -6061,8 +6068,8 @@ mod tests {
                 let mut actual = constraint.start();
                 let mut expected = monolithic.start();
                 assert_eq!(
-                    actual.commit_token(token).is_ok(),
-                    expected.commit_token(token).is_ok(),
+                    actual.commit_token(token),
+                    expected.commit_token(token),
                     "fused token {token}",
                 );
                 assert_eq!(actual.is_accepting(), expected.is_accepting());
@@ -6117,15 +6124,15 @@ mod tests {
             let mut expected = monolithic.start();
             for token in [0, 1] {
                 assert_eq!(actual.mask(), expected.mask(), "before token {token}");
-                actual.commit_token(token).unwrap();
-                expected.commit_token(token).unwrap();
+                assert!(actual.commit_token(token));
+                assert!(expected.commit_token(token));
             }
             let actual_mask = actual.mask();
             let expected_mask = expected.mask();
             assert_eq!(actual_mask, expected_mask, "after child completion");
             assert_ne!(actual_mask[0] & (1 << 4), 0, "fused parent token !? must be allowed");
-            actual.commit_token(4).unwrap();
-            expected.commit_token(4).unwrap();
+            assert!(actual.commit_token(4));
+            assert!(expected.commit_token(4));
             assert!(actual.is_accepting());
             assert!(expected.is_accepting());
         }
@@ -6297,7 +6304,7 @@ mod cached_parent_main_tests {
 
     fn accepts(constraint: &RuntimeConstraint, bytes: &[u8]) -> bool {
         let mut state = constraint.start();
-        state.commit_bytes(bytes).is_ok() && state.is_accepting()
+        state.commit_bytes(bytes) && state.is_accepting()
     }
 
     #[test]
@@ -6439,7 +6446,7 @@ mod cached_parent_main_tests {
         .unwrap();
         let bound = open.bind_grammar("payload", &child).unwrap();
         let mut state = bound.start();
-        state.commit_bytes(b"a").unwrap();
+        assert!(state.commit_bytes(b"a"));
         assert!(state.is_accepting());
     }
 
@@ -6469,8 +6476,8 @@ mod cached_parent_main_tests {
         let mut build_state = fast_build.start();
         let mut runtime_state = fast_runtime.start();
         assert_eq!(build_state.mask(), runtime_state.mask());
-        build_state.commit_token(2).unwrap();
-        runtime_state.commit_token(2).unwrap();
+        assert!(build_state.commit_token(2));
+        assert!(runtime_state.commit_token(2));
         assert_eq!(build_state.is_accepting(), runtime_state.is_accepting());
 
         let loaded = RuntimeConstraint::load(fast_build.save(), &vocab).unwrap();
@@ -6577,7 +6584,7 @@ mod final_ordinary_dynamic_selection_tests {
             assert!(!restored.has_template_parser()); assert!(restored.table.is_present());
             for prefix in [b"".as_slice(),b"(",b"()",b"()("] {
                 let mut a=restored.start();let mut b=oracle.start_dynamic();
-                a.commit_bytes(prefix).unwrap();b.commit_bytes(prefix).unwrap();
+                assert!(a.commit_bytes(prefix));assert!(b.commit_bytes(prefix));
                 assert_eq!(a.mask(),b.mask());assert_eq!(a.is_accepting(),b.is_accepting());
             }
         }
@@ -6675,8 +6682,8 @@ mod bare_direct_region_regression_tests {
                 (b"aa",133,true,false),(b"b",10,true,false),(b"bb",10,true,false),
                 (b"ab",0,false,true),(b"ba",0,false,true)] {
                 let mut a=actual.start();let mut o=union.start();
-                let ae=a.commit_bytes(prefix);let oe=o.commit_bytes(prefix);
-                assert_eq!(ae.is_err(),oe.is_err(),"after {prefix:?}");
+                let ae= a.commit_bytes(prefix);let oe= o.commit_bytes(prefix);
+                assert_eq!(!ae,!oe,"after {prefix:?}");
                 assert_eq!(a.mask(),vec![mask],"unsplit after {prefix:?}");
                 assert_eq!(o.mask(),vec![mask],"union after {prefix:?}");
                 assert_eq!((a.is_accepting(),(a.mask().iter().all(|word| *word == 0))),(accept,reject));
@@ -6701,7 +6708,7 @@ mod static_whole_token_regression_tests {
                 assert!(c.direct_regular_automaton.is_some());
                 for c in [c.clone(),RuntimeConstraint::load(c.save(), &v).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
-                    state.commit_token(3).unwrap();assert!(state.is_accepting());assert!(!(state.mask().iter().all(|word| *word == 0)));
+                    assert!(state.commit_token(3));assert!(state.is_accepting());assert!(state.mask().iter().all(|word| *word == 0));
                 }
             }
         }
@@ -6880,12 +6887,8 @@ mod tiny_cfg_compile_blowup_tests {
                     alive = false;
                     break;
                 }
-                state
-                    .commit_token((byte - b'a') as u32)
-                    .unwrap_or_else(|error| panic!(
-                        "commit rejected {:?}[{position}]: {error}",
-                        String::from_utf8_lossy(word),
-                    ));
+                assert!(state
+                    .commit_token((byte - b'a') as u32));
             }
             if alive {
                 assert_eq!(
@@ -6972,9 +6975,13 @@ mod module_build_overhead_tests {
                     .end_tokens([0u32]),
             )
             .expect("direct build");
-        let standalone = Module::new(&grammar)
-            .compile_with(&vocab, CompileOptions::default().end_tokens([0u32]))
-            .expect("module build");
+        let standalone = Grammar::from_expr(Expr::sequence([
+            Expr::from(grammar.clone()),
+            Expr::from(TokenSet::new([0u32])),
+        ]))
+        .expect("root expression")
+        .compile(&vocab)
+        .expect("module build");
         assert!(
             matches!(standalone.boundary_trigger, crate::runtime::BoundaryTrigger::TokenSet(_)),
             "standalone Module must carry the default TokenSet trigger"
@@ -7002,9 +7009,13 @@ mod module_build_overhead_tests {
 
             let grammar = Grammar::from_json_schema(&source);
             let started = Instant::now();
-            Module::new(&grammar)
-                .compile_with(&vocab, CompileOptions::default().end_tokens([0u32]))
-                .expect("module build");
+            Grammar::from_expr(Expr::sequence([
+                Expr::from(grammar.clone()),
+                Expr::from(TokenSet::new([0u32])),
+            ]))
+            .expect("root expression")
+            .compile(&vocab)
+            .expect("module build");
             module_ms.push(started.elapsed().as_secs_f64() * 1000.0);
         }
         let grammar_median = median(grammar_ms);

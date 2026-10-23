@@ -115,10 +115,10 @@ fn prepare_state<'a>(
         .unwrap(),
     ));
     let mut state = constraint.start();
-    state.commit_bytes(prefix).unwrap();
+    assert!(state.commit_bytes(prefix));
     let close_token_id = token_id_override.unwrap_or_else(|| close_token_id(vocab, close_token_bytes));
     let mut verify = state.clone();
-    verify.commit_token(close_token_id).unwrap();
+    assert!(verify.commit_token(close_token_id));
     state
 }
 
@@ -144,7 +144,7 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
             b.iter_batched(
                 || prepared.clone(),
                 |mut state| {
-                    state.commit_token(black_box(close_token_id)).unwrap();
+                    assert!(state.commit_token(black_box(close_token_id)));
                     black_box(state);
                 },
                 BatchSize::SmallInput,
@@ -156,7 +156,7 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                 || (prepared.clone(), vec![0u32; mask_words]),
                 |(mut state, mut mask_buf)| {
                     state.fill_mask(&mut mask_buf);
-                    state.commit_token(black_box(close_token_id)).unwrap();
+                    assert!(state.commit_token(black_box(close_token_id)));
                     black_box((&state, &mask_buf));
                 },
                 BatchSize::SmallInput,
@@ -264,7 +264,7 @@ fn bench_bounded_string_array_close(c: &mut Criterion) {
                         )
                         .unwrap();
                         let mut state = constraint.start();
-                        state.commit_bytes(case.prefix).unwrap();
+                        assert!(state.commit_bytes(case.prefix));
                         let mut mask_buf = vec![0u32; mask_words];
                         let mask_profile = state.fill_mask_profiled(&mut mask_buf);
                         let commit_profile = state

@@ -12,10 +12,6 @@ export declare const MaskStrategy: Readonly<{
   TokenTrie: 'token-trie';
   /** Trie walk over token equivalence classes. */
   TokenClassTrie: 'token-class-trie';
-  /** Alias for `TokenTrie`. */
-  FastBuild: 'token-trie';
-  /** Alias for `ParserDwa`. */
-  FastRuntime: 'parser-dwa';
 }>;
 /** A mask computation strategy value. */
 export type MaskStrategy = typeof MaskStrategy[keyof typeof MaskStrategy];
@@ -28,16 +24,9 @@ export declare const BoundaryMaskStrategy: Readonly<{
   ParserDwa: 'parser-dwa';
   /** Segmented dynamic boundary token walk; faster build. */
   TokenTrie: 'token-trie';
-  /** Alias for `TokenTrie`. */
-  FastBuild: 'token-trie';
-  /** Alias for `ParserDwa`. */
-  FastRuntime: 'parser-dwa';
 }>;
-/** A boundary parser strategy; the legacy `fast-runtime`/`fast-build` strings are also accepted as input. */
-export type BoundaryMaskStrategy =
-  | typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy]
-  | 'fast-runtime'
-  | 'fast-build';
+/** A boundary parser strategy. */
+export type BoundaryMaskStrategy = typeof BoundaryMaskStrategy[keyof typeof BoundaryMaskStrategy];
 
 /** Error codes carried by {@link GlrMaskError}. */
 export type ErrorCode = 'GLRMASK_INVALID_ARGUMENT' | 'GLRMASK_ENGINE_ERROR' | 'GLRMASK_PANIC' | 'GLRMASK_BUFFER_TOO_SMALL' | 'GLRMASK_CLOSED';
@@ -89,8 +78,6 @@ export declare class Vocab implements Disposable {
   /** Number of byte-backed entries; special IDs are not counted. */
   readonly size: number;
   /** An independent handle. */
-  copy(): Vocab;
-  /** An independent handle. */
   clone(): Vocab;
   /** Releases the native handle. */
   dispose(): void;
@@ -110,8 +97,6 @@ export declare class TokenSet implements Disposable {
   /** The normalized ranges, for example `TokenSet[0..=9, 20..=29]`. */
   toString(): string;
   /** An independent handle. */
-  copy(): TokenSet;
-  /** An independent handle. */
   clone(): TokenSet;
   /** Releases the native handle. */
   dispose(): void;
@@ -119,18 +104,12 @@ export declare class TokenSet implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** Strategy settings for a precompile or compile. */
-export interface StrategyOptions {
+/** Compilation settings for a grammar or module assembly. */
+export interface CompileOptions {
   /** The mask computation strategy for the whole compile. */
   maskStrategy?: MaskStrategy;
   /** The boundary parser strategy for the whole compile. */
   boundaryMaskStrategy?: BoundaryMaskStrategy;
-}
-
-/** Root compile options. */
-export interface GrammarCompileOptions extends StrategyOptions {
-  /** Accepted end-of-sequence token IDs, applied only to this root compile and admitted once the grammar is complete. */
-  endTokens?: Iterable<number>;
 }
 
 /** The source-language definition, without compilation settings. Source text is parsed lazily, so parse errors surface at compile. */
@@ -148,37 +127,25 @@ export declare class Grammar implements Disposable {
   /** A read-only map of the grammar's declared externs, in declaration order. */
   readonly externs: Externs;
   /** An independent handle. */
-  copy(): Grammar;
+  clone(): Grammar;
+  /** Builds a source grammar from an expression. */
+  static fromExpr(expr: Expr | Grammar | TokenSet): Grammar;
+  /** Binds one declared extern. */
+  bind(name: string, value: ExprPart): void;
   /** Retains vocabulary-specific compilation artifacts; equivalent to `new Module(this).precompile(vocab, ...)`. */
-  precompile(vocab: Vocab, options?: StrategyOptions | CompileOptions): Promise<Module>;
+  precompile(vocab: Vocab, options?: CompileOptions): Promise<Module>;
   /** Retains vocabulary-specific compilation artifacts; equivalent to `new Module(this).precompileSync(vocab, ...)`. */
-  precompileSync(vocab: Vocab, options?: StrategyOptions | CompileOptions): Module;
+  precompileSync(vocab: Vocab, options?: CompileOptions): Module;
   /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compile(vocab, ...)`. */
-  compile(vocab: Vocab, options?: GrammarCompileOptions): Promise<Constraint>;
+  compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
   /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compileSync(vocab, ...)`. */
-  compileSync(vocab: Vocab, options?: GrammarCompileOptions): Constraint;
+  compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Releases the native handle. */
   dispose(): void;
   /** Releases the native handle when leaving a `using` block. */
   [Symbol.dispose](): void;
 }
 
-/** Root generation options. */
-export interface RootSettings extends StrategyOptions {
-  /** Accepted end-of-sequence token IDs, admitted once the grammar is complete and committed before stopping. */
-  endTokens?: Iterable<number>;
-}
-/** Compilation settings for a module assembly. */
-export declare class CompileOptions {
-  /** Creates compile options; `endTokens` are admitted once the grammar is complete and must be committed before stopping. */
-  constructor(options?: RootSettings);
-  /** The accepted end-of-sequence token IDs. */
-  readonly endTokens: readonly number[];
-  /** The mask computation strategy for the whole compile. */
-  readonly maskStrategy: MaskStrategy;
-  /** The boundary parser strategy for the whole compile. */
-  readonly boundaryMaskStrategy: BoundaryMaskStrategy;
-}
 
 /** A value accepted as an `Expr` operand. */
 export type ExprPart = Grammar | Module | Expr | TokenSet | number;
@@ -194,7 +161,7 @@ export declare class Expr implements Disposable {
   /** Matches exact bytes, with no whitespace or ignore inserted; strings are UTF-8 encoded. */
   static literal(value: string | Uint8Array): Expr;
   /** An independent handle. */
-  copy(): Expr;
+  clone(): Expr;
   /** Releases the native handle. */
   dispose(): void;
   /** Releases the native handle when leaving a `using` block. */
@@ -209,19 +176,19 @@ export declare class Module implements Disposable {
   /** A read-only map of the module's declared externs, in declaration order. */
   readonly externs: Externs;
   /** An independent snapshot sharing immutable source and retained work. */
-  copy(): Module;
+  clone(): Module;
   /** Binds the extern `name` to `value`; fails if the extern is undeclared or already bound, and names containing `::` are rejected. */
   bind(name: string, value: ExprPart): void;
   /** Binds several externs atomically; if any binding fails, none is applied. */
   bind(bindings: Record<string, ExprPart>): void;
   /** Retains vocabulary-specific compilation artifacts for this module. */
-  precompile(vocab: Vocab, options?: StrategyOptions | CompileOptions): Promise<void>;
+  precompile(vocab: Vocab, options?: CompileOptions): Promise<void>;
   /** Retains vocabulary-specific compilation artifacts for this module. */
-  precompileSync(vocab: Vocab, options?: StrategyOptions | CompileOptions): void;
+  precompileSync(vocab: Vocab, options?: CompileOptions): void;
   /** Compiles the module assembly against `vocab`; every extern must be bound. */
-  compile(vocab: Vocab, options?: RootSettings | CompileOptions): Promise<Constraint>;
+  compile(vocab: Vocab, options?: CompileOptions): Promise<Constraint>;
   /** Compiles the module assembly against `vocab`; every extern must be bound. */
-  compileSync(vocab: Vocab, options?: RootSettings | CompileOptions): Constraint;
+  compileSync(vocab: Vocab, options?: CompileOptions): Constraint;
   /** Serializes the module assembly and any retained precompiled artifacts. */
   save(): Promise<Uint8Array>;
   /** Serializes the module assembly and any retained precompiled artifacts. */
@@ -242,8 +209,6 @@ export declare class Constraint implements Disposable {
   private readonly __constraintBrand: void;
   /** Number of packed `u32` words in a mask. */
   readonly maskLength: number;
-  /** An independent handle. */
-  copy(): Constraint;
   /** An independent handle. */
   clone(): Constraint;
   /** Creates independent state for one generated sequence. */
@@ -271,19 +236,17 @@ export declare class ConstraintState implements Disposable {
   /** Number of packed `u32` words in a mask. */
   readonly maskLength: number;
   /** An independent snapshot at the current prefix. */
-  copy(): ConstraintState;
-  /** An independent snapshot at the current prefix. */
   clone(): ConstraintState;
   /** The current allowed-token mask as packed original-token-ID `u32` words. */
   mask(): Uint32Array;
   /** Writes the current mask into `output`, which must hold at least `maskLength` words; extra words are cleared. */
   fillMask(output: Uint32Array): void;
-  /** Commits one model token event; a disallowed event returns an error and rejects the state. */
-  commitToken(id: number): void;
-  /** Commits model token events in order; a disallowed event returns an error and rejects the state. */
-  commitTokens(ids: Iterable<number> | Uint32Array): void;
-  /** Commits raw bytes rather than a model token event; does not substitute for committing a token-set or end-token event. */
-  commitBytes(bytes: Uint8Array): void;
+  /** Commits one model token event; false when it is disallowed and rejects the state. */
+  commitToken(id: number): boolean;
+  /** Commits model token events in order; false at the first disallowed event. */
+  commitTokens(ids: Iterable<number> | Uint32Array): boolean;
+  /** Commits raw bytes rather than a model token event; false when disallowed. */
+  commitBytes(bytes: Uint8Array): boolean;
   /** Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed. */
   isAccepting(): boolean;
   /** A read-only prefix of library-canonical forced output. */

@@ -429,7 +429,7 @@ fn main() {
                     }
                     let left_result = left_state.commit_token(token);
                     let right_result = right_state.commit_token(token);
-                    if left_result.is_err() != right_result.is_err() {
+                    if left_result != right_result {
                         eprintln!(
                             "commit result divergence sample={sample_index} example={example_index} token_index={token_index} token={token} left={left_result:?} right={right_result:?}"
                         );
