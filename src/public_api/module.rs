@@ -826,12 +826,19 @@ impl Module {
         if let Some(c) = cache.get(&id) { return Ok(c.clone()); }
         let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
         let local = self.node.prepared.get(&engine).ok_or_else(|| error("missing local compilation"))?;
-        let mut parent = if local.bindings.is_empty() {
-            local.inner.as_ref().clone()
-        } else {
-            local.link_with(BuildOptions::default().optimization(engine))?
+        // Rebuilding the pre-composition parent is only needed when the rare
+        // `Auto` boundary decline has to redo composition, so keep it in a
+        // closure instead of snapshotting the composed constraint.
+        let build_base = || -> Result<RuntimeConstraint> {
+            let mut base = if local.bindings.is_empty() {
+                local.inner.as_ref().clone()
+            } else {
+                local.link_with(BuildOptions::default().optimization(engine))?
+            };
+            base.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
+            Ok(base)
         };
-        parent.materialize_composition_link_metadata_for_compilation().map_err(Error::Compilation)?;
+        let mut parent = build_base()?;
         let active = parent.late_grammar_slots.iter().map(|s| s.name.as_str()).collect::<BTreeSet<_>>();
         let children = self.node.bindings.iter().filter(|(name, _)| active.contains(name.as_str())).map(|(name, value)| {
             let child = match value {
@@ -849,11 +856,22 @@ impl Module {
             }
         }
         if linked {
-            parent = if parent.has_template_parser() {
-                crate::error::catch_internal_invariant(|| crate::runtime::parser_backend::link::compose_owned(parent, children, vocab))??
-            } else {
-                crate::error::catch_internal_invariant(|| compose_named_children(parent, &children, vocab, SegmentedBoundaryBackend::Dynamic))??
+            // Composition consumes the pre-composition parent. Factor it into
+            // a closure so the rare `Auto` decline can redo composition from
+            // the same inputs without a full `Constraint` snapshot per build.
+            let compose = |parent: RuntimeConstraint| -> Result<RuntimeConstraint> {
+                let composed = if parent.has_template_parser() {
+                    crate::error::catch_internal_invariant(|| {
+                        crate::runtime::parser_backend::link::compose_owned(parent, children.clone(), vocab)
+                    })??
+                } else {
+                    crate::error::catch_internal_invariant(|| {
+                        compose_named_children(parent, &children, vocab, SegmentedBoundaryBackend::Dynamic)
+                    })??
+                };
+                Ok(composed)
             };
+            parent = compose(parent)?;
             let boundary_strategy = self.node.boundary_mask_strategy;
             if boundary_strategy != BoundaryMaskStrategy::TokenTrie
                 && parent.has_template_parser()
@@ -862,7 +880,6 @@ impl Module {
                 // `Auto` mirrors `MaskStrategy::Auto`: prefer the static
                 // boundary parser, and fall back to the token-trie boundary
                 // when it declines on budget instead of failing the build.
-                let fallback = (boundary_strategy == BoundaryMaskStrategy::Auto).then(|| parent.clone());
                 let declined = {
                     #[cfg(test)]
                     let forced_decline = self
@@ -887,9 +904,7 @@ impl Module {
                     ));
                 }
                 if declined {
-                    if let Some(fallback) = fallback {
-                        parent = fallback;
-                    }
+                    parent = compose(build_base()?)?;
                 }
             }
             let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
