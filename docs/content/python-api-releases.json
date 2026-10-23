@@ -94,6 +94,10 @@
       "auto.AutoSchemaShape.pattern_chars": "",
       "auto.AutoSchemaShape.max_length": "",
       "auto.AutoSchemaShape.json_bytes": ""
+    },
+    "quickstarts": {
+      "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    state.commit_token(token_id)\nassert state.is_accepting()\n```\n\nPython masks are NumPy Boolean arrays indexed by original model token ID.",
+      "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for (token_id, expected) in [(0, 1), (1, 2), (2, 4)] {\n        assert_eq!(state.mask()[0] & 7, expected);\n        state.commit_token(token_id)?;\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```\n\nRust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32` indicates whether that token is allowed."
     }
   }
 }
