@@ -101,7 +101,7 @@ fn exact(tokens: &ExactTokens, vocabs: &mut Vec<Vocab>) -> Exact {
     Exact { target: vocab_id(tokens.target_vocab(), vocabs), ranges: tokens.range_pairs().to_vec() }
 }
 
-fn source(grammar: &Grammar<'_>, vocabs: &mut Vec<Vocab>) -> Source {
+fn source(grammar: &Grammar, vocabs: &mut Vec<Vocab>) -> Source {
     if let Some(t) = &grammar.exact_value { return Source::Exact(exact(t, vocabs)); }
     if let Some(id) = grammar.exact_token_id { return Source::Token(id); }
     match &grammar.source {
@@ -195,13 +195,13 @@ fn decode_exact(value: Exact, vocabs: &[Vocab]) -> Result<ExactTokens> {
     vocab.token_ranges(value.ranges.into_iter().map(|(a, b)| a..=b)).map_err(|e| err(e.to_string()))
 }
 
-fn decode_source(value: Source, vocabs: &[Vocab]) -> Result<Grammar<'static>> {
+fn decode_source(value: Source, vocabs: &[Vocab]) -> Result<Grammar> {
     let source = match value {
-        Source::Ebnf(s) => GrammarSource::Ebnf(SourceText::Owned(Arc::from(s))),
-        Source::Glrm(s) => GrammarSource::Glrm(SourceText::Owned(Arc::from(s))),
-        Source::Json(s) => GrammarSource::JsonSchema(SourceText::Owned(Arc::from(s))),
+        Source::Ebnf(s) => GrammarSource::Ebnf(Arc::from(s)),
+        Source::Glrm(s) => GrammarSource::Glrm(Arc::from(s)),
+        Source::Json(s) => GrammarSource::JsonSchema(Arc::from(s)),
         Source::Lark { text, llm, tokens } => {
-            let mut grammar = Grammar::new(GrammarSource::Lark(SourceText::Owned(Arc::from(text))));
+            let mut grammar = Grammar::new(GrammarSource::Lark(Arc::from(text)));
             grammar.lark_options = Arc::new(LarkOptions { profile: if llm { LarkProfile::Llm } else { LarkProfile::Recognition }, token_names: tokens });
             return Ok(grammar);
         }

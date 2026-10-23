@@ -5,7 +5,7 @@ use glrmask::{
 
 // Composition fixtures explicitly materialize the native parser before binding.
 // The ordinary Dynamic default remains LR-backed; mixed native/LR rejection is checked.
-fn compile_native_dynamic_fixture(grammar: Grammar<'_>, vocab: &Vocab) -> glrmask::Result<DynamicConstraint> {
+fn compile_native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> glrmask::Result<DynamicConstraint> {
     glrmask::__private::into_dynamic_template_parser(DynamicConstraint::compile(grammar, vocab)?)
 }
 

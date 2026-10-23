@@ -9,22 +9,22 @@ use serde_json::json;
 use std::{error::Error, hint::black_box, time::Instant};
 
 trait Apply<G> { fn apply(self, receiver: &mut G); }
-impl Apply<Grammar<'static>> for Grammar<'static> {
-    fn apply(self, receiver: &mut Grammar<'static>) { *receiver = self; }
+impl Apply<Grammar> for Grammar {
+    fn apply(self, receiver: &mut Grammar) { *receiver = self; }
 }
-impl Apply<Grammar<'static>> for () { fn apply(self, _: &mut Grammar<'static>) {} }
+impl Apply<Grammar> for () { fn apply(self, _: &mut Grammar) {} }
 impl Apply<PreparedGrammar> for PreparedGrammar {
     fn apply(self, receiver: &mut PreparedGrammar) { *receiver = self; }
 }
 impl Apply<PreparedGrammar> for () { fn apply(self, _: &mut PreparedGrammar) {} }
 
-fn source(slots: usize) -> Grammar<'static> {
+fn source(slots: usize) -> Grammar {
     let mut text = (0..slots).map(|i| format!("extern token E{i}\n")).collect::<String>();
     text.push_str("start root nt root=E0");
-    Grammar::from_glrm_owned(text)
+    Grammar::from_glrm(text)
 }
 
-fn bind_source(g: &mut Grammar<'static>, name: &str, id: u32) -> glrmask::Result<()> {
+fn bind_source(g: &mut Grammar, name: &str, id: u32) -> glrmask::Result<()> {
     g.bind(name, Token::new(id))?.apply(g);
     Ok(())
 }

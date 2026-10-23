@@ -5,7 +5,7 @@ fn require_send_sync<T: Send + Sync>() {}
 
 #[test]
 fn source_module_and_expression_are_send_sync_at_the_default_budget() {
-    require_send_sync::<Grammar<'static>>();
+    require_send_sync::<Grammar>();
     require_send_sync::<Module>();
     require_send_sync::<Expr>();
 }
@@ -22,7 +22,7 @@ fn scoped_threads_share_module_snapshots_without_mutating_the_source() {
             let vocab = &vocab;
             scope.spawn(move || {
                 let mut local = module.clone();
-                local.bind("item", Grammar::from_ebnf_owned(format!("start ::= {text:?}"))).unwrap();
+                local.bind("item", Grammar::from_ebnf(format!("start ::= {text:?}"))).unwrap();
                 let constraint = local.compile(vocab).unwrap();
                 let mut state = constraint.start();
                 state.commit_token(id).unwrap();

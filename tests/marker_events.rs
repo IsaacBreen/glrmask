@@ -11,7 +11,7 @@ fn vocabulary() -> Vocab {
         (6,b"xaby".to_vec()), (7,b"pxabyq".to_vec()), (8,b"p".to_vec()),
         (9,b"q".to_vec()), (10,Vec::new()), (11,b"<event>".to_vec())])
 }
-fn annotated() -> Grammar<'static> {
+fn annotated() -> Grammar {
     Grammar::from_glrm(r#"glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);"#)
 }
 fn equivalent_replay(a: &Constraint, b: &Constraint, tokens: &[u32]) {

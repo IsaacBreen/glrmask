@@ -284,16 +284,16 @@ enum ModuleBinding {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum GrammarValue<'a> {
-    Source(Arc<Grammar<'a>>),
+pub(crate) enum GrammarValue {
+    Source(Arc<Grammar>),
     Token(Token),
     ExactTokens(ExactTokens),
 }
 
 
 #[doc(hidden)]
-pub(crate) trait IntoGrammarValue<'a> {
-    fn into_grammar_value(self) -> Result<GrammarValue<'a>>;
+pub(crate) trait IntoGrammarValue {
+    fn into_grammar_value(self) -> Result<GrammarValue>;
 }
 
 #[derive(Debug, Clone)]
@@ -346,15 +346,13 @@ impl LarkOptions {
 
 /// The source-language definition, without compilation settings.
 ///
-/// Binding changes this handle; clones and attached children retain independent
-/// snapshots. Source text is parsed lazily, so parse errors surface at
-/// preparation or compilation.
+/// Source text is parsed lazily, so parse errors surface at preparation or
+/// compilation.
 #[derive(Debug, Clone)]
-pub struct Grammar<'a> {
-    source: GrammarSource<'a>,
-    owned_text: Arc<OnceLock<Arc<str>>>,
+pub struct Grammar {
+    source: GrammarSource,
     module_snapshot: Arc<OnceLock<Module>>,
-    bindings: OrdMap<String, GrammarValue<'a>>,
+    bindings: OrdMap<String, GrammarValue>,
     declarations_cache: Arc<OnceLock<Result<GlrmExternalDeclarations>>>,
     analysis: graph::SummaryCache,
     parsed_component: Arc<OnceLock<std::result::Result<ParsedComponent, Error>>>,
@@ -364,36 +362,23 @@ pub struct Grammar<'a> {
     lark_document:Arc<OnceLock<std::result::Result<LarkDocument,Error>>>,
 }
 
-#[derive(Debug,Clone,PartialEq,Eq)]
-pub(crate) enum SourceText<'a> {
-    Borrowed(&'a str),
-    Owned(Arc<str>),
-}
-impl std::ops::Deref for SourceText<'_> {
-    type Target=str;
-    fn deref(&self)->&str {match self {Self::Borrowed(source)=>source,Self::Owned(source)=>source}}
-}
-impl<'a> From<&'a str> for SourceText<'a> {
-    fn from(source:&'a str)->Self {Self::Borrowed(source)}
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum GrammarSource<'a> {
-    Ebnf(SourceText<'a>),
-    Lark(SourceText<'a>),
-    JsonSchema(SourceText<'a>),
-    Glrm(SourceText<'a>),
+enum GrammarSource {
+    Ebnf(Arc<str>),
+    Lark(Arc<str>),
+    JsonSchema(Arc<str>),
+    Glrm(Arc<str>),
     Constructed,
 }
 
 #[derive(Default)]
-struct SourcePreparation<'a> {
+struct SourcePreparation {
     prepared: std::collections::HashMap<usize,Arc<PreparedGrammar>>,
-    retained: Vec<Arc<Grammar<'a>>>,
+    retained: Vec<Arc<Grammar>>,
     visited: usize,
 }
 
-impl<'a> Grammar<'a> {
+impl Grammar {
 
     /// Resolve the parser-facing expression graph without selecting an LR
     /// normal form. Source bindings are not part of this constructor boundary;
@@ -429,32 +414,32 @@ impl<'a> Grammar<'a> {
 
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn ebnf(source: &'a str) -> Self { Self::new(GrammarSource::Ebnf(source.into())) }
+    pub fn ebnf(source: &str) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source))) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn lark(source: &'a str) -> Self { Self::from_lark_with(source,LarkOptions::llm()) }
+    pub fn lark(source: &str) -> Self { Self::from_lark_with(source,LarkOptions::llm()) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source.into())) }
+    pub fn json_schema(source: &str) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source))) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn glrm(source: &'a str) -> Self {
-        let grammar=Self::new(GrammarSource::Glrm(source.into()));
+    pub fn glrm(source: &str) -> Self {
+        let grammar=Self::new(GrammarSource::Glrm(Arc::from(source)));
         let _=grammar.parsed_component.set(ParsedComponent::parse_glrm_for_tools(source).map_err(Into::into));
         grammar
     }
 
     /// Creates a grammar from EBNF source text.
-    pub fn from_ebnf(source: &'a str) -> Self { Self::new(GrammarSource::Ebnf(source.into())) }
+    pub fn from_ebnf(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref()))) }
 
     /// Creates a grammar from Lark source using the recognition profile.
     ///
     /// See [`Self::from_lark_with`] for LLM extensions and named-token mappings.
-    pub fn from_lark(source: &'a str) -> Self { Self::new(GrammarSource::Lark(source.into())) }
+    pub fn from_lark(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Lark(Arc::from(source.as_ref()))) }
 
     /// Creates a grammar from Lark source with explicit [`LarkOptions`].
-    pub fn from_lark_with(source:&'a str,options:LarkOptions)->Self {
-        let mut grammar=Self::new(GrammarSource::Lark(source.into()));grammar.lark_options=Arc::new(options);grammar
+    pub fn from_lark_with(source:impl AsRef<str>,options:LarkOptions)->Self {
+        let mut grammar=Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));grammar.lark_options=Arc::new(options);grammar
     }
 
 
@@ -462,16 +447,16 @@ impl<'a> Grammar<'a> {
     ///
     /// `format` is an annotation only, as in JSON Schema 2020-12; unrecognised
     /// keywords are ignored and unsupported keywords are rejected.
-    pub fn from_json_schema(source: &'a str) -> Self { Self::new(GrammarSource::JsonSchema(source.into())) }
+    pub fn from_json_schema(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source.as_ref()))) }
 
     /// Creates a grammar from GLRM source.
     ///
     /// GLRM supports typed extern slots; bind them before compiling a runnable
     /// root.
-    pub fn from_glrm(source: &'a str) -> Self { Self::new(GrammarSource::Glrm(source.into())) }
+    pub fn from_glrm(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Glrm(Arc::from(source.as_ref()))) }
 
-    fn new(source: GrammarSource<'a>) -> Self {
-        Self { source, owned_text: Arc::new(OnceLock::new()), module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_options:Arc::new(LarkOptions::default()),lark_document:Arc::new(OnceLock::new()) }
+    fn new(source: GrammarSource) -> Self {
+        Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_options:Arc::new(LarkOptions::default()),lark_document:Arc::new(OnceLock::new()) }
     }
 
     fn component(&self) -> Result<&ParsedComponent> {
@@ -538,7 +523,7 @@ impl<'a> Grammar<'a> {
         for (name,range) in &document.schemas {
             // Preserve a real child boundary and the JSON frontend's own whitespace
             // rules. The source span borrows the original Lark document safely.
-            let child=Self::new(GrammarSource::JsonSchema(SourceText::Owned(Arc::from(&source[range.clone()]))));
+            let child=Self::new(GrammarSource::JsonSchema(Arc::from(&source[range.clone()])));
             resolved.bindings.insert(name.clone(),GrammarValue::Source(Arc::new(child)));
         }
         Ok(resolved)
@@ -616,7 +601,7 @@ impl<'a> Grammar<'a> {
     #[allow(private_bounds)]
     pub fn bind<T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where
-        T: IntoGrammarValue<'a>,
+        T: IntoGrammarValue,
     {
         let next = self.bind_value(name.as_ref(), value.into_grammar_value()?)?;
         *self = next;
@@ -629,13 +614,13 @@ impl<'a> Grammar<'a> {
     #[doc(hidden)]
     #[allow(private_bounds)]
     pub fn bind_snapshot<T>(&self, name: impl AsRef<str>, value: T) -> Result<Self>
-    where T: IntoGrammarValue<'a> {
+    where T: IntoGrammarValue {
         let mut next = self.clone();
         next.bind(name, value)?;
         Ok(next)
     }
 
-    fn bind_value(&self, name:&str, mut value:GrammarValue<'a>) -> Result<Self> {
+    fn bind_value(&self, name:&str, mut value:GrammarValue) -> Result<Self> {
         let declared = self.declarations()?;
         let previous = graph::source_summary(self)?;
         if !declared.kinds.contains_key(name) {
@@ -682,7 +667,7 @@ impl<'a> Grammar<'a> {
     /// Compatibility spelling for source-only grammar binding.
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn bind_grammar(self, name: impl AsRef<str>, grammar: Grammar<'a>) -> Result<Self> {
+    pub fn bind_grammar(self, name: impl AsRef<str>, grammar: Grammar) -> Result<Self> {
         self.bind_value(name.as_ref(), GrammarValue::Source(Arc::new(grammar)))
     }
 
@@ -953,7 +938,7 @@ impl<'a> Grammar<'a> {
     #[doc(hidden)]
     pub fn compile_unlinked_with(&self,vocab:&Vocab,options:BuildOptions)->Result<PreparedGrammar> {self.prepare_with(vocab,options)}
 
-    fn prepare_cached(&self,vocab:&Vocab,options:BuildOptions,cache:&mut SourcePreparation<'a>,depth:usize)
+    fn prepare_cached(&self,vocab:&Vocab,options:BuildOptions,cache:&mut SourcePreparation,depth:usize)
         -> Result<Arc<PreparedGrammar>> {
         if depth>graph::MAX_DEPTH {return Err(Error::Compilation("component preparation depth exceeds 64".into()));}
         let identity=graph::source_identity(self);
@@ -978,7 +963,7 @@ impl<'a> Grammar<'a> {
         let mut builder = ConstraintSpec::builder(local_grammar, vocab)?;
         let event_adapters=Arc::new(event_cache::ExactAdapterCache::default());
         let mut bindings = OrdMap::<String, ModuleBinding>::new();
-        let mut source_children = Vec::<(String, Arc<Grammar<'a>>)>::new();
+        let mut source_children = Vec::<(String, Arc<Grammar>)>::new();
         for (name, value) in source_bindings {
             match value {
                 GrammarValue::Token(token) => {
@@ -1169,7 +1154,7 @@ impl<'a> Grammar<'a> {
         Ok(constraint)
     }
 
-    pub(crate) fn from_expr(expr: &Expr) -> Result<Grammar<'static>> {
+    pub(crate) fn from_expr(expr: &Expr) -> Result<Grammar> {
         let module = Module::from_expr(expr)?;
         module.to_source()
     }
@@ -1185,7 +1170,7 @@ impl<'a> Grammar<'a> {
         }
     }
 
-    fn into_source_only_and_bindings(self) -> (Self, OrdMap<String, GrammarValue<'a>>) {
+    fn into_source_only_and_bindings(self) -> (Self, OrdMap<String, GrammarValue>) {
         let mut source=self;
         let bindings=std::mem::take(&mut source.bindings);
         source.analysis=graph::empty_cache();
@@ -1194,57 +1179,37 @@ impl<'a> Grammar<'a> {
     }
 }
 
-impl Grammar<'static> {
-    /// Creates a grammar from owned GLRM source; see [`Self::from_glrm`].
-    pub fn from_glrm_owned(source:impl Into<String>)->Self {
-        Self::new(GrammarSource::Glrm(SourceText::Owned(Arc::from(source.into()))))
-    }
-    /// Creates a grammar from owned Lark source and options; see [`Self::from_lark_with`].
-    pub fn from_lark_owned(source:impl Into<String>,options:LarkOptions)->Self {
-        let mut grammar=Self::new(GrammarSource::Lark(SourceText::Owned(Arc::from(source.into()))));
-        grammar.lark_options=Arc::new(options);grammar
-    }
-    /// Creates a grammar from owned EBNF source; see [`Self::from_ebnf`].
-    pub fn from_ebnf_owned(source:impl Into<String>)->Self {
-        Self::new(GrammarSource::Ebnf(SourceText::Owned(Arc::from(source.into()))))
-    }
-    /// Creates a grammar from an owned JSON Schema document; see [`Self::from_json_schema`].
-    pub fn from_json_schema_owned(source:impl Into<String>)->Self {
-        Self::new(GrammarSource::JsonSchema(SourceText::Owned(Arc::from(source.into()))))
-    }
-}
-
-impl<'a> IntoGrammarValue<'a> for Grammar<'a> {
-    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+impl IntoGrammarValue for Grammar {
+    fn into_grammar_value(self) -> Result<GrammarValue> {
         Ok(GrammarValue::Source(Arc::new(self)))
     }
 }
 
-impl<'a> IntoGrammarValue<'a> for &Grammar<'a> {
-    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+impl IntoGrammarValue for &Grammar {
+    fn into_grammar_value(self) -> Result<GrammarValue> {
         Ok(GrammarValue::Source(Arc::new(self.clone())))
     }
 }
 
-impl<'a> IntoGrammarValue<'a> for Token {
-    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+impl IntoGrammarValue for Token {
+    fn into_grammar_value(self) -> Result<GrammarValue> {
         Ok(GrammarValue::Token(self))
     }
 }
 
-impl<'a> IntoGrammarValue<'a> for ExactTokens {
-    fn into_grammar_value(self) -> Result<GrammarValue<'a>> {
+impl IntoGrammarValue for ExactTokens {
+    fn into_grammar_value(self) -> Result<GrammarValue> {
         Ok(GrammarValue::ExactTokens(self))
     }
 }
 
-impl<'a> IntoGrammarValue<'a> for Expr {
-    fn into_grammar_value(self)->Result<GrammarValue<'a>> {
+impl IntoGrammarValue for Expr {
+    fn into_grammar_value(self)->Result<GrammarValue> {
         Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(&self)?)))
     }
 }
-impl<'a> IntoGrammarValue<'a> for &Expr {
-    fn into_grammar_value(self)->Result<GrammarValue<'a>> {
+impl IntoGrammarValue for &Expr {
+    fn into_grammar_value(self)->Result<GrammarValue> {
         Ok(GrammarValue::Source(Arc::new(Grammar::from_expr(self)?)))
     }
 }
@@ -1324,13 +1289,13 @@ pub struct VocabPartition {
 
 impl VocabPartition {
     /// Analyze `grammar` for `vocab` without constructing terminal/parser DWAs.
-    pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+    pub fn compile(grammar: Grammar, vocab: &Vocab) -> Result<Self> {
         Self::compile_with_strategy(grammar, vocab, VocabPartitionStrategy::Automatic)
     }
 
     /// Analyze `grammar` for `vocab` using an explicit partition strategy.
     pub fn compile_with_strategy(
-        grammar: Grammar<'_>,
+        grammar: Grammar,
         vocab: &Vocab,
         strategy: VocabPartitionStrategy,
     ) -> Result<Self> {
@@ -1508,7 +1473,7 @@ pub enum BoundarySummaryPolicy {
 /// A grammar, vocabulary, and complete set of extern bindings.
 #[derive(Debug, Clone)]
 pub struct ConstraintSpec<'a> {
-    grammar: Grammar<'a>,
+    grammar: Grammar,
     vocab: &'a Vocab,
     token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
     grammar_bindings: BTreeMap<String, GrammarBinding<'a>>,
@@ -1528,7 +1493,7 @@ pub struct ConstraintSpec<'a> {
 /// Builder for [`ConstraintSpec`].
 #[derive(Debug)]
 pub struct ConstraintSpecBuilder<'a> {
-    grammar: Grammar<'a>,
+    grammar: Grammar,
     vocab: &'a Vocab,
     declared_externals: BTreeSet<String>,
     token_bindings: BTreeMap<String, Vec<(u32, u32)>>,
@@ -1542,7 +1507,7 @@ pub struct ConstraintSpecBuilder<'a> {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub(crate) enum GrammarBinding<'a> {
-    Source(Grammar<'a>),
+    Source(Grammar),
     Spec(Box<ConstraintSpec<'a>>),
     #[doc(hidden)]
     StaticBorrowed(&'a RuntimeConstraint),
@@ -1561,7 +1526,7 @@ pub(crate) trait IntoGrammarBinding<'a> {
     fn into_grammar_binding(self) -> GrammarBinding<'a>;
 }
 
-impl<'a> IntoGrammarBinding<'a> for Grammar<'a> {
+impl<'a> IntoGrammarBinding<'a> for Grammar {
     fn into_grammar_binding(self) -> GrammarBinding<'a> { GrammarBinding::Source(self) }
 }
 
@@ -1616,7 +1581,7 @@ impl<'a> IntoGrammarBinding<'a> for Arc<DynamicConstraint> {
 impl<'a> ConstraintSpec<'a> {
     /// Start a specification for `grammar` and `vocab`.
     pub fn builder(
-        grammar: Grammar<'a>,
+        grammar: Grammar,
         vocab: &'a Vocab,
     ) -> Result<ConstraintSpecBuilder<'a>> {
         ConstraintSpecBuilder::new(grammar, vocab)
@@ -1843,7 +1808,7 @@ impl<'a> ConstraintSpec<'a> {
 }
 
 impl<'a> ConstraintSpecBuilder<'a> {
-    fn new(grammar: Grammar<'a>, vocab: &'a Vocab) -> Result<Self> {
+    fn new(grammar: Grammar, vocab: &'a Vocab) -> Result<Self> {
         let (grammar, source_bindings) = grammar.into_source_only_and_bindings();
         let declarations = grammar.declarations()?;
         let declared_externals = declarations.names.iter().cloned().collect::<BTreeSet<_>>();
@@ -2358,7 +2323,7 @@ fn compose_named_children(
 }
 
 fn compile_static_source(
-    grammar: &Grammar<'_>,
+    grammar: &Grammar,
     vocab: &Vocab,
     token_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<RuntimeConstraint> {
@@ -2374,7 +2339,7 @@ fn compile_static_source(
 }
 
 fn compile_dynamic_source(
-    grammar: &Grammar<'_>,
+    grammar: &Grammar,
     vocab: &Vocab,
     token_bindings: &[(&str, &[(u32, u32)])],
 ) -> Result<DynamicConstraint> {
@@ -2392,7 +2357,7 @@ fn compile_dynamic_source(
 #[cfg(any(test, feature = "internal-api"))]
 impl RuntimeConstraint {
     /// Compile `grammar` into a [`Constraint`](crate::Constraint) for `vocab`.
-    pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+    pub fn compile(grammar: Grammar, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile()
     }
 
@@ -2456,7 +2421,7 @@ impl RuntimeConstraint {
 #[cfg(any(test, feature = "internal-api"))]
 impl DynamicConstraint {
     /// Compile `grammar` into a [`DynamicConstraint`] for `vocab`.
-    pub fn compile(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+    pub fn compile(grammar: Grammar, vocab: &Vocab) -> Result<Self> {
         ConstraintSpec::builder(grammar, vocab)?.build()?.compile_dynamic()
     }
 
@@ -2468,7 +2433,7 @@ impl DynamicConstraint {
     /// composition compatibility, and boundary triggers. Consequently a
     /// partition-optimized constraint can be composed with ordinary static or
     /// dynamic constraints without changing the public token coordinate.
-    pub fn compile_with_vocab_partition(grammar: Grammar<'_>, vocab: &Vocab) -> Result<Self> {
+    pub fn compile_with_vocab_partition(grammar: Grammar, vocab: &Vocab) -> Result<Self> {
         if !grammar.bindings.is_empty() {
             return Err(Error::Compilation(
                 "compile_with_vocab_partition does not yet compile source-level bound subgrammars; compile the components first and bind the compiled constraints"
@@ -3161,7 +3126,7 @@ where
 }
 
 #[cfg(test)]
-fn native_dynamic_fixture(grammar: Grammar<'_>, vocab: &Vocab) -> Result<DynamicConstraint> {
+fn native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> Result<DynamicConstraint> {
     assert!(grammar.bindings.is_empty(), "fixture supplies compiled bindings separately");
     let constraint = match &grammar.source {
         // Keep the ordinary full-vocabulary lane in EBNF comparison fixtures,

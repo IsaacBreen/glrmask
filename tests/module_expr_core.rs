@@ -18,11 +18,11 @@ fn allowed(mask: &[u32], id: u32) -> bool {
 const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
 const OPEN: &str = "glrm 1; start start; extern grammar item; nt start = item;";
 
-fn a() -> Grammar<'static> {
+fn a() -> Grammar {
     Grammar::from_ebnf("start ::= \"a\"")
 }
 
-fn b() -> Grammar<'static> {
+fn b() -> Grammar {
     Grammar::from_ebnf("start ::= \"b\"")
 }
 

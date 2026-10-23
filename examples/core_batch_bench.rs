@@ -30,7 +30,7 @@ fn trace(text:&str,vocab:&[(u32,Vec<u8>)],exact:bool)->Vec<u32>{
     while pos<text.len(){let (id,b)=vocab.iter().filter(|(_,b)|!b.is_empty()&&b.len()<=3&&text.as_bytes()[pos..].starts_with(b)).max_by_key(|(id,b)|(b.len(),std::cmp::Reverse(*id))).unwrap();ids.push(*id);pos+=b.len();}
     ids
 }
-fn grammar(case:&str,vocab:&Vocab)->Result<Grammar<'static>,Box<dyn Error>>{
+fn grammar(case:&str,vocab:&Vocab)->Result<Grammar,Box<dyn Error>>{
     Ok(match case {
         "json_schema"=>Grammar::from_json_schema(JSON_SOURCE),
         "lark_arithmetic"=>Grammar::from_lark(LARK_SOURCE),
@@ -48,7 +48,7 @@ fn grammar(case:&str,vocab:&Vocab)->Result<Grammar<'static>,Box<dyn Error>>{
         _=>unreachable!(),
     })
 }
-fn prepare(g:&Grammar<'_>,v:&Vocab)->glrmask::Result<Prepared>{
+fn prepare(g:&Grammar,v:&Vocab)->glrmask::Result<Prepared>{
     g.prepare(v)
 }
 fn mask_trace(c:&Constraint,ids:&[u32])->u64{

@@ -28,10 +28,10 @@ pub(super) struct Index<'a, T> {
     root: usize,
 }
 pub(super) trait InstanceNode { fn identity(&self) -> usize; }
-impl InstanceNode for Grammar<'_> { fn identity(&self)->usize { source_identity(self) } }
+impl InstanceNode for Grammar { fn identity(&self)->usize { source_identity(self) } }
 impl InstanceNode for PreparedGrammar { fn identity(&self)->usize { prepared_identity(self) } }
 fn key<T:InstanceNode>(node:&T)->usize { node.identity() }
-pub(super) fn source_identity(node:&Grammar<'_>)->usize { Arc::as_ptr(&node.analysis) as usize }
+pub(super) fn source_identity(node:&Grammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 pub(super) fn prepared_identity(node:&PreparedGrammar)->usize { Arc::as_ptr(&node.analysis) as usize }
 fn limit(message: &str) -> Error {
     Error::Compilation(format!("component graph resource limit: {message}"))
@@ -110,7 +110,7 @@ impl<T:InstanceNode> Index<'_, T> {
     }
 }
 
-fn source_index<'a, 's>(root: &'a Grammar<'s>) -> Result<Index<'a, Grammar<'s>>> {
+fn source_index<'a, 's>(root: &'a Grammar) -> Result<Index<'a, Grammar>> {
     analyze(root, |grammar| {
         // One descriptor lookup per actual instance, never one per output path.
         let declared = grammar.declarations()?;
@@ -123,9 +123,9 @@ fn source_index<'a, 's>(root: &'a Grammar<'s>) -> Result<Index<'a, Grammar<'s>>>
         Ok(View { node:grammar,local,children,ports:declared.kinds.len() })
     })
 }
-pub(super) fn source_requirements(root: &Grammar<'_>) -> Result<Vec<Requirement>> { source_summary(root)?.requirements() }
-pub(super) fn source_first(root: &Grammar<'_>) -> Result<Option<Requirement>> { Ok(source_summary(root)?.first()) }
-pub(super) fn source_preflight(root: &Grammar<'_>) -> Result<()> { source_summary(root)?.expansion_preflight() }
+pub(super) fn source_requirements(root: &Grammar) -> Result<Vec<Requirement>> { source_summary(root)?.requirements() }
+pub(super) fn source_first(root: &Grammar) -> Result<Option<Requirement>> { Ok(source_summary(root)?.first()) }
+pub(super) fn source_preflight(root: &Grammar) -> Result<()> { source_summary(root)?.expansion_preflight() }
 
 fn prepared_for_vocab<'a>(root: &'a PreparedGrammar, vocab: &Vocab) -> Result<Index<'a, PreparedGrammar>> {
     analyze(root, |module| {
@@ -254,7 +254,7 @@ impl Summary {
     }
 }
 
-pub(super) fn source_summary(root:&Grammar<'_>)->Result<Arc<Summary>> {
+pub(super) fn source_summary(root:&Grammar)->Result<Arc<Summary>> {
     root.analysis.get_or_init(|| {
         let declared=root.declarations()?;
         let mut summary=Summary::new(&declared.kinds,&declared.spans);
@@ -290,7 +290,7 @@ pub(super) fn prepared_summary(root:&PreparedGrammar)->Result<Arc<Summary>> {
         Ok(Arc::new(summary))
     }).clone()
 }
-pub(super) fn check_source_limits(root:&Grammar<'_>)->Result<()> {
+pub(super) fn check_source_limits(root:&Grammar)->Result<()> {
     let summary=source_summary(root)?;summary.check_height()?;
     if summary.instances>MAX_NODES as u128 || summary.ports>MAX_PORTS as u128 {source_index(root)?;}
     Ok(())

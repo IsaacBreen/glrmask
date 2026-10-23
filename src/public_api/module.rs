@@ -62,8 +62,8 @@ pub(crate) enum BindingKind {
 
 impl From<Module> for Binding { fn from(m: Module) -> Self { Self(BindingKind::Module(m)) } }
 impl From<&Module> for Binding { fn from(m: &Module) -> Self { Self(BindingKind::Module(m.clone())) } }
-impl From<Grammar<'_>> for Binding { fn from(g: Grammar<'_>) -> Self { Self(BindingKind::Module(Module::new(&g))) } }
-impl From<&Grammar<'_>> for Binding { fn from(g: &Grammar<'_>) -> Self { Self(BindingKind::Module(Module::new(g))) } }
+impl From<Grammar> for Binding { fn from(g: Grammar) -> Self { Self(BindingKind::Module(Module::new(&g))) } }
+impl From<&Grammar> for Binding { fn from(g: &Grammar) -> Self { Self(BindingKind::Module(Module::new(g))) } }
 impl From<Expr> for Binding { fn from(e: Expr) -> Self { Self(BindingKind::Expr(e)) } }
 impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Expr(e.clone())) } }
 impl From<Token> for Binding { fn from(t: Token) -> Self { Self(BindingKind::Token(t)) } }
@@ -89,7 +89,7 @@ pub struct Module {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
-    pub(crate) source: Arc<Grammar<'static>>,
+    pub(crate) source: Arc<Grammar>,
     pub(crate) prepared: BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
@@ -156,20 +156,9 @@ impl Certificate {
 
 fn error(message: impl Into<String>) -> Error { Error::Compilation(message.into()) }
 
-fn own_local(grammar: &Grammar<'_>) -> Grammar<'static> {
-    let text = |source: &SourceText<'_>| match source {
-        SourceText::Owned(text) => SourceText::Owned(text.clone()),
-        SourceText::Borrowed(text) => SourceText::Owned(grammar.owned_text.get_or_init(|| Arc::from(*text)).clone()),
-    };
+fn own_local(grammar: &Grammar) -> Grammar {
     Grammar {
-        source: match &grammar.source {
-            GrammarSource::Ebnf(s) => GrammarSource::Ebnf(text(s)),
-            GrammarSource::Lark(s) => GrammarSource::Lark(text(s)),
-            GrammarSource::JsonSchema(s) => GrammarSource::JsonSchema(text(s)),
-            GrammarSource::Glrm(s) => GrammarSource::Glrm(text(s)),
-            GrammarSource::Constructed => GrammarSource::Constructed,
-        },
-        owned_text: grammar.owned_text.clone(),
+        source: grammar.source.clone(),
         module_snapshot: Arc::new(OnceLock::new()),
         bindings: OrdMap::new(),
         declarations_cache: grammar.declarations_cache.clone(),
@@ -247,14 +236,14 @@ impl Module {
     }
 }
 
-impl Grammar<'_> {
+impl Grammar {
     pub(crate) fn module(&self) -> Module { Module::new(self) }
 }
 
 impl Module {
     /// Wraps a source grammar with default settings.
-    pub fn new(grammar: &Grammar<'_>) -> Self {
-        fn convert(grammar: &Grammar<'_>, cache: &mut HashMap<usize, Module>) -> Module {
+    pub fn new(grammar: &Grammar) -> Self {
+        fn convert(grammar: &Grammar, cache: &mut HashMap<usize, Module>) -> Module {
             if let Some(module) = grammar.module_snapshot.get() { return module.clone(); }
             let id = graph::source_identity(grammar);
             if let Some(module) = cache.get(&id) { return module.clone(); }
@@ -998,7 +987,7 @@ impl Module {
         Ok(leaf.compiled_for_representation(vocab, native)?.as_ref().clone())
     }
 
-    pub(super) fn to_source(&self) -> Result<Grammar<'static>> {
+    pub(super) fn to_source(&self) -> Result<Grammar> {
         if !self.node.prepared.is_empty() {
             return Err(error("expressions with precompiled operands cannot be converted to source Grammar; bind directly to Module instead"));
         }
@@ -1007,7 +996,7 @@ impl Module {
 
     // The whole composition as one source Grammar, with every bound child
     // inlined as a scoped source body. Retained work and settings are ignored.
-    fn flatten_source(&self) -> Result<Grammar<'static>> {
+    fn flatten_source(&self) -> Result<Grammar> {
         let mut grammar = self.node.source.as_ref().clone();
         for (name, value) in &self.node.bindings {
             let value = match value {

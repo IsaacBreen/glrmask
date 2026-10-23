@@ -10,7 +10,7 @@ use std::{cell::RefCell, ffi::{CString, c_char}, mem::{align_of, size_of}, ptr, 
 
 pub struct glrmask_vocab(g::Vocab);
 pub struct glrmask_exact_tokens(g::ExactTokens);
-pub struct glrmask_grammar(g::Grammar<'static>);
+pub struct glrmask_grammar(g::Grammar);
 pub struct glrmask_constraint(Arc<g::Constraint>);
 pub struct glrmask_state(core::State);
 pub struct glrmask_bytes(Vec<u8>);
@@ -166,10 +166,10 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { produce(out, || {
         let source = text(source, n)?.to_owned();
         let grammar = match format {
-            0 => g::Grammar::from_ebnf_owned(source),
-            1 => g::Grammar::from_glrm_owned(source),
-            2 => g::Grammar::from_json_schema_owned(source),
-            3 => g::Grammar::from_lark_owned(source, lark_options(lark)?),
+            0 => g::Grammar::from_ebnf(source),
+            1 => g::Grammar::from_glrm(source),
+            2 => g::Grammar::from_json_schema(source),
+            3 => g::Grammar::from_lark_with(source, lark_options(lark)?),
             _ => return Err(Error::invalid("unknown source format")),
         }; Ok(glrmask_grammar(grammar))
     }) })

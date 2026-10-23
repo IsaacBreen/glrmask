@@ -136,16 +136,16 @@ fn grammar_compile_options(end: Vec<f64>, mode: f64, boundary: f64) -> core::Res
 }
 
 #[napi]
-pub struct NativeGrammar { inner: Handle<g::Grammar<'static>> }
+pub struct NativeGrammar { inner: Handle<g::Grammar> }
 #[napi]
 impl NativeGrammar {
     #[napi(factory)]
     pub fn from_source(format: String, source: String, profile: Option<String>, token_names: Option<BTreeMap<String, Vec<f64>>>) -> napi::Result<Self> {
         call(|| {
             let grammar = match format.as_str() {
-                "ebnf" => g::Grammar::from_ebnf_owned(source),
-                "glrm" => g::Grammar::from_glrm_owned(source),
-                "json-schema" => g::Grammar::from_json_schema_owned(source),
+                "ebnf" => g::Grammar::from_ebnf(source),
+                "glrm" => g::Grammar::from_glrm(source),
+                "json-schema" => g::Grammar::from_json_schema(source),
                 "lark" => {
                     let mut o = match profile.as_deref().unwrap_or("recognition") {
                         "recognition" => g::LarkOptions::default(),
@@ -153,7 +153,7 @@ impl NativeGrammar {
                         _ => return Err(core::Error::invalid("Lark profile must be recognition or llm")),
                     };
                     for (name, values) in token_names.unwrap_or_default() { o = o.token(name, ids(values)?); }
-                    g::Grammar::from_lark_owned(source, o)
+                    g::Grammar::from_lark_with(source, o)
                 }
                 _ => return Err(core::Error::invalid("unknown grammar source format")),
             }; Ok(Self { inner: Handle::new(grammar) })

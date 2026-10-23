@@ -34,13 +34,13 @@ impl From<&Module> for Expr {
         Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Module(m.clone()))))
     }
 }
-impl From<Grammar<'_>> for Expr {
-    fn from(g: Grammar<'_>) -> Self {
+impl From<Grammar> for Expr {
+    fn from(g: Grammar) -> Self {
         Expr::from(Module::new(&g))
     }
 }
-impl From<&Grammar<'_>> for Expr {
-    fn from(g: &Grammar<'_>) -> Self {
+impl From<&Grammar> for Expr {
+    fn from(g: &Grammar) -> Self {
         Expr::from(Module::new(g))
     }
 }
@@ -89,7 +89,7 @@ impl Expr {
         Self(Arc::new(ExprNode::Literal(bytes.as_ref().to_vec())))
     }
 
-    pub(crate) fn skeleton(&self) -> Result<(Grammar<'static>, Vec<(String, Binding)>)> {
+    pub(crate) fn skeleton(&self) -> Result<(Grammar, Vec<(String, Binding)>)> {
         fn walk(
             expr: &Expr,
             leaves: &mut Vec<(String, Binding)>,

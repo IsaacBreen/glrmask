@@ -946,7 +946,7 @@ fn json_vocab() -> Vocab {
 }
 
 fn compile_with_te_first(
-    grammar: Grammar<'_>,
+    grammar: Grammar,
     vocab: &Vocab,
     strategy: MaskStrategy,
 ) -> crate::Result<Constraint> {
@@ -1013,7 +1013,7 @@ fn rescue_lowering_equals_the_normal_static_route() {
     set_test_terminal_ended_first(None);
     let v = vocab();
     let json = json_vocab();
-    let cases: Vec<(&str, Grammar<'_>, &Vocab)> = vec![
+    let cases: Vec<(&str, Grammar, &Vocab)> = vec![
         (
             "ebnf",
             Grammar::from_ebnf("start ::= \"a\" \"b\""),

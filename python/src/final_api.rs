@@ -166,19 +166,19 @@ enum SourceKind { Ebnf, Glrm, JsonSchema }
 #[pyclass(name = "Grammar", module = "glrmask", from_py_object)]
 #[derive(Clone)]
 pub(super) struct PyGrammar {
-    pub(super) inner: glrmask::Grammar<'static>,
+    pub(super) inner: glrmask::Grammar,
 }
 
 impl PyGrammar {
     fn new(source: String, kind: SourceKind) -> Self {
         let inner = match kind {
-            SourceKind::Ebnf => glrmask::Grammar::from_ebnf_owned(source),
-            SourceKind::Glrm => glrmask::Grammar::from_glrm_owned(source),
-            SourceKind::JsonSchema => glrmask::Grammar::from_json_schema_owned(source),
+            SourceKind::Ebnf => glrmask::Grammar::from_ebnf(source),
+            SourceKind::Glrm => glrmask::Grammar::from_glrm(source),
+            SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(source),
         };
         Self { inner }
     }
-    pub(super) fn as_rust(&self) -> glrmask::Result<glrmask::Grammar<'static>> {
+    pub(super) fn as_rust(&self) -> glrmask::Result<glrmask::Grammar> {
         Ok(self.inner.clone())
     }
 }
@@ -187,7 +187,7 @@ impl Drop for PyGrammar {
     fn drop(&mut self) {
         let inner = std::mem::replace(
             &mut self.inner,
-            glrmask::Grammar::from_ebnf_owned(String::new()),
+            glrmask::Grammar::from_ebnf(String::new()),
         );
         let _ = Python::try_attach(move |py| py.detach(move || drop(inner)));
     }
@@ -248,7 +248,7 @@ impl PyGrammar {
             }
         }
         Ok(Self {
-            inner: glrmask::Grammar::from_lark_owned(source, options),
+            inner: glrmask::Grammar::from_lark_with(source, options),
         })
     }
 

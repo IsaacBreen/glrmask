@@ -3,7 +3,7 @@ const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStr
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || s.commit_token(id).is_err(){return false;}}s.is_accepting()}
 fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i as u32,w.as_bytes().to_vec())).collect())}
-fn llm(source:&str)->Grammar<'_>{Grammar::from_lark_with(source,LarkOptions::llm())}
+fn llm(source:&str)->Grammar{Grammar::from_lark_with(source,LarkOptions::llm())}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
     let v=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])],[5,7]);
