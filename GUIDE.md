@@ -188,22 +188,23 @@ let grammar = Grammar::from_glrm(r#"
 let mut parent = Module::new(&grammar);
 let child = Grammar::from_json_schema(r#"{"type":"null"}"#);
 parent.bind("PAYLOAD", &child)?;
-parent.bind("END", glrmask::Token::new(end_id))?;
+parent.bind("END", glrmask::TokenSet::from(end_id))?;
 let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
 # }
 ```
 
-Use `vocab.tokens(ids)` or `vocab.token_ranges(ranges)` for exact sets. Rust ranges
-are inclusive; Python `range` stops are exclusive. The set consumes **one** ID,
-not a sequence. Sparse vocabulary holes and incompatible vocabulary identities
-are errors. IDs with the same spelling remain distinct, and spelling-less IDs
-are not epsilon. See [exact-token ranges](docs/exact-token-ranges.md).
+Use `TokenSet::new(ids)` or `TokenSet::from_ranges(ranges)` for token sets. Rust
+ranges are inclusive (`0..=9`) or half-open (`0..10`); Python `range` stops are
+exclusive and `TokenSet.from_ranges` takes a list of them. The set consumes
+**one** ID, not a sequence. Every ID must exist in the compile vocabulary.
+IDs with the same spelling remain distinct, and spelling-less special IDs are
+not epsilon. See [token sets](docs/exact-token-ranges.md).
 
-A grammar-valued extern also accepts `Token` or `ExactTokens` directly: this
-widens an exact event into a general fragment without changing its meaning.
-Neither conversion uses decoded token spelling.
+A grammar-valued extern also accepts a `TokenSet` directly: this widens a token
+event into a general fragment without changing its meaning. The conversion does
+not use decoded token spelling.
 An arbitrary grammar cannot bind a token-valued extern.
 
 ### Configure, precompile, attach and execute
@@ -232,7 +233,7 @@ leaf1 = glrmask.Module(glrmask.Grammar.from_glrm('''
     start body
     nt body = "x" MARK
 '''))
-leaf1.bind("MARK", vocab.tokens([4]))
+leaf1.bind("MARK", glrmask.TokenSet([4]))
 leaf1.precompile(vocab)
 
 leaf2 = glrmask.Module(glrmask.Grammar.from_glrm('''
@@ -240,7 +241,7 @@ leaf2 = glrmask.Module(glrmask.Grammar.from_glrm('''
     start body
     nt body = "x" MARK
 '''))
-leaf2.bind("MARK", vocab.tokens([5]))
+leaf2.bind("MARK", glrmask.TokenSet([5]))
 leaf2.precompile(vocab)
 
 parent = glrmask.Module(glrmask.Grammar.from_glrm('''
@@ -317,7 +318,7 @@ supply the enclosing generation's root termination policy.
 language concatenation. In Python, both accept positional parts:
 `Expr.choice(*parts)` and `Expr.sequence(*parts)`. `Expr.literal` matches exact
 bytes without whitespace or ignore inserted between parts. Leaves can be
-`Grammar`, `Module`, `Expr`, `Token`, or `ExactTokens`. In Python, passing a
+`Grammar`, `Module`, `Expr`, or `TokenSet`. In Python, passing a
 plain string raises `TypeError` (use `Expr.literal`). Parts with open externs
 raise an error immediately. An expression can be bound directly into a
 module extern (`m.bind("name", expr)`). Whole grammar and module leaves keep

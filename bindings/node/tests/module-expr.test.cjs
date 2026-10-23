@@ -1,8 +1,8 @@
 'use strict';
 const test=require('node:test');
 const assert=require('node:assert/strict');
-const {Vocab,Token,Grammar,Module,CompileOptions,Expr,MaskStrategy,BoundaryMaskStrategy}=require('../index.cjs');
-const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]],{exactOnlyIds:[63]});
+const {Vocab,TokenSet,Grammar,Module,CompileOptions,Expr,MaskStrategy,BoundaryMaskStrategy}=require('../index.cjs');
+const vocab=(different=false)=>new Vocab([[0,Buffer.from('x')],[1,Buffer.from('a')],[2,Buffer.from('b')],[3,Buffer.from('y')],[4,Buffer.from('xay')],[5,Buffer.from('ab')],[8,Buffer.from(different?'z':'a')]],{specialTokenIds:[63]});
 const source=(text='a')=>Grammar.fromEbnf(`start ::= "${text}"`);
 const host=()=>Grammar.fromGlrm('glrm 1; start start; extern grammar child; nt start = "x" child "y";');
 const mark=()=>Grammar.fromGlrm('glrm 1; start start; extern token MARK; nt start = MARK;');
@@ -125,13 +125,13 @@ test('Module: atomic multi-bind',()=>{
   assert.equal(m.externs.unbound.size,2);
 
   // Failing multi-bind leaves m completely untouched
-  assert.throws(()=>m.bind({a:new Token(1),b:'not_a_valid_binding'}));
+  assert.throws(()=>m.bind({a:new TokenSet([1]),b:'not_a_valid_binding'}));
   assert.equal(m.externs.unbound.size,2);
   assert.ok(m.externs.unbound.has('a'));
   assert.ok(m.externs.unbound.has('b'));
 
   // Successful multi-bind
-  m.bind({a:new Token(1),b:new Token(2)});
+  m.bind({a:new TokenSet([1]),b:new TokenSet([2])});
   assert.equal(m.externs.unbound.size,0);
 });
 
@@ -140,7 +140,7 @@ for(const parentPrepared of [false,true])for(const childPrepared of [false,true]
     const v=vocab(),parent=new Module(host()),child=new Module(mark());
     if(parentPrepared)assert.equal(await parent.precompile(v),undefined);
     if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.TokenClassTrie}),undefined);
-    child.bind('MARK',new Token(8));
+    child.bind('MARK',new TokenSet([8]));
     parent.bind('child',child);const bytes=await parent.save();
     const loaded=await Module.load(bytes,v);
     assert.equal(loaded.externs.unbound.size,0);

@@ -44,7 +44,7 @@ fn grammar(case:&str,vocab:&Vocab)->Result<Grammar<'static>,Box<dyn Error>>{
         "exact_token_set"=>{
             let p=if cfg!(feature="redesign") {"glrm 1; start root; extern token MARK; nt root = MARK MARK;"}
                 else {"glrm 1; start root; extern MARK; nt root = MARK MARK;"};
-            Grammar::from_glrm(p).bind("MARK",vocab.token_ranges([97..=122])?)?
+            Grammar::from_glrm(p).bind("MARK",glrmask::TokenSet::from_ranges([97..=122]))?
         },
         _=>unreachable!(),
     })

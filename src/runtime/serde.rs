@@ -6107,7 +6107,7 @@ impl Constraint {
         let exact_only_token_ids = self
             .late_bind_vocab
             .get()
-            .map(|vocab| vocab.exact_only_token_ids().collect::<Vec<_>>())
+            .map(|vocab| vocab.special_token_ids().collect::<Vec<_>>())
             .unwrap_or_default();
         if self.end_tokens.is_empty() && exact_only_token_ids.is_empty() {
             return self.save_body_with_vocab_policy(external_vocab);
@@ -7128,12 +7128,9 @@ impl Constraint {
             ));
         }
         if !exact_ids.is_empty() {
-            let vocab = crate::Vocab::new_with_exact_token_ids(
-                body.token_bytes_iter()
+            let vocab = crate::Vocab::new(body.token_bytes_iter()
                     .map(|(token_id, bytes)| (token_id, bytes.to_vec()))
-                    .collect(),
-                exact_ids,
-            );
+                    .collect()).with_special_tokens(exact_ids);
             body.bind_vocab_exact(&vocab)
                 .map_err(crate::Error::Serialization)?;
         }

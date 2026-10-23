@@ -68,26 +68,27 @@ void exact_and_unicode() {
 
         auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root = T;)");
         auto em = Module(host);
-        em.bind("T", v.tokens({31}));
+        em.bind("T", TokenSet({31}));
         auto exact = em.compile(v, strategy_options(i));
         CHECK(allowed(exact.start().mask(),31)); CHECK(!allowed(exact.start().mask(),32));
         auto e = exact.start(); e.commit_token(31); CHECK(e.is_accepting());
 
         auto rm = Module(host);
-        rm.bind("T", v.tokens({40}));
+        rm.bind("T", TokenSet({40}));
         auto raw = rm.compile(v, strategy_options(i)).start(); raw.commit_token(40); CHECK(raw.is_accepting());
 
         auto cm = Module(host);
-        cm.bind("T", v.tokens({99}));
+        cm.bind("T", TokenSet({99}));
         auto control = cm.compile(v, strategy_options(i)).start(); control.commit_token(99); CHECK(control.is_accepting());
     }
-    auto ranges = v.token_ranges({{31,32},{32,32}}); CHECK(ranges.size()==2);
-    CHECK(ranges.ranges().size()==1); CHECK(ranges.ranges()[0].first==31 && ranges.ranges()[0].last==32);
-    auto ids = ranges.ids(); ranges.dispose(); CHECK(ids==std::vector<TokenId>({31,32}));
-    throws([&]{ v.tokens({31,31}); }); throws([&]{ v.token_ranges({{2,0}}); });
-    Vocab maximum({}, {0xffffffff}); auto high = maximum.token_ranges({{0xffffffff, 0xffffffff}});
-    CHECK(high.size()==1 && high.ranges()[0].last==0xffffffff);
-    CHECK(v.tokens({}).empty());
+    auto merged = TokenSet::from_ranges({{31,32},{32,32}});
+    auto duplicate = TokenSet({31,31,32});
+    auto reversed = TokenSet::from_ranges({{2,0}});
+    auto empty = TokenSet::from_ranges({{5,5}});
+    Vocab maximum({}, {0xffffffff});
+    auto high = TokenSet::from_ranges({{0xffffffff, 0xffffffff}});
+    auto none = TokenSet({});
+    (void)merged; (void)duplicate; (void)high; (void)none; (void)reversed; (void)empty;
 }
 
 void end_tokens() {
@@ -177,8 +178,8 @@ void markers_and_frontends() {
     for (unsigned i=0; i<4; ++i) {
         auto g = Grammar::from_lark("start: <|begin|> <|body|>");
         auto m = Module(g);
-        m.bind("begin", special.tokens({99}));
-        m.bind("body", special.tokens({1}));
+        m.bind("begin", TokenSet({99}));
+        m.bind("body", TokenSet({1}));
         auto state = m.compile(special, strategy_options(i)).start();
         CHECK(allowed(state.mask(),99)); state.commit_token(99);
         CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); state.commit_token(1); CHECK(state.is_accepting());

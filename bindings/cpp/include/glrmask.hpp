@@ -71,12 +71,6 @@ public:
     glrmask_status status() const noexcept { return status_; }
 };
 
-/// An original model token ID without vocabulary identity.
-struct Token {
-    /// The original model token ID.
-    TokenId id;
-    explicit Token(TokenId value) : id(value) {}
-};
 /// A declared extern slot.
 struct Extern {
     /// The declared name.
@@ -229,49 +223,37 @@ class Expr;
 class Constraint;
 class ConstraintState;
 
-/// One token event chosen from a vocabulary-bound set.
-class ExactTokens : public detail::Owned<glrmask_exact_tokens, glrmask_exact_tokens_free, glrmask_exact_tokens_clone> {
-    using Base = detail::Owned<glrmask_exact_tokens, glrmask_exact_tokens_free, glrmask_exact_tokens_clone>;
-    explicit ExactTokens(glrmask_exact_tokens* p) : Base(p) {}
-    friend class Vocab;
+/// A set of model token IDs. IDs are validated against the compile vocabulary.
+class TokenSet : public detail::Owned<glrmask_token_set, glrmask_token_set_free, glrmask_token_set_clone> {
+    using Base = detail::Owned<glrmask_token_set, glrmask_token_set_free, glrmask_token_set_clone>;
+    explicit TokenSet(glrmask_token_set* p) : Base(p) {}
 public:
-    /// Number of allowed token IDs.
-    std::size_t size() const { std::size_t n = 0; detail::check(glrmask_exact_tokens_len(native_handle(), &n)); return n; }
-    /// Whether the set contains no token IDs.
-    bool empty() const { return size() == 0; }
-    /// The exact model token IDs, sorted in ascending order.
-    std::vector<TokenId> ids() const {
-        glrmask_u32s* p = nullptr; detail::check(glrmask_exact_tokens_ids(native_handle(), &p)); return detail::take_ids(p);
+    /// Creates a set from token IDs; duplicates are ignored.
+    explicit TokenSet(const std::vector<TokenId>& ids) : Base(create_ids(ids)) {}
+    /// Creates a set from inclusive `ranges`; overlapping or adjacent ranges merge.
+    static TokenSet from_ranges(const std::vector<TokenRange>& ranges) {
+        glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_from_ranges(ranges.data(), ranges.size(), &p)); return TokenSet(p);
     }
-    /// The normalized, disjoint inclusive token-ID ranges.
-    std::vector<TokenRange> ranges() const {
-        std::size_t n = 0; detail::check(glrmask_exact_tokens_ranges(native_handle(), nullptr, 0, &n));
-        std::vector<TokenRange> out(n); detail::check(glrmask_exact_tokens_ranges(native_handle(), out.data(), out.size(), &n)); return out;
+private:
+    static glrmask_token_set* create_ids(const std::vector<TokenId>& ids) {
+        glrmask_token_set* p = nullptr; detail::check(glrmask_token_set_new(ids.data(), ids.size(), &p)); return p;
     }
 };
 
 /// The model vocabulary a constraint is compiled against.
 class Vocab : public detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone> {
     using Base = detail::Owned<glrmask_vocab, glrmask_vocab_free, glrmask_vocab_clone>;
-    static glrmask_vocab* create(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& exact_only) {
+    static glrmask_vocab* create(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special) {
         std::vector<glrmask_vocab_entry> native; native.reserve(entries.size());
         for (const auto& e : entries) native.push_back({e.id, e.bytes.data(), e.bytes.size()});
         glrmask_vocab* p = nullptr;
-        detail::check(glrmask_vocab_new(native.data(), native.size(), exact_only.data(), exact_only.size(), &p)); return p;
+        detail::check(glrmask_vocab_new(native.data(), native.size(), special.data(), special.size(), &p)); return p;
     }
 public:
-    /// Creates a vocabulary from byte entries plus exact-only token IDs.
-    explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& exact_only = {}) : Base(create(entries, exact_only)) {}
-    /// Number of byte-backed entries; exact-only IDs are not counted.
+    /// Creates a vocabulary from byte entries plus special token IDs.
+    explicit Vocab(const std::vector<VocabEntry>& entries, const std::vector<TokenId>& special = {}) : Base(create(entries, special)) {}
+    /// Number of byte-backed entries; special IDs are not counted.
     std::size_t size() const { std::size_t n = 0; detail::check(glrmask_vocab_len(native_handle(), &n)); return n; }
-    /// Creates a vocabulary-bound token event matching `ids`.
-    ExactTokens tokens(const std::vector<TokenId>& ids) const {
-        glrmask_exact_tokens* p = nullptr; detail::check(glrmask_vocab_tokens(native_handle(), ids.data(), ids.size(), &p)); return ExactTokens(p);
-    }
-    /// Creates a vocabulary-bound token event matching inclusive `ranges`.
-    ExactTokens token_ranges(const std::vector<TokenRange>& ranges) const {
-        glrmask_exact_tokens* p = nullptr; detail::check(glrmask_vocab_token_ranges(native_handle(), ranges.data(), ranges.size(), &p)); return ExactTokens(p);
-    }
 };
 
 /// The source-language definition, without compilation settings.
@@ -302,7 +284,7 @@ public:
     Module precompile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
-/// One `Expr` operand: a grammar, module, expression, token or exact-token set.
+/// One `Expr` operand: a grammar, module, expression, token ID or token set.
 struct ExprOperand {
     glrmask_expr_operand value;
     /// From a grammar.
@@ -311,10 +293,10 @@ struct ExprOperand {
     ExprOperand(const Module&);
     /// From an expression.
     ExprOperand(const Expr&);
-    /// From a token event.
-    ExprOperand(Token);
-    /// From an exact-token set.
-    ExprOperand(const ExactTokens&);
+    /// From a single token ID.
+    ExprOperand(TokenId);
+    /// From a token set.
+    ExprOperand(const TokenSet&);
 };
 
 /// An immutable unordered union or concatenation of independently scoped grammars.
@@ -372,12 +354,12 @@ public:
     void bind(std::string_view name, const Expr& value) {
         detail::check(glrmask_module_bind_expr(native_handle(), name.data(), name.size(), value.native_handle()));
     }
-    /// Binds an extern to one token event.
-    void bind(std::string_view name, Token value) {
-        detail::check(glrmask_module_bind_token(native_handle(), name.data(), name.size(), value.id));
+    /// Binds an extern to one token ID.
+    void bind(std::string_view name, TokenId value) {
+        detail::check(glrmask_module_bind_token(native_handle(), name.data(), name.size(), value));
     }
-    /// Binds an extern to an exact-token set.
-    void bind(std::string_view name, const ExactTokens& value) {
+    /// Binds an extern to a token set.
+    void bind(std::string_view name, const TokenSet& value) {
         detail::check(glrmask_module_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
 
@@ -418,10 +400,10 @@ inline ExprOperand::ExprOperand(const Grammar& value) : value{0, value.native_ha
 inline ExprOperand::ExprOperand(const Module& value) : value{1, value.native_handle()} {}
 /// From an expression.
 inline ExprOperand::ExprOperand(const Expr& value) : value{2, value.native_handle()} {}
-/// From a token event.
-inline ExprOperand::ExprOperand(Token value) : value{3, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value.id))} {}
-/// From an exact-token set.
-inline ExprOperand::ExprOperand(const ExactTokens& value) : value{4, value.native_handle()} {}
+/// From a single token ID.
+inline ExprOperand::ExprOperand(TokenId value) : value{3, reinterpret_cast<const void*>(static_cast<std::uintptr_t>(value))} {}
+/// From a token set.
+inline ExprOperand::ExprOperand(const TokenSet& value) : value{4, value.native_handle()} {}
 
 /// A fully runnable grammar compiled against a specific vocabulary.
 class Constraint : public detail::Owned<glrmask_constraint, glrmask_constraint_free, glrmask_constraint_clone> {

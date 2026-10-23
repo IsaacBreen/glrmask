@@ -22,7 +22,7 @@ impl ExactEvent {
         if native {return self.compiled(vocab);}
         let mut artifact=self.lr_artifact.lock().map_err(|_|Error::InternalInvariant("LR event adapter construction poisoned".into()))?;
         if let Some(artifact)=artifact.as_ref(){return Ok(artifact.clone());}
-        let source=Grammar::from_exact_tokens(vocab.token_ranges(self.ranges.iter().map(|&(a,b)|a..=b))?);
+        let source=Grammar::from_token_set(TokenSet::from_ranges(self.ranges.iter().map(|&(a, b)| a..=b)));
         let compiled=Arc::new(crate::import::compile_dynamic_named_single_with_backend(
             source.component()?.lower_closed()?,vocab,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,false,
@@ -62,7 +62,7 @@ mod tests {
     use super::*;
     #[test]
     fn same_event_set_reuses_the_compiled_component_and_preserves_identity() {
-        let v=Vocab::new_with_exact_token_ids(vec![(0,b"x".to_vec())],[17,29]);
+        let v=Vocab::new(vec![(0,b"x".to_vec())]).with_special_tokens([17,29]);
         let cache=ExactAdapterCache::default();
         let a=cache.get(&v,&[(17,17),(29,29)]).unwrap();
         let b=cache.get(&v,&[(17,17),(29,29)]).unwrap();
@@ -74,7 +74,7 @@ mod tests {
     }
     #[test]
     fn native_and_lr_event_adapters_have_separate_shared_slots() {
-        let vocab=Vocab::new_with_exact_token_ids(vec![(0,b"x".to_vec())],[17,29]);
+        let vocab=Vocab::new(vec![(0,b"x".to_vec())]).with_special_tokens([17,29]);
         let cache=ExactAdapterCache::default();
         let leaf=cache.leaf(&[(17,17),(29,29)]).unwrap();
         let native=leaf.compiled_for_representation(&vocab,true).unwrap();

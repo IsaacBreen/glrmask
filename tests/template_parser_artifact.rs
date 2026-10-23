@@ -370,7 +370,7 @@ fn compact_template_edges_reject_cycles_missing_targets_and_bad_labels() {
 #[test]
 fn table_free_root_end_and_exact_only_token_policies_survive_roundtrip() {
     use glrmask::BuildOptions;
-    let v=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"b".to_vec())],[31,77]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]).with_special_tokens([31,77]);
     let source=Grammar::from_glrm(r#"start root; t A = "a"; nt root = A;"#);
     let reference=source.compile_with_build_options(&v,BuildOptions::default().end_tokens([77])).unwrap();
     let template=reference.clone();

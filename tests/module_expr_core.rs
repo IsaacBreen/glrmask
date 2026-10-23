@@ -1,14 +1,11 @@
-use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, Token, Vocab};
+use glrmask::{CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
-    Vocab::new_with_exact_token_ids(
-        vec![
+    Vocab::new(vec![
             (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
             (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
             (6, b"xby".to_vec()), (7, b"a".to_vec()), (8, b"aab".to_vec()),
-        ],
-        [99],
-    )
+        ]).with_special_tokens([99])
 }
 
 fn allowed(mask: &[u32], id: u32) -> bool {
@@ -140,7 +137,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     let host = Grammar::from_glrm("glrm 1; start start; extern token mark; nt start = mark;");
     let mut m = Module::new(&host);
     assert!(m.bind("mark", a()).is_err());
-    m.bind("mark", v.tokens([7, 99]).unwrap()).unwrap();
+    m.bind("mark", TokenSet::new([7, 99])).unwrap();
     let loaded = Module::load(&m.save(), None).unwrap();
     let c = loaded.compile(&v).unwrap();
     let mask = c.start().mask();
@@ -148,12 +145,12 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     assert!(allowed(&mask, 99));
     assert!(!allowed(&mask, 1));
 
-    let wrong = Vocab::new_with_exact_token_ids(vec![(7, b"different".to_vec())], [99]);
+    let wrong = Vocab::new(vec![(7, b"different".to_vec())]).with_special_tokens([99]);
     assert!(Module::load(&m.save(), Some(&wrong)).is_err());
     assert!(loaded.compile(&wrong).is_err());
 
     let mut wide = Module::new(&Grammar::from_glrm(OPEN));
-    wide.bind("item", Token::new(7)).unwrap();
+    wide.bind("item", TokenSet::from(7)).unwrap();
     let c = wide.compile(&v).unwrap();
     assert!(accepts(&c, &[7]));
     assert!(!allowed(&c.start().mask(), 1));
@@ -210,7 +207,7 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert!(parent.precompile(&wrong).is_err());
     assert_eq!(parent.save(), original);
 
-    assert!(parent.bind("child", wrong.tokens([0]).unwrap()).is_err());
+    assert!(parent.bind("child", TokenSet::new([0])).is_err());
     assert_eq!(parent.save(), original);
 
     let mut child = Module::new(&a());
@@ -219,7 +216,7 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert_eq!(parent.save(), original);
 
     let mut child = Module::new(&Grammar::from_glrm(OPEN));
-    child.bind("item", Token::new(777)).unwrap();
+    child.bind("item", TokenSet::from(777)).unwrap();
     assert!(parent.bind("child", child).is_err());
     assert_eq!(parent.save(), original);
 }
@@ -273,14 +270,14 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     }
 
     let mut token = Module::load(&open, Some(&v)).unwrap();
-    token.bind("child", v.tokens([7, 99]).unwrap()).unwrap();
+    token.bind("child", TokenSet::new([7, 99])).unwrap();
     let c = token.compile_with(&v, trie.clone()).unwrap();
     assert!(accepts(&c, &[0, 7, 3]));
     assert!(!accepts(&c, &[0, 1, 3]));
 
     let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
     terminal.precompile_with(&v, trie.clone()).unwrap();
-    terminal.bind("mark", Token::new(99)).unwrap();
+    terminal.bind("mark", TokenSet::from(99)).unwrap();
     let c = Module::load(&terminal.save(), None).unwrap().compile_with(&v, trie).unwrap();
     assert!(accepts(&c, &[99]));
 }
@@ -320,14 +317,11 @@ fn compile_succeeds_on_threads_with_small_stacks() {
     let worker = std::thread::Builder::new()
         .stack_size(128 * 1024)
         .spawn(|| {
-            let vocab = Vocab::new_with_exact_token_ids(
-                vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())],
-                [],
-            );
+            let vocab = Vocab::new(vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())]).with_special_tokens([]);
             let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M"));
             template.precompile(&vocab).unwrap();
             let mut request = template.clone();
-            request.bind("M", Token::new(17)).unwrap();
+            request.bind("M", TokenSet::from(17)).unwrap();
             request.compile(&vocab).unwrap()
         })
         .unwrap();

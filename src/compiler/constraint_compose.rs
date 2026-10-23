@@ -19811,7 +19811,7 @@ fn validate_compiled_subgrammar_placeholders(
                 .is_some_and(|weight| !weight.is_empty());
             let has_exact_token_match = parent.special_token_terminals.iter().any(|special| {
                 special.terminal_id == placeholder_terminal
-                    && vocab.intersects_exact_token_range(special.token_id, special.token_id_end)
+                    && vocab.intersects_token_range(special.token_id, special.token_id_end)
             });
             if has_byte_token_matches || has_exact_token_match {
                 return Err(format!(

@@ -1,10 +1,10 @@
 //! Independent liveness probe for caller-owned Rayon + cold shared event cache.
 //! Compile externally against a frozen/verified crate; not a speed benchmark.
-use glrmask::{BuildOptions,Grammar,Optimization,PreparedGrammar,Vocab};
+use glrmask::{BuildOptions,Grammar,Optimization,PreparedGrammar,TokenSet,Vocab};
 use rayon::prelude::*;
 use std::time::Instant;
 
-fn configured(template:&PreparedGrammar, value:glrmask::ExactTokens)->PreparedGrammar {
+fn configured(template:&PreparedGrammar, value:glrmask::TokenSet)->PreparedGrammar {
     #[cfg(candidate)] {
         let mut instance=template.clone();instance.bind("E",value).unwrap();instance
     }
@@ -18,7 +18,7 @@ fn main() {
     while words.len()<4096 {let id=words.len() as u32;words.push((id,format!("token{id:06}").into_bytes()));}
     let v=Vocab::new(words);
     let g=Grammar::from_glrm("extern token E start root nt root=E");
-    let selection=v.tokens((0..128).map(|i|2*i+1)).unwrap();
+    let selection=TokenSet::new((0..128).map(|i|2*i+1));
     let pool=rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
     for round in 0..repeats {
         // A fresh prepared definition gives a cold adapter cache each round.

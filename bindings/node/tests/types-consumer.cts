@@ -1,7 +1,7 @@
 import api = require('@glrmask/node');
-const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {exactOnlyIds:[99]});
-const exact: api.ExactTokens = v.tokenRanges([{start:0,end:2}]);
-const range: api.TokenRange|undefined = exact.ranges[0];
+const v = new api.Vocab([[0,Buffer.from('a')],[1,Buffer.from('b')]], {specialTokenIds:[99]});
+const exact: api.TokenSet = api.TokenSet.fromRanges([{start:0,end:2}]);
+const range: api.TokenRange = {start:0,end:2};
 const g: api.Grammar = api.Grammar.fromEbnf('start ::= "a"');
 const c = g.compileSync(v, {maskStrategy: api.MaskStrategy.TokenTrie, endTokens: [99]});
 const s = c.start(); const words: Uint32Array = s.mask(); s.fillMask(words); s.commitToken(0);
@@ -11,8 +11,8 @@ const saved: Uint8Array = c.saveSync({externalVocab: true}); api.Constraint.load
 
 // @ts-expect-error Mask words must be unsigned 32-bit values.
 s.fillMask(new Int32Array(1));
-// @ts-expect-error Raw numeric values need an explicit Token wrapper.
-new api.Token('invalid');
+// @ts-expect-error Token sets are constructed from an iterable of IDs.
+new api.TokenSet('invalid');
 // @ts-expect-error Invalid option spelling must not be accepted by declarations.
 g.compileSync(v, {optimisation: 'auto'});
 // @ts-expect-error States are obtained from a compiled Constraint, not constructed.

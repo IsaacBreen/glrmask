@@ -210,8 +210,8 @@ mod tests {
             charge("unit_test", 11);
         })
         .expect_err("the budget must decline");
-        match error {
-            crate::Error::ResourceLimit(message) => {
+        match error.kind() {
+            crate::ErrorKind::ResourceLimit(message) => {
                 assert_eq!(message, "unit_test build budget exhausted");
             }
             other => panic!("expected a resource-limit error, got {other:?}"),

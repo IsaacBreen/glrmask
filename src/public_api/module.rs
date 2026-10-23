@@ -56,8 +56,7 @@ pub struct Binding(pub(crate) BindingKind);
 pub(crate) enum BindingKind {
     Module(Module),
     Expr(Expr),
-    Token(Token),
-    ExactTokens(ExactTokens),
+    TokenSet(TokenSet),
 }
 
 impl From<Module> for Binding { fn from(m: Module) -> Self { Self(BindingKind::Module(m)) } }
@@ -66,16 +65,14 @@ impl From<Grammar> for Binding { fn from(g: Grammar) -> Self { Self(BindingKind:
 impl From<&Grammar> for Binding { fn from(g: &Grammar) -> Self { Self(BindingKind::Module(Module::new(g))) } }
 impl From<Expr> for Binding { fn from(e: Expr) -> Self { Self(BindingKind::Expr(e)) } }
 impl From<&Expr> for Binding { fn from(e: &Expr) -> Self { Self(BindingKind::Expr(e.clone())) } }
-impl From<Token> for Binding { fn from(t: Token) -> Self { Self(BindingKind::Token(t)) } }
-impl From<&Token> for Binding { fn from(t: &Token) -> Self { Self(BindingKind::Token(*t)) } }
-impl From<ExactTokens> for Binding { fn from(t: ExactTokens) -> Self { Self(BindingKind::ExactTokens(t)) } }
-impl From<&ExactTokens> for Binding { fn from(t: &ExactTokens) -> Self { Self(BindingKind::ExactTokens(t.clone())) } }
+impl From<TokenSet> for Binding { fn from(t: TokenSet) -> Self { Self(BindingKind::TokenSet(t)) } }
+impl From<&TokenSet> for Binding { fn from(t: &TokenSet) -> Self { Self(BindingKind::TokenSet(t.clone())) } }
+impl From<u32> for Binding { fn from(id: u32) -> Self { Self(BindingKind::TokenSet(TokenSet::from(id))) } }
 
 #[derive(Debug, Clone)]
 pub(crate) enum BoundValue {
     Module(Module),
-    Token(Token),
-    ExactTokens(ExactTokens),
+    TokenSet(TokenSet),
 }
 
 /// A reusable grammar with bindings and any retained compilation work.
@@ -89,7 +86,7 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     pub(crate) source: Arc<Grammar>,
-    pub(crate) prepared: BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>,
+    pub(crate) prepared: BTreeMap<u8, Arc<dyn RetainedPreparation>>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
     #[cfg(test)]
@@ -116,7 +113,7 @@ pub(crate) struct Certificate {
     instances: u128,
     ports: u128,
     target: Option<Vocab>,
-    pending_tokens: im::OrdSet<u32>,
+    pending_sets: Vec<TokenSet>,
 }
 impl Certificate {
     fn target(&mut self, vocab: &Vocab) -> Result<()> {
@@ -124,29 +121,31 @@ impl Certificate {
             return Err(error("module graph targets incompatible vocabularies"));
         }
         if self.target.is_none() {
-            for &id in &self.pending_tokens {
-                if !vocab.contains_exact_token_id(id) { return Err(error(format!("unknown exact token ID {id}"))); }
+            for set in std::mem::take(&mut self.pending_sets) {
+                self.tokens(&set)?;
             }
-            self.pending_tokens.clear();
             self.target = Some(vocab.clone());
         }
         Ok(())
     }
-    fn token(&mut self, id: u32) -> Result<()> {
-        if let Some(v) = &self.target {
-            if !v.contains_exact_token_id(id) { return Err(error(format!("unknown exact token ID {id}"))); }
-        } else { self.pending_tokens.insert(id); }
+    fn tokens(&mut self, set: &TokenSet) -> Result<()> {
+        if let Some(vocab) = &self.target {
+            if let Some(id) = vocab.first_unknown_token_id(set) {
+                return Err(error(format!("token ID {id} is not present in the target vocabulary")));
+            }
+        } else {
+            self.pending_sets.push(set.clone());
+        }
         Ok(())
     }
     fn value(&mut self, value: &BoundValue) -> Result<()> {
         match value {
-            BoundValue::Token(t) => self.token(t.id())?,
-            BoundValue::ExactTokens(t) => self.target(t.target_vocab())?,
+            BoundValue::TokenSet(set) => self.tokens(set)?,
             BoundValue::Module(m) => {
                 let child = m.certificate()?;
                 self.height = self.height.max(child.height + 1);
                 if let Some(v) = &child.target { self.target(v)?; }
-                for &id in &child.pending_tokens { self.token(id)?; }
+                for set in &child.pending_sets { self.tokens(set)?; }
             }
         }
         Ok(())
@@ -164,16 +163,15 @@ fn own_local(grammar: &Grammar) -> Grammar {
         analysis: graph::empty_cache(),
         parsed_component: grammar.parsed_component.clone(),
         exact_value: grammar.exact_value.clone(),
-        exact_token_id: grammar.exact_token_id,
         lark_document: grammar.lark_document.clone(),
     }
 }
 
 /// A retained static preparation, if any, in preference order.
-fn retained_static(prepared: &BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>) -> Option<MaskStrategy> {
-    if prepared.contains_key(&MaskStrategy::ParserDwa) {
+fn retained_static(prepared: &BTreeMap<u8, Arc<dyn RetainedPreparation>>) -> Option<MaskStrategy> {
+    if prepared.contains_key(&MaskStrategy::ParserDwa.key()) {
         Some(MaskStrategy::ParserDwa)
-    } else if prepared.contains_key(&MaskStrategy::TokenClassTrie) {
+    } else if prepared.contains_key(&MaskStrategy::TokenClassTrie.key()) {
         Some(MaskStrategy::TokenClassTrie)
     } else {
         None
@@ -209,7 +207,7 @@ impl Module {
     /// over retained static work) a node without the resolved static
     /// preparation is compiled dynamically instead of statically.
     fn node_engine(&self, resolved: MaskStrategy, mixed: bool) -> MaskStrategy {
-        if mixed && !self.node.prepared.contains_key(&resolved) {
+        if mixed && !self.node.prepared.contains_key(&resolved.key()) {
             MaskStrategy::TokenTrie
         } else {
             resolved
@@ -247,8 +245,7 @@ impl Module {
             for (name, value) in &grammar.bindings {
                 let value = match value {
                     GrammarValue::Source(child) => BoundValue::Module(convert(child, cache)),
-                    GrammarValue::Token(t) => BoundValue::Token(*t),
-                    GrammarValue::ExactTokens(t) => BoundValue::ExactTokens(t.clone()),
+                    GrammarValue::TokenSet(t) => BoundValue::TokenSet(t.clone()),
                 };
                 bindings.insert(name.clone(), value);
             }
@@ -282,8 +279,14 @@ impl Module {
         }
     }
 
-    /// Binds the extern `name` to a module, expression, token, or exact token
-    /// sequence.
+    // Lets bindings surface a parse error where the Rust view must stay infallible.
+    #[cfg(any(test, feature = "internal-api"))]
+    #[doc(hidden)]
+    pub fn check_source(&self) -> Result<()> {
+        self.node.source.declarations().map(|_| ())
+    }
+
+    /// Binds the extern `name` to a module, expression, or token set.
     ///
     /// Fails if the extern is undeclared or already bound.
     pub fn bind(&mut self, name: &str, value: impl Into<Binding>) -> Result<()> {
@@ -324,15 +327,10 @@ impl Module {
                 let child = Module::from_expr(&expr)?;
                 BoundValue::Module(child)
             }
-            BindingKind::Token(token) => {
+            BindingKind::TokenSet(tokens) => {
                 check_binding_kind(name, kind, false)
                     .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
-                BoundValue::Token(token)
-            }
-            BindingKind::ExactTokens(exact) => {
-                check_binding_kind(name, kind, false)
-                    .map_err(|e| e.with_source_span(declared.spans.get(name).copied()))?;
-                BoundValue::ExactTokens(exact)
+                BoundValue::TokenSet(tokens)
             }
         };
 
@@ -377,8 +375,7 @@ impl Module {
             for p in self.node.prepared.values() {
                 c.target(&constraint_vocab(&p.inner))?;
             }
-            if let Some(t) = &self.node.source.exact_value { c.target(t.target_vocab())?; }
-            if let Some(id) = self.node.source.exact_token_id { c.token(id)?; }
+            if let Some(t) = &self.node.source.exact_value { c.tokens(t)?; }
             for value in self.node.bindings.values() {
                 c.value(value)?;
                 if let BoundValue::Module(m) = value {
@@ -485,7 +482,7 @@ impl Module {
                 continue;
             }
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-            if let Some(p) = m.node.prepared.get(&engine) {
+            if let Some(p) = m.node.prepared.get(&engine.key()) {
                 // `boundary_trigger` records the requested detail; the trigger
                 // itself is built lazily in `materialize`.
                 if p.prepared().boundary_trigger >= target_b {
@@ -524,7 +521,7 @@ impl Module {
             let node = Arc::make_mut(&mut next.node);
             if engine != MaskStrategy::TokenTrie || mixed {
                 let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
-                node.prepared.insert(engine, locals[&key].clone());
+                node.prepared.insert(engine.key(), locals[&key].clone());
             }
             node.certificate = Arc::new(OnceLock::from(Ok(Arc::new(c))));
             for (name, value) in &m.node.bindings {
@@ -545,7 +542,7 @@ impl Module {
         target_b: BoundaryTriggerDetail,
         build_boundary: bool,
     ) -> Result<PreparedGrammar> {
-        if let Some(existing) = self.node.prepared.get(&engine) {
+        if let Some(existing) = self.node.prepared.get(&engine.key()) {
             let mut upgraded = existing.prepared().clone();
             if build_boundary && upgraded.inner.boundary_trigger.detail() < target_b {
                 Arc::make_mut(&mut upgraded.inner)
@@ -567,8 +564,7 @@ impl Module {
             for (name, value) in &self.node.bindings {
                 if resolved.bindings.contains_key(name) { continue; }
                 match value {
-                    BoundValue::Token(t) => resolved = resolved.bind_value(name, GrammarValue::Token(*t))?,
-                    BoundValue::ExactTokens(t) => resolved = resolved.bind_value(name, GrammarValue::ExactTokens(t.clone()))?,
+                    BoundValue::TokenSet(t) => resolved = resolved.bind_value(name, GrammarValue::TokenSet(t.clone()))?,
                     BoundValue::Module(_) => {}
                 }
             }
@@ -578,7 +574,7 @@ impl Module {
                 let mut next = m.clone();
                 let p = m.prepare_local_for(vocab, engine, target_b, build_boundary)?;
                 let node = Arc::make_mut(&mut next.node);
-                node.prepared.insert(engine, retain_local(p));
+                node.prepared.insert(engine.key(), retain_local(p));
                 node.certificate = Arc::new(OnceLock::new());
                 for (name, value) in &m.node.bindings {
                     if let BoundValue::Module(child) = value {
@@ -588,15 +584,14 @@ impl Module {
                 instances.insert(Arc::as_ptr(&m.node) as usize, next);
             }
             module = instances.remove(&(Arc::as_ptr(&module.node) as usize)).unwrap();
-            let mut local = module.node.prepared.get(&engine).ok_or_else(|| error("module is not prepared"))?.prepared().clone();
+            let mut local = module.node.prepared.get(&engine.key()).ok_or_else(|| error("module is not prepared"))?.prepared().clone();
             for (name, value) in &module.node.bindings {
                 match value {
                     BoundValue::Module(child) => {
-                        let child_prep = child.node.prepared.get(&engine).ok_or_else(|| error("child is not prepared"))?.prepared().clone();
+                        let child_prep = child.node.prepared.get(&engine.key()).ok_or_else(|| error("child is not prepared"))?.prepared().clone();
                         local.bind(name, child_prep)?;
                     }
-                    BoundValue::Token(t) => local.bind(name, *t)?,
-                    BoundValue::ExactTokens(t) => local.bind(name, t.clone())?,
+                    BoundValue::TokenSet(t) => local.bind(name, t.clone())?,
                 }
             }
             return Ok(local);
@@ -874,7 +869,7 @@ impl Module {
         let id = Arc::as_ptr(&self.node) as usize;
         if let Some(c) = cache.get(&id) { return Ok(c.clone()); }
         let engine = self.node_engine(resolved, mixed);
-        let local = self.node.prepared.get(&engine).ok_or_else(|| error("missing local compilation"))?;
+        let local = self.node.prepared.get(&engine.key()).ok_or_else(|| error("missing local compilation"))?;
         // Rebuilding the pre-composition parent is only needed when the rare
         // `Auto` boundary decline has to redo composition, so keep it in a
         // closure instead of snapshotting the composed constraint.
@@ -892,8 +887,7 @@ impl Module {
         let children = self.node.bindings.iter().filter(|(name, _)| active.contains(name.as_str())).map(|(name, value)| {
             let child = match value {
                 BoundValue::Module(child) => child.materialize(vocab, cache, resolved, mixed, boundary_strategy)?,
-                BoundValue::Token(t) => self.event_adapter(&[(t.id(), t.id())], vocab, parent.has_template_parser(), engine)?,
-                BoundValue::ExactTokens(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
+                BoundValue::TokenSet(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
             };
             Ok((name.clone(), Arc::new(child)))
         }).collect::<Result<Vec<_>>>()?;
@@ -981,7 +975,7 @@ impl Module {
     }
 
     fn event_adapter(&self, ranges: &[(u32, u32)], vocab: &Vocab, native: bool, engine: MaskStrategy) -> Result<RuntimeConstraint> {
-        let local = self.node.prepared.get(&engine).ok_or_else(|| error("missing prepared event owner"))?;
+        let local = self.node.prepared.get(&engine.key()).ok_or_else(|| error("missing prepared event owner"))?;
         let leaf = local.event_adapters.leaf(ranges)?;
         Ok(leaf.compiled_for_representation(vocab, native)?.as_ref().clone())
     }
@@ -1000,8 +994,7 @@ impl Module {
         for (name, value) in &self.node.bindings {
             let value = match value {
                 BoundValue::Module(child) => GrammarValue::Source(Arc::new(child.flatten_source()?)),
-                BoundValue::Token(t) => GrammarValue::Token(*t),
-                BoundValue::ExactTokens(t) => GrammarValue::ExactTokens(t.clone()),
+                BoundValue::TokenSet(t) => GrammarValue::TokenSet(t.clone()),
             };
             grammar = grammar.bind_value(name, value)?;
         }
@@ -1183,7 +1176,7 @@ mod precompile_boundary_tests {
         let prepared_trigger = module
             .node
             .prepared
-            .get(&MaskStrategy::ParserDwa)
+            .get(&MaskStrategy::ParserDwa.key())
             .and_then(|prepared| tokens(&prepared.prepared().inner))
             .expect("ParserDwa preparation must carry a Tokens trigger");
 
@@ -1203,7 +1196,7 @@ mod precompile_boundary_tests {
             "compile must reuse the precompiled Tokens Arc"
         );
         assert!(
-            module.node.prepared.contains_key(&MaskStrategy::ParserDwa),
+            module.node.prepared.contains_key(&MaskStrategy::ParserDwa.key()),
             "compile must not discard the retained static part"
         );
 
@@ -1327,7 +1320,7 @@ mod grammar_precompile_tests {
             .expect("TokenTrie compile after a ParserDwa grammar precompile");
         assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
         assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");
-        assert!(module.node.prepared.contains_key(&MaskStrategy::ParserDwa));
+        assert!(module.node.prepared.contains_key(&MaskStrategy::ParserDwa.key()));
 
         // Composing through the returned Module still matches the explicit
         // Module::new + bind + precompile path.
@@ -1548,8 +1541,8 @@ mod boundary_error_tests {
             )
         };
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
-        match error {
-            Error::ResourceLimit(message) => {
+        match error.kind() {
+            crate::ErrorKind::ResourceLimit(message) => {
                 assert!(message.starts_with("boundary_parser_dwa:"));
                 assert!(message.contains("FAST_BUILD"));
             }

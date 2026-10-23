@@ -1,5 +1,5 @@
 'use strict';
-const {types} = require('node:util');
+const {types, inspect} = require('node:util');
 const native = require('./loader.cjs');
 const key = Symbol('GLRMask owning native handle');
 const handles = new WeakMap();
@@ -148,44 +148,46 @@ class Owned {
   [Symbol.dispose]() { this.dispose(); }
 }
 
-class Token {
-  constructor(id) { this.id = tokenId(id); Object.freeze(this); }
-}
-
 class Vocab extends Owned {
   constructor(entries, options) {
     if (entries === key) { super(key, options); return; }
-    const o = checkedOptions(options, ['exactOnlyIds']);
+    const o = checkedOptions(options, ['specialTokenIds']);
     const input = iterable(entries, 'vocabulary entries');
     const tokenIds = [], tokenBytes = [];
     for (const entry of input) {
       if (!Array.isArray(entry) || entry.length !== 2) throw new TypeError('Each vocabulary entry must be [id, Uint8Array]');
       tokenIds.push(tokenId(entry[0])); tokenBytes.push(bytes(entry[1]));
     }
-    const exact = o.exactOnlyIds === undefined ? [] : ids(o.exactOnlyIds);
-    super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes, exact)));
+    const special = o.specialTokenIds === undefined ? [] : ids(o.specialTokenIds);
+    super(key, invoke(() => native.NativeVocab.fromEntries(tokenIds, tokenBytes, special)));
   }
   get size() { return invoke(() => handle(this, Vocab).size); }
   copy() { return wrap(Vocab, invoke(() => handle(this, Vocab).clone())); }
   clone() { return this.copy(); }
-  tokens(values) { return wrap(ExactTokens, invoke(() => handle(this, Vocab).tokens(ids(values)))); }
-  tokenRanges(values) {
+}
+
+class TokenSet extends Owned {
+  constructor(values) {
+    if (values === key) { super(key, arguments[1]); return; }
+    super(key, invoke(() => native.NativeTokenSet.fromIds(ids(values))));
+  }
+  static fromRanges(values) {
     const ranges = iterable(values, 'token ranges').map(r => {
       if (r === null || typeof r !== 'object') throw new TypeError('A token range must have start and end');
       const start = tokenId(r.start), end = r.end;
       if (!Number.isInteger(end) || end <= start || end > 4294967296) throw new RangeError('Invalid half-open token range');
       return {start, end};
     });
-    return wrap(ExactTokens, invoke(() => handle(this, Vocab).tokenRanges(ranges)));
+    return wrap(TokenSet, invoke(() => native.NativeTokenSet.fromRanges(ranges)));
   }
-}
-
-class ExactTokens extends Owned {
-  get size() { return invoke(() => handle(this, ExactTokens).size); }
-  get ids() { return invoke(() => handle(this, ExactTokens).ids()); }
-  get ranges() { return invoke(() => handle(this, ExactTokens).ranges()); }
-  copy() { return wrap(ExactTokens, invoke(() => handle(this, ExactTokens).clone())); }
+  copy() { return wrap(TokenSet, invoke(() => handle(this, TokenSet).clone())); }
   clone() { return this.copy(); }
+  equals(other) {
+    if (!(other instanceof TokenSet) || !handles.has(other)) return false;
+    return invoke(() => handle(this, TokenSet).equals(handle(other, TokenSet)));
+  }
+  toString() { return invoke(() => handle(this, TokenSet).toString()); }
+  [inspect.custom]() { return this.toString(); }
 }
 
 class Grammar extends Owned {
@@ -266,9 +268,9 @@ class Expr extends Owned {
           if (value instanceof Grammar) return native.NativeExpr.fromGrammar(handle(value, Grammar));
           if (value instanceof Module) return native.NativeExpr.fromModule(handle(value, Module));
           if (value instanceof Expr) return handle(value, Expr).clone();
-          if (value instanceof Token) return native.NativeExpr.fromToken(tokenId(value.id));
-          if (value instanceof ExactTokens) return native.NativeExpr.fromExactTokens(handle(value, ExactTokens));
-          throw new TypeError('Expr operands must be Grammar, Module, Expr, Token or ExactTokens');
+          if (typeof value === 'number') return native.NativeExpr.fromToken(tokenId(value));
+          if (value instanceof TokenSet) return native.NativeExpr.fromTokenSet(handle(value, TokenSet));
+          throw new TypeError('Expr operands must be Grammar, Module, Expr, Token or TokenSet');
         }));
       }
       return wrap(Expr, invoke(() => native.NativeExpr[operator](parts)));
@@ -317,9 +319,9 @@ class Module extends Owned {
         target.bindModule(name, handle(value, Module));
       }
       else if (value instanceof Expr) target.bindExpr(name, handle(value, Expr));
-      else if (value instanceof Token) target.bindToken(name, tokenId(value.id));
-      else if (value instanceof ExactTokens) target.bindTokens(name, handle(value, ExactTokens));
-      else throw new TypeError('Module.bind requires Grammar, Module, Expr, Token or ExactTokens');
+      else if (typeof value === 'number') target.bindToken(name, tokenId(value));
+      else if (value instanceof TokenSet) target.bindTokens(name, handle(value, TokenSet));
+      else throw new TypeError('Module.bind requires Grammar, Module, Expr, Token or TokenSet');
     });
   }
 
@@ -415,6 +417,6 @@ class ConstraintState extends Owned {
 }
 
 module.exports = Object.freeze({
-  Vocab, Token, ExactTokens, Grammar, Module, CompileOptions, Expr, Constraint, ConstraintState,
+  Vocab, TokenSet, Grammar, Module, CompileOptions, Expr, Constraint, ConstraintState,
   MaskStrategy, BoundaryMaskStrategy, GlrMaskError, version: native.version(),
 });

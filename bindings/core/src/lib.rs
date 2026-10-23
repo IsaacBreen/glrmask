@@ -49,7 +49,7 @@ pub fn vocab(entries: Vec<(u32, Vec<u8>)>, exact_only: Vec<u32>) -> Result<glrma
     for id in &exact_only {
         if !ids.insert(*id) { return Err(Error::invalid(format!("duplicate or byte-backed exact-only ID {id}"))); }
     }
-    guarded(|| Ok(glrmask::Vocab::new_with_exact_token_ids(entries, exact_only)))
+    guarded(|| Ok(glrmask::Vocab::new(entries).with_special_tokens(exact_only)))
 }
 
 pub fn mask_strategy(val: u32) -> Result<glrmask::MaskStrategy> {

@@ -74,12 +74,12 @@ pub struct NativeVocab { inner: Handle<g::Vocab> }
 #[napi]
 impl NativeVocab {
     #[napi(factory)]
-    pub fn from_entries(env: Env, token_ids: Vec<f64>, token_bytes: Vec<Unknown<'_>>, exact_only: Vec<f64>) -> napi::Result<Self> {
+    pub fn from_entries(env: Env, token_ids: Vec<f64>, token_bytes: Vec<Unknown<'_>>, special: Vec<f64>) -> napi::Result<Self> {
         call(|| {
             if token_ids.len() != token_bytes.len() { return Err(core::Error::invalid("vocabulary IDs and bytes have different lengths")); }
             let token_ids = ids(token_ids)?;
             let bytes = token_bytes.iter().map(|b| arrays::bytes(&env, b)).collect::<core::Result<Vec<_>>>()?;
-            Ok(Self { inner: Handle::new(core::vocab(token_ids.into_iter().zip(bytes).collect(), ids(exact_only)?)?) })
+            Ok(Self { inner: Handle::new(core::vocab(token_ids.into_iter().zip(bytes).collect(), ids(special)?)?) })
         })
     }
     #[napi]
@@ -87,42 +87,42 @@ impl NativeVocab {
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
     #[napi(getter)]
-    pub fn size(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.len() as f64)) }
-    #[napi]
-    pub fn tokens(&self, values: Vec<f64>) -> napi::Result<NativeExactTokens> {
-        call(|| Ok(NativeExactTokens { inner: Handle::new(live(&self.inner)?.tokens(ids(values)?).map_err(core::Error::engine)?) }))
-    }
-    #[napi]
-    pub fn token_ranges(&self, ranges: Vec<NativeRange>) -> napi::Result<NativeExactTokens> {
-        call(|| {
-            let ranges = ranges.into_iter().map(|r| {
-                let first = id(r.start)?;
-                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end <= r.start || r.end > 4294967296.0 {
-                    return Err(core::Error::invalid("ranges must be nonempty with integer half-open endpoints in 0..4294967296"));
-                }
-                Ok(first..=((r.end as u64 - 1) as u32))
-            }).collect::<core::Result<Vec<_>>>()?;
-            Ok(NativeExactTokens { inner: Handle::new(live(&self.inner)?.token_ranges(ranges).map_err(core::Error::engine)?) })
-        })
-    }
+    pub fn size(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.iter().len() as f64)) }
 }
 
 #[napi]
-pub struct NativeExactTokens { inner: Handle<g::ExactTokens> }
+pub struct NativeTokenSet { inner: Handle<g::TokenSet> }
 #[napi]
-impl NativeExactTokens {
+impl NativeTokenSet {
+    #[napi(factory)]
+    pub fn from_ids(values: Vec<f64>) -> napi::Result<Self> {
+        call(|| Ok(Self { inner: Handle::new(g::TokenSet::new(ids(values)?)) }))
+    }
+    #[napi(factory)]
+    pub fn from_ranges(ranges: Vec<NativeRange>) -> napi::Result<Self> {
+        call(|| {
+            let mut out = Vec::new();
+            for r in ranges {
+                let first = id(r.start)?;
+                if !r.end.is_finite() || r.end.fract() != 0.0 || r.end > 4294967296.0 {
+                    return Err(core::Error::invalid("ranges must have integer half-open endpoints in 0..4294967296"));
+                }
+                if r.end <= r.start { continue; }
+                out.push(first..=((r.end as u64 - 1) as u32));
+            }
+            Ok(Self { inner: Handle::new(g::TokenSet::from_ranges(out)) })
+        })
+    }
     #[napi]
     pub fn clone(&self) -> napi::Result<Self> { call(|| Ok(Self { inner: Handle::new(live(&self.inner)?.clone()) })) }
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
-    #[napi(getter)]
-    pub fn size(&self) -> napi::Result<f64> { call(|| Ok(live(&self.inner)?.len() as f64)) }
     #[napi]
-    pub fn ids(&self) -> napi::Result<Uint32Array> { call(|| Ok(live(&self.inner)?.ids().to_vec().into())) }
-    #[napi]
-    pub fn ranges(&self) -> napi::Result<Vec<NativeRange>> {
-        call(|| Ok(live(&self.inner)?.ranges().map(|r| NativeRange { start: *r.start() as f64, end: *r.end() as f64 + 1.0 }).collect()))
+    pub fn equals(&self, other: &NativeTokenSet) -> napi::Result<bool> {
+        call(|| Ok(*live(&self.inner)? == *live(&other.inner)?))
     }
+    #[napi]
+    pub fn to_string(&self) -> napi::Result<String> { call(|| Ok(format!("{:?}", *live(&self.inner)?))) }
 }
 
 fn grammar_compile_options(end: Vec<f64>, mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {

@@ -1,18 +1,18 @@
-## Vocabulary and exact tokens
+## Vocabulary and token sets
 
-`new Vocab(entries, options?)` maps original token IDs to the exact bytes from the tokenizer. Each entry is `[id, bytes]`, where `id` is an integer in `0..4294967295` and `bytes` is a `Uint8Array` or `Buffer`. Inputs are copied. Partial UTF-8, embedded NUL, sparse IDs, and different IDs with identical bytes are valid; do not normalize the bytes or reconstruct them from a display string. Duplicate IDs, duplicate exact-only IDs, and overlap between the two domains are rejected.
+`new Vocab(entries, options?)` maps original token IDs to the exact bytes from the tokenizer. Each entry is `[id, bytes]`, where `id` is an integer in `0..4294967295` and `bytes` is a `Uint8Array` or `Buffer`. Inputs are copied. Partial UTF-8, embedded NUL, sparse IDs, and different IDs with identical bytes are valid; do not normalize the bytes or reconstruct them from a display string. Duplicate IDs, duplicate special IDs, and overlap between the two domains are rejected.
 
 ```js
 const vocab = new Vocab([
   [0, Uint8Array.of(0xc3)],
   [1, Uint8Array.of(0xa9)],
   [31, Buffer.from('é')],
-], { exactOnlyIds: [99] });
+], { specialTokenIds: [99] });
 ```
 
-`vocab.size` counts byte-backed entries, not exact-only controls. `new Token(id)` is a raw original-ID event without vocabulary identity. `vocab.tokens(ids)` returns vocabulary-qualified `ExactTokens`, and `vocab.tokenRanges([{start, end}])` uses half-open ranges; `end` may be `4294967296` to include ID `4294967295`. Overlapping or adjacent ranges normalize without expanding every ID. `exact.ranges` stays compact and `exact.ids` materializes a `Uint32Array`. An empty set matches no event, and each match consumes one chosen token event.
+`vocab.size` counts byte-backed entries, not special controls. `new TokenSet(ids)` holds a set of original token IDs, and `TokenSet.fromRanges([{start, end}])` uses half-open ranges; `end` may be `4294967296` to include ID `4294967295`. Overlapping or adjacent ranges merge without expanding every ID. Set membership is checked against the compile vocabulary, token identity is preserved even when another ID has the same bytes, and an empty set matches no event. Each match consumes one chosen token event.
 
-Exact-token and end-token events must be committed with `commitToken`. `commitBytes` advances ordinary byte input and cannot stand in for a token event.
+Token-set and end-token events must be committed with `commitToken`. `commitBytes` advances ordinary byte input and cannot stand in for a token event.
 
 ## Grammars
 
@@ -30,12 +30,12 @@ Lark code uses one dialect; the GLRMask extensions are always available. A named
 ```js
 const grammar = Grammar.fromLark('start: <|begin|>');
 const module = new Module(grammar);
-module.bind('begin', vocab.tokens([99]));
+module.bind('begin', new TokenSet([99]));
 ```
 
 ## Modules and expressions
 
-The lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable bindings and retained compilation work; `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging lexical scopes.
+The lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable bindings and retained compilation work; `Expr` composes whole `Grammar`, `Module`, `Expr`, and `TokenSet` pieces without merging lexical scopes.
 
 ```js
 const moduleVocab = new Vocab([
@@ -53,7 +53,7 @@ const constraint = await parent.compile(moduleVocab, {
 });
 ```
 
-`bind` and `precompile` mutate atomically. A failed `bind` leaves the receiver unchanged; `copy()` gives an independent binding snapshot, and attaching a child snapshots that occurrence. Accepted bindings are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Qualified descendant paths using `::` are unsupported, each extern binds once, and a child with unbound externs cannot be attached.
+`bind` and `precompile` mutate atomically. A failed `bind` leaves the receiver unchanged; `copy()` gives an independent binding snapshot, and attaching a child snapshots that occurrence. Accepted bindings are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Qualified descendant paths using `::` are unsupported, each extern binds once, and a child with unbound externs cannot be attached.
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 

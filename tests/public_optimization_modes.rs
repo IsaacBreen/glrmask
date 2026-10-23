@@ -1,5 +1,5 @@
 //! Public root policy and state operations across actual Dynamic, O2, and Static.
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, TokenSet, Vocab};
 
 const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie,
     MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa];
@@ -60,7 +60,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
         a.commit_token(2).unwrap(); assert!(a.is_accepting());
     }
     let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
-        .bind_snapshot("MARK", glrmask::Token::new(15)).unwrap();
+        .bind_snapshot("MARK", glrmask::TokenSet::from(15)).unwrap();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
         let mut a = c.start(); assert!(allowed(&a.mask(),15)); assert!(!allowed(&a.mask(),0));
@@ -102,10 +102,10 @@ fn compare_prefixes(actual:&Constraint, expected:&Constraint, ids:&[u32], depth:
 
 #[test]
 fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
-    let v=Vocab::new_with_exact_token_ids(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
+    let v=Vocab::new(vec![(0,b"x".to_vec()),(1,b"a".to_vec()),
         (2,b"b".to_vec()),(3,b"y".to_vec()),(4,b"xaby".to_vec()),(5,b"ab".to_vec()),
         (6,b" ".to_vec()),(7,b"\t".to_vec()),(8,b"x ab y".to_vec()),(9,b"xab\ty".to_vec()),
-        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())],[99]);
+        (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]).with_special_tokens([99]);
     let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";");
     let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#),
         Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/"),
@@ -121,7 +121,7 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         }
     }
     let exact=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK;")
-        .bind_snapshot("MARK",v.tokens([33,99]).unwrap()).unwrap();
+        .bind_snapshot("MARK",TokenSet::new([33,99])).unwrap();
     let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;")
         .bind_snapshot("leaf",exact).unwrap();
     let description=parent.bind_snapshot("child",middle).unwrap();

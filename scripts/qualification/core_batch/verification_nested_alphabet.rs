@@ -32,7 +32,7 @@ fn main(){
         let mut words=(0..256u32).map(|i|(i,vec![i as u8])).collect::<Vec<_>>();
         for i in 0..512{words.push((300+i,format!("word{i:04}").into_bytes()));}
         if alias{for (i,s) in ["A","xy","Axy","xyB","yz!","!?","\u{e9}","A\u{e9}","bad","badly"].iter().enumerate(){words.push((1000+i as u32,s.as_bytes().to_vec()));}}
-        let v=Vocab::new_with_exact_token_ids(words,[9000]);
+        let v=Vocab::new(words).with_special_tokens([9000]);
         for mode in modes{for source in sources{
             let c=Grammar::from_glrm(source).compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();compiled+=1;
             let restored=Constraint::load(c.save()).unwrap();
@@ -42,7 +42,7 @@ fn main(){
                 }
             }
         }
-        let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",Token::new(9000)).unwrap();
+        let mut child=Grammar::from_glrm("extern token E start x nt x=\"x\" E \"y\"");child.bind("E",TokenSet::from(9000)).unwrap();
         let mut parent=Grammar::from_glrm("extern grammar C start r nt r=\"A\" C \"B\"");parent.bind("C",&child).unwrap();
         let c=parent.compile_with(&v,BuildOptions::default().optimization(mode)).unwrap();
         for c in [&c,&Constraint::load(c.save()).unwrap()]{let mut s=c.start();for id in [65,120,9000,121,66]{let before=s.marker_events().to_vec();assert_eq!(s.forced_tokens().unwrap(),s.forced_canonical_reference());assert_eq!(before,s.marker_events());s.commit_token(id).unwrap();n+=1;}assert!(s.is_accepting());}

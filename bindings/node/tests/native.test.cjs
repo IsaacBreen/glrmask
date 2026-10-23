@@ -2,7 +2,7 @@
 const test=require('node:test');
 const assert=require('node:assert/strict');
 const {types}=require('node:util');
-const {Vocab,Token,Grammar,Module,Constraint,ConstraintState,ExactTokens,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
+const {Vocab,TokenSet,Grammar,Module,Constraint,ConstraintState,MaskStrategy,BoundaryMaskStrategy,GlrMaskError,version}=require('../index.cjs');
 const raw=require('../loader.cjs');
 const strategies=[MaskStrategy.Auto, MaskStrategy.ParserDwa, MaskStrategy.TokenTrie, MaskStrategy.TokenClassTrie];
 const b=s=>Buffer.from(s);
@@ -38,13 +38,13 @@ for(const maskStrategy of strategies) {
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
     for(const id of [31,40,99]) {
       const m=new Module(host);
-      m.bind('T',v.tokens([id]));
+      m.bind('T',new TokenSet([id]));
       const e=m.compileSync(v,{maskStrategy}).start();
       assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));e.commitToken(id);assert.ok(e.isAccepting());
     }
   });
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
-    const v=new Vocab([[0,b('a')]],{exactOnlyIds:[99]});
+    const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
     const s=Grammar.fromEbnf('start ::= "a"').compileSync(v,{maskStrategy,endTokens:[99]}).start();
     assert.ok(!allowed(s.mask(),99));s.commitToken(0);assert.ok(s.isAccepting());assert.ok(allowed(s.mask(),99));
     s.commitToken(99);assert.ok(s.isAccepting());assert.ok(!s.isRejected());assert.ok(s.mask().every(w=>w===0));
@@ -75,15 +75,18 @@ for(const maskStrategy of strategies) {
   });
 }
 
-test('compact ranges and full-width numeric IDs without accidental expansion',()=>{
-  const v=vocab(),t=v.tokenRanges([{start:31,end:33},{start:32,end:33}]);
-  assert.equal(t.size,2);assert.deepEqual(t.ranges,[{start:31,end:33}]);assert.deepEqual(Array.from(t.ids),[31,32]);
-  const copy=t.clone(),kept=t.ids;t.dispose();assert.equal(copy.size,2);assert.deepEqual(Array.from(kept),[31,32]);
-  const empty=v.tokens([]);assert.equal(empty.size,0);assert.deepEqual(empty.ranges,[]);
-  assert.throws(()=>v.tokens([31,31]));assert.throws(()=>v.tokenRanges([{start:32,end:31}]));
-  const high=new Vocab([],{exactOnlyIds:[0xffffffff]});
-  assert.equal(high.size,0);assert.deepEqual(high.tokenRanges([{start:0xffffffff,end:4294967296}]).ranges,[{start:0xffffffff,end:4294967296}]);
-  assert.equal(new Token(0xffffffff).id,0xffffffff);
+test('token sets normalize ranges and expose no inspection accessors',()=>{
+  const v=vocab(),t=TokenSet.fromRanges([{start:31,end:33},{start:32,end:33}]);
+  assert.equal(t.toString(),'TokenSet[31..=32]');
+  assert.ok(t.equals(TokenSet.fromRanges([{start:31,end:33}])));
+  const copy=t.clone();t.dispose();assert.equal(copy.toString(),'TokenSet[31..=32]');
+  const empty=new TokenSet([]);assert.equal(empty.toString(),'TokenSet[]');
+  assert.ok(new TokenSet([7,7,3]).equals(new TokenSet([3,7])));
+  assert.equal(TokenSet.fromRanges([{start:32,end:31}]).toString(),'TokenSet[]');
+  assert.equal(TokenSet.fromRanges([{start:5,end:5}]).toString(),'TokenSet[]');
+  const high=new Vocab([],{specialTokenIds:[0xffffffff]});
+  assert.equal(high.size,0);
+  assert.equal(TokenSet.fromRanges([{start:0xffffffff,end:4294967296}]).toString(),'TokenSet[4294967295..=4294967295]');
 });
 
 test('async work snapshots sources and vocabulary before disposal',async()=>{
@@ -110,12 +113,12 @@ test('frontends and input validation preserve the public contracts',async()=>{
   const j=new Vocab([[0,b('null')],[1,b('true')]]);
   const s=(await Grammar.fromJsonSchema({type:'null'}).compile(j)).start();assert.ok(allowed(s.mask(),0));assert.ok(!allowed(s.mask(),1));
   assert.throws(()=>new Vocab([[0,'a']]),TypeError);assert.throws(()=>new Vocab([[0,b('a')],[0,b('b')]]),GlrMaskError);
-  assert.throws(()=>new Vocab([[0,b('a')]],{exactOnlyIds:[0]}),GlrMaskError);
+  assert.throws(()=>new Vocab([[0,b('a')]],{specialTokenIds:[0]}),GlrMaskError);
   for(const bad of [-1,0.5,NaN,Infinity,4294967296,'1',1n,null]) {
-    assert.throws(()=>new Token(bad),RangeError);assert.throws(()=>v.tokens([bad]),RangeError);
+    assert.throws(()=>new TokenSet([bad]),RangeError);
     assert.throws(()=>s.commitToken(bad),RangeError);
   }
-  for(const Class of [Constraint,ConstraintState,Grammar,Module,ExactTokens]) assert.throws(()=>new Class(),TypeError);
+  for(const Class of [Constraint,ConstraintState,Grammar,Module]) assert.throws(()=>new Class(),TypeError);
   assert.throws(()=>simple().compileSync(v,{optimisation:'auto'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{maskStrategy:'bogus'}),TypeError);
   assert.throws(()=>simple().compileSync(v,{boundaryMaskStrategy:'bogus'}),TypeError);
@@ -131,7 +134,7 @@ test('raw native arguments reject truncation and unsafe typed-array backing',()=
   const initial=s.mask();
   for(const bad of [-1,0.1,NaN,Infinity,4294967296]) {
     assert.throws(()=>s.commitToken(bad),/GLRMASK_INVALID_ARGUMENT/);
-    assert.throws(()=>v.tokens([bad]),/GLRMASK_INVALID_ARGUMENT/);
+    assert.throws(()=>new TokenSet([bad]),/GLRMASK_INVALID_ARGUMENT/);
     assert.throws(()=>g.compileSync(v,[],bad,0),/GLRMASK_INVALID_ARGUMENT/);
   }
   assert.deepEqual(s.mask(),initial);
@@ -161,11 +164,11 @@ test('ESM and CommonJS share constructor identities',async()=>{
 });
 
 test('named Lark special tokens use explicit mappings, not byte aliases',async()=>{
-  const v=new Vocab([[0,b('a')],[1,b('a')]],{exactOnlyIds:[99]});
+  const v=new Vocab([[0,b('a')],[1,b('a')]],{specialTokenIds:[99]});
   for(const maskStrategy of strategies) {
     const g=Grammar.fromLark('start: <|begin|> <|body|>');
     const m=new Module(g);
-    m.bind('begin',v.tokens([99]));m.bind('body',v.tokens([1]));
+    m.bind('begin',new TokenSet([99]));m.bind('body',new TokenSet([1]));
     const s=(await m.compile(v,{maskStrategy})).start();assert.ok(allowed(s.mask(),99));s.commitToken(99);
     assert.ok(allowed(s.mask(),1));assert.ok(!allowed(s.mask(),0));s.commitToken(1);assert.ok(s.isAccepting());
     assert.deepEqual(Array.from(g.externs.keys()),['begin','body']);

@@ -297,7 +297,7 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BuildOptions, Grammar, MaskStrategy, Vocab};
+    use crate::{BuildOptions, Grammar, MaskStrategy, TokenSet, Vocab};
 
     #[test]
     fn union_forcing_returns_common_prefix_not_equal_whole_vectors() {
@@ -330,12 +330,11 @@ mod tests {
 
     #[test]
     fn greedy_ab_stops_before_optional_event_after_a() {
-        let vocab=Vocab::new_with_exact_token_ids(
-            vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())],[9]);
+        let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]).with_special_tokens([9]);
         let ordinary=Grammar::from_glrm("start root nt root=\"ab\"");
         let guarded=Grammar::from_glrm(
             "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"")
-            .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap();
+            .bind_snapshot("MARK",TokenSet::new([9])).unwrap();
         for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
             let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();

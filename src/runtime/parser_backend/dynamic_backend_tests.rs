@@ -407,7 +407,7 @@ fn empty_special_id_is_exact_and_ordinary_empty_alias_is_rejected() {
     let source = "glrm 1; start start; extern token MARK; nt start = MARK;";
     let lr = crate::DynamicConstraint::from_glrm_grammar_with_bindings_and_end_tokens(
         source, &vocab, &[("MARK", &[(9, 9)])], &[]).unwrap().into_constraint();
-    let native = Grammar::from_glrm(source).bind_snapshot("MARK", crate::Token::new(9)).unwrap()
+    let native = Grammar::from_glrm(source).bind_snapshot("MARK", crate::TokenSet::from(9)).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     for constraint in [&lr, &native] {
         let mut state = constraint.start();
@@ -518,7 +518,7 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
         source,&vocab,&[("MARK",&[(25, 25)])],&[]).unwrap().into_constraint();
     let mut constraints = vec![lr];
     for mode in [MaskStrategy::Auto,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
-        constraints.push(Grammar::from_glrm(source).bind_snapshot("MARK",crate::Token::new(25)).unwrap()
+        constraints.push(Grammar::from_glrm(source).bind_snapshot("MARK",crate::TokenSet::from(25)).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap());
     }
     for compiled in constraints {
@@ -534,10 +534,10 @@ fn focused_empty_special_token_is_live_after_prefix_across_reload() {
 
 #[test]
 fn focused_empty_byte_summary_is_shared_by_compilers_and_rebuilt_by_loaders() {
-    let vocab = Vocab::new_with_exact_token_ids(vec![
+    let vocab = Vocab::new(vec![
         (0, b"a".to_vec()), (2, b"b".to_vec()), (7, Vec::new()),
         (31, Vec::new()), (42, vec![0]), (512, Vec::new()),
-    ], [1000]);
+    ]).with_special_tokens([1000]);
     let source = r#"start ::= "a""#;
     let expected = crate::compiler::compile::vocab_empty_byte_token_ids(&vocab);
     let mut compiled = vec![crate::DynamicConstraint::from_ebnf(source, &vocab)

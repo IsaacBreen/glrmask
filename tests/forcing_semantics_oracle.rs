@@ -1,7 +1,7 @@
 //! Independent finite byte/event trace model. No GLRMask parser, tokenizer,
 //! regular-expression engine or grammar normalization decides the expected set.
 use std::collections::{BTreeSet, VecDeque};
-use glrmask::{BuildOptions, Constraint, ConstraintState, Grammar, MaskStrategy, Vocab};
+use glrmask::{BuildOptions, Constraint, ConstraintState, Grammar, MaskStrategy, TokenSet, Vocab};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Cell { Byte(u8), Event(u32) }
@@ -140,8 +140,8 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
         Entry{id:8,bytes:Some(vec![0xA9])}, Entry{id:9,bytes:None},
         Entry{id:10,bytes:Some("é".as_bytes().to_vec())},
     ];
-    let vocab=Vocab::new_with_exact_token_ids(entries.iter().filter_map(|e|
-        e.bytes.as_ref().map(|b|(e.id,b.clone()))).collect(),[9]);
+    let vocab=Vocab::new(entries.iter().filter_map(|e|
+        e.bytes.as_ref().map(|b|(e.id,b.clone()))).collect()).with_special_tokens([9]);
     let bases = [vec![B(b'a'),B(b'b')],vec![E(3),B(b'b')],vec![B(b'a'),E(4)],
         vec![E(4),B(b'a'),B(b'b')],vec![E(9),B(b'a')]];
     let mut cases=(1usize..(1<<bases.len())).map(|bits|
@@ -157,7 +157,7 @@ fn exact_event_and_byte_trace_oracle_covers_all_original_id_paths() {
     for (case,words) in cases.iter().enumerate() {
         let (source,events)=grammar_source(words);
         let mut grammar=Grammar::from_glrm(&source);
-        for id in events { grammar=grammar.bind_snapshot(format!("EVENT_{id}"),vocab.tokens([id]).unwrap()).unwrap(); }
+        for id in events { grammar=grammar.bind_snapshot(format!("EVENT_{id}"),TokenSet::new([id])).unwrap(); }
         for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let compiled=grammar.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             let label=format!("case={case},mode={mode:?}");
@@ -186,8 +186,8 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
         Entry{id:8,bytes:Some(b"a".to_vec())}, Entry{id:9,bytes:Some(b"b".to_vec())},
         Entry{id:10,bytes:Some(b"()".to_vec())}, Entry{id:11,bytes:None},
     ];
-    let vocab=Vocab::new_with_exact_token_ids(entries.iter().filter_map(|e|
-        e.bytes.as_ref().map(|bytes|(e.id,bytes.clone()))).collect(),[11]);
+    let vocab=Vocab::new(entries.iter().filter_map(|e|
+        e.bytes.as_ref().map(|bytes|(e.id,bytes.clone()))).collect()).with_special_tokens([11]);
     let parent = Grammar::from_glrm("extern grammar CHILD start root nt root=\"(\" CHILD \")\"");
     let parent_prepared=parent.prepare(&vocab).unwrap();
     let leaf_cases: Vec<Residuals>=vec![
@@ -207,8 +207,8 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
         let mut source_assembly=parent.bind_snapshot("CHILD",&leaf).unwrap();
         for id in events {
             let path=format!("CHILD::EVENT_{id}");
-            assembly=assembly.bind_snapshot(&path,vocab.tokens([id]).unwrap()).unwrap();
-            source_assembly=source_assembly.bind_snapshot(&path,vocab.tokens([id]).unwrap()).unwrap();
+            assembly=assembly.bind_snapshot(&path,TokenSet::new([id])).unwrap();
+            source_assembly=source_assembly.bind_snapshot(&path,TokenSet::new([id])).unwrap();
         }
         let expected=leaf_language.iter().map(|word| {
             let mut wrapped=vec![B(b'(')];wrapped.extend_from_slice(word);wrapped.push(B(b')'));wrapped
@@ -229,11 +229,11 @@ fn prepared_child_byte_event_calls_match_finite_trace_oracle_mid_token() {
 #[test]
 fn unused_high_original_ids_do_not_change_event_weight_or_mask_domains() {
     for highest in [31,32,63,64,257] {
-        let vocab=Vocab::new_with_exact_token_ids(vec![
+        let vocab=Vocab::new(vec![
             (0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(3,b"a".to_vec()),
-            (highest,b"unused".to_vec())], [highest-1]);
+            (highest,b"unused".to_vec())]).with_special_tokens([highest-1]);
         let g=Grammar::from_glrm("extern token MARK start root nt root=\"a\" \"b\" | MARK \"b\"")
-            .bind_snapshot("MARK",vocab.tokens([3]).unwrap()).unwrap();
+            .bind_snapshot("MARK",TokenSet::new([3])).unwrap();
         for mode in [MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let c=g.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             for c in [c.clone(),Constraint::load(&c.save()).unwrap()] {

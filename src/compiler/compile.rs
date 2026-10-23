@@ -277,11 +277,11 @@ mod empty_byte_summary_tests {
 
     #[test]
     fn empty_byte_summary_is_exact_shared_and_vocab_local() {
-        let vocab = Vocab::new_with_exact_token_ids(vec![
+        let vocab = Vocab::new(vec![
             (512, Vec::new()), (31, Vec::new()), (7, Vec::new()),
             (7, b"last spelling wins".to_vec()), (3, Vec::new()),
             (0, vec![0]), (2, b"a".to_vec()), (90, b"a".to_vec()),
-        ], [1000, 3]);
+        ]).with_special_tokens([1000, 3]);
         assert_eq!(vocab.compiler_cache_entry_count(), 0);
         let first = vocab_empty_byte_token_ids(&vocab);
         assert_eq!(first.as_ref(), &[3, 31, 512]);
@@ -290,16 +290,14 @@ mod empty_byte_summary_tests {
         let cloned = vocab.clone();
         assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&cloned)));
         assert!(Arc::ptr_eq(&first, &vocab_empty_byte_token_ids(&vocab)));
-        let other = Vocab::new_with_exact_token_ids(vec![
+        let other = Vocab::new(vec![
             (512, vec![0]), (31, b"a".to_vec()), (7, b"last spelling wins".to_vec()),
             (3, b"b".to_vec()), (0, Vec::new()), (2, b"a".to_vec()), (90, Vec::new()),
-        ], [1000]);
+        ]).with_special_tokens([1000]);
         assert_eq!(vocab_empty_byte_token_ids(&other).as_ref(), &[0, 90]);
         assert_eq!(vocab_empty_byte_token_ids(&vocab).as_ref(), &[3, 31, 512]);
         assert!(vocab_empty_byte_token_ids(&Vocab::new(Vec::new())).is_empty());
-        assert!(vocab_empty_byte_token_ids(&Vocab::new_with_exact_token_ids(
-            Vec::new(), [0, 1, 77],
-        )).is_empty());
+        assert!(vocab_empty_byte_token_ids(&Vocab::new(Vec::new()).with_special_tokens([0, 1, 77])).is_empty());
     }
 
     #[test]

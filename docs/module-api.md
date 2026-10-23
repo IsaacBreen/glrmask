@@ -176,19 +176,19 @@ fn alternatives(vocab: &Vocab) -> glrmask::Result<glrmask::Constraint> {
 
 Whole grammar leaves retain their own lexer and ignore rules. Nested expression
 operators add no extra namespace. Leaves can be `Grammar`, `Module`, `Expr`,
-`Token`, or `ExactTokens`. In Python, passing a plain string raises `TypeError`;
+or `TokenSet`. In Python, passing a plain string raises `TypeError`;
 use `Expr.literal`. A part with unbound externs is an error: Python's
 `Expr.choice` and `Expr.sequence` raise `ValueError` immediately, and Rust
 reports it when the expression is bound or compiled.
 
 An empty sequence denotes epsilon. An empty choice matches nothing.
 
-## Exact token events and errors
+## Token events and errors
 
-`Token` and `ExactTokens` denote exact original-ID events, not their decoded
-text. A grammar-valued extern accepts `Module`, `Grammar`, `Expr`, `Token`, or
-`ExactTokens` directly without requiring a separate grammar conversion. A
-token-valued extern accepts `Token` or `ExactTokens`.
+A `TokenSet` denotes original-ID events, not their decoded text. A
+grammar-valued extern accepts `Module`, `Grammar`, `Expr`, or `TokenSet`
+directly without requiring a separate grammar conversion. A token-valued extern
+accepts a `TokenSet` or a single token ID.
 
 Binding is atomic and mutates in place: unknown extern names, repeated bindings,
 wrong value kinds, or children with open externs leave the module unchanged.

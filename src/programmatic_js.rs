@@ -920,8 +920,8 @@ mod tests {
         )
         .err()
         .expect("legacy None schema composition must be unsupported");
-        match legacy_error {
-            crate::GlrMaskError::Compilation(message) => assert!(
+        match legacy_error.kind() {
+            crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("legacy owned-parent composition is unsupported"),
                 "unexpected legacy None error: {message}",
             ),

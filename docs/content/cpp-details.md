@@ -1,4 +1,4 @@
-## Vocabulary and exact tokens
+## Vocabulary and token sets
 
 `Vocab` maps original `uint32_t` token IDs to the exact bytes that tokenizer produces. Bytes may be partial UTF-8 or contain NUL; do not normalize them or reconstruct them from a display spelling. The string-view constructor copies exactly the supplied range, so use `Bytes` or an explicitly sized `std::string_view` for embedded NUL. Different IDs may have identical bytes.
 
@@ -7,12 +7,12 @@ glrmask::Vocab vocab({
     {0, glrmask::Bytes{0xc3}},
     {1, glrmask::Bytes{0xa9}},
     {31, glrmask::Bytes{0xc3, 0xa9}},
-}, {99});  // 99 is an exact-only control with no byte spelling.
+}, {99});  // 99 is a special control token with no byte spelling.
 ```
 
-Duplicate byte-backed IDs, duplicate exact-only IDs, and overlap between those two domains are rejected. `vocab.size()` counts byte-backed entries, not exact-only controls.
+Duplicate byte-backed IDs, duplicate special IDs, and overlap between those two domains are rejected. `vocab.size()` counts byte-backed entries, not special controls.
 
-`Token(id)` is a raw original-ID event whose bytes are resolved by the eventual vocabulary. `vocab.tokens(ids)` produces vocabulary-qualified `ExactTokens`, preserving token identity even when another ID has the same bytes. `vocab.token_ranges({{first, last}, ...})` uses inclusive endpoints; overlapping or adjacent ranges normalize without expanding every ID. `ExactTokens::ranges()` stays compact and `ids()` materializes the IDs. An empty set denotes an empty event language, not epsilon. Each match consumes one chosen token event.
+`TokenSet(ids)` holds a set of original token IDs; `TokenSet::from_ranges({{first, last}, ...})` takes inclusive endpoints. Overlapping or adjacent ranges merge without expanding every ID. Set membership is checked against the compile vocabulary, token identity is preserved even when another ID has the same bytes, and an empty set denotes an empty event language, not epsilon. Each match consumes one chosen token event. A single ID can be bound directly, for example `module.bind("MARK", 9)`.
 
 Exact-token events cannot be reproduced by committing their decoded bytes. Use `commit_token` for exact controls and end tokens; `commit_bytes` advances ordinary byte input only.
 
@@ -32,12 +32,12 @@ Lark code uses one dialect; the GLRMask extensions are always available. A named
 ```cpp
 auto grammar = glrmask::Grammar::from_lark("start: <|begin|>");
 auto module = glrmask::Module(grammar);
-module.bind("begin", vocab.tokens({99}));
+module.bind("begin", glrmask::TokenSet({99}));
 ```
 
 ## Modules and expressions
 
-The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging their lexical scopes.
+The public lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable binding snapshots and retained compilation work; it may still contain unresolved externs. `Expr` composes whole `Grammar`, `Module`, `Expr`, and `TokenSet` pieces without merging their lexical scopes.
 
 ```cpp
 glrmask::Vocab module_vocab({{0, "x"}, {1, "a"}, {2, "y"}, {3, "b"}});
@@ -54,7 +54,7 @@ parent.bind("child", child);
 auto constraint = parent.compile(module_vocab, options);
 ```
 
-`bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
+`bind` and `precompile` mutate the receiver atomically and return `void`; a failure preserves the previous snapshot. Accepted binding values are `Module`, `Grammar`, `Expr`, `TokenSet`, and a single token ID. Attaching a child snapshots that occurrence, so later edits to the original child do not change the parent. Copy construction creates independent bindings and shares immutable work. Qualified descendant paths using `::` are not supported, each extern binds once, and a child with unbound externs cannot be attached.
 
 `externs()` on a grammar or module returns an `Externs` snapshot of `name` and `kind`; `unbound()` contains only unresolved entries. `CompileOptions` carries `mask_strategy` and `boundary_mask_strategy` (defaulting to `Auto`) for the whole compile, plus root `end_tokens`; an option never downgrades a part that already has a static preparation:
 

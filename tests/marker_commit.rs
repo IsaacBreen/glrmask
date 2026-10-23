@@ -1,4 +1,4 @@
-use glrmask::{BuildOptions, Constraint, Grammar, MarkerEvent, MaskStrategy, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MarkerEvent, MaskStrategy, TokenSet, Vocab};
 
 const MODES: [MaskStrategy; 4] = [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie,
     MaskStrategy::ParserDwa, MaskStrategy::Auto];
@@ -122,7 +122,7 @@ fn exact_model_events_and_marker_ids_are_distinct_namespaces() {
         for mode in MODES {
             let mut grammar=Grammar::from_glrm("start root\nextern token SEP\nnt root = \"a\" @mark(1) SEP @mark(2) \"b\" @mark(3)\n")
                 ;
-            grammar.bind("SEP", v.tokens([2]).unwrap()).unwrap();
+            grammar.bind("SEP", TokenSet::new([2])).unwrap();
             let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
             let mut s=c.start();s.commit_token(0).unwrap();assert_eq!(events(&s),[(1,1)]);
             s.commit_token(2).unwrap();assert_eq!(events(&s),[(2,1+spelling.len() as u64)],"special {mode:?}");

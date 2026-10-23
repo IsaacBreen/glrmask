@@ -24,8 +24,7 @@ def test_top_level_surface_hides_engine_and_experimental_policy_types():
         "Expr",
         "Extern",
         "Externs",
-        "Token",
-        "ExactTokens",
+        "TokenSet",
         "MaskStrategy",
         "BoundaryMaskStrategy",
         "Vocab",
@@ -79,11 +78,11 @@ def test_bind_validation_is_early_and_unlinked_constraints_reject_source():
     open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
     with pytest.raises(ValueError, match="unbound externs"):
         _bound_snapshot(g, 'C', open_child)
-    bound = _bound_snapshot(g, 'T', glrmask.Token(7))
+    bound = _bound_snapshot(g, 'T', glrmask.TokenSet([7]))
     assert list(bound.externs.unbound) == ['C']
     assert set(bound.externs) == {'T', 'C'}
     with pytest.raises(ValueError, match="already bound"):
-        _bound_snapshot(bound, 'T', glrmask.Token(8))
+        _bound_snapshot(bound, 'T', glrmask.TokenSet([8]))
     with pytest.raises(ValueError, match="no external"):
         _bound_snapshot(bound, 'missing', child)
     with pytest.raises(ValueError, match="qualified paths"):
@@ -143,31 +142,30 @@ def test_artifact_ownership_and_existing_vocab_validation():
         glrmask.Constraint.load(raw, vocab=other)
 
 
-@pytest.mark.parametrize("id", [-1, 2**32])
-def test_token_constructor_rejects_out_of_u32_range(id):
-    with pytest.raises(OverflowError):
-        glrmask.Token(id)
+def test_token_set_has_no_introspection_accessors():
+    assert not hasattr(glrmask.Vocab, "tokens")
+    assert not hasattr(glrmask.Vocab, "token_ranges")
+    value = glrmask.TokenSet([7, 7, 3])
+    assert repr(value) == "TokenSet[3..=3, 7..=7]"
+    assert value == glrmask.TokenSet.from_ranges([range(3, 4), range(7, 8)])
+    for name in ["ids", "ranges", "size", "__len__"]:
+        assert not hasattr(value, name), name
 
 
-def test_token_constructor_and_sparse_membership_validation():
-    assert not hasattr(glrmask.Vocab, "token")
+def test_token_set_and_sparse_membership_validation():
     assert hasattr(glrmask, "Expr")
-    token = glrmask.Token(id=7)
-    assert token.id == 7
-    with pytest.raises(AttributeError):
-        token.id = 8
     v = glrmask.Vocab.from_id_to_bytes({2: b"a", 7: b"a", 63: b""})
     g = glrmask.Grammar.from_glrm("glrm 1; start s; extern token item; nt s = item;")
     m = glrmask.Module.load(glrmask.Module(g).save())
     for id in [0, 3, 62, 64, 2**32-1]:
-        value = glrmask.Token(id)
+        value = glrmask.TokenSet([id])
         bound = _bound_snapshot(g, "item", value)
         with pytest.raises(ValueError, match="unknown exact token ID|not present"):
             bound.compile(v)
         with pytest.raises(ValueError, match="unknown exact token ID|not present"):
             _bound_snapshot(m, "item", value).compile(v)
     for id in [7, 63]:
-        c = _bound_snapshot(m, "item", glrmask.Token(id)).compile(v)
+        c = _bound_snapshot(m, "item", glrmask.TokenSet([id])).compile(v)
         assert np.flatnonzero(c.start().mask()).tolist() == [id]
     text = glrmask.Grammar.from_ebnf('s ::= "a"')
     with pytest.raises(ValueError):

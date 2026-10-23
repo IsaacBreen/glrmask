@@ -90,7 +90,7 @@ Anchors, lookaround, backreferences and unsupported flags also fail explicitly.
 vocab = glrmask.Vocab.from_id_to_bytes({0: b"x", 1: b"x", 4: b"", 5: b""})
 grammar = glrmask.Grammar.from_lark('start: <|begin|> <[^0-1]>')
 module = glrmask.Module(grammar)
-module.bind("begin", vocab.tokens([1]))
+module.bind("begin", glrmask.TokenSet([1]))
 constraint = module.compile(vocab)
 state = constraint.start()
 assert not state.mask()[0] and state.mask()[1]

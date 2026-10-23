@@ -1,6 +1,6 @@
 use glrmask::{
     BoundaryMaskStrategy, CompileOptions, Constraint, Expr, ExternKind, Grammar, MaskStrategy,
-    Module, Token, Vocab,
+    Module, TokenSet, Vocab,
 };
 
 fn vocab() -> Vocab {
@@ -74,7 +74,7 @@ fn module_reuse_load_and_closed_link() {
 fn source_exact_token_identity_is_not_bytes() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_glrm(TOKEN_HOST));
-    m.bind("MARK", Token::new(7)).unwrap();
+    m.bind("MARK", TokenSet::from(7)).unwrap();
     let c = m.compile(&v).unwrap();
     let mut s = c.start();
     assert!(!allowed(&s.mask(), 4));
@@ -90,13 +90,13 @@ fn source_exact_token_identity_is_not_bytes() {
 fn compiled_exact_token_bind_matches_source_at_every_step() {
     let v = vocab();
     let mut m_expected = Module::new(&Grammar::from_glrm(TOKEN_HOST));
-    m_expected.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap();
+    m_expected.bind("MARK", TokenSet::new([7, 8])).unwrap();
     let expected = m_expected.compile(&v).unwrap();
 
     let mut m = Module::new(&Grammar::from_glrm(TOKEN_HOST));
     m.precompile(&v).unwrap();
     assert!(m.compile(&v).is_err());
-    m.bind("MARK", v.tokens([7, 8]).unwrap()).unwrap();
+    m.bind("MARK", TokenSet::new([7, 8])).unwrap();
     let actual = m.compile(&v).unwrap();
 
     let mut a = actual.start();
@@ -117,7 +117,7 @@ fn unbound_exact_token_survives_save_load() {
     m.precompile(&v).unwrap();
     let mut loaded = Module::load(&m.save(), Some(&v)).unwrap();
     assert!(loaded.compile(&v).is_err(), "loading must not silently close unresolved token slots");
-    loaded.bind("MARK", Token::new(7)).unwrap();
+    loaded.bind("MARK", TokenSet::from(7)).unwrap();
     let c = loaded.compile(&v).unwrap();
     let mut s = c.start();
     s.commit_token(0).unwrap();
@@ -131,10 +131,10 @@ fn token_membership_and_compiled_vocabulary_are_validated() {
     let other = Vocab::new(vec![(7, b"different".to_vec())]);
     let mut parent = Module::new(&Grammar::from_glrm(TOKEN_HOST));
     parent.precompile(&v).unwrap();
-    assert!(parent.bind("MARK", Token::new(6)).is_err());
+    assert!(parent.bind("MARK", TokenSet::from(6)).is_err());
 
     let mut widened = Module::new(&Grammar::from_glrm(HOST));
-    widened.bind("child", Token::new(7)).unwrap();
+    widened.bind("child", TokenSet::from(7)).unwrap();
     let c = widened.compile(&v).unwrap();
     let mut state = c.start();
     state.commit_token(0).unwrap();
@@ -239,16 +239,13 @@ fn root_end_ids_are_reserved_and_early_end_rejects_even_with_matching_bytes() {
 
 #[test]
 fn exact_only_model_tokens_survive_open_module_and_constraint_roundtrips() {
-    let vocab = Vocab::new_with_exact_token_ids(
-        vec![(0, b"x".to_vec()), (1, b"y".to_vec())],
-        [2, 77],
-    );
+    let vocab = Vocab::new(vec![(0, b"x".to_vec()), (1, b"y".to_vec())]).with_special_tokens([2, 77]);
     let mut open = Module::new(&Grammar::from_glrm(
         r#"glrm 1; start start; extern token CONTROL; nt start = "x" CONTROL "y";"#,
     ));
     open.precompile(&vocab).unwrap();
     let mut loaded_open = Module::load(&open.save(), Some(&vocab)).unwrap();
-    loaded_open.bind("CONTROL", Token::new(2)).unwrap();
+    loaded_open.bind("CONTROL", TokenSet::from(2)).unwrap();
     let constraint = loaded_open.compile(&vocab).unwrap();
 
     let mut state = constraint.start();
@@ -285,7 +282,7 @@ fn focused_1_bind_atomicity_on_error() {
     let before_unbound: Vec<_> = m.externs().unbound().iter().map(|e| e.name().to_string()).collect();
 
     // 1. Error: unknown extern
-    assert!(m.bind("nonexistent", Token::new(7)).is_err());
+    assert!(m.bind("nonexistent", TokenSet::from(7)).is_err());
     assert_eq!(m.save(), before_save);
     assert_eq!(
         m.externs().unbound().iter().map(|e| e.name().to_string()).collect::<Vec<_>>(),
@@ -293,7 +290,7 @@ fn focused_1_bind_atomicity_on_error() {
     );
 
     // 2. Error: qualified path
-    assert!(m.bind("child::sub", Token::new(7)).is_err());
+    assert!(m.bind("child::sub", TokenSet::from(7)).is_err());
     assert_eq!(m.save(), before_save);
 
     // 3. Error: open child
@@ -312,14 +309,14 @@ fn focused_2_rebinding_error() {
     let child = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
     m.bind("child", child).unwrap();
 
-    let err = m.bind("child", Token::new(7)).unwrap_err().to_string();
+    let err = m.bind("child", TokenSet::from(7)).unwrap_err().to_string();
     assert!(err.contains("already bound"), "expected 'already bound', got: {err}");
 }
 
 #[test]
 fn focused_3_qualified_path_rejection() {
     let mut m = Module::new(&Grammar::from_glrm(HOST));
-    let err = m.bind("a::b", Token::new(1)).unwrap_err().to_string();
+    let err = m.bind("a::b", TokenSet::from(1)).unwrap_err().to_string();
     assert!(err.contains("qualified paths are not supported"), "{err}");
 }
 
@@ -365,7 +362,7 @@ fn focused_5_externs_get_iter_order_len_unbound() {
     assert_eq!(externs.unbound().len(), 3);
 
     // bind one
-    m.bind("b", Token::new(7)).unwrap();
+    m.bind("b", TokenSet::from(7)).unwrap();
     let externs2 = m.externs();
     assert_eq!(externs2.len(), 3);
     assert_eq!(externs2.unbound().len(), 2);
@@ -514,7 +511,7 @@ fn focused_10_expr_empty_choice_one_part_literal_token_leaf() {
     assert!(allowed(&c_lit.start().mask(), 1));
 
     // 4. Token leaf matches exact token ID
-    let tok_leaf = Expr::from(Token::new(7));
+    let tok_leaf = Expr::from(TokenSet::from(7));
     let mut m_tok = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
     m_tok.bind("E", tok_leaf).unwrap();
     let c_tok = m_tok.compile(&v).unwrap();

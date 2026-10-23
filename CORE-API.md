@@ -44,7 +44,7 @@ impl CompileOptions {
 
 // Module binding value wrapper
 pub struct Binding { /* private fields */ }
-// Infallible From impls: Module, &Module, Grammar<'_>, &Grammar<'_>, Expr, &Expr, Token, &Token, ExactTokens, &ExactTokens
+// Infallible From impls: Module, &Module, Grammar<'_>, &Grammar<'_>, Expr, &Expr, TokenSet, &TokenSet, u32
 
 impl Module {
     pub fn new(grammar: &Grammar<'_>) -> Self;
@@ -93,7 +93,7 @@ impl Expr {
     pub fn sequence(items: impl IntoIterator<Item = impl Into<Expr>>) -> Self;
     pub fn literal(bytes: impl AsRef<[u8]>) -> Self;
 }
-// From impls into Expr: Grammar<'_>, &Grammar<'_>, Module, &Module, Token, &Token, ExactTokens, &ExactTokens, &Expr
+// From impls into Expr: Grammar<'_>, &Grammar<'_>, Module, &Module, TokenSet, &TokenSet, u32, &Expr
 ```
 
 ## Rules and semantics
@@ -115,7 +115,7 @@ impl Expr {
 - `compile` takes `&self` and never modifies `self` or passed objects. It errors if any extern is unbound.
 
 ### Expr
-- Parts: `Grammar`, `Module`, `Expr`, `Token`, `ExactTokens`. Plain strings are rejected; use `Expr::literal`.
+- Parts: `Grammar`, `Module`, `Expr`, `TokenSet`. Plain strings are rejected; use `Expr::literal`.
 - `Expr::literal` matches exact bytes without whitespace or ignore inserted between parts.
 - Empty choice matches nothing; one-part choice simplifies to that part. Empty sequence matches epsilon.
 - Open parts with unbound externs are rejected at `bind`.
@@ -128,7 +128,7 @@ impl Expr {
 
 ### Removals
 - `PreparedGrammar`, `link()`, and `requirements` (use `Module`, `compile()`, and `externs()` / `unbound()`).
-- `Grammar.bind` (Grammar is source-only) and `Grammar.exact` (pass `Token` or `ExactTokens` directly).
+- `Grammar.bind` (Grammar is source-only) and `Grammar.exact` (pass a `TokenSet` directly).
 - `BoundaryTriggerDetail` (replaced by `BoundaryMaskStrategy`).
 - `Optimization` (replaced by `MaskStrategy`).
 - Python `clone()` (replaced by `copy()`).

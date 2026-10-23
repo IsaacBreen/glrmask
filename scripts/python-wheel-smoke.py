@@ -110,11 +110,11 @@ sys.modules["llama_cpp"] = fake_llama_cpp
 
 llama_vocab = glrmask.Vocab.from_llama_cpp(fake_llm)
 assert llama_vocab.llama_cpp_end_token_ids == [3, 5]
-assert glrmask.Token(2).id == 2  # control token: exact-only, no byte route
+assert glrmask.TokenSet([2]) == glrmask.TokenSet([2])  # control token: no byte route
 control_module = glrmask.Module(glrmask.Grammar.from_glrm(
     'glrm 1; start start; extern token CONTROL; nt start = CONTROL;'
 ))
-assert control_module.bind("CONTROL", glrmask.Token(2)) is None
+assert control_module.bind("CONTROL", glrmask.TokenSet([2])) is None
 control_constraint = control_module.compile(llama_vocab)
 assert control_constraint.start().mask(6).tolist() == [False, False, True, False, False, False]
 

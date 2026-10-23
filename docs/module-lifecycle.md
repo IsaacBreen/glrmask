@@ -78,7 +78,7 @@ let constraint = restored.compile(vocab)?;
 ```
 
 The vocabulary is supplied once per root compilation operation, not once per
-child. Saved work records its original token-ID/byte mapping and exact-only
+child. Saved work records its original token-ID/byte mapping and special-token
 event domain. An incompatible vocabulary is an error; matching decoded
 spellings alone are not sufficient. A cold child may still require the full
 vocabulary even when its parent has already been precompiled.
@@ -128,7 +128,7 @@ than silently discarding information. Source-only expressions support
 An empty sequence denotes epsilon. Empty choice is rejected when materializing
 an expression as source or a module. Unknown or duplicate bindings, including
 duplicate qualified paths, are errors. General grammars cannot fill atomic token
-slots; exact-token events can fill grammar-valued slots without becoming decoded
+slots; a token set can fill a grammar-valued slot without becoming decoded
 text.
 
 ## Diagnostics and execution

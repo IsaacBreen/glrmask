@@ -418,10 +418,10 @@ pub(crate) fn compile_glrm_with_protected_shift_terminals(
 }
 
 fn first_external_placeholder_token_id(vocab: &crate::Vocab) -> crate::Result<u32> {
-    if let Some(next) = vocab.max_exact_token_id().and_then(|id| id.checked_add(1)) {
+    if let Some(next) = vocab.max_event_token_id().and_then(|id| id.checked_add(1)) {
         return Ok(next);
     }
-    vocab.next_available_exact_token_id(0).ok_or_else(|| crate::GlrMaskError::Compilation(
+    vocab.next_available_token_id(0).ok_or_else(|| crate::GlrMaskError::Compilation(
         "every u32 token ID is occupied; no external-subgrammar placeholder is available".into()))
 }
 
@@ -432,7 +432,7 @@ pub(crate) fn external_placeholder_token_id_avoiding(
     let reserved = reserved.into_iter().collect::<BTreeSet<_>>();
     let mut candidate = first_external_placeholder_token_id(vocab)?;
     loop {
-        candidate = vocab.next_available_exact_token_id(candidate).ok_or_else(||
+        candidate = vocab.next_available_token_id(candidate).ok_or_else(||
             crate::GlrMaskError::Compilation("no external-subgrammar placeholder is available".into()))?;
         if !reserved.contains(&candidate) { return Ok(candidate); }
         candidate = candidate.checked_add(1).ok_or_else(|| {
@@ -2223,8 +2223,8 @@ mod tests {
         )
         .err()
         .expect("programmatic JSON schema values must be unsupported");
-        match error {
-            crate::GlrMaskError::Compilation(message) => assert!(
+        match error.kind() {
+            crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),
@@ -2238,8 +2238,8 @@ mod tests {
         )
         .err()
         .expect("dynamic-value JSON schema must be unsupported");
-        match error {
-            crate::GlrMaskError::Compilation(message) => assert!(
+        match error.kind() {
+            crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),
@@ -2254,8 +2254,8 @@ mod tests {
         )
         .err()
         .expect("dynamic-value JSON schema with end tokens must be unsupported");
-        match error {
-            crate::GlrMaskError::Compilation(message) => assert!(
+        match error.kind() {
+            crate::ErrorKind::Compilation(message) => assert!(
                 message.contains("programmatic JSON schema values are unsupported"),
                 "unexpected message: {message}",
             ),

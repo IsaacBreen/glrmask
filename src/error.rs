@@ -20,7 +20,17 @@ pub(crate) fn catch_template_attempt<T>(f: impl FnOnce() -> Result<T>) -> Result
 ///
 /// Source coordinates are included when the frontend can locate them.
 #[derive(ThisError, Debug, Clone)]
-pub enum Error {
+#[error("{kind}")]
+#[non_exhaustive]
+pub struct Error {
+    kind: ErrorKind,
+    span: Option<glrmask_grammar::SourceSpan>,
+}
+
+/// The kind of a [`Error`].
+#[derive(ThisError, Debug, Clone)]
+#[non_exhaustive]
+pub enum ErrorKind {
     /// The grammar source could not be parsed.
     #[error("Grammar parse error: {0}")]
     GrammarParse(String),
@@ -45,56 +55,102 @@ pub enum Error {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
-    /// An error located in the original source.
-    #[error("{error} at {span}")]
-    SourceAt { error: Box<Error>, span: glrmask_grammar::SourceSpan },
-
     /// A token or byte commit was rejected by the sequence state.
     #[error("Constraint state error: {0}")]
     State(String),
 }
 
+#[allow(non_snake_case)]
 impl Error {
+    /// The grammar source could not be parsed.
+    pub(crate) fn GrammarParse(message: String) -> Self {
+        Self::new(ErrorKind::GrammarParse(message))
+    }
+
+    /// The grammar could not be compiled.
+    ///
+    /// Public only so integration tests and examples can implement
+    /// `ParserCompiler`; not part of the supported API surface.
+    #[doc(hidden)]
+    pub fn Compilation(message: String) -> Self {
+        Self::new(ErrorKind::Compilation(message))
+    }
+
+    /// An internal compiler invariant was violated, which indicates a bug.
+    pub(crate) fn InternalInvariant(message: String) -> Self {
+        Self::new(ErrorKind::InternalInvariant(message))
+    }
+
+    /// A build exceeded a resource budget.
+    pub(crate) fn ResourceLimit(message: String) -> Self {
+        Self::new(ErrorKind::ResourceLimit(message))
+    }
+
+    /// The requested strategy cannot represent this grammar exactly.
+    pub(crate) fn StrategyUnsupported(message: String) -> Self {
+        Self::new(ErrorKind::StrategyUnsupported(message))
+    }
+
+    /// An artifact could not be serialized or loaded.
+    pub(crate) fn Serialization(message: String) -> Self {
+        Self::new(ErrorKind::Serialization(message))
+    }
+
+    /// A token or byte commit was rejected by the sequence state.
+    pub(crate) fn State(message: String) -> Self {
+        Self::new(ErrorKind::State(message))
+    }
+
+    fn new(kind: ErrorKind) -> Self {
+        Self { kind, span: None }
+    }
+
+    /// The failure kind.
+    pub fn kind(&self) -> &ErrorKind {
+        &self.kind
+    }
+
     /// Original source coordinates when the frontend can identify them exactly.
     pub fn source_span(&self) -> Option<glrmask_grammar::SourceSpan> {
-        match self { Self::SourceAt { span, .. } => Some(*span), _ => None }
+        self.span
     }
-    pub(crate) fn with_source_span(self, span: Option<glrmask_grammar::SourceSpan>) -> Self {
-        if self.source_span().is_some() { return self; }
-        match span { Some(span) => Self::SourceAt { error: Box::new(self), span }, None => self }
+
+    pub(crate) fn with_source_span(mut self, span: Option<glrmask_grammar::SourceSpan>) -> Self {
+        if self.span.is_none() {
+            self.span = span;
+        }
+        self
     }
 
     /// A template strategy declined deterministically. Public entry points
     /// return this error unchanged, or attempt the opt-in terminal-ended
     /// rescue when it is explicitly enabled.
     pub(crate) fn is_strategy_decline(&self) -> bool {
-        match self {
-            Self::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => false,
-            Self::ResourceLimit(_) | Self::StrategyUnsupported(_) => true,
-            Self::SourceAt { error, .. } => error.is_strategy_decline(),
+        match &self.kind {
+            ErrorKind::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => false,
+            ErrorKind::ResourceLimit(_) | ErrorKind::StrategyUnsupported(_) => true,
             _ => false,
         }
     }
 
     pub(crate) fn decline_stage(&self) -> &'static str {
-        match self {
-            Self::ResourceLimit(message) if message.starts_with("glr_table_lr1") => "glr_table_lr1",
-            Self::ResourceLimit(message) if message.starts_with("glr_table_collapse") => "glr_table_collapse",
-            Self::ResourceLimit(message) if message.starts_with("glr_table") => "glr_table",
-            Self::ResourceLimit(message) if message.starts_with("o2_quotient_materialize") => "o2_quotient_materialize",
-            Self::ResourceLimit(message) if message.starts_with("runtime_tokenizer_join") => "runtime_tokenizer_join",
-            Self::ResourceLimit(message) if message.starts_with("split_terminal_dwa_wall") => "split_terminal_dwa_wall",
-            Self::ResourceLimit(message) if message.starts_with("template_determinization") => "template_determinization",
-            Self::ResourceLimit(message) if message.starts_with("template_specialization") => "template_specialization",
-            Self::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
-            Self::ResourceLimit(message) if message.starts_with("single_use_inlining") => "single_use_inlining",
-            Self::ResourceLimit(message) if message.starts_with("bound_reduction_length") => "bound_reduction_length",
-            Self::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => "boundary_parser_dwa",
-            Self::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
-            Self::ResourceLimit(_) => "template",
-            Self::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",
-            Self::StrategyUnsupported(_) => "template",
-            Self::SourceAt { error, .. } => error.decline_stage(),
+        match &self.kind {
+            ErrorKind::ResourceLimit(message) if message.starts_with("glr_table_lr1") => "glr_table_lr1",
+            ErrorKind::ResourceLimit(message) if message.starts_with("glr_table_collapse") => "glr_table_collapse",
+            ErrorKind::ResourceLimit(message) if message.starts_with("glr_table") => "glr_table",
+            ErrorKind::ResourceLimit(message) if message.starts_with("o2_quotient_materialize") => "o2_quotient_materialize",
+            ErrorKind::ResourceLimit(message) if message.starts_with("runtime_tokenizer_join") => "runtime_tokenizer_join",
+            ErrorKind::ResourceLimit(message) if message.starts_with("split_terminal_dwa_wall") => "split_terminal_dwa_wall",
+            ErrorKind::ResourceLimit(message) if message.starts_with("template_determinization") => "template_determinization",
+            ErrorKind::ResourceLimit(message) if message.starts_with("template_specialization") => "template_specialization",
+            ErrorKind::ResourceLimit(message) if message.starts_with("grammar_normalization") => "grammar_normalization",
+            ErrorKind::ResourceLimit(message) if message.starts_with("single_use_inlining") => "single_use_inlining",
+            ErrorKind::ResourceLimit(message) if message.starts_with("bound_reduction_length") => "bound_reduction_length",
+            ErrorKind::ResourceLimit(message) if message.starts_with("boundary_parser_dwa:") => "boundary_parser_dwa",
+            ErrorKind::ResourceLimit(message) if message.starts_with("parser_dwa") => "parser_dwa",
+            ErrorKind::ResourceLimit(_) => "template",
+            ErrorKind::StrategyUnsupported(message) if message.contains("right-recursive cycle") => "glr_table",
+            ErrorKind::StrategyUnsupported(_) => "template",
             _ => "template",
         }
     }
@@ -119,7 +175,9 @@ impl From<glrmask_grammar::Error> for Error {
     fn from(error: glrmask_grammar::Error) -> Self {
         match error {
             glrmask_grammar::Error::GrammarParse(message) => Self::GrammarParse(message),
-            glrmask_grammar::Error::GrammarParseAt{message,span} => Self::GrammarParse(message).with_source_span(Some(span)),
+            glrmask_grammar::Error::GrammarParseAt { message, span } => {
+                Self::GrammarParse(message).with_source_span(Some(span))
+            }
         }
     }
 }
@@ -129,12 +187,6 @@ impl From<glrmask_weighted_automata::Error> for Error {
         match error {
             glrmask_weighted_automata::Error::Compilation(message) => Self::Compilation(message),
         }
-    }
-}
-
-impl From<glrmask_vocab::ExactTokenError> for Error {
-    fn from(error: glrmask_vocab::ExactTokenError) -> Self {
-        Self::Compilation(error.to_string())
     }
 }
 
@@ -152,7 +204,7 @@ mod tests {
         })
         .expect_err("the internal invariant payload must cross the Rayon boundary");
 
-        assert!(matches!(error, Error::InternalInvariant(_)));
+        assert!(matches!(error.kind(), ErrorKind::InternalInvariant(_)));
         assert_eq!(
             error.to_string(),
             "Internal compiler invariant violated: analysis coordinate escaped its domain"
@@ -183,7 +235,7 @@ mod resource_limit_tests {
                 || 1,
             );
         }).expect_err("resource-limit signal must cross the Rayon boundary");
-        assert!(matches!(error, Error::ResourceLimit(_)));
+        assert!(matches!(error.kind(), ErrorKind::ResourceLimit(_)));
         assert_eq!(error.to_string(), "Resource limit exceeded: projected L1 state budget");
         assert_eq!(catch_internal_invariant(|| 42).unwrap(), 42);
     }

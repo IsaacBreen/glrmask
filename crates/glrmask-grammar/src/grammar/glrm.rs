@@ -911,9 +911,9 @@ pub struct GlrmWithExternalSubgrammars {
 ///
 /// Token values can fill either kind; a general grammar cannot fill a token
 /// slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalKind {
-    /// A token-level slot, bound to tokens or exact token sets.
+    /// A token-level slot, bound to a token set.
     Token,
     /// A grammar-level slot, bound to a grammar.
     Grammar,

@@ -3,7 +3,7 @@
 //! The small Apply implementations let the *same source* measure both the old
 //! return-new bind contract and the mutable contract. They compile to assignment
 //! for the old API and to a no-op for the new API; no runtime version detection.
-use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, Token, Vocab};
+use glrmask::{BuildOptions, Grammar, MaskStrategy, PreparedGrammar, TokenSet, Vocab};
 use rayon::prelude::*;
 use serde_json::json;
 use std::{error::Error, hint::black_box, time::Instant};
@@ -25,11 +25,11 @@ fn source(slots: usize) -> Grammar {
 }
 
 fn bind_source(g: &mut Grammar, name: &str, id: u32) -> glrmask::Result<()> {
-    g.bind(name, Token::new(id))?.apply(g);
+    g.bind(name, TokenSet::from(id))?.apply(g);
     Ok(())
 }
 fn bind_prepared(g: &mut PreparedGrammar, name: &str, id: u32) -> glrmask::Result<()> {
-    g.bind(name, Token::new(id))?.apply(g);
+    g.bind(name, TokenSet::from(id))?.apply(g);
     Ok(())
 }
 

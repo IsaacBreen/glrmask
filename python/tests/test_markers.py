@@ -14,7 +14,7 @@ def test_cold_canonical_forcing_is_silent_across_exact_events_and_markers(mode):
         'extern token EVENT start root '
         'nt root=@mark(1) EVENT @mark(2) "a" @mark(3);'
     ))
-    grammar.bind("EVENT", v.tokens([10]))
+    grammar.bind("EVENT", glrmask.TokenSet([10]))
     compiled = grammar.compile(v, mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
@@ -147,7 +147,7 @@ def test_empty_spelling_special_events_do_not_become_marker_tokens(mode):
     grammar = glrmask.Module(glrmask.Grammar.from_glrm(
         'glrm 1; start root; extern token EVENT; nt root = @mark(0) EVENT @mark(1) "a" @mark(2);'
     ))
-    assert grammar.bind("EVENT", v.tokens([10])) is None
+    assert grammar.bind("EVENT", glrmask.TokenSet([10])) is None
     c = grammar.compile(v, mask_strategy=mode)
     s = c.start(); assert events(s) == [(0, 0)]
     assert s.mask()[10]

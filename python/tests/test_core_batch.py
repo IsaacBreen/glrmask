@@ -21,16 +21,16 @@ def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
     grammar = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
     alias = grammar
     untouched = grammar.copy()
-    assert grammar.bind("M", glrmask.Token(17)) is None
+    assert grammar.bind("M", glrmask.TokenSet([17])) is None
     assert list(alias.externs.unbound) == []
     assert list(untouched.externs.unbound) == ["M"]
-    for name, value in [("M", glrmask.Token(29)), ("absent", glrmask.Token(17))]:
+    for name, value in [("M", glrmask.TokenSet([29])), ("absent", glrmask.TokenSet([17]))]:
         with pytest.raises(ValueError):
             grammar.bind(name, value)
         assert list(grammar.externs.unbound) == []
     for method in [lambda x: x.copy(), copy.copy, copy.deepcopy]:
         fork = method(untouched)
-        assert fork.bind("M", glrmask.Token(29)) is None
+        assert fork.bind("M", glrmask.TokenSet([29])) is None
         assert list(untouched.externs.unbound) == ["M"]
         assert np.flatnonzero(fork.compile(v).start().mask()).tolist() == [29]
 
@@ -38,9 +38,9 @@ def test_bind_is_single_item_mutation_and_each_failure_is_atomic():
 def test_child_and_sibling_snapshots_survive_later_edits():
     v = vocab()
     child_17 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
-    child_17.bind("M", glrmask.Token(17))
+    child_17.bind("M", glrmask.TokenSet([17]))
     child_29 = glrmask.Module(glrmask.Grammar.from_glrm('extern token M start r nt r=M'))
-    child_29.bind("M", glrmask.Token(29))
+    child_29.bind("M", glrmask.TokenSet([29]))
 
     parent = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar L extern grammar R start r nt r=L R'))
     parent.precompile(v)
@@ -63,7 +63,7 @@ def test_child_and_sibling_snapshots_survive_later_edits():
 @pytest.mark.parametrize("mode", MODES)
 def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
     v = vocab()
-    for value in [glrmask.Token(17), v.tokens([17, 29])]:
+    for value in [glrmask.TokenSet([17]), glrmask.TokenSet([17, 29])]:
         m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
         m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
         m2.precompile(v, mask_strategy=mode)
@@ -104,7 +104,7 @@ def test_independent_parallel_mutation_keeps_shared_template_open():
     def specialize(index):
         request = template.copy()
         token = 17 if index % 2 == 0 else 29
-        request.bind("M", glrmask.Token(token))
+        request.bind("M", glrmask.TokenSet([token]))
         compiled = request.compile(v, end_tokens=None)
         return compiled.start().forced_tokens(), token
 
@@ -121,6 +121,6 @@ def test_incremental_many_bindings_and_requirements_preserve_all_snapshots():
     original = g.copy()
     assert len(g.externs.unbound) == size
     for i in range(size):
-        assert g.bind(f"E{i}", glrmask.Token(17)) is None
+        assert g.bind(f"E{i}", glrmask.TokenSet([17])) is None
     assert len(g.externs.unbound) == 0
     assert len(original.externs.unbound) == size

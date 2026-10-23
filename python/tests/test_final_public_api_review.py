@@ -31,7 +31,7 @@ def _bound_snapshot(source, name, value):
 
 
 def test_public_types_exist_without_exposing_backend_selection():
-    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "Token", "ExactTokens", "MaskStrategy", "BoundaryMaskStrategy"]:
+    for name in ["Grammar", "Module", "Constraint", "ConstraintState", "Vocab", "TokenSet", "MaskStrategy", "BoundaryMaskStrategy"]:
         assert hasattr(glrmask, name), name
     for name in ["AUTO", "FAST_BUILD", "FAST_RUNTIME", "PARSER_DWA", "TOKEN_TRIE", "TOKEN_CLASS_TRIE"]:
         assert hasattr(glrmask.MaskStrategy, name), name
@@ -78,18 +78,18 @@ def test_module_save_load_remains_open_and_immutable():
 
 
 def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
-    value = vocab().tokens([63, 7])
+    value = glrmask.TokenSet([63, 7])
     gc.collect()
     v = vocab()
-    assert list(value.ids) == [7, 63]
+    assert repr(value) == "TokenSet[7..=7, 63..=63]"
     c = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", value).compile(v)
     mask = c.start().mask()
     assert mask[7] and mask[63]
     assert not mask[1]  # Same bytes as token 7, not the same token ID.
     with pytest.raises((ValueError, RuntimeError)):
-        _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.Token(126)).compile(v)
-    empty = v.tokens([])
-    assert len(empty) == 0 and empty.ids == [] and empty.ranges == []
+        _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.TokenSet([126])).compile(v)
+    empty = glrmask.TokenSet([])
+    assert empty == glrmask.TokenSet.from_ranges([])
     for mode in [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]:
         m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
@@ -97,8 +97,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.forced_tokens() == [] and state.forced_tokens() == []
-    with pytest.raises((ValueError, RuntimeError)):
-        v.tokens([7, 7])
+    assert glrmask.TokenSet([7, 7]) == glrmask.TokenSet([7])
 
 
 def test_nested_path_and_open_child_are_rejected():
@@ -108,8 +107,8 @@ def test_nested_path_and_open_child_are_rejected():
     with pytest.raises(ValueError, match="unbound externs"):
         parent.bind("child", child)
     with pytest.raises(ValueError, match="qualified paths"):
-        parent.bind("child::MARK", glrmask.Token(7))
-    child.bind("MARK", glrmask.Token(7))
+        parent.bind("child::MARK", glrmask.TokenSet([7]))
+    child.bind("MARK", glrmask.TokenSet([7]))
     parent.bind("child", child)
     c = parent.compile(v)
     state = c.start()
@@ -124,7 +123,7 @@ def test_nested_path_and_open_child_are_rejected():
 def test_precompiled_module_with_precompiled_child():
     v = vocab()
     child = glrmask.Module(glrmask.Grammar.from_glrm(MARK))
-    child.bind("MARK", glrmask.Token(7))
+    child.bind("MARK", glrmask.TokenSet([7]))
     child.precompile(v)
     parent = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent.precompile(v)
@@ -151,17 +150,17 @@ def test_token_membership_is_checked_against_target_without_identity_guarantees(
     v = vocab()
     different = dict(TOKENS)
     different[7] = b"changed"
-    desc = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.Token(7))
+    desc = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", glrmask.TokenSet([7]))
     for target in [v, vocab(different)]:
         mask = desc.compile(target).start().mask()
         assert mask[7] and not mask[1]
     with pytest.raises(ValueError):
-        _bound_snapshot(desc, "missing", glrmask.Token(7))
+        _bound_snapshot(desc, "missing", glrmask.TokenSet([7]))
 
 
 def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
     v = vocab()
-    c = _bound_snapshot(glrmask.Module(glrmask.Grammar.from_glrm(MARK)), "MARK", v.tokens([7, 63, 127])).compile(v)
+    c = _bound_snapshot(glrmask.Module(glrmask.Grammar.from_glrm(MARK)), "MARK", glrmask.TokenSet([7, 63, 127])).compile(v)
     state = c.start()
     words = np.full(6, -1, dtype=np.int32)
     state.fill_mask(words)

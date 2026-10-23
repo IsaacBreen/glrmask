@@ -6,7 +6,7 @@
 use std::hint::black_box;
 use std::ops::RangeInclusive;
 use std::time::{Duration, Instant};
-use glrmask::{BuildOptions, Grammar, MaskStrategy, Vocab};
+use glrmask::{BuildOptions, Grammar, MaskStrategy, TokenSet, Vocab};
 use serde_json::{json, Value};
 
 const SOURCE: &str = "glrm 1; start start; extern token T; nt start = T;";
@@ -49,26 +49,26 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrate
     // Fresh vocabulary for every case. Input-vector allocation and validation
     // index construction are INCLUDED, not shifted before this timer.
     let (vocab, vocab_ns) = timed(|| match kind {
-        "exact_only" => Vocab::new_with_exact_token_ids(Vec::new(), 0..n),
+        "exact_only" => Vocab::new(Vec::new()).with_special_tokens(0..n),
         "byte_aliases" => Vocab::new((0..n).map(|id| (id, b"x".to_vec())).collect()),
         "empty_aliases" => Vocab::new((0..n).map(|id| (id, Vec::new())).collect()),
         _ => unreachable!(),
     });
-    let (tokens, first_set_ns) = timed(|| vocab.token_ranges(ranges.clone()));
-    let tokens = tokens?;
-    let cardinality = tokens.len();
+    let pairs = || ranges.iter().cloned();
+    let (tokens, first_set_ns) = timed(|| TokenSet::from_ranges(pairs()));
+    let cardinality = tokens.range_pairs().iter().map(|&(a, b)| (u64::from(b) - u64::from(a) + 1) as usize).sum::<usize>();
     let mut set_samples = Vec::with_capacity(200);
     for _ in 0..200 {
-        let (result, elapsed) = timed(|| vocab.token_ranges(ranges.clone()));
-        black_box(result?);
+        let (result, elapsed) = timed(|| TokenSet::from_ranges(pairs()));
+        black_box(result);
         set_samples.push(elapsed);
     }
     // The explicit-ID alternative includes iterating the IDs, allocation,
     // sorting/validation and compression. It is not a historical library build.
     let mut explicit_samples = Vec::with_capacity(5);
     for _ in 0..5 {
-        let (result, elapsed) = timed(|| vocab.tokens(ranges.iter().cloned().flatten()));
-        black_box(result?);
+        let (result, elapsed) = timed(|| TokenSet::new(ranges.iter().cloned().flatten()));
+        black_box(result);
         explicit_samples.push(elapsed);
     }
     let options = BuildOptions::default().optimization(mode);
@@ -120,7 +120,7 @@ fn run_case(n: u32, repetitions: usize, kind: &str, name: &str, mode: MaskStrate
     }
     Ok(json!({"vocab_size": n, "vocab_kind": kind, "selection": name,
         "optimization": format!("{mode:?}"), "selected_tokens": cardinality,
-        "normalized_ranges": tokens.ranges().len(), "mask_words": mask.len(),
+        "normalized_ranges": tokens.range_pairs().len(), "mask_words": mask.len(),
         "vocab_prepare_ns": vocab_ns, "first_set_construct_ns": first_set_ns,
         "compact_set_construct": summary(&set_samples),
         "explicit_id_set_construct": summary(&explicit_samples),
@@ -147,8 +147,8 @@ fn run_two_event_sanity(n: u32, repetitions: usize, mode: MaskStrategy, mixed: b
         if mixed {
             Ok(Grammar::from_glrm(
                 "glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | \"x\");",
-            ).bind_snapshot("A", vocab.token_ranges([0..=n - 1])?)?
-                .bind_snapshot("B", vocab.token_ranges([0..=n - 2])?)?)
+            ).bind_snapshot("A", TokenSet::from_ranges([0..=n - 1]))?
+                .bind_snapshot("B", TokenSet::from_ranges([0..=n - 2]))?)
         } else {
             Ok(Grammar::from_glrm("glrm 1; start start; nt start = \"x\" \"x\";"))
         }

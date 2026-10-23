@@ -32,7 +32,7 @@ benchmark for independent requests.
 Rust callers can choose an executor and CPU budget for independent construction:
 
 ```rust
-use glrmask::{BuildOptions, Constraint, Optimization, PreparedGrammar, Token};
+use glrmask::{BuildOptions, Constraint, Optimization, PreparedGrammar};
 use rayon::prelude::*;
 
 fn instantiate_many(
@@ -44,7 +44,7 @@ fn instantiate_many(
     Ok(pool.install(|| {
         markers.par_iter().map(|&id| {
             let mut request = template.clone();
-            request.bind("MARK", Token::new(id))?;
+            request.bind("MARK", glrmask::TokenSet::from(id))?;
             request.link_with(BuildOptions::default().optimization(Optimization::FastBuild))
         }).collect::<glrmask::Result<Vec<_>>>()
     })?)

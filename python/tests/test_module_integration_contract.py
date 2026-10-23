@@ -56,7 +56,7 @@ def test_one_event_widens_to_grammar_slot_but_not_the_reverse():
     grammar_slot = glrmask.Module(glrmask.Grammar.from_glrm(
         "glrm 1; start s; extern grammar EVENT; nt s=EVENT;"
     ))
-    grammar_slot.bind("EVENT", v.tokens([5]))
+    grammar_slot.bind("EVENT", glrmask.TokenSet([5]))
     state = glrmask.Module.load(grammar_slot.save(), vocab=v).compile(v).start()
     assert state.mask()[5]
     state.commit_token(5)

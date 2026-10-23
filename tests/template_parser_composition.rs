@@ -1,5 +1,5 @@
 use std::collections::BTreeSet;
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, ParserBackend, TokenSet, Vocab};
 
 const HOST: &str = r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#;
 
@@ -430,8 +430,8 @@ fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
     tokens.extend([(600, b"special".to_vec()), (601, vec![]), (602, b"special".to_vec()), (700, vec![])]);
     let vocab = Vocab::new(tokens);
     let child = Grammar::from_glrm(r#"extern token SPECIAL extern token EMPTY start root nt root = SPECIAL "a" | EMPTY "b""#)
-        .bind_snapshot("SPECIAL",vocab.tokens([600]).unwrap()).unwrap()
-        .bind_snapshot("EMPTY",vocab.tokens([601]).unwrap()).unwrap()
+        .bind_snapshot("SPECIAL",TokenSet::new([600])).unwrap()
+        .bind_snapshot("EMPTY",TokenSet::new([601])).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
     let parent = Grammar::from_glrm(HOST).prepare(&vocab).unwrap();
     let result = parent.bind_snapshot("child", &child).unwrap().link_with(BuildOptions::default()

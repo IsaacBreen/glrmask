@@ -11,9 +11,12 @@ fn compile_native_dynamic_fixture(grammar: Grammar, vocab: &Vocab) -> glrmask::R
 
 fn assert_lr_composition_rejected<T>(result: glrmask::Result<T>) {
     match result {
-        Err(glrmask::Error::Compilation(message)) => assert!(
-            message.contains("LR-backed components") ||
-            message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}"),
+        Err(error) if matches!(error.kind(), glrmask::ErrorKind::Compilation(_)) => {
+            let glrmask::ErrorKind::Compilation(message) = error.kind() else { unreachable!() };
+            assert!(
+                message.contains("LR-backed components") ||
+                message.contains("FastBuild/LR composition requires homogeneous retained-LR components"), "{message}");
+        }
         Err(error) => panic!("unexpected composition error: {error}"),
         Ok(_) => panic!("LR-backed composition unexpectedly succeeded"),
     }
@@ -114,7 +117,7 @@ fn named_external_token_is_exact_not_a_byte_language() {
 
 #[test]
 fn byte_less_decoder_ids_are_valid_and_multiple_ids_are_interchangeable() {
-    let vocab = Vocab::new_with_exact_token_ids(Vec::new(), [100,101]);
+    let vocab = Vocab::new(Vec::new()).with_special_tokens([100,101]);
     let source = "glrm 1; start start; extern token SPECIAL; nt start = SPECIAL;";
     let spec = ConstraintSpec::builder(Grammar::glrm(source), &vocab)
         .unwrap()
@@ -164,8 +167,8 @@ nt start = CONTROL payload;
         .build().unwrap();
     assert!(narrow.compile().unwrap_err().to_string().contains("requires a grammar"));
     let mut widened = Grammar::from_glrm(source);
-    widened.bind("CONTROL", glrmask::Token::new(7)).unwrap();
-    widened.bind("payload", glrmask::Token::new(7)).unwrap();
+    widened.bind("CONTROL", glrmask::TokenSet::from(7)).unwrap();
+    widened.bind("payload", glrmask::TokenSet::from(7)).unwrap();
     for mode in [glrmask::MaskStrategy::Auto, glrmask::MaskStrategy::TokenTrie,
                  glrmask::MaskStrategy::TokenClassTrie, glrmask::MaskStrategy::ParserDwa] {
         let constraint = widened.compile_with_build_options(
@@ -677,7 +680,7 @@ fn grammar_source_bindings_can_nest_and_mix_with_constraintspec_token_bindings()
         .build()
         .unwrap();
     assert_lr_composition_rejected(spec.compile_dynamic());
-    let constraint = parent.bind_snapshot("MARK", glrmask::Token::new(7)).unwrap()
+    let constraint = parent.bind_snapshot("MARK", glrmask::TokenSet::from(7)).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     let mut state = constraint.start();
     state.commit_token(7).unwrap();

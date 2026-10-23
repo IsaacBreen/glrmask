@@ -185,14 +185,11 @@ fn extract_expr_part(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Expr> {
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
         return Ok(e.inner.clone());
     }
-    if let Ok(t) = value.extract::<PyRef<'_, PyToken>>() {
-        return Ok(glrmask::Expr::from(t.inner));
-    }
-    if let Ok(et) = value.extract::<PyRef<'_, PyExactTokens>>() {
+    if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Expr::from(et.inner.clone()));
     }
     Err(PyTypeError::new_err(
-        "Expr parts must be Grammar, Module, Expr, Token, or ExactTokens",
+        "Expr parts must be Grammar, Module, Expr, or TokenSet",
     ))
 }
 
@@ -294,14 +291,11 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     if let Ok(e) = value.extract::<PyRef<'_, PyExpr>>() {
         return Ok(glrmask::Binding::from(e.inner.clone()));
     }
-    if let Ok(t) = value.extract::<PyRef<'_, PyToken>>() {
-        return Ok(glrmask::Binding::from(t.inner));
-    }
-    if let Ok(et) = value.extract::<PyRef<'_, PyExactTokens>>() {
+    if let Ok(et) = value.extract::<PyRef<'_, PyTokenSet>>() {
         return Ok(glrmask::Binding::from(et.inner.clone()));
     }
     Err(PyTypeError::new_err(
-        "Module.bind accepts Grammar, Module, Expr, Token, or ExactTokens",
+        "Module.bind accepts Grammar, Module, Expr, or TokenSet",
     ))
 }
 

@@ -9,8 +9,7 @@ pub struct Expr(pub(crate) Arc<ExprNode>);
 #[derive(Debug, Clone)]
 pub(crate) enum ExprLeaf {
     Module(Module),
-    Token(Token),
-    ExactTokens(ExactTokens),
+    TokenSet(TokenSet),
 }
 
 #[derive(Debug, Clone)]
@@ -44,24 +43,19 @@ impl From<&Grammar> for Expr {
         Expr::from(Module::new(g))
     }
 }
-impl From<Token> for Expr {
-    fn from(t: Token) -> Self {
-        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Token(t))))
+impl From<TokenSet> for Expr {
+    fn from(t: TokenSet) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::TokenSet(t))))
     }
 }
-impl From<&Token> for Expr {
-    fn from(t: &Token) -> Self {
-        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::Token(*t))))
+impl From<&TokenSet> for Expr {
+    fn from(t: &TokenSet) -> Self {
+        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::TokenSet(t.clone()))))
     }
 }
-impl From<ExactTokens> for Expr {
-    fn from(t: ExactTokens) -> Self {
-        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::ExactTokens(t))))
-    }
-}
-impl From<&ExactTokens> for Expr {
-    fn from(t: &ExactTokens) -> Self {
-        Expr(Arc::new(ExprNode::Leaf(ExprLeaf::ExactTokens(t.clone()))))
+impl From<u32> for Expr {
+    fn from(id: u32) -> Self {
+        Expr::from(TokenSet::from(id))
     }
 }
 
@@ -106,8 +100,7 @@ impl Expr {
                     let name = format!("leaf{}", leaves.len());
                     let (kind, binding) = match leaf {
                         ExprLeaf::Module(m) => (ExternalKind::Grammar, Binding::from(m.clone())),
-                        ExprLeaf::Token(t) => (ExternalKind::Token, Binding::from(*t)),
-                        ExprLeaf::ExactTokens(t) => (ExternalKind::Token, Binding::from(t.clone())),
+                        ExprLeaf::TokenSet(t) => (ExternalKind::Token, Binding::from(t.clone())),
                     };
                     externs.push((name.clone(), kind));
                     leaves.push((name.clone(), binding));

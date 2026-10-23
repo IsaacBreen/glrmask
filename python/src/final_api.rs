@@ -2,7 +2,7 @@
 mod canonical;
 use super::{PyConstraint, PyVocab};
 use glrmask::__private::ConstraintExt as _;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyDict, PyModule};
 use std::sync::Arc;
@@ -116,47 +116,65 @@ impl TryFrom<glrmask::ParserBackend> for PyParserBackend {
     }
 }
 
-/// An original token ID with no vocabulary identity. Only ID membership is checked against the target vocabulary; the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
-#[pyclass(name = "Token", module = "glrmask", frozen, from_py_object)]
+/// A set of model token IDs. IDs are validated against the compile vocabulary; an empty set matches nothing.
+#[pyclass(name = "TokenSet", module = "glrmask", frozen, from_py_object)]
 #[derive(Clone)]
-pub(super) struct PyToken {
-    pub(super) inner: glrmask::Token,
+pub(super) struct PyTokenSet {
+    pub(super) inner: glrmask::TokenSet,
+}
+
+fn python_range(value: &Bound<'_, PyAny>) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
+    let range_type = value.py().import("builtins")?.getattr("range")?;
+    if !value.is_instance(&range_type)? {
+        return Err(PyTypeError::new_err("TokenSet.from_ranges expects range objects"));
+    }
+    let step: i128 = value.getattr("step")?.extract()?;
+    if step != 1 {
+        return Err(PyValueError::new_err("TokenSet.from_ranges requires ranges with step 1"));
+    }
+    let start: i128 = value.getattr("start")?.extract()?;
+    let stop: i128 = value.getattr("stop")?.extract()?;
+    if start >= stop {
+        return Ok(None);
+    }
+    let convert = |id: i128| u32::try_from(id).map_err(|_| {
+        PyValueError::new_err("TokenSet.from_ranges range contains an ID outside the u32 token-ID domain")
+    });
+    Ok(Some(convert(start)?..=convert(stop - 1)?))
 }
 
 #[pymethods]
-impl PyToken {
+impl PyTokenSet {
     #[new]
-    #[pyo3(signature = (id))]
-    fn new(id: u32) -> Self { Self { inner: glrmask::Token::new(id) } }
-
-    #[getter]
-    fn id(&self) -> u32 { self.inner.id() }
-}
-
-/// One token event chosen from a vocabulary-bound set. Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
-#[pyclass(name = "ExactTokens", module = "glrmask", frozen, from_py_object)]
-#[derive(Clone)]
-pub(super) struct PyExactTokens {
-    pub(super) inner: glrmask::ExactTokens,
-}
-
-#[pymethods]
-impl PyExactTokens {
-    /// Sorted IDs, materialized on access. Prefer `ranges` for large sets.
-    #[getter]
-    fn ids(&self) -> Vec<u32> { self.inner.ids().to_vec() }
-
-    /// Normalized, disjoint Python ranges with exclusive stops; does not expand the IDs.
-    #[getter]
-    fn ranges(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
-        let range_type = py.import("builtins")?.getattr("range")?;
-        self.inner.ranges().map(|range| {
-            range_type.call1((*range.start(), u64::from(*range.end()) + 1)).map(Bound::unbind)
-        }).collect()
+    #[pyo3(signature = (ids))]
+    fn new(ids: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let ids = ids
+            .try_iter()?
+            .map(|item| item?.extract::<u32>())
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self {
+            inner: glrmask::TokenSet::new(ids),
+        })
     }
 
-    /// Number of IDs, rather than ranges.
-    fn __len__(&self) -> usize { self.inner.len() }
+    /// Creates a set from Python ranges with step 1 and exclusive stops; overlapping or adjacent ranges merge, and an empty or reversed range contributes nothing.
+    #[staticmethod]
+    fn from_ranges(ranges: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let ranges = ranges
+            .try_iter()?
+            .map(|item| python_range(&item?))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(Self { inner: glrmask::TokenSet::from_ranges(ranges.into_iter().flatten()) })
+    }
+
+    /// The normalized ranges, for example `TokenSet[0..=9, 20..=29]`.
+    fn __repr__(&self) -> String {
+        format!("{:?}", self.inner)
+    }
+
+    fn __eq__(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -319,8 +337,7 @@ impl PyGrammar {
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     canonical::register(module)?;
     module.add_class::<PyGrammar>()?;
-    module.add_class::<PyToken>()?;
-    module.add_class::<PyExactTokens>()?;
+    module.add_class::<PyTokenSet>()?;
     module.add_class::<PyMaskStrategy>()?;
     module.add_class::<PyBoundaryMaskStrategy>()?;
 

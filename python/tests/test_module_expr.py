@@ -107,7 +107,7 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
     before = parent.save()
     incompatible = g.Module(source())
     incompatible.precompile(vocab(True))
-    for name, child in [('missing', source()), ('child::MARK', g.Token(8)), ('child', incompatible)]:
+    for name, child in [('missing', source()), ('child::MARK', g.TokenSet([8])), ('child', incompatible)]:
         with pytest.raises(ValueError):
             parent.bind(name, child)
         assert parent.save() == before
@@ -121,7 +121,7 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
     with pytest.raises(ValueError):
         token_parent.bind('MARK', source())
     assert list(token_parent.externs.unbound) == ['MARK']
-    token_parent.bind('MARK', g.Token(62))
+    token_parent.bind('MARK', g.TokenSet([62]))
     with pytest.raises(ValueError):
         token_parent.compile(v)
 
@@ -169,7 +169,7 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
         with pytest.raises(ValueError):
             g.Module.load(data)
     target = g.Module(g.Grammar.from_glrm(MARK))
-    target.bind('MARK', vocab(True).tokens([8]))
+    target.bind('MARK', vocab(True)TokenSet([8]))
     with pytest.raises(ValueError):
         target.compile(v)
     accepts(parent, v, [1])
@@ -178,7 +178,7 @@ def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
 def test_expression_union_sequence_and_module_binding():
     v = vocab()
     closed_leaf = g.Module(g.Grammar.from_glrm(MARK))
-    closed_leaf.bind('MARK', g.Token(8))
+    closed_leaf.bind('MARK', g.TokenSet([8]))
     expr = g.Expr.choice(g.Expr.sequence(source('x'), closed_leaf), source('b'))
 
     parent = g.Module(g.Grammar.from_glrm('glrm 1; start start; extern grammar E; nt start = E;'))

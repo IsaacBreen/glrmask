@@ -18,7 +18,7 @@ def vocab():
 def test_atomic_kwargs_bind():
     m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
     # Valid atomic keyword bind
-    m.bind(A=glrmask.Token(1), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+    m.bind(A=glrmask.TokenSet([1]), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
     assert len(m.externs.unbound) == 0
 
     # Failed atomic keyword bind: second argument is invalid
@@ -26,7 +26,7 @@ def test_atomic_kwargs_bind():
     saved = m2.save()
     open_child = glrmask.Grammar.from_glrm("glrm 1; start s; extern token X; nt s = X;")
     with pytest.raises(ValueError, match="unbound externs"):
-        m2.bind(A=glrmask.Token(1), B=open_child)
+        m2.bind(A=glrmask.TokenSet([1]), B=open_child)
     # On error, m2 must be completely unchanged; A was not bound!
     assert m2.save() == saved
     assert "A" in m2.externs.unbound
@@ -34,7 +34,7 @@ def test_atomic_kwargs_bind():
 
     # Mixing positional and keyword arguments is a TypeError
     with pytest.raises(TypeError, match="mix"):
-        m2.bind("A", glrmask.Token(1), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
+        m2.bind("A", glrmask.TokenSet([1]), B=glrmask.Grammar.from_ebnf('start ::= "b"'))
 
     # Zero arguments is a TypeError
     with pytest.raises(TypeError):
@@ -43,9 +43,9 @@ def test_atomic_kwargs_bind():
 
 def test_rebinding_error():
     m = glrmask.Module(glrmask.Grammar.from_glrm(TWO_EXTERNS))
-    m.bind("A", glrmask.Token(1))
+    m.bind("A", glrmask.TokenSet([1]))
     with pytest.raises(ValueError, match="already bound"):
-        m.bind("A", glrmask.Token(1))
+        m.bind("A", glrmask.TokenSet([1]))
 
 
 def test_qualified_paths_rejected():
@@ -102,7 +102,7 @@ def test_externs_mapping_semantics():
     assert externs.unbound.unbound == externs.unbound
 
     # After binding A, unbound only has B, but externs still has A and B
-    m.bind("A", glrmask.Token(1))
+    m.bind("A", glrmask.TokenSet([1]))
     assert list(m.externs.unbound) == ["B"]
     assert list(m.externs) == ["A", "B"]
 
@@ -115,7 +115,7 @@ def test_copy_independence():
     method_copied = m.copy()
 
     # Binding on copy does not affect original
-    copied.bind("A", glrmask.Token(1))
+    copied.bind("A", glrmask.TokenSet([1]))
     assert "A" in m.externs.unbound
     assert "A" not in copied.externs.unbound
 

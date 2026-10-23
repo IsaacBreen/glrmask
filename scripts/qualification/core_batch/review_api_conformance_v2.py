@@ -115,7 +115,7 @@ for source in ['extern token M start root nt root=M "a"?',
     for values in [[],[0],[4],[7],[99],[0,4,7,99]]:
         for mode in modes:
             desc=g.Grammar.from_glrm(source)
-            assert desc.bind("M",v.tokens(values)) is None
+            assert desc.bind("M",g.TokenSet(values)) is None
             walk(desc.compile(v,optimization=mode,end_tokens=[130]))
 
 # Snapshot identities, aliases, save/load, strong per-bind failure semantics.

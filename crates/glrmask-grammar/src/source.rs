@@ -1,11 +1,9 @@
 //! Original UTF-8 source coordinates, independent of transformed grammar nodes.
-use serde::{Deserialize, Serialize};
-
 /// A half-open byte range in the original document, with a one-based line and
 /// column.
 ///
 /// Columns count Unicode scalars, not UTF-8 bytes; source is never normalized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceSpan {
     /// Inclusive start byte offset.
     pub start: usize,

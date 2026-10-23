@@ -234,7 +234,7 @@ fn llama_cpp_to_vocab(llm: &Bound<'_, PyAny>) -> PyResult<(glrmask::Vocab, Vec<u
     }
 
     Ok((
-        glrmask::Vocab::new_with_exact_token_ids(entries, exact_only_token_ids),
+        glrmask::Vocab::new(entries).with_special_tokens(exact_only_token_ids),
         end_token_ids,
     ))
 }
@@ -572,33 +572,6 @@ fn advance_trace_step_to_dict<'py>(
     Ok(dict)
 }
 
-/// Resolve a contiguous builtin Python range without iterating its members.
-/// A non-range or strided range returns None for the explicit-ID fallback.
-fn contiguous_exact_token_range(value: &Bound<'_, PyAny>, allow_empty:bool) -> PyResult<Option<std::ops::RangeInclusive<u32>>> {
-    let range_type = value.py().import("builtins")?.getattr("range")?;
-    if !value.is_instance(&range_type)? { return Ok(None); }
-    if !value.is_truthy()? {
-        // tokens(iterable) admits an empty iterable, even when its optimized
-        // representation is a range. token_ranges still rejects an individually
-        // empty range rather than silently erasing a malformed range member.
-        return if allow_empty {Ok(None)} else {Err(PyValueError::new_err("exact-token range must not be empty"))};
-    }
-    let step: i128 = value.getattr("step")?.extract()?;
-    if step != 1 && step != -1 { return Ok(None); }
-    let start: i128 = value.getattr("start")?.extract()?;
-    let stop: i128 = value.getattr("stop")?.extract()?;
-    let (first, last) = if step == 1 && start < stop {
-        (start, stop - 1)
-    } else if step == -1 && start > stop {
-        (stop + 1, start)
-    } else {
-        return Err(PyValueError::new_err("exact-token range must not be empty"));
-    };
-    let convert = |id| u32::try_from(id).map_err(|_| PyValueError::new_err(
-        "exact-token range contains an ID outside the u32 token-ID domain"));
-    Ok(Some(convert(first)?..=convert(last)?))
-}
-
 // ---------------------------------------------------------------------------
 // PyVocab
 // ---------------------------------------------------------------------------
@@ -613,30 +586,7 @@ pub struct PyVocab {
 
 #[pymethods]
 impl PyVocab {
-    /// Match one of the supplied IDs. Unknown or duplicate IDs are errors; empty input matches nothing. The result retains vocabulary identity, including for a singleton. Contiguous ranges remain compact; other iterables are consumed once.
-    fn tokens(&self, ids: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
-        let result = if let Some(range) = contiguous_exact_token_range(ids,true)? {
-            self.inner.token_ranges([range])
-        } else {
-            let ids = ids.try_iter()?.map(|item| item?.extract::<u32>())
-                .collect::<PyResult<Vec<_>>>()?;
-            self.inner.tokens(ids)
-        };
-        result.map(|inner| final_api::PyExactTokens { inner })
-            .map_err(|error| PyValueError::new_err(error.to_string()))
-    }
-
-    /// Union of nonempty Python ranges with step 1 or -1 and exclusive stops. Overlapping or adjacent ranges merge; unknown IDs are errors. Empty input matches nothing. Use `tokens` for arbitrary strides.
-    fn token_ranges(&self, ranges: &Bound<'_, PyAny>) -> PyResult<final_api::PyExactTokens> {
-        let ranges = ranges.try_iter()?.map(|item| {
-            contiguous_exact_token_range(&item?,false)?.ok_or_else(|| PyValueError::new_err(
-                "token_ranges expects nonempty Python ranges with step 1 or -1; use tokens for individual or strided IDs"))
-        }).collect::<PyResult<Vec<_>>>()?;
-        self.inner.token_ranges(ranges).map(|inner| final_api::PyExactTokens { inner })
-            .map_err(|error| PyValueError::new_err(error.to_string()))
-    }
-
-    /// Counts byte-backed entries; exact-only control IDs are excluded.
+    /// Number of byte-backed entries; special IDs are not counted.
     fn __len__(&self) -> usize { self.inner.len() }
 
     /// String keys are UTF-8 encoded; byte keys are used verbatim. IDs must fit an unsigned 32-bit integer.
@@ -2035,8 +1985,7 @@ fn _glrmask(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "Expr",
             "Extern",
             "Externs",
-            "Token",
-            "ExactTokens",
+            "TokenSet",
             "MaskStrategy",
             "BoundaryMaskStrategy",
             "Vocab",

@@ -1,5 +1,5 @@
 //! Public-consumer lifecycle tests: no internal-api shortcuts or private field access.
-use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, Token, Vocab};
+use glrmask::{BoundaryMaskStrategy, CompileOptions, Expr, Grammar, MaskStrategy, Module, TokenSet, Vocab};
 
 fn vocab() -> Vocab {
     Vocab::new(vec![
@@ -75,7 +75,7 @@ fn open_child_and_qualified_paths_are_strictly_rejected() {
     assert!(err.contains("unbound externs"), "must reject open child: {err}");
     assert!(err.contains("VALUE"), "must list unbound externs: {err}");
 
-    let err_qual = parent.bind("CHILD::VALUE", Token::new(5)).unwrap_err().to_string();
+    let err_qual = parent.bind("CHILD::VALUE", TokenSet::from(5)).unwrap_err().to_string();
     assert!(err_qual.contains("qualified paths are not supported"), "must reject '::': {err_qual}");
 }
 

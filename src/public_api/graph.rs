@@ -312,7 +312,7 @@ mod snapshot_tests {
         let original=g.clone();
         for i in 0..256 {
             assert_eq!(g.requirements().unwrap(),source_index(&g).unwrap().requirements().unwrap());
-            g.bind(format!("E{i}"),Token::new(7)).unwrap();
+            g.bind(format!("E{i}"),TokenSet::from(7)).unwrap();
             assert_eq!(source_summary(&g).unwrap().closed(),i==255);
         }
         assert!(g.requirements().unwrap().is_empty());
@@ -323,7 +323,7 @@ mod snapshot_tests {
         let child=Grammar::from_glrm("extern token MARK start root nt root=MARK");
         let mut p=Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT");
         p.bind("LEFT",&child).unwrap();p.bind("RIGHT",&child).unwrap();
-        let old=p.clone();p.bind("LEFT::MARK",Token::new(17)).unwrap();
+        let old=p.clone();p.bind("LEFT::MARK",TokenSet::from(17)).unwrap();
         assert_eq!(p.requirements().unwrap().iter().map(Requirement::name).collect::<Vec<_>>(),["RIGHT::MARK"]);
         assert_eq!(p.requirements().unwrap(),source_index(&p).unwrap().requirements().unwrap());
         assert_eq!(old.requirements().unwrap().len(),2);assert_eq!(child.requirements().unwrap().len(),1);

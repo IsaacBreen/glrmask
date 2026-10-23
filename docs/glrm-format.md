@@ -92,7 +92,7 @@ This subtraction acts on one regular terminal expression before unrelated
 terminals are combined. It does not globally change lexer policy or commit a
 context-free rule to its first completion. Operands may use regular terminal
 helpers, literals, regexes and regular algebra, but not parser-rule references,
-grammar calls or exact-token events. If `L` accepts epsilon, its prefix-minimal
+grammar calls or token-set events. If `L` accepts epsilon, its prefix-minimal
 language is exactly epsilon; that remains invalid as an ignored terminal. Other
 terminals retain maximal-munch semantics.
 
@@ -157,7 +157,7 @@ Inline grammars own their names, start and ignore settings. Parent declarations
 do not enter a child's lexical scope.
 
 `extern token MARK` consumes one original model-token ID selected by a host-bound
-`Token` or `ExactTokens` value. `extern grammar PAYLOAD` invokes an independent
+`TokenSet` value. `extern grammar PAYLOAD` invokes an independent
 recognition fragment. Bind externs through a `Module`:
 
 ```python
@@ -166,7 +166,7 @@ parent.bind("PAYLOAD", glrmask.Grammar.from_ebnf('start ::= "data"'))
 constraint = parent.compile(vocab)
 ```
 
-Bindings accept `Grammar`, `Module`, `Expr`, `Token`, or `ExactTokens`, subject to
+Bindings accept `Grammar`, `Module`, `Expr`, `TokenSet`, or a single token ID, subject to
 the extern's kind. A child must have all its own externs bound before attachment.
 Each extern binds once; qualified descendant paths such as `child::MARK` are
 unsupported. Attaching a module captures its bindings and settings, so later

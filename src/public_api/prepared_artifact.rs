@@ -15,6 +15,30 @@ struct Definition {
     #[serde(deserialize_with="artifact_limits::items")]
     exact_only_token_ids: Vec<u32>,
 }
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+enum SlotKind { Token, Grammar, LegacyGeneric }
+impl From<ExternalKind> for SlotKind {
+    fn from(kind: ExternalKind) -> Self {
+        match kind { ExternalKind::Token => Self::Token, ExternalKind::Grammar => Self::Grammar, ExternalKind::LegacyGeneric => Self::LegacyGeneric }
+    }
+}
+impl From<SlotKind> for ExternalKind {
+    fn from(kind: SlotKind) -> Self {
+        match kind { SlotKind::Token => Self::Token, SlotKind::Grammar => Self::Grammar, SlotKind::LegacyGeneric => Self::LegacyGeneric }
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy)]
+struct Span { start: usize, end: usize, line: usize, column: usize }
+impl From<glrmask_grammar::SourceSpan> for Span {
+    fn from(span: glrmask_grammar::SourceSpan) -> Self {
+        Self { start: span.start, end: span.end, line: span.line, column: span.column }
+    }
+}
+impl From<Span> for glrmask_grammar::SourceSpan {
+    fn from(span: Span) -> Self {
+        Self { start: span.start, end: span.end, line: span.line, column: span.column }
+    }
+}
 #[derive(serde::Serialize, serde::Deserialize)]
 enum Binding {
     Prepared(u32),
@@ -24,8 +48,8 @@ enum Binding {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Instance {
     definition: u32,
-    slot_kinds: BTreeMap<String, ExternalKind>,
-    slot_spans: BTreeMap<String, glrmask_grammar::SourceSpan>,
+    slot_kinds: BTreeMap<String, SlotKind>,
+    slot_spans: BTreeMap<String, Span>,
     boundary_trigger: u8,
     #[serde(deserialize_with="artifact_limits::items")]
     bindings: Vec<(String, Binding)>,
@@ -63,7 +87,7 @@ fn preflight(manifest: &Manifest) -> Result<()> {
         for (name, binding) in &instance.bindings {
             let kind = instance.slot_kinds.get(name).ok_or_else(||error("unknown prepared binding"))?;
             if !names.insert(name) { return Err(error("duplicate prepared binding")); }
-            check_binding_kind(name,*kind,!matches!(binding,Binding::Events(_))).map_err(|e|error(e.to_string()))?;
+            check_binding_kind(name,(*kind).into(),!matches!(binding,Binding::Events(_))).map_err(|e|error(e.to_string()))?;
             match binding {
                 Binding::Prepared(child) => {
                     let child = *child as usize;
@@ -107,7 +131,7 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
             bytes: body.len() as u64,
             runnable,
             exact_only_token_ids: if runnable { Vec::new() }
-                else { constraint_vocab(value).exact_only_token_ids().collect() },
+                else { constraint_vocab(value).special_token_ids().collect() },
         });
         bodies.push(body); ids.insert(key, id); id
     };
@@ -120,14 +144,15 @@ pub(super) fn save(root: &PreparedGrammar) -> Vec<u8> {
             let value = match value {
                 ModuleBinding::Module(child) => Binding::Prepared(instance_ids[&(graph::prepared_identity(child))]),
                 ModuleBinding::Constraint(child) => Binding::Runnable(definition(child, true)),
-                ModuleBinding::ExactTokens(ids) => Binding::Events(ids.to_vec()),
+                ModuleBinding::TokenSet(ids) => Binding::Events(ids.to_vec()),
             };
             (name.clone(), value)
         }).collect();
         instance_ids.insert(*id, instances.len() as u32);
         instances.push(Instance {
             definition: body,
-            slot_kinds: module.slot_kinds.as_ref().clone(), slot_spans: module.slot_spans.as_ref().clone(),
+            slot_kinds: module.slot_kinds.iter().map(|(name, &kind)| (name.clone(), kind.into())).collect(),
+            slot_spans: module.slot_spans.iter().map(|(name, &span)| (name.clone(), span.into())).collect(),
             boundary_trigger: match module.boundary_trigger {
                 BoundaryTriggerDetail::None => 0, BoundaryTriggerDetail::TokenSet => 1, BoundaryTriggerDetail::Exact => 2,
             },
@@ -183,9 +208,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
                 }
                 previous=Some(id);
             }
-            let retained=Vocab::new_with_exact_token_ids(
-                inner.token_bytes_iter().map(|(id,bytes)|(id,bytes.to_vec())).collect(),
-                definition.exact_only_token_ids.iter().copied());
+            let retained=Vocab::new(inner.token_bytes_iter().map(|(id,bytes)|(id,bytes.to_vec())).collect()).with_special_tokens(definition.exact_only_token_ids.iter().copied());
             if supplied.is_some_and(|vocab|!retained.same_model_vocab(vocab)) {
                 return Err(error("prepared artifact targets an incompatible vocabulary"));
             }
@@ -218,15 +241,17 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<PreparedGram
                     if definition>=definitions.len() || !manifest.definitions[definition].runnable { return Err(error("invalid runnable definition reference")); }
                     ModuleBinding::Constraint(definitions[definition].clone())
                 }
-                Binding::Events(ranges) => ModuleBinding::ExactTokens(event_caches[def].leaf(&ranges)?),
+                Binding::Events(ranges) => ModuleBinding::TokenSet(event_caches[def].leaf(&ranges)?),
             };
             bindings.insert(name,value);
         }
         if height>graph::MAX_DEPTH { return Err(error("prepared attachment depth exceeds 64")); }
         let boundary_trigger=match instance.boundary_trigger {0=>BoundaryTriggerDetail::None,1=>BoundaryTriggerDetail::TokenSet,
             2=>BoundaryTriggerDetail::Exact,_=>return Err(error("invalid prepared boundary-trigger policy"))};
+        let slot_kinds = instance.slot_kinds.into_iter().map(|(name, kind)| (name, kind.into())).collect();
+        let slot_spans = instance.slot_spans.into_iter().map(|(name, span)| (name, span.into())).collect();
         instances.push(Arc::new(PreparedGrammar {inner:definitions[def].clone(),bindings,boundary_trigger,
-            slot_kinds:Arc::new(instance.slot_kinds),slot_spans:Arc::new(instance.slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone()}));
+            slot_kinds:Arc::new(slot_kinds),slot_spans:Arc::new(slot_spans),analysis:graph::empty_cache(),event_adapters:event_caches[def].clone()}));
         heights.push(height);edges.push(children);
     }
     let mut reached=vec![false;instances.len()];let mut pending=vec![instances.len()-1];
@@ -263,7 +288,7 @@ mod tests {
             |m|{let last=m.instances.len() as u32-1;m.instances.last_mut().unwrap().bindings[0].1=Binding::Prepared(last);},
             |m|m.instances.last_mut().unwrap().bindings.push(("CHILD".into(),Binding::Prepared(0))),
             |m|m.instances.last_mut().unwrap().bindings[0].0="UNKNOWN".into(),
-            |m|{m.instances.last_mut().unwrap().slot_kinds.insert("CHILD".into(),ExternalKind::Token);},
+            |m|{m.instances.last_mut().unwrap().slot_kinds.insert("CHILD".into(),SlotKind::Token);},
             |m|m.instances.last_mut().unwrap().boundary_trigger=255,
             |m|m.instances.last_mut().unwrap().definition=u32::MAX,
             |m|m.instances.last_mut().unwrap().bindings.clear(),

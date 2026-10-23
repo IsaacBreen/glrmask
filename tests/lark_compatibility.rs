@@ -1,4 +1,4 @@
-use glrmask::{BuildOptions,CompileOptions,Constraint,Grammar,MaskStrategy,Module,PreparedGrammar,Token,Vocab};
+use glrmask::{BuildOptions,CompileOptions,Constraint,Grammar,MaskStrategy,Module,PreparedGrammar,TokenSet,Vocab};
 const MODES:[MaskStrategy;4]=[MaskStrategy::Auto,MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa];
 fn allowed(mask:&[u32],id:u32)->bool{mask.get(id as usize/32).is_some_and(|w|w&(1<<(id%32))!=0)}
 fn accepts(c:&Constraint,ids:&[u32])->bool {let mut s=c.start();for &id in ids {if !allowed(&s.mask(),id) || s.commit_token(id).is_err(){return false;}}s.is_accepting()}
@@ -6,7 +6,7 @@ fn words(words:&[&str])->Vocab{Vocab::new(words.iter().enumerate().map(|(i,w)|(i
 fn lark(source:&str)->Grammar{Grammar::from_lark(source)}
 #[test]
 fn numeric_sets_complements_and_wildcards_use_actual_id_domain() {
-    let v=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])],[5,7]);
+    let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"a".to_vec()),(3,vec![])]).with_special_tokens([5,7]);
     for (source,expected) in [("start: <[1,3,5-5]>",vec![1,3,5]),("start: <[^0,3]>",vec![1,5,7]),("start: <[*]>",vec![0,1,3,5,7])]{
         for mode in MODES{
             let c=lark(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([10])).unwrap();
@@ -31,7 +31,7 @@ fn empty_event_set_is_not_epsilon() {
 }
 #[test]
 fn named_tokens_are_token_externs_and_preserve_alias_identity() {
-    let v=Vocab::new_with_exact_token_ids(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())],[4]);
+    let v=Vocab::new(vec![(0,b"<|end|>".to_vec()),(1,b"<|end|>".to_vec())]).with_special_tokens([4]);
     let g=lark("start: <|end|>");
     assert!(g.compile(&v).is_err());
     let externs=g.externs();
@@ -39,7 +39,7 @@ fn named_tokens_are_token_externs_and_preserve_alias_identity() {
     assert_eq!(externs.get("end").unwrap().kind(),glrmask::ExternKind::Token);
     for mode in MODES {
         let mut m=Module::new(&g);
-        m.bind("end",v.tokens([1,4]).unwrap()).unwrap();
+        m.bind("end",TokenSet::new([1,4])).unwrap();
         let c=m.compile_with(&v,CompileOptions::default().mask_strategy(mode)).unwrap();
         assert!(!allowed(&c.start().mask(),0));assert!(allowed(&c.start().mask(),1));assert!(allowed(&c.start().mask(),4));
     }
@@ -49,7 +49,7 @@ fn imported_grammars_share_binding_api_and_do_not_collide_with_rules() {
     let v=words(&["x","y","xy"]);
     let g=lark("start: payload @payload\npayload: \"x\"");
     assert_eq!(g.requirements().unwrap()[0].name(),"payload");
-    let widened=g.bind_snapshot("payload",Token::new(0)).unwrap();
+    let widened=g.bind_snapshot("payload",TokenSet::from(0)).unwrap();
     for mode in MODES {
         let c=widened.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         assert!(accepts(&c,&[0,0]));assert!(!accepts(&c,&[2]));

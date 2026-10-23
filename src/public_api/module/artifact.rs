@@ -7,16 +7,7 @@ const MAGIC: &[u8; 8] = b"GLRASM02";
 const MAX_BYTES: u64 = 1 << 30;
 
 #[derive(Serialize, Deserialize)]
-struct Vocabulary {
-    #[serde(deserialize_with = "artifact_limits::items")]
-    entries: Vec<(u32, Vec<u8>)>,
-    #[serde(deserialize_with = "artifact_limits::items")]
-    exact_only: Vec<u32>,
-}
-
-#[derive(Serialize, Deserialize)]
 struct Exact {
-    target: u32,
     #[serde(deserialize_with = "artifact_limits::items")]
     ranges: Vec<(u32, u32)>,
 }
@@ -27,14 +18,12 @@ enum Source {
     Glrm(String),
     Json(String),
     Lark(String),
-    Token(u32),
     Exact(Exact),
 }
 
 #[derive(Serialize, Deserialize)]
 enum Value {
     Module(u32),
-    Token(u32),
     Exact(Exact),
 }
 
@@ -60,8 +49,6 @@ struct Preparation {
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     #[serde(deserialize_with = "artifact_limits::nodes")]
-    vocabs: Vec<Vocabulary>,
-    #[serde(deserialize_with = "artifact_limits::nodes")]
     sources: Vec<Source>,
     #[serde(deserialize_with = "artifact_limits::nodes")]
     prepared: Vec<Preparation>,
@@ -70,15 +57,6 @@ struct Manifest {
 }
 
 fn err(message: impl Into<String>) -> Error { Error::Serialization(message.into()) }
-
-fn engine_to_u8(s: MaskStrategy) -> u8 {
-    match s {
-        MaskStrategy::Auto => 0,
-        MaskStrategy::ParserDwa => 1,
-        MaskStrategy::TokenTrie => 2,
-        MaskStrategy::TokenClassTrie => 3,
-    }
-}
 
 fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
     match n {
@@ -90,20 +68,12 @@ fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
     }
 }
 
-fn vocab_id(vocab: &Vocab, vocabs: &mut Vec<Vocab>) -> u32 {
-    if let Some(id) = vocabs.iter().position(|v| v.same_model_vocab(vocab)) { return id as u32; }
-    let id = vocabs.len() as u32;
-    vocabs.push(vocab.clone());
-    id
+fn exact(tokens: &TokenSet) -> Exact {
+    Exact { ranges: tokens.range_pairs().to_vec() }
 }
 
-fn exact(tokens: &ExactTokens, vocabs: &mut Vec<Vocab>) -> Exact {
-    Exact { target: vocab_id(tokens.target_vocab(), vocabs), ranges: tokens.range_pairs().to_vec() }
-}
-
-fn source(grammar: &Grammar, vocabs: &mut Vec<Vocab>) -> Source {
-    if let Some(t) = &grammar.exact_value { return Source::Exact(exact(t, vocabs)); }
-    if let Some(id) = grammar.exact_token_id { return Source::Token(id); }
+fn source(grammar: &Grammar) -> Source {
+    if let Some(t) = &grammar.exact_value { return Source::Exact(exact(t)); }
     match &grammar.source {
         GrammarSource::Ebnf(s) => Source::Ebnf(s.to_string()),
         GrammarSource::Glrm(s) => Source::Glrm(s.to_string()),
@@ -122,19 +92,18 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
     let mut sources = Vec::new();
     let mut prepared = Vec::new();
     let mut instances = Vec::new();
-    let mut vocabs = Vec::new();
 
     for module in modules {
         let node = &module.node;
         let source_key = Arc::as_ptr(&node.source.parsed_component) as usize;
         let source_id = *source_ids.entry(source_key).or_insert_with(|| {
             let id = sources.len() as u32;
-            sources.push(source(&node.source, &mut vocabs));
+            sources.push(source(&node.source));
             id
         });
         let mut preps = Vec::new();
         for (&engine, p) in &node.prepared {
-            let engine_u8 = engine_to_u8(engine);
+            let engine_u8 = engine;
             let prep_key = Arc::as_ptr(p) as *const () as usize;
             let prep_id = *prepared_ids.entry(prep_key).or_insert_with(|| {
                 let id = prepared.len() as u32;
@@ -155,8 +124,7 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
         let bindings = node.bindings.iter().map(|(name, value)| {
             let value = match value {
                 BoundValue::Module(m) => Value::Module(instance_ids[&(Arc::as_ptr(&m.node) as usize)]),
-                BoundValue::Token(t) => Value::Token(t.id()),
-                BoundValue::ExactTokens(t) => Value::Exact(exact(t, &mut vocabs)),
+                BoundValue::TokenSet(t) => Value::Exact(exact(t)),
             };
             (name.clone(), value)
         }).collect();
@@ -168,7 +136,6 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
         });
     }
     let manifest = Manifest {
-        vocabs: vocabs.iter().map(|v| Vocabulary { entries: v.iter().map(|(id, b)| (id, b.to_vec())).collect(), exact_only: v.exact_only_token_ids().collect() }).collect(),
         sources,
         prepared,
         instances,
@@ -181,24 +148,22 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
     bytes
 }
 
-fn decode_exact(value: Exact, vocabs: &[Vocab]) -> Result<ExactTokens> {
-    let vocab = vocabs.get(value.target as usize).ok_or_else(|| err("invalid exact-event target reference"))?;
+fn decode_exact(value: Exact) -> Result<TokenSet> {
     let mut previous = None;
     for &(a, b) in &value.ranges {
-        if a > b || previous.is_some_and(|p| u64::from(p) + 1 >= u64::from(a)) { return Err(err("unnormalized exact-event ranges")); }
+        if a > b || previous.is_some_and(|p| u64::from(p) + 1 >= u64::from(a)) { return Err(err("unnormalized token-set ranges")); }
         previous = Some(b);
     }
-    vocab.token_ranges(value.ranges.into_iter().map(|(a, b)| a..=b)).map_err(|e| err(e.to_string()))
+    Ok(TokenSet::from_ranges(value.ranges.iter().map(|&(a, b)| a..=b)))
 }
 
-fn decode_source(value: Source, vocabs: &[Vocab]) -> Result<Grammar> {
+fn decode_source(value: Source) -> Result<Grammar> {
     let source = match value {
         Source::Ebnf(s) => GrammarSource::Ebnf(Arc::from(s)),
         Source::Glrm(s) => GrammarSource::Glrm(Arc::from(s)),
         Source::Json(s) => GrammarSource::JsonSchema(Arc::from(s)),
         Source::Lark(text) => return Ok(Grammar::new(GrammarSource::Lark(Arc::from(text)))),
-        Source::Token(id) => return Ok(Grammar::exact_token(Token::new(id))),
-        Source::Exact(e) => return Ok(Grammar::from_exact_tokens(decode_exact(e, vocabs)?)),
+        Source::Exact(e) => return Ok(Grammar::from_token_set(decode_exact(e)?)),
     };
     Ok(Grammar::new(source))
 }
@@ -210,15 +175,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
     let manifest: Manifest = bincode::DefaultOptions::new().with_fixint_encoding().with_limit(size).reject_trailing_bytes()
         .deserialize(&data[16..]).map_err(|e| err(format!("invalid Module manifest: {e}")))?;
     if manifest.instances.is_empty() || manifest.instances.len() > graph::MAX_NODES || manifest.sources.is_empty()
-        || manifest.sources.len() > graph::MAX_NODES || manifest.prepared.len() > graph::MAX_NODES || manifest.vocabs.len() > graph::MAX_NODES {
+        || manifest.sources.len() > graph::MAX_NODES || manifest.prepared.len() > graph::MAX_NODES {
         return Err(err("invalid or excessive Module graph size"));
-    }
-
-    let mut used_vocabs = BTreeSet::new();
-    for source in &manifest.sources { if let Source::Exact(e) = source { used_vocabs.insert(e.target); } }
-    for node in &manifest.instances { for (_, value) in &node.bindings { if let Value::Exact(e) = value { used_vocabs.insert(e.target); } } }
-    if used_vocabs.len() != manifest.vocabs.len() || used_vocabs.iter().any(|&id| id as usize >= manifest.vocabs.len()) {
-        return Err(err("invalid or unreferenced exact-event vocabulary"));
     }
 
     let mut heights = Vec::new();
@@ -268,17 +226,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
     }
     if reached.len() != edges.len() { return Err(err("unreachable Module instances")); }
 
-    let vocabs = manifest.vocabs.into_iter().map(|v| {
-        if v.entries.windows(2).any(|p| p[0].0 >= p[1].0) || v.exact_only.windows(2).any(|p| p[0] >= p[1])
-            || v.exact_only.iter().any(|id| v.entries.binary_search_by_key(id, |e| e.0).is_ok()) {
-            return Err(err("duplicate or unordered vocabulary IDs"));
-        }
-        let vocab = Vocab::new_with_exact_token_ids(v.entries, v.exact_only);
-        if supplied.is_some_and(|v| !v.same_model_vocab(&vocab)) { return Err(err("Module exact events target a different vocabulary")); }
-        Ok(supplied.cloned().unwrap_or(vocab))
-    }).collect::<Result<Vec<_>>>()?;
-
-    let sources = manifest.sources.into_iter().map(|s| decode_source(s, &vocabs).map(Arc::new)).collect::<Result<Vec<_>>>()?;
+    let sources = manifest.sources.into_iter().map(|s| decode_source(s).map(Arc::new)).collect::<Result<Vec<_>>>()?;
     let prepared = manifest.prepared.into_iter().map(|p| {
         let mut prepared = prepared_artifact::load(&p.bytes, supplied)?;
         if let Some(mut tokens) = p.token_set {
@@ -296,14 +244,13 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
         let mut retained_map = BTreeMap::new();
         for (engine_u8, prep_id) in node.prepared {
             let engine = u8_to_engine(engine_u8)?;
-            retained_map.insert(engine, prepared[prep_id as usize].clone());
+            retained_map.insert(engine.key(), prepared[prep_id as usize].clone());
         }
         let mut bindings = OrdMap::new();
         for (name, value) in node.bindings {
             let value = match value {
                 Value::Module(i) => BoundValue::Module(instances[i as usize].clone()),
-                Value::Token(id) => BoundValue::Token(Token::new(id)),
-                Value::Exact(e) => BoundValue::ExactTokens(decode_exact(e, &vocabs)?),
+                Value::Exact(e) => BoundValue::TokenSet(decode_exact(e)?),
             };
             bindings.insert(name, value);
         }
@@ -328,7 +275,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 let mut generated = BTreeSet::new();
                 if matches!(module.node.source.source, GrammarSource::Lark(_)) {
                     for (name, _) in &module.node.source.lark_document().map_err(|e| err(e.to_string()))?.schemas {
-                        if engine != MaskStrategy::TokenTrie {
+                        if engine != MaskStrategy::TokenTrie.key() {
                             expected.insert(name.clone(), ExternalKind::Grammar);
                             generated.insert(name.clone());
                         }
@@ -340,8 +287,8 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
                 let native = p.inner.has_template_parser();
                 if native && p.inner.table.is_present() { return Err(err("native Module artifact retains physical LR storage")); }
                 if !native && !p.inner.table.is_present() { return Err(err("Module artifact has no supported parser representation")); }
-                if engine != MaskStrategy::TokenTrie && !native { return Err(err("native Module artifact contains LR runtime")); }
-                if engine == MaskStrategy::TokenTrie && !p.inner.uses_dynamic_runtime() {
+                if engine != MaskStrategy::TokenTrie.key() && !native { return Err(err("native Module artifact contains LR runtime")); }
+                if engine == MaskStrategy::TokenTrie.key() && !p.inner.uses_dynamic_runtime() {
                     return Err(err("FastBuild Module artifact contains a non-Dynamic local body"));
                 }
             }
@@ -395,20 +342,15 @@ mod tests {
         assert!(Module::load(&write(&m), None).is_err());
     }
     #[test]
-    fn exact_target_references_and_ranges_are_validated() {
-        let v = Vocab::new_with_exact_token_ids(vec![(0, b"a".to_vec())], [7]);
+    fn token_set_ranges_are_validated() {
+        let v = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([7]);
         let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
-        module.bind("mark", v.tokens([7]).unwrap()).unwrap();
+        module.bind("mark", TokenSet::from(7)).unwrap();
         let bytes = module.save();
-        let mut m = read(&bytes);
-        if let Value::Exact(e) = &mut m.instances[0].bindings[0].1 { e.target = 99; }
-        assert!(Module::load(&write(&m), None).is_err());
         let mut m = read(&bytes);
         if let Value::Exact(e) = &mut m.instances[0].bindings[0].1 { e.ranges = vec![(7, 7), (7, 7)]; }
         assert!(Module::load(&write(&m), None).is_err());
-        let mut m = read(&bytes);
-        m.vocabs[0].exact_only.push(0);
-        assert!(Module::load(&write(&m), None).is_err());
+
     }
     #[test]
     fn tiny_manifests_cannot_claim_unbounded_vector_allocations() {

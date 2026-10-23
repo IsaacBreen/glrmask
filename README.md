@@ -174,7 +174,7 @@ Rust masks are packed `u32` bitsets. Bit `token_id % 32` of word `token_id / 32`
 
 ### Composition and reusable grammars
 
-Use `extern token NAME` for a one-event exact-token contract and
+Use `extern token NAME` for a one-event token-set contract and
 `extern grammar NAME` for a general byte/event grammar fragment. Bind
 children to a `Module`. A child must have every extern bound before it is
 attached. Modules keep bindings and retained work; strategy values are supplied
@@ -188,7 +188,7 @@ let child_grammar = Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
 );
 let mut child = child_grammar.precompile(vocab)?;
-child.bind("MARK", glrmask::Token::new(marker))?;
+child.bind("MARK", marker)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
 ));
@@ -223,7 +223,7 @@ constructor.
 Exact token sets and compact ranges consume one original ID, never its decoded
 spelling. A JSON Schema is an ordinary grammar-valued child. Exact event values
 can also bind directly to grammar externs. See the [full guide](GUIDE.md),
-[native syntax](docs/glrm-format.md), and [exact-token ranges](docs/exact-token-ranges.md).
+[native syntax](docs/glrm-format.md), and [token sets](docs/exact-token-ranges.md).
 
 `Expr.choice` and `Expr.sequence` combine whole grammar, module, or token leaves
 without adding scopes at intermediate grouping operators. `Expr.literal` matches

@@ -4,29 +4,94 @@
 use std::any::{Any, TypeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::ops::{Bound, RangeBounds, RangeInclusive};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Error returned when constructing a vocabulary-qualified exact-token value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExactTokenError {
-    message: String,
+/// A set of model token IDs.
+///
+/// Stored as normalized, disjoint, ascending inclusive ranges. Membership is
+/// checked against the target vocabulary at compile, precompile or link time.
+/// An empty set matches nothing.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct TokenSet {
+    ranges: Arc<[(u32, u32)]>,
 }
 
-impl ExactTokenError {
-    fn new(message: impl Into<String>) -> Self {
+impl fmt::Debug for TokenSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TokenSet[")?;
+        for (index, &(start, end)) in self.ranges.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{start}..={end}")?;
+        }
+        f.write_str("]")
+    }
+}
+
+impl TokenSet {
+    /// Creates a set from `ids`; duplicates are ignored.
+    pub fn new(ids: impl IntoIterator<Item = u32>) -> Self {
+        Self::from_pairs(ids.into_iter().map(|id| (id, id)))
+    }
+
+    /// Creates a set from inclusive or exclusive token-ID ranges.
+    ///
+    /// Overlapping or adjacent ranges merge. Empty or reversed ranges
+    /// contribute nothing; an unbounded start means 0 and an unbounded end
+    /// means [`u32::MAX`].
+    pub fn from_ranges<R: RangeBounds<u32>>(
+        ranges: impl IntoIterator<Item = R>,
+    ) -> Self {
+        let mut pairs = Vec::new();
+        for range in ranges {
+            let start = match range.start_bound() {
+                Bound::Included(&start) | Bound::Excluded(&start) => start,
+                Bound::Unbounded => 0,
+            };
+            let end = match range.end_bound() {
+                Bound::Included(&end) => end,
+                Bound::Excluded(&end) => match end.checked_sub(1) {
+                    Some(end) => end,
+                    None => continue,
+                },
+                Bound::Unbounded => u32::MAX,
+            };
+            if start > end {
+                continue;
+            }
+            pairs.push((start, end));
+        }
+        Self::from_pairs(pairs)
+    }
+
+    fn from_pairs(ranges: impl IntoIterator<Item = (u32, u32)>) -> Self {
         Self {
-            message: message.into(),
+            ranges: RangeSetBlaze::from_iter(
+                ranges.into_iter().map(|(start, end)| start..=end),
+            )
+            .ranges()
+            .map(|range| (*range.start(), *range.end()))
+            .collect::<Vec<_>>()
+            .into(),
         }
     }
-}
 
-impl fmt::Display for ExactTokenError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
+    /// The normalized, disjoint inclusive ranges. Internal representation.
+    #[doc(hidden)]
+    pub fn range_pairs(&self) -> &[(u32, u32)] {
+        &self.ranges
     }
 }
 
-impl std::error::Error for ExactTokenError {}
+impl From<u32> for TokenSet {
+    fn from(id: u32) -> Self {
+        Self::from_pairs([(id, id)])
+    }
+}
+
+use range_set_blaze::RangeSetBlaze;
 
 /// The model vocabulary a constraint is compiled against.
 ///
@@ -34,81 +99,15 @@ impl std::error::Error for ExactTokenError {}
 /// sparse; masks use the original model token IDs.
 pub struct Vocab {
     entries: Arc<BTreeMap<u32, Vec<u8>>>,
-    /// Model token IDs which are valid for exact-token bindings but have no
+    /// Model token IDs which are valid for token-set bindings but have no
     /// byte spelling in the grammar lexer (for example control/tool tokens).
     ///
     /// These IDs are deliberately absent from the byte entries: they must
     /// never become zero-byte alternatives in the vocabulary trie.
-    exact_only_token_ids: Arc<BTreeSet<u32>>,
+    special_token_ids: Arc<BTreeSet<u32>>,
     compiler_cache: Arc<VocabCompilerCache>,
-    exact_token_ranges: Arc<[(u32, u32)]>,
+    event_token_ranges: Arc<[(u32, u32)]>,
     max_token_byte_len: OnceLock<usize>,
-}
-
-/// An original model token ID without vocabulary identity.
-///
-/// Only ID membership is checked against the target vocabulary, so the same ID
-/// can refer to different bytes. Use [`Vocab::tokens`] for a vocabulary-bound
-/// singleton.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Token {
-    id: u32,
-}
-
-impl Token {
-    /// Creates a token event for `id`; membership is checked at compile or link.
-    pub const fn new(id: u32) -> Self { Self { id } }
-
-    /// The original model token ID.
-    pub const fn id(&self) -> u32 { self.id }
-}
-
-/// One token event chosen from a vocabulary-bound set.
-///
-/// Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even
-/// for a singleton. An empty set matches nothing.
-#[derive(Debug, Clone)]
-pub struct ExactTokens {
-    vocab: Vocab,
-    ranges: Arc<[(u32, u32)]>,
-    // Materialized only when the caller explicitly requests individual IDs.
-    ids: Arc<OnceLock<Box<[u32]>>>,
-}
-
-impl ExactTokens {
-    /// The exact model token IDs, sorted in ascending order.
-    ///
-    /// Materializes the IDs; compilation and linking use the compact ranges
-    /// instead. Use [`Self::ranges`] to inspect large sets.
-    pub fn ids(&self) -> &[u32] {
-        self.ids.get_or_init(|| self.ranges().flatten().collect())
-    }
-
-    /// The normalized, disjoint inclusive token-ID ranges.
-    pub fn ranges(&self) -> impl ExactSizeIterator<Item = std::ops::RangeInclusive<u32>> + '_ {
-        self.ranges.iter().map(|&(start, end)| start..=end)
-    }
-
-    /// Number of allowed token IDs, not the number of ranges.
-    pub fn len(&self) -> usize {
-        self.ranges.iter().map(|&(start, end)| (u64::from(end) - u64::from(start) + 1) as usize).sum()
-    }
-
-    /// Whether the set contains no token IDs.
-    pub fn is_empty(&self) -> bool { self.ranges.is_empty() }
-
-    #[doc(hidden)]
-    pub fn range_pairs(&self) -> &[(u32, u32)] { &self.ranges }
-
-    /// Complete vocabulary identity for versioned composition artifacts.
-    #[doc(hidden)]
-    pub fn target_vocab(&self) -> &Vocab { &self.vocab }
-
-    /// Whether this value belongs to exactly vocab's token-ID/byte mapping.
-    #[doc(hidden)]
-    pub fn targets(&self, vocab: &Vocab) -> bool {
-        self.vocab.same_model_vocab(vocab)
-    }
 }
 
 #[derive(Default)]
@@ -156,7 +155,7 @@ impl fmt::Debug for Vocab {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Vocab")
             .field("entries", &self.entries)
-            .field("exact_only_token_ids", &self.exact_only_token_ids)
+            .field("special_token_ids", &self.special_token_ids)
             .finish()
     }
 }
@@ -169,9 +168,9 @@ impl Clone for Vocab {
         }
         Self {
             entries: Arc::clone(&self.entries),
-            exact_only_token_ids: Arc::clone(&self.exact_only_token_ids),
+            special_token_ids: Arc::clone(&self.special_token_ids),
             compiler_cache: Arc::clone(&self.compiler_cache),
-            exact_token_ranges: Arc::clone(&self.exact_token_ranges),
+            event_token_ranges: Arc::clone(&self.event_token_ranges),
             max_token_byte_len,
         }
     }
@@ -180,128 +179,75 @@ impl Clone for Vocab {
 impl Vocab {
     /// Creates a vocabulary from `(token_id, token_bytes)` pairs.
     pub fn new(entries: Vec<(u32, Vec<u8>)>) -> Self {
-        Self::new_with_exact_token_ids(entries, std::iter::empty())
+        let entries: Arc<BTreeMap<u32, Vec<u8>>> = Arc::new(entries.into_iter().collect());
+        let max_token_byte_len = OnceLock::new();
+        let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
+        let mut vocab = Self {
+            event_token_ranges: Arc::from(Vec::new()),
+            entries,
+            special_token_ids: Arc::new(BTreeSet::new()),
+            compiler_cache: Arc::new(VocabCompilerCache::default()),
+            max_token_byte_len,
+        };
+        vocab.rebuild_event_ranges();
+        vocab
     }
 
-    /// Creates a vocabulary from byte-backed entries plus extra model token IDs
-    /// that have no byte spelling but are valid for exact-token bindings.
+    /// Adds model token IDs that have no byte spelling but are valid for
+    /// token-set bindings.
     ///
     /// This suits integrations that distinguish control or tool tokens from
     /// text tokens.
-    pub fn new_with_exact_token_ids(
-        entries: Vec<(u32, Vec<u8>)>,
-        exact_token_ids: impl IntoIterator<Item = u32>,
-    ) -> Self {
-        let entries = Arc::new(entries.into_iter().collect::<BTreeMap<_, _>>());
-        let exact_only_token_ids = Arc::new(
-            exact_token_ids
-                .into_iter()
-                .filter(|id| !entries.contains_key(id))
-                .collect::<BTreeSet<_>>(),
-        );
-        let exact_token_ranges = range_set_blaze::RangeSetBlaze::from_iter(
-            entries.keys().chain(exact_only_token_ids.iter()).copied(),
-        ).ranges().map(|range| (*range.start(), *range.end())).collect::<Vec<_>>().into();
-        let max_token_byte_len = OnceLock::new();
-        let _ = max_token_byte_len.set(entries.values().map(Vec::len).max().unwrap_or(0));
-        Self {
-            entries,
-            exact_only_token_ids,
-            compiler_cache: Arc::new(VocabCompilerCache::default()),
-            exact_token_ranges,
-            max_token_byte_len,
+    pub fn with_special_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
+        {
+            let entries = Arc::make_mut(&mut self.entries);
+            let special = Arc::make_mut(&mut self.special_token_ids);
+            for id in ids {
+                if !entries.contains_key(&id) {
+                    special.insert(id);
+                }
+            }
         }
+        self.rebuild_event_ranges();
+        self
     }
 
-    /// Creates a vocabulary-bound token event matching one of `token_ids`.
-    ///
-    /// Unknown or duplicate IDs are errors. Empty input matches nothing, not
-    /// epsilon.
-    pub fn tokens(
-        &self,
-        token_ids: impl IntoIterator<Item = u32>,
-    ) -> Result<ExactTokens, ExactTokenError> {
-        let mut ids = token_ids.into_iter().collect::<Vec<_>>();
-        ids.sort_unstable();
-        for pair in ids.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(ExactTokenError::new(format!(
-                    "exact-token binding contains duplicate token ID {}",
-                    pair[0],
-                )));
-            }
-        }
-        if let Some(&missing) = ids.iter().find(|&&id| !self.contains_exact_token_id(id)) {
-            return Err(ExactTokenError::new(format!(
-                "token ID {missing} is not present in this vocabulary",
-            )));
-        }
-        let ranges = range_set_blaze::RangeSetBlaze::from_iter(ids)
-            .ranges().map(|range| (*range.start(), *range.end())).collect::<Vec<_>>();
-        Ok(ExactTokens {
-            vocab: self.clone(),
-            ranges: ranges.into(),
-            ids: Arc::new(OnceLock::new()),
-        })
+    fn rebuild_event_ranges(&mut self) {
+        self.event_token_ranges = RangeSetBlaze::from_iter(
+            self.entries.keys().chain(self.special_token_ids.iter()).copied(),
+        )
+        .ranges()
+        .map(|range| (*range.start(), *range.end()))
+        .collect::<Vec<_>>()
+        .into();
     }
 
-    /// Creates a vocabulary-bound token event matching the union of inclusive
-    /// ID ranges.
-    ///
-    /// Overlapping or adjacent ranges merge. Reversed ranges and unknown IDs
-    /// are errors; empty input matches nothing. A match consumes one token, not
-    /// a sequence.
-    pub fn token_ranges(
-        &self,
-        ranges: impl IntoIterator<Item = std::ops::RangeInclusive<u32>>,
-    ) -> Result<ExactTokens, ExactTokenError> {
-        let mut pairs = Vec::new();
-        for range in ranges {
-            if range.is_empty() {
-                return Err(ExactTokenError::new("exact-token range must not be reversed or empty"));
-            }
-            pairs.push((*range.start(), *range.end()));
-        }
-        pairs.sort_unstable();
-        let mut normalized = Vec::<(u32, u32)>::with_capacity(pairs.len());
-        for (start, end) in pairs {
-            if let Some(previous) = normalized.last_mut()
-                && u64::from(start) <= u64::from(previous.1) + 1
-            {
-                previous.1 = previous.1.max(end);
-                continue;
-            }
-            normalized.push((start, end));
-        }
-        for &(start, end) in &normalized {
-            if !self.contains_exact_token_range(start, end) {
-                return Err(ExactTokenError::new(format!(
-                    "token range {start}..={end} contains an ID not present in this vocabulary",
-                )));
-            }
-        }
-        Ok(ExactTokens {
-            vocab: self.clone(),
-            ranges: normalized.into(),
-            ids: Arc::new(OnceLock::new()),
-        })
-    }
-
-    /// Whether every ID in the inclusive range is defined (including exact-only IDs).
+    /// The first ID in `set` that this vocabulary does not define.
     #[doc(hidden)]
-    /// All IDs that may be consumed as grammar events, including IDs without
-    /// ordinary byte spellings. This view does not include root-only controls
-    /// merely because they are present in a caller's termination policy.
-    pub fn exact_token_ranges(&self) -> impl ExactSizeIterator<Item=std::ops::RangeInclusive<u32>> + '_ {
-        self.exact_token_ranges.iter().map(|&(start,end)|start..=end)
+    pub fn first_unknown_token_id(&self, set: &TokenSet) -> Option<u32> {
+        set.range_pairs()
+            .iter()
+            .find_map(|&(start, end)| (start..=end).find(|&id| !self.contains_token_id(id)))
+    }
+
+    /// All IDs that may be consumed as grammar events, including special IDs
+    /// without ordinary byte spellings. This view does not include root-only
+    /// controls merely because they are present in a caller's termination
+    /// policy.
+    #[doc(hidden)]
+    pub fn event_token_ranges(&self) -> impl ExactSizeIterator<Item = RangeInclusive<u32>> + '_ {
+        self.event_token_ranges.iter().map(|&(start, end)| start..=end)
     }
 
     /// Whether every ID in the inclusive range `start..=end` is defined,
-    /// including exact-only IDs.
-    pub fn contains_exact_token_range(&self, start: u32, end: u32) -> bool {
-        if start > end { return false; }
-        let index = self.exact_token_ranges.partition_point(|&(lower, _)| lower <= start);
-        index > 0 && self.exact_token_ranges[index - 1].1 >= end
+    /// including special IDs.
+    #[doc(hidden)]
+    pub fn contains_token_range(&self, start: u32, end: u32) -> bool {
+        if start > end {
+            return false;
+        }
+        let index = self.event_token_ranges.partition_point(|&(lower, _)| lower <= start);
+        index > 0 && self.event_token_ranges[index - 1].1 >= end
     }
 
     /// Maximum byte length of any token in this vocabulary.
@@ -341,63 +287,69 @@ impl Vocab {
         bytes
     }
 
-    /// Number of byte-backed entries; exact-only IDs are not counted.
+    /// Number of byte-backed entries; special IDs are not counted.
+    #[doc(hidden)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// Whether there are no byte-backed entries.
+    #[doc(hidden)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// Whether this model token ID is known either as a byte-backed token or
-    /// as an exact-only token.
+    /// as a special token.
     #[doc(hidden)]
-    pub fn contains_exact_token_id(&self, token_id: u32) -> bool {
-        self.entries.contains_key(&token_id) || self.exact_only_token_ids.contains(&token_id)
+    pub fn contains_token_id(&self, token_id: u32) -> bool {
+        self.entries.contains_key(&token_id) || self.special_token_ids.contains(&token_id)
     }
 
-    /// Highest defined model ID, including exact-only IDs.
+    /// Highest defined model ID, including special IDs.
     #[doc(hidden)]
-    pub fn max_exact_token_id(&self) -> Option<u32> {
-        self.exact_token_ranges.last().map(|&(_, end)| end)
+    pub fn max_event_token_id(&self) -> Option<u32> {
+        self.event_token_ranges.last().map(|&(_, end)| end)
     }
 
     /// Find a free ID at or above `start` without scanning each occupied ID.
     #[doc(hidden)]
-    pub fn next_available_exact_token_id(&self, start: u32) -> Option<u32> {
-        let index = self.exact_token_ranges.partition_point(|&(lower, _)| lower <= start);
-        if index > 0 && self.exact_token_ranges[index - 1].1 >= start {
-            self.exact_token_ranges[index - 1].1.checked_add(1)
-        } else { Some(start) }
+    pub fn next_available_token_id(&self, start: u32) -> Option<u32> {
+        let index = self.event_token_ranges.partition_point(|&(lower, _)| lower <= start);
+        if index > 0 && self.event_token_ranges[index - 1].1 >= start {
+            self.event_token_ranges[index - 1].1.checked_add(1)
+        } else {
+            Some(start)
+        }
     }
 
     /// Whether at least one model ID intersects an inclusive range.
     #[doc(hidden)]
-    pub fn intersects_exact_token_range(&self, start: u32, end: u32) -> bool {
-        if start > end { return false; }
-        let index = self.exact_token_ranges.partition_point(|&(_, upper)| upper < start);
-        self.exact_token_ranges.get(index).is_some_and(|&(lower, _)| lower <= end)
+    pub fn intersects_token_range(&self, start: u32, end: u32) -> bool {
+        if start > end {
+            return false;
+        }
+        let index = self.event_token_ranges.partition_point(|&(_, upper)| upper < start);
+        self.event_token_ranges.get(index).is_some_and(|&(lower, _)| lower <= end)
     }
 
     /// Whether two vocabularies describe the same byte mapping and the same
-    /// exact-only token domain.
+    /// special-token domain.
     #[doc(hidden)]
     pub fn same_model_vocab(&self, other: &Vocab) -> bool {
         (Arc::ptr_eq(&self.entries, &other.entries) || self.entries == other.entries)
-            && (Arc::ptr_eq(&self.exact_only_token_ids, &other.exact_only_token_ids)
-                || self.exact_only_token_ids == other.exact_only_token_ids)
+            && (Arc::ptr_eq(&self.special_token_ids, &other.special_token_ids)
+                || self.special_token_ids == other.special_token_ids)
     }
 
-    /// Exact-only token IDs in ascending order.
+    /// Special token IDs in ascending order.
     #[doc(hidden)]
-    pub fn exact_only_token_ids(&self) -> impl ExactSizeIterator<Item = u32> + '_ {
-        self.exact_only_token_ids.iter().copied()
+    pub fn special_token_ids(&self) -> impl ExactSizeIterator<Item = u32> + '_ {
+        self.special_token_ids.iter().copied()
     }
 
-    /// The highest byte-backed token ID, or zero if none; excludes exact-only
-    /// IDs.
+    /// The highest byte-backed token ID, or zero if none; excludes special IDs.
+    #[doc(hidden)]
     pub fn max_token_id(&self) -> u32 {
         self.entries
             .last_key_value()
@@ -421,27 +373,25 @@ impl Vocab {
         }
     }
 
-    /// The exact byte spelling, or `None` for unknown and exact-only IDs.
+    /// The exact byte spelling, or `None` for unknown and special IDs.
     pub fn get(&self, token_id: u32) -> Option<&[u8]> {
         self.entries.get(&token_id).map(Vec::as_slice)
     }
 
     /// Byte-backed token IDs and their exact byte sequences, in ID order.
     ///
-    /// Exact-only IDs are omitted.
+    /// Special IDs are omitted.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &[u8])> {
         self.entries
             .iter()
             .map(|(&token_id, bytes)| (token_id, bytes.as_slice()))
     }
 
-    #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn entries_map(&self) -> &BTreeMap<u32, Vec<u8>> {
         &self.entries
     }
 
-    #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn entries_arc(&self) -> Arc<BTreeMap<u32, Vec<u8>>> {
         Arc::clone(&self.entries)
@@ -459,7 +409,6 @@ impl Vocab {
         self.vocab_derived_cache_set_internal(artifact);
     }
 
-    #[cfg(feature = "internal-api")]
     #[doc(hidden)]
     pub fn compiler_cache_entry_count(&self) -> usize {
         self.compiler_cache
@@ -503,34 +452,48 @@ mod tests {
     }
 
     #[test]
-    fn exact_tokens_validate_membership_and_duplicates() {
+    fn token_sets_are_normalized_and_validate_membership() {
         let vocab = Vocab::new(vec![(2, b"a".to_vec()), (7, b"b".to_vec())]);
-        assert_eq!(Token::new(2).id(), 2);
-        assert_eq!(vocab.tokens([7, 2]).unwrap().ids(), &[2, 7]);
-        assert_eq!(Token::new(3).id(), 3); // target membership is deferred
-        let empty = vocab.tokens([]).unwrap();
-        assert!(empty.is_empty());
-        assert_eq!(empty.len(), 0);
-        assert!(empty.ids().is_empty());
-        assert!(empty.targets(&vocab));
-        assert!(vocab.tokens([2, 2]).is_err());
+        assert_eq!(TokenSet::from(2u32).range_pairs(), &[(2, 2)]);
+        assert_eq!(TokenSet::new([7, 2, 7]).range_pairs(), &[(2, 2), (7, 7)]);
+        assert_eq!(TokenSet::new([]).range_pairs(), &[]);
+        assert_eq!(TokenSet::from_ranges([3..=5]).range_pairs(), &[(3, 5)]);
+        assert_eq!(TokenSet::from_ranges([3..6]).range_pairs(), &[(3, 5)]);
+        assert_eq!(
+            TokenSet::from_ranges([0..10, 5..13, 20..30]).range_pairs(),
+            &[(0, 12), (20, 29)],
+        );
+        assert_eq!(
+            TokenSet::from_ranges([0..=11, 10..=12, 20..=29]).range_pairs(),
+            &[(0, 12), (20, 29)],
+        );
+        // Overlapping and adjacent input round-trips to the same merged set.
+        assert_eq!(
+            TokenSet::from_ranges([0..10, 5..20, 20..30]),
+            TokenSet::from_ranges([0..30]),
+        );
+        assert_eq!(format!("{:?}", TokenSet::from_ranges([0..10, 20..30])),
+            "TokenSet[0..=9, 20..=29]");
+        assert_eq!(TokenSet::from_ranges([5..=3]).range_pairs(), &[]);
+        assert_eq!(TokenSet::from_ranges([5..5]).range_pairs(), &[]);
+        assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 7])), None);
+        assert_eq!(vocab.first_unknown_token_id(&TokenSet::new([2, 9])), Some(9));
     }
 
     #[test]
-    fn exact_only_ids_are_bindable_but_not_byte_entries() {
-        let vocab = Vocab::new_with_exact_token_ids(vec![(0, b"a".to_vec())], [77, 78]);
-        assert_eq!(Token::new(77).id(), 77);
-        assert_eq!(vocab.tokens([78, 77]).unwrap().ids(), &[77, 78]);
+    fn special_ids_are_bindable_but_not_byte_entries() {
+        let vocab = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([77, 78]);
+        assert_eq!(TokenSet::new([78, 77]).range_pairs(), &[(77, 78)]);
         assert_eq!(vocab.get(77), None);
-        assert!(vocab.contains_exact_token_id(78));
+        assert!(vocab.contains_token_id(78));
         assert_eq!(vocab.max_token_id(), 0);
 
-        let same = Vocab::new_with_exact_token_ids(vec![(0, b"a".to_vec())], [78, 77]);
+        let same = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([78, 77]);
         let missing_domain = Vocab::new(vec![(0, b"a".to_vec())]);
         assert!(vocab.same_model_vocab(&same));
         assert!(!vocab.same_model_vocab(&missing_domain));
-        assert!(same.contains_exact_token_id(Token::new(77).id()));
-        assert!(!missing_domain.contains_exact_token_id(Token::new(77).id()));
+        assert!(same.contains_token_id(77));
+        assert!(!missing_domain.contains_token_id(77));
     }
 }
 #[cfg(test)]
@@ -539,31 +502,27 @@ mod compact_token_range_tests {
 
     #[test]
     fn full_domain_ranges_do_not_materialize_ids_until_requested() {
-        let vocab = Vocab::new_with_exact_token_ids(Vec::new(), 0..131_072);
-        let tokens = vocab.token_ranges([0..=131_071]).unwrap();
+        let vocab = Vocab::new(Vec::new()).with_special_tokens(0..131_072);
+        let tokens = TokenSet::from_ranges([0..131_072]);
         let shared = tokens.clone();
         assert_eq!(tokens.range_pairs(), &[(0, 131_071)]);
-        assert_eq!(tokens.len(), 131_072);
-        assert!(tokens.ids.get().is_none());
-        assert!(shared.ids.get().is_none());
         assert!(Arc::ptr_eq(&tokens.ranges, &shared.ranges));
-        assert!(tokens.targets(&vocab));
-        assert_eq!(shared.ids().len(), 131_072);
-        assert!(std::ptr::eq(tokens.ids(), shared.ids()));
+        assert_eq!(vocab.first_unknown_token_id(&tokens), None);
     }
 
     #[test]
     fn coverage_validation_handles_gaps_and_u32_endpoint_without_expansion() {
-        let vocab = Vocab::new_with_exact_token_ids(Vec::new(), [0, 1, 3, 4, u32::MAX]);
-        assert!(vocab.token_ranges([0..=4]).is_err());
-        let selected = vocab.token_ranges([3..=4, u32::MAX..=u32::MAX, 0..=1]).unwrap();
-        assert_eq!(selected.len(), 5);
+        let vocab = Vocab::new(Vec::new()).with_special_tokens([0, 1, 3, 4, u32::MAX]);
+        assert_eq!(vocab.first_unknown_token_id(&TokenSet::from_ranges([0..=4])), Some(2));
+        let selected = TokenSet::new([3, 4, u32::MAX, 0, 1]);
         assert_eq!(selected.range_pairs(), &[(0, 1), (3, 4), (u32::MAX, u32::MAX)]);
-        assert!(selected.ids.get().is_none());
-        assert_eq!(vocab.next_available_exact_token_id(0), Some(2));
-        assert_eq!(vocab.next_available_exact_token_id(3), Some(5));
-        assert_eq!(vocab.next_available_exact_token_id(u32::MAX), None);
-        assert!(!vocab.intersects_exact_token_range(2, 2));
-        assert!(vocab.intersects_exact_token_range(2, 3));
+        assert_eq!(vocab.next_available_token_id(0), Some(2));
+        assert_eq!(vocab.next_available_token_id(3), Some(5));
+        assert_eq!(vocab.next_available_token_id(u32::MAX), None);
+        assert!(!vocab.intersects_token_range(2, 2));
+        assert!(vocab.intersects_token_range(2, 3));
+        assert!(vocab.contains_token_range(0, 1));
+        assert!(!vocab.contains_token_range(0, 2));
+        assert!(!vocab.contains_token_range(4, 3));
     }
 }

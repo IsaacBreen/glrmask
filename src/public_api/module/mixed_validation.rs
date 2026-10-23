@@ -211,7 +211,7 @@ fn compile_assembly(spec: &AssemblySpec, precompiled: &[usize], vocab: &Vocab) -
         }
         for &(slot, id) in node.tokens {
             module
-                .bind(slot, Token::new(id))
+                .bind(slot, TokenSet::from(id))
                 .unwrap_or_else(|error| panic!("{}: bind token {slot:?}: {error}", spec.name));
         }
         built[index] = Some(module);

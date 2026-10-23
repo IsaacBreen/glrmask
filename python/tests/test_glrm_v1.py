@@ -32,7 +32,7 @@ def _grammar():
 def _final_constraint():
     vocab = _vocab()
     return (
-        _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([77, 78]))
+        _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", glrmask.TokenSet([77, 78]))
         .compile(vocab)
     )
 
@@ -61,7 +61,7 @@ def test_named_external_terminal_binding_errors(bad_bindings):
     with pytest.raises((ValueError, RuntimeError, OverflowError)):
         for name, value in bad_bindings.items():
             ids = value if isinstance(value, list) else [value]
-            grammar = _bound_snapshot(grammar, name, vocab.tokens(ids))
+            grammar = _bound_snapshot(grammar, name, glrmask.TokenSet(ids))
         grammar.compile(vocab)
 
 
@@ -69,7 +69,7 @@ def test_empty_event_binding_recognizes_no_output():
     vocab = _vocab()
     for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME):
-        grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([]))
+        grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", glrmask.TokenSet([]))
         constraint = grammar.compile(vocab, mask_strategy=mode)
         state = constraint.start()
         assert not state.is_accepting()

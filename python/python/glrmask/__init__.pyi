@@ -80,41 +80,23 @@ class BoundaryMaskStrategy:
     """Alias for PARSER_DWA."""
 
 @final
-class Token:
-    """An original model token ID without vocabulary identity.
-
-    Only ID membership is checked against the target vocabulary, so the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.
-    """
-    def __init__(self, id: int) -> None:
-        """Creates a token event for `id`; membership is checked at compile."""
+class TokenSet:
+    """A set of model token IDs. IDs are validated against the compile vocabulary; an empty set matches nothing."""
+    def __init__(self, ids: Iterable[int]) -> None:
+        """Creates a set from token IDs; duplicates are ignored."""
         ...
-    @property
-    def id(self) -> int:
-        """The original model token ID."""
-        ...
+    @staticmethod
+    def from_ranges(ranges: Iterable[range]) -> TokenSet:
+        """Creates a set from Python ranges with step 1 and exclusive stops.
 
-@final
-class ExactTokens:
-    """One token event chosen from a vocabulary-bound set.
-
-    Vocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.
-    """
-    @property
-    def ids(self) -> list[int]:
-        """The exact model token IDs, sorted in ascending order.
-
-        Materializes the IDs; use `ranges` to inspect large sets.
+        Overlapping or adjacent ranges merge; an empty or reversed range contributes nothing.
         """
         ...
-    @property
-    def ranges(self) -> list[range]:
-        """The normalized, disjoint token-ID ranges.
-
-        Each `range` has an exclusive stop.
-        """
+    def __repr__(self) -> str:
+        """The normalized ranges, for example `TokenSet[0..=9, 20..=29]`."""
         ...
-    def __len__(self) -> int:
-        """Number of allowed token IDs, not the number of ranges."""
+    def __eq__(self, other: object) -> bool:
+        """Whether both sets hold the same token IDs."""
         ...
 
 @final
@@ -148,20 +130,8 @@ class Vocab:
     def llama_cpp_end_token_ids(self) -> list[int]:
         """EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling."""
         ...
-    def tokens(self, ids: Iterable[int]) -> ExactTokens:
-        """Creates a vocabulary-bound token event matching one of `ids`.
-
-        Unknown or duplicate IDs raise `ValueError`; empty input matches nothing.
-        """
-        ...
-    def token_ranges(self, ranges: Iterable[range]) -> ExactTokens:
-        """Creates a vocabulary-bound token event matching the union of `ranges`.
-
-        Ranges are nonempty Python ranges with step 1 or -1 and exclusive stops; overlapping or adjacent ranges merge. Unknown IDs raise `ValueError`; empty input matches nothing.
-        """
-        ...
     def __len__(self) -> int:
-        """Number of byte-backed entries; exact-only IDs are not counted."""
+        """Number of byte-backed entries; special IDs are not counted."""
         ...
 
 @final
@@ -212,14 +182,14 @@ class Externs(Mapping[str, Extern]):
 class Expr:
     """An immutable unordered union or concatenation of independently scoped grammars."""
     @staticmethod
-    def choice(*parts: Union[Grammar, Module, Expr, Token, ExactTokens]) -> Expr:
+    def choice(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Creates a union without ordered-choice priority.
 
         An empty choice matches nothing; open parts raise `ValueError` immediately.
         """
         ...
     @staticmethod
-    def sequence(*parts: Union[Grammar, Module, Expr, Token, ExactTokens]) -> Expr:
+    def sequence(*parts: Union[Grammar, Module, Expr, TokenSet]) -> Expr:
         """Creates a concatenation; a model token may cross any number of operand boundaries.
 
         An empty sequence is epsilon; open parts raise `ValueError` immediately.
@@ -243,14 +213,14 @@ class Module:
         """Creates a module from a source grammar."""
         ...
     @overload
-    def bind(self, name: str, value: Union[Grammar, Module, Expr, Token, ExactTokens], /) -> None:
+    def bind(self, name: str, value: Union[Grammar, Module, Expr, TokenSet], /) -> None:
         """Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.
 
         Fails if an extern is undeclared or already bound; names containing `::` are rejected.
         """
         ...
     @overload
-    def bind(self, **bindings: Union[Grammar, Module, Expr, Token, ExactTokens]) -> None:
+    def bind(self, **bindings: Union[Grammar, Module, Expr, TokenSet]) -> None:
         """Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.
 
         Fails if an extern is undeclared or already bound; names containing `::` are rejected.
@@ -431,7 +401,7 @@ class ConstraintState:
     def commit_bytes(self, data: bytes) -> None:
         """Commits raw bytes rather than a model token event.
 
-        Does not substitute for committing exact-token or end-token events.
+        Does not substitute for committing a token-set or end-token event.
         """
         ...
     def is_accepting(self) -> bool:
@@ -446,6 +416,6 @@ class ConstraintState:
     def forced_tokens(self) -> list[int]:
         """A read-only prefix of library-canonical forced output, at most 10,000 IDs.
 
-        Uses the longest admitted nonempty token spelling, then the lowest original token ID; exact-token events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.
+        Uses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.
         """
         ...

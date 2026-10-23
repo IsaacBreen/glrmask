@@ -92,7 +92,7 @@ fresh boundary at which later markers are reported.
 
 For `commit_bytes()`, offsets count the supplied bytes. For `commit_token()`,
 offsets count that token's vocabulary byte spelling, including the spelling of
-an exact-token event. An empty-spelled exact token advances no bytes. A final
+a token-set event. An empty-spelled token advances no bytes. A final
 root end token terminates generation without adding its spelling to the offset.
 Thus different zero-byte events can share a byte position; markers do not encode
 their order or multiplicity.

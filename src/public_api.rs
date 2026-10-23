@@ -14,7 +14,7 @@ use crate::compiler::constraint_compose::{
 use crate::runtime::Constraint as RuntimeConstraint;
 use crate::dynamic_constraint::DynamicConstraint;
 use crate::runtime::BoundaryTriggerDetail;
-use crate::{Error, Token, ExactTokens, Result, Vocab};
+use crate::{Error, TokenSet, Result, Vocab};
 
 mod graph;
 mod snapshot_map;
@@ -31,7 +31,7 @@ pub(crate) use stack::with_deep_stack;
 pub(crate) use stack::{DEEP_STACK_RED_ZONE, DEEP_STACK_SIZE};
 
 /// Mask computation strategy, trading build time against per-token latency.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum MaskStrategy {
     /// Automatic selection: [`MaskStrategy::ParserDwa`], or the retained
@@ -51,6 +51,15 @@ impl MaskStrategy {
     pub const FAST_BUILD: Self = Self::TokenTrie;
     /// Alias for [`MaskStrategy::ParserDwa`].
     pub const FAST_RUNTIME: Self = Self::ParserDwa;
+
+    pub(crate) fn key(self) -> u8 {
+        match self {
+            Self::Auto => 0,
+            Self::ParserDwa => 1,
+            Self::TokenTrie => 2,
+            Self::TokenClassTrie => 3,
+        }
+    }
 }
 
 /// Boundary parser selection for crossings between composed grammars.
@@ -59,7 +68,7 @@ impl MaskStrategy {
 /// (faster crossings; an over-budget build returns [`Error::ResourceLimit`]
 /// with a `boundary_parser_dwa:` message). [`BoundaryMaskStrategy::TokenTrie`]
 /// keeps the segmented dynamic boundary and builds faster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum BoundaryMaskStrategy {
     /// Automatic selection: [`BoundaryMaskStrategy::ParserDwa`], falling back
@@ -294,14 +303,13 @@ impl Requirement {
 enum ModuleBinding {
     Module(Arc<PreparedGrammar>),
     Constraint(Arc<RuntimeConstraint>),
-    ExactTokens(Arc<event_cache::ExactEvent>),
+    TokenSet(Arc<event_cache::ExactEvent>),
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum GrammarValue {
     Source(Arc<Grammar>),
-    Token(Token),
-    ExactTokens(ExactTokens),
+    TokenSet(TokenSet),
 }
 
 
@@ -315,8 +323,7 @@ pub(crate) enum UnlinkedValue<'a> {
     Prepared(Arc<PreparedGrammar>),
     StaticBorrowed(&'a RuntimeConstraint),
     StaticOwned(Arc<RuntimeConstraint>),
-    Token(Token),
-    ExactTokens(ExactTokens),
+    TokenSet(TokenSet),
 }
 
 #[doc(hidden)]
@@ -357,8 +364,7 @@ pub struct Grammar {
     declarations_cache: Arc<OnceLock<Result<GlrmExternalDeclarations>>>,
     analysis: graph::SummaryCache,
     parsed_component: Arc<OnceLock<std::result::Result<ParsedComponent, Error>>>,
-    exact_value: Option<ExactTokens>,
-    exact_token_id: Option<u32>,
+    exact_value: Option<TokenSet>,
     lark_document:Arc<OnceLock<std::result::Result<LarkDocument,Error>>>,
 }
 
@@ -449,7 +455,7 @@ impl Grammar {
     pub fn from_glrm(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Glrm(Arc::from(source.as_ref()))) }
 
     fn new(source: GrammarSource) -> Self {
-        Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, exact_token_id: None, lark_document:Arc::new(OnceLock::new()) }
+        Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, lark_document:Arc::new(OnceLock::new()) }
     }
 
     fn component(&self) -> Result<&ParsedComponent> {
@@ -479,7 +485,7 @@ impl Grammar {
         use range_set_blaze::RangeSetBlaze;
         let GrammarSource::Lark(source)=&self.source else{return Err(Error::Compilation("not a Lark description".into()));};
         let document=self.lark_document()?;
-        let domain=RangeSetBlaze::from_iter(vocab.exact_token_ranges());
+        let domain=RangeSetBlaze::from_iter(vocab.event_token_ranges());
         let mut values=std::collections::HashMap::new();
         for (name,set) in &document.events {
             // A named atom is a token extern; its binding supplies the IDs.
@@ -491,7 +497,7 @@ impl Grammar {
                 LarkTokenSet::Any=>domain.clone(),
                 LarkTokenSet::Ranges{ranges,negate}=>{
                     for &(start,end) in ranges {
-                        if !vocab.contains_exact_token_range(start,end){return Err(Error::Compilation(format!("exact token range {start}..={end} contains an ID outside the vocabulary event domain")));}
+                        if !vocab.contains_token_range(start,end){return Err(Error::Compilation(format!("token range {start}..={end} contains an ID outside the vocabulary event domain")));}
                     }
                     let selected=RangeSetBlaze::from_iter(ranges.iter().map(|&(a,b)|a..=b));
                     if *negate {&domain-&selected}else{selected}
@@ -537,20 +543,21 @@ impl Grammar {
     }
 
     fn validate_exact_target(&self, vocab:&Vocab) -> Result<()> {
-        if self.exact_token_id.is_some_and(|id|!vocab.contains_exact_token_id(id)) {
-            return Err(Error::Compilation("exact-event grammar token is absent from the target vocabulary".into()));
-        }
-        if self.exact_value.as_ref().is_some_and(|value|!value.targets(vocab)) {
-            return Err(Error::Compilation("exact-event grammar targets a different vocabulary".into()));
+        if let Some(set) = &self.exact_value
+            && let Some(id) = vocab.first_unknown_token_id(set)
+        {
+            return Err(Error::Compilation(format!(
+                "token-set grammar contains token ID {id}, which is not present in the target vocabulary",
+            )));
         }
         Ok(())
     }
 
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn exact(tokens: ExactTokens) -> Self { Self::from_exact_tokens(tokens) }
+    pub fn exact(tokens: TokenSet) -> Self { Self::from_token_set(tokens) }
 
-    pub(crate) fn from_exact_tokens(tokens: ExactTokens) -> Self {
+    pub(crate) fn from_token_set(tokens: TokenSet) -> Self {
         let exprs=tokens.range_pairs().iter().map(|&(a,b)|if a==b {
             glrmask_grammar::GrammarExpr::SpecialToken(a)
         } else {glrmask_grammar::GrammarExpr::SpecialTokenRange(a,b)}).collect::<Vec<_>>();
@@ -566,22 +573,6 @@ impl Grammar {
         grammar.exact_value=Some(tokens);grammar
     }
 
-
-    fn exact_token(token: Token) -> Self {
-        let named=glrmask_grammar::NamedGrammar {
-            start:"__exact_event".into(),
-            rules:vec![glrmask_grammar::NamedRule {
-                name:"__exact_event".into(),expr:glrmask_grammar::GrammarExpr::SpecialToken(token.id()),
-                is_terminal:false,is_internal:false,
-            }],
-            ignore:None,lexer_partitions:Default::default(),lexer_literal_partitions:Default::default(),default_lexer_partition:None,
-        };
-        let mut grammar=Self::new(GrammarSource::Constructed);
-        grammar.exact_token_id=Some(token.id());
-        let _=grammar.parsed_component.set(ParsedComponent::from_named(named,&[]).map_err(Into::into));
-        grammar
-    }
-
     /// Includes unresolved slots in attached open children. Diagnostic expansion is bounded and may return an error for very large shared graphs.
     #[cfg(any(test,feature="internal-api"))]
     #[doc(hidden)]
@@ -589,7 +580,7 @@ impl Grammar {
         graph::source_requirements(self)
     }
 
-    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, `Token` or `ExactTokens`; token slots require exact events. Attached children are snapshots. Failed binds leave this handle unchanged.
+    /// Fill a declared slot once; `::` paths require the parent to be attached first. Accepts `Grammar`, source-only `Expr`, or `TokenSet`; token slots require a token set. Attached children are snapshots. Failed binds leave this handle unchanged.
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     #[allow(private_bounds)]
@@ -642,8 +633,7 @@ impl Grammar {
         // the independently scoped child boundary, not a decoded-byte alias.
         if declared.kinds[name]==ExternalKind::Grammar {
             value=match value {
-                GrammarValue::Token(token)=>GrammarValue::Source(Arc::new(Self::exact_token(token))),
-                GrammarValue::ExactTokens(tokens)=>GrammarValue::Source(Arc::new(Self::from_exact_tokens(tokens))),
+                GrammarValue::TokenSet(tokens)=>GrammarValue::Source(Arc::new(Self::from_token_set(tokens))),
                 other=>other,
             };
         }
@@ -970,22 +960,13 @@ impl Grammar {
         let mut source_children = Vec::<(String, Arc<Grammar>)>::new();
         for (name, value) in source_bindings {
             match value {
-                GrammarValue::Token(token) => {
-                    if !vocab.contains_exact_token_id(token.id()) {
+                GrammarValue::TokenSet(tokens) => {
+                    if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} binds token ID {}, which is not present in the target vocabulary", token.id(),
+                            "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
                         )));
                     }
-                    bindings.insert(name.clone(),ModuleBinding::ExactTokens(event_adapters.leaf(&[(token.id(),token.id())])?));
-                    builder.token_bindings.insert(name, vec![(token.id(), token.id())]);
-                }
-                GrammarValue::ExactTokens(tokens) => {
-                    if !tokens.targets(vocab) {
-                        return Err(Error::Compilation(format!(
-                            "external token {name:?} was built for an incompatible vocabulary",
-                        )));
-                    }
-                    bindings.insert(name.clone(),ModuleBinding::ExactTokens(event_adapters.leaf(tokens.range_pairs())?));
+                    bindings.insert(name.clone(),ModuleBinding::TokenSet(event_adapters.leaf(tokens.range_pairs())?));
                     builder.token_bindings.insert(name, tokens.range_pairs().to_vec());
                 }
                 GrammarValue::Source(child) => {
@@ -1054,12 +1035,10 @@ impl Grammar {
                 for (name,value) in &self.bindings {
                     match value {
                         GrammarValue::Source(child)=>children.push((name.as_str(),ParsedComponent::from_named(child.resolve_dynamic_source(vocab,true)?,&[])?)),
-                        GrammarValue::Token(token)=>{
-                            if !vocab.contains_exact_token_id(token.id()){return Err(Error::Compilation(format!("unknown token ID {}",token.id())));}
-                            tokens.push((name.as_str(),vec![(token.id(),token.id())]));
-                        },
-                        GrammarValue::ExactTokens(ids)=>{
-                            if !ids.targets(vocab){return Err(Error::Compilation("exact binding targets another vocabulary".into()));}
+                        GrammarValue::TokenSet(ids)=>{
+                            if let Some(id) = vocab.first_unknown_token_id(ids) {
+                                return Err(Error::Compilation(format!("token ID {id} is not present in the target vocabulary")));
+                            }
                             tokens.push((name.as_str(),ids.range_pairs().to_vec()));
                         },
                     }
@@ -1195,15 +1174,15 @@ impl IntoGrammarValue for &Grammar {
     }
 }
 
-impl IntoGrammarValue for Token {
+impl IntoGrammarValue for TokenSet {
     fn into_grammar_value(self) -> Result<GrammarValue> {
-        Ok(GrammarValue::Token(self))
+        Ok(GrammarValue::TokenSet(self))
     }
 }
 
-impl IntoGrammarValue for ExactTokens {
+impl IntoGrammarValue for u32 {
     fn into_grammar_value(self) -> Result<GrammarValue> {
-        Ok(GrammarValue::ExactTokens(self))
+        Ok(GrammarValue::TokenSet(TokenSet::from(self)))
     }
 }
 
@@ -1246,15 +1225,15 @@ impl<'a> IntoUnlinkedValue<'a> for PreparedGrammar {
     fn into_unlinked_value(self)->UnlinkedValue<'a>{UnlinkedValue::Prepared(Arc::new(self))}
 }
 
-impl<'a> IntoUnlinkedValue<'a> for Token {
+impl<'a> IntoUnlinkedValue<'a> for TokenSet {
     fn into_unlinked_value(self) -> UnlinkedValue<'a> {
-        UnlinkedValue::Token(self)
+        UnlinkedValue::TokenSet(self)
     }
 }
 
-impl<'a> IntoUnlinkedValue<'a> for ExactTokens {
+impl<'a> IntoUnlinkedValue<'a> for u32 {
     fn into_unlinked_value(self) -> UnlinkedValue<'a> {
-        UnlinkedValue::ExactTokens(self)
+        UnlinkedValue::TokenSet(TokenSet::from(self))
     }
 }
 
@@ -1820,28 +1799,15 @@ impl<'a> ConstraintSpecBuilder<'a> {
         let mut grammar_bindings = BTreeMap::new();
         for (name, value) in source_bindings {
             match value {
-                GrammarValue::Token(token) => {
+                GrammarValue::TokenSet(tokens) => {
                     if !declared_externals.contains(&name) {
                         return Err(Error::Compilation(format!(
-                            "exact-token binding was supplied for unknown external token {name:?}",
+                            "token-set binding was supplied for unknown external token {name:?}",
                         )));
                     }
-                    if !vocab.contains_exact_token_id(token.id()) {
+                    if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                         return Err(Error::Compilation(format!(
-                            "external {name:?} binds token ID {}, which is not present in the target vocabulary", token.id(),
-                        )));
-                    }
-                    token_bindings.insert(name, vec![(token.id(), token.id())]);
-                }
-                GrammarValue::ExactTokens(tokens) => {
-                    if !declared_externals.contains(&name) {
-                        return Err(Error::Compilation(format!(
-                            "exact-token binding was supplied for unknown external token {name:?}",
-                        )));
-                    }
-                    if !tokens.targets(vocab) {
-                        return Err(Error::Compilation(format!(
-                            "external token {name:?} was built for an incompatible vocabulary",
+                            "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
                         )));
                     }
                     token_bindings.insert(name, tokens.range_pairs().to_vec());
@@ -1888,7 +1854,7 @@ impl<'a> ConstraintSpecBuilder<'a> {
         self
     }
 
-    /// Bind an `extern NAME;` declaration to exact token IDs.
+    /// Bind an `extern NAME;` declaration to token IDs.
     pub fn bind_token(
         mut self,
         name: impl AsRef<str>,
@@ -2671,16 +2637,16 @@ impl PreparedGrammar {
                     "unlinked-constraint binding {name:?} has no compiled linker slot",
                 )));
             }
-            check_binding_kind(name,self.slot_kinds[name],!matches!(binding,ModuleBinding::ExactTokens(_)))?;
+            check_binding_kind(name,self.slot_kinds[name],!matches!(binding,ModuleBinding::TokenSet(_)))?;
             match binding {
-                ModuleBinding::ExactTokens(ids) => {
+                ModuleBinding::TokenSet(ids) => {
                     let mut previous = None;
                     for &(start, end) in ids.iter() {
-                        if !vocab.contains_exact_token_range(start, end)
+                        if !vocab.contains_token_range(start, end)
                             || previous.is_some_and(|value| u64::from(value) + 1 >= u64::from(start))
                         {
                             return Err(Error::Serialization(format!(
-                                "unlinked-constraint exact-token binding {name:?} is invalid for its vocabulary",
+                                "unlinked-constraint token-set binding {name:?} is invalid for its vocabulary",
                             )));
                         }
                         previous = Some(end);
@@ -2757,23 +2723,14 @@ impl PreparedGrammar {
                 let _=graph::prepared_first(&child)?;
                 ModuleBinding::Module(child)
             }
-            UnlinkedValue::Token(token) => {
+            UnlinkedValue::TokenSet(tokens) => {
                 self.require_direct_slot(name)?;
-                if !vocab.contains_exact_token_id(token.id()) {
+                if let Some(id) = vocab.first_unknown_token_id(&tokens) {
                     return Err(Error::Compilation(format!(
-                        "external {name:?} binds token ID {}, which is not present in the target vocabulary", token.id(),
+                        "external {name:?} binds token ID {id}, which is not present in the target vocabulary",
                     )));
                 }
-                ModuleBinding::ExactTokens(self.event_adapters.leaf(&[(token.id(),token.id())])?)
-            }
-            UnlinkedValue::ExactTokens(tokens) => {
-                self.require_direct_slot(name)?;
-                if !tokens.targets(&vocab) {
-                    return Err(Error::Compilation(format!(
-                        "external token {name:?} was built for an incompatible vocabulary",
-                    )));
-                }
-                ModuleBinding::ExactTokens(self.event_adapters.leaf(tokens.range_pairs())?)
+                ModuleBinding::TokenSet(self.event_adapters.leaf(tokens.range_pairs())?)
             }
             UnlinkedValue::StaticBorrowed(child) => {
                 self.require_direct_slot(name)?;
@@ -2802,7 +2759,7 @@ impl PreparedGrammar {
         Ok(next)
     }
 
-    /// Fill a declared slot once with `PreparedGrammar`, `Token` or `ExactTokens`. Attach a parent before binding descendants. Prepared children must use the same byte mapping and exact-only IDs. Attached children are snapshots; failed binds leave this handle unchanged.
+    /// Fill a declared slot once with `PreparedGrammar` or `TokenSet`. Attach a parent before binding descendants. Prepared children must use the same byte mapping and special-token IDs. Attached children are snapshots; failed binds leave this handle unchanged.
     #[allow(private_bounds)]
     pub fn bind<'a, T>(&mut self, name: impl AsRef<str>, value: T) -> Result<()>
     where T: IntoUnlinkedValue<'a> {
@@ -2838,7 +2795,7 @@ impl PreparedGrammar {
                         child
                     },
                     ModuleBinding::Constraint(constraint) => constraint.as_ref().clone(),
-                    ModuleBinding::ExactTokens(ids) => {
+                    ModuleBinding::TokenSet(ids) => {
                         ids.compiled(&vocab)?.as_ref().clone()
                     }
                 };
@@ -2887,7 +2844,7 @@ impl PreparedGrammar {
         needs_native(self.inner.as_ref()) || self.bindings.values().any(|binding| match binding {
             ModuleBinding::Module(module) => module.requires_template_linker(),
             ModuleBinding::Constraint(constraint) => needs_native(constraint.as_ref()),
-            ModuleBinding::ExactTokens(_) => false,
+            ModuleBinding::TokenSet(_) => false,
         })
     }
 
@@ -2908,7 +2865,7 @@ impl PreparedGrammar {
             let mut child = match binding {
                 ModuleBinding::Module(module) => module.materialize_template_components(optimization)?,
                 ModuleBinding::Constraint(constraint) => constraint.as_ref().clone(),
-                ModuleBinding::ExactTokens(ids) => ids.compiled(&vocab)?.as_ref().clone(),
+                ModuleBinding::TokenSet(ids) => ids.compiled(&vocab)?.as_ref().clone(),
             };
             child.end_tokens = Arc::from([]);
             if child.has_template_parser() {
@@ -3187,11 +3144,11 @@ mod tests {
     use crate::automata::lexer::tokenizer::Lexer;
 
     fn compose_owned_test_fixture() -> (Vocab, PreparedGrammar, RuntimeConstraint) {
-        let vocab = Vocab::new_with_exact_token_ids(vec![
+        let vocab = Vocab::new(vec![
             (0, b"<".to_vec()), (1, b"a".to_vec()), (2, b">".to_vec()),
             (3, b"<a>".to_vec()), (4, b"a>".to_vec()), (5, b"<a".to_vec()),
             (6, b"b".to_vec()), (7, b"ab".to_vec()), (8, b"<ab>".to_vec()),
-        ], [99]);
+        ]).with_special_tokens([99]);
         let parent = Grammar::glrm("glrm 1; start root; extern child; nt root = \"<\" child \">\";")
             .prepare(&vocab).unwrap();
         let child = Grammar::glrm("glrm 1; start value; nt value = \"a\" | \"ab\";")
@@ -3999,7 +3956,7 @@ mod tests {
         for error in [spec.compile().unwrap_err(), spec.compile_dynamic().unwrap_err(),
             parent.bind_grammar("child", &child).unwrap_err(),
             parent.bind_grammar_dynamic_boundary("child", &child).unwrap_err()] {
-            assert!(matches!(error, Error::Compilation(_)));
+            assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
             let message=error.to_string();
             assert!(message.contains("LR-backed components are unsupported") ||
                 message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||
@@ -4009,7 +3966,7 @@ mod tests {
         let native_child = RuntimeConstraint::compile(Grammar::ebnf("start ::= 'y'"), &vocab).unwrap();
         for error in [lr_parent.bind_grammar("child", &native_child).unwrap_err(),
             lr_parent.bind_grammar_dynamic_boundary("child", &native_child).unwrap_err()] {
-            assert!(matches!(error, Error::Compilation(_)));
+            assert!(matches!(error.kind(), crate::ErrorKind::Compilation(_)));
             let message=error.to_string();
             assert!(message.contains("LR-backed components are unsupported") ||
                 message.contains("FastBuild/LR composition requires homogeneous retained-LR Dynamic components") ||

@@ -26,7 +26,7 @@ pub(crate) const TEMPLATE_DECLINE_PREFIX: &str = "shared template constructor de
 /// a resource budget. Callers that selected the static backend heuristically
 /// may keep the exact segmented dynamic boundary instead of failing.
 pub(crate) fn is_template_budget_decline(error: &Error) -> bool {
-    matches!(error, Error::Compilation(message) if message.starts_with(TEMPLATE_DECLINE_PREFIX))
+    matches!(error.kind(), crate::ErrorKind::Compilation(message) if message.starts_with(TEMPLATE_DECLINE_PREFIX))
 }
 
 /// PM deliberately leaves tokens/states with no delayed-terminal matches

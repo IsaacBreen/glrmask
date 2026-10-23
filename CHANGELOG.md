@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (0.4.0 candidate) — v1 API cleanup
+
+- `Token` and `ExactTokens` are replaced by one value type, `TokenSet`.
+  `TokenSet::new(ids)` takes individual IDs; `TokenSet::from_ranges(ranges)`
+  accepts inclusive (`0..=9`) or half-open (`0..10`) ranges and ignores empty
+  or reversed ranges. An unbounded start means 0 and an unbounded end means
+  `u32::MAX`. Overlapping and adjacent ranges merge. A `TokenSet` no longer
+  carries vocabulary identity: every ID is checked against the compile,
+  precompile or link vocabulary.
+  Bindings expose `TokenSet(ids)` / `TokenSet.from_ranges(...)` (Python),
+  `new TokenSet(ids)` / `TokenSet.fromRanges([{start, end}])` (Node.js), and
+  `glrmask_token_set_new` / `glrmask_token_set_from_ranges` (C/C++).
+  `TokenSet` is input-only and has no accessors; `Debug`, Python `repr`/`==`,
+  Node `toString`/`equals` and C++ construction avoid materializing IDs.
+- `Vocab`'s surface is now `new(entries)`, `with_special_tokens(ids)`, `get`
+  and `iter`. `new_with_exact_token_ids`, `contains_exact_token_range`,
+  `max_token_id`, `len` and `is_empty` are no longer public. "Exact-only token"
+  is renamed "special token" throughout. Node's `VocabOptions.exactOnlyIds`
+  becomes `specialTokenIds`.
+- `Error` is a `#[non_exhaustive]` struct with `kind() -> &ErrorKind` and
+  `source_span()`; the `SourceAt` wrapper variant is removed in favour of a
+  stored optional span. `ErrorKind` is `#[non_exhaustive]`.
+- The `TokenId` alias is removed. `ExternKind` and `SourceSpan` no longer
+  implement serde. `MaskStrategy` and `BoundaryMaskStrategy` no longer
+  implement `PartialOrd`/`Ord`.
+
 ## Unreleased (0.4.0 candidate) — v1 API: modules, expressions and mask strategies
 
 - The public pipeline is `Grammar` → `Module` → `Constraint`, plus `Expr` for

@@ -25,21 +25,17 @@
     "BoundaryMaskStrategy.TOKEN_TRIE": "Segmented dynamic boundary token walk; faster build.",
     "BoundaryMaskStrategy.FAST_RUNTIME": "Alias for PARSER_DWA.",
     "BoundaryMaskStrategy.FAST_BUILD": "Alias for TOKEN_TRIE.",
-    "Token": "An original model token ID without vocabulary identity.\n\nOnly ID membership is checked against the target vocabulary, so the same ID can refer to different bytes. Use `vocab.tokens([id])` for a vocabulary-bound singleton.",
-    "Token.__init__": "Creates a token event for `id`; membership is checked at compile.",
-    "Token.id": "The original model token ID.",
-    "ExactTokens": "One token event chosen from a vocabulary-bound set.\n\nVocabularies must have the same ID-to-byte mapping and exact-only IDs, even for a singleton. An empty set matches nothing.",
-    "ExactTokens.ids": "The exact model token IDs, sorted in ascending order.\n\nMaterializes the IDs; use `ranges` to inspect large sets.",
-    "ExactTokens.ranges": "The normalized, disjoint token-ID ranges.\n\nEach `range` has an exclusive stop.",
-    "ExactTokens.__len__": "Number of allowed token IDs, not the number of ranges.",
+    "TokenSet": "A set of model token IDs. IDs are validated against the compile vocabulary; an empty set matches nothing.",
+    "TokenSet.__init__": "Creates a set from token IDs; duplicates are ignored.",
+    "TokenSet.from_ranges": "Creates a set from Python ranges with step 1 and exclusive stops.\n\nOverlapping or adjacent ranges merge; an empty or reversed range contributes nothing.",
+    "TokenSet.__repr__": "The normalized ranges, for example `TokenSet[0..=9, 20..=29]`.",
+    "TokenSet.__eq__": "Whether both sets hold the same token IDs.",
     "Vocab": "The model vocabulary a constraint is compiled against.\n\nEntries map model token IDs to exact token bytes. Token IDs may be sparse; masks use the original model token IDs.",
     "Vocab.from_dict": "Creates a vocabulary from `{token: id}`.\n\nString tokens are UTF-8 encoded and byte tokens are used verbatim; IDs must be unsigned 32-bit integers.",
     "Vocab.from_id_to_bytes": "Creates a vocabulary from `{token_id: bytes}`.\n\nUse the tokenizer's exact decoded bytes, including partial UTF-8 sequences, not display spellings.",
     "Vocab.from_llama_cpp": "Creates a vocabulary from a llama-cpp-python `Llama`.\n\nEOG, control, unused, and empty-piece tokens are omitted from byte matching; use `llama_cpp_end_token_ids` for the root stopping policy.",
     "Vocab.llama_cpp_end_token_ids": "EOG IDs discovered by `from_llama_cpp`; pass them as `end_tokens` when compiling.",
-    "Vocab.tokens": "Creates a vocabulary-bound token event matching one of `ids`.\n\nUnknown or duplicate IDs raise `ValueError`; empty input matches nothing.",
-    "Vocab.token_ranges": "Creates a vocabulary-bound token event matching the union of `ranges`.\n\nRanges are nonempty Python ranges with step 1 or -1 and exclusive stops; overlapping or adjacent ranges merge. Unknown IDs raise `ValueError`; empty input matches nothing.",
-    "Vocab.__len__": "Number of byte-backed entries; exact-only IDs are not counted.",
+    "Vocab.__len__": "Number of byte-backed entries; special IDs are not counted.",
     "Extern": "A declared extern slot on a `Grammar` or `Module`.",
     "Extern.name": "The declared name.",
     "Extern.kind": "The declared kind: token or grammar.",
@@ -88,10 +84,10 @@
     "ConstraintState.mask": "The current allowed-token mask as a new Boolean array indexed by original token ID.\n\n`size` must cover the constraint's whole token range; extra positions are false.",
     "ConstraintState.fill_mask": "Writes the current mask into a contiguous, writable 1-D NumPy `int32` array.\n\nThe array must hold at least `Constraint.mask_len()` words; extra words are cleared.",
     "ConstraintState.commit_token": "Commits one model token event.\n\nUnknown IDs raise `ValueError`; forbidden IDs reject the state and may also raise. Committing after an end token raises.",
-    "ConstraintState.commit_bytes": "Commits raw bytes rather than a model token event.\n\nDoes not substitute for committing exact-token or end-token events.",
+    "ConstraintState.commit_bytes": "Commits raw bytes rather than a model token event.\n\nDoes not substitute for committing a token-set or end-token event.",
     "ConstraintState.is_accepting": "Whether the current prefix is a complete grammar match.\n\nFurther tokens may still be allowed; this alone does not commit an end token.",
     "ConstraintState.is_rejected": "Whether the prefix cannot be extended to a valid match.",
-    "ConstraintState.forced_tokens": "A read-only prefix of library-canonical forced output, at most 10,000 IDs.\n\nUses the longest admitted nonempty token spelling, then the lowest original token ID; exact-token events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.",
+    "ConstraintState.forced_tokens": "A read-only prefix of library-canonical forced output, at most 10,000 IDs.\n\nUses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.",
     "ConstraintState.marker_events": "Initial or most recent commit's observations as `(marker_id, absolute_byte_offset)`.\n\nSorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.",
     "auto": "Adaptive JSON Schema policy inspection and persisted tier selection.\n\nFor ordinary compilation, prefer `Grammar.compile(..., mask_strategy=MaskStrategy.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer's partial assertion support.",
     "auto.AUTO_POLICY_NAME": "Policy identifier stored on `AutoConstraint` instances.",
@@ -218,8 +214,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "5fd93e7b3d9bd12917f888c9562acaf429babcbacebcecceaf75085d8896a13b",
-    "bindings/node/README.md": "929d48c203639aeb456caca2865e1c6b735809d032363ae478936b7fe9415c8d",
+    "bindings/cpp/README.md": "a5ba3c336f640dea4da2695c723d2b027599a47ab45821e40818b1bd7525a35b",
+    "bindings/node/README.md": "0074fc5679854c665d20bdc4d3aea2d5ae44ed64c4a0899ad92f23235f6d2b78",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -227,5 +223,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "51a17064a258403fca0d0834c52218ab07bbb0a7632cb58c05952c8ca2c435b3"
+  "content_sha256": "ec324afa2d566eab5d8089b10083c139f319bd05e75c9692980b7c9242952792"
 }

@@ -56,7 +56,7 @@ for mode_name in ["FAST_BUILD","BALANCED","FAST_RUNTIME"]:
         ("nested_inline",'grammar CHILD { start inner nt inner="!?" } start root nt root=CHILD "!"',[]),
         ("exact_event",None,[]),
     ]:
-        desc=g.Grammar.exact(v.tokens([args.vocab_size+3])) if source is None else g.Grammar.from_glrm(source)
+        desc=g.Grammar.exact(g.TokenSet([args.vocab_size+3])) if source is None else g.Grammar.from_glrm(source)
         c=desc.compile(v,optimization=mode)
         for cache in ["cold-state","mask-already-computed"]:
             state=c.start()

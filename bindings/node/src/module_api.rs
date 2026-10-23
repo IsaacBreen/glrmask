@@ -16,10 +16,10 @@ impl NativeExpr {
     }
     #[napi(factory)]
     pub fn from_token(value: f64) -> napi::Result<Self> {
-        call(|| Ok(Self { inner: Handle::new(g::Expr::from(g::Token::new(id(value)?))) }))
+        call(|| Ok(Self { inner: Handle::new(g::Expr::from(id(value)?)) }))
     }
     #[napi(factory)]
-    pub fn from_exact_tokens(value: &NativeExactTokens) -> napi::Result<Self> {
+    pub fn from_token_set(value: &NativeTokenSet) -> napi::Result<Self> {
         call(|| Ok(Self { inner: Handle::new(g::Expr::from(live(&value.inner)?.clone())) }))
     }
     #[napi(factory)]
@@ -94,10 +94,10 @@ impl NativeModule {
     }
     #[napi]
     pub fn bind_token(&self, name: String, value: f64) -> napi::Result<()> {
-        call(|| self.bind_value(&name, g::Token::new(id(value)?)))
+        call(|| self.bind_value(&name, g::TokenSet::from(id(value)?)))
     }
     #[napi]
-    pub fn bind_tokens(&self, name: String, value: &NativeExactTokens) -> napi::Result<()> {
+    pub fn bind_tokens(&self, name: String, value: &NativeTokenSet) -> napi::Result<()> {
         call(|| {
             let child = live(&value.inner)?.clone();
             self.bind_value(&name, g::Binding::from(child))

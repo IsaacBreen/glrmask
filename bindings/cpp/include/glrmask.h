@@ -85,7 +85,7 @@ enum {
 };
 
 typedef struct glrmask_vocab glrmask_vocab;
-typedef struct glrmask_exact_tokens glrmask_exact_tokens;
+typedef struct glrmask_token_set glrmask_token_set;
 typedef struct glrmask_grammar glrmask_grammar;
 typedef struct glrmask_module glrmask_module;
 typedef struct glrmask_expr glrmask_expr;
@@ -115,7 +115,7 @@ typedef struct {
 } glrmask_extern;
 /// A possible boundary observation.
 typedef struct { uint32_t id; uint64_t byte_offset; } glrmask_marker_event;
-/// One `Expr` operand. kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 ExactTokens.
+/// One `Expr` operand. kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 TokenSet.
 typedef struct { uint32_t kind; const void* handle; } glrmask_expr_operand;
 
 /// C ABI revision.
@@ -127,7 +127,7 @@ GLRMASK_API const char *glrmask_error_message(void);
 /// Root compile options with no end tokens and automatic strategies.
 GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
 
-/// Creates a vocabulary from byte entries plus exact-only token IDs.
+/// Creates a vocabulary from byte entries plus special token IDs.
 GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry*,size_t,const uint32_t*,size_t,glrmask_vocab**);
 /// Clones a vocabulary handle.
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab*,glrmask_vocab**);
@@ -135,21 +135,14 @@ GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab*,glrmask_voca
 GLRMASK_API void glrmask_vocab_free(glrmask_vocab*);
 /// Writes the number of byte-backed entries.
 GLRMASK_API glrmask_status glrmask_vocab_len(const glrmask_vocab*,size_t*);
-/// Creates a vocabulary-bound token event from the given IDs.
-GLRMASK_API glrmask_status glrmask_vocab_tokens(const glrmask_vocab*,const uint32_t*,size_t,glrmask_exact_tokens**);
-/// Creates a vocabulary-bound token event from inclusive ID ranges.
-GLRMASK_API glrmask_status glrmask_vocab_token_ranges(const glrmask_vocab*,const glrmask_token_range*,size_t,glrmask_exact_tokens**);
-
-/// Clones an exact-token set.
-GLRMASK_API glrmask_status glrmask_exact_tokens_clone(const glrmask_exact_tokens*,glrmask_exact_tokens**);
-/// Frees an exact-token set.
-GLRMASK_API void glrmask_exact_tokens_free(glrmask_exact_tokens*);
-/// Writes the number of allowed token IDs.
-GLRMASK_API glrmask_status glrmask_exact_tokens_len(const glrmask_exact_tokens*,size_t*);
-/// Returns owning sorted IDs; free with glrmask_u32s_free.
-GLRMASK_API glrmask_status glrmask_exact_tokens_ids(const glrmask_exact_tokens*,glrmask_u32s**);
-/// Copies normalized inclusive ranges. NULL output/capacity zero queries the count without expanding IDs.
-GLRMASK_API glrmask_status glrmask_exact_tokens_ranges(const glrmask_exact_tokens*,glrmask_token_range*,size_t,size_t*);
+/// Creates a token set from the given IDs.
+GLRMASK_API glrmask_status glrmask_token_set_new(const uint32_t*,size_t,glrmask_token_set**);
+/// Creates a token set from inclusive ID ranges; empty or reversed ranges contribute nothing.
+GLRMASK_API glrmask_status glrmask_token_set_from_ranges(const glrmask_token_range*,size_t,glrmask_token_set**);
+/// Clones a token set.
+GLRMASK_API glrmask_status glrmask_token_set_clone(const glrmask_token_set*,glrmask_token_set**);
+/// Frees a token set.
+GLRMASK_API void glrmask_token_set_free(glrmask_token_set*);
 
 /// Parses a grammar in the given format.
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t,const char*,size_t,glrmask_grammar**);
@@ -178,8 +171,8 @@ GLRMASK_API glrmask_status glrmask_module_bind_module(glrmask_module*,const char
 GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module*,const char*,size_t,const glrmask_expr*);
 /// Binds an extern to one token event.
 GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module*,const char*,size_t,uint32_t);
-/// Binds an extern to an exact-token set.
-GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_exact_tokens*);
+/// Binds an extern to a token set.
+GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_token_set*);
 /// Retains vocabulary-specific compilation artifacts for this module; options may be NULL for defaults.
 GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*);
 /// Compiles a module assembly; every extern must be bound.

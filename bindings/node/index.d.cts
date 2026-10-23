@@ -78,33 +78,21 @@ export interface MarkerEvent {
 }
 /** Vocabulary construction options. */
 export interface VocabOptions {
-  /** Token IDs valid for exact-token bindings that have no byte spelling. */
-  exactOnlyIds?: Iterable<number>;
+  /** Token IDs valid for token-set bindings that have no byte spelling. */
+  specialTokenIds?: Iterable<number>;
 }
 /** Constraint serialization options. */
 export interface SaveOptions {
   /** Omit the vocabulary; load with the exact original token-ID/byte mapping. */
   externalVocab?: boolean;
 }
-/** An original model token ID without vocabulary identity. Only ID membership is checked against the target vocabulary, so the same ID can refer to different bytes; use `vocab.tokens([id])` for a vocabulary-bound singleton. */
-export declare class Token {
-  /** The original model token ID. */
-  readonly id: number;
-  /** Creates a token event for `id`; membership is checked at compile. */
-  constructor(id: number);
-}
-
 /** The model vocabulary a constraint is compiled against. Entries map model token IDs to exact token bytes; token IDs may be sparse. */
 export declare class Vocab implements Disposable {
   private readonly __vocabBrand: void;
   /** Creates a vocabulary from `[token_id, bytes]` entries. */
   constructor(entries: Iterable<readonly [number, Uint8Array]>, options?: VocabOptions);
-  /** Number of byte-backed entries; exact-only IDs are not counted. */
+  /** Number of byte-backed entries; special IDs are not counted. */
   readonly size: number;
-  /** Creates a vocabulary-bound token event matching one of `ids`; unknown or duplicate IDs raise `GlrMaskError` and empty input matches nothing. */
-  tokens(ids: Iterable<number>): ExactTokens;
-  /** Creates a vocabulary-bound token event matching the union of half-open `ranges`; overlapping or adjacent ranges merge, unknown IDs raise `GlrMaskError`, and empty input matches nothing. */
-  tokenRanges(ranges: Iterable<TokenRange>): ExactTokens;
   /** An independent handle. */
   copy(): Vocab;
   /** An independent handle. */
@@ -115,20 +103,21 @@ export declare class Vocab implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** One token event chosen from a vocabulary-bound set. An empty set matches nothing. */
-export declare class ExactTokens implements Disposable {
-  private constructor();
-  private readonly __exactTokensBrand: void;
-  /** Number of allowed token IDs, not the number of ranges. */
-  readonly size: number;
-  /** The exact model token IDs, sorted in ascending order. */
-  readonly ids: Uint32Array;
-  /** The normalized, disjoint half-open token-ID ranges. */
-  readonly ranges: TokenRange[];
+/** A set of model token IDs; an empty set matches nothing. IDs are validated against the compile vocabulary. */
+export declare class TokenSet implements Disposable {
+  private readonly __tokenSetBrand: void;
+  /** Creates a set from token IDs; duplicates are ignored. */
+  constructor(ids: Iterable<number>);
+  /** Creates a set from half-open `ranges`; overlapping or adjacent ranges merge, and an empty or reversed range contributes nothing. */
+  static fromRanges(ranges: Iterable<TokenRange>): TokenSet;
+  /** Whether both handles hold the same token IDs. */
+  equals(other: unknown): boolean;
+  /** The normalized ranges, for example `TokenSet[0..=9, 20..=29]`. */
+  toString(): string;
   /** An independent handle. */
-  copy(): ExactTokens;
+  copy(): TokenSet;
   /** An independent handle. */
-  clone(): ExactTokens;
+  clone(): TokenSet;
   /** Releases the native handle. */
   dispose(): void;
   /** Releases the native handle when leaving a `using` block. */
@@ -197,7 +186,7 @@ export declare class CompileOptions {
 }
 
 /** A value accepted as an `Expr` operand. */
-export type ExprPart = Grammar | Module | Expr | Token | ExactTokens;
+export type ExprPart = Grammar | Module | Expr | TokenSet | number;
 
 /** An immutable unordered union or concatenation of independently scoped grammars. */
 export declare class Expr implements Disposable {
@@ -296,7 +285,7 @@ export declare class ConstraintState implements Disposable {
   fillMask(output: Uint32Array): void;
   /** Commits one model token event; unknown or forbidden IDs reject the state. */
   commitToken(id: number): void;
-  /** Commits raw bytes rather than a model token event; does not substitute for committing exact-token or end-token events. */
+  /** Commits raw bytes rather than a model token event; does not substitute for committing a token-set or end-token event. */
   commitBytes(bytes: Uint8Array): void;
   /** Whether the current prefix is a complete grammar match; further tokens may still be allowed. */
   isAccepting(): boolean;

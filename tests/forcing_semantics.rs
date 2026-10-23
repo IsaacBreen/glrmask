@@ -1,6 +1,6 @@
 //! Original-ID and byte-language forcing regressions. Kept separate from
 //! backend-agreement tests: comparing two identical bugs is not an oracle.
-use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, Vocab};
+use glrmask::{BuildOptions, Constraint, Grammar, MaskStrategy, TokenSet, Vocab};
 const MODES: [MaskStrategy; 4] = [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa];
 
 fn allows(mask: &[u32], id: u32) -> bool {
@@ -51,10 +51,10 @@ fn exact_only_event_competes_with_text_even_without_spelling() {
     for empty_spelling in [false,true] {
         let mut entries=vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())];
         if empty_spelling { entries.push((9,Vec::new())); }
-        let vocab=Vocab::new_with_exact_token_ids(entries,[9]);
+        let vocab=Vocab::new(entries).with_special_tokens([9]);
         for mode in MODES {
             let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;")
-                .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap()
+                .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             assert!(checked_force(&c).is_empty(), "{mode:?}, empty={empty_spelling}");
         }
@@ -66,7 +66,7 @@ fn same_spelling_exact_event_is_not_a_byte_prefix_alias() {
     let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec()),(9,b"a".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK;")
-            .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap()
+            .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         assert!(checked_force(&c).is_empty(), "{mode:?}");
     }
@@ -77,7 +77,7 @@ fn singleton_mixed_id_keeps_ordinary_and_exact_successors() {
     let vocab=Vocab::new(vec![(10,b"a".to_vec()),(11,b"b".to_vec()),(12,b"c".to_vec())]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = \"ab\" | MARK \"c\";")
-            .bind_snapshot("MARK",vocab.tokens([10]).unwrap()).unwrap()
+            .bind_snapshot("MARK",TokenSet::new([10])).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         assert_eq!(checked_force(&c), [10], "{mode:?}");
         let mut after=c.start();after.commit_token(10).unwrap();
@@ -109,13 +109,13 @@ fn canonical_text_forcing_is_not_token_id_uniqueness() {
 
 #[test]
 fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() {
-    let vocab=Vocab::new_with_exact_token_ids(vec![
+    let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),
-    ],[9]);
+    ]).with_special_tokens([9]);
     let ordinary=Grammar::from_glrm("glrm 1; start root; nt root = \"ab\";");
     let guarded=Grammar::from_glrm(
         "glrm 1; start root; extern token MARK; nt root = \"ab\" | \"a\" MARK \"b\";",
-    ).bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap();
+    ).bind_snapshot("MARK",TokenSet::new([9])).unwrap();
     for mode in MODES {
         let options=BuildOptions::default().optimization(mode);
         let baseline=ordinary.compile_with_build_options(&vocab,options.clone()).unwrap();
@@ -138,24 +138,24 @@ fn canonical_greedy_token_does_not_cross_an_intermediate_exact_event_boundary() 
 
 #[test]
 fn exact_events_before_and_after_text_keep_their_original_ids() {
-    let vocab=Vocab::new_with_exact_token_ids(vec![
+    let vocab=Vocab::new(vec![
         (0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec()),(8,Vec::new()),
-    ],[9,10]);
+    ]).with_special_tokens([9,10]);
     for (event,expected) in [
         (8,vec![8,1,8]),
         (9,vec![9,1,9]),
     ] {
         let grammar=Grammar::from_glrm(
             "glrm 1; start root; extern token BEFORE; extern token AFTER; nt root = BEFORE \"ab\" AFTER;",
-        ).bind_snapshot("BEFORE",vocab.tokens([event]).unwrap()).unwrap()
-            .bind_snapshot("AFTER",vocab.tokens([event]).unwrap()).unwrap();
+        ).bind_snapshot("BEFORE",TokenSet::new([event])).unwrap()
+            .bind_snapshot("AFTER",TokenSet::new([event])).unwrap();
         for mode in MODES {
             let c=grammar.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
             assert_eq!(checked_force(&c),expected,"event={event}, {mode:?}");
         }
     }
     let ambiguous=Grammar::from_glrm("extern token MARK start root nt root=MARK \"ab\"")
-        .bind_snapshot("MARK",vocab.tokens([9,10]).unwrap()).unwrap();
+        .bind_snapshot("MARK",TokenSet::new([9,10])).unwrap();
     for mode in MODES {
         let c=ambiguous.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         assert!(checked_force(&c).is_empty(),"multiple exact IDs {mode:?}");
@@ -184,12 +184,12 @@ fn longer_admitted_token_can_block_a_canonical_prefix_at_acceptance() {
 
 #[test]
 fn exact_event_chain_retains_ids_and_never_canonicalizes_equal_bytes() {
-    let vocab=Vocab::new_with_exact_token_ids(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())],[3]);
+    let vocab=Vocab::new(vec![(0,b"x".to_vec()),(1,b"x".to_vec()),(2,Vec::new())]).with_special_tokens([3]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token A; extern token B; extern token C; nt root = A B C;")
-            .bind_snapshot("A",vocab.tokens([1]).unwrap()).unwrap()
-            .bind_snapshot("B",vocab.tokens([2]).unwrap()).unwrap()
-            .bind_snapshot("C",vocab.tokens([3]).unwrap()).unwrap()
+            .bind_snapshot("A",TokenSet::new([1])).unwrap()
+            .bind_snapshot("B",TokenSet::new([2])).unwrap()
+            .bind_snapshot("C",TokenSet::new([3])).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         assert_eq!(checked_force(&c),[1,2,3],"{mode:?}");
     }
@@ -259,10 +259,10 @@ fn strict_id_forcing_is_distinct_from_canonical_byte_fastforward() {
 
 #[test]
 fn strict_id_forcing_keeps_exact_id_events_and_stops_at_acceptance() {
-    let vocab=Vocab::new_with_exact_token_ids(vec![(0,b"a".to_vec()),(1,b"b".to_vec())],[9]);
+    let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]).with_special_tokens([9]);
     for mode in MODES {
         let c=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK \"a\" \"b\"?;")
-            .bind_snapshot("MARK",vocab.tokens([9]).unwrap()).unwrap()
+            .bind_snapshot("MARK",TokenSet::new([9])).unwrap()
             .compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).unwrap();
         let state=c.start();let mask=state.mask();
         assert_eq!(state.forced_token_ids_reference(),[9,0]);
@@ -279,7 +279,7 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
         (3,b"y".to_vec()),(4,"éx".as_bytes().to_vec())]);
     let ordinary=Grammar::from_glrm("start root t TEXT=/éx/ nt root=TEXT");
     let dual=Grammar::from_glrm("extern token MARK start root t TEXT=/éx/ nt root=TEXT | MARK \"y\"")
-        .bind_snapshot("MARK",v.tokens([0]).unwrap()).unwrap();
+        .bind_snapshot("MARK",TokenSet::new([0])).unwrap();
     for mode in MODES {
         let c=ordinary.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         let mut s=c.start();s.commit_token(0).unwrap();
@@ -297,13 +297,13 @@ fn utf8_partial_token_frontier_keeps_exact_event_alternative_distinct() {
 
 #[test]
 fn child_trailing_ignore_and_parent_suffix_do_not_force_past_exact_event() {
-    let v=Vocab::new_with_exact_token_ids(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),
+    let v=Vocab::new(vec![(0,b"P".to_vec()),(1,b"a".to_vec()),
         (2,b" ".to_vec()),(3,b" X".to_vec()),(4,b"X".to_vec()),(5,b"Pa X".to_vec()),
-        (6,b"\t".to_vec())],[9]);
+        (6,b"\t".to_vec())]).with_special_tokens([9]);
     let child=Grammar::from_glrm("extern token MARK start item ignore SPACE t SPACE=/ +/ nt item=\"a\" MARK?");
     let parent=Grammar::from_glrm("extern grammar CHILD start root nt root=\"P\" CHILD \" X\"");
     let p=parent.prepare(&v).unwrap().bind_snapshot("CHILD",child.prepare(&v).unwrap()).unwrap()
-        .bind_snapshot("CHILD::MARK",v.tokens([9]).unwrap()).unwrap();
+        .bind_snapshot("CHILD::MARK",TokenSet::new([9])).unwrap();
     for mode in MODES {
         let c=p.link_with(BuildOptions::default().optimization(mode)).unwrap();
         for path in [&[5][..],&[0,1,3][..],&[0,2,1,2,3][..],&[0,1,9,3][..]] {

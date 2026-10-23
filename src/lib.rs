@@ -75,8 +75,8 @@ pub(crate) use public_api::with_deep_stack;
 
 pub use runtime::{Constraint, ConstraintState};
 pub use runtime::markers::{MarkerEvent, MarkerId};
-pub use glrmask_vocab::{Token, ExactTokens, Vocab};
-pub use error::{Error, Result};
+pub use glrmask_vocab::{TokenSet, Vocab};
+pub use error::{Error, ErrorKind, Result};
 pub use public_api::{Grammar, Module, CompileOptions, Binding, Expr, MaskStrategy, BoundaryMaskStrategy, Extern, Externs};
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
@@ -91,9 +91,6 @@ pub use glrmask_grammar::__private::grammar::glrm::ExternalKind as ExternKind;
 #[cfg(any(test, feature = "internal-api"))]
 #[doc(hidden)]
 pub use glrmask_grammar::__private::grammar::glrm::ExternalKind;
-
-/// A model token ID.
-pub type TokenId = u32;
 
 /// Unstable compatibility surface for repository tooling and benchmark
 /// harnesses. It is deliberately absent from normal dependency builds.
