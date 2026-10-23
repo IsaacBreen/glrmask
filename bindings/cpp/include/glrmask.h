@@ -140,7 +140,7 @@ GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
 
 /// Creates a vocabulary from `entries`, plus special tokens that have no bytes
 /// (`special_ids`).
-GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,const uint32_t* exact,size_t exact_n,glrmask_vocab** out);
+GLRMASK_API glrmask_status glrmask_vocab_new(const glrmask_vocab_entry* entries,size_t n,const uint32_t* special_ids,size_t special_len,glrmask_vocab** out);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_vocab_clone(const glrmask_vocab* p,glrmask_vocab** out);
 /// Frees a vocabulary handle.
@@ -160,13 +160,21 @@ GLRMASK_API void glrmask_token_set_free(glrmask_token_set* p);
 GLRMASK_API glrmask_status glrmask_grammar_from_source(uint32_t format,const char* source,size_t n,glrmask_grammar** out);
 /// Creates a grammar from an expression.
 GLRMASK_API glrmask_status glrmask_grammar_from_expr(const glrmask_expr* expr,glrmask_grammar** out);
-/// Binds one declared grammar extern to a grammar.
+/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
+/// or the value is the wrong kind for it. A token extern takes only a token ID or
+/// token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_grammar(glrmask_grammar* p,const char* name,size_t n,const glrmask_grammar* child);
-/// Binds one declared grammar extern to an expression.
+/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
+/// or the value is the wrong kind for it. A token extern takes only a token ID or
+/// token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_expr(glrmask_grammar* p,const char* name,size_t n,const glrmask_expr* child);
-/// Binds one declared grammar extern to one token ID.
+/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
+/// or the value is the wrong kind for it. A token extern takes only a token ID or
+/// token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_token(glrmask_grammar* p,const char* name,size_t n,uint32_t id);
-/// Binds one declared grammar extern to a token set.
+/// Binds the extern `name`. Each fails if `name` is undeclared or already bound,
+/// or the value is the wrong kind for it. A token extern takes only a token ID or
+/// token set.
 GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar* p,const char* name,size_t n,const glrmask_token_set* child);
 /// Creates an independent copy.
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* p,glrmask_grammar** out);
@@ -289,15 +297,15 @@ GLRMASK_API glrmask_status glrmask_state_forced_tokens(const glrmask_state* p,gl
 GLRMASK_API glrmask_status glrmask_state_marker_events(const glrmask_state* p,glrmask_events** out);
 
 /// Points `*out_data` at the contents, valid until the buffer is freed.
-GLRMASK_API glrmask_status glrmask_bytes_data(const glrmask_bytes* p,const uint8_t** bytes,size_t* n);
+GLRMASK_API glrmask_status glrmask_bytes_data(const glrmask_bytes* p,const uint8_t** out_data,size_t* out_len);
 /// Frees a byte buffer.
 GLRMASK_API void glrmask_bytes_free(glrmask_bytes* p);
 /// Points `*out_data` at the contents, valid until the buffer is freed.
-GLRMASK_API glrmask_status glrmask_u32s_data(const glrmask_u32s* p,const uint32_t** values,size_t* n);
+GLRMASK_API glrmask_status glrmask_u32s_data(const glrmask_u32s* p,const uint32_t** out_data,size_t* out_len);
 /// Frees a u32 buffer.
 GLRMASK_API void glrmask_u32s_free(glrmask_u32s* p);
 /// Points `*out_data` at the contents, valid until the buffer is freed.
-GLRMASK_API glrmask_status glrmask_events_data(const glrmask_events* p,const glrmask_marker_event** events,size_t* n);
+GLRMASK_API glrmask_status glrmask_events_data(const glrmask_events* p,const glrmask_marker_event** out_data,size_t* out_len);
 /// Frees a marker-event buffer.
 GLRMASK_API void glrmask_events_free(glrmask_events* p);
 
