@@ -481,7 +481,12 @@ impl<'a> Grammar<'a> {
                 .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
             GrammarSource::Lark(source) => crate::import::parse_lark_to_named(source)
                 .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
-            GrammarSource::JsonSchema(_) => Err(Error::Compilation("JSON components use the schema compiler".into())),
+            // JSON Schema lowers to an ordinary named grammar, so it can join a
+            // mixed compile as a dynamic component shell. The schema pipeline
+            // prepares it exactly as the static schema route does, including
+            // lexer partitioning for the generated terminal classes.
+            GrammarSource::JsonSchema(source) => crate::import::prepare_json_schema_named_for_component(source)
+                .and_then(|n|ParsedComponent::from_named(n,&[]).map_err(Into::into)),
             GrammarSource::Constructed => Err(Error::Compilation("constructed grammar has no semantic description".into())),
         }).as_ref().map_err(Clone::clone)
     }

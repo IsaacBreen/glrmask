@@ -275,12 +275,21 @@ fn compare_exhaustive(
     visited
 }
 
+fn compare_against_parser_dwa_at(
+    reference: &RuntimeConstraint,
+    candidate: &RuntimeConstraint,
+    label: &str,
+    depth: usize,
+) -> usize {
+    compare_exhaustive(&reference.start(), &candidate.start(), depth, label)
+}
+
 fn compare_against_parser_dwa(
     reference: &RuntimeConstraint,
     candidate: &RuntimeConstraint,
     label: &str,
 ) -> usize {
-    compare_exhaustive(&reference.start(), &candidate.start(), 3, label)
+    compare_against_parser_dwa_at(reference, candidate, label, 3)
 }
 
 #[test]
@@ -338,5 +347,115 @@ fn mixed_compile_matches_parser_dwa_on_composed_assemblies() {
     );
     for (label, error) in &fallbacks {
         eprintln!("[mixed-validation] fallback {label}: {error}");
+    }
+    assert!(
+        fallbacks.is_empty(),
+        "mixed compile fell back for {} subset(s): {fallbacks:?}",
+        fallbacks.len(),
+    );
+}
+
+/// A retained GLRM parent plus a non-precompiled JSON Schema child must take
+/// the mixed route: the child gets a dynamic component shell without retrying
+/// the whole assembly as all-static.
+#[test]
+fn json_schema_child_mixed_compile_has_no_fallback() {
+    let vocab = vocab();
+    let spec = AssemblySpec {
+        name: "json_schema_child_unit",
+        nodes: vec![
+            NodeSpec {
+                kind: Kind::Glrm(HOST),
+                slots: &[("child", 1)],
+                tokens: &[],
+            },
+            node(Kind::JsonSchema(r#"{"type":"string","maxLength":2}"#)),
+        ],
+        root: 0,
+        subsets: vec![("parent", vec![0])],
+    };
+    let reference = compile_reference(&spec, PARSER_DWA, &vocab);
+
+    let _ = crate::public_api::module::mixed_compile_probe::take();
+    let candidate = compile_assembly(&spec, &[0], &vocab)
+        .compile_with(&vocab, CompileOptions::default().mask_strategy(TOKEN_TRIE))
+        .unwrap_or_else(|error| panic!("{}: mixed TokenTrie compile failed: {error}", spec.name));
+    let fallbacks = crate::public_api::module::mixed_compile_probe::take();
+    assert!(
+        fallbacks.is_empty(),
+        "{}: mixed compile fell back: {fallbacks:?}",
+        spec.name,
+    );
+
+    compare_against_parser_dwa(&reference, &candidate, &spec.name);
+}
+
+fn json_vocab() -> Vocab {
+    let entries = [
+        "{", "}", "[", "]", ",", ":", "\"", "\"a\"", "\"b\"", "\"ab\"", "\"abc\"",
+        "\"key\"", "a", "b", "0", "1", "12", "-1", "true", "false", "null", " ", "x", "y",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(id, bytes)| (id as u32, bytes.as_bytes().to_vec()))
+    .collect::<Vec<_>>();
+    let vocab = Vocab::new(entries);
+    vocab.prepare_for_compile();
+    vocab
+}
+
+/// The JSON Schema component shell must recognize the same token language as
+/// the static schema compiler it replaces; a retained parent plus this child
+/// must stay on the mixed route for every shape below.
+#[test]
+#[ignore = "differential JSON Schema component language validation; run explicitly"]
+fn json_schema_component_matches_static_schema_compiler() {
+    let vocab = json_vocab();
+    let schemas: [(&str, &str); 8] = [
+        ("string_max_length", r#"{"type":"string","maxLength":2}"#),
+        ("string_pattern", r#"{"type":"string","pattern":"^[ab]+$"}"#),
+        ("integer", r#"{"type":"integer"}"#),
+        ("number", r#"{"type":"number"}"#),
+        ("enum", r#"{"enum":["a","b",1]}"#),
+        (
+            "object_required",
+            r#"{"type":"object","properties":{"key":{"type":"integer"}},"required":["key"]}"#,
+        ),
+        (
+            "array_items",
+            r#"{"type":"array","items":{"type":"boolean"},"maxItems":2}"#,
+        ),
+        (
+            "nested_object",
+            r#"{"type":"object","properties":{"a":{"type":"array","items":{"type":"string","maxLength":2}},"b":{"type":"integer"}},"required":["a","b"]}"#,
+        ),
+    ];
+
+    for (name, schema) in schemas {
+        let spec = AssemblySpec {
+            name,
+            nodes: vec![
+                NodeSpec {
+                    kind: Kind::Glrm(HOST),
+                    slots: &[("child", 1)],
+                    tokens: &[],
+                },
+                node(Kind::JsonSchema(schema)),
+            ],
+            root: 0,
+            subsets: vec![("parent", vec![0])],
+        };
+        let reference = compile_reference(&spec, PARSER_DWA, &vocab);
+        let _ = crate::public_api::module::mixed_compile_probe::take();
+        let candidate = compile_assembly(&spec, &[0], &vocab)
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(TOKEN_TRIE))
+            .unwrap_or_else(|error| panic!("{name}: mixed TokenTrie compile failed: {error}"));
+        let fallbacks = crate::public_api::module::mixed_compile_probe::take();
+        assert!(
+            fallbacks.is_empty(),
+            "{name}: mixed compile fell back: {fallbacks:?}",
+        );
+        let visited = compare_against_parser_dwa_at(&reference, &candidate, name, 5);
+        eprintln!("[json-language] schema={name} states={visited} fallback=[]");
     }
 }

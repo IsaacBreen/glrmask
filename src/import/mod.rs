@@ -53,6 +53,20 @@ fn prepare_json_schema_named(grammar: &mut ast::NamedGrammar) -> crate::Result<(
     Ok(json_schema::prepare_named_grammar(grammar)?)
 }
 
+/// Parse, factor and prepare one JSON Schema document exactly as the static
+/// schema route does before `ast::lower`. Shared with the JSON component shell
+/// so both consumers see the same named grammar and lexer partitions.
+pub(crate) fn prepare_json_schema_named_for_component(
+    source: &str,
+) -> crate::Result<ast::NamedGrammar> {
+    with_large_import_stack(source.len(), || {
+        let named = parse_json_schema_to_named(source)?;
+        let mut factored = factor_named_grammar(named);
+        prepare_json_schema_named(&mut factored)?;
+        Ok(factored)
+    })
+}
+
 type GrammarParser = fn(&str) -> crate::Result<GrammarDef>;
 type NamedGrammarParser = fn(&str) -> crate::Result<ast::NamedGrammar>;
 type NamedGrammarTransform = fn(&mut ast::NamedGrammar) -> crate::Result<()>;
