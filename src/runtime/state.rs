@@ -601,6 +601,10 @@ impl<'a> ConstraintState<'a> {
         if self.state.is_empty() {
             return true;
         }
+        // A complete body under an end-token root can still commit its end token.
+        if !self.constraint.end_tokens.is_empty() && self.frontier_complete() {
+            return false;
+        }
         !self.state.iter().any(|(&tokenizer_state, gss)| {
             super::commit::entry_can_continue(self.constraint, tokenizer_state, gss)
         })
