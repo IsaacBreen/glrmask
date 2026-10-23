@@ -66,16 +66,37 @@ GitHub Actions environment **`release`** for all three OIDC services.
    `IsaacBreen`, repository `glrmask`, filename `release.yml`, environment
    `release`. This is a separate setting on PyPI, not an npm setting.
    [Official PyPI instructions](https://docs.pypi.org/trusted-publishers/adding-a-publisher/).
-3. **crates.io**: sign in, open the existing **`glrmask`** crate settings →
+3. **crates.io**: create a crates.io API token under **Settings → API Tokens** with
+   the **`trusted-publishing`** endpoint scope (the UI describes it as "Manage
+   trusted publishing configurations") and a crate scope covering the crates (for
+   example `glrmask*`), then run from a clean `main` checkout:
+
+   ```sh
+   CRATES_IO_TOKEN=... python3 scripts/register-trusted-publishers.py --dry-run
+   CRATES_IO_TOKEN=... python3 scripts/register-trusted-publishers.py --apply
+   ```
+
+   The script registers owner `IsaacBreen`, repository `glrmask`, workflow
+   `release.yml`, environment `release` on every publishable crate: the root
+   `glrmask` crate and its internal crates `glrmask-invariant`,
+   `glrmask-finite-automata`, `glrmask-weight`, `glrmask-weighted-automata`,
+   `glrmask-artifact`, `glrmask-vocab`, `glrmask-lexer`, `glrmask-grammar`,
+   `glrmask-glr`, `glrmask-json-schema`, `glrmask-dwa-merge`,
+   `glrmask-parser-dwa` and `glrmask-terminal-dwa`. It lists each crate's
+   existing configurations and skips crates that already have an identical one,
+   so reruns are safe; a crate added later is included automatically once it is
+   a publishable workspace member. All of them already have a published version,
+   fulfilling the initial-publication prerequisite. The token must belong to a
+   crate owner whose crates.io account has a linked, verified GitHub account,
+   because crates.io uses it to resolve the repository owner. Revoke the token
+   after use.
+
+   Manual fallback: sign in, open the existing **`glrmask`** crate settings →
    Trusted Publishing → GitHub Actions. Enter owner `IsaacBreen`, repository
-   `glrmask`, filename `release.yml`, environment `release`.
-   Repeat this for every internal crate: crates.io trust is per crate. The crates are
-   `glrmask-invariant`, `glrmask-finite-automata`, `glrmask-weight`,
-   `glrmask-weighted-automata`, `glrmask-artifact`, `glrmask-vocab`, `glrmask-lexer`,
-   `glrmask-grammar`, `glrmask-glr`, `glrmask-json-schema`, `glrmask-dwa-merge`,
-   `glrmask-parser-dwa` and `glrmask-terminal-dwa`. All of them already have a
-   published version, fulfilling the initial-publication prerequisite. A crate added
-   later must be published once by hand before trusted publishing can be enabled.
+   `glrmask`, filename `release.yml`, environment `release`. Repeat this for
+   every internal crate listed above: crates.io trust is per crate. A crate
+   added later must be published once by hand before trusted publishing can be
+   enabled.
    [Official crates.io instructions](https://crates.io/docs/trusted-publishing).
 4. **C/C++**: **no external publishing account**. GitHub releases receive prebuilt
    binaries using the workflow's scoped, short-lived `GITHUB_TOKEN`. No NuGet,
