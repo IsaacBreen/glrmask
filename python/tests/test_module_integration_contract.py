@@ -42,15 +42,12 @@ def test_open_precompiled_parent_late_children_and_copy_independence():
     glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
     glrmask.MaskStrategy.PARSER_DWA,
 ])
-def test_python_settings_configure_only_module_and_do_not_discard_work(mask_strategy):
+def test_python_compile_options_do_not_discard_work(mask_strategy):
     v = vocab()
     g = source("a")
-    m = glrmask.Module(g, mask_strategy=mask_strategy)
-    m.precompile(v)
-    assert m.mask_strategy == mask_strategy
-    # Changing mask strategy updates property
-    m.mask_strategy = glrmask.MaskStrategy.AUTO
-    assert m.mask_strategy == glrmask.MaskStrategy.AUTO
+    m = glrmask.Module(g)
+    m.precompile(v, mask_strategy=mask_strategy)
+    assert g.compile(v).start().mask().tolist() == m.compile(v, mask_strategy=mask_strategy).start().mask().tolist()
     assert g.compile(v).start().mask().tolist() == m.compile(v).start().mask().tolist()
 
 

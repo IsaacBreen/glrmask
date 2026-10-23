@@ -93,8 +93,7 @@ def test_exact_values_survive_original_vocab_lifetime_and_keep_ids():
     for mode in [glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME]:
         m = _bound_snapshot(glrmask.Grammar.from_glrm(MARK), "MARK", empty)
-        m.mask_strategy = mode
-        impossible = m.compile(v, end_tokens=[127])
+        impossible = m.compile(v, end_tokens=[127], mask_strategy=mode)
         state = impossible.start()
         assert not accepting(state) and not state.mask().any()
         assert state.forced_tokens() == [] and state.forced_tokens() == []
@@ -175,16 +174,16 @@ def test_packed_numpy_fill_mask_agrees_with_boolean_mask():
 def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     v = vocab()
     mode = getattr(glrmask.MaskStrategy, mode_name)
-    child_mod = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'), mask_strategy=mode)
-    child = child_mod.compile(v, end_tokens=[127])
+    child_mod = glrmask.Module(glrmask.Grammar.from_ebnf('start ::= "a"'))
+    child = child_mod.compile(v, end_tokens=[127], mask_strategy=mode)
     child = glrmask.Constraint.load(child.save())
     own_state = child.start()
     assert not own_state.mask()[127]
     own_state.commit_token(1)
     assert accepting(own_state) and own_state.mask()[127]
-    parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST), mask_strategy=mode)
+    parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
-    c = parent_mod.compile(v, end_tokens=[63])
+    c = parent_mod.compile(v, end_tokens=[63], mask_strategy=mode)
     state = c.start()
     assert state.mask()[4]
     state.commit_token(4)

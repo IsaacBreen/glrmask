@@ -159,17 +159,26 @@ public:
     }
 };
 
-/// Root generation options.
+/// Compilation settings for a grammar or module assembly.
+///
+/// `end_tokens` applies only to the top-level sequence; the strategies apply
+/// to the whole compile, including every composed child.
 struct CompileOptions {
     /// Accepted end-of-sequence token IDs, allowed only at acceptance.
     std::vector<TokenId> end_tokens;
-    /// No end tokens.
+    /// Mask computation strategy for the whole compile.
+    MaskStrategy mask_strategy = MaskStrategy::Auto;
+    /// Boundary parser strategy for the whole compile.
+    BoundaryMaskStrategy boundary_mask_strategy = BoundaryMaskStrategy::Auto;
+    /// No end tokens and automatic strategies.
     CompileOptions() = default;
-    /// The given end tokens.
+    /// The given end tokens with automatic strategies.
     CompileOptions(std::vector<TokenId> tokens) : end_tokens(std::move(tokens)) {}
     /// The matching C options struct.
     glrmask_compile_options native() const noexcept {
-        return {sizeof(glrmask_compile_options), end_tokens.data(), end_tokens.size()};
+        return {sizeof(glrmask_compile_options), end_tokens.data(), end_tokens.size(),
+                static_cast<std::uint32_t>(mask_strategy),
+                static_cast<std::uint32_t>(boundary_mask_strategy)};
     }
 };
 
@@ -366,7 +375,7 @@ public:
     }
 };
 
-/// A reusable, independently configured grammar with bindings and any retained compilation work.
+/// A reusable grammar with bindings and any retained compilation work.
 class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone> {
     using Base = detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone>;
     explicit Module(glrmask_module* p) : Base(p) {}
@@ -376,26 +385,6 @@ class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask
 public:
     /// Creates a module from a source grammar with default settings.
     explicit Module(const Grammar& grammar) : Base(create(grammar)) {}
-
-    /// The mask computation strategy.
-    MaskStrategy mask_strategy() const {
-        std::uint32_t val = 0; detail::check(glrmask_module_get_mask_strategy(native_handle(), &val));
-        return static_cast<MaskStrategy>(val);
-    }
-    /// Sets the mask computation strategy.
-    void set_mask_strategy(MaskStrategy strategy) {
-        detail::check(glrmask_module_set_mask_strategy(native_handle(), static_cast<std::uint32_t>(strategy)));
-    }
-
-    /// The boundary parser strategy.
-    BoundaryMaskStrategy boundary_mask_strategy() const {
-        std::uint32_t val = 0; detail::check(glrmask_module_get_boundary_mask_strategy(native_handle(), &val));
-        return static_cast<BoundaryMaskStrategy>(val);
-    }
-    /// Sets the boundary parser strategy.
-    void set_boundary_mask_strategy(BoundaryMaskStrategy strategy) {
-        detail::check(glrmask_module_set_boundary_mask_strategy(native_handle(), static_cast<std::uint32_t>(strategy)));
-    }
 
     /// Binds an extern to a module.
     void bind(std::string_view name, const Module& value) {
@@ -419,8 +408,9 @@ public:
     }
 
     /// Retains vocabulary-specific compilation artifacts for this module.
-    void precompile(const Vocab& vocab) {
-        detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle()));
+    void precompile(const Vocab& vocab, const CompileOptions& options = {}) {
+        const glrmask_compile_options native = options.native();
+        detail::check(glrmask_module_precompile(native_handle(), vocab.native_handle(), &native));
     }
     /// Compiles the module assembly against `vocab`; every extern must be bound.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;

@@ -37,9 +37,9 @@ for(const maskStrategy of strategies) {
     assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),1));s.commitBytes(Buffer.from([0xa9]));assert.ok(s.isAccepting());
     const host=Grammar.fromGlrm('glrm 1; start root; extern token T; nt root = T;');
     for(const id of [31,40,99]) {
-      const m=new Module(host,{maskStrategy});
+      const m=new Module(host);
       m.bind('T',v.tokens([id]));
-      const e=m.compileSync(v).start();
+      const e=m.compileSync(v,{maskStrategy}).start();
       assert.ok(allowed(e.mask(),id));assert.ok(!allowed(e.mask(),32));e.commitToken(id);assert.ok(e.isAccepting());
     }
   });

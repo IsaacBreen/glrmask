@@ -7,9 +7,9 @@ const c = await Grammar.fromJsonSchema({type: 'string'}).compile(v, options);
 const bytes = await c.save(); const loaded = await Constraint.load(bytes);
 const words: Uint32Array = loaded.start().mask();
 
-const module = new Module(Grammar.fromEbnf('start ::= "a"'), {maskStrategy: MaskStrategy.TokenClassTrie});
-await module.precompile(v);
+const module = new Module(Grammar.fromEbnf('start ::= "a"'));
+await module.precompile(v, {maskStrategy: MaskStrategy.TokenClassTrie});
 const expr = Expr.choice(module, Grammar.fromEbnf('start ::= "a"'));
 const restored = await Module.load(await module.save(), v);
-const canonical: api.Constraint = await restored.compile(v);
+const canonical: api.Constraint = await restored.compile(v, {maskStrategy: MaskStrategy.TokenClassTrie});
 void [sameVocab, words, expr, canonical];

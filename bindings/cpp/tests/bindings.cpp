@@ -20,6 +20,12 @@ template<class F> void throws(F&& fn, glrmask_status status=-1) {
 }
 
 bool allowed(const std::vector<TokenId>& m, TokenId id) { return id/32<m.size() && (m[id/32]&(TokenId{1}<<(id%32)))!=0; }
+CompileOptions strategy_options(unsigned mode, BoundaryMaskStrategy boundary = BoundaryMaskStrategy::Auto) {
+    CompileOptions options;
+    options.mask_strategy = static_cast<MaskStrategy>(mode);
+    options.boundary_mask_strategy = boundary;
+    return options;
+}
 Vocab vocabulary() { return Vocab({{0,"a"},{1,"b"},{31,"ab"},{32,"a"},{65,"z"}}); }
 auto simple() { return Grammar::from_ebnf(R"(start ::= "a" "b")"); }
 
@@ -28,8 +34,7 @@ void basic() {
         auto v = vocabulary();
         auto g = simple();
         auto m = Module(g);
-        m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto c = m.compile(v);
+        auto c = m.compile(v, strategy_options(i));
         auto s = c.start();
         const auto initial = s.mask();
         CHECK(allowed(initial,0)); CHECK(allowed(initial,31)); CHECK(allowed(initial,32));
@@ -55,8 +60,7 @@ void exact_and_unicode() {
     for (unsigned i=0; i<4; ++i) {
         auto g = Grammar::from_ebnf(source);
         auto m = Module(g);
-        m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto c = m.compile(v);
+        auto c = m.compile(v, strategy_options(i));
         auto s = c.start();
         CHECK(allowed(s.mask(),0)); CHECK(allowed(s.mask(),31));
         s.commit_bytes(first); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),1));
@@ -65,20 +69,17 @@ void exact_and_unicode() {
         auto host = Grammar::from_glrm(R"(glrm 1; start root; extern token T; nt root = T;)");
         auto em = Module(host);
         em.bind("T", v.tokens({31}));
-        em.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto exact = em.compile(v);
+        auto exact = em.compile(v, strategy_options(i));
         CHECK(allowed(exact.start().mask(),31)); CHECK(!allowed(exact.start().mask(),32));
         auto e = exact.start(); e.commit_token(31); CHECK(e.is_accepting());
 
         auto rm = Module(host);
         rm.bind("T", v.tokens({40}));
-        rm.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto raw = rm.compile(v).start(); raw.commit_token(40); CHECK(raw.is_accepting());
+        auto raw = rm.compile(v, strategy_options(i)).start(); raw.commit_token(40); CHECK(raw.is_accepting());
 
         auto cm = Module(host);
         cm.bind("T", v.tokens({99}));
-        cm.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto control = cm.compile(v).start(); control.commit_token(99); CHECK(control.is_accepting());
+        auto control = cm.compile(v, strategy_options(i)).start(); control.commit_token(99); CHECK(control.is_accepting());
     }
     auto ranges = v.token_ranges({{31,32},{32,32}}); CHECK(ranges.size()==2);
     CHECK(ranges.ranges().size()==1); CHECK(ranges.ranges()[0].first==31 && ranges.ranges()[0].last==32);
@@ -93,8 +94,8 @@ void end_tokens() {
     Vocab v({{0,"a"}}, {99});
     for (unsigned i=0; i<4; ++i) {
         CompileOptions o({99});
+        o.mask_strategy = static_cast<MaskStrategy>(i);
         auto m = Module(Grammar::from_ebnf(R"(start ::= "a")"));
-        m.set_mask_strategy(static_cast<MaskStrategy>(i));
         auto s = m.compile(v, o).start();
         CHECK(!allowed(s.mask(),99)); s.commit_token(0); CHECK(s.is_accepting()); CHECK(allowed(s.mask(),99));
         s.commit_token(99); CHECK(s.is_accepting() && !s.is_rejected());
@@ -141,12 +142,11 @@ void composition_and_persistence() {
 
     for (unsigned i=0; i<2; ++i) {
         auto strat = (i == 0) ? MaskStrategy::Auto : MaskStrategy::ParserDwa;
-        left.set_mask_strategy(strat);
-        right.set_mask_strategy(strat);
-        restored.set_mask_strategy(strat);
-        auto lc = left.compile(v);
-        auto rc = right.compile(v);
-        auto pc = restored.compile(v);
+        CompileOptions options;
+        options.mask_strategy = strat;
+        auto lc = left.compile(v, options);
+        auto rc = right.compile(v, options);
+        auto pc = restored.compile(v, options);
         CHECK(allowed(lc.start().mask(),4) && !allowed(lc.start().mask(),5));
         CHECK(allowed(rc.start().mask(),5) && !allowed(rc.start().mask(),4));
         CHECK(pc.start().mask()==lc.start().mask());
@@ -163,23 +163,21 @@ void markers_and_frontends() {
     auto v = vocabulary();
     for (unsigned i=0; i<4; ++i) {
         auto g = Grammar::from_glrm(R"(glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);)");
-        auto m = Module(g); m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto c = m.compile(v); CHECK(c.marker_ids()==std::vector<TokenId>({10,20,30}));
+        auto m = Module(g);
+        auto c = m.compile(v, strategy_options(i)); CHECK(c.marker_ids()==std::vector<TokenId>({10,20,30}));
         auto s = c.start(); CHECK(s.marker_events().size()==1 && s.marker_events()[0].byte_offset==0);
         s.commit_token(31); const auto events = s.marker_events();
         CHECK(events.size()==2 && events[0].id==20 && events[0].byte_offset==1 && events[1].id==30 && events[1].byte_offset==2);
         CHECK(ConstraintState(s).marker_events().size()==2);
         auto load = Constraint::load(c.save()); CHECK(load.marker_ids()==c.marker_ids());
         auto lm = Module(Grammar::from_lark("start: \"a\" \"b\""));
-        lm.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto l = lm.compile(v).start(); l.commit_token(31); CHECK(l.is_accepting());
+        auto l = lm.compile(v, strategy_options(i)).start(); l.commit_token(31); CHECK(l.is_accepting());
     }
     Vocab special({{0,"a"},{1,"a"}}, {99});
     LarkOptions named; named.profile = LarkProfile::Llm; named.token_names = {{"begin",{99}},{"body",{1}}};
     for (unsigned i=0; i<4; ++i) {
         auto m = Module(Grammar::from_lark("start: <|begin|> <|body|>", named));
-        m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto state = m.compile(special).start();
+        auto state = m.compile(special, strategy_options(i)).start();
         CHECK(allowed(state.mask(),99)); state.commit_token(99);
         CHECK(allowed(state.mask(),1) && !allowed(state.mask(),0)); state.commit_token(1); CHECK(state.is_accepting());
     }
@@ -204,8 +202,8 @@ void threads_and_errors() {
 int thread_stack_probe(std::size_t stack_bytes) {
     auto v = vocabulary(); std::vector<Constraint> constraints;
     for (unsigned i=0; i<4; ++i) {
-        auto m = Module(simple()); m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        constraints.push_back(m.compile(v));
+        auto m = Module(simple());
+        constraints.push_back(m.compile(v, strategy_options(i)));
     }
     struct Probe { std::vector<Constraint>* constraints; bool okay=false; } probe{&constraints};
     pthread_attr_t requested; CHECK(pthread_attr_init(&requested)==0);
@@ -242,8 +240,8 @@ void emit_parity() {
     auto v = vocabulary(); std::cout << '[';
     for (unsigned i=0; i<4; ++i) {
         if (i) std::cout << ','; std::cout << "{\"mode\":" << i << ",\"states\":[";
-        auto m = Module(simple()); m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto s = m.compile(v).start();
+        auto m = Module(simple());
+        auto s = m.compile(v, strategy_options(i)).start();
         for (unsigned step=0; step<3; ++step) {
             if (step) { s.commit_token(step-1); std::cout << ','; }
             const auto mask_words = s.mask(); std::cout << "{\"mask\":[";
@@ -260,8 +258,8 @@ Bytes read_bytes(const std::filesystem::path& path) {
 void artifacts(const std::filesystem::path& directory, bool check) {
     std::filesystem::create_directories(directory); auto v = vocabulary();
     for (unsigned i=0; i<4; ++i) {
-        auto m = Module(simple()); m.set_mask_strategy(static_cast<MaskStrategy>(i));
-        auto c = m.compile(v);
+        auto m = Module(simple());
+        auto c = m.compile(v, strategy_options(i));
         for (bool external : {false, true}) {
             const auto path = directory/((check?"node-":"cpp-")+std::string(external?"external-":"mode-")+std::to_string(i)+".glr");
             if (check) {
@@ -285,28 +283,25 @@ void canonical_modules() {
     auto original = parent; // copy constructor is a cheap snapshot
 
     auto child = Module(Grammar::from_ebnf("start ::= \"a\""));
-    child.set_mask_strategy(MaskStrategy::TokenClassTrie);
-    child.set_boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie);
     CHECK(BoundaryMaskStrategy::FastBuild == BoundaryMaskStrategy::TokenTrie);
     CHECK(BoundaryMaskStrategy::FastRuntime == BoundaryMaskStrategy::ParserDwa);
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::TokenTrie) == GLRMASK_BOUNDARY_MASK_STRATEGY_TOKEN_TRIE);
     CHECK(static_cast<std::uint32_t>(BoundaryMaskStrategy::ParserDwa) == GLRMASK_BOUNDARY_MASK_STRATEGY_PARSER_DWA);
-    child.precompile(v); parent.bind("child", child);
+    CompileOptions child_options = strategy_options(
+        static_cast<unsigned>(MaskStrategy::TokenClassTrie), BoundaryMaskStrategy::TokenTrie);
+    child.precompile(v, child_options); parent.bind("child", child);
 
     auto loaded = Module::load(parent.save(), &v);
     CHECK(loaded.externs().unbound().empty());
     CHECK(original.externs().unbound().at(0).name=="child");
     CHECK(loaded.externs().at(0).name=="child");
 
-    // Round-trip settings
-    CHECK(child.mask_strategy() == MaskStrategy::TokenClassTrie);
-    CHECK(child.boundary_mask_strategy() == BoundaryMaskStrategy::TokenTrie);
+    // Retained work survives without storing per-module settings.
     auto child_bytes = child.save();
     auto child_loaded = Module::load(child_bytes, &v);
-    CHECK(child_loaded.mask_strategy() == MaskStrategy::TokenClassTrie);
-    CHECK(child_loaded.boundary_mask_strategy() == BoundaryMaskStrategy::TokenTrie);
+    CHECK(child_loaded.externs().empty());
 
-    auto state = loaded.compile(v).start(); loaded.dispose(); parent.dispose(); child.dispose();
+    auto state = loaded.compile(v, child_options).start(); loaded.dispose(); parent.dispose(); child.dispose();
     state.commit_token(3); CHECK(state.is_accepting());
 
     bool failed = false; try { original.bind("missing", Grammar::from_ebnf("start ::= \"a\"")); } catch(const Error&) { failed=true; } CHECK(failed);

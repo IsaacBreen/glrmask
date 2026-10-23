@@ -23,7 +23,7 @@ def _glrm(source, vocab, *, subgrammars=None, end_tokens=None, mask_strategy=Non
         kwargs["end_tokens"] = end_tokens
     m = _prepare_glrm(source, vocab, subgrammars=subgrammars)
     if mask_strategy is not None:
-        m.mask_strategy = mask_strategy
+        kwargs["mask_strategy"] = mask_strategy
     return m.compile(vocab, **kwargs)
 
 

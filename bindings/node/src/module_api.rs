@@ -63,48 +63,13 @@ impl NativeModule {
 #[napi]
 impl NativeModule {
     #[napi(factory)]
-    pub fn from_grammar(value: &NativeGrammar, mode: f64, boundary: f64) -> napi::Result<Self> {
-        call(|| {
-            let mut module = g::Module::new(&*live(&value.inner)?);
-            module.set_mask_strategy(core::mask_strategy(id(mode)?)?)?;
-            module.set_boundary_mask_strategy(core::boundary_mask_strategy(id(boundary)?)?)?;
-            Ok(Self::new(module))
-        })
+    pub fn from_grammar(value: &NativeGrammar) -> napi::Result<Self> {
+        call(|| Ok(Self::new(g::Module::new(&*live(&value.inner)?))))
     }
     #[napi]
     pub fn clone(&self) -> napi::Result<Self> { call(|| Ok(Self::new(self.snapshot()?))) }
     #[napi]
     pub fn dispose(&self) -> napi::Result<()> { call(|| self.inner.close()) }
-
-    #[napi]
-    pub fn get_mask_strategy(&self) -> napi::Result<f64> {
-        call(|| Ok(core::mask_strategy_value(self.snapshot()?.mask_strategy()) as f64))
-    }
-    #[napi]
-    pub fn set_mask_strategy(&self, value: f64) -> napi::Result<()> {
-        call(|| {
-            let s = core::mask_strategy(id(value)?)?;
-            let mut target = live(&self.inner)?;
-            target.module.set_mask_strategy(s)?;
-            target.revision += 1;
-            Ok(())
-        })
-    }
-
-    #[napi]
-    pub fn get_boundary_mask_strategy(&self) -> napi::Result<f64> {
-        call(|| Ok(core::boundary_mask_strategy_value(self.snapshot()?.boundary_mask_strategy()) as f64))
-    }
-    #[napi]
-    pub fn set_boundary_mask_strategy(&self, value: f64) -> napi::Result<()> {
-        call(|| {
-            let s = core::boundary_mask_strategy(id(value)?)?;
-            let mut target = live(&self.inner)?;
-            target.module.set_boundary_mask_strategy(s)?;
-            target.revision += 1;
-            Ok(())
-        })
-    }
 
     #[napi]
     pub fn bind_grammar(&self, name: String, value: &NativeGrammar) -> napi::Result<()> {
@@ -148,18 +113,27 @@ impl NativeModule {
         call(|| Ok(externs_to_native(self.snapshot()?.externs().unbound().iter())))
     }
 
+    fn options(end: Vec<f64>, mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
+        Ok(core::compile_options(
+            ids(end)?,
+            core::mask_strategy(id(mode)?)?,
+            core::boundary_mask_strategy(id(boundary)?)?,
+        ))
+    }
+
     #[napi]
-    pub fn precompile_sync(&self, vocab: &NativeVocab) -> napi::Result<()> {
+    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<()> {
         call(|| {
             let vocab = live(&vocab.inner)?.clone();
+            let options = Self::options(Vec::new(), mode, boundary)?;
             let mut target = live(&self.inner)?;
-            target.module.precompile(&vocab)?;
+            target.module.precompile_with(&vocab, &options)?;
             target.revision += 1;
             Ok(())
         })
     }
     #[napi]
-    pub fn precompile(&self, vocab: &NativeVocab) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
+    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<ModulePrecompileTask>> {
         call(|| {
             let target = live(&self.inner)?;
             Ok(AsyncTask::new(ModulePrecompileTask {
@@ -167,22 +141,23 @@ impl NativeModule {
                 revision: target.revision,
                 owner: self.inner.clone(),
                 vocab: live(&vocab.inner)?.clone(),
+                options: Self::options(Vec::new(), mode, boundary)?,
             }))
         })
     }
 
     #[napi]
-    pub fn compile_sync(&self, vocab: &NativeVocab, end: Vec<f64>) -> napi::Result<NativeConstraint> {
+    pub fn compile_sync(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
         call(|| Ok(NativeConstraint {
-            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, core::compile_options(ids(end)?))?)),
+            inner: Handle::new(Arc::new(self.snapshot()?.compile_with(&*live(&vocab.inner)?, Self::options(end, mode, boundary)?)?)),
         }))
     }
     #[napi]
-    pub fn compile(&self, vocab: &NativeVocab, end: Vec<f64>) -> napi::Result<AsyncTask<ModuleCompileTask>> {
+    pub fn compile(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<AsyncTask<ModuleCompileTask>> {
         call(|| Ok(AsyncTask::new(ModuleCompileTask {
             module: self.snapshot()?,
             vocab: live(&vocab.inner)?.clone(),
-            options: core::compile_options(ids(end)?),
+            options: Self::options(end, mode, boundary)?,
         })))
     }
 
@@ -203,12 +178,12 @@ impl Task for ModuleCompileTask {
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeConstraint { inner: Handle::new(value) }) }
 }
 
-pub struct ModulePrecompileTask { module: g::Module, vocab: g::Vocab, owner: Arc<Handle<ModuleSlot>>, revision: u64 }
+pub struct ModulePrecompileTask { module: g::Module, vocab: g::Vocab, owner: Arc<Handle<ModuleSlot>>, revision: u64, options: g::CompileOptions }
 #[napi]
 impl Task for ModulePrecompileTask {
     type Output = g::Module;
     type JsValue = ();
-    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile(&self.vocab)?; Ok(self.module.clone()) }) }
+    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, &self.options)?; Ok(self.module.clone()) }) }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<()> {
         call(|| {
             let mut target = live(&self.owner)?;

@@ -219,28 +219,49 @@ class Grammar extends Owned {
   }
   copy() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
   compileSync(vocab, options) {
-    const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
-    const mod = new Module(this, { maskStrategy: o.maskStrategy, boundaryMaskStrategy: o.boundaryMaskStrategy });
-    return mod.compileSync(vocab, { endTokens: o.endTokens });
+    const s = compileSettings(options);
+    const mod = new Module(this);
+    try {
+      return wrap(Constraint, invoke(() => handle(mod, Module).compileSync(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+    } finally {
+      mod.dispose();
+    }
   }
   async compile(vocab, options) {
-    const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
-    const mod = new Module(this, { maskStrategy: o.maskStrategy, boundaryMaskStrategy: o.boundaryMaskStrategy });
-    return mod.compile(vocab, { endTokens: o.endTokens });
+    const s = compileSettings(options);
+    const mod = new Module(this);
+    try {
+      return wrap(Constraint, await invokeAsync(() => handle(mod, Module).compile(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
+    } finally {
+      mod.dispose();
+    }
   }
 }
 
 class CompileOptions {
   constructor(options) {
-    const o = checkedOptions(options, ['endTokens']);
+    const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
     this.endTokens = Object.freeze(o.endTokens === undefined ? [] : ids(o.endTokens));
+    this.maskStrategy = formatMaskStrategy(parseMaskStrategy(o.maskStrategy));
+    this.boundaryMaskStrategy = formatBoundaryMaskStrategy(parseBoundaryMaskStrategy(o.boundaryMaskStrategy));
     Object.freeze(this);
   }
+  _settings() {
+    return {
+      end: this.endTokens,
+      mode: parseMaskStrategy(this.maskStrategy),
+      boundary: parseBoundaryMaskStrategy(this.boundaryMaskStrategy),
+    };
+  }
 }
-function rootOptions(options) {
-  if (options instanceof CompileOptions) return options.endTokens;
-  const o = checkedOptions(options, ['endTokens']);
-  return o.endTokens === undefined ? [] : ids(o.endTokens);
+function compileSettings(options) {
+  if (options instanceof CompileOptions) return options._settings();
+  const o = checkedOptions(options, ['endTokens', 'maskStrategy', 'boundaryMaskStrategy']);
+  return {
+    end: o.endTokens === undefined ? [] : ids(o.endTokens),
+    mode: parseMaskStrategy(o.maskStrategy),
+    boundary: parseBoundaryMaskStrategy(o.boundaryMaskStrategy),
+  };
 }
 
 class Expr extends Owned {
@@ -284,30 +305,10 @@ class Expr extends Owned {
 }
 
 class Module extends Owned {
-  constructor(value, options) {
-    if (value === key) { super(key, options); return; }
+  constructor(value, nativeHandle) {
+    if (value === key) { super(key, nativeHandle); return; }
     if (!(value instanceof Grammar)) throw new TypeError('Module expects a Grammar');
-    const o = checkedOptions(options, ['maskStrategy', 'boundaryMaskStrategy']);
-    const mode = parseMaskStrategy(o.maskStrategy);
-    const boundary = parseBoundaryMaskStrategy(o.boundaryMaskStrategy);
-    const inner = invoke(() => native.NativeModule.fromGrammar(handle(value, Grammar), mode, boundary));
-    super(key, inner);
-  }
-
-  get maskStrategy() {
-    return formatMaskStrategy(invoke(() => handle(this, Module).getMaskStrategy()));
-  }
-  set maskStrategy(value) {
-    const num = parseMaskStrategy(value);
-    invoke(() => handle(this, Module).setMaskStrategy(num));
-  }
-
-  get boundaryMaskStrategy() {
-    return formatBoundaryMaskStrategy(invoke(() => handle(this, Module).getBoundaryMaskStrategy()));
-  }
-  set boundaryMaskStrategy(value) {
-    const num = parseBoundaryMaskStrategy(value);
-    invoke(() => handle(this, Module).setBoundaryMaskStrategy(num));
+    super(key, invoke(() => native.NativeModule.fromGrammar(handle(value, Grammar))));
   }
 
   copy() { return wrap(Module, invoke(() => handle(this, Module).clone())); }
@@ -355,16 +356,22 @@ class Module extends Owned {
     return formatExterns(rawAll, unboundSupplier);
   }
 
-  precompileSync(vocab) { invoke(() => handle(this, Module).precompileSync(handle(vocab, Vocab))); }
-  async precompile(vocab) { await invokeAsync(() => handle(this, Module).precompile(handle(vocab, Vocab))); }
+  precompileSync(vocab, options) {
+    const s = compileSettings(options);
+    invoke(() => handle(this, Module).precompileSync(handle(vocab, Vocab), s.mode, s.boundary));
+  }
+  async precompile(vocab, options) {
+    const s = compileSettings(options);
+    await invokeAsync(() => handle(this, Module).precompile(handle(vocab, Vocab), s.mode, s.boundary));
+  }
 
   compileSync(vocab, options) {
-    const end = rootOptions(options);
-    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), end)));
+    const s = compileSettings(options);
+    return wrap(Constraint, invoke(() => handle(this, Module).compileSync(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
   }
   async compile(vocab, options) {
-    const end = rootOptions(options);
-    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), end)));
+    const s = compileSettings(options);
+    return wrap(Constraint, await invokeAsync(() => handle(this, Module).compile(handle(vocab, Vocab), s.end, s.mode, s.boundary)));
   }
 
   saveSync() { return invoke(() => handle(this, Module).saveSync()); }

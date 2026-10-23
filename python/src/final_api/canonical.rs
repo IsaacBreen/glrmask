@@ -316,62 +316,32 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     ))
 }
 
+fn compile_options(
+    mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
+    boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
+) -> glrmask::CompileOptions {
+    let mask_strategy = mask_strategy
+        .as_deref()
+        .copied()
+        .unwrap_or(PyMaskStrategy::AUTO);
+    let boundary_mask_strategy = boundary_mask_strategy
+        .as_deref()
+        .copied()
+        .unwrap_or(PyBoundaryMaskStrategy::AUTO);
+    glrmask::CompileOptions::default()
+        .mask_strategy(mask_strategy.into())
+        .boundary_mask_strategy(boundary_mask_strategy.into())
+}
+
 #[pymethods]
 impl PyModule {
     #[new]
-    #[pyo3(signature = (source, /, *, mask_strategy = None, boundary_mask_strategy = None))]
-    fn new(
-        source: &Bound<'_, PyAny>,
-        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
-        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
-    ) -> PyResult<Self> {
+    #[pyo3(signature = (source, /))]
+    fn new(source: &Bound<'_, PyAny>) -> PyResult<Self> {
         let grammar = source
             .extract::<PyRef<'_, PyGrammar>>()
             .map_err(|_| PyTypeError::new_err("Module expects Grammar"))?;
-        let mut inner = glrmask::Module::new(&grammar.inner);
-        let mask_strategy = mask_strategy
-            .as_deref()
-            .copied()
-            .unwrap_or(PyMaskStrategy::AUTO);
-        let boundary_mask_strategy = boundary_mask_strategy
-            .as_deref()
-            .copied()
-            .unwrap_or(PyBoundaryMaskStrategy::AUTO);
-        inner
-            .set_mask_strategy(mask_strategy.into())
-            .map_err(api_error)?;
-        inner
-            .set_boundary_mask_strategy(boundary_mask_strategy.into())
-            .map_err(api_error)?;
-        Ok(Self::from_inner(inner))
-    }
-
-    #[getter]
-    fn mask_strategy(&self) -> PyMaskStrategy {
-        self.snapshot().mask_strategy().into()
-    }
-
-    #[setter]
-    fn set_mask_strategy(&mut self, strategy: PyMaskStrategy) -> PyResult<()> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .set_mask_strategy(strategy.into())
-            .map_err(api_error)
-    }
-
-    #[getter]
-    fn boundary_mask_strategy(&self) -> PyBoundaryMaskStrategy {
-        self.snapshot().boundary_mask_strategy().into()
-    }
-
-    #[setter]
-    fn set_boundary_mask_strategy(&mut self, strategy: PyBoundaryMaskStrategy) -> PyResult<()> {
-        self.inner
-            .as_mut()
-            .unwrap()
-            .set_boundary_mask_strategy(strategy.into())
-            .map_err(api_error)
+        Ok(Self::from_inner(glrmask::Module::new(&grammar.inner)))
     }
 
     #[pyo3(signature = (*args, **kwargs))]
@@ -440,13 +410,21 @@ impl PyModule {
         }
     }
 
-    fn precompile(slf: &Bound<'_, Self>, py: Python<'_>, vocab: &PyVocab) -> PyResult<()> {
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
+    fn precompile(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        vocab: &PyVocab,
+        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
+        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
+    ) -> PyResult<()> {
         let vocab = vocab.inner.clone();
+        let options = compile_options(mask_strategy, boundary_mask_strategy);
         let mut target = slf.try_borrow_mut()?;
         let mut next = target.snapshot();
         let next = py
             .detach(move || {
-                next.precompile(&vocab)?;
+                next.precompile_with(&vocab, &options)?;
                 Ok::<_, glrmask::Error>(next)
             })
             .map_err(api_error)?;
@@ -454,16 +432,18 @@ impl PyModule {
         Ok(())
     }
 
-    #[pyo3(signature = (vocab, *, end_tokens = None))]
+    #[pyo3(signature = (vocab, *, end_tokens = None, mask_strategy = None, boundary_mask_strategy = None))]
     fn compile(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
         vocab: &PyVocab,
         end_tokens: Option<Vec<u32>>,
+        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
+        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
     ) -> PyResult<PyConstraint> {
         let snapshot = slf.try_borrow()?.snapshot();
         let vocab = vocab.inner.clone();
-        let options = glrmask::CompileOptions::default()
+        let options = compile_options(mask_strategy, boundary_mask_strategy)
             .end_tokens(end_tokens.unwrap_or_default());
         let constraint = py
             .detach(move || snapshot.compile_with(&vocab, options))

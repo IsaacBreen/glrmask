@@ -23,7 +23,7 @@ Produce the tarball as described in [Building from source](#building-from-source
 GLRMask has four core types:
 
 - `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
+- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
@@ -95,29 +95,29 @@ const grammar = Grammar.fromLark('start: <|begin|>', {
 
 ## Modules and expressions
 
-The lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns local mask settings, mutable bindings, and retained compilation work; `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging lexical scopes.
+The lifecycle is source `Grammar` -> `Module` -> runnable `Constraint` -> per-sequence `ConstraintState`. A `Module` owns mutable bindings and retained compilation work; `Expr` composes whole `Grammar`, `Module`, `Expr`, `Token`, and `ExactTokens` pieces without merging lexical scopes.
 
 ```js
 const moduleVocab = new Vocab([
   [0, Buffer.from('x')], [1, Buffer.from('a')],
   [2, Buffer.from('y')], [3, Buffer.from('b')],
 ]);
-const child = new Module(Grammar.fromEbnf('start ::= "a"'), {
-  maskStrategy: MaskStrategy.TokenClassTrie,
-});
-await child.precompile(moduleVocab);
+const child = new Module(Grammar.fromEbnf('start ::= "a"'));
+await child.precompile(moduleVocab, { maskStrategy: MaskStrategy.TokenClassTrie });
 
 const parent = new Module(Grammar.fromGlrm(
   'extern grammar child; start root; nt root = "x" child "y";'));
 parent.bind('child', child);
-const constraint = await parent.compile(moduleVocab);
+const constraint = await parent.compile(moduleVocab, {
+  maskStrategy: MaskStrategy.TokenClassTrie,
+});
 ```
 
 `bind` and `precompile` mutate atomically. A failed `bind` leaves the receiver unchanged; `copy()` gives an independent binding snapshot, and attaching a child snapshots that occurrence. Accepted bindings are `Module`, `Grammar`, `Expr`, `Token`, and `ExactTokens`. Qualified descendant paths using `::` are unsupported, each extern binds once, and a child with unbound externs cannot be attached.
 
 `precompile`, `compile`, `save`, and `load` return promises and run on native workers; `precompileSync`, `compileSync`, `saveSync`, and `loadSync` block the caller. Async calls snapshot their Rust inputs before returning, so later mutation or disposal does not affect scheduled work. Async `precompile` checks the receiver revision when it completes and rejects if concurrent mutation changed the snapshot; retry against the current state.
 
-`module.externs` is a read-only `Map`-like snapshot of `{name, kind, span}`, with `externs.unbound` containing only unresolved entries. Setting `maskStrategy` or `boundaryMaskStrategy` changes future compilation without discarding retained work. Final compilation accepts only `{endTokens}`:
+`module.externs` is a read-only `Map`-like snapshot of `{name, kind, span}`, with `externs.unbound` containing only unresolved entries. Options go to `precompile` and `compile`; one value applies to the whole compile, including every composed child, and never downgrades a part that already has a static preparation. `compile` accepts `{endTokens, maskStrategy, boundaryMaskStrategy}`:
 
 ```js
 const expression = Expr.choice(child, Grammar.fromEbnf('start ::= "b"'));

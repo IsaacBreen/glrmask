@@ -40,7 +40,7 @@ def compile_grammar(grammar, vocab, **options):
 def link_module(module, vocab, **options):
     if isinstance(module, GrammarCalls): module = module.grammar
     if "optimization" in options:
-        module.mask_strategy = options.pop("optimization")
+        options["mask_strategy"] = options.pop("optimization")
     return module.compile(vocab, **options)
 
 def grammar_from_ebnf(source): return GrammarCalls(glrmask.Grammar.from_ebnf(source))

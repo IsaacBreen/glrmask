@@ -51,12 +51,12 @@ def test_typed_source_bindings_and_precompiled_links_share_masks(mode):
         'glrm 1; start root; extern grammar child; nt root = "x" child "y";')
     child = glrmask.Grammar.from_lark('start: "a" "b"?\n%ignore /\\t+/')
     reference = _bound_snapshot(glrmask.Module(parent), "child", glrmask.Module(child)).compile(vocab)
-    configured_child = glrmask.Module(child, mask_strategy=mode)
-    configured = _bound_snapshot(glrmask.Module(parent, mask_strategy=mode), "child", configured_child)
-    compiled = configured.compile(vocab)
-    module = _bound_snapshot(glrmask.Module(parent, mask_strategy=mode), "child", configured_child)
-    module.precompile(vocab)
-    linked = module.compile(vocab)
+    configured_child = glrmask.Module(child)
+    configured = _bound_snapshot(glrmask.Module(parent), "child", configured_child)
+    compiled = configured.compile(vocab, mask_strategy=mode)
+    module = _bound_snapshot(glrmask.Module(parent), "child", configured_child)
+    module.precompile(vocab, mask_strategy=mode)
+    linked = module.compile(vocab, mask_strategy=mode)
     for constraint in [compiled, linked, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
         for prefix in [b"", b"x", b"xa", b"xab", b"xab\t", b"xaby"]:
@@ -73,8 +73,7 @@ def test_exact_token_identity_survives_source_compilation(mode):
     vocab = glrmask.Vocab.from_id_to_bytes({0: b"a", 15: b"a"})
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         "glrm 1; start root; extern token MARK; nt root = MARK;"), "MARK", glrmask.Token(15))
-    grammar.mask_strategy = mode
-    compiled = grammar.compile(vocab)
+    compiled = grammar.compile(vocab, mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save()),
                        glrmask.Constraint.load(compiled.save(external_vocab=True), vocab)]:
         state = constraint.start()

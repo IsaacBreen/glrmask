@@ -70,8 +70,7 @@ def test_empty_event_binding_recognizes_no_output():
     for mode in (glrmask.MaskStrategy.AUTO, glrmask.MaskStrategy.FAST_BUILD,
                  glrmask.MaskStrategy.TOKEN_CLASS_TRIE, glrmask.MaskStrategy.FAST_RUNTIME):
         grammar = _bound_snapshot(glrmask.Grammar.from_glrm(_grammar()), "END", vocab.tokens([]))
-        grammar.mask_strategy = mode
-        constraint = grammar.compile(vocab)
+        constraint = grammar.compile(vocab, mask_strategy=mode)
         state = constraint.start()
         assert not state.is_accepting()
         # The preceding literal can be a locally viable parser prefix. Empty

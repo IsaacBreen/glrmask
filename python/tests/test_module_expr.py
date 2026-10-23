@@ -25,41 +25,40 @@ def accepts(module, v, ids):
     assert state.is_accepting()
 
 
-def test_module_settings_properties_and_compile():
+def test_compile_options_and_helpers():
     v = vocab()
-    module = g.Module(
-        source(),
-        mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE,
-        boundary_mask_strategy=g.BoundaryMaskStrategy.PARSER_DWA,
-    )
-    assert module.mask_strategy == g.MaskStrategy.TOKEN_CLASS_TRIE
-    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.PARSER_DWA
-    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.FAST_RUNTIME
-
-    # Modifying settings properties
-    module.mask_strategy = g.MaskStrategy.PARSER_DWA
-    assert module.mask_strategy == g.MaskStrategy.PARSER_DWA
-    module.boundary_mask_strategy = g.BoundaryMaskStrategy.TOKEN_TRIE
-    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.TOKEN_TRIE
-    assert module.boundary_mask_strategy == g.BoundaryMaskStrategy.FAST_BUILD
-
-    # Module options and compile options are removed from public API
+    module = g.Module(source())
+    assert not hasattr(module, "mask_strategy")
+    assert not hasattr(module, "boundary_mask_strategy")
     assert not hasattr(g, "ModuleOptions")
     assert not hasattr(g, "CompileOptions")
     assert not hasattr(source(), "mask_strategy")
+    assert g.MaskStrategy.FAST_BUILD == g.MaskStrategy.TOKEN_TRIE
+    assert g.BoundaryMaskStrategy.FAST_RUNTIME == g.BoundaryMaskStrategy.PARSER_DWA
 
+    assert module.precompile(
+        v,
+        mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE,
+        boundary_mask_strategy=g.BoundaryMaskStrategy.PARSER_DWA,
+    ) is None
+    state = module.compile(
+        v,
+        mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE,
+        boundary_mask_strategy=g.BoundaryMaskStrategy.TOKEN_TRIE,
+    ).start()
+    assert state.mask()[1]
+    state.commit_token(1)
+    assert state.is_accepting()
     accepts(module, v, [1])
 
 
-def test_local_settings_and_root_only_compile():
+def test_local_precompilation_and_root_only_compile():
     v = vocab()
-    child = g.Module(source(), mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE)
-    assert child.precompile(v) is None
-    parent = g.Module(g.Grammar.from_glrm(HOST), mask_strategy=g.MaskStrategy.PARSER_DWA)
+    child = g.Module(source())
+    assert child.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE) is None
+    parent = g.Module(g.Grammar.from_glrm(HOST))
     assert parent.bind('child', child) is None
-    assert parent.mask_strategy == g.MaskStrategy.PARSER_DWA
-    assert child.mask_strategy == g.MaskStrategy.TOKEN_CLASS_TRIE
-    state = parent.compile(v, end_tokens=[63]).start()
+    state = parent.compile(v, end_tokens=[63], mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE).start()
     assert not state.mask()[63]
     state.commit_token(4)
     assert state.is_accepting() and state.mask()[63]
@@ -85,11 +84,10 @@ def test_independent_mutable_copies(copy_fn):
 
 def test_precompilation_persists_across_save_and_retained_work_preserved():
     v = vocab()
-    module = g.Module(source(), mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE)
-    module.precompile(v)
+    module = g.Module(source())
+    module.precompile(v, mask_strategy=g.MaskStrategy.TOKEN_CLASS_TRIE)
     saved = module.save()
     loaded = g.Module.load(saved, vocab=v)
-    assert loaded.mask_strategy == g.MaskStrategy.TOKEN_CLASS_TRIE
     accepts(loaded, v, [1])
 
 

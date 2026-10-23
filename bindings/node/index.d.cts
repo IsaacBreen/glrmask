@@ -166,14 +166,18 @@ export declare class ExactTokens implements Disposable {
   [Symbol.dispose](): void;
 }
 
+/** Strategy settings for a precompile or compile. */
+export interface StrategyOptions {
+  /** The mask computation strategy for the whole compile. */
+  maskStrategy?: MaskStrategy;
+  /** The boundary parser strategy for the whole compile. */
+  boundaryMaskStrategy?: BoundaryMaskStrategy;
+}
+
 /** Root compile options. */
-export interface GrammarCompileOptions {
+export interface GrammarCompileOptions extends StrategyOptions {
   /** Accepted end-of-sequence token IDs, applied only to this root compile and allowed only at acceptance. */
   endTokens?: Iterable<number>;
-  /** The mask computation strategy. */
-  maskStrategy?: MaskStrategy;
-  /** The boundary parser strategy. */
-  boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
 /** The source-language definition, without compilation settings. Source text is parsed lazily, so parse errors surface at compile. */
@@ -190,9 +194,9 @@ export declare class Grammar implements Disposable {
   static fromLark(source: string, options?: LarkOptions): Grammar;
   /** An independent handle. */
   copy(): Grammar;
-  /** Compiles the grammar against `vocab`; equivalent to `new Module(this, options).compile(vocab, ...)`. */
+  /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compile(vocab, ...)`. */
   compile(vocab: Vocab, options?: GrammarCompileOptions): Promise<Constraint>;
-  /** Compiles the grammar against `vocab`; equivalent to `new Module(this, options).compileSync(vocab, ...)`. */
+  /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compileSync(vocab, ...)`. */
   compileSync(vocab: Vocab, options?: GrammarCompileOptions): Constraint;
   /** Releases the native handle. */
   dispose(): void;
@@ -200,24 +204,21 @@ export declare class Grammar implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** Module construction settings. */
-export interface ModuleSettings {
-  /** The mask computation strategy. */
-  maskStrategy?: MaskStrategy;
-  /** The boundary parser strategy. */
-  boundaryMaskStrategy?: BoundaryMaskStrategy;
-}
 /** Root generation options. */
-export interface RootSettings {
+export interface RootSettings extends StrategyOptions {
   /** Accepted end-of-sequence token IDs, allowed only at acceptance and committed before stopping. */
   endTokens?: Iterable<number>;
 }
-/** Root generation options. */
+/** Compilation settings for a module assembly. */
 export declare class CompileOptions {
-  /** Creates root options; `endTokens` are allowed only at acceptance and must be committed before stopping. */
+  /** Creates compile options; `endTokens` are allowed only at acceptance and must be committed before stopping. */
   constructor(options?: RootSettings);
   /** The accepted end-of-sequence token IDs. */
   readonly endTokens: readonly number[];
+  /** The mask computation strategy for the whole compile. */
+  readonly maskStrategy: MaskStrategy;
+  /** The boundary parser strategy for the whole compile. */
+  readonly boundaryMaskStrategy: BoundaryMaskStrategy;
 }
 
 /** A value accepted as an `Expr` operand. */
@@ -241,15 +242,11 @@ export declare class Expr implements Disposable {
   [Symbol.dispose](): void;
 }
 
-/** A reusable, independently configured grammar with bindings and any retained compilation work. May still have unresolved externs. */
+/** A reusable grammar with bindings and any retained compilation work. May still have unresolved externs. */
 export declare class Module implements Disposable {
   private readonly __moduleBrand: void;
-  /** Creates a module from a source grammar with default settings. */
-  constructor(grammar: Grammar, options?: ModuleSettings);
-  /** The mask computation strategy. */
-  maskStrategy: MaskStrategy;
-  /** The boundary parser strategy. */
-  boundaryMaskStrategy: BoundaryMaskStrategy;
+  /** Creates a module from a source grammar. */
+  constructor(grammar: Grammar);
   /** A read-only map of the module's declared externs, in declaration order. */
   readonly externs: Externs;
   /** An independent snapshot sharing immutable source and retained work. */
@@ -259,9 +256,9 @@ export declare class Module implements Disposable {
   /** Binds several externs atomically; if any binding fails, none is applied. */
   bind(bindings: Record<string, ExprPart>): void;
   /** Retains vocabulary-specific compilation artifacts for this module. */
-  precompile(vocab: Vocab): Promise<void>;
+  precompile(vocab: Vocab, options?: StrategyOptions | CompileOptions): Promise<void>;
   /** Retains vocabulary-specific compilation artifacts for this module. */
-  precompileSync(vocab: Vocab): void;
+  precompileSync(vocab: Vocab, options?: StrategyOptions | CompileOptions): void;
   /** Compiles the module assembly against `vocab`; every extern must be bound. */
   compile(vocab: Vocab, options?: RootSettings | CompileOptions): Promise<Constraint>;
   /** Compiles the module assembly against `vocab`; every extern must be bound. */

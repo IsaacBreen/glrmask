@@ -90,8 +90,15 @@ pub fn boundary_mask_strategy_value(strategy: glrmask::BoundaryMaskStrategy) -> 
     }
 }
 
-pub fn compile_options(end_tokens: Vec<u32>) -> glrmask::CompileOptions {
-    glrmask::CompileOptions::default().end_tokens(end_tokens)
+pub fn compile_options(
+    end_tokens: Vec<u32>,
+    mask_strategy: glrmask::MaskStrategy,
+    boundary_mask_strategy: glrmask::BoundaryMaskStrategy,
+) -> glrmask::CompileOptions {
+    glrmask::CompileOptions::default()
+        .end_tokens(end_tokens)
+        .mask_strategy(mask_strategy)
+        .boundary_mask_strategy(boundary_mask_strategy)
 }
 
 type BorrowedState<'a> = glrmask::ConstraintState<'a>;
@@ -163,9 +170,13 @@ mod tests {
         let vocab = vocab(vec![(0,b"a".to_vec()), (1,b"b".to_vec()), (31,b"ab".to_vec()), (32,b"a".to_vec()), (65,b"z".to_vec())], vec![]).unwrap();
         for mode in 0..4 {
             let grammar = glrmask::Grammar::from_ebnf("start ::= \"a\" \"b\"");
-            let mut module = glrmask::Module::new(&grammar);
-            module.set_mask_strategy(mask_strategy(mode).unwrap()).unwrap();
-            let c = Arc::new(module.compile(&vocab).unwrap());
+            let module = glrmask::Module::new(&grammar);
+            let options = compile_options(
+                Vec::new(),
+                mask_strategy(mode).unwrap(),
+                glrmask::BoundaryMaskStrategy::Auto,
+            );
+            let c = Arc::new(module.compile_with(&vocab, options).unwrap());
             let expected = c.start().mask();
             let mut a = State::start(c).unwrap();
             assert_eq!(a.mask().unwrap(), expected);

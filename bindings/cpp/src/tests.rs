@@ -13,15 +13,25 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
         assert_eq!(glrmask_grammar_from_source(0, source.as_ptr().cast(), source.len(), ptr::null(), &mut grammar), 0);
         for strategy in 0..4 {
             let rust_g = g::Grammar::from_ebnf(source);
-            let mut rust_m = g::Module::new(&rust_g);
-            rust_m.set_mask_strategy(core::mask_strategy(strategy).unwrap()).unwrap();
-            let rust = rust_m.compile(&rust_vocab).unwrap();
+            let rust_m = g::Module::new(&rust_g);
+            let rust_options = core::compile_options(
+                Vec::new(),
+                core::mask_strategy(strategy).unwrap(),
+                g::BoundaryMaskStrategy::Auto,
+            );
+            let rust = rust_m.compile_with(&rust_vocab, rust_options).unwrap();
             let mut reference = rust.start();
             let mut module = ptr::null_mut();
             assert_eq!(glrmask_module_new(grammar, &mut module), 0);
-            assert_eq!(glrmask_module_set_mask_strategy(module, strategy), 0);
+            let options = glrmask_compile_options {
+                struct_size: size_of::<glrmask_compile_options>(),
+                end_tokens: ptr::null(),
+                end_tokens_len: 0,
+                mask_strategy: strategy,
+                boundary_mask_strategy: 0,
+            };
             let (mut constraint, mut state) = (ptr::null_mut(), ptr::null_mut());
-            assert_eq!(glrmask_module_compile(module, vocab, ptr::null(), &mut constraint), 0);
+            assert_eq!(glrmask_module_compile(module, vocab, &options, &mut constraint), 0);
             assert_eq!(glrmask_constraint_start(constraint, &mut state), 0);
             glrmask_constraint_free(constraint);
             glrmask_module_free(module);
@@ -57,7 +67,7 @@ fn invalid_foreign_lengths_and_null_outputs_fail_before_access() {
 fn header_layout_contract_on_supported_64_bit_platforms() {
     assert_eq!(size_of::<*const u8>(), 8);
     assert_eq!(size_of::<glrmask_vocab_entry>(), 24);
-    assert_eq!(size_of::<glrmask_compile_options>(), 24);
+    assert_eq!(size_of::<glrmask_compile_options>(), 32);
     assert_eq!(size_of::<glrmask_lark_options>(), 32);
     assert_eq!(size_of::<glrmask_extern>(), 56);
     assert_eq!(size_of::<glrmask_marker_event>(), 16);
@@ -78,12 +88,18 @@ fn module_ffi_snapshots_expressions_storage_and_invalid_binds() {
         assert_eq!(glrmask_grammar_from_source(0, leaf.as_ptr().cast(), leaf.len(), ptr::null(), &mut child), 0);
         let (mut parent, mut clone, mut prepared) = (ptr::null_mut(), ptr::null_mut(), ptr::null_mut());
         assert_eq!(glrmask_module_new(grammar, &mut parent), 0);
-        assert_eq!(glrmask_module_precompile(parent, vocab), 0);
+        assert_eq!(glrmask_module_precompile(parent, vocab, ptr::null()), 0);
         assert_eq!(glrmask_module_clone(parent, &mut clone), 0);
 
         assert_eq!(glrmask_module_new(child, &mut prepared), 0);
-        assert_eq!(glrmask_module_set_mask_strategy(prepared, 1), 0);
-        assert_eq!(glrmask_module_precompile(prepared, vocab), 0);
+        let parse_options = glrmask_compile_options {
+            struct_size: size_of::<glrmask_compile_options>(),
+            end_tokens: ptr::null(),
+            end_tokens_len: 0,
+            mask_strategy: 1,
+            boundary_mask_strategy: 0,
+        };
+        assert_eq!(glrmask_module_precompile(prepared, vocab, &parse_options), 0);
 
         // Unknown extern
         assert_ne!(glrmask_module_bind_grammar(parent, c"missing".as_ptr(), 7, child), 0);

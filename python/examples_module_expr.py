@@ -2,9 +2,8 @@
 from glrmask import Expr, Grammar, MaskStrategy, Module, Vocab
 
 vocab = Vocab.from_id_to_bytes({0: b'xay', 1: b'xby'})
-child = Module(Grammar.from_ebnf('start ::= "a"'),
-               mask_strategy=MaskStrategy.TOKEN_CLASS_TRIE)
-child.precompile(vocab)
+child = Module(Grammar.from_ebnf('start ::= "a"'))
+child.precompile(vocab, mask_strategy=MaskStrategy.TOKEN_CLASS_TRIE)
 parent = Module(Grammar.from_glrm(
     'glrm 1; start start; extern grammar child; nt start = "x" child "y";'
 ))

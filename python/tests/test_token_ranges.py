@@ -61,8 +61,7 @@ def test_exact_ranges_preserve_id_identity_repetition_and_overlap(mode):
     v = vocab()
     source = "glrm 1; start start; extern token A; extern token B; nt start = A B;"
     module = _bound_snapshot(_bound_snapshot(glrmask.Grammar.from_glrm(source), "A", v.tokens(range(10, 31))), "B", v.token_ranges([range(20, 41), range(70, 81)]))
-    module.mask_strategy = mode
-    c = module.compile(v)
+    c = module.compile(v, mask_strategy=mode)
     for first in (10, 20, 30):
         state = c.start()
         assert accepted_ids(state) == set(range(10, 31))
@@ -82,8 +81,7 @@ def test_deferred_range_binding_and_serialization():
     expected = set(range(3, 9)) | set(range(90, 100))
     loaded = glrmask.Module.load(bound.save(), vocab=v)
     for mode in MODES:
-        loaded.mask_strategy = mode
-        constraint = loaded.compile(v)
+        constraint = loaded.compile(v, mask_strategy=mode)
         assert accepted_ids(constraint.start()) == expected
     with pytest.raises(ValueError):
         module.compile(v)
@@ -99,8 +97,7 @@ def test_128k_contiguous_and_nearly_all_token_sets(mode):
         assert len(tokens.ranges) == (1 if excluded is None else 2)
         assert len(tokens) == n - (excluded is not None)
         module = _bound_snapshot(glrmask.Grammar.from_glrm(ONE), "T", tokens)
-        module.mask_strategy = mode
-        constraint = module.compile(v)
+        constraint = module.compile(v, mask_strategy=mode)
         state = constraint.start()
         mask = state.mask()
         assert int(mask.sum()) == len(tokens)
@@ -143,12 +140,9 @@ def test_compact_ranges_match_pointwise_token_alternatives(mode, deferred):
         for name, ranges in selections.items():
             compact = _bound_snapshot(compact, name, v.token_ranges(ranges))
             oracle = pointwise_token_grammar(token for interval in ranges for token in interval)
-            oracle.mask_strategy = mode
             pointwise = _bound_snapshot(pointwise, name, oracle)
-        compact.mask_strategy = mode
-        pointwise.mask_strategy = mode
-        actual = compact.compile(v)
-        expected = pointwise.compile(v)
+        actual = compact.compile(v, mask_strategy=mode)
+        expected = pointwise.compile(v, mask_strategy=mode)
         # Exhaust every legal prefix through two model tokens, comparing the
         # full next-token mask and acceptance at every node.
         prefixes = [()]
@@ -176,8 +170,7 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     grammar = glrmask.Grammar.from_glrm('glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     grammar = _bound_snapshot(grammar, "A", v.tokens(range(6)) if compact else glrmask.Token(0))
     grammar = _bound_snapshot(grammar, "B", v.tokens(range(3, 10)) if compact else glrmask.Token(1))
-    grammar.mask_strategy = mode
-    constraint = grammar.compile(v, end_tokens=[15])
+    constraint = grammar.compile(v, end_tokens=[15], mask_strategy=mode)
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)
@@ -195,8 +188,7 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     grammar = glrmask.Grammar.from_glrm(
         'glrm 1; start start; extern token A; extern token B; nt start = (A | B) (A | "a");')
     module = _bound_snapshot(_bound_snapshot(grammar, "A", v.tokens(a)), "B", v.tokens(b))
-    module.mask_strategy = mode
-    constraint = module.compile(v, end_tokens=[15])
+    constraint = module.compile(v, end_tokens=[15], mask_strategy=mode)
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)

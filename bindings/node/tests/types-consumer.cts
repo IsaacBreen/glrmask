@@ -20,12 +20,12 @@ new api.ConstraintState();
 s[Symbol.dispose](); c.dispose();
 void [range, accepted, offset];
 
-const module = new api.Module(g, {maskStrategy: api.MaskStrategy.TokenClassTrie});
+const module = new api.Module(g);
 const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');
-module.precompileSync(v);
+module.precompileSync(v, {maskStrategy: api.MaskStrategy.TokenClassTrie});
 const independent: api.Module = module.copy();
-const result: api.Constraint = independent.compileSync(v, new api.CompileOptions({endTokens:[99]}));
+const result: api.Constraint = independent.compileSync(v, new api.CompileOptions({endTokens:[99], maskStrategy: api.MaskStrategy.TokenClassTrie, boundaryMaskStrategy: api.BoundaryMaskStrategy.ParserDwa}));
 const savedModule: Uint8Array = module.saveSync(); api.Module.loadSync(savedModule, v);
 // @ts-expect-error Strings are not valid operands in Expr.choice.
 api.Expr.choice('invalid');

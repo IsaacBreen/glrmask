@@ -9,25 +9,14 @@ const mark=()=>Grammar.fromGlrm('glrm 1; start start; extern token MARK; nt star
 const allowed=(s,id)=>(s.mask()[id>>>5] & (1<<(id&31)))!==0;
 function accept(module,v,ids){const s=module.compileSync(v).start();for(const id of ids){assert.ok(allowed(s,id));s.commitToken(id);}assert.ok(s.isAccepting());}
 
-test('Module: properties, setters, copy and root-only final options',()=>{
+test('Module: copy and root-only final options',()=>{
   const v=vocab(),original=new Module(host());
-  assert.equal(original.maskStrategy,MaskStrategy.Auto);
-  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.Auto);
   assert.equal(BoundaryMaskStrategy.FastRuntime,BoundaryMaskStrategy.ParserDwa);
   assert.equal(BoundaryMaskStrategy.FastBuild,BoundaryMaskStrategy.TokenTrie);
 
-  original.maskStrategy=MaskStrategy.TokenClassTrie;
-  assert.equal(original.maskStrategy,MaskStrategy.TokenClassTrie);
-  original.boundaryMaskStrategy=BoundaryMaskStrategy.TokenTrie;
-  assert.equal(original.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
-
   const configured=original.copy();
-  assert.equal(configured.maskStrategy,MaskStrategy.TokenClassTrie);
-  assert.equal(configured.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
-
-  const child=new Module(source(),{maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
-  assert.equal(child.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
-  assert.equal(child.precompileSync(v),undefined);
+  const child=new Module(source());
+  assert.equal(child.precompileSync(v,{maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie}),undefined);
   accept(child,v,[1]);
 
   assert.equal(configured.bind('child',child),undefined);
@@ -35,30 +24,31 @@ test('Module: properties, setters, copy and root-only final options',()=>{
   assert.equal(original.externs.unbound.size,1);
   assert.equal(original.externs.get('child').name,'child');
 
-  const state=configured.compileSync(v,new CompileOptions({endTokens:[63]})).start();
+  const options=new CompileOptions({endTokens:[63],maskStrategy:MaskStrategy.TokenClassTrie,boundaryMaskStrategy:BoundaryMaskStrategy.TokenTrie});
+  assert.equal(options.maskStrategy,MaskStrategy.TokenClassTrie);
+  assert.equal(options.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
+  const state=configured.compileSync(v,options).start();
   assert.ok(!allowed(state,63));state.commitToken(4);assert.ok(state.isAccepting());assert.ok(allowed(state,63));state.commitToken(63);assert.ok(state.mask().every(w=>w===0));
-  assert.throws(()=>new Module(source(),{endTokens:[63]}),TypeError);
+  assert.throws(()=>new CompileOptions({bogus:true}),TypeError);
 });
 
-test('Module: settings round-trip through save/load',()=>{
+test('Module: retained work round-trips without stored settings',()=>{
   const v=vocab();
-  const m=new Module(source(),{maskStrategy:MaskStrategy.TokenTrie,boundaryMaskStrategy:BoundaryMaskStrategy.ParserDwa});
-  m.precompileSync(v);
+  const m=new Module(source());
+  m.precompileSync(v,{maskStrategy:MaskStrategy.TokenTrie,boundaryMaskStrategy:BoundaryMaskStrategy.ParserDwa});
   const bytes=m.saveSync();
   const loaded=Module.loadSync(bytes,v);
-  assert.equal(loaded.maskStrategy,MaskStrategy.TokenTrie);
-  assert.equal(loaded.boundaryMaskStrategy,BoundaryMaskStrategy.ParserDwa);
   accept(loaded,v,[1]);
 });
 
 test('Module: legacy boundary strategy strings remain accepted',()=>{
   const v=vocab();
-  for (const [input,expected] of [['fast-runtime',BoundaryMaskStrategy.ParserDwa],['fast-build',BoundaryMaskStrategy.TokenTrie]]) {
-    const m=new Module(source(),{boundaryMaskStrategy:input});
-    assert.equal(m.boundaryMaskStrategy,expected);
+  for (const input of ['fast-runtime','fast-build']) {
+    const m=new Module(source());
+    m.precompileSync(v,{boundaryMaskStrategy:input});
     accept(m,v,[1]);
   }
-  assert.throws(()=>new Module(source(),{boundaryMaskStrategy:'dynamic'}),TypeError);
+  assert.throws(()=>new Module(source()).precompileSync(v,{boundaryMaskStrategy:'dynamic'}),TypeError);
 });
 
 test('Module: rebinding error, :: error and open-child error',()=>{
@@ -118,9 +108,9 @@ test('Module: atomic multi-bind',()=>{
 
 for(const parentPrepared of [false,true])for(const childPrepared of [false,true]){
   test(`Module: saved mixed graph parent=${parentPrepared}, child=${childPrepared}`,async()=>{
-    const v=vocab(),parent=new Module(host()),child=new Module(mark(),{maskStrategy:MaskStrategy.TokenClassTrie});
+    const v=vocab(),parent=new Module(host()),child=new Module(mark());
     if(parentPrepared)assert.equal(await parent.precompile(v),undefined);
-    if(childPrepared)assert.equal(await child.precompile(v),undefined);
+    if(childPrepared)assert.equal(await child.precompile(v,{maskStrategy:MaskStrategy.TokenClassTrie}),undefined);
     child.bind('MARK',new Token(8));
     parent.bind('child',child);const bytes=await parent.save();
     const loaded=await Module.load(bytes,v);

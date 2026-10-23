@@ -275,11 +275,11 @@ impl PyGrammar {
             .unwrap_or(PyBoundaryMaskStrategy::AUTO)
             .into();
         let options = glrmask::CompileOptions::default()
-            .end_tokens(end_tokens.unwrap_or_default());
+            .end_tokens(end_tokens.unwrap_or_default())
+            .mask_strategy(mask_strategy)
+            .boundary_mask_strategy(boundary_mask_strategy);
         py.detach(move || {
-            let mut module = glrmask::Module::new(&grammar);
-            module.set_mask_strategy(mask_strategy)?;
-            module.set_boundary_mask_strategy(boundary_mask_strategy)?;
+            let module = glrmask::Module::new(&grammar);
             module.compile_with(&vocab, options)
         })
         .map(constraint)

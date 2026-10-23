@@ -110,6 +110,8 @@ typedef struct {
     size_t struct_size;              ///< Size of this structure in bytes.
     const uint32_t *end_tokens;      ///< Accepted end-of-sequence token IDs.
     size_t end_tokens_len;           ///< Number of entries in end_tokens.
+    uint32_t mask_strategy;          ///< GLRMASK_MASK_STRATEGY_* value; 0 selects Auto.
+    uint32_t boundary_mask_strategy; ///< GLRMASK_BOUNDARY_MASK_STRATEGY_* value; 0 selects Auto.
 } glrmask_compile_options;
 /// One named Lark token atom mapped to original model token IDs.
 typedef struct { const char *name; size_t name_len; const uint32_t *ids; size_t ids_len; } glrmask_lark_token;
@@ -133,7 +135,7 @@ GLRMASK_API uint32_t glrmask_abi_version(void);
 GLRMASK_API const char *glrmask_version(void);
 /// Last error for this thread, valid until the next GLRMask call on it.
 GLRMASK_API const char *glrmask_error_message(void);
-/// Root compile options with no end tokens.
+/// Root compile options with no end tokens and automatic strategies.
 GLRMASK_API glrmask_compile_options glrmask_default_compile_options(void);
 /// Lark options using the recognition profile.
 GLRMASK_API glrmask_lark_options glrmask_default_lark_options(void);
@@ -177,14 +179,6 @@ GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar*,glrmask_mod
 GLRMASK_API glrmask_status glrmask_module_clone(const glrmask_module*,glrmask_module**);
 /// Frees a module handle.
 GLRMASK_API void glrmask_module_free(glrmask_module*);
-/// Writes the mask computation strategy.
-GLRMASK_API glrmask_status glrmask_module_get_mask_strategy(const glrmask_module*,uint32_t*);
-/// Sets the mask computation strategy.
-GLRMASK_API glrmask_status glrmask_module_set_mask_strategy(glrmask_module*,uint32_t);
-/// Writes the boundary parser strategy.
-GLRMASK_API glrmask_status glrmask_module_get_boundary_mask_strategy(const glrmask_module*,uint32_t*);
-/// Sets the boundary parser strategy.
-GLRMASK_API glrmask_status glrmask_module_set_boundary_mask_strategy(glrmask_module*,uint32_t);
 /// Binds an extern to a grammar.
 GLRMASK_API glrmask_status glrmask_module_bind_grammar(glrmask_module*,const char*,size_t,const glrmask_grammar*);
 /// Binds an extern to a module.
@@ -195,8 +189,8 @@ GLRMASK_API glrmask_status glrmask_module_bind_expr(glrmask_module*,const char*,
 GLRMASK_API glrmask_status glrmask_module_bind_token(glrmask_module*,const char*,size_t,uint32_t);
 /// Binds an extern to an exact-token set.
 GLRMASK_API glrmask_status glrmask_module_bind_tokens(glrmask_module*,const char*,size_t,const glrmask_exact_tokens*);
-/// Retains vocabulary-specific compilation artifacts for this module.
-GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*);
+/// Retains vocabulary-specific compilation artifacts for this module; options may be NULL for defaults.
+GLRMASK_API glrmask_status glrmask_module_precompile(glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*);
 /// Compiles a module assembly; every extern must be bound.
 GLRMASK_API glrmask_status glrmask_module_compile(const glrmask_module*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
 /// Returns an owning view of all declared externs.

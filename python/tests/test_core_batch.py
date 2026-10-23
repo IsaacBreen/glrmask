@@ -64,13 +64,13 @@ def test_child_and_sibling_snapshots_survive_later_edits():
 def test_exact_values_widen_to_grammar_without_becoming_printed_bytes(mode):
     v = vocab()
     for value in [glrmask.Token(17), v.tokens([17, 29])]:
-        m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'), mask_strategy=mode)
-        m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'), mask_strategy=mode)
-        m2.precompile(v)
+        m1 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
+        m2 = glrmask.Module(glrmask.Grammar.from_glrm('extern grammar X start r nt r=X'))
+        m2.precompile(v, mask_strategy=mode)
         m1.bind("X", value)
         m2.bind("X", value)
-        a = m1.compile(v)
-        b = m2.compile(v)
+        a = m1.compile(v, mask_strategy=mode)
+        b = m2.compile(v, mask_strategy=mode)
         assert np.array_equal(a.start().mask(), b.start().mask())
         for constraint in [a, b, glrmask.Constraint.load(b.save())]:
             assert constraint.start().mask()[17]

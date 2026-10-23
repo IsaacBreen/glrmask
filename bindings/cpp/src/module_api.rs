@@ -4,7 +4,13 @@ use std::ffi::c_void;
 
 pub struct glrmask_module(pub(super) g::Module);
 pub struct glrmask_expr(pub(super) g::Expr);
-#[repr(C)] pub struct glrmask_compile_options { pub struct_size: usize, pub end_tokens: *const u32, pub end_tokens_len: usize }
+#[repr(C)] pub struct glrmask_compile_options {
+    pub struct_size: usize,
+    pub end_tokens: *const u32,
+    pub end_tokens_len: usize,
+    pub mask_strategy: u32,
+    pub boundary_mask_strategy: u32,
+}
 /// kind: 0 Grammar, 1 Module, 2 Expr, 3 Token, 4 ExactTokens. Inputs are borrowed for this call only.
 #[repr(C)] pub struct glrmask_expr_operand { pub kind: u32, pub handle: *const c_void }
 
@@ -12,11 +18,21 @@ pub(super) unsafe fn root_options(p: *const glrmask_compile_options) -> Result<g
     if p.is_null() { return Ok(g::CompileOptions::default()); }
     let o = unsafe { read(p)? };
     if o.struct_size != size_of::<glrmask_compile_options>() { return Err(Error::invalid("compile-options struct_size does not match ABI")); }
-    Ok(core::compile_options(unsafe { input(o.end_tokens, o.end_tokens_len)? }.to_vec()))
+    Ok(core::compile_options(
+        unsafe { input(o.end_tokens, o.end_tokens_len)? }.to_vec(),
+        core::mask_strategy(o.mask_strategy)?,
+        core::boundary_mask_strategy(o.boundary_mask_strategy)?,
+    ))
 }
 
 #[unsafe(no_mangle)] pub extern "C" fn glrmask_default_compile_options() -> glrmask_compile_options {
-    glrmask_compile_options { struct_size: size_of::<glrmask_compile_options>(), end_tokens: ptr::null(), end_tokens_len: 0 }
+    glrmask_compile_options {
+        struct_size: size_of::<glrmask_compile_options>(),
+        end_tokens: ptr::null(),
+        end_tokens_len: 0,
+        mask_strategy: 0,
+        boundary_mask_strategy: 0,
+    }
 }
 
 free!(glrmask_module_free, glrmask_module);
@@ -26,22 +42,6 @@ clone_handle!(glrmask_expr_clone, glrmask_expr);
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_new(p: *const glrmask_grammar, out: *mut *mut glrmask_module) -> i32 {
     ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::new(&read(p)?.0)))) })
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_get_mask_strategy(p: *const glrmask_module, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = core::mask_strategy_value(read(p)?.0.mask_strategy()); Ok(()) })
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_set_mask_strategy(p: *mut glrmask_module, strategy: u32) -> i32 {
-    ffi(|| unsafe { let s = core::mask_strategy(strategy)?; write(p)?.0.set_mask_strategy(s)?; Ok(()) })
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_get_boundary_mask_strategy(p: *const glrmask_module, out: *mut u32) -> i32 {
-    ffi(|| unsafe { *write(out)? = core::boundary_mask_strategy_value(read(p)?.0.boundary_mask_strategy()); Ok(()) })
-}
-
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_set_boundary_mask_strategy(p: *mut glrmask_module, strategy: u32) -> i32 {
-    ffi(|| unsafe { let s = core::boundary_mask_strategy(strategy)?; write(p)?.0.set_boundary_mask_strategy(s)?; Ok(()) })
 }
 
 macro_rules! bind_handle {($name:ident,$child:ty,$wrap:expr)=>{
@@ -58,8 +58,13 @@ bind_handle!(glrmask_module_bind_tokens, glrmask_exact_tokens, |t| g::Binding::f
     ffi(|| unsafe { let name = text(name, n)?; write(p)?.0.bind(name, g::Token::new(id))?; Ok(()) })
 }
 
-#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab) -> i32 {
-    ffi(|| unsafe { let vocab = read(v)?.0.clone(); write(p)?.0.precompile(&vocab)?; Ok(()) })
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_precompile(p: *mut glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options) -> i32 {
+    ffi(|| unsafe {
+        let vocab = read(v)?.0.clone();
+        let options = root_options(o)?;
+        write(p)?.0.precompile_with(&vocab, &options)?;
+        Ok(())
+    })
 }
 
 #[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_module_compile(p: *const glrmask_module, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_constraint) -> i32 {

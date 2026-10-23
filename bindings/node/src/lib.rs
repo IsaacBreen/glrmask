@@ -126,6 +126,14 @@ impl NativeExactTokens {
     }
 }
 
+fn grammar_compile_options(end: Vec<f64>, mode: f64, boundary: f64) -> core::Result<g::CompileOptions> {
+    Ok(core::compile_options(
+        ids(end)?,
+        core::mask_strategy(id(mode)?)?,
+        core::boundary_mask_strategy(id(boundary)?)?,
+    ))
+}
+
 #[napi]
 pub struct NativeGrammar { inner: Handle<g::Grammar<'static>> }
 #[napi]
@@ -157,19 +165,16 @@ impl NativeGrammar {
     #[napi]
     pub fn compile_sync(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<NativeConstraint> {
         call(|| {
-            let mut m = g::Module::new(&*live(&self.inner)?);
-            m.set_mask_strategy(core::mask_strategy(id(mode)?)?)?;
-            m.set_boundary_mask_strategy(core::boundary_mask_strategy(id(boundary)?)?)?;
-            Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, core::compile_options(ids(end)?))?)) })
+            let m = g::Module::new(&*live(&self.inner)?);
+            let options = grammar_compile_options(end, mode, boundary)?;
+            Ok(NativeConstraint { inner: Handle::new(Arc::new(m.compile_with(&*live(&vocab.inner)?, options)?)) })
         })
     }
     #[napi]
     pub fn compile(&self, vocab: &NativeVocab, end: Vec<f64>, mode: f64, boundary: f64) -> napi::Result<AsyncTask<CompileTask>> {
         call(|| {
-            let mut m = g::Module::new(&*live(&self.inner)?);
-            m.set_mask_strategy(core::mask_strategy(id(mode)?)?)?;
-            m.set_boundary_mask_strategy(core::boundary_mask_strategy(id(boundary)?)?)?;
-            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: core::compile_options(ids(end)?) }))
+            let m = g::Module::new(&*live(&self.inner)?);
+            Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(end, mode, boundary)? }))
         })
     }
 }

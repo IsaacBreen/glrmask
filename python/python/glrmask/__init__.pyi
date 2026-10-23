@@ -13,7 +13,7 @@ python -m pip install glrmask
 GLRMask has four core types:
 
 - `Grammar`: the source-language definition, without compilation settings.
-- `Module`: a reusable, independently configured grammar with bindings and any retained compilation work. It may still have unresolved externs.
+- `Module`: a reusable grammar with bindings and any retained compilation work. It may still have unresolved externs.
 - `Constraint`: a fully runnable grammar compiled against a specific vocabulary.
 - `ConstraintState`: the mutable state for a single generated sequence.
 
@@ -242,33 +242,12 @@ class Expr:
 
 @final
 class Module:
-    """A reusable, independently configured grammar with bindings and any retained compilation work.
+    """A reusable grammar with bindings and any retained compilation work.
 
     May still have unresolved externs.
     """
-    def __init__(
-        self,
-        source: Grammar,
-        /,
-        *,
-        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
-        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
-    ) -> None:
-        """Creates a module from a source grammar with default settings."""
-        ...
-    @property
-    def mask_strategy(self) -> MaskStrategy:
-        """The mask computation strategy."""
-        ...
-    @mask_strategy.setter
-    def mask_strategy(self, value: MaskStrategy) -> None:
-        ...
-    @property
-    def boundary_mask_strategy(self) -> BoundaryMaskStrategy:
-        """The boundary parser strategy."""
-        ...
-    @boundary_mask_strategy.setter
-    def boundary_mask_strategy(self, value: BoundaryMaskStrategy) -> None:
+    def __init__(self, source: Grammar, /) -> None:
+        """Creates a module from a source grammar."""
         ...
     @overload
     def bind(self, name: str, value: Union[Grammar, Module, Expr, Token, ExactTokens], /) -> None:
@@ -284,10 +263,16 @@ class Module:
         Fails if an extern is undeclared or already bound; names containing `::` are rejected.
         """
         ...
-    def precompile(self, vocab: Vocab) -> None:
+    def precompile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+    ) -> None:
         """Retains vocabulary-specific compilation artifacts for this module.
 
-        A module using `TOKEN_TRIE` retains no work and compiles from source.
+        The strategies decide which static parts are built. A module resolved to `TOKEN_TRIE` retains no work and compiles from source.
         """
         ...
     def compile(
@@ -295,10 +280,12 @@ class Module:
         vocab: Vocab,
         *,
         end_tokens: Optional[Sequence[int]] = None,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
     ) -> Constraint:
         """Compiles the module assembly against `vocab`.
 
-        Requires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping.
+        Requires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
         """
         ...
     @property

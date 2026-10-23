@@ -115,41 +115,34 @@ def test_copy_independence():
     copied = copy.copy(m)
     method_copied = m.copy()
 
-    # Changing settings on copy does not affect original
-    copied.mask_strategy = glrmask.MaskStrategy.PARSER_DWA
-    assert m.mask_strategy == glrmask.MaskStrategy.AUTO
-    assert copied.mask_strategy == glrmask.MaskStrategy.PARSER_DWA
-
     # Binding on copy does not affect original
     copied.bind("A", glrmask.Token(1))
     assert "A" in m.externs.unbound
     assert "A" not in copied.externs.unbound
 
 
-def test_settings_properties_and_save_load_roundtrip():
+def test_compile_options_and_save_load_roundtrip():
     v = vocab()
     g = glrmask.Grammar.from_ebnf('start ::= "a"')
-    m = glrmask.Module(
-        g,
+    m = glrmask.Module(g)
+    m.precompile(
+        v,
         mask_strategy=glrmask.MaskStrategy.PARSER_DWA,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_RUNTIME,
     )
-    assert m.mask_strategy == glrmask.MaskStrategy.PARSER_DWA
-    assert m.boundary_mask_strategy == glrmask.BoundaryMaskStrategy.FAST_RUNTIME
-
-    # Modifying properties
-    m.mask_strategy = glrmask.MaskStrategy.TOKEN_TRIE
-    assert m.mask_strategy == glrmask.MaskStrategy.TOKEN_TRIE
 
     # Aliases
     assert glrmask.MaskStrategy.FAST_BUILD is glrmask.MaskStrategy.TOKEN_TRIE
     assert glrmask.MaskStrategy.FAST_RUNTIME is glrmask.MaskStrategy.PARSER_DWA
 
-    # Save / load round-trip preserves settings
+    # Save / load round-trip preserves retained work; options are supplied per compile.
     saved = m.save()
     loaded = glrmask.Module.load(saved, vocab=v)
-    assert loaded.mask_strategy == glrmask.MaskStrategy.TOKEN_TRIE
-    assert loaded.boundary_mask_strategy == glrmask.BoundaryMaskStrategy.FAST_RUNTIME
+    assert loaded.compile(
+        v,
+        mask_strategy=glrmask.MaskStrategy.TOKEN_TRIE,
+        boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_RUNTIME,
+    ).start().mask().tolist() == m.compile(v).start().mask().tolist()
 
 
 def test_expr_literal_str_rejection_and_empty_choice():
@@ -183,11 +176,11 @@ def test_grammar_compile_sugar():
         mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_BUILD,
     )
-    module_constraint = glrmask.Module(
-        g,
+    module_constraint = glrmask.Module(g).compile(
+        v,
         mask_strategy=glrmask.MaskStrategy.TOKEN_CLASS_TRIE,
         boundary_mask_strategy=glrmask.BoundaryMaskStrategy.FAST_BUILD,
-    ).compile(v)
+    )
     assert np.array_equal(sugar_constraint.start().mask(), module_constraint.start().mask())
 
     # Grammar is source-only

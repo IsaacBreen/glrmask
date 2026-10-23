@@ -60,8 +60,7 @@ def test_spellingless_event_is_not_erased_from_byte_proof(mode):
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | MARK;'
     ), "MARK", vocab.tokens([9]))
-    grammar.mask_strategy = mode
-    state = grammar.compile(vocab).start()
+    state = grammar.compile(vocab, mask_strategy=mode).start()
     assert state.mask()[9]
     assert not hasattr(state, "forced")
     assert assert_read_only_and_replay(state,"forced_tokens") == []
@@ -83,8 +82,7 @@ def test_shorter_token_boundary_preserves_exact_event_opportunity(mode, event_by
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
     ), "MARK", vocab.tokens([9]))
-    grammar.mask_strategy = mode
-    compiled = grammar.compile(vocab)
+    compiled = grammar.compile(vocab, mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert state.mask()[0] and state.mask()[2]
@@ -117,8 +115,7 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
     grammar = _bound_snapshot(glrmask.Grammar.from_glrm(
         'extern token MARK; start root; nt root = "ab" | "a" MARK "c";'
     ), "MARK", vocab.tokens([1]))
-    grammar.mask_strategy = mode
-    compiled = grammar.compile(vocab, end_tokens=[9])
+    compiled = grammar.compile(vocab, end_tokens=[9], mask_strategy=mode)
     for constraint in [compiled, glrmask.Constraint.load(compiled.save())]:
         state = constraint.start()
         assert assert_read_only_and_replay(state, "forced_tokens") == []
