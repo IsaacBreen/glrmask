@@ -247,7 +247,8 @@ keyword arguments to `compile` and `precompile`). One value applies to the whole
 compile, including every composed child. `CompileOptions::end_tokens` applies to
 the root compile call only; `precompile_with` accepts the same options so that
 precompilation decides which static parts are built. A part that already has a
-static preparation is never downgraded to `TokenTrie`:
+static preparation is never downgraded: with `TokenTrie`, precompiled parts stay
+static and only the other modules compile dynamically, with no new static work:
 
 ```rust
 # use glrmask::{CompileOptions, Grammar, MaskStrategy, Result, Vocab};

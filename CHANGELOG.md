@@ -31,8 +31,9 @@
   applies to the whole compile, including every composed child.
 - Precompilation decides which static parts are built. Compilation uses every
   static part that already exists and never downgrades one to dynamic
-  `TokenTrie` compilation, so a `TokenTrie` request after a static precompile
-  keeps the static parts and produces the same masks; the options govern only
+  `TokenTrie` compilation. A `TokenTrie` request after a static precompile keeps
+  the precompiled parts static, compiles only the other modules dynamically, and
+  produces the same masks; the options govern only
   the parts not yet built.
 - The bindings expose the same strategy names: Python
   `BoundaryMaskStrategy.AUTO`/`PARSER_DWA`/`TOKEN_TRIE`, Node.js
