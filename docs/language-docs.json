@@ -86,6 +86,7 @@
     "ConstraintState.commit_tokens": "Commits the tokens in order.\n\nReturns `False` at the first token that is not allowed, leaving the state unusable.",
     "ConstraintState.commit_bytes": "Commits raw bytes instead of a token.\n\nReturns `False` if they are not allowed, leaving the state unusable. Bytes never match a token set; commit those tokens with `commit_token`.",
     "ConstraintState.is_accepting": "Whether the input committed so far is a complete match for the grammar.\n\nMore input may still be allowed; see `is_terminated`.",
+    "ConstraintState.is_terminated": "Whether nothing more can be committed.\n\nThis is true when the sequence is finished, for example after its end token, and after a failed commit. `is_accepting` tells the two apart.\n\nA complete match is not terminated if more input could follow, such as whitespace the grammar ignores.",
     "ConstraintState.forced_tokens": "The tokens that must come next, without committing them.\n\nStops where more than one token could follow, or after 10,000 tokens or bytes. When forced text could be tokenized in several ways, the longest token is chosen at each step.",
     "ConstraintState.marker_events": "The markers passed by the most recent commit, or by `start()`, as `(marker_id, byte_offset)` pairs in byte order.\n\nA marker means some parse reached that point. That parse may still fail later.",
     "auto": "Adaptive JSON Schema policy inspection and persisted tier selection.\n\nFor ordinary compilation, prefer `Grammar.compile(..., mask_strategy=MaskStrategy.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer's partial assertion support.",
@@ -217,8 +218,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "1d7eaa7ad979eccb4f467f54fcabb4b2b6e93c9991036be596f56d5bf066c19d",
-    "bindings/node/README.md": "a2481fc81a9b49decc5a03760744876de46dbaea12c4bec04cf83574ae559550",
+    "bindings/cpp/README.md": "360483c57f9d96d300e52ec52121780a06f542dff6e6816e0861c21eaef8276f",
+    "bindings/node/README.md": "affbac27959c0f0f0bfb543c5011209c09699a88c3fb3f9119679625d83987eb",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -226,5 +227,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "e49c52065abdb412131614229657a31aa85d0fe1b07c858bc6be7af62c6479ba"
+  "content_sha256": "37603e83438bb6542d78380a669fe03e2f40ff0d0b0b95bb4389523ba3fafa20"
 }
