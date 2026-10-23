@@ -100,7 +100,7 @@ fn packed_final_cache_preserves_wire_masks_and_cloned_loads() {
                 let backend = ParserBackend::TemplateDfa;
                 let options = BuildOptions::default().optimization(optimization);
                 let options = if explicit_backend { options.parser_backend(backend) } else { options };
-                let fresh = Grammar::from_json_schema(&source)
+                let fresh = Grammar::from_json_schema(&source).unwrap()
                     .compile_with_build_options(&vocab, options)
                     .unwrap();
                 let bytes = fresh.save();
@@ -168,7 +168,7 @@ fn loaded_exact_transition_cache_crosses_the_old_8192_state_cutoff() {
         let backend = ParserBackend::TemplateDfa;
         let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie);
         let options = if explicit_backend { options.parser_backend(backend) } else { options };
-        let fresh = Grammar::from_glrm(&source)
+        let fresh = Grammar::from_glrm(&source).unwrap()
             .compile_with_build_options(&vocab, options)
             .unwrap();
         let bytes = fresh.save();

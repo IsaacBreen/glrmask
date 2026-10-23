@@ -140,10 +140,10 @@ impl NativeGrammar {
     pub fn from_source(format: String, source: String) -> napi::Result<Self> {
         call(|| {
             let grammar = match format.as_str() {
-                "ebnf" => g::Grammar::from_ebnf(source),
-                "glrm" => g::Grammar::from_glrm(source),
-                "json-schema" => g::Grammar::from_json_schema(source),
-                "lark" => g::Grammar::from_lark(source),
+                "ebnf" => g::Grammar::from_ebnf(source)?,
+                "glrm" => g::Grammar::from_glrm(source)?,
+                "json-schema" => g::Grammar::from_json_schema(source)?,
+                "lark" => g::Grammar::from_lark(source)?,
                 _ => return Err(core::Error::invalid("unknown grammar source format")),
             }; Ok(Self { inner: Handle::new(grammar) })
         })

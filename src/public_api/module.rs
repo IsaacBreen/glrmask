@@ -274,9 +274,6 @@ impl Module {
     }
 
     /// The module's externs, in declaration order.
-    ///
-    /// Empty if the source has a syntax error; [`bind`](Self::bind) and
-    /// [`compile`](Self::compile) report it.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Module(self),
@@ -1252,7 +1249,7 @@ mod precompile_boundary_tests {
     #[test]
     fn precompile_builds_tokens_and_compile_reuses_the_same_arc() {
         let vocab = vocab();
-        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#);
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#).unwrap();
 
         let mut module = Module::new(&grammar);
         module.precompile(&vocab).expect("precompile");
@@ -1306,7 +1303,7 @@ mod precompile_boundary_tests {
     #[test]
     fn compile_after_precompile_never_downgrades_static_parts() {
         let vocab = vocab();
-        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#);
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#).unwrap();
         let mut module = Module::new(&grammar);
         module
             .precompile_with(
@@ -1382,11 +1379,11 @@ mod precompile_boundary_tests {
     fn assembly(precompile_parent: bool, precompile_child: bool) -> (Module, Module, Module) {
         let vocab = vocab();
         let static_options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
-        let mut child = Module::new(&Grammar::from_ebnf(CHILD));
+        let mut child = Module::new(&Grammar::from_ebnf(CHILD).unwrap());
         if precompile_child {
             child.precompile_with(&vocab, static_options.clone()).expect("precompile child");
         }
-        let mut parent = Module::new(&Grammar::from_glrm(PARENT));
+        let mut parent = Module::new(&Grammar::from_glrm(PARENT).unwrap());
         if precompile_parent {
             parent.precompile_with(&vocab, static_options).expect("precompile unbound parent");
         }
@@ -1450,7 +1447,7 @@ mod grammar_precompile_tests {
     fn grammar_precompile_returns_a_module_that_retains_its_work() {
         let vocab = vocab();
         let options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
-        let child = Grammar::from_ebnf(r#"start ::= "a""#);
+        let child = Grammar::from_ebnf(r#"start ::= "a""#).unwrap();
 
         let module = child.precompile_with(&vocab, options).expect("grammar precompile");
         let builds = static_build_probe::builds(&module);
@@ -1465,14 +1462,14 @@ mod grammar_precompile_tests {
 
         // Composing through the returned Module still matches the explicit
         // Module::new + bind + precompile path.
-        let mut parent = Grammar::from_glrm(HOST).precompile(&vocab).expect("open parent precompile");
+        let mut parent = Grammar::from_glrm(HOST).unwrap().precompile(&vocab).expect("open parent precompile");
         parent.bind("child", module).expect("bind child");
         let composed = parent.compile(&vocab).expect("compile composed modules");
         let mut state = composed.start();
         assert!(state.commit_token(4));
         assert!(state.is_accepting());
 
-        let mut reference_parent = Module::new(&Grammar::from_glrm(HOST));
+        let mut reference_parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
         reference_parent.bind("child", Module::new(&child)).expect("bind reference child");
         reference_parent.precompile(&vocab).expect("precompile reference parent");
         let reference = reference_parent.compile(&vocab).expect("compile reference");
@@ -1499,7 +1496,7 @@ mod boundary_gate_tests {
     }
 
     fn compile_linked(parent: &str, child: Module, vocab: &Vocab) -> RuntimeConstraint {
-        let mut module = Module::new(&Grammar::from_glrm(parent));
+        let mut module = Module::new(&Grammar::from_glrm(parent).unwrap());
         module.bind("child", child).expect("bind child");
         module
             .compile_with(vocab, CompileOptions::default())
@@ -1549,7 +1546,7 @@ mod boundary_gate_tests {
     #[test]
     fn token_set_gate_never_changes_masks() {
         let vocab = vocab();
-        let child = Module::new(&Grammar::from_lark("start: \"y\"?"));
+        let child = Module::new(&Grammar::from_lark("start: \"y\"?").unwrap());
         let simple = compile_linked(
             r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
             child.clone(),
@@ -1566,14 +1563,14 @@ mod boundary_gate_tests {
 
         let mid_token = compile_linked(
             r#"glrm 1; start start; extern grammar child; nt start = child;"#,
-            Module::new(&Grammar::from_ebnf(r#"start ::= "x""#)),
+            Module::new(&Grammar::from_ebnf(r#"start ::= "x""#).unwrap()),
             &vocab,
         );
         assert_gate_agrees(&mid_token, "child ends mid-token");
 
         let after_prefix = compile_linked(
             r#"glrm 1; start start; extern grammar child; nt start = "a" child;"#,
-            Module::new(&Grammar::from_ebnf(r#"start ::= "b""#)),
+            Module::new(&Grammar::from_ebnf(r#"start ::= "b""#).unwrap()),
             &vocab,
         );
         assert_gate_agrees(&after_prefix, "bound slot after prefix");
@@ -1588,7 +1585,7 @@ mod boundary_gate_tests {
         let nested_child = {
             let mut middle = Module::new(&Grammar::from_glrm(
                 r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
-            ));
+            ).unwrap());
             middle.bind("child", child).unwrap();
             middle
         };
@@ -1599,7 +1596,7 @@ mod boundary_gate_tests {
         );
         assert_gate_agrees(&nested, "two-level nested");
 
-        let ignored = Grammar::from_lark("start: \"x\" \"y\"\n%ignore WS\nWS: /[ \\t]+/")
+        let ignored = Grammar::from_lark("start: \"x\" \"y\"\n%ignore WS\nWS: /[ \\t]+/").unwrap()
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -1628,11 +1625,11 @@ mod boundary_strategy_tests {
     #[test]
     fn token_trie_and_parser_dwa_boundaries_produce_identical_masks() {
         let vocab = vocab();
-        let child = Module::new(&Grammar::from_ebnf(r#"start ::= "y" "z""#));
+        let child = Module::new(&Grammar::from_ebnf(r#"start ::= "y" "z""#).unwrap());
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
                 r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
-            ));
+            ).unwrap());
             parent.bind("child", child.clone()).unwrap();
             parent
                 .compile_with(
@@ -1670,9 +1667,9 @@ mod boundary_error_tests {
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
                 r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
-            ));
+            ).unwrap());
             parent
-                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
+                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))
                 .unwrap();
             parent.force_boundary_dwa_decline();
             parent.compile_with(
@@ -1701,9 +1698,9 @@ mod boundary_error_tests {
         let compile = |strategy| {
             let mut parent = Module::new(&Grammar::from_glrm(
                 r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
-            ));
+            ).unwrap());
             parent
-                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
+                .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#).unwrap()))
                 .unwrap();
             parent.force_boundary_dwa_decline();
             parent.compile_with(

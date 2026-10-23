@@ -90,7 +90,7 @@ fn minimal_right_recursion_grammar_compiles_and_masks_match_the_language() {
         (1, b"b".to_vec()),
         (2, b"c".to_vec()),
     ]);
-    let grammar = Grammar::from_lark(GRAMMAR);
+    let grammar = Grammar::from_lark(GRAMMAR).unwrap();
     for strategy in [
         MaskStrategy::TokenTrie,
         MaskStrategy::TokenClassTrie,

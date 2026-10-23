@@ -124,9 +124,7 @@ export interface CompileOptions {
   boundaryMaskStrategy?: BoundaryMaskStrategy;
 }
 
-/** A grammar, written as source text or built from an `Expr`.
- *
- * Source text is parsed on first use, so syntax errors appear when you bind or compile. */
+/** A grammar, written as source text or built from an `Expr`. */
 export declare class Grammar implements Disposable {
   private constructor();
   private readonly __grammarBrand: void;
@@ -142,9 +140,7 @@ export declare class Grammar implements Disposable {
    *
    * A token name such as `<|end|>` declares a token extern, which must be bound before compiling. */
   static fromLark(source: string): Grammar;
-  /** The grammar's externs, in declaration order.
-   *
-   * Empty if the source has a syntax error. */
+  /** The grammar's externs, in declaration order. */
   readonly externs: Externs;
   /** A new handle to the same object. */
   clone(): Grammar;
@@ -209,9 +205,7 @@ export declare class Module implements Disposable {
   private readonly __moduleBrand: void;
   /** Creates a module from `grammar`. */
   constructor(grammar: Grammar);
-  /** The module's externs, in declaration order.
-   *
-   * Empty if the source has a syntax error; `bind` and `compile` report it. */
+  /** The module's externs, in declaration order. */
   readonly externs: Externs;
   /** A copy of the module. Binding the copy does not change the original. */
   clone(): Module;

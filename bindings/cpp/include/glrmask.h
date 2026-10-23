@@ -180,8 +180,7 @@ GLRMASK_API glrmask_status glrmask_grammar_bind_tokens(glrmask_grammar* p,const 
 GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar* p,glrmask_grammar** out);
 /// Frees a grammar handle.
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar* p);
-/// Writes the grammar's externs, in declaration order. Empty if the source has a
-/// syntax error.
+/// Writes the grammar's externs, in declaration order.
 GLRMASK_API glrmask_status glrmask_grammar_externs(const glrmask_grammar* p,glrmask_externs** out);
 /// Compiles the grammar for `vocab`. `options` may be NULL for defaults.
 GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar* p,const glrmask_vocab* v,const glrmask_compile_options* o,glrmask_constraint** out);

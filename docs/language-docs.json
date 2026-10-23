@@ -8,7 +8,7 @@
   },
   "quickstarts": {
     "python": "```python\nimport glrmask\n\nvocab = glrmask.Vocab.from_id_to_bytes({0: b\"hello\", 1: b\" \", 2: b\"world\"})\ngrammar = glrmask.Grammar.from_ebnf('start ::= \"hello\" \" \" \"world\"')\nconstraint = grammar.compile(vocab)\nstate = constraint.start()\nfor token_id, expected in [(0, [True, False, False]),\n                           (1, [False, True, False]),\n                           (2, [False, False, True])]:\n    assert state.mask().tolist() == expected\n    assert state.commit_token(token_id)\nassert state.is_accepting()\n```",
-    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#);\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
+    "rust": "```rust\nuse glrmask::{Grammar, Vocab};\n\nfn main() -> glrmask::Result<()> {\n    let vocab = Vocab::new(vec![\n        (0, b\"hello\".to_vec()), (1, b\" \".to_vec()), (2, b\"world\".to_vec()),\n    ]);\n    let grammar = Grammar::from_ebnf(r#\"start ::= \"hello\" \" \" \"world\"\"#)?;\n    let constraint = grammar.compile(&vocab)?;\n    let mut state = constraint.start();\n    for token_id in 0..3 {\n        assert_eq!(state.mask()[0], 1 << token_id);\n        assert!(state.commit_token(token_id));\n    }\n    assert!(state.is_accepting());\n    Ok(())\n}\n```"
   },
   "guide_url": "https://github.com/IsaacBreen/glrmask/blob/main/GUIDE.md",
   "python_symbols": {
@@ -61,18 +61,18 @@
     "Module.bind": "Binds the extern `name` to `value`: a grammar, module, expression or token set.\n\n`bind(a=x, b=y)` binds several at once; if one fails, none is bound. Raises `ValueError` if a name is undeclared or already bound, or a value is the wrong kind for it. A token extern takes only a token set.",
     "Module.precompile": "Compiles as much as possible for `vocab` now, so later compiles are fast.\n\nExterns may still be unbound. The keyword arguments choose how masks are computed.",
     "Module.compile": "Compiles the module for `vocab`, reusing any precompiled work.\n\nEvery extern must be bound. The keyword arguments choose how masks are computed.",
-    "Module.externs": "The module's externs, in declaration order.\n\nEmpty if the source has a syntax error; `bind` and `compile` report it.",
+    "Module.externs": "The module's externs, in declaration order.",
     "Module.copy": "A copy of the module. Binding the copy does not change the original.",
     "Module.__copy__": "Same as `copy()`.",
     "Module.__deepcopy__": "Same as `copy()`.",
     "Module.save": "Saves the module, including precompiled work, as bytes.\n\nThe vocabulary is not included. Bytes saved by one GLRMask version may not load in another.",
     "Module.load": "Loads a module saved with `save`.\n\nPrecompiled work applies only to the vocabulary it was built for; compiling with a different one is an error.",
-    "Grammar": "A grammar, written as source text or built from an `Expr`.\n\nSource text is parsed on first use, so syntax errors appear when you bind or compile.",
+    "Grammar": "A grammar, written as source text or built from an `Expr`.",
     "Grammar.from_ebnf": "Creates a grammar from EBNF source.",
     "Grammar.from_glrm": "Creates a grammar from GLRM, GLRMask's native format.",
     "Grammar.from_json_schema": "Creates a grammar from a JSON Schema, given as JSON text or a JSON-compatible object such as a dict.\n\nStandard keywords that GLRMask does not support are an error. Unknown keywords and `format` are ignored.",
     "Grammar.from_lark": "Creates a grammar from Lark source.\n\nA token name such as `<|end|>` declares a token extern, which must be bound before compiling.",
-    "Grammar.externs": "The grammar's externs, in declaration order.\n\nEmpty if the source has a syntax error.",
+    "Grammar.externs": "The grammar's externs, in declaration order.",
     "Grammar.precompile": "Compiles as much as possible for `vocab` now, and returns a `Module` that keeps the work.\n\nExterns may still be unbound. The keyword arguments choose how masks are computed.",
     "Grammar.compile": "Compiles the grammar for `vocab`.\n\nThe keyword arguments choose how masks are computed; see `MaskStrategy` and `BoundaryMaskStrategy`.",
     "Grammar.__copy__": "A copy of the grammar.",
@@ -235,5 +235,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "d02e21001a0c8a2f3ffb1f3ea8975bb5c567c64f06760f0f37ada432314b1d28"
+  "content_sha256": "86fbef3b12e521e13e9c075651eeba69ce182bf076a0452b6d3642296955162e"
 }

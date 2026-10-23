@@ -200,6 +200,13 @@ void threads_and_errors() {
     CHECK(main_error==glrmask_error_message());
     throws([&]{ Vocab duplicate({{0,"a"},{0,"b"}}); }, GLRMASK_INVALID_ARGUMENT);
     throws([&]{ Vocab overlap({{0,"a"}}, {0}); }, GLRMASK_INVALID_ARGUMENT);
+    throws([]{ Grammar::from_ebnf("start ::= ("); });
+    throws([]{ Grammar::from_lark("start: ("); });
+    throws([]{ Grammar::from_json_schema("{"); });
+    throws([]{ Grammar::from_glrm("invalid source"); });
+    glrmask_grammar* invalid_source = nullptr;
+    CHECK(glrmask_grammar_from_source(GLRMASK_EBNF, "start ::= (", 11, &invalid_source) == GLRMASK_ENGINE_ERROR);
+    CHECK(invalid_source == nullptr);
 }
 
 #if defined(__linux__)

@@ -10,7 +10,7 @@ fn vocab() -> Vocab {
 
 #[test]
 fn construction_and_compile_options_do_not_change_the_source_grammar() {
-    let source = Grammar::from_ebnf("start ::= \"a\"");
+    let source = Grammar::from_ebnf("start ::= \"a\"").unwrap();
     let module = Module::new(&source);
     let v = vocab();
     let default_mask = module.compile(&v).unwrap().start().mask();
@@ -26,16 +26,16 @@ fn construction_and_compile_options_do_not_change_the_source_grammar() {
 #[test]
 fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
     let v = vocab();
-    let source = Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT");
+    let source = Grammar::from_glrm("extern grammar LEFT extern grammar RIGHT start root nt root=LEFT RIGHT").unwrap();
     let mut prepared = Module::new(&source);
     prepared.precompile(&v).unwrap();
     let saved_open = prepared.save();
     let mut first = Module::load(&saved_open).unwrap();
     let mut second = first.clone();
-    first.bind("LEFT", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
-    first.bind("RIGHT", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
-    second.bind("LEFT", Grammar::from_ebnf("start ::= \"b\"")).unwrap();
-    second.bind("RIGHT", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
+    first.bind("LEFT", Grammar::from_ebnf("start ::= \"a\"").unwrap()).unwrap();
+    first.bind("RIGHT", Grammar::from_ebnf("start ::= \"b\"").unwrap()).unwrap();
+    second.bind("LEFT", Grammar::from_ebnf("start ::= \"b\"").unwrap()).unwrap();
+    second.bind("RIGHT", Grammar::from_ebnf("start ::= \"a\"").unwrap()).unwrap();
     assert_eq!(prepared.externs().unbound().len(), 2);
     assert_eq!(saved_open, prepared.save());
     assert_ne!(first.compile(&v).unwrap().start().mask(), second.compile(&v).unwrap().start().mask());
@@ -49,11 +49,11 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
 fn native_local_modes_survive_expression_grouping_and_persistence() {
     let v = vocab();
     for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-        let a = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
-        let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\""));
+        let a = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
+        let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\"").unwrap());
         b.precompile_with(&v, CompileOptions::default().mask_strategy(mode)).unwrap();
         let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
-        let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
+        let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
         host.bind("E", expr).unwrap();
         let loaded = Module::load(&host.save()).unwrap();
         let root = loaded
@@ -68,8 +68,8 @@ fn native_local_modes_survive_expression_grouping_and_persistence() {
 
 #[test]
 fn open_child_and_qualified_paths_are_strictly_rejected() {
-    let a = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;");
-    let mut parent = Module::new(&Grammar::from_glrm("extern grammar CHILD start s nt s=CHILD;"));
+    let a = Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;").unwrap();
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar CHILD start s nt s=CHILD;").unwrap());
     let err = parent.bind("CHILD", Module::new(&a)).unwrap_err().to_string();
     assert!(err.contains("unbound externs"), "must reject open child: {err}");
     assert!(err.contains("VALUE"), "must list unbound externs: {err}");
@@ -81,11 +81,11 @@ fn open_child_and_qualified_paths_are_strictly_rejected() {
 #[test]
 fn compile_options_never_invalidate_retained_work() {
     let v = vocab();
-    let mut leaf = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
+    let mut leaf = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
     leaf.precompile(&v).unwrap();
     let _before_save = leaf.save();
 
-    let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;"));
+    let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;").unwrap());
     parent.bind("VALUE", &leaf).unwrap();
     let root = Grammar::from_expr(Expr::sequence([
         Expr::from(parent),

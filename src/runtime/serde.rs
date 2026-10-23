@@ -9561,7 +9561,7 @@ mod tests {
     #[test]
     fn explicit_lr_envelope_roundtrips_and_cross_backend_tamper_is_rejected() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec())]);
-        let grammar = crate::Grammar::from_ebnf(r#"start ::= "a" "b""#);
+        let grammar = crate::Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap();
         let lr = crate::DynamicConstraint::from_ebnf(r#"start ::= "a" "b""#, &vocab)
             .unwrap().into_constraint();
         assert_eq!(lr.parser_backend(), crate::ParserBackend::LrTable);

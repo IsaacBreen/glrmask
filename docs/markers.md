@@ -28,7 +28,7 @@ use glrmask::{Grammar, MarkerEvent, Result, Vocab};
 let vocab = Vocab::new(vec![(0, b"helloworld".to_vec())]);
 let grammar = Grammar::from_glrm(
     r#"glrm 1; start root; nt root = @mark(10) "hello" @mark(20) "world" @mark(30);"#,
-);
+)?;
 let constraint = grammar.compile(&vocab)?;
 assert_eq!(constraint.marker_ids(), &[10, 20, 30]);
 

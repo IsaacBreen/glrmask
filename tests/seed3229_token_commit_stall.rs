@@ -54,7 +54,7 @@ fn commit_tokens(
 ) -> Result<Option<bool>, String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let module = Module::new(&Grammar::from_lark(lark));
+        let module = Module::new(&Grammar::from_lark(lark).unwrap());
         let constraint = module
             .compile_with(&vocab_fn(), CompileOptions::default().mask_strategy(mode))
             .unwrap();

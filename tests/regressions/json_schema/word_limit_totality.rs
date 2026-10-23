@@ -66,7 +66,7 @@ fn word_limit_totality_default_and_loaded_public_constraints() {
     for words in 1..=4 {
         let source = schema(words);
         for mode in [MaskStrategy::Auto, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-            let constraint = Grammar::from_json_schema(&source)
+            let constraint = Grammar::from_json_schema(&source).unwrap()
                 .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode))
                 .unwrap();
             assert_last_word_masks(&constraint, words);
@@ -80,12 +80,12 @@ fn word_limit_totality_default_and_loaded_public_constraints() {
 fn word_limit_totality_survives_compiled_child_binding_and_module_load() {
     let vocab = vocabulary();
     let source = schema(2);
-    let child = Grammar::from_json_schema(&source)
+    let child = Grammar::from_json_schema(&source).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().optimization(MaskStrategy::TokenClassTrie))
         .unwrap();
     let host = Grammar::from_glrm(
         r#"glrm 1; start start; extern grammar child; nt start = "[" child "]";"#,
-    ).prepare(&vocab).unwrap();
+    ).unwrap().prepare(&vocab).unwrap();
     let loaded_host = UnlinkedConstraint::load(host.save(), &vocab).unwrap();
     for parent in [&host, &loaded_host] {
         let bound = parent.bind_snapshot("child", &child).unwrap().link().unwrap();

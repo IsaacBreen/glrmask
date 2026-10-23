@@ -34,10 +34,10 @@ let source = Grammar::from_glrm(r#"
     extern grammar ITEM
     start list
     nt list = "[" ITEM "]"
-"#);
+"#)?;
 let options = ModuleOptions::default().optimization(Optimization::Balanced);
 let mut parent = Module::new(&source).with_options(options)?;
-parent.bind("ITEM", Grammar::from_ebnf(r#"start ::= "null""#))?;
+parent.bind("ITEM", Grammar::from_ebnf(r#"start ::= "null""#)?)?;
 let constraint = parent.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
@@ -64,13 +64,13 @@ let mut parent = Module::new(&Grammar::from_glrm(r#"
     extern grammar TOOL
     start message
     nt message = "call(" TOOL ")"
-"#));
+"#)?);
 parent.precompile(vocab)?;
 assert_eq!(parent.unbound()?[0].name(), "TOOL");
 let saved = parent.save();
 
 let mut restored = Module::load(saved)?;
-restored.bind("TOOL", Grammar::from_ebnf(r#"start ::= "ping""#))?;
+restored.bind("TOOL", Grammar::from_ebnf(r#"start ::= "ping""#)?)?;
 let constraint = restored.compile(vocab)?;
 # let _ = constraint;
 # Ok(())
@@ -103,16 +103,16 @@ order; attaching an expression introduces the normal parent-slot prefix.
 use glrmask::{Expr, Grammar, IntoExpr, Module, Result};
 
 # fn expression() -> Result<()> {
-let open = Grammar::from_glrm("extern grammar ITEM start s nt s = ITEM");
-let separator = Grammar::from_ebnf(r#"start ::= ",""#);
+let open = Grammar::from_glrm("extern grammar ITEM start s nt s = ITEM")?;
+let separator = Grammar::from_ebnf(r#"start ::= ",""#)?;
 let expression = Expr::sequence([
     open.clone().into_expr(),
     separator.into_expr(),
     open.into_expr(),
 ]);
 let mut module = Module::from_expr(&expression)?;
-module.bind("leaf0::ITEM", Grammar::from_ebnf(r#"start ::= "a""#))?;
-module.bind("leaf2::ITEM", Grammar::from_ebnf(r#"start ::= "b""#))?;
+module.bind("leaf0::ITEM", Grammar::from_ebnf(r#"start ::= "a""#)?)?;
+module.bind("leaf2::ITEM", Grammar::from_ebnf(r#"start ::= "b""#)?)?;
 assert!(module.unbound()?.is_empty());
 # Ok(())
 # }

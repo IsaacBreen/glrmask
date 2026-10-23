@@ -66,10 +66,10 @@ fn main() -> Result<()> {
         .optimization(MaskStrategy::ParserDwa)
         .parser_backend(ParserBackend::TemplateDfa);
     let started = Instant::now();
-    let original = Grammar::from_json_schema(&schema).compile_with_build_options(&vocab, options.clone())?;
+    let original = Grammar::from_json_schema(&schema)?.compile_with_build_options(&vocab, options.clone())?;
     let original_compile_ns = started.elapsed().as_nanos();
     let started = Instant::now();
-    let reparsed = Grammar::from_glrm(&source).compile_with_build_options(&vocab, options)?;
+    let reparsed = Grammar::from_glrm(&source)?.compile_with_build_options(&vocab, options)?;
     let reparsed_compile_ns = started.elapsed().as_nanos();
     let original_report = native_report(&original)?;
     let reparsed_report = native_report(&reparsed)?;

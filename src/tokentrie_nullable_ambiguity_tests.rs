@@ -17,14 +17,14 @@ fn vocab() -> Vocab {
 }
 
 fn token_trie() -> crate::runtime::Constraint {
-    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
+    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
         .compile_with(&vocab(), CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
         .unwrap()
 }
 
 fn mode_constraint(mode: MaskStrategy) -> crate::runtime::Constraint {
-    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
+    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS).unwrap());
     module
         .compile_with(&vocab(), CompileOptions::default().mask_strategy(mode))
         .unwrap()

@@ -12,7 +12,7 @@ fn c_abi_masks_and_commits_match_direct_rust_every_mode() {
         assert_eq!(glrmask_vocab_new(ffi_entries.as_ptr(), ffi_entries.len(), ptr::null(), 0, &mut vocab), 0);
         assert_eq!(glrmask_grammar_from_source(0, source.as_ptr().cast(), source.len(), &mut grammar), 0);
         for strategy in 0..4 {
-            let rust_g = g::Grammar::from_ebnf(source);
+            let rust_g = g::Grammar::from_ebnf(source).unwrap();
             let rust_m = g::Module::new(&rust_g);
             let rust_options = core::compile_options(
                 core::mask_strategy(strategy).unwrap(),

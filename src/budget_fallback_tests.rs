@@ -320,7 +320,7 @@ const V2_1654: Case = Case {
 
 fn try_compile_case(case: Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
     let source = lark(case);
-    Grammar::from_lark(&source).compile_with_build_options(
+    Grammar::from_lark(&source)?.compile_with_build_options(
         &fuzz_vocab(),
         BuildOptions::default().optimization(strategy),
     )
@@ -406,14 +406,14 @@ fn concurrent_compiles_keep_separate_budgets() {
     for _ in 0..3 {
         let tiny = std::thread::spawn(|| {
             let _limit = TestBudgetLimit::set(1_000);
-            let result = Grammar::from_json_schema(SCHEMA).compile_with_build_options(
+            let result = Grammar::from_json_schema(SCHEMA).unwrap().compile_with_build_options(
                 &real_vocab(),
                 BuildOptions::default().optimization(MaskStrategy::ParserDwa),
             );
             let _ = expect_strategy_decline(result, "concurrent tiny-budget compile");
         });
         let default = std::thread::spawn(|| {
-            Grammar::from_json_schema(SCHEMA)
+            Grammar::from_json_schema(SCHEMA).unwrap()
                 .compile_with_build_options(
                     &real_vocab(),
                     BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -467,9 +467,9 @@ fn real_grammars_compile_without_fallback_at_the_default_budget() {
     for (name, source) in REAL_GRAMMARS {
         for strategy in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let grammar = if name.ends_with(".lark") {
-                Grammar::from_lark(source)
+                Grammar::from_lark(source).unwrap()
             } else {
-                Grammar::from_json_schema(source)
+                Grammar::from_json_schema(source).unwrap()
             };
             let constraint = grammar
                 .compile_with_build_options(

@@ -234,7 +234,7 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
     }
     for mode in modes {
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let module = Module::new(&Grammar::from_lark(lark));
+            let module = Module::new(&Grammar::from_lark(lark).unwrap());
             let constraint = module
                 .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
                 .ok()?;

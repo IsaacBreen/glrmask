@@ -262,9 +262,6 @@ public:
 };
 
 /// A grammar, written as source text or built from an `Expr`.
-///
-/// Source text is parsed on first use, so syntax errors appear when you bind or
-/// compile.
 class Grammar : public detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone> {
     using Base = detail::Owned<glrmask_grammar, glrmask_grammar_free, glrmask_grammar_clone>;
     explicit Grammar(glrmask_grammar* p) : Base(p) {}
@@ -305,8 +302,6 @@ public:
         detail::check(glrmask_grammar_bind_tokens(native_handle(), name.data(), name.size(), value.native_handle()));
     }
     /// The grammar's externs, in declaration order.
-    ///
-    /// Empty if the source has a syntax error.
     Externs externs() const {
         glrmask_externs* p = nullptr;
         detail::check(glrmask_grammar_externs(native_handle(), &p));

@@ -15260,7 +15260,7 @@ mod boundary_token_trie_tests {
         for (index, schema) in schemas.iter().enumerate() {
             let source = serde_json::to_string(schema).unwrap();
             let started = std::time::Instant::now();
-            let mut constraint = match Grammar::from_json_schema(&source).compile_with_build_options(
+            let mut constraint = match Grammar::from_json_schema(&source).unwrap().compile_with_build_options(
                 &vocab,
                 BuildOptions::default().optimization(MaskStrategy::ParserDwa),
             ) {
@@ -15292,7 +15292,7 @@ mod boundary_token_trie_tests {
     fn trie_trigger_matches_scan_on_plain_ignore_and_placeholder_grammars() {
         let vocab = vocab();
 
-        let mut plain = Grammar::from_ebnf(r#"start ::= "a" "b""#)
+        let mut plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap()
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -15306,7 +15306,7 @@ mod boundary_token_trie_tests {
 %ignore WS
 WS: /[ \t]+/
 "#,
-        )
+        ).unwrap()
         .compile_with_build_options(
             &vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -15317,7 +15317,7 @@ WS: /[ \t]+/
 
         let mut schema = Grammar::from_json_schema(
             r#"{"type":"object","additionalProperties":false,"properties":{"ab":{"type":"string"},"ba":{"type":"string"}}}"#,
-        )
+        ).unwrap()
         .compile_with_build_options(
             &vocab,
             BuildOptions::default().optimization(MaskStrategy::ParserDwa),
@@ -15328,7 +15328,7 @@ WS: /[ \t]+/
 
         let placeholder = Grammar::from_glrm(
             r#"glrm 1; start start; extern grammar child; nt start = "a" child | "b";"#,
-        )
+        ).unwrap()
         .prepare(&vocab)
         .expect("placeholder prepare");
         let mut placeholder = placeholder.boundary_test_inner().clone();

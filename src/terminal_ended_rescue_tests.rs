@@ -236,7 +236,7 @@ fn compile(case: &Case, strategy: MaskStrategy) -> Constraint {
 
 fn try_compile(case: &Case, strategy: MaskStrategy) -> crate::Result<Constraint> {
     let source = lark(case);
-    Grammar::from_lark(&source).compile_with_build_options(
+    Grammar::from_lark(&source)?.compile_with_build_options(
         &vocab(),
         BuildOptions::default().optimization(strategy),
     )
@@ -443,7 +443,7 @@ fn seed_cfg(rules: &[(usize, &[isize])], start: usize, bound: usize) -> Case {
 /// alternatives in a shape the generic Lark emitter would reorder. Parse the
 /// canonical text directly instead.
 fn compile_source(source: &str, strategy: MaskStrategy) -> Constraint {
-    Grammar::from_lark(source)
+    Grammar::from_lark(source).unwrap()
         .compile_with_build_options(&vocab(), BuildOptions::default().optimization(strategy))
         .unwrap_or_else(|error| panic!("{strategy:?} compile failed for {source:?}: {error}"))
 }
@@ -962,7 +962,7 @@ fn terminal_ended_first_json_schema_matches_the_exact_oracle() {
     let case = case(0, 3, &[(0, &[-1, -2, -1])]);
     reset_test_rescue_entries();
     let constraint = compile_with_te_first(
-        Grammar::from_json_schema(SCHEMA),
+        Grammar::from_json_schema(SCHEMA).unwrap(),
         &json_vocab(),
         MaskStrategy::ParserDwa,
     )
@@ -983,7 +983,7 @@ fn terminal_ended_first_lark_event_matches_the_exact_oracle() {
     let case = case(0, 2, &[(0, &[-1, -2])]);
     reset_test_rescue_entries();
     let constraint = compile_with_te_first(
-        Grammar::from_lark("start: \"a\" <[1]>"),
+        Grammar::from_lark("start: \"a\" <[1]>").unwrap(),
         &vocab(),
         MaskStrategy::ParserDwa,
     )
@@ -1007,22 +1007,22 @@ fn rescue_lowering_equals_the_normal_static_route() {
     let cases: Vec<(&str, Grammar, &Vocab)> = vec![
         (
             "ebnf",
-            Grammar::from_ebnf("start ::= \"a\" \"b\""),
+            Grammar::from_ebnf("start ::= \"a\" \"b\"").unwrap(),
             &v,
         ),
         (
             "lark-event",
-            Grammar::from_lark("start: \"a\" <[1]>"),
+            Grammar::from_lark("start: \"a\" <[1]>").unwrap(),
             &v,
         ),
         (
             "glrm",
-            Grammar::from_glrm("start root nt root=\"a\" \"b\""),
+            Grammar::from_glrm("start root nt root=\"a\" \"b\"").unwrap(),
             &v,
         ),
         (
             "json_schema",
-            Grammar::from_json_schema(r#"{"type":"string","const":"a"}"#),
+            Grammar::from_json_schema(r#"{"type":"string","const":"a"}"#).unwrap(),
             &json,
         ),
     ];

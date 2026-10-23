@@ -138,7 +138,7 @@ fn source_graph_is_resolved_not_flattened_and_callback_is_compile_time_only() {
 
 #[test]
 fn optional_cfg_views_and_analysis_are_lazy_shared_and_shape_explicit() {
-    let prepared = Grammar::from_ebnf("root ::= item*\nitem ::= \"a\" \"b\"?").prepare_parser_grammar().unwrap();
+    let prepared = Grammar::from_ebnf("root ::= item*\nitem ::= \"a\" \"b\"?").unwrap().prepare_parser_grammar().unwrap();
     let g = prepared.grammar(); let left = g.lower_to_cfg().unwrap(); let right = g.lower_to_cfg_with(CfgRecursion::Right).unwrap();
     assert!(Arc::ptr_eq(&left, &g.clone().lower_to_cfg().unwrap()));
     assert!(Arc::ptr_eq(&right, &g.lower_to_cfg_with(CfgRecursion::Right).unwrap()));
@@ -205,10 +205,10 @@ fn separated_sequence_keeps_item_quantifiers_and_required_group_semantics() {
 #[test]
 fn all_source_frontends_reach_the_public_constructor() {
     let (v, _) = vocabulary();
-    let sources = [(Grammar::from_glrm(r#"start root; nt root ::= "a" "b"?;"#), b"ab".as_slice()),
-        (Grammar::from_ebnf(r#"start ::= "a" "b"?"#), b"ab"),
-        (Grammar::from_lark(r#"start: "a" "b"?"#), b"ab"),
-        (Grammar::from_json_schema(r#"{"enum":["a","ab"]}"#), b"\"ab\"")];
+    let sources = [(Grammar::from_glrm(r#"glrm 1; start root; nt root = "a" "b"?;"#).unwrap(), b"ab".as_slice()),
+        (Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap(), b"ab"),
+        (Grammar::from_lark(r#"start: "a" "b"?"#).unwrap(), b"ab"),
+        (Grammar::from_json_schema(r#"{"enum":["a","ab"]}"#).unwrap(), b"\"ab\"")];
     for (source, word) in sources {
         for optimization in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = source.compile_with_parser(&v, &finite_compiler, TemplateBuildOptions::default().optimization(optimization)).unwrap();
@@ -241,7 +241,7 @@ fn malformed_grammar_and_compiler_results_fail_before_generation() {
         named(vec![("root", false, E::Quantified(Box::new(literal(b"a")), Q::Range(3, Some(1))))])] {
         assert!(PreparedParserGrammar::from_named(&source).is_err());
     }
-    let prepared = Grammar::from_ebnf(r#"start ::= "a""#).prepare_parser_grammar().unwrap();
+    let prepared = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().prepare_parser_grammar().unwrap();
     let wrong_count = |_: &ParserGrammar| Ok(ParserDefinition { stack_symbol_count: 1, terminals: vec![], completion: StackTemplate::identity() });
     assert!(prepared.compile_parser(&wrong_count).is_err());
     let fail = |_: &ParserGrammar| Err(glrmask::Error::Compilation("compiler's own reason".into()));

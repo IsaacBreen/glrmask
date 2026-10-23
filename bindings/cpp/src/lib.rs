@@ -133,10 +133,10 @@ clone_handle!(glrmask_constraint_clone, glrmask_constraint);
     ffi(|| unsafe { produce(out, || {
         let source = text(source, n)?.to_owned();
         let grammar = match format {
-            0 => g::Grammar::from_ebnf(source),
-            1 => g::Grammar::from_glrm(source),
-            2 => g::Grammar::from_json_schema(source),
-            3 => g::Grammar::from_lark(source),
+            0 => g::Grammar::from_ebnf(source)?,
+            1 => g::Grammar::from_glrm(source)?,
+            2 => g::Grammar::from_json_schema(source)?,
+            3 => g::Grammar::from_lark(source)?,
             _ => return Err(Error::invalid("unknown source format")),
         }; Ok(glrmask_grammar(grammar))
     }) })

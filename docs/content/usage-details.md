@@ -12,12 +12,12 @@ use glrmask::{Grammar, Module, Result, Vocab};
 # fn demo(vocab: &Vocab, marker: u32) -> Result<()> {
 let child_grammar = Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
-);
+)?;
 let mut child = child_grammar.precompile(vocab)?;
 child.bind("MARK", marker)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
-));
+)?);
 parent.bind("ITEM", &child)?;
 parent.precompile(vocab)?;
 let constraint = parent.compile(vocab)?;

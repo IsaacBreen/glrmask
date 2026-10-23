@@ -17,7 +17,7 @@ let vocab = Vocab::new(vec![
     (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"y".to_vec()),
     (3, b"xay".to_vec()), (4, b"xy".to_vec()),
 ]);
-let child = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with(
+let child = Grammar::from_ebnf(r#"start ::= "a"?"#)?.compile_with(
     &vocab,
     BuildOptions::default()
         .optimization(Optimization::FastRuntime)
@@ -25,7 +25,7 @@ let child = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with(
 )?;
 let parent = Grammar::from_glrm(
     r#"glrm 1; start root; extern grammar child; nt root = "x" child "y";"#,
-).compile_unlinked(&vocab)?;
+)?.compile_unlinked(&vocab)?;
 
 for optimization in [Optimization::Balanced, Optimization::FastRuntime] {
     let mut request = parent.clone();

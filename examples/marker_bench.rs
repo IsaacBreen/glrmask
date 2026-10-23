@@ -87,7 +87,7 @@ fn main() -> Result<(),Box<dyn std::error::Error>> {
     for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
         for case in workloads(marked) {
             let start=Instant::now();
-            let c=Grammar::from_glrm(&case.source).compile_with_build_options(&vocab,BuildOptions::default().optimization(mode))?;
+            let c=Grammar::from_glrm(&case.source)?.compile_with_build_options(&vocab,BuildOptions::default().optimization(mode))?;
             let build_ms=start.elapsed().as_secs_f64()*1000.;
             let values=measure(&c,&case.sequence,samples,rounds)?;
             eprintln!("BENCH {} {:?} marked={} commit_p50_ns={:.1}",case.name,mode,marked,values["commit"]["p50_ns"].as_f64().unwrap());

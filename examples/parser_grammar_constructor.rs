@@ -103,7 +103,7 @@ impl ParserCompiler for TerminalLeading {
 }
 
 fn main() -> Result<()> {
-    let grammar = Grammar::from_ebnf(r#"root ::= "a" | "(" root ")""#).prepare_parser_grammar()?;
+    let grammar = Grammar::from_ebnf(r#"root ::= "a" | "(" root ")""#)?.prepare_parser_grammar()?;
     let parser = grammar.compile_parser(&TerminalLeading)?;
     let vocab = Vocab::new(vec![(0, b"(".to_vec()), (1, b")".to_vec()), (2, b"a".to_vec()),
         (3, b"((a))".to_vec()), (4, b"()".to_vec())]);
@@ -127,14 +127,14 @@ mod tests {
     fn dead_recursion_and_unsupported_shapes_are_errors() {
         for source in ["root ::= \"a\" root", "root ::= \"a\" | \"b\" dead\ndead ::= \"c\" dead",
             "root ::= \"a\"?", "root ::= child\nchild ::= \"a\""] {
-            let prepared = Grammar::from_ebnf(source).prepare_parser_grammar().unwrap();
+            let prepared = Grammar::from_ebnf(source).unwrap().prepare_parser_grammar().unwrap();
             assert!(prepared.compile_parser(&TerminalLeading).is_err(), "{source}");
         }
     }
 
     #[test]
     fn ambiguous_terminal_leading_alternatives_preserve_both_suffixes() {
-        let prepared = Grammar::from_ebnf(r#"root ::= "a" "b" | "a" "c""#).prepare_parser_grammar().unwrap();
+        let prepared = Grammar::from_ebnf(r#"root ::= "a" "b" | "a" "c""#).unwrap().prepare_parser_grammar().unwrap();
         let parser = prepared.compile_parser(&TerminalLeading).unwrap();
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"c".to_vec()),
             (3, b"ab".to_vec()), (4, b"ac".to_vec()), (5, b"aa".to_vec())]);

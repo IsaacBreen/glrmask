@@ -46,10 +46,10 @@ enum Kind {
 impl Kind {
     fn module(self) -> Module {
         match self {
-            Kind::Glrm(source) => Module::new(&Grammar::from_glrm(source)),
-            Kind::Ebnf(source) => Module::new(&Grammar::from_ebnf(source)),
-            Kind::Lark(source) => Module::new(&Grammar::from_lark(source)),
-            Kind::JsonSchema(source) => Module::new(&Grammar::from_json_schema(source)),
+            Kind::Glrm(source) => Module::new(&Grammar::from_glrm(source).unwrap()),
+            Kind::Ebnf(source) => Module::new(&Grammar::from_ebnf(source).unwrap()),
+            Kind::Lark(source) => Module::new(&Grammar::from_lark(source).unwrap()),
+            Kind::JsonSchema(source) => Module::new(&Grammar::from_json_schema(source).unwrap()),
         }
     }
 }

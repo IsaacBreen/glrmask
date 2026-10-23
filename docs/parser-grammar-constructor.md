@@ -12,7 +12,7 @@ use glrmask::template_parser::{ParserCompiler, TemplateBuildOptions};
 fn build(vocab: &Vocab, compiler: &impl ParserCompiler)
     -> glrmask::Result<glrmask::Constraint>
 {
-    let prepared = Grammar::from_ebnf(r#"root ::= "a" | "(" root ")""#)
+    let prepared = Grammar::from_ebnf(r#"root ::= "a" | "(" root ")""#)?
         .prepare_parser_grammar()?;
     let parser = prepared.compile_parser(compiler)?;
     parser.compile_with(vocab,

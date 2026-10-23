@@ -313,8 +313,8 @@ mod tests {
         bytes
     }
     fn fixture() -> Module {
-        let mut m = Module::new(&Grammar::from_glrm("glrm 1; start s; extern grammar child; nt s = child;"));
-        m.bind("child", Grammar::from_ebnf("start ::= \"a\"")).unwrap();
+        let mut m = Module::new(&Grammar::from_glrm("glrm 1; start s; extern grammar child; nt s = child;").unwrap());
+        m.bind("child", Grammar::from_ebnf("start ::= \"a\"").unwrap()).unwrap();
         m
     }
     #[test]
@@ -344,7 +344,7 @@ mod tests {
     #[test]
     fn token_set_ranges_are_validated() {
         let v = Vocab::new(vec![(0, b"a".to_vec())]).with_special_tokens([7]);
-        let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
+        let mut module = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
         module.bind("mark", TokenSet::from(7)).unwrap();
         let bytes = module.save();
         let mut m = read(&bytes);
@@ -374,13 +374,13 @@ mod tests {
     #[test]
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
         let v = Vocab::new(vec![(0, b"a".to_vec())]);
-        let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
+        let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\"").unwrap());
         module
             .precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
             .unwrap();
         let mut m = read(&module.save());
         let inner = crate::import::compile_dynamic_named_single_with_backend(
-            Grammar::from_ebnf("start ::= \"a\"").resolve_dynamic_source(&v, false).unwrap(),
+            Grammar::from_ebnf("start ::= \"a\"").unwrap().resolve_dynamic_source(&v, false).unwrap(),
             &v,
             crate::compiler::glr::table::GlrTableConstruction::ExperimentalCoreMerged,
             false,

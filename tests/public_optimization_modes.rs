@@ -14,7 +14,7 @@ fn vocab() -> Vocab {
 #[test]
 fn recursive_masks_root_eos_force_clone_and_reload_agree() {
     let v = vocab();
-    let g = Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#);
+    let g = Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#).unwrap();
     let reference = g.compile_with_build_options(&v, BuildOptions::default().end_tokens([100])).unwrap();
     for mode in MODES {
         let compiled = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
@@ -47,7 +47,7 @@ fn recursive_masks_root_eos_force_clone_and_reload_agree() {
 #[test]
 fn force_and_exact_token_aliases_agree_across_modes() {
     let v = vocab();
-    let g = Grammar::from_ebnf(r#"start ::= "(" ")""#);
+    let g = Grammar::from_ebnf(r#"start ::= "(" ")""#).unwrap();
     let reference = g.compile(&v).unwrap();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
@@ -58,7 +58,7 @@ fn force_and_exact_token_aliases_agree_across_modes() {
         assert_eq!(a.forced_canonical_reference(),r.forced_canonical_reference()); assert_eq!(a.mask(),r.mask());
         assert!(a.commit_token(2)); assert!(a.is_accepting());
     }
-    let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;")
+    let g = Grammar::from_glrm("glrm 1; start start; extern token MARK; nt start = MARK;").unwrap()
         .bind_snapshot("MARK", glrmask::TokenSet::from(15)).unwrap();
     for mode in MODES {
         let c = g.compile_with_build_options(&v, BuildOptions::default().optimization(mode)).unwrap();
@@ -70,8 +70,8 @@ fn force_and_exact_token_aliases_agree_across_modes() {
 #[test]
 fn source_dynamic_composition_and_precompiled_link_have_distinct_scopes() {
     let v = vocab();
-    let child = Grammar::from_ebnf(r#"start ::= ")""#);
-    let grammar = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"(\" child;")
+    let child = Grammar::from_ebnf(r#"start ::= ")""#).unwrap();
+    let grammar = Grammar::from_glrm("glrm 1; start start; extern grammar child; nt start = \"(\" child;").unwrap()
         .bind_snapshot("child", &child).unwrap();
     let reference = grammar.compile(&v).unwrap();
     for mode in MODES {
@@ -105,11 +105,11 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
         (2,b"b".to_vec()),(3,b"y".to_vec()),(4,b"xaby".to_vec()),(5,b"ab".to_vec()),
         (6,b" ".to_vec()),(7,b"\t".to_vec()),(8,b"x ab y".to_vec()),(9,b"xab\ty".to_vec()),
         (10,b"\"a\"".to_vec()),(11,b"x\"a\"y".to_vec()),(33,b"a".to_vec())]).with_special_tokens([99]);
-    let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";");
-    let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#),
-        Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/"),
-        Grammar::from_glrm("glrm 1; start root; pragma glrmask { lexer group letters = A, B; } t A = \"a\"; t B = \"b\"; nt root = A B?;"),
-        Grammar::from_json_schema(r#"{"const":"a"}"#)];
+    let parent=Grammar::from_glrm("glrm 1; start root; extern grammar child; nt root = \"x\" child \"y\";").unwrap();
+    let children=[Grammar::from_ebnf(r#"start ::= "a" "b"?"#).unwrap(),
+        Grammar::from_lark("start: \"a\" \"b\"?\n%ignore /\\t+/").unwrap(),
+        Grammar::from_glrm("glrm 1; start root; pragma glrmask { lexer group letters = A, B; } t A = \"a\"; t B = \"b\"; nt root = A B?;").unwrap(),
+        Grammar::from_json_schema(r#"{"const":"a"}"#).unwrap()];
     for child in children {
         let description=parent.clone().bind_snapshot("child",child).unwrap();
         let reference=description.compile(&v).unwrap();
@@ -119,9 +119,9 @@ fn mixed_frontends_and_nested_exact_identity_match_native_composition() {
             compare_prefixes(&c,&reference,&[0,1,2,3,4,5,6,7,8,9,10,11,33,99],5);
         }
     }
-    let exact=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK;")
+    let exact=Grammar::from_glrm("glrm 1; start root; extern token MARK; nt root = MARK;").unwrap()
         .bind_snapshot("MARK",TokenSet::new([33,99])).unwrap();
-    let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;")
+    let middle=Grammar::from_glrm("glrm 1; start root; extern grammar leaf; nt root = leaf;").unwrap()
         .bind_snapshot("leaf",exact).unwrap();
     let description=parent.bind_snapshot("child",middle).unwrap();
     let reference=description.compile(&v).unwrap();
@@ -137,7 +137,7 @@ fn compressed_public_lark_uses_executable_lr_and_roundtrips() {
     let mut source=String::from("start: r0\n");
     for i in 0..30 { source.push_str(&format!("r{i}: \"a\" r{}\n",i+1)); }
     source.push_str("r30: \"b\"\n");
-    let g=Grammar::from_lark(&source);
+    let g=Grammar::from_lark(&source).unwrap();
     let oracle=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).end_tokens([100])).unwrap();
     let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
     assert_eq!(actual.start().mask()[0],5);
@@ -173,7 +173,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
         let word=|count:usize| {let mut bytes=vec![b'a';count];bytes.push(b'b');bytes};
         let v=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),
             (3,word(n)),(7,word(n)),(8,word(n-1)),(9,word(n+1)),(11,b"x".to_vec())]);
-        let g=Grammar::from_lark(&source);
+        let g=Grammar::from_lark(&source).unwrap();
         let reference=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie).end_tokens([100])).unwrap();
         for mode in MODES {
             let compiled=g.compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([100])).unwrap();
@@ -206,7 +206,7 @@ fn whole_word_tokens_remain_suggested_after_right_linear_compression() {
     source.push_str("r30: \"b\"\n");let mut word=vec![b'a';30];word.push(b'b');
     let v=Vocab::new(vec![(3,word)]);
     for mode in MODES {
-        let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+        let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
         let mut a=c.start();assert_eq!(a.mask(),vec![8]);assert!(a.commit_token(3));assert!(a.is_accepting());
     }
 }

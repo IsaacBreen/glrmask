@@ -32,18 +32,18 @@ fn trace(text:&str,vocab:&[(u32,Vec<u8>)],exact:bool)->Vec<u32>{
 }
 fn grammar(case:&str,_vocab:&Vocab)->Result<Grammar,Box<dyn Error>>{
     Ok(match case {
-        "json_schema"=>Grammar::from_json_schema(JSON_SOURCE),
-        "lark_arithmetic"=>Grammar::from_lark(LARK_SOURCE),
-        "glrm_list"=>Grammar::from_glrm(SIMPLE),
+        "json_schema"=>Grammar::from_json_schema(JSON_SOURCE)?,
+        "lark_arithmetic"=>Grammar::from_lark(LARK_SOURCE)?,
+        "glrm_list"=>Grammar::from_glrm(SIMPLE)?,
         "scoped_child"=>{
             let p=if true {"glrm 1; start root; extern grammar CHILD; nt root = \"BEGIN:\" CHILD \":END\";"}
                 else {"glrm 1; start root; extern CHILD; nt root = \"BEGIN:\" CHILD \":END\";"};
-            { let mut g=Grammar::from_glrm(p);g.bind("CHILD",Grammar::from_glrm(CHILD))?;g }
+            { let mut g=Grammar::from_glrm(p)?;g.bind("CHILD",Grammar::from_glrm(CHILD)?)?;g }
         },
         "exact_token_set"=>{
             let p=if true {"glrm 1; start root; extern token MARK; nt root = MARK MARK;"}
                 else {"glrm 1; start root; extern MARK; nt root = MARK MARK;"};
-            { let mut g=Grammar::from_glrm(p);g.bind("MARK",glrmask::TokenSet::from_ranges([97..=122]))?;g }
+            { let mut g=Grammar::from_glrm(p)?;g.bind("MARK",glrmask::TokenSet::from_ranges([97..=122]))?;g }
         },
         _=>unreachable!(),
     })

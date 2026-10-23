@@ -7,12 +7,12 @@ const HOST: &str = r#"glrm 1; start root; extern grammar child; nt root = "x" ch
 fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
     let (vocab, tokens) = vocabulary();
     let sources = [
-        Grammar::from_glrm("start root; t A = /a?/; nt root = A;"),
-        Grammar::from_glrm("start root; t A = /a?/ & /a*/; nt root = A;"),
+        Grammar::from_glrm("start root; t A = /a?/; nt root = A;").unwrap(),
+        Grammar::from_glrm("start root; t A = /a?/ & /a*/; nt root = A;").unwrap(),
         // EBNF has no slash-delimited regex syntax; its explicit optional
         // literal is the independent parser-nullability control case.
-        Grammar::from_ebnf(r#"start ::= "a"?"#),
-        Grammar::from_lark("start: A\nA: /a?/"),
+        Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap(),
+        Grammar::from_lark("start: A\nA: /a?/").unwrap(),
     ];
     let words: &[&[u8]] = &[b"xy", b"xay"];
     for (source_index, source) in sources.iter().enumerate() {
@@ -22,7 +22,7 @@ fn nullable_lexical_source_is_preserved_by_every_compiled_child_backend() {
                     .optimization(child_mode).parser_backend(backend)).unwrap();
                 let saved_child = Constraint::load(child.save(), &vocab).unwrap();
                 for child in [&child, &saved_child] {
-                    let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap()
+                    let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap()
                         .bind_snapshot("child", child).unwrap();
                     for link_mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
                         let linked = bound.link_with(BuildOptions::default()
@@ -91,7 +91,7 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
             else { &[b"xay", b"xby", b"xaby"] };
         // A raw sparse child must select the native template linker as well;
         // the LR splicer requires augmented rules which this frontend omits.
-        let legacy = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &source).unwrap();
+        let legacy = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &source).unwrap();
         for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let linked = legacy.link_with(BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -101,14 +101,14 @@ fn sparse_regular_precompiled_children_keep_their_one_symbol_return_frame() {
         let child = into_template_parser(source).unwrap();
         assert_eq!(parser_backend_report(&child)["finite_embedding"], true);
         let child = Constraint::load(child.save(), &vocab).unwrap();
-        let host = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
+        let host = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
         for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let c = host.link_with(BuildOptions::default().optimization(mode)
                 .parser_backend(ParserBackend::TemplateDfa)).unwrap();
             let loaded = Constraint::load(c.save(), &vocab).unwrap();
             let external = Constraint::load(c.save(), &vocab).unwrap();
             for c in [&c, &loaded, &external] { assert_language(c, &tokens, words); }
-            let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
+            let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("C", &loaded).unwrap()
                 .link_with(BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa)).unwrap();
             let nested_words = words.iter().map(|word| {
@@ -140,10 +140,10 @@ fn static_composition_with_no_crossing_tokens_needs_no_boundary_shards() {
     let vocab = Vocab::new(tokens.clone());
     let options = || BuildOptions::default().optimization(MaskStrategy::ParserDwa)
         .parser_backend(ParserBackend::TemplateDfa);
-    let leaf = Grammar::from_ebnf(r#"start ::= "a""#).compile_with_build_options(&vocab, options()).unwrap();
-    let middle = Grammar::from_glrm(HOST).prepare(&vocab).unwrap()
+    let leaf = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile_with_build_options(&vocab, options()).unwrap();
+    let middle = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap()
         .bind_snapshot("child", &leaf).unwrap().link_with(options()).unwrap();
-    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#)
+    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar C; nt root = "p" C "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("C", &middle).unwrap().link_with(options()).unwrap();
     fn check_empty_shards(report: &serde_json::Value) {
         assert_eq!(report["lr_table_present"], false);
@@ -201,8 +201,8 @@ fn strict_static_crossings_preserve_delayed_lexemes_sparse_ids_and_aliases() {
     ];
     let options = || BuildOptions::default().optimization(MaskStrategy::ParserDwa).parser_backend(ParserBackend::TemplateDfa);
     for (source, words) in cases {
-        let child = Grammar::from_glrm(source).compile_with_build_options(&vocab, options()).unwrap();
-        let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
+        let child = Grammar::from_glrm(source).unwrap().compile_with_build_options(&vocab, options()).unwrap();
+        let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
         let candidate = bound.link_with(options()).unwrap();
         let loaded = Constraint::load(candidate.save(), &vocab).unwrap();
         let external = Constraint::load(candidate.save(), &vocab).unwrap();
@@ -229,13 +229,13 @@ fn strict_static_table_free_nested_composition_uses_no_dynamic_boundary() {
     }
     let (vocab, tokens) = vocabulary();
     let build = |optimization| BuildOptions::default().optimization(optimization).parser_backend(ParserBackend::TemplateDfa);
-    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).compile_with_build_options(&vocab, build(MaskStrategy::ParserDwa)).unwrap();
+    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap().compile_with_build_options(&vocab, build(MaskStrategy::ParserDwa)).unwrap();
     // The nested component starts with a dynamic boundary. The outer static
     // construction must materialize that boundary too, not hide a fallback.
-    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
+    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(build(MaskStrategy::TokenClassTrie)).unwrap();
     let middle = Constraint::load(middle.save(), &vocab).unwrap();
-    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
+    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap().link_with(build(MaskStrategy::ParserDwa)).unwrap();
     let words: &[&[u8]] = &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"];
     let loaded = Constraint::load(outer.save(), &vocab).unwrap();
@@ -268,9 +268,9 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
     }
     let (vocab, tokens) = vocabulary();
     let options = || BuildOptions::default().optimization(MaskStrategy::ParserDwa).parser_backend(ParserBackend::TemplateDfa);
-    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with_build_options(&vocab, options()).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap().compile_with_build_options(&vocab, options()).unwrap();
     // A single gap can require 128 CALL/RETURN events despite link depth 1.
-    let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child{64} "y";"#)
+    let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child{64} "y";"#).unwrap()
         .prepare(&vocab).unwrap();
     let c = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
     let words = (0..=64).map(|count| format!("x{}y", "a".repeat(count)).into_bytes()).collect::<Vec<_>>();
@@ -281,7 +281,7 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
 
     // Nullable repetition has no finite control-word enumeration bound.
     // Its language is x a* y; check against a direct byte-language predicate.
-    let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child* "y";"#)
+    let parent = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = "x" child* "y";"#).unwrap()
         .prepare(&vocab).unwrap();
     let c = parent.bind_snapshot("child", &child).unwrap().link_with(options()).unwrap();
     let loaded = Constraint::load(c.save(), &vocab).unwrap();
@@ -311,11 +311,11 @@ fn strict_static_nullable_controls_have_no_unfolding_depth_limit() {
 fn nullable_nested_table_free_children_keep_every_repetition_count() {
     let (vocab, tokens) = vocabulary();
     let options = || BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa);
-    let leaf = Grammar::from_ebnf(r#"start ::= "a"?"#).compile_with_build_options(&vocab, options()).unwrap();
-    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = leaf leaf;"#)
+    let leaf = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap().compile_with_build_options(&vocab, options()).unwrap();
+    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = leaf leaf;"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
     for middle in [&middle, &Constraint::load(middle.save(), &vocab).unwrap()] {
-        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
+        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap().link_with(options()).unwrap();
         let words: &[&[u8]] = &[b"xy", b"xay", b"xaay", b"xaaay", b"xaaaay"];
         assert_language(&outer, &tokens, words);
@@ -339,19 +339,19 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
     let prefixes = words.iter().flat_map(|word| (0..=word.len()).map(|end| &word[..end]))
         .collect::<BTreeSet<_>>();
     let options = |mode| BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa);
-    let oracle = Grammar::from_glrm(r#"glrm 1; start root; nt root = "X" "[" "a"? "]" "!";"#)
+    let oracle = Grammar::from_glrm(r#"glrm 1; start root; nt root = "X" "[" "a"? "]" "!";"#).unwrap()
         .compile_with_build_options(&vocab, options(MaskStrategy::ParserDwa)).unwrap();
     for leaf_mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
+        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options(leaf_mode)).unwrap();
         for middle_mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-            let middle = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
+            let middle = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
                 .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap()
                 .link_with(options(middle_mode)).unwrap();
             let reloaded_middle = Constraint::load(middle.save(), &vocab).unwrap();
             for middle in [&middle, &reloaded_middle] {
                 for outer_mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-                    let linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#)
+                    let linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "X" middle "!";"#).unwrap()
                         .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap()
                         .link_with(options(outer_mode)).unwrap();
                     let loaded = Constraint::load(linked.save(), &vocab).unwrap();
@@ -386,9 +386,9 @@ fn nested_nullable_return_keeps_the_empty_child_crossing_mask() {
 #[test]
 fn scoped_ignores_match_the_independent_lr_composition() {
     let (vocab, _) = vocabulary();
-    let parent = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS = "~"+; extern grammar child; nt root = "x" child "y";"#)
+    let parent = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS = "~"+; extern grammar child; nt root = "x" child "y";"#).unwrap()
         .prepare(&vocab).unwrap();
-    let grammar = Grammar::from_glrm(r#"start root; ignore WS; t WS = "_"+; nt root = "a" "b"?;"#);
+    let grammar = Grammar::from_glrm(r#"start root; ignore WS; t WS = "_"+; nt root = "a" "b"?;"#).unwrap();
     let lr_child = grammar.compile(&vocab).unwrap();
     let lr = parent.bind_snapshot("child", &lr_child).unwrap().link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
     let child = grammar.compile_with_build_options(&vocab, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -421,11 +421,11 @@ fn table_free_links_preserve_exact_empty_tokens_and_root_end_policy() {
     let (_, mut tokens) = vocabulary();
     tokens.extend([(600, b"special".to_vec()), (601, vec![]), (602, b"special".to_vec()), (700, vec![])]);
     let vocab = Vocab::new(tokens);
-    let child = Grammar::from_glrm(r#"extern token SPECIAL extern token EMPTY start root nt root = SPECIAL "a" | EMPTY "b""#)
+    let child = Grammar::from_glrm(r#"extern token SPECIAL extern token EMPTY start root nt root = SPECIAL "a" | EMPTY "b""#).unwrap()
         .bind_snapshot("SPECIAL",TokenSet::new([600])).unwrap()
         .bind_snapshot("EMPTY",TokenSet::new([601])).unwrap()
         .compile_with_build_options(&vocab, BuildOptions::default().parser_backend(ParserBackend::TemplateDfa)).unwrap();
-    let parent = Grammar::from_glrm(HOST).prepare(&vocab).unwrap();
+    let parent = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap();
     let result = parent.bind_snapshot("child", &child).unwrap().link_with(BuildOptions::default()
         .optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa).end_tokens([700])).unwrap();
     let loaded = Constraint::load(result.save(), &vocab).unwrap();
@@ -449,12 +449,12 @@ fn already_table_free_children_link_without_reconstructing_tables() {
     for child_mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         for nullable in [false, true] {
             let source = if nullable { r#"start ::= "a"?"# } else { r#"start ::= "a" | "b" | "a" "b""# };
-            let child = Grammar::from_ebnf(source).compile_with_build_options(&vocab, BuildOptions::default()
+            let child = Grammar::from_ebnf(source).unwrap().compile_with_build_options(&vocab, BuildOptions::default()
                 .optimization(child_mode).parser_backend(ParserBackend::TemplateDfa)).unwrap();
             let loaded = Constraint::load(child.save(), &vocab).unwrap();
             for child in [&child, &loaded] {
                 assert_eq!(glrmask::__private::parser_backend_report(child)["finite_embedding"], true);
-                let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", child).unwrap();
+                let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", child).unwrap();
                 for mode in [MaskStrategy::TokenClassTrie, MaskStrategy::Auto, MaskStrategy::ParserDwa] {
                     let result = bound.link_with(BuildOptions::default().optimization(mode)
                         .parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -471,11 +471,11 @@ fn already_table_free_children_link_without_reconstructing_tables() {
 fn table_free_composition_can_itself_be_reused_as_a_child() {
     let (vocab, tokens) = vocabulary();
     let options = || BuildOptions::default().optimization(MaskStrategy::TokenClassTrie).parser_backend(ParserBackend::TemplateDfa);
-    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).compile_with_build_options(&vocab, options()).unwrap();
-    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
+    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap().compile_with_build_options(&vocab, options()).unwrap();
+    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
     for middle in [&middle, &Constraint::load(middle.save(), &vocab).unwrap()] {
-        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
+        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("middle", middle).unwrap().link_with(options()).unwrap();
         let words: &[&[u8]] = &[b"xpaqpaqy", b"xpaqpbqy", b"xpbqpaqy", b"xpbqpbqy"];
         assert_language(&outer, &tokens, words);
@@ -495,10 +495,10 @@ fn vocabulary() -> (Vocab, Vec<(u32, Vec<u8>)>) {
 #[test]
 fn nested_repeated_child_retains_scope_across_token_boundaries_and_reload() {
     let (vocab, tokens) = vocabulary();
-    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).compile(&vocab).unwrap();
-    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
+    let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap().compile(&vocab).unwrap();
+    let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("leaf", &leaf).unwrap().link().unwrap();
-    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
+    let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
         .prepare(&vocab).unwrap().bind_snapshot("middle", &middle).unwrap();
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         let candidate = outer.link_with(BuildOptions::default().optimization(optimization)
@@ -540,8 +540,8 @@ fn assert_language(constraint: &Constraint, tokens: &[(u32, Vec<u8>)], words: &[
 #[test]
 fn compiled_child_composition_uses_templates_for_advance_and_masks() {
     let (vocab, tokens) = vocabulary();
-    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#).compile(&vocab).unwrap();
-    let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#).unwrap().compile(&vocab).unwrap();
+    let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie, MaskStrategy::Auto] {
         let candidate = bound.link_with(BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -557,8 +557,8 @@ fn compiled_child_composition_uses_templates_for_advance_and_masks() {
 #[test]
 fn source_bound_composition_uses_template_backend() {
     let (vocab, tokens) = vocabulary();
-    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#);
-    let source = Grammar::from_glrm(HOST).bind_snapshot("child", &child).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a" | "b" | "a" "b""#).unwrap();
+    let source = Grammar::from_glrm(HOST).unwrap().bind_snapshot("child", &child).unwrap();
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie, MaskStrategy::Auto] {
         let candidate = source.compile_with_build_options(&vocab, BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -571,8 +571,8 @@ fn source_bound_composition_uses_template_backend() {
 #[test]
 fn nullable_child_controls_preserve_empty_body_and_parent_suffix() {
     let (vocab, tokens) = vocabulary();
-    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).compile(&vocab).unwrap();
-    let bound = Grammar::from_glrm(HOST).prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
+    let child = Grammar::from_ebnf(r#"start ::= "a"?"#).unwrap().compile(&vocab).unwrap();
+    let bound = Grammar::from_glrm(HOST).unwrap().prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap();
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         let candidate = bound.link_with(BuildOptions::default().optimization(optimization)
             .parser_backend(ParserBackend::TemplateDfa)).unwrap();
@@ -605,24 +605,24 @@ fn nested_artifact_loads_preserve_exact_language_on_default_rayon_stacks() {
     };
 
     for optimization in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-        let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#)
+        let leaf = Grammar::from_ebnf(r#"start ::= "a" | "b""#).unwrap()
             .compile_with_build_options(&vocab, build(optimization))
             .unwrap();
-        let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#)
+        let middle = Grammar::from_glrm(r#"glrm 1; start mid; extern grammar leaf; nt mid = "p" leaf "q";"#).unwrap()
             .prepare(&vocab)
             .unwrap()
             .bind_snapshot("leaf", &leaf)
             .unwrap()
             .link_with(build(optimization))
             .unwrap();
-        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#)
+        let outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar middle; nt root = "x" middle middle "y";"#).unwrap()
             .prepare(&vocab)
             .unwrap()
             .bind_snapshot("middle", &middle)
             .unwrap()
             .link_with(build(optimization))
             .unwrap();
-        let topwrap = Grammar::from_glrm(HOST)
+        let topwrap = Grammar::from_glrm(HOST).unwrap()
             .prepare(&vocab)
             .unwrap()
             .bind_snapshot("child", &outer)

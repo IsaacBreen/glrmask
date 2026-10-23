@@ -16,11 +16,11 @@ const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" 
 const OPEN: &str = "glrm 1; start start; extern grammar item; nt start = item;";
 
 fn a() -> Grammar {
-    Grammar::from_ebnf("start ::= \"a\"")
+    Grammar::from_ebnf("start ::= \"a\"").unwrap()
 }
 
 fn b() -> Grammar {
-    Grammar::from_ebnf("start ::= \"b\"")
+    Grammar::from_ebnf("start ::= \"b\"").unwrap()
 }
 
 fn accepts(c: &glrmask::Constraint, ids: &[u32]) -> bool {
@@ -36,11 +36,11 @@ fn accepts(c: &glrmask::Constraint, ids: &[u32]) -> bool {
 #[test]
 fn prepared_parent_raw_child_and_atomic_snapshots() {
     let v = vocab();
-    let g = Grammar::from_glrm(HOST);
+    let g = Grammar::from_glrm(HOST).unwrap();
     let mut parent = Module::new(&g);
     parent.precompile(&v).unwrap();
     let empty = parent.clone();
-    let mut child = Module::new(&Grammar::from_glrm(OPEN));
+    let mut child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
 
     // Open child rejection: child has unbound "item"
     let err = parent.bind("child", &child).unwrap_err().to_string();
@@ -74,7 +74,7 @@ fn compile_options_apply_to_the_whole_compile_and_are_atomic() {
         .unwrap();
     let _bytes = child.save();
 
-    let mut parent = Module::new(&Grammar::from_glrm(HOST));
+    let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     parent.bind("child", &child).unwrap();
     let options = CompileOptions::default()
         .mask_strategy(MaskStrategy::ParserDwa)
@@ -85,9 +85,9 @@ fn compile_options_apply_to_the_whole_compile_and_are_atomic() {
 #[test]
 fn mixed_roundtrip_retains_open_raw_and_prepared_nodes() {
     let v = vocab();
-    let mut parent = Module::new(&Grammar::from_glrm(HOST));
+    let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     parent.precompile(&v).unwrap();
-    let mut child = Module::new(&Grammar::from_glrm(OPEN));
+    let mut child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     child.bind("item", a()).unwrap();
     parent.bind("child", child).unwrap();
 
@@ -97,7 +97,7 @@ fn mixed_roundtrip_retains_open_raw_and_prepared_nodes() {
     let raw = Module::load(&Module::new(&a()).save()).unwrap();
     assert!(accepts(&raw.compile(&v).unwrap(), &[1]));
 
-    let mut open = Module::load(&Module::new(&Grammar::from_glrm(OPEN)).save()).unwrap();
+    let mut open = Module::load(&Module::new(&Grammar::from_glrm(OPEN).unwrap()).save()).unwrap();
     open.bind("item", a()).unwrap();
     assert!(accepts(&open.compile(&v).unwrap(), &[1]));
 }
@@ -106,7 +106,7 @@ fn mixed_roundtrip_retains_open_raw_and_prepared_nodes() {
 fn expr_crosses_boundaries_and_parentheses_do_not_change_paths() {
     let v = vocab();
     let union = Expr::choice([Expr::from(a()), Expr::from(b())]);
-    let mut host = Module::new(&Grammar::from_glrm(HOST));
+    let mut host = Module::new(&Grammar::from_glrm(HOST).unwrap());
     host.bind("child", &union).unwrap();
     let c = host.compile(&v).unwrap();
     assert!(accepts(&c, &[4]));
@@ -117,13 +117,13 @@ fn expr_crosses_boundaries_and_parentheses_do_not_change_paths() {
 fn empty_operators_have_explicit_behavior() {
     let v = vocab();
     // Empty sequence matches epsilon
-    let mut host_eps = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
+    let mut host_eps = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     host_eps.bind("E", Expr::sequence(Vec::<Expr>::new())).unwrap();
     let eps_constraint = host_eps.compile(&v).unwrap();
     assert!(eps_constraint.start().is_accepting());
 
     // Empty choice matches nothing
-    let mut host_choice = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
+    let mut host_choice = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;").unwrap());
     host_choice.bind("E", Expr::choice(Vec::<Expr>::new())).unwrap();
     let choice_constraint = host_choice.compile(&v).unwrap();
     assert!(!choice_constraint.start().is_accepting());
@@ -134,7 +134,7 @@ fn empty_operators_have_explicit_behavior() {
 #[test]
 fn exact_events_identity_and_kind_widening_survive_storage() {
     let v = vocab();
-    let host = Grammar::from_glrm("glrm 1; start start; extern token mark; nt start = mark;");
+    let host = Grammar::from_glrm("glrm 1; start start; extern token mark; nt start = mark;").unwrap();
     let mut m = Module::new(&host);
     assert!(m.bind("mark", a()).is_err());
     m.bind("mark", TokenSet::new([7, 99])).unwrap();
@@ -152,7 +152,7 @@ fn exact_events_identity_and_kind_widening_survive_storage() {
     let missing = Vocab::new(vec![(7, b"different".to_vec())]);
     assert!(loaded.compile(&missing).is_err());
 
-    let mut wide = Module::new(&Grammar::from_glrm(OPEN));
+    let mut wide = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     wide.bind("item", TokenSet::from(7)).unwrap();
     let c = wide.compile(&v).unwrap();
     assert!(accepts(&c, &[7]));
@@ -168,7 +168,7 @@ fn fastbuild_precompilation_retains_no_work_and_static_compiles_can_follow() {
     let leaf = Module::load(&leaf.save()).unwrap();
     assert!(accepts(&leaf.compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap(), &[1]));
 
-    let mut parent = Module::new(&Grammar::from_glrm(HOST));
+    let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     parent.bind("child", leaf).unwrap();
     assert!(accepts(&parent.compile(&v).unwrap(), &[4]));
 }
@@ -207,7 +207,7 @@ fn malformed_storage_is_rejected() {
 #[test]
 fn open_precompilation_and_binding_mismatch_are_atomic() {
     let v = vocab();
-    let mut parent = Module::new(&Grammar::from_glrm(HOST));
+    let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     parent.precompile(&v).unwrap();
     let original = parent.save();
 
@@ -224,7 +224,7 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
     assert!(parent.bind("child", child).is_err());
     assert_eq!(parent.save(), original);
 
-    let mut child = Module::new(&Grammar::from_glrm(OPEN));
+    let mut child = Module::new(&Grammar::from_glrm(OPEN).unwrap());
     child.bind("item", TokenSet::from(777)).unwrap();
     assert!(parent.bind("child", child).is_err());
     assert_eq!(parent.save(), original);
@@ -234,12 +234,10 @@ fn open_precompilation_and_binding_mismatch_are_atomic() {
 fn raw_module_is_owned_and_can_preserve_deferred_source_errors() {
     let module = {
         let text = String::from("start ::= \"a\"");
-        Module::new(&Grammar::from_ebnf(&text))
+        Module::new(&Grammar::from_ebnf(&text).unwrap())
     };
     assert!(accepts(&Module::load(&module.save()).unwrap().compile(&vocab()).unwrap(), &[1]));
-    let invalid = Module::new(&Grammar::from_glrm("invalid source"));
-    let loaded = Module::load(&invalid.save()).unwrap();
-    assert!(loaded.compile(&vocab()).is_err());
+    assert!(Grammar::from_glrm("invalid source").is_err());
 }
 
 #[test]
@@ -263,7 +261,7 @@ fn local_modes_retain_actual_native_or_lr_storage_across_load() {
 #[test]
 fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     let v = vocab();
-    let mut root = Module::new(&Grammar::from_glrm(HOST));
+    let mut root = Module::new(&Grammar::from_glrm(HOST).unwrap());
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie);
     root.precompile_with(&v, trie.clone()).unwrap();
     let open = root.save();
@@ -284,7 +282,7 @@ fn homogeneous_fastbuild_open_preparation_and_exact_token_edges() {
     assert!(accepts(&c, &[0, 7, 3]));
     assert!(!accepts(&c, &[0, 1, 3]));
 
-    let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;"));
+    let mut terminal = Module::new(&Grammar::from_glrm("glrm 1; start s; extern token mark; nt s = mark;").unwrap());
     terminal.precompile_with(&v, trie.clone()).unwrap();
     terminal.bind("mark", TokenSet::from(99)).unwrap();
     let c = Module::load(&terminal.save()).unwrap().compile_with(&v, trie).unwrap();
@@ -298,7 +296,7 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
     let b_mod = Module::new(&b());
 
     let expr = Expr::sequence([Expr::from(a_mod), Expr::from(b_mod)]);
-    let mut parent = Module::new(&Grammar::from_glrm(HOST));
+    let mut parent = Module::new(&Grammar::from_glrm(HOST).unwrap());
     let trie = CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie);
     parent.precompile_with(&v, trie.clone()).unwrap();
     parent.bind("child", expr).unwrap();
@@ -309,8 +307,8 @@ fn homogeneous_fastbuild_expression_and_nested_retained_graph() {
 #[test]
 fn token_trie_nullable_child_compiles_as_one_grammar() {
     let v = vocab();
-    let mut root = Module::new(&Grammar::from_glrm(HOST));
-    let mut child = Module::new(&Grammar::from_ebnf(r#"start ::= "" | "a""#));
+    let mut root = Module::new(&Grammar::from_glrm(HOST).unwrap());
+    let mut child = Module::new(&Grammar::from_ebnf(r#"start ::= "" | "a""#).unwrap());
     child.precompile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie)).unwrap();
     root.bind("child", child).unwrap();
     let c = root
@@ -327,7 +325,7 @@ fn compile_succeeds_on_threads_with_small_stacks() {
         .stack_size(128 * 1024)
         .spawn(|| {
             let vocab = Vocab::new(vec![(17, b"m17".to_vec()), (29, b"m29".to_vec())]).with_special_tokens([]);
-            let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M"));
+            let mut template = Module::new(&Grammar::from_glrm("extern token M start r nt r=M").unwrap());
             template.precompile(&vocab).unwrap();
             let mut request = template.clone();
             request.bind("M", TokenSet::from(17)).unwrap();

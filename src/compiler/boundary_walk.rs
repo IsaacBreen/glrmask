@@ -4399,14 +4399,14 @@ mod tests {
 
     fn selected10_module(tools: usize, _vocab: &Vocab) -> crate::Result<crate::Module> {
         let mut dispatch =
-            crate::Module::new(&crate::Grammar::from_glrm(&selected10_dispatcher_source(tools)));
+            crate::Module::new(&crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?);
         for (index, (_, file)) in SELECTED10_TOOLS.iter().take(tools).enumerate() {
             dispatch.bind(
                 &format!("TOOL_ARGS_SLOT_{index}"),
                 crate::Module::new(&crate::Grammar::json_schema(&selected10_schema_source(file))),
             )?;
         }
-        let mut core = crate::Module::new(&crate::Grammar::from_glrm(SELECTED10_MODULE_CORE));
+        let mut core = crate::Module::new(&crate::Grammar::from_glrm(SELECTED10_MODULE_CORE)?);
         core.bind("PROGRAMMATIC_TOOL_SUFFIX", dispatch)?;
         Ok(core)
     }
@@ -4420,12 +4420,12 @@ mod tests {
             })
             .collect::<crate::Result<Vec<_>>>()?;
         let mut dispatch =
-            crate::Grammar::from_glrm(&selected10_dispatcher_source(tools)).prepare(vocab)?;
+            crate::Grammar::from_glrm(&selected10_dispatcher_source(tools))?.prepare(vocab)?;
         for (index, leaf) in leaves.iter().enumerate() {
             dispatch = dispatch.bind_snapshot(format!("TOOL_ARGS_SLOT_{index}"), leaf)?;
         }
         let dispatch = dispatch.link_with(crate::BuildOptions::default())?;
-        let mut core = crate::Grammar::from_glrm(SELECTED10_MODULE_CORE).prepare(vocab)?;
+        let mut core = crate::Grammar::from_glrm(SELECTED10_MODULE_CORE)?.prepare(vocab)?;
         core = core.bind_snapshot("PROGRAMMATIC_TOOL_SUFFIX", &dispatch)?;
         core.link_with(crate::BuildOptions::default())
     }

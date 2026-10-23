@@ -188,14 +188,15 @@ pub(super) struct PyGrammar {
 }
 
 impl PyGrammar {
-    fn new(source: String, kind: SourceKind) -> Self {
+    fn new(source: String, kind: SourceKind) -> PyResult<Self> {
         let inner = match kind {
             SourceKind::Ebnf => glrmask::Grammar::from_ebnf(source),
             SourceKind::Glrm => glrmask::Grammar::from_glrm(source),
             SourceKind::JsonSchema => glrmask::Grammar::from_json_schema(source),
             SourceKind::Lark => glrmask::Grammar::from_lark(source),
-        };
-        Self { inner }
+        }
+        .map_err(api_error)?;
+        Ok(Self { inner })
     }
     pub(super) fn as_rust(&self) -> glrmask::Result<glrmask::Grammar> {
         Ok(self.inner.clone())
@@ -206,7 +207,7 @@ impl Drop for PyGrammar {
     fn drop(&mut self) {
         let inner = std::mem::replace(
             &mut self.inner,
-            glrmask::Grammar::from_ebnf(String::new()),
+            glrmask::Grammar::ebnf(""),
         );
         let _ = Python::try_attach(move |py| py.detach(move || drop(inner)));
     }
@@ -214,15 +215,14 @@ impl Drop for PyGrammar {
 
 #[pymethods]
 impl PyGrammar {
-    /// Parsing and compilation errors can be deferred until `compile`.
     #[staticmethod]
-    fn from_ebnf(source: String) -> Self {
+    fn from_ebnf(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Ebnf)
     }
 
     /// GLRM supports typed external declarations; bind them via `Module(g).bind(...)` before compiling.
     #[staticmethod]
-    fn from_glrm(source: String) -> Self {
+    fn from_glrm(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Glrm)
     }
 
@@ -240,12 +240,12 @@ impl PyGrammar {
                 .call1((schema,))?
                 .extract()?,
         };
-        Ok(Self::new(source, SourceKind::JsonSchema))
+        Self::new(source, SourceKind::JsonSchema)
     }
 
     /// Named token atoms declare token externs; bind each through `Module.bind`.
     #[staticmethod]
-    fn from_lark(source: String) -> Self {
+    fn from_lark(source: String) -> PyResult<Self> {
         Self::new(source, SourceKind::Lark)
     }
 

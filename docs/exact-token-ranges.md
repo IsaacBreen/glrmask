@@ -59,7 +59,7 @@ let selection = TokenSet::from_ranges([0..=65_534, 65_536..=131_071]);
 
 let mut grammar = Grammar::from_glrm(
     "extern token T start root nt root = T"
-);
+)?;
 grammar.bind("T", selection)?;
 let constraint = grammar.compile(&vocab)?;
 ```

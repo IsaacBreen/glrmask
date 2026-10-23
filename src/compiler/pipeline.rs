@@ -7627,7 +7627,7 @@ mod caller_execution_tests {
     #[test]
     fn caller_parallel_compilation_preserves_masks_and_snapshot_isolation() {
         let v=crate::Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"ab".to_vec())]);
-        let g=crate::Grammar::from_glrm("start root nt root=\"ab\"");
+        let g=crate::Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
         let opts=crate::BuildOptions::default().optimization(crate::MaskStrategy::TokenTrie);
         let reference=g.compile_with_build_options(&v,opts.clone()).unwrap();let expected=reference.start().mask();
         let pool=rayon::ThreadPoolBuilder::new().num_threads(4).build().unwrap();

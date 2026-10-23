@@ -264,10 +264,7 @@ class Module:
         ...
     @property
     def externs(self) -> Externs:
-        """The module's externs, in declaration order.
-
-        Empty if the source has a syntax error; `bind` and `compile` report it.
-        """
+        """The module's externs, in declaration order."""
         ...
     def copy(self) -> Module:
         """A copy of the module. Binding the copy does not change the original."""
@@ -294,10 +291,7 @@ class Module:
 
 @final
 class Grammar:
-    """A grammar, written as source text or built from an `Expr`.
-
-    Source text is parsed on first use, so syntax errors appear when you bind or compile.
-    """
+    """A grammar, written as source text or built from an `Expr`."""
     @staticmethod
     def from_ebnf(source: str) -> Grammar:
         """Creates a grammar from EBNF source."""
@@ -322,10 +316,7 @@ class Grammar:
         ...
     @property
     def externs(self) -> Externs:
-        """The grammar's externs, in declaration order.
-
-        Empty if the source has a syntax error.
-        """
+        """The grammar's externs, in declaration order."""
         ...
     def precompile(
         self,

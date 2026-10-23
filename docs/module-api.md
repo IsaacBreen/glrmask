@@ -64,14 +64,14 @@ fn main() -> glrmask::Result<()> {
     ]);
     let source = Grammar::from_glrm(
         r#"extern grammar ITEM start root nt root = "[" ITEM "]""#,
-    );
+    )?;
     let mut parent = Module::new(&source);
     assert_eq!(parent.externs().unbound().len(), 1);
     parent.precompile(&vocab)?;
 
     let saved = parent.save();
     let mut loaded = Module::load(&saved, Some(&vocab))?;
-    loaded.bind("ITEM", Grammar::from_glrm("start root nt root = /[0-9]+/"))?;
+    loaded.bind("ITEM", Grammar::from_glrm("start root nt root = /[0-9]+/")?)?;
     assert!(loaded.externs().unbound().is_empty());
 
     let constraint = loaded.compile(&vocab)?;
@@ -155,9 +155,9 @@ In Rust:
 use glrmask::{Expr, Grammar, Module, Vocab};
 
 fn alternatives(vocab: &Vocab) -> glrmask::Result<glrmask::Constraint> {
-    let a = Grammar::from_glrm(r#"start root nt root = "a""#);
-    let b = Grammar::from_glrm(r#"start root nt root = "b""#);
-    let c = Grammar::from_glrm(r#"start root nt root = "c""#);
+    let a = Grammar::from_glrm(r#"start root nt root = "a""#)?;
+    let b = Grammar::from_glrm(r#"start root nt root = "b""#)?;
+    let c = Grammar::from_glrm(r#"start root nt root = "c""#)?;
     let expression = Expr::sequence([
         Expr::choice([&a, &b]),
         Expr::from(&c),
@@ -166,7 +166,7 @@ fn alternatives(vocab: &Vocab) -> glrmask::Result<glrmask::Constraint> {
 
     let mut parent = Module::new(&Grammar::from_glrm(
         "extern grammar SUB start root nt root = SUB",
-    ));
+    )?);
     parent.bind("SUB", expression)?;
     parent.compile(vocab)
 }

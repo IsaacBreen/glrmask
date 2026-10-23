@@ -156,7 +156,7 @@ fn main() -> glrmask::Result<()> {
     let vocab = Vocab::new(vec![
         (0, b"hello".to_vec()), (1, b" ".to_vec()), (2, b"world".to_vec()),
     ]);
-    let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#);
+    let grammar = Grammar::from_ebnf(r#"start ::= "hello" " " "world""#)?;
     let constraint = grammar.compile(&vocab)?;
     let mut state = constraint.start();
     for token_id in 0..3 {
@@ -182,12 +182,12 @@ use glrmask::{Grammar, Module, Result, Vocab};
 # fn demo(vocab: &Vocab, marker: u32) -> Result<()> {
 let child_grammar = Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
-);
+)?;
 let mut child = child_grammar.precompile(vocab)?;
 child.bind("MARK", marker)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
-));
+)?);
 parent.bind("ITEM", &child)?;
 parent.precompile(vocab)?;
 let constraint = parent.compile(vocab)?;

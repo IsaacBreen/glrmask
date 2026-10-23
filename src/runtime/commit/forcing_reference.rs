@@ -304,8 +304,8 @@ mod tests {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"c".to_vec())]);
         for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
-            let first=Grammar::from_ebnf("start ::= \"ab\"").compile_with_build_options(&vocab,options.clone()).unwrap();
-            let second=Grammar::from_ebnf("start ::= \"abc\"").compile_with_build_options(&vocab,options).unwrap();
+            let first=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile_with_build_options(&vocab,options.clone()).unwrap();
+            let second=Grammar::from_ebnf("start ::= \"abc\"").unwrap().compile_with_build_options(&vocab,options).unwrap();
             let states=[first.start(),second.start()];
             assert_eq!(force(&states,None),[0,1],"{mode:?}");
         }
@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn union_with_accepting_owner_must_not_force_a_continuation() {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
-        let first=Grammar::from_ebnf("start ::= \"a\"?").compile(&vocab).unwrap();
-        let second=Grammar::from_ebnf("start ::= \"ab\"").compile(&vocab).unwrap();
+        let first=Grammar::from_ebnf("start ::= \"a\"?").unwrap().compile(&vocab).unwrap();
+        let second=Grammar::from_ebnf("start ::= \"ab\"").unwrap().compile(&vocab).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
     }
 
@@ -323,17 +323,17 @@ mod tests {
     fn different_owner_spelling_maps_cannot_be_canonicalized_together() {
         let a=Vocab::new(vec![(0,b"a".to_vec())]);
         let b=Vocab::new(vec![(0,b"b".to_vec())]);
-        let first=Grammar::from_ebnf("start ::= \"a\"").compile(&a).unwrap();
-        let second=Grammar::from_ebnf("start ::= \"b\"").compile(&b).unwrap();
+        let first=Grammar::from_ebnf("start ::= \"a\"").unwrap().compile(&a).unwrap();
+        let second=Grammar::from_ebnf("start ::= \"b\"").unwrap().compile(&b).unwrap();
         assert!(force(&[first.start(),second.start()],None).is_empty());
     }
 
     #[test]
     fn greedy_ab_stops_before_optional_event_after_a() {
         let vocab=Vocab::new(vec![(0,b"a".to_vec()),(1,b"ab".to_vec()),(2,b"b".to_vec())]).with_special_tokens([9]);
-        let ordinary=Grammar::from_glrm("start root nt root=\"ab\"");
+        let ordinary=Grammar::from_glrm("start root nt root=\"ab\"").unwrap();
         let guarded=Grammar::from_glrm(
-            "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"")
+            "extern token MARK start root nt root=\"ab\" | \"a\" MARK \"b\"").unwrap()
             .bind_snapshot("MARK",TokenSet::new([9])).unwrap();
         for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
             let options=BuildOptions::default().optimization(mode);
@@ -354,7 +354,7 @@ mod tests {
             "glrm 1; start root; nt root = \"\u{e9}\u{e9}\";",
         ] {
             for mode in [MaskStrategy::TokenTrie,MaskStrategy::TokenClassTrie,MaskStrategy::ParserDwa] {
-                let c=Grammar::from_glrm(source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_glrm(source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 let seed=[c.start()];
                 let fast=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),true);
                 let full=byte_prefix_with_bounds(&seed,32,&mut Budget(MAX_PROBES),false);

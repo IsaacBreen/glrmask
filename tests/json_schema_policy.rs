@@ -5,7 +5,7 @@ fn check(schema: Value, examples: &[(&str, bool)]) {
     let vocab = Vocab::new((0..=255).map(|b| (b, vec![b as u8])).collect());
     let text = schema.to_string();
     for mode in [MaskStrategy::TokenTrie, MaskStrategy::ParserDwa] {
-        let constraint = Grammar::from_json_schema(&text).compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap_or_else(|e| panic!("{schema} {mode:?}: {e}"));
+        let constraint = Grammar::from_json_schema(&text).unwrap().compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap_or_else(|e| panic!("{schema} {mode:?}: {e}"));
         for (text, expected) in examples {
             let mut state = constraint.start();
             let mut possible = true;
@@ -19,13 +19,10 @@ fn check(schema: Value, examples: &[(&str, bool)]) {
     }
 }
 fn refuses(schema: Value, location: &str) {
-    let vocab = Vocab::new(vec![(0,b"x".to_vec())]);
     let text=schema.to_string();
-    for mode in [MaskStrategy::TokenTrie, MaskStrategy::ParserDwa] {
-        let error = Grammar::from_json_schema(&text).compile_with_build_options(&vocab,BuildOptions::default().optimization(mode)).err().expect("must fail closed").to_string();
-        assert!(error.contains(location), "{error}");
-        assert!(error.contains("unsupported") || error.contains("Unimplemented"), "{error}");
-    }
+    let error = Grammar::from_json_schema(&text).expect_err("must fail closed").to_string();
+    assert!(error.contains(location), "{error}");
+    assert!(error.contains("unsupported") || error.contains("Unimplemented"), "{error}");
 }
 #[test]
 fn exact_oneof_and_restricted_assertions_enforce_instances() {

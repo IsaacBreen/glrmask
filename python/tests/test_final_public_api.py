@@ -167,3 +167,14 @@ def test_token_set_and_sparse_membership_validation():
         _bound_snapshot(g, "item", text)
     general = glrmask.Grammar.from_glrm("glrm 1; start s; extern grammar item; nt s = item;")
     assert np.flatnonzero(_bound_snapshot(general, "item", text).compile(v).start().mask()).tolist() == [2, 7]
+
+
+def test_source_constructors_reject_invalid_source_at_construction():
+    for factory, source in [
+        (glrmask.Grammar.from_ebnf, "start ::= ("),
+        (glrmask.Grammar.from_lark, "start: ("),
+        (glrmask.Grammar.from_json_schema, "{"),
+        (glrmask.Grammar.from_glrm, "invalid source"),
+    ]:
+        with pytest.raises(ValueError):
+            factory(source)

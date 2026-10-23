@@ -23,7 +23,7 @@ fn lr(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
 }
 
 fn native(vocab: &crate::Vocab, source: &str) -> crate::Constraint {
-    Grammar::from_ebnf(source)
+    Grammar::from_ebnf(source).unwrap()
         .compile_with_build_options(
             vocab,
             BuildOptions::default().optimization(MaskStrategy::TokenClassTrie),

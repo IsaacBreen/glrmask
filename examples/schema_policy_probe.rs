@@ -41,7 +41,7 @@ fn probe(request: &Value, vocab: &Vocab, mode: MaskStrategy) -> Value {
         return json!({"status":"input_error", "error":"cases must be an array"});
     };
     let text = serde_json::to_string(schema).unwrap();
-    let compiled = match Grammar::from_json_schema(&text)
+    let compiled = match Grammar::from_json_schema(&text).unwrap()
         .compile_with_build_options(vocab, BuildOptions::default().optimization(mode)) {
         Ok(compiled) => compiled,
         Err(error) => {

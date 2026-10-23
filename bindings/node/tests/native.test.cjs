@@ -124,7 +124,7 @@ test('frontends and input validation preserve the public contracts',async()=>{
   assert.throws(()=>simple().compileSync(v,{endTokens:[-1]}),TypeError);
   assert.throws(()=>s.fillMask(new Int32Array(3)),TypeError);
   assert.throws(()=>s.commitBytes('a'),TypeError);
-  await assert.rejects(Grammar.fromEbnf('this is not a grammar').compile(v));
+  assert.throws(()=>Grammar.fromEbnf('this is not a grammar'),GlrMaskError);
 });
 
 test('raw native arguments reject truncation and unsafe typed-array backing',()=>{
@@ -184,4 +184,11 @@ test('named Lark special tokens use explicit mappings, not byte aliases',async()
     assert.equal(g.externs.get('begin').kind,'token');
   }
   await assert.rejects(Grammar.fromLark('start: <|missing|>').compile(v));
+});
+
+test('source constructors reject invalid source',()=>{
+  assert.throws(()=>Grammar.fromEbnf('start ::= ('));
+  assert.throws(()=>Grammar.fromLark('start: ('));
+  assert.throws(()=>Grammar.fromJsonSchema('{'));
+  assert.throws(()=>Grammar.fromGlrm('invalid source'));
 });

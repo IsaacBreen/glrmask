@@ -458,9 +458,9 @@ mod tests {
     fn passive_probe_admission_and_masks_match_erased_markers_in_all_modes() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"b".to_vec()), (2, b"ab".to_vec())]);
         for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
-            let marked = Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n")
+            let marked = Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(7) \"b\" @mark(42)\n").unwrap()
                 .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
-            let ordinary = Grammar::from_glrm("start root\nnt root = \"a\" \"b\"\n")
+            let ordinary = Grammar::from_glrm("start root\nnt root = \"a\" \"b\"\n").unwrap()
                 .compile_with_build_options(&vocab, BuildOptions::default().optimization(mode)).unwrap();
             assert_eq!(marked.marker_ids(), [0, 7, 42], "{mode:?}");
             let mut state = marked.start(); let mut reference = ordinary.start();
@@ -494,7 +494,7 @@ mod tests {
         let mut comparisons = 0usize;
         for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa, MaskStrategy::Auto] {
             for source in sources {
-                let constraint = Grammar::from_glrm(source).compile_with_build_options(&vocab,
+                let constraint = Grammar::from_glrm(source).unwrap().compile_with_build_options(&vocab,
                     BuildOptions::default().optimization(mode)).unwrap();
                 for seed in 0..16u64 {
                     let mut observed = constraint.start();
@@ -559,7 +559,7 @@ mod tests {
     #[test]
     fn observer_adapters_preserve_empty_and_mixed_stack_languages() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec())]);
-        let constraint = Grammar::from_ebnf(r#"start ::= "a""#).compile(&vocab).unwrap();
+        let constraint = Grammar::from_ebnf(r#"start ::= "a""#).unwrap().compile(&vocab).unwrap();
         // A valid admission index whose sole predicate accepts the empty word.
         // This isolates adapter semantics from any particular grammar frontend.
         let queries = MarkerQueries { terminals: Box::new([]), ids: vec![7].into(),

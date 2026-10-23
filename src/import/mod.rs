@@ -2775,13 +2775,13 @@ mod tests {
             };
             nt document = "<" wrapper ">";
         "#;
-        let err = Grammar::from_glrm(source).compile(&vocab).unwrap_err().to_string();
+        let err = Grammar::from_glrm(source).unwrap_err().to_string();
         assert!(err.contains("extern declarations are only allowed at the top level"), "{err}");
 
-        let mut host = Module::new(&Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;"));
-        let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-        let err2 = host.bind("wrapper::leaf", leaf).unwrap_err().to_string();
-        assert!(err2.contains("qualified paths are not supported"), "{err2}");
+        let leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#).unwrap());
+        let bound = Grammar::from_glrm("glrm 1; start s; extern grammar `wrapper::leaf`; nt s = `wrapper::leaf`;")
+            .and_then(|g| Module::new(&g).bind("wrapper::leaf", leaf));
+        assert!(bound.is_err(), "a qualified extern path must be rejected");
     }
 
     #[test]

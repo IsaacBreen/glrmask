@@ -514,7 +514,7 @@ mod reset_projection_tests {
                 .chain((0..width).map(|id| format!("\"x{id}:\" @mark({id}) \"b\"")))
                 .collect::<Vec<_>>().join(" | "));
             for mode in [MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
-                let fresh = Grammar::from_glrm(&source).compile_with_build_options(&vocab,
+                let fresh = Grammar::from_glrm(&source).unwrap().compile_with_build_options(&vocab,
                     BuildOptions::default().optimization(mode)).unwrap();
                 let loaded = Constraint::load(fresh.save(), &vocab).unwrap();
                 for constraint in [&fresh, &loaded] {
@@ -557,7 +557,7 @@ mod reset_projection_tests {
         use std::sync::Arc;
         let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec())]);
         for cached in [false,true] {
-            let mut constraint = Grammar::from_glrm("start root; t A=/ab*/; nt root=A;")
+            let mut constraint = Grammar::from_glrm("start root; t A=/ab*/; nt root=A;").unwrap()
                 .compile_with_build_options(&vocab,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
             // The public analysis union retains distinct states but shares
             // terminal IDs, exactly the overlapping-lane case under test.

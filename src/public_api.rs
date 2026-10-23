@@ -356,9 +356,6 @@ fn check_binding_kind(name:&str,kind:ExternKind,grammar:bool)->Result<()> {
 }
 
 /// A grammar, written as source text or built from an [`Expr`].
-///
-/// Source text is parsed on first use, so syntax errors appear when you bind or
-/// compile.
 #[derive(Debug, Clone)]
 pub struct Grammar {
     source: GrammarSource,
@@ -426,7 +423,7 @@ impl Grammar {
     pub fn ebnf(source: &str) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source))) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
-    pub fn lark(source: &str) -> Self { Self::from_lark(source) }
+    pub fn lark(source: &str) -> Self { Self::new(GrammarSource::Lark(Arc::from(source))) }
     #[cfg(any(test, feature = "internal-api"))]
     #[doc(hidden)]
     pub fn json_schema(source: &str) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source))) }
@@ -439,23 +436,40 @@ impl Grammar {
     }
 
     /// Creates a grammar from EBNF source.
-    pub fn from_ebnf(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref()))) }
+    pub fn from_ebnf(source: impl AsRef<str>) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Ebnf(Arc::from(source.as_ref())));
+        grammar.component()?;
+        Ok(grammar)
+    }
 
     /// Creates a grammar from Lark source.
     ///
     /// A token name such as `<|end|>` declares a token extern, which must be bound
     /// before compiling.
-    pub fn from_lark(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Lark(Arc::from(source.as_ref()))) }
+    pub fn from_lark(source: impl AsRef<str>) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Lark(Arc::from(source.as_ref())));
+        grammar.lark_document()?;
+        grammar.declarations()?;
+        Ok(grammar)
+    }
 
 
     /// Creates a grammar from a JSON Schema document.
     ///
     /// Standard keywords that GLRMask does not support are an error. Unknown
     /// keywords and `format` are ignored.
-    pub fn from_json_schema(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::JsonSchema(Arc::from(source.as_ref()))) }
+    pub fn from_json_schema(source: impl AsRef<str>) -> Result<Self> {
+        let source = source.as_ref();
+        crate::import::parse_json_schema_to_named(source)?;
+        Ok(Self::new(GrammarSource::JsonSchema(Arc::from(source))))
+    }
 
     /// Creates a grammar from GLRM, GLRMask's native format.
-    pub fn from_glrm(source: impl AsRef<str>) -> Self { Self::new(GrammarSource::Glrm(Arc::from(source.as_ref()))) }
+    pub fn from_glrm(source: impl AsRef<str>) -> Result<Self> {
+        let grammar = Self::new(GrammarSource::Glrm(Arc::from(source.as_ref())));
+        grammar.component()?;
+        Ok(grammar)
+    }
 
     fn new(source: GrammarSource) -> Self {
         Self { source, module_snapshot: Arc::new(OnceLock::new()), bindings: OrdMap::new(), declarations_cache: Arc::new(OnceLock::new()), analysis: graph::empty_cache(), parsed_component: Arc::new(OnceLock::new()), exact_value: None, lark_document:Arc::new(OnceLock::new()) }
@@ -665,8 +679,6 @@ impl Grammar {
     }
 
     /// The grammar's externs, in declaration order.
-    ///
-    /// Empty if the source has a syntax error.
     pub fn externs(&self) -> Externs<'_> {
         Externs {
             source: ExternsSource::Grammar(self),
@@ -6516,7 +6528,7 @@ mod final_boundary_option_tests {
     #[test]
     fn trigger_metadata_exists_before_first_use_in_every_public_mode() {
         let v = vocab();
-        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#);
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y""#).unwrap();
         for mode in [MaskStrategy::Auto, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie, MaskStrategy::ParserDwa] {
             for detail in [BoundaryTriggerDetail::None, BoundaryTriggerDetail::TokenSet, BoundaryTriggerDetail::Exact] {
                 let result = grammar.compile_with_build_options(&v,
@@ -6539,11 +6551,11 @@ mod final_boundary_option_tests {
     #[test]
     fn deferred_trigger_metadata_is_built_at_link_and_explicit_none_overrides() {
         let v = vocab();
-        let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
+        let parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#).unwrap()
             .prepare_with(&v, BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::Exact)).unwrap();
         assert!(matches!(parent.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
         let parent = PreparedGrammar::load(parent.save(), &v).unwrap();
-        let child = Grammar::from_ebnf(r#"start ::= "y""#).prepare(&v).unwrap();
+        let child = Grammar::from_ebnf(r#"start ::= "y""#).unwrap().prepare(&v).unwrap();
         let bound = parent.bind_snapshot("child", &child).unwrap();
         assert!(matches!(bound.inner.boundary_trigger, crate::runtime::BoundaryTrigger::None));
         let exact = bound.link().unwrap();
@@ -6556,9 +6568,9 @@ mod final_boundary_option_tests {
     #[test]
     fn persisted_child_request_is_scoped_to_the_child() {
         let v = vocab();
-        let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#)
+        let mut parent = Grammar::from_glrm(r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#).unwrap()
             .prepare(&v).unwrap();
-        let child = Grammar::from_ebnf(r#"start ::= "y""#).prepare_with(&v,
+        let child = Grammar::from_ebnf(r#"start ::= "y""#).unwrap().prepare_with(&v,
             BuildOptions::default().boundary_trigger(BoundaryTriggerDetail::TokenSet)).unwrap();
         parent.bindings.insert("child".to_owned(), ModuleBinding::Module(Arc::new(child)));
         let parent = PreparedGrammar::load(parent.save(), &v).unwrap();
@@ -6578,7 +6590,7 @@ mod final_ordinary_dynamic_selection_tests {
     #[test]
     fn fast_build_uses_the_actual_dynamic_compiler_and_preserves_loaded_representation() {
         let v=Vocab::new(vec![(0,b"(".to_vec()),(1,b")".to_vec()),(2,b"()".to_vec()),(3,b"x".to_vec())]);
-        let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#);
+        let g=Grammar::from_ebnf(r#"start ::= "(" start ")" start | """#).unwrap();
         let actual=g.compile_with_build_options(&v,BuildOptions::default().optimization(MaskStrategy::TokenTrie)).unwrap();
         let oracle=DynamicConstraint::compile(g.clone(),&v).unwrap().into_constraint();
         assert!(actual.uses_dynamic_runtime());
@@ -6710,7 +6722,7 @@ mod static_whole_token_regression_tests {
         for entries in [vec![(3,word.clone())],vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aa".to_vec()),(3,word.clone())]] {
             let singleton=entries.len()==1;let v=Vocab::new(entries);
             for mode in [MaskStrategy::Auto,MaskStrategy::ParserDwa] {
-                let c=Grammar::from_lark(&source).compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
+                let c=Grammar::from_lark(&source).unwrap().compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();
                 assert!(c.direct_regular_automaton.is_some());
                 for c in [c.clone(),RuntimeConstraint::load(c.save(), &v).unwrap(),RuntimeConstraint::load(c.save(),&v).unwrap()] {
                     let mut state=c.start();assert_eq!(state.mask(),vec![if singleton {8} else {13}]);
@@ -6915,7 +6927,7 @@ mod tiny_cfg_compile_blowup_tests {
 
     fn compile(case: &Case, strategy: MaskStrategy) -> RuntimeConstraint {
         let source = lark(case);
-        let grammar = Grammar::from_lark(&source);
+        let grammar = Grammar::from_lark(&source).unwrap();
         let module = Module::new(&grammar);
         module
             .compile_with(&vocabulary(), CompileOptions::default().mask_strategy(strategy))
@@ -6972,7 +6984,7 @@ mod module_build_overhead_tests {
         let vocab = jsb_like_vocab(16_384);
         let source = jsb_like_schema(80);
 
-        let grammar = Grammar::from_json_schema(&source);
+        let grammar = Grammar::from_json_schema(&source).unwrap();
         let direct = grammar
             .compile_with_build_options(
                 &vocab,
@@ -7001,7 +7013,7 @@ mod module_build_overhead_tests {
         let mut grammar_ms = Vec::new();
         let mut module_ms = Vec::new();
         for _ in 0..5 {
-            let grammar = Grammar::from_json_schema(&source);
+            let grammar = Grammar::from_json_schema(&source).unwrap();
             let started = Instant::now();
             grammar
                 .compile_with_build_options(
@@ -7013,7 +7025,7 @@ mod module_build_overhead_tests {
                 .expect("direct build");
             grammar_ms.push(started.elapsed().as_secs_f64() * 1000.0);
 
-            let grammar = Grammar::from_json_schema(&source);
+            let grammar = Grammar::from_json_schema(&source).unwrap();
             let started = Instant::now();
             Grammar::from_expr(Expr::sequence([
                 Expr::from(grammar.clone()),

@@ -12,7 +12,7 @@ fn vocabulary() -> Vocab {
         (9,b"q".to_vec()), (10,Vec::new()), (11,b"<event>".to_vec())])
 }
 fn annotated() -> Grammar {
-    Grammar::from_glrm(r#"glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);"#)
+    Grammar::from_glrm(r#"glrm 1; start root; nt root = @mark(10) "a" @mark(20) "b" @mark(30);"#).unwrap()
 }
 fn equivalent_replay(a: &Constraint, b: &Constraint, tokens: &[u32]) {
     let compare_events = a.marker_ids() == b.marker_ids();
@@ -49,7 +49,7 @@ fn marker_inventory_roundtrips_every_public_mode_and_vocabulary_form() {
             let twice = Constraint::load(loaded.save(), &vocab).unwrap();
             assert_eq!(fresh.marker_ids(), twice.marker_ids());
         }
-        let plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).compile_with_build_options(&vocab, options(mode)).unwrap();
+        let plain = Grammar::from_ebnf(r#"start ::= "a" "b""#).unwrap().compile_with_build_options(&vocab, options(mode)).unwrap();
         assert!(plain.marker_ids().is_empty());
         assert!(!plain.save()[40..].starts_with(b"GLRMARK1"));
         equivalent_replay(&plain, &fresh, &[0,1]);
@@ -60,7 +60,7 @@ fn marker_inventory_roundtrips_every_public_mode_and_vocabulary_form() {
 #[test]
 fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
     let vocab = vocabulary();
-    let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = @mark(40) "x" child "y" @mark(50);"#)
+    let host = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = @mark(40) "x" child "y" @mark(50);"#).unwrap()
         .prepare(&vocab).unwrap();
     let host = PreparedGrammar::load(host.save(), &vocab).unwrap();
     for child_mode in modes() {
@@ -81,7 +81,7 @@ fn prepared_and_nested_compiled_children_keep_typed_marker_inventory() {
                 assert_eq!(batch(&state), vec![(10, 1), (20, 2), (30, 3), (50, 4)],
                     "child={child_mode:?} link={mode:?}");
             }
-            let mut outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = @mark(60) "p" child "q" @mark(70);"#)
+            let mut outer = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child; nt root = @mark(60) "p" child "q" @mark(70);"#).unwrap()
                 .prepare(&vocab).unwrap();
             outer.bind("child", &loaded).unwrap();
             let outer=outer.link_with(options(mode)).unwrap();
@@ -123,7 +123,7 @@ fn batch(state: &glrmask::ConstraintState<'_>) -> Vec<(u32, u64)> {
 fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b" ".to_vec()),
         (2,b"b".to_vec()),(3,b"a  b".to_vec())]);
-    let grammar = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS=" "; nt root="a" @mark(1) "b";"#);
+    let grammar = Grammar::from_glrm(r#"glrm 1; start root; ignore WS; t WS=" "; nt root="a" @mark(1) "b";"#).unwrap();
     for mode in modes() {
         let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
         for tokens in [&[0,1,1,2][..], &[3][..]] {
@@ -140,12 +140,12 @@ fn ignored_terminal_boundaries_remain_observable_inside_model_tokens() {
 fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec())]);
     for mode in modes() {
-        let empty = Grammar::from_glrm("glrm 1; start root; nt root=@mark(7);")
+        let empty = Grammar::from_glrm("glrm 1; start root; nt root=@mark(7);").unwrap()
             .compile_with_build_options(&vocab,options(mode)).unwrap();
         let state = empty.start();
         assert!(state.is_accepting());
         assert_eq!(batch(&state), vec![(7,0)]);
-        let repeat = Grammar::from_glrm(r#"glrm 1; start root; nt root=@mark(7)* "a";"#)
+        let repeat = Grammar::from_glrm(r#"glrm 1; start root; nt root=@mark(7)* "a";"#).unwrap()
             .compile_with_build_options(&vocab,options(mode)).unwrap();
         let repeat = Constraint::load(repeat.save(), &vocab).unwrap();
         let mut state = repeat.start();
@@ -159,7 +159,7 @@ fn nullable_marker_only_cycles_are_observations_not_runtime_transitions() {
 #[test]
 fn recursive_and_repeated_components_keep_positions_without_capture_pairing() {
     let vocab = Vocab::new(vec![(0,b"a".to_vec()),(1,b"b".to_vec()),(2,b"aabb".to_vec())]);
-    let grammar = Grammar::from_glrm(r#"glrm 1; start root; nt root="a" @mark(1) root? "b" @mark(2);"#);
+    let grammar = Grammar::from_glrm(r#"glrm 1; start root; nt root="a" @mark(1) root? "b" @mark(2);"#).unwrap();
     for mode in modes() {
         let constraint = grammar.compile_with_build_options(&vocab,options(mode)).unwrap();
         for tokens in [&[0,0,1,1][..], &[2][..]] {

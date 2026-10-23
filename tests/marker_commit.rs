@@ -9,7 +9,7 @@ fn events(state: &glrmask::ConstraintState<'_>) -> Vec<(u32,u64)> {
     state.marker_events().iter().map(|e| (e.id,e.byte_offset)).collect()
 }
 fn compile(source: &str, vocab: &Vocab, mode: MaskStrategy) -> Constraint {
-    Grammar::from_glrm(source).compile_with_build_options(vocab, BuildOptions::default().optimization(mode)).unwrap()
+    Grammar::from_glrm(source).unwrap().compile_with_build_options(vocab, BuildOptions::default().optimization(mode)).unwrap()
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn offsets_are_bytes_including_partial_utf8_tokens() {
 fn clone_masks_forcing_errors_and_eos_obey_batch_lifecycle() {
     let v=vocab(&[b"a",b"b",b"ab",b"BAD",b"<eos>"]);
     for mode in MODES {
-        let c=Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(1) \"b\" @mark(2)\n")
+        let c=Grammar::from_glrm("start root\nnt root = @mark(0) \"a\" @mark(1) \"b\" @mark(2)\n").unwrap()
             .compile_with_build_options(&v,BuildOptions::default().optimization(mode).end_tokens([4])).unwrap();
         let mut s=c.start();let initial=s.marker_events().to_vec();
         let _=s.mask();let _=s.forced_tokens();assert_eq!(s.marker_events(),initial);
@@ -124,7 +124,7 @@ fn exact_model_events_and_marker_ids_are_distinct_namespaces() {
     for spelling in [b"<s>".as_slice(),b""] {
         let v=vocab(&[b"a",b"b",spelling]);
         for mode in MODES {
-            let mut grammar=Grammar::from_glrm("start root\nextern token SEP\nnt root = \"a\" @mark(1) SEP @mark(2) \"b\" @mark(3)\n")
+            let mut grammar=Grammar::from_glrm("start root\nextern token SEP\nnt root = \"a\" @mark(1) SEP @mark(2) \"b\" @mark(3)\n").unwrap()
                 ;
             grammar.bind("SEP", TokenSet::new([2])).unwrap();
             let c=grammar.compile_with_build_options(&v,BuildOptions::default().optimization(mode)).unwrap();

@@ -20,7 +20,7 @@ fn body() -> Grammar {
             t WS = " "+;
             nt root = "{" "}";
         "#,
-    )
+    ).unwrap()
 }
 
 fn root(grammar: Grammar, ids: impl IntoIterator<Item = u32>) -> Grammar {
@@ -83,7 +83,7 @@ fn ignored_root_takes_the_normal_path_and_still_compiles() {
             extern token eos;
             nt root = child eos;
         "#,
-    );
+    ).unwrap();
     let mut m = Module::new(&g);
     m.bind("child", body()).unwrap();
     m.bind("eos", TokenSet::new([99])).unwrap();
@@ -94,7 +94,7 @@ fn ignored_root_takes_the_normal_path_and_still_compiles() {
 #[test]
 fn bound_expression_over_precompiled_body_uses_the_fast_path() {
     let v = vocab();
-    let g = Grammar::from_glrm("glrm 1; start root; extern grammar x; nt root = x;");
+    let g = Grammar::from_glrm("glrm 1; start root; extern grammar x; nt root = x;").unwrap();
     let mut m = Module::new(&g);
     let precompiled = Module::new(&body());
     m.bind(

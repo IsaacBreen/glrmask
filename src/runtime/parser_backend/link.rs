@@ -307,7 +307,7 @@ mod candidate_tests {
             (5, b"xay".to_vec()),
             (6, b"xaby".to_vec()),
         ]);
-        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#)
+        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
             .compile_with_build_options(
                 &vocab,
                 BuildOptions::default().parser_backend(ParserBackend::TemplateDfa),
@@ -324,7 +324,7 @@ mod candidate_tests {
 
         let parent = Grammar::from_glrm(
             r#"glrm 1; extern grammar child; start root; nt root = "x" child "y";"#,
-        )
+        ).unwrap()
         .prepare(&vocab)
         .unwrap();
         let linked = parent
@@ -374,8 +374,8 @@ mod candidate_tests {
                 r#"glrm 1; start value; nt value = "a"?;"#] {
                 let options = BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)
                     .parser_backend(ParserBackend::TemplateDfa);
-                let child = Grammar::from_glrm(child).compile_with_build_options(&vocab, options.clone()).unwrap();
-                let linked = Grammar::from_glrm(parent).prepare(&vocab).unwrap()
+                let child = Grammar::from_glrm(child).unwrap().compile_with_build_options(&vocab, options.clone()).unwrap();
+                let linked = Grammar::from_glrm(parent).unwrap().prepare(&vocab).unwrap()
                     .bind_snapshot("child", &child).unwrap().link_with(options).unwrap();
                 assert!(linked.boundary_candidate_summary.get().is_none());
                 let mut eager = linked.clone();
@@ -411,10 +411,10 @@ mod candidate_tests {
     fn disabled_and_stale_deferred_wrapper_proofs_cannot_prune() {
         let vocab = Vocab::new(vec![(0, b"a".to_vec()), (1, b"x".to_vec()),
             (2, b"y".to_vec()), (3, b"xay".to_vec()), (4, b"yz".to_vec())]);
-        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#)
+        let child = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a";"#).unwrap()
             .compile(&vocab).unwrap();
         let mut linked = Grammar::from_glrm(r#"glrm 1; start root; extern grammar child;
-            nt root = "x" child "y";"#)
+            nt root = "x" child "y";"#).unwrap()
             .prepare(&vocab).unwrap().bind_snapshot("child", &child).unwrap()
             .link_with(BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
         let disabled = linked.clone();

@@ -825,9 +825,9 @@ fn nullable_nested_return_keeps_the_empty_child_crossing_token() {
         (2, b"[]!".to_vec()), (3, b"X[]!".to_vec())]);
     for mode in [MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
         let options = || BuildOptions::default().optimization(mode).parser_backend(ParserBackend::TemplateDfa);
-        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#)
+        let leaf = Grammar::from_glrm(r#"glrm 1; start value; nt value = "a"?;"#).unwrap()
             .compile_with_build_options(&vocab, options()).unwrap();
-        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#)
+        let parent = Grammar::from_glrm(r#"glrm 1; start middle; extern grammar leaf; nt middle = "[" leaf "]";"#).unwrap()
             .prepare(&vocab).unwrap();
         let middle = parent.bind_snapshot("leaf", &leaf).unwrap().link_with(options()).unwrap();
         let overlay = middle.static_dynamic_overlay.as_ref().unwrap();
@@ -2396,7 +2396,7 @@ fn o2_dependency_ready_summary_matches_final_rules_and_nullable_source() {
         (format!("start ::= r0\n{large_body}"), false, true),
         (format!("start ::= r0?\n{large_body}"), true, true)];
     for (source, nullable, large) in cases {
-        let constraint = Grammar::from_ebnf(&source).compile_with_build_options(&vocab,
+        let constraint = Grammar::from_ebnf(&source).unwrap().compile_with_build_options(&vocab,
             BuildOptions::default().optimization(MaskStrategy::TokenClassTrie)).unwrap();
         assert!(constraint.has_template_parser());
         assert!(!constraint.table.is_present());

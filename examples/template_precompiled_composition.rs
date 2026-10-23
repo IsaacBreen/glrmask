@@ -216,7 +216,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let named = glrmask_grammar::__private::grammar::glrm::from_glrm_with_inline_subgrammars(&source, &bindings)?;
     let inline_source = source_for_reparse(named);
     fs::write(output.join("inline-reference-source.glrm"), &inline_source)?;
-    let reference = Grammar::from_glrm(&inline_source).compile_with_build_options(&vocab, options.clone())?;
+    let reference = Grammar::from_glrm(&inline_source)?.compile_with_build_options(&vocab, options.clone())?;
     let reference_compile_ns = started.elapsed().as_nanos();
     assert_table_free(&parser_backend_report(&reference));
     eprintln!("INLINE_REFERENCE source_prepare_compile_ns={reference_compile_ns}");

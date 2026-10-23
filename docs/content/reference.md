@@ -14,9 +14,9 @@ let grammar = Grammar::from_glrm(r#"
     extern token END
     start response
     nt response = PAYLOAD END
-"#);
+"#)?;
 let mut parent = Module::new(&grammar);
-let child = Grammar::from_json_schema(r#"{"type":"null"}"#);
+let child = Grammar::from_json_schema(r#"{"type":"null"}"#)?;
 parent.bind("PAYLOAD", &child)?;
 parent.bind("END", glrmask::TokenSet::from(end_id))?;
 let constraint = parent.compile(vocab)?;

@@ -166,7 +166,7 @@ nt start = CONTROL payload;
         .bind_token("payload", [7]).unwrap()
         .build().unwrap();
     assert!(narrow.compile().unwrap_err().to_string().contains("requires a grammar"));
-    let mut widened = Grammar::from_glrm(source);
+    let mut widened = Grammar::from_glrm(source).unwrap();
     widened.bind("CONTROL", glrmask::TokenSet::from(7)).unwrap();
     widened.bind("payload", glrmask::TokenSet::from(7)).unwrap();
     for mode in [glrmask::MaskStrategy::Auto, glrmask::MaskStrategy::TokenTrie,
@@ -331,7 +331,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
     assert_dynamic_xy_matches(&reference, &loaded_dynamic_bound_dynamic);
 
     let loaded_static_parent = PreparedGrammar::load(
-        Grammar::from_glrm(parent_source)
+        Grammar::from_glrm(parent_source).unwrap()
             .prepare(&vocab)
             .unwrap()
             .save(),
@@ -351,7 +351,7 @@ fn compiled_parent_late_binding_matches_monolithic_across_backend_matrix() {
         "an unresolved parent must not load as a runnable constraint: {error}",
     );
     let loaded_dynamic_parent = PreparedGrammar::load(
-        Grammar::from_glrm(parent_source)
+        Grammar::from_glrm(parent_source).unwrap()
             .prepare(&vocab)
             .unwrap()
             .save(),
@@ -380,7 +380,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
     ]);
     let parent = Grammar::from_glrm(
         "glrm 1; start start; extern grammar child; nt start = \"x\" child;",
-    )
+    ).unwrap()
     .prepare(&vocab)
     .unwrap();
 
@@ -388,7 +388,7 @@ fn unresolved_late_parent_roundtrip_excludes_private_linker_token_from_masks() {
     // private linker coordinate survives PreparedGrammar persistence without becoming
     // part of the public model-token mask.
     let loaded = PreparedGrammar::load(parent.save(), &vocab).unwrap();
-    let child = Grammar::from_ebnf(r#"start ::= "y""#)
+    let child = Grammar::from_ebnf(r#"start ::= "y""#).unwrap()
         .prepare(&vocab)
         .unwrap();
     let reference = Constraint::compile(Grammar::ebnf(r#"start ::= "x" "y""#), &vocab).unwrap();
@@ -744,8 +744,8 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
 
     let unresolved_grammar_child = Grammar::from_glrm(
         "glrm 1; start start; extern grammar nested; nt start = nested;",
-    );
-    let open = Grammar::from_glrm(parent)
+    ).unwrap();
+    let open = Grammar::from_glrm(parent).unwrap()
         .bind_snapshot("child", unresolved_grammar_child)
         .unwrap()
         .prepare(&vocab)
@@ -755,7 +755,7 @@ fn bind_grammar_accepts_source_and_spec_and_does_not_inherit_parent_bindings() {
     // number. Terminal IDs, not those hidden token IDs, are the linker
     // coordinate; qualified nested slots must survive serialization and bind.
     let open = PreparedGrammar::load(open.save(), &vocab).unwrap();
-    let leaf = Grammar::from_ebnf(r#"start ::= "x""#)
+    let leaf = Grammar::from_ebnf(r#"start ::= "x""#).unwrap()
         .prepare(&vocab)
         .unwrap();
     let fully_bound = open
