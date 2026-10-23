@@ -1139,14 +1139,27 @@ impl Module {
 pub(super) mod static_build_probe {
     use super::*;
     use std::sync::Mutex;
-    fn counts() -> &'static Mutex<HashMap<usize, usize>> {
-        static COUNTS: OnceLock<Mutex<HashMap<usize, usize>>> = OnceLock::new();
+    // Each count keeps a liveness check for its grammar, because a dropped
+    // grammar's address can be reused by a grammar in a parallel test.
+    type Entry = (Box<dyn Fn() -> bool + Send>, usize);
+    fn counts() -> &'static Mutex<HashMap<usize, Entry>> {
+        static COUNTS: OnceLock<Mutex<HashMap<usize, Entry>>> = OnceLock::new();
         COUNTS.get_or_init(|| Mutex::new(HashMap::new()))
     }
     fn key(m: &Module) -> usize { Arc::as_ptr(&m.node.source.parsed_component) as usize }
-    pub(crate) fn record(m: &Module) { *counts().lock().unwrap().entry(key(m)).or_default() += 1; }
+    pub(crate) fn record(m: &Module) {
+        let mut counts = counts().lock().unwrap();
+        let entry = counts.entry(key(m)).or_insert_with(|| (Box::new(|| false), 0));
+        if !(entry.0)() {
+            let weak = Arc::downgrade(&m.node.source.parsed_component);
+            *entry = (Box::new(move || weak.strong_count() > 0), 0);
+        }
+        entry.1 += 1;
+    }
     /// Static preparations built so far for this module's grammar.
-    pub(crate) fn builds(m: &Module) -> usize { counts().lock().unwrap().get(&key(m)).copied().unwrap_or(0) }
+    pub(crate) fn builds(m: &Module) -> usize {
+        counts().lock().unwrap().get(&key(m)).filter(|e| (e.0)()).map_or(0, |e| e.1)
+    }
 }
 
 /// Records mixed-compile fallbacks on the calling test thread.
