@@ -37,6 +37,9 @@
 - Add `commit_tokens` / `commitTokens` / `glrmask_state_commit_tokens` to the
   Rust, Python, Node.js, C and C++ APIs. It commits IDs in order and stops at
   the first disallowed token.
+- With `end_tokens` configured, `is_accepting()` is true only after an end token
+  has been committed. Without end tokens it still reports a complete grammar
+  match. A rejected state is never accepting.
 - `Constraint::save()` no longer embeds the vocabulary; `Constraint::load(data,
   vocab)` verifies a stored vocabulary fingerprint covering the ID-to-bytes
   mapping and the special token IDs. `Module::load(data)` takes no vocabulary;

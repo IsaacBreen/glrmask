@@ -61,9 +61,9 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
             assert!(!allowed(&state.mask(), 99));
 
             state.commit_token(0).unwrap();
-            // Live acceptance after "a", which permits both continuation "b" and EOS 99
-            assert!(state.is_accepting());
-            assert!(!(state.mask().iter().all(|word| *word == 0)));
+            // The grammar is complete after "a", but with end tokens configured
+            // acceptance needs the EOS commit. Both "b" and EOS 99 are allowed.
+            assert!(!state.is_accepting());
             assert!(allowed(&state.mask(), 1));
             assert!(allowed(&state.mask(), 99));
 
@@ -87,13 +87,13 @@ fn configured_eos_absent_from_vocab_supports_continuation_and_terminal_lifecycle
         {
             let mut state = constraint.start();
             state.commit_token(0).unwrap();
-            assert!(state.is_accepting());
+            assert!(!state.is_accepting());
             assert!(allowed(&state.mask(), 1));
             assert!(allowed(&state.mask(), 99));
 
             // Continue through "b"
             state.commit_token(1).unwrap();
-            assert!(state.is_accepting());
+            assert!(!state.is_accepting());
             assert!(!(state.mask().iter().all(|word| *word == 0)));
             assert!(!allowed(&state.mask(), 0));
             assert!(!allowed(&state.mask(), 1));

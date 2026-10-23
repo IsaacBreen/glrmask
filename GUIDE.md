@@ -306,11 +306,11 @@ not once per child. Final compilation handles outstanding work, so attaching a
 cold child never requires a separate manual precompilation step. Incompatible
 retained representations or targets produce errors, not implicit loss of work.
 
-Configure `end_tokens` on the final compile operation. Acceptance means a
-complete grammar match exists; it does not require generation to stop when longer
-matches remain possible. A configured end ID is admitted only at acceptance. Commit
-the sampled end ID before ending the generation loop. Child components do not
-supply the enclosing generation's root termination policy.
+Configure `end_tokens` on the final compile operation. Acceptance then means an
+end token has been committed; a complete grammar match alone is not acceptance. A
+configured end ID is admitted only once the grammar is complete. Commit the sampled
+end ID before ending the generation loop. Child components do not supply the
+enclosing generation's root termination policy.
 
 ### Lightweight expressions
 

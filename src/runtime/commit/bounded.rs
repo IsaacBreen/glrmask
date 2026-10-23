@@ -487,7 +487,7 @@ impl ConstraintState<'_> {
 /// Probe before allocating the mutable private cursor; most states are choices.
 pub(crate) fn forced_tokens(states:&[ConstraintState<'_>])->crate::Result<Vec<u32>> {
     resource_guard(|| {
-        if states.is_empty() || states.iter().any(ConstraintState::is_accepting){return Ok(Vec::new());}
+        if states.is_empty() || states.iter().any(|s| s.frontier_complete()){return Ok(Vec::new());}
         let AtMostOne::One(mut id)=one(states.iter().map(View::of))? else{return Ok(Vec::new())};
         struct Cursor<'a>{constraint:&'a Constraint,state:ParserStateMap,buffers:CommitBuffers}
         let mut cursors=states.iter().filter(|s|!s.state.is_empty()&&!s.terminated)
@@ -859,8 +859,12 @@ mod differential_tests {
                         assert!(allowed(&state.mask()).contains(&id),"{context}, next={id}");
                         state.commit_token(id).unwrap();remaining=&remaining[bytes.len()..];step+=1;
                     }
-                    assert!(state.is_accepting());check(&state.clone(),"frontend root acceptance");
-                    state.commit_token(2000).unwrap();check(&state,"frontend terminated");
+                    // The grammar is complete; acceptance needs the end token.
+                    assert!(allowed(&state.mask()).contains(&2000),"frontend grammar completion");
+                    assert!(!state.is_accepting());
+                    state.commit_token(2000).unwrap();
+                    assert!(state.is_accepting());
+                    check(&state,"frontend terminated");
                 }
             }
         }

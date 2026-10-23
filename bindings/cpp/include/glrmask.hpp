@@ -137,7 +137,7 @@ public:
 /// `end_tokens` applies only to the top-level sequence; the strategies apply
 /// to the whole compile, including every composed child.
 struct CompileOptions {
-    /// Accepted end-of-sequence token IDs, allowed only at acceptance.
+    /// Accepted end-of-sequence token IDs, admitted once the grammar is complete.
     std::vector<TokenId> end_tokens;
     /// Mask computation strategy for the whole compile.
     MaskStrategy mask_strategy = MaskStrategy::Auto;
@@ -449,7 +449,7 @@ public:
     void commit_bytes(const Bytes& bytes) { commit_bytes(bytes.data(), bytes.size()); }
     /// Commits the bytes of a string view.
     void commit_bytes(std::string_view bytes) { commit_bytes(reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size()); }
-    /// Whether the current prefix is a complete grammar match.
+    /// Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
     bool is_accepting() const { std::uint32_t value = 0; detail::check(glrmask_state_is_accepting(native_handle(), &value)); return value != 0; }
     /// Whether the prefix cannot be extended to a valid match.
     /// A read-only prefix of library-canonical forced output.

@@ -46,7 +46,7 @@ for(const maskStrategy of strategies) {
   test(`${maskStrategy}: end-token policy is separate from acceptance`,()=>{
     const v=new Vocab([[0,b('a')]],{specialTokenIds:[99]});
     const s=Grammar.fromEbnf('start ::= "a"').compileSync(v,{maskStrategy,endTokens:[99]}).start();
-    assert.ok(!allowed(s.mask(),99));s.commitToken(0);assert.ok(s.isAccepting());assert.ok(allowed(s.mask(),99));
+    assert.ok(!allowed(s.mask(),99));s.commitToken(0);assert.ok(!s.isAccepting());assert.ok(allowed(s.mask(),99));
     s.commitToken(99);assert.ok(s.isAccepting());assert.ok(s.mask().every(w=>w===0));
     assert.ok(s.clone().isAccepting());assert.throws(()=>s.commitToken(99));
   });

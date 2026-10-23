@@ -227,7 +227,7 @@ GLRMASK_API glrmask_status glrmask_state_commit_token(glrmask_state*,uint32_t);
 GLRMASK_API glrmask_status glrmask_state_commit_tokens(glrmask_state*,const uint32_t*,size_t);
 /// Commits raw bytes rather than a model token event.
 GLRMASK_API glrmask_status glrmask_state_commit_bytes(glrmask_state*,const uint8_t*,size_t);
-/// Writes nonzero when the current prefix is a complete grammar match.
+/// Writes nonzero when the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed.
 GLRMASK_API glrmask_status glrmask_state_is_accepting(const glrmask_state*,uint32_t*);
 /// Returns an owning read-only prefix of library-canonical forced output.
 GLRMASK_API glrmask_status glrmask_state_forced_tokens(const glrmask_state*,glrmask_u32s**);

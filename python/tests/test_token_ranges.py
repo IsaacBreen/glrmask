@@ -173,7 +173,8 @@ def test_ambiguous_two_events_cannot_admit_a_third_token(mode, compact):
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)
-    assert state.is_accepting()
+    # The grammar is complete; acceptance needs the end token.
+    assert not state.is_accepting()
     assert accepted_ids(state) == {15}
 
 
@@ -191,7 +192,8 @@ def test_ambiguous_exact_byte_choices_stop_after_two_tokens(mode, a, b):
     state = constraint.start()
     state.commit_token(0)
     state.commit_token(0)
-    assert state.is_accepting()
+    # The grammar is complete; acceptance needs the end token.
+    assert not state.is_accepting()
     assert accepted_ids(state) == {15}
     with pytest.raises(ValueError):
         state.commit_token(0)

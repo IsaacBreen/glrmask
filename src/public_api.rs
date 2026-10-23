@@ -3171,7 +3171,12 @@ mod tests {
                 let before_a = a.mask(); let before_b = b.mask();
                 assert_eq!(before_a, before_b, "mask at {prefix:?}");
                 assert_eq!(a.is_accepting(), b.is_accepting());
-                assert_eq!(token_allowed(&before_a, 99), a.is_accepting(), "root EOF policy");
+                // The end token is admitted exactly when the grammar is
+                // complete, and committing it makes the state accepting.
+                let mut eof = a.clone();
+                let allowed_eof = token_allowed(&before_a, 99);
+                assert_eq!(eof.commit_token(99).is_ok(), allowed_eof, "root EOF policy");
+                if allowed_eof { assert!(eof.is_accepting()); }
                 for token in (0..=8).chain([99]) {
                     let mut trial_a = a.clone(); let mut trial_b = b.clone();
                     let ok_a = trial_a.commit_token(token).is_ok();

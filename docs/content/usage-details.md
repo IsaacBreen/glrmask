@@ -97,10 +97,11 @@ let constraint = grammar.compile_with(
 
 ### Completion and forcing
 
-Set `end_tokens` on the final compile call. `is_accepting()` means the
-current output is a complete match, possibly with valid continuations. Commit the
-sampled end token before stopping. An initially accepting grammar can instead stop
-immediately if that is the application's policy.
+Set `end_tokens` on the final compile call. `is_accepting()` then becomes true
+only after an end token has been committed; a complete grammar match alone is not
+acceptance. Commit the sampled end token before stopping. Without end tokens,
+`is_accepting()` means the current output is a complete match, possibly with valid
+continuations.
 
 The read-only `forced_tokens()` query returns a safe library-canonical prefix of
 genuinely forced ordinary text. It uses the longest admitted nonempty spelling

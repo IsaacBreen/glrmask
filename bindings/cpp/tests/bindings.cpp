@@ -98,7 +98,7 @@ void end_tokens() {
         o.mask_strategy = static_cast<MaskStrategy>(i);
         auto m = Module(Grammar::from_ebnf(R"(start ::= "a")"));
         auto s = m.compile(v, o).start();
-        CHECK(!allowed(s.mask(),99)); s.commit_token(0); CHECK(s.is_accepting()); CHECK(allowed(s.mask(),99));
+        CHECK(!allowed(s.mask(),99)); s.commit_token(0); CHECK(!s.is_accepting()); CHECK(allowed(s.mask(),99));
         s.commit_token(99); CHECK(s.is_accepting());
         const auto m_words = s.mask(); CHECK(std::all_of(m_words.begin(), m_words.end(), [](auto w){ return w==0; }));
         CHECK(ConstraintState(s).is_accepting()); throws([&]{ s.commit_token(99); });

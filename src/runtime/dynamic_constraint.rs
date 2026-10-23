@@ -4066,9 +4066,11 @@ impl<'a> DynamicConstraintState<'a> {
         crate::runtime::force_ids_for_states(&self.alternatives,Some(true))
     }
 
-    /// Return whether the committed prefix is currently accepted by the grammar.
+    /// Whether the input so far is a complete match.
     ///
-    /// An accepting prefix may still admit additional tokens.
+    /// With end tokens configured, this becomes true only once an end token is
+    /// committed. Without them it reports a complete grammar match, which may
+    /// still admit further tokens.
     pub fn is_accepting(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }

@@ -92,7 +92,7 @@ A failed `commitToken`, `commitBytes` or `commitTokens` throws and leaves the st
 
 ## End tokens
 
-`isAccepting()` means the current prefix is a complete match, not that generation must stop. To stop on an explicit event, configure root `endTokens` and stop when one is sampled and committed.
+`isAccepting()` means the input so far is a complete match. With root `endTokens` configured, it becomes true only once an end token is committed. Without end tokens it reports a complete grammar match, which may still permit more input.
 
 An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root and is not inherited by embedded children.
 

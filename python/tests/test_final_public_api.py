@@ -106,8 +106,7 @@ def test_oversized_and_undersized_mask_buffers_and_state_termination():
     s.commit_token(0)
     assert s.mask()[130]
     s.commit_token(130)
-    assert s.is_accepting() and not (not s.mask().any())
-    assert not np.any(s.mask())
+    assert s.is_accepting() and not np.any(s.mask())
     with pytest.raises(ValueError):
         s.commit_token(0)
     with pytest.raises(ValueError):

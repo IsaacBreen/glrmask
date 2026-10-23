@@ -69,12 +69,15 @@ fn assert_pair_trace(
         b.fill_mask(&mut right_mask);
         assert_eq!(left_mask, right_mask, "mask parity after {token}");
     }
-    assert_eq!(a.is_accepting(), final_accepting, "left final acceptance");
-    assert_eq!(b.is_accepting(), final_accepting, "right final acceptance");
+    assert!(!a.is_accepting(), "left accepted before its end token");
+    assert!(!b.is_accepting(), "right accepted before its end token");
+    assert_eq!(allowed(&left_mask, END_TOKEN), final_accepting,
+        "end token must be admitted only at grammar completion");
     if final_accepting {
-        assert!(allowed(&left_mask, END_TOKEN), "end token must be admitted at acceptance");
         a.commit_token(END_TOKEN).expect("left end token commit");
         b.commit_token(END_TOKEN).expect("right end token commit");
+        assert!(a.is_accepting(), "left end token must accept");
+        assert!(b.is_accepting(), "right end token must accept");
     }
 }
 
@@ -116,16 +119,24 @@ fn assert_positive_trace(source: &str, trace: &[u32], final_accepting: bool) {
     left.fill_mask(&mut left_mask);
     right.fill_mask(&mut right_mask);
     assert_eq!(left_mask, right_mask, "final masks differ for {source:?}");
+    assert!(!left.is_accepting(), "explicit LR accepted before its end token for {source:?}");
+    assert!(!right.is_accepting(), "native accepted before its end token for {source:?}");
     assert_eq!(
-        left.is_accepting(),
+        allowed(&left_mask, END_TOKEN),
         final_accepting,
-        "explicit LR final acceptance mismatch for {source:?}",
+        "explicit LR end-token admission mismatch for {source:?}",
     );
     assert_eq!(
-        right.is_accepting(),
+        allowed(&right_mask, END_TOKEN),
         final_accepting,
-        "native final acceptance mismatch for {source:?}",
+        "native end-token admission mismatch for {source:?}",
     );
+    if final_accepting {
+        left.commit_token(END_TOKEN).expect("explicit LR end token commit");
+        right.commit_token(END_TOKEN).expect("native end token commit");
+        assert!(left.is_accepting(), "explicit LR must accept its end token for {source:?}");
+        assert!(right.is_accepting(), "native must accept its end token for {source:?}");
+    }
 }
 
 /// Parity-only trace for inputs whose membership is intentionally not asserted
@@ -156,22 +167,24 @@ fn acyclic_positive_trace_and_end_token() {
     let source = r#"start ::= "a" "b""#;
     assert_positive_trace(source, &[0, 1], true);
 
-    // The explicit end token is only *admitted* once the parser is accepting.
+    // The explicit end token is only *admitted* once the grammar is complete.
     let vocab = vocab();
     let lr = compile(&vocab, source, ParserBackend::LrTable);
     let mut state = lr.start();
     assert!(!state.is_accepting());
-    assert!(!allowed(&state.mask(), END_TOKEN), "end token must not be allowed before acceptance");
+    assert!(!allowed(&state.mask(), END_TOKEN), "end token must not be allowed before completion");
     state.commit_token(0).unwrap();
     state.commit_token(1).unwrap();
+    // The grammar is complete, but acceptance needs the end token.
+    assert!(!state.is_accepting());
+    assert!(allowed(&state.mask(), END_TOKEN), "end token must be allowed at completion");
+    state.commit_token(END_TOKEN).expect("end token commit at completion");
     assert!(state.is_accepting());
-    assert!(allowed(&state.mask(), END_TOKEN), "end token must be allowed at acceptance");
-    state.commit_token(END_TOKEN).expect("end token commit at accepting state");
     // Root termination policy: the mask becomes empty and further commits fail.
     assert_eq!(state.mask(), vec![0u32; lr.mask_len()]);
     assert!(state.commit_token(0).is_err(), "commit after termination must fail");
 
-    // Committing an end token before acceptance never reaches acceptance.
+    // Committing an end token before grammar completion never reaches acceptance.
     let mut early = lr.start();
     let _ = early.commit_token(END_TOKEN);
     assert!(!early.is_accepting(), "early end token commit must not accept");

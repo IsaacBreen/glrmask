@@ -188,7 +188,8 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert_eq!(&buffer[8..], &[0, 0]);
         assert!(!allowed(&state.mask(), 130));
         state.commit_token(1).unwrap();
-        assert!(state.is_accepting());
+        // Grammar complete, but acceptance needs an end token.
+        assert!(!state.is_accepting());
         assert!(allowed(&state.mask(), 130));
         assert!(allowed(&state.mask(), 255));
         let mut other = state.clone();
@@ -198,7 +199,7 @@ fn root_end_tokens_can_extend_the_mask_without_changing_body_caches() {
         assert!(state.forced_canonical_reference().is_empty());
         assert!(state.commit_token(1).is_err());
         assert!(state.commit_bytes(b"a").is_err());
-        assert!(other.is_accepting());
+        assert!(!other.is_accepting());
         assert!(allowed(&other.mask(), 130));
         assert!(allowed(&other.mask(), 255));
         other.commit_token(255).unwrap();

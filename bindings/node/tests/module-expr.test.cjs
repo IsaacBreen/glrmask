@@ -28,7 +28,7 @@ test('Module: copy and root-only final options',()=>{
   assert.equal(options.maskStrategy,MaskStrategy.TokenClassTrie);
   assert.equal(options.boundaryMaskStrategy,BoundaryMaskStrategy.TokenTrie);
   const state=configured.compileSync(v,options).start();
-  assert.ok(!allowed(state,63));state.commitToken(4);assert.ok(state.isAccepting());assert.ok(allowed(state,63));state.commitToken(63);assert.ok(state.mask().every(w=>w===0));
+  assert.ok(!allowed(state,63));state.commitToken(4);assert.ok(!state.isAccepting());assert.ok(allowed(state,63));state.commitToken(63);assert.ok(state.isAccepting());assert.ok(state.mask().every(w=>w===0));
   assert.throws(()=>new CompileOptions({bogus:true}),TypeError);
 });
 

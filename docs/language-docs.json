@@ -56,7 +56,7 @@
     "Module.__init__": "Creates a module from a source grammar.",
     "Module.bind": "Binds the extern `name` to `value`; the keyword form binds several atomically, and none is applied if any fails.\n\nFails if an extern is undeclared or already bound; names containing `::` are rejected.",
     "Module.precompile": "Retains vocabulary-specific compilation artifacts for this module.\n\nThe strategies decide which static parts are built. A module resolved to `TOKEN_TRIE` retains no work and compiles from source.",
-    "Module.compile": "Compiles the module assembly against `vocab`.\n\nRequires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.",
+    "Module.compile": "Compiles the module assembly against `vocab`.\n\nRequires every extern to be bound; `end_tokens` are admitted once the grammar is complete and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.",
     "Module.externs": "A view over the module's declared externs, in declaration order.",
     "Module.copy": "An independent snapshot sharing immutable source and retained work.",
     "Module.__copy__": "An independent snapshot.",
@@ -86,7 +86,7 @@
     "ConstraintState.commit_token": "Commits one model token event.\n\nReturns an error if the token is not allowed; the state is then unusable, so clone it first to try a token speculatively.",
     "ConstraintState.commit_tokens": "Commits model token IDs in order.\n\nStops with an error at the first disallowed token; the state is then unusable.",
     "ConstraintState.commit_bytes": "Commits raw bytes rather than a model token event.\n\nDoes not substitute for committing a token-set or end-token event.",
-    "ConstraintState.is_accepting": "Whether the current prefix is a complete grammar match.\n\nFurther tokens may still be allowed; this alone does not commit an end token.",
+    "ConstraintState.is_accepting": "Whether the input so far is a complete match.\n\nWith end tokens configured, this becomes true only once an end token is committed.",
     "ConstraintState.forced_tokens": "A read-only prefix of library-canonical forced output, at most 10,000 IDs.\n\nUses the longest admitted nonempty token spelling, then the lowest original token ID; token-set events retain their IDs. The query stops at root acceptance or an ambiguous event boundary.",
     "ConstraintState.marker_events": "Initial or most recent commit's observations as `(marker_id, absolute_byte_offset)`.\n\nSorted by offset then ID; a failed commit clears the batch and mask or forcing queries leave it unchanged.",
     "auto": "Adaptive JSON Schema policy inspection and persisted tier selection.\n\nFor ordinary compilation, prefer `Grammar.compile(..., mask_strategy=MaskStrategy.AUTO)`. Policy thresholds are empirical choices, not latency guarantees. All tiers inherit the JSON Schema importer's partial assertion support.",
@@ -214,8 +214,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "f7446c756cdf61b5e32a597c8ea4a5856409fe0c305a8ff8ba9ce533e0f52c59",
-    "bindings/node/README.md": "250518edb78977efa441238c57da622b0cba0faf25cd292e93228e9e62a73fe7",
+    "bindings/cpp/README.md": "144dd4451ef937d2b9e0561ce8e58c1a9947b11d242298e676706b54bada3d89",
+    "bindings/node/README.md": "400af17367b59101a87f81870c502193e746ef037fc147e1aa4e03d8b9f183e8",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -223,5 +223,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "38c39295e8cac45a1a4352648e4290eb6ab7752f032ba75c5621b645dcefa7e5"
+  "content_sha256": "6d0c3e2f998d94b61e1a91e4d13eee80329db2e2afd37bb3cf06afdb439a5f32"
 }

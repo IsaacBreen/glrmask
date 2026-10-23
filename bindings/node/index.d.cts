@@ -129,7 +129,7 @@ export interface StrategyOptions {
 
 /** Root compile options. */
 export interface GrammarCompileOptions extends StrategyOptions {
-  /** Accepted end-of-sequence token IDs, applied only to this root compile and allowed only at acceptance. */
+  /** Accepted end-of-sequence token IDs, applied only to this root compile and admitted once the grammar is complete. */
   endTokens?: Iterable<number>;
 }
 
@@ -165,12 +165,12 @@ export declare class Grammar implements Disposable {
 
 /** Root generation options. */
 export interface RootSettings extends StrategyOptions {
-  /** Accepted end-of-sequence token IDs, allowed only at acceptance and committed before stopping. */
+  /** Accepted end-of-sequence token IDs, admitted once the grammar is complete and committed before stopping. */
   endTokens?: Iterable<number>;
 }
 /** Compilation settings for a module assembly. */
 export declare class CompileOptions {
-  /** Creates compile options; `endTokens` are allowed only at acceptance and must be committed before stopping. */
+  /** Creates compile options; `endTokens` are admitted once the grammar is complete and must be committed before stopping. */
   constructor(options?: RootSettings);
   /** The accepted end-of-sequence token IDs. */
   readonly endTokens: readonly number[];
@@ -284,7 +284,7 @@ export declare class ConstraintState implements Disposable {
   commitTokens(ids: Iterable<number> | Uint32Array): void;
   /** Commits raw bytes rather than a model token event; does not substitute for committing a token-set or end-token event. */
   commitBytes(bytes: Uint8Array): void;
-  /** Whether the current prefix is a complete grammar match; further tokens may still be allowed. */
+  /** Whether the input so far is a complete match. With end tokens configured, this becomes true only once an end token is committed. */
   isAccepting(): boolean;
   /** A read-only prefix of library-canonical forced output. */
   forcedTokens(): Uint32Array;

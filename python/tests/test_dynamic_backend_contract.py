@@ -68,11 +68,13 @@ def test_public_empty_eos_and_empty_ordinary_alias_survive_reload(mode):
                 assert not state.mask()[25]
                 assert bool(state.mask()[26]) == accepting
             if accepting:
+                assert not state.is_accepting()
                 state.commit_token(26)
-                assert state.is_accepting() and not (not state.mask().any())
+                assert state.is_accepting() and not state.mask().any()
                 assert not state.mask().any()
             else:
-                state.commit_token(26)
+                with pytest.raises(ValueError):
+                    state.commit_token(26)
                 assert (not state.mask().any()) and not state.is_accepting()
                 assert not state.mask().any()
 

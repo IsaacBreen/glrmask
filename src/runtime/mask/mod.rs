@@ -7199,7 +7199,7 @@ impl<'a> ConstraintState<'a> {
                 );
             }
         }
-        if !used_direct_final && !self.is_accepting() {
+        if !used_direct_final && !self.frontier_complete() {
             restore_scratch(merged, output_scratch, single_path_aux, single_path_acc);
             return false;
         }
@@ -8848,7 +8848,7 @@ impl<'a> ConstraintState<'a> {
         // may return before their composed-mask endpoint filter runs.
         self.enforce_empty_byte_token_domain(buf);
         if !self.constraint.end_tokens.is_empty() {
-            let accepting = self.is_accepting();
+            let accepting = self.frontier_complete();
             for &id in self.constraint.end_tokens.iter() {
                 let word = &mut buf[id as usize / 32];
                 let bit = 1u32 << (id % 32);

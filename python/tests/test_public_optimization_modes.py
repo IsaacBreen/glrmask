@@ -32,12 +32,16 @@ def test_recursive_state_clone_force_eos_and_both_load_forms(mode):
             assert np.array_equal(mask, expected.mask())
             assert state.forced_tokens() == expected.forced_tokens()
             assert state.is_accepting() == expected.is_accepting()
-            assert bool(mask[100]) == state.is_accepting()
+            assert not state.is_accepting()
             assert not mask[25]
             snapshot = state.clone()
-            state.commit_token(100)
-            assert state.is_accepting() == expected.is_accepting()
-            assert (not state.mask().any()) != expected.is_accepting()
+            if mask[100]:
+                state.commit_token(100)
+                assert state.is_accepting()
+            else:
+                with pytest.raises(ValueError):
+                    state.commit_token(100)
+                assert not state.is_accepting()
             assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), mask)
             assert snapshot.is_accepting() == expected.is_accepting()
@@ -100,10 +104,10 @@ def test_compressed_public_lark_masks_commit_clone_and_reload():
             snapshot = state.clone()
             if n == 30:
                 state.commit_token(1)
-                assert state.is_accepting()
+                assert not state.is_accepting()
                 assert state.mask()[100]
                 state.commit_token(100)
-                assert state.is_accepting() and not (not state.mask().any())
+                assert state.is_accepting() and not state.mask().any()
                 assert not state.mask().any()
             assert np.array_equal(snapshot.mask(), expected.mask())
 
@@ -132,7 +136,7 @@ def test_whole_token_is_suggested_by_compressed_static_mask(mode, n):
         assert state.mask()[3] and state.mask()[7]
         assert not state.mask()[8] and not state.mask()[9]
         state.commit_token(7)
-        assert state.is_accepting()
+        assert not state.is_accepting()
         state.commit_token(100)
-        assert state.is_accepting() and not (not state.mask().any())
+        assert state.is_accepting() and not state.mask().any()
         assert not state.mask().any()

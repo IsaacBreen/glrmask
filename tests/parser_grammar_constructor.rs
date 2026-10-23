@@ -94,7 +94,8 @@ fn check_words(c: &Constraint, vocab: &[Vec<u8>], language: &[&[u8]]) {
     for word in language { for length in 0..=word.len() { prefixes.insert(word[..length].to_vec()); } }
     for prefix in prefixes {
         let mut state = c.start(); state.commit_bytes(&prefix).unwrap();
-        assert_eq!(state.is_accepting(), language.contains(&prefix.as_slice()), "completion at {prefix:?}");
+        // Acceptance needs the configured end token, never just completion.
+        assert!(!state.is_accepting(), "unexpected acceptance at {prefix:?}");
         let mask = state.mask();
         for (token, bytes) in vocab.iter().enumerate() {
             let mut extension = prefix.clone(); extension.extend(bytes);
@@ -102,10 +103,11 @@ fn check_words(c: &Constraint, vocab: &[Vec<u8>], language: &[&[u8]]) {
                 "prefix={prefix:?} token={bytes:?}");
             if bit(&mask, token as u32) {
                 let mut replay = c.start(); replay.commit_bytes(&prefix).unwrap(); replay.commit_token(token as u32).unwrap();
-                assert_eq!(replay.is_accepting(), language.contains(&extension.as_slice()));
+                assert!(!replay.is_accepting(), "unexpected acceptance at {extension:?}");
             }
         }
-        assert_eq!(bit(&mask, 512), state.is_accepting());
+        assert_eq!(bit(&mask, 512), language.contains(&prefix.as_slice()),
+            "end token {prefix:?} is admitted only at completion");
     }
 }
 

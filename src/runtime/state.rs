@@ -580,12 +580,22 @@ impl<'a> ConstraintState<'a> {
     }
 
 
-    /// Whether the current prefix is a complete grammar match.
+    /// Whether the input so far is a complete match.
     ///
-    /// Further tokens may still be allowed; this alone does not commit an end
-    /// token.
+    /// With end tokens configured, this becomes true only once an end token is
+    /// committed. Without them it reports a complete grammar match, which may
+    /// still admit further tokens.
     pub fn is_accepting(&self) -> bool {
+        if !self.constraint.end_tokens.is_empty() {
+            return self.terminated;
+        }
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
+    }
+
+    /// Whether the parser frontier is a complete grammar match, ignoring any
+    /// end-token policy.
+    pub(crate) fn frontier_complete(&self) -> bool {
+        frontier_is_accepting(self.constraint, &self.state, false)
     }
 
     pub(crate) fn parser_root_count(&self) -> usize {
@@ -660,7 +670,7 @@ impl<'a> ConstraintState<'a> {
 
 }
 
-/// The authoritative acceptance predicate, shared with read-only forcing probes.
+/// Whether the parser frontier completes the grammar, ignoring end-token policy.
 pub(super) fn frontier_is_accepting(constraint: &Constraint, state: &ParserStateMap, terminated: bool) -> bool {
         if terminated { return true; }
         if constraint.uses_compact_segmented_parser_runtime() {

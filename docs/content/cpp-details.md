@@ -93,7 +93,7 @@ A failed `commit_token`, `commit_bytes` or `commit_tokens` returns `glrmask::Err
 
 ## End tokens
 
-`is_accepting()` means the current prefix is a complete match. It does not mean generation must stop, because the grammar may permit more input. To stop at an explicit event, configure root `end_tokens` in `CompileOptions` and stop when one is sampled and committed.
+`is_accepting()` means the input so far is a complete match. With root `end_tokens` configured in `CompileOptions`, it becomes true only once an end token is committed. Without end tokens it reports a complete grammar match, which may still permit more input.
 
 An allowed end token leaves the state accepting, empties the next mask, and prevents further commits; a rejected commit also empties the mask. End-token policy belongs to the root; embedded child modules do not inherit it.
 

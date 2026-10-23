@@ -104,7 +104,8 @@ def test_long_token_cannot_cross_possible_root_acceptance(mode):
         state = constraint.start()
         assert assert_read_only_and_replay(state, "forced_tokens") == []
         state.commit_token(0)
-        assert state.is_accepting() and state.mask()[1] and state.mask()[9]
+        # With end tokens configured, completion alone is not acceptance.
+        assert not state.is_accepting() and state.mask()[1] and state.mask()[9]
         assert assert_read_only_and_replay(state, "forced_tokens") == []
 
 
@@ -122,5 +123,5 @@ def test_dual_byte_event_id_keeps_accepting_and_nonaccepting_successors(mode):
         state.commit_token(0)
         assert assert_read_only_and_replay(state, "forced_tokens") == [1]
         state.commit_token(1)
-        assert state.is_accepting() and state.mask()[3] and state.mask()[9]
+        assert not state.is_accepting() and state.mask()[3] and state.mask()[9]
         assert assert_read_only_and_replay(state, "forced_tokens") == []

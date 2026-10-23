@@ -173,7 +173,7 @@ def test_python_data_only_program_matches_literal_language(mode, as_json):
             depth = depth_after(prefix)
             state = compiled.start()
             state.commit_bytes(prefix)
-            assert state.is_accepting() == (depth == 0)
+            assert not state.is_accepting()
             mask = state.mask()
             for token_id, word in enumerate(words):
                 assert bool(mask[token_id]) == (depth_after(word, depth) is not None), (prefix, word)
@@ -262,10 +262,10 @@ def test_python_precompiled_nullable_composition_preserves_crossings_and_root_en
         for token in [3, 4]:
             state = compiled.start()
             state.commit_token(token)
-            assert state.is_accepting()
+            assert not state.is_accepting()
             assert state.mask()[6]
             state.commit_token(6)
-            assert state.is_accepting() and not (not state.mask().any())
+            assert state.is_accepting() and not state.mask().any()
             assert not state.mask().any()
 
 
@@ -303,9 +303,9 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
         state = compiled.start()
         assert state.mask()[3]
         state.commit_token(3)
-        assert state.is_accepting() and state.mask()[8]
+        assert not state.is_accepting() and state.mask()[8]
         state.commit_token(8)
-        assert state.is_accepting() and not (not state.mask().any())
+        assert state.is_accepting() and not state.mask().any()
         assert not state.mask().any()
 
         for count in [0, 1, 31, 4996, 4997, 4998]:
@@ -316,7 +316,7 @@ def test_python_projected_virtual_child_preserves_exact_limits_and_reload(mode):
                 assert bool(mask[token]) == (2 + count + payload_size <= 5000), (count, token)
             assert mask[7]  # Completing the URI and returning to the parent.
             state.commit_token(7)
-            assert state.is_accepting()
+            assert not state.is_accepting()
         state = compiled.start()
         with pytest.raises(ValueError):
             state.commit_bytes(b'p"x:' + b"a" * 4999)
@@ -346,7 +346,7 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                 state = compiled.start()
                 state.commit_bytes(prefix)
                 mask = state.mask()
-                assert state.is_accepting() == (prefix in language)
+                assert not state.is_accepting()
                 assert bool(mask[8]) == (prefix in language)
                 for token_id, word in tokens.items():
                     if token_id == 8:
@@ -357,8 +357,8 @@ def test_python_nullable_lexical_body_survives_compiled_child_binding(backend, m
                         branch = compiled.start()
                         branch.commit_bytes(prefix)
                         branch.commit_token(token_id)
-                        assert branch.is_accepting() == (prefix + word in language)
+                        assert not branch.is_accepting()
                 if prefix in language:
                     state.commit_token(8)
-                    assert state.is_accepting() and not (not state.mask().any())
+                    assert state.is_accepting() and not state.mask().any()
                     assert not state.mask().any()

@@ -230,7 +230,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bo
         states.retain(|state| !state.state.is_empty());
         let mut output = Vec::new();
         while !states.is_empty() && output.len() < MAX_OUTPUT_IDS {
-            if states.iter().any(ConstraintState::is_accepting) { break; }
+            if states.iter().any(ConstraintState::frontier_complete) { break; }
             let (individual, union) = masks(&states, dynamic);
             let Some(id) = singleton(&union) else { break; };
             if !commit_selected(&mut states, &individual, id, dynamic) { break; }
@@ -241,7 +241,7 @@ pub(crate) fn force_token_ids(states: &[ConstraintState<'_>], dynamic: Option<bo
 }
 
 fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32> {
-    if states.is_empty() || states.iter().any(ConstraintState::is_accepting) || !same_spelling_policy(states) {
+    if states.is_empty() || states.iter().any(ConstraintState::frontier_complete) || !same_spelling_policy(states) {
         return Vec::new();
     }
     let mut states = states.to_vec();
@@ -250,7 +250,7 @@ fn force_inner(states: &[ConstraintState<'_>], dynamic: Option<bool>) -> Vec<u32
     let mut output = Vec::new();
     let mut output_bytes = 0;
     while !states.is_empty() && output.len() < MAX_OUTPUT_IDS && output_bytes < MAX_OUTPUT_BYTES {
-        if states.iter().any(ConstraintState::is_accepting) { break; }
+        if states.iter().any(ConstraintState::frontier_complete) { break; }
         let (individual, mask) = masks(&states, dynamic);
         let constraints = states.iter().map(|s| s.constraint).collect::<Vec<_>>();
         let mut frontiers = states.iter().map(|s| s.state.clone()).collect::<Vec<_>>();

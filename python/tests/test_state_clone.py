@@ -12,12 +12,12 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
     branch = state.clone()
     assert branch.mask().tolist() == state.mask().tolist()
     branch.commit_token(1)
-    assert branch.is_accepting()
+    assert not branch.is_accepting()
     assert not state.is_accepting()
     assert state.mask().tolist() == [False, True, True, False]
     branch.commit_token(3)
     for ended in [branch, branch.clone()]:
-        assert ended.is_accepting() and not (not ended.mask().any())
+        assert ended.is_accepting() and not ended.mask().any()
         assert not ended.mask().any()
         with pytest.raises(ValueError, match="already terminated"):
             ended.commit_token(0)
@@ -26,6 +26,8 @@ def test_clone_preserves_prefix_and_keeps_mutations_independent():
     assert not state.is_accepting() and not (not state.mask().any())
     assert state.mask().tolist() == [False, True, True, False]
     state.commit_token(2)
+    assert not state.is_accepting()
+    state.commit_token(3)
     assert state.is_accepting()
 
 

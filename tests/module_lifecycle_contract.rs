@@ -98,7 +98,8 @@ fn compile_options_never_invalidate_retained_work() {
         .unwrap();
     let mut state = root.start();
     state.commit_token(0).unwrap();
-    assert!(state.is_accepting());
+    // Grammar complete, but acceptance needs the configured end token.
+    assert!(!state.is_accepting());
     state.commit_token(5).unwrap();
     assert!(state.is_accepting());
 }

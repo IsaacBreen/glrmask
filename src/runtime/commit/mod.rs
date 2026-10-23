@@ -9146,7 +9146,7 @@ impl<'a> ConstraintState<'a> {
         if self.constraint.end_tokens.binary_search(&token_id).is_err() {
             return None;
         }
-        if !self.is_accepting() {
+        if !self.frontier_complete() {
             // An end token before a complete match is a disallowed commit. The
             // state is rejected, mirroring every other failed commit.
             self.reject_after_failed_commit();

@@ -77,7 +77,8 @@ fn check_all_prefixes(c:&Constraint) {
             let prefix=(0..length).map(|i|if bits & (1<<i)==0 {b'('} else {b')'}).collect::<Vec<_>>();
             let Some(d)=depth(&prefix,0) else {continue;};
             let mut state=c.start(); state.commit_bytes(&prefix).unwrap();
-            assert_eq!(state.is_accepting(),d==0,"completion at {prefix:?}");
+            // Acceptance needs the configured end token, never just completion.
+            assert!(!state.is_accepting(),"unexpected acceptance at {prefix:?}");
             let mut mask=vec![0;c.mask_len()]; state.fill_mask(&mut mask);
             for (i,word) in words().iter().enumerate() {
                 let allowed=mask[i/32] & (1 << (i%32)) != 0;

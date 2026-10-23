@@ -37,10 +37,14 @@ fn exact_range_bindings_cover_all_members_without_byte_alias_leaks() {
         for id in [5, 6, 18, 31, 33, 48, 63] {
             let mut state = constraint.start();
             state.commit_token(id).unwrap();
-            assert!(state.is_accepting(), "{mode:?}, {id}");
+            // The event completes the grammar; acceptance needs the end token.
+            assert!(!state.is_accepting(), "{mode:?}, {id}");
             let mask = state.mask();
             assert!(allowed(&mask, 95));
             assert_eq!(mask.iter().map(|w| w.count_ones()).sum::<u32>(), 1);
+            state.commit_token(95).unwrap();
+            assert!(state.is_accepting(), "{mode:?}, {id}");
+            assert!(state.mask().iter().all(|word| *word == 0));
         }
         let loaded = Constraint::load_without_vocab(&constraint.save()).unwrap();
         assert_mask(&loaded, &[], 96, accepts);

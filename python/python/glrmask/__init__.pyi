@@ -248,7 +248,7 @@ class Module:
     ) -> Constraint:
         """Compiles the module assembly against `vocab`.
 
-        Requires every extern to be bound; `end_tokens` are allowed only at acceptance and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
+        Requires every extern to be bound; `end_tokens` are admitted once the grammar is complete and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
         """
         ...
     @property
@@ -411,9 +411,9 @@ class ConstraintState:
         """
         ...
     def is_accepting(self) -> bool:
-        """Whether the current prefix is a complete grammar match.
+        """Whether the input so far is a complete match.
 
-        Further tokens may still be allowed; this alone does not commit an end token.
+        With end tokens configured, this becomes true only once an end token is committed.
         """
         ...
     def forced_tokens(self) -> list[int]:

@@ -179,14 +179,15 @@ def test_final_keyword_options_and_child_root_end_isolation(mode_name):
     own_state = child.start()
     assert not own_state.mask()[127]
     own_state.commit_token(1)
-    assert accepting(own_state) and own_state.mask()[127]
+    assert not accepting(own_state) and own_state.mask()[127]
     parent_mod = glrmask.Module(glrmask.Grammar.from_glrm(HOST))
     parent_mod.bind("child", child_mod)
     c = parent_mod.compile(v, end_tokens=[63], mask_strategy=mode)
     state = c.start()
     assert state.mask()[4]
     state.commit_token(4)
-    assert accepting(state)
+    assert not accepting(state)
     assert state.mask()[63] and not state.mask()[127]
     state.commit_token(63)
+    assert accepting(state)
     assert not np.any(state.mask())
