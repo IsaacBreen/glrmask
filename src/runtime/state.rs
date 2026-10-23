@@ -592,6 +592,20 @@ impl<'a> ConstraintState<'a> {
         frontier_is_accepting(self.constraint, &self.state, self.terminated)
     }
 
+    /// TODO(docs)
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        if self.terminated {
+            return true;
+        }
+        if self.state.is_empty() {
+            return true;
+        }
+        !self.state.iter().any(|(&tokenizer_state, gss)| {
+            super::commit::entry_can_continue(self.constraint, tokenizer_state, gss)
+        })
+    }
+
     /// Whether the parser frontier is a complete grammar match, ignoring any
     /// end-token policy.
     pub(crate) fn frontier_complete(&self) -> bool {

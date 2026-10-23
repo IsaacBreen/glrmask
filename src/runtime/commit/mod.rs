@@ -1184,6 +1184,30 @@ fn assert_commit_oracles(
     }
 }
 
+// The read-only core of `advance_special_terminal_paths`: commit one
+// zero-width special terminal from one reset-state entry, if it is admissible.
+fn advance_single_special_terminal(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    gss: &ParserGSS,
+    terminal_id: u32,
+) -> Option<ParserGSS> {
+    let pruned = prune_single_initial_state_for_terminal(
+        gss.clone(), tokenizer_state, terminal_id, None,
+    );
+    if pruned.is_empty() { return None; }
+    advance_parser_stacks_if_possible(constraint, &pruned, terminal_id)
+}
+
+fn special_terminal_admissible(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    gss: &ParserGSS,
+    terminal_id: u32,
+) -> bool {
+    advance_single_special_terminal(constraint, tokenizer_state, gss, terminal_id).is_some()
+}
+
 pub(super) fn advance_special_terminal_paths(
     constraint: &Constraint,
     state: &ParserStateMap,
@@ -1192,12 +1216,9 @@ pub(super) fn advance_special_terminal_paths(
     let mut merged = None::<ParserGSS>;
     for (&initial_state, initial_gss) in state.iter() {
         if !runtime_tokenizer_is_reset_state(constraint, initial_state) { continue; }
-        let pruned = prune_single_initial_state_for_terminal(
-            initial_gss.clone(), initial_state, terminal_id, None,
-        );
-        if pruned.is_empty() { continue; }
-        let Some(advanced) = advance_parser_stacks_if_possible(constraint, &pruned, terminal_id)
-            else { continue; };
+        let Some(advanced) =
+            advance_single_special_terminal(constraint, initial_state, initial_gss, terminal_id)
+        else { continue; };
         merged = Some(match merged.take() {
             Some(existing) => existing.merge(&advanced),
             None => advanced,
@@ -1870,10 +1891,38 @@ fn end_state_may_advance(constraint: &Constraint, gss: &ParserGSS, end_state: u3
     if runtime_tokenizer_is_reset_state(constraint, end_state) {
         return true;
     }
+    end_state_may_advance_exact(constraint, gss, end_state)
+}
+
+// `end_state_may_advance` without the reset-state shortcut: can any terminal
+// the lexer still matches from `end_state` advance the parser?
+#[inline]
+fn end_state_may_advance_exact(constraint: &Constraint, gss: &ParserGSS, end_state: u32) -> bool {
     let future = runtime_tokenizer_future_terminals(constraint, end_state)
         .expect("runtime tokenizer end state must belong to its active coordinate");
     parser_may_advance_on_any(constraint, gss, future.as_ref())
         || runtime_future_contains_ignore(constraint, future.as_ref())
+}
+
+// Whether one frontier entry can still commit input: its lexer can extend, or
+// a special token can be committed from it.
+pub(crate) fn entry_can_continue(
+    constraint: &Constraint,
+    tokenizer_state: u32,
+    gss: &ParserGSS,
+) -> bool {
+    if !runtime_tokenizer_is_reset_state(constraint, tokenizer_state) {
+        // Commit admits a non-reset entry only after `end_state_may_advance`
+        // and the exact-liveness post-pass, so it is already known to extend.
+        return true;
+    }
+    if end_state_may_advance_exact(constraint, gss, tokenizer_state) {
+        return true;
+    }
+    constraint.special_token_terminals.iter().any(|special| {
+        !constraint.is_late_grammar_placeholder_terminal(special.terminal_id)
+            && special_terminal_admissible(constraint, tokenizer_state, gss, special.terminal_id)
+    })
 }
 
 /// For a tokenizer execution that produced several end states against the same

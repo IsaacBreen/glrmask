@@ -3912,6 +3912,12 @@ impl<'a> DynamicConstraintState<'a> {
         self.alternatives.iter().any(ConstraintState::is_accepting)
     }
 
+    /// TODO(docs)
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.alternatives.iter().all(ConstraintState::is_terminated)
+    }
+
     pub(crate) fn frontier_complete(&self) -> bool {
         self.alternatives.iter().any(ConstraintState::frontier_complete)
     }
