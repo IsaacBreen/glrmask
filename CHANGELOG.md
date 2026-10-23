@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased (0.4.0 candidate) — v1 API cleanup
+## 1.0.0
 
+- Add `is_terminated` to `ConstraintState` in every binding.
 - `Token` and `ExactTokens` are replaced by one value type, `TokenSet`.
   `TokenSet::new(ids)` takes individual IDs; `TokenSet::from_ranges(ranges)`
   accepts inclusive (`0..=9`) or half-open (`0..10`) ranges and ignores empty
@@ -25,9 +26,6 @@
 - The `TokenId` alias is removed. `ExternKind` and `SourceSpan` no longer
   implement serde. `MaskStrategy` and `BoundaryMaskStrategy` no longer
   implement `PartialOrd`/`Ord`.
-
-## Unreleased (0.4.0 candidate) — v1 API: modules, expressions and mask strategies
-
 - `ConstraintState` commits (`commit_token`, `commit_bytes`, `commit_tokens`)
   always return an error when the commit is not allowed: unknown ID, forbidden
   ID, bytes with no viable continuation, or a commit after an end token. A
