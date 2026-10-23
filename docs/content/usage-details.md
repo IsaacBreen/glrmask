@@ -83,7 +83,7 @@ static and only the other modules compile dynamically, with no new static work:
 
 ```rust
 # use glrmask::{CompileOptions, Grammar, MaskStrategy, Result, Vocab};
-# fn demo(grammar: &Grammar<'_>, vocab: &Vocab) -> Result<()> {
+# fn demo(grammar: &Grammar, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
     CompileOptions::default()

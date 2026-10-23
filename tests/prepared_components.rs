@@ -104,9 +104,14 @@ fn lark_requirements_and_cached_errors_retain_original_locations() {
     assert_eq!(g.clone().requirements().unwrap_err().source_span(),Some(span));
     let unknown="start: <|unknown|>";
     let g=Grammar::from_lark(unknown);
-    assert!(g.prepare(&v).is_err(),"an unbound named token atom is an error");
-    let span=g.prepare(&v).unwrap_err().source_span().unwrap();
-    assert_eq!(&unknown[span.start..span.end],"<|unknown|>");
+    let externs=g.externs();
+    assert_eq!(externs.len(),1);
+    let declared=externs.get("unknown").expect("a named atom declares a token extern");
+    assert_eq!(declared.name(),"unknown");
+    assert_eq!(declared.kind(),glrmask::ExternKind::Token);
+    // A named atom stays open while preparing and must be bound before compile.
+    assert_eq!(g.prepare(&v).unwrap().requirements().unwrap()[0].name(),"unknown");
+    assert!(g.compile(&v).is_err());
 }
 
 

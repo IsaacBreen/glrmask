@@ -257,7 +257,7 @@ static and only the other modules compile dynamically, with no new static work:
 
 ```rust
 # use glrmask::{CompileOptions, Grammar, MaskStrategy, Result, Vocab};
-# fn demo(grammar: &Grammar<'_>, vocab: &Vocab) -> Result<()> {
+# fn demo(grammar: &Grammar, vocab: &Vocab) -> Result<()> {
 let constraint = grammar.compile_with(
     vocab,
     CompileOptions::default()
@@ -288,8 +288,7 @@ Raw-byte `commit_bytes()` remains separate. See [the forcing contract](docs/forc
 Native GLRM has optional semicolons, `grammar NAME { ... }`, explicit `t`/`nt`
 declarations, typed externs, scoped ignore, Unicode/byte expressions and regular
 intersection/subtraction. Use regular subtraction for prefix-minimal matching, or Lark's regular-body `[lazy]` annotation. Native source contains no numeric-token, special-token-name or
-inline JSON literals. Lark accepts those selected compatibility forms only in its
-explicit `llm` profile. Unsupported priorities, capture/sampling annotations,
+inline JSON literals. Lark accepts those selected compatibility forms. Unsupported priorities, capture/sampling annotations,
 substring generation and regex-internal lazy quantifiers are errors.
 
 ## How it works

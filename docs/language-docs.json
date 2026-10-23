@@ -40,13 +40,12 @@
     "Vocab.tokens": "Creates a vocabulary-bound token event matching one of `ids`.\n\nUnknown or duplicate IDs raise `ValueError`; empty input matches nothing.",
     "Vocab.token_ranges": "Creates a vocabulary-bound token event matching the union of `ranges`.\n\nRanges are nonempty Python ranges with step 1 or -1 and exclusive stops; overlapping or adjacent ranges merge. Unknown IDs raise `ValueError`; empty input matches nothing.",
     "Vocab.__len__": "Number of byte-backed entries; exact-only IDs are not counted.",
-    "Extern": "A declared extern slot on a `Module`.",
+    "Extern": "A declared extern slot on a `Grammar` or `Module`.",
     "Extern.name": "The declared name.",
     "Extern.kind": "The declared kind: token or grammar.",
-    "Extern.span": "Source span of the declaration, or `None`.\n\n`(start_byte, end_byte, line, column)` in the declaring source; the byte interval is half-open and line and Unicode-scalar column are one-based.",
     "Extern.__repr__": "The debug representation.",
-    "Extern.__eq__": "Compares name, kind, and span.",
-    "Externs": "A view over a `Module`'s declared externs, in declaration order.\n\nImplements `collections.abc.Mapping`.",
+    "Extern.__eq__": "Compares name and kind.",
+    "Externs": "A view over a `Grammar`'s or `Module`'s declared externs, in declaration order.\n\nImplements `collections.abc.Mapping`.",
     "Externs.unbound": "The same view restricted to unresolved externs.",
     "Externs.__getitem__": "The extern for `key`; raises `KeyError` if absent.",
     "Externs.__iter__": "The declared extern names in declaration order.",
@@ -72,7 +71,8 @@
     "Grammar.from_ebnf": "Creates a grammar from EBNF source text.",
     "Grammar.from_glrm": "Creates a grammar from GLRM source.\n\nGLRM supports typed extern slots; bind them before compiling a runnable root.",
     "Grammar.from_json_schema": "Creates a grammar from a JSON Schema document.\n\nAccepts JSON text or a JSON-serializable object; `format` is an annotation only.",
-    "Grammar.from_lark": "Creates a grammar from Lark source.\n\n`profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.",
+    "Grammar.from_lark": "Creates a grammar from Lark source.\n\nNamed token atoms declare token externs; bind each through `Module.bind`.",
+    "Grammar.externs": "A view over the grammar's declared externs, in declaration order.",
     "Grammar.precompile": "Retains vocabulary-specific compilation artifacts and returns the module.\n\nEquivalent to `Module(self).precompile(vocab, ...)`.",
     "Grammar.compile": "Compiles the grammar against `vocab`.\n\nEquivalent to `Module(self).compile(vocab, ...)`.",
     "Grammar.__copy__": "An independent handle.",
@@ -218,8 +218,8 @@
     }
   },
   "native_guides": {
-    "bindings/cpp/README.md": "efe6ab3974c0ccc34ee6ebffda82f1a0ad65da21d6b30b3269ea451944b40ea0",
-    "bindings/node/README.md": "ae1be08211fbeddf26523d440828f5f02f42d2c55e431a2150076d1b25d38bcb",
+    "bindings/cpp/README.md": "5fd93e7b3d9bd12917f888c9562acaf429babcbacebcecceaf75085d8896a13b",
+    "bindings/node/README.md": "929d48c203639aeb456caca2865e1c6b735809d032363ae478936b7fe9415c8d",
     "docs/content/releases/0.3/cpp.md": "31e6cb1bfebb28535b0045d86cb7016868c1af4b69bce5c33cb7f3631afc9622",
     "docs/content/releases/0.3/javascript.md": "6b8e69179d39fd106a0fc9c61672ab9779c6f2c83806efbd8c55d5d86f781c9a"
   },
@@ -227,5 +227,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "b9413fe6707a4a5ae06cd986fbcbe30b67415302fc3508bcdcd3cefcc81803ec"
+  "content_sha256": "51a17064a258403fca0d0834c52218ab07bbb0a7632cb58c05952c8ca2c435b3"
 }
