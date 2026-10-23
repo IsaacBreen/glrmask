@@ -9,15 +9,18 @@ fn vocab() -> Vocab {
 }
 
 #[test]
-fn construction_and_options_do_not_change_the_source_grammar() {
+fn construction_and_compile_options_do_not_change_the_source_grammar() {
     let source = Grammar::from_ebnf("start ::= \"a\"");
-    let original = Module::new(&source);
-    let mut different = original.clone();
-    different.set_mask_strategy(MaskStrategy::TokenClassTrie).unwrap();
-    assert_eq!(original.mask_strategy(), MaskStrategy::Auto);
-    assert_eq!(different.mask_strategy(), MaskStrategy::TokenClassTrie);
+    let module = Module::new(&source);
     let v = vocab();
-    assert_eq!(source.compile(&v).unwrap().start().mask(), different.compile(&v).unwrap().start().mask());
+    let default_mask = module.compile(&v).unwrap().start().mask();
+    let explicit_mask = module
+        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+        .unwrap()
+        .start()
+        .mask();
+    assert_eq!(default_mask, explicit_mask);
+    assert_eq!(source.compile(&v).unwrap().start().mask(), default_mask);
 }
 
 #[test]
@@ -45,24 +48,22 @@ fn prepared_parent_accepts_late_cold_children_and_preserves_snapshots() {
 #[test]
 fn native_local_modes_survive_expression_grouping_and_persistence() {
     let v = vocab();
-    for a_mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-        for b_mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
-            let mut a = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
-            a.set_mask_strategy(a_mode).unwrap();
-            let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\""));
-            b.set_mask_strategy(b_mode).unwrap();
-            b.precompile(&v).unwrap();
-            let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
-            let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
-            host.bind("E", expr).unwrap();
-            let loaded = Module::load(&host.save(), Some(&v)).unwrap();
-            let root = loaded.compile(&v).unwrap();
-            let mut state = root.start();
-            assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
-            state.commit_token(2).unwrap();
-            assert!(state.is_accepting());
-            assert!(!state.is_rejected());
-        }
+    for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenClassTrie] {
+        let a = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
+        let mut b = Module::new(&Grammar::from_ebnf("start ::= \"b\""));
+        b.precompile_with(&v, &CompileOptions::default().mask_strategy(mode)).unwrap();
+        let expr = Expr::sequence([Expr::from(a), Expr::sequence([Expr::from(b)])]);
+        let mut host = Module::new(&Grammar::from_glrm("extern grammar E start s nt s = E;"));
+        host.bind("E", expr).unwrap();
+        let loaded = Module::load(&host.save(), Some(&v)).unwrap();
+        let root = loaded
+            .compile_with(&v, CompileOptions::default().mask_strategy(mode))
+            .unwrap();
+        let mut state = root.start();
+        assert_ne!(state.mask()[0] & (1 << 2), 0, "a model token may span both leaves");
+        state.commit_token(2).unwrap();
+        assert!(state.is_accepting());
+        assert!(!state.is_rejected());
     }
 }
 
@@ -79,22 +80,23 @@ fn open_child_and_qualified_paths_are_strictly_rejected() {
 }
 
 #[test]
-fn settings_setters_never_invalidate_retained_work() {
+fn compile_options_never_invalidate_retained_work() {
     let v = vocab();
     let mut leaf = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
     leaf.precompile(&v).unwrap();
     let _before_save = leaf.save();
 
-    // Setters store the value and never touch retained work
-    leaf.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
-    assert_eq!(leaf.mask_strategy(), MaskStrategy::ParserDwa);
-    leaf.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
-    assert_eq!(leaf.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
-
     let mut parent = Module::new(&Grammar::from_glrm("extern grammar VALUE start s nt s=VALUE;"));
     parent.bind("VALUE", &leaf).unwrap();
-    parent.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
-    let root = parent.compile_with(&v, CompileOptions::default().end_tokens([5])).unwrap();
+    let root = parent
+        .compile_with(
+            &v,
+            CompileOptions::default()
+                .end_tokens([5])
+                .mask_strategy(MaskStrategy::ParserDwa)
+                .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+        )
+        .unwrap();
     let mut state = root.start();
     state.commit_token(0).unwrap();
     assert!(state.is_accepting());

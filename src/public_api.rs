@@ -6949,9 +6949,10 @@ mod tiny_cfg_compile_blowup_tests {
     fn compile(case: &Case, strategy: MaskStrategy) -> RuntimeConstraint {
         let source = lark(case);
         let grammar = Grammar::from_lark(&source);
-        let mut module = Module::new(&grammar);
-        module.set_mask_strategy(strategy).unwrap();
-        module.compile(&vocabulary()).unwrap()
+        let module = Module::new(&grammar);
+        module
+            .compile_with(&vocabulary(), CompileOptions::default().mask_strategy(strategy))
+            .unwrap()
     }
 
     #[test]

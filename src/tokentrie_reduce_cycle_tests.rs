@@ -7,7 +7,7 @@
 //! source CFG, not from any glrmask parser. Masks are checked at every prefix
 //! of length at most four, for byte feeds and token feeds.
 
-use crate::{Grammar, MaskStrategy, Module, Vocab};
+use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
 
 const TOKEN_BYTES: [&[u8]; 6] = [b"a", b"b", b"c", b"ab", b"bc", b"ca"];
 
@@ -234,9 +234,10 @@ fn check_masks_and_acceptance(cfg: &Cfg, lark: &str, try_auxiliary_backends: boo
     }
     for mode in modes {
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let mut module = Module::new(&Grammar::from_lark(lark));
-            module.set_mask_strategy(mode).ok()?;
-            let constraint = module.compile(&vocab).ok()?;
+            let module = Module::new(&Grammar::from_lark(lark));
+            let constraint = module
+                .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
+                .ok()?;
             // Some backends decline lazily during materialization rather than
             // returning a compile error. Those modes are simply not exercised.
             let _ = constraint.start();

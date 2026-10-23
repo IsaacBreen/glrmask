@@ -375,25 +375,27 @@ fn focused_5_externs_get_iter_order_len_unbound() {
 }
 
 #[test]
-fn focused_6_settings_getters_setters_never_touch_retained_work() {
+fn focused_6_compile_options_never_touch_retained_work() {
     let v = vocab();
-    let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    assert_eq!(m.mask_strategy(), MaskStrategy::Auto);
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::Auto);
+    let m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
+    assert_eq!(MaskStrategy::FAST_BUILD, MaskStrategy::TokenTrie);
+    assert_eq!(MaskStrategy::FAST_RUNTIME, MaskStrategy::ParserDwa);
     assert_eq!(BoundaryMaskStrategy::FAST_BUILD, BoundaryMaskStrategy::TokenTrie);
     assert_eq!(BoundaryMaskStrategy::FAST_RUNTIME, BoundaryMaskStrategy::ParserDwa);
 
+    let mut m = m;
     m.precompile(&v).unwrap();
     let _saved_before = m.save();
 
-    // Change settings
-    m.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
-    assert_eq!(m.mask_strategy(), MaskStrategy::ParserDwa);
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
-    assert_eq!(m.boundary_mask_strategy(), BoundaryMaskStrategy::ParserDwa);
-
-    // Retained work is preserved and runnable without re-running precompile
-    let c = m.compile(&v).unwrap();
+    // Options govern the compile without mutating the module or its retained work
+    let c = m
+        .compile_with(
+            &v,
+            CompileOptions::default()
+                .mask_strategy(MaskStrategy::ParserDwa)
+                .boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+        )
+        .unwrap();
     let s = c.start();
     assert!(allowed(&s.mask(), 1));
 }
@@ -402,40 +404,51 @@ fn focused_6_settings_getters_setters_never_touch_retained_work() {
 fn focused_7_boundary_level_minimum() {
     let v = vocab();
     let mut m = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie).unwrap();
-    m.precompile(&v).unwrap();
+    m.precompile_with(
+        &v,
+        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+    )
+    .unwrap();
 
     // Switching to the explicit static boundary keeps retained work valid.
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa).unwrap();
-    m.precompile(&v).unwrap();
+    m.precompile_with(
+        &v,
+        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::ParserDwa),
+    )
+    .unwrap();
 
     // Switching back to the token-trie boundary also keeps retained work valid.
-    m.set_boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie).unwrap();
-    m.precompile(&v).unwrap();
+    m.precompile_with(
+        &v,
+        &CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+    )
+    .unwrap();
 
-    let c = m.compile(&v).unwrap();
+    let c = m
+        .compile_with(
+            &v,
+            CompileOptions::default().boundary_mask_strategy(BoundaryMaskStrategy::TokenTrie),
+        )
+        .unwrap();
     let s = c.start();
     assert!(allowed(&s.mask(), 1));
 }
 
 #[test]
-fn focused_8_explicit_strategy_errors_instead_of_fallback() {
+fn focused_8_static_parts_are_never_downgraded() {
     let v = vocab();
     let mut leaf = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    leaf.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
-    leaf.precompile(&v).unwrap();
+    leaf.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+        .unwrap();
 
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
-    parent.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
     parent.bind("child", leaf).unwrap();
 
-    let res = parent.compile(&v);
-    assert!(res.is_err(), "must fail explicitly when combining incompatible strategies");
-    let err = res.unwrap_err().to_string();
-    assert!(
-        err.contains("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"),
-        "{err}"
-    );
+    // TokenTrie requests use the retained static parts instead of downgrading.
+    let c = parent
+        .compile_with(&v, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+        .unwrap();
+    assert!(allowed(&c.start().mask(), 4), "xay must compose statically");
 }
 
 #[test]
@@ -444,10 +457,8 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 1. Auto reuses retained ParserDwa
     let mut m_dwa = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_dwa.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
-    m_dwa.precompile(&v).unwrap();
-    m_dwa.set_mask_strategy(MaskStrategy::Auto).unwrap();
-    assert_eq!(m_dwa.mask_strategy(), MaskStrategy::Auto);
+    m_dwa.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+        .unwrap();
     let c_dwa = m_dwa.compile(&v).unwrap();
     let mut s_dwa = c_dwa.start();
     s_dwa.commit_token(1).unwrap();
@@ -455,10 +466,8 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 2. Auto reuses retained TokenClassTrie
     let mut m_tct = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_tct.set_mask_strategy(MaskStrategy::TokenClassTrie).unwrap();
-    m_tct.precompile(&v).unwrap();
-    m_tct.set_mask_strategy(MaskStrategy::Auto).unwrap();
-    assert_eq!(m_tct.mask_strategy(), MaskStrategy::Auto);
+    m_tct.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenClassTrie))
+        .unwrap();
     let c_tct = m_tct.compile(&v).unwrap();
     let mut s_tct = c_tct.start();
     s_tct.commit_token(1).unwrap();
@@ -466,13 +475,9 @@ fn focused_9_auto_reusing_retained_engine() {
 
     // 3. Auto never resolves to TokenTrie even if TokenTrie was precompiled
     let mut m_tt = Module::new(&Grammar::from_ebnf(r#"start ::= "a""#));
-    m_tt.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
-    m_tt.precompile(&v).unwrap();
-    m_tt.set_mask_strategy(MaskStrategy::Auto).unwrap();
-    assert_eq!(m_tt.mask_strategy(), MaskStrategy::Auto);
-    // If Auto resolved to TokenTrie, linking into a native parent would fail with
-    // a mixed-composition error ("cannot combine TOKEN_TRIE parts...").
-    // Instead, Auto resolves to ParserDwa and composes cleanly.
+    m_tt.precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+        .unwrap();
+    // TokenTrie precompilation retains no work, so Auto builds ParserDwa.
     let mut parent = Module::new(&Grammar::from_glrm(HOST));
     parent.bind("child", m_tt).unwrap();
     let c = parent.compile(&v).unwrap();

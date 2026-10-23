@@ -41,8 +41,6 @@ enum Value {
 #[derive(Serialize, Deserialize)]
 struct Instance {
     source: u32,
-    mask_strategy: u8,
-    boundary_mask_strategy: u8,
     #[serde(deserialize_with = "artifact_limits::items")]
     prepared: Vec<(u8, u32)>,
     #[serde(deserialize_with = "artifact_limits::items")]
@@ -89,23 +87,6 @@ fn u8_to_engine(n: u8) -> Result<MaskStrategy> {
         2 => Ok(MaskStrategy::TokenTrie),
         3 => Ok(MaskStrategy::TokenClassTrie),
         _ => Err(err("invalid mask strategy tag")),
-    }
-}
-
-fn boundary_to_u8(b: BoundaryMaskStrategy) -> u8 {
-    match b {
-        BoundaryMaskStrategy::Auto => 0,
-        BoundaryMaskStrategy::ParserDwa => 1,
-        BoundaryMaskStrategy::TokenTrie => 2,
-    }
-}
-
-fn u8_to_boundary(n: u8) -> Result<BoundaryMaskStrategy> {
-    match n {
-        0 => Ok(BoundaryMaskStrategy::Auto),
-        1 => Ok(BoundaryMaskStrategy::ParserDwa),
-        2 => Ok(BoundaryMaskStrategy::TokenTrie),
-        _ => Err(err("invalid boundary mask strategy tag")),
     }
 }
 
@@ -186,8 +167,6 @@ pub(super) fn save(root: &Module) -> Vec<u8> {
         instance_ids.insert(Arc::as_ptr(node) as usize, instances.len() as u32);
         instances.push(Instance {
             source: source_id,
-            mask_strategy: engine_to_u8(node.mask_strategy),
-            boundary_mask_strategy: boundary_to_u8(node.boundary_mask_strategy),
             prepared: preps,
             bindings,
         });
@@ -257,7 +236,7 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
     let mut ports = 0usize;
 
     for (i, node) in manifest.instances.iter().enumerate() {
-        if node.source as usize >= manifest.sources.len() || node.mask_strategy > 3 || node.boundary_mask_strategy > 2 {
+        if node.source as usize >= manifest.sources.len() {
             return Err(err("invalid Module source/options"));
         }
         used_sources.insert(node.source);
@@ -321,8 +300,6 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
 
     let mut instances = Vec::<Module>::new();
     for node in manifest.instances {
-        let mask_strategy = u8_to_engine(node.mask_strategy)?;
-        let boundary_mask_strategy = u8_to_boundary(node.boundary_mask_strategy)?;
         let source = sources[node.source as usize].clone();
         let mut retained_map = BTreeMap::new();
         for (engine_u8, prep_id) in node.prepared {
@@ -341,8 +318,6 @@ pub(super) fn load(data: &[u8], supplied: Option<&Vocab>) -> Result<Module> {
         let module = Module {
             node: Arc::new(Node {
                 source,
-                mask_strategy,
-                boundary_mask_strategy,
                 prepared: retained_map,
                 bindings,
                 certificate: Arc::new(OnceLock::new()),
@@ -413,7 +388,7 @@ mod tests {
         m.instances.last_mut().unwrap().bindings[0].1 = Value::Module(1);
         assert!(Module::load(&write(&m), None).is_err());
         let mut m = read(&bytes);
-        m.instances.last_mut().unwrap().mask_strategy = 99;
+        m.instances.last_mut().unwrap().prepared[0].1 = 99;
         assert!(Module::load(&write(&m), None).is_err());
         let mut m = read(&bytes);
         m.instances.last_mut().unwrap().source = 999;
@@ -462,8 +437,9 @@ mod tests {
     fn relabelled_lr_as_native_and_immutable_local_bindings_are_rejected() {
         let v = Vocab::new(vec![(0, b"a".to_vec())]);
         let mut module = Module::new(&Grammar::from_ebnf("start ::= \"a\""));
-        module.set_mask_strategy(MaskStrategy::ParserDwa).unwrap();
-        module.precompile(&v).unwrap();
+        module
+            .precompile_with(&v, &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa))
+            .unwrap();
         let mut m = read(&module.save());
         let inner = crate::import::compile_dynamic_named_single_with_backend(
             Grammar::from_ebnf("start ::= \"a\"").resolve_dynamic_source(&v, false).unwrap(),

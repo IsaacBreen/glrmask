@@ -14,10 +14,9 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
     ]);
     let grammar = Grammar::from_lark(lark);
     for mode in [MaskStrategy::Auto, MaskStrategy::ParserDwa, MaskStrategy::TokenTrie, MaskStrategy::TokenClassTrie] {
-        let mut module = Module::new(&grammar);
-        module.set_mask_strategy(mode).unwrap();
+        let module = Module::new(&grammar);
         let c = module
-            .compile(&vocab)
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(mode))
             .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: {e:?}"));
         let mut state = c.start();
         assert!(state.commit_bytes(bytes).is_ok(), "seed {seed} mode {mode:?} falsely rejected {bytes:?}");
@@ -200,10 +199,12 @@ fn check_positive_word(lark: &str, bytes: &[u8], seed: u32) {
             // With an explicitly configured EOS token that is absent from
             // the vocabulary, stop admission must agree with the ORIGINAL
             // source grammar's acceptance (not merely with the fast parser).
-            let mut eos_module = Module::new(&grammar);
-            eos_module.set_mask_strategy(mode).unwrap();
+            let eos_module = Module::new(&grammar);
             let with_eos = eos_module
-                .compile_with(&vocab, CompileOptions::default().end_tokens([99]))
+                .compile_with(
+                    &vocab,
+                    CompileOptions::default().end_tokens([99]).mask_strategy(mode),
+                )
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS compilation: {e:?}"));
             let reloaded_eos = glrmask::Constraint::load(with_eos.save())
                 .unwrap_or_else(|e| panic!("seed {seed} mode {mode:?}: EOS reload: {e:?}"));

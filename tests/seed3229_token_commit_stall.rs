@@ -4,7 +4,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use glrmask::{Grammar, MaskStrategy, Module, Vocab};
+use glrmask::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
 
 const ORIGINAL: &str = r#"start: n3
 n0: "a" | n1 "c" n1 | "a" n3 | "b" n1 n1
@@ -54,9 +54,10 @@ fn commit_tokens(
 ) -> Result<Option<bool>, String> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut module = Module::new(&Grammar::from_lark(lark));
-        module.set_mask_strategy(mode).unwrap();
-        let constraint = module.compile(&vocab_fn()).unwrap();
+        let module = Module::new(&Grammar::from_lark(lark));
+        let constraint = module
+            .compile_with(&vocab_fn(), CompileOptions::default().mask_strategy(mode))
+            .unwrap();
         let mut state = constraint.start();
         for &token in tokens {
             let _ = state.mask();

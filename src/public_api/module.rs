@@ -7,13 +7,16 @@ mod artifact;
 thread_local! { static BIND_WORK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
 
 
-/// Root generation policy, applied only to the top-level sequence.
+/// Compilation settings for a [`Module`] assembly.
 ///
-/// Never inherited by embedded modules.
+/// `end_tokens` applies only to the top-level sequence. The strategy settings
+/// apply to the whole compile, including every composed child.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct CompileOptions {
     pub(crate) end_tokens: Vec<u32>,
+    pub(crate) mask_strategy: MaskStrategy,
+    pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
 }
 
 impl CompileOptions {
@@ -22,6 +25,23 @@ impl CompileOptions {
     /// They are allowed only at acceptance and must be committed before stopping.
     pub fn end_tokens(mut self, ids: impl IntoIterator<Item = u32>) -> Self {
         self.end_tokens = ids.into_iter().collect();
+        self
+    }
+
+    /// Sets the mask computation strategy for the whole compile.
+    ///
+    /// [`MaskStrategy::Auto`] (the default) uses any retained static
+    /// preparation and otherwise builds [`MaskStrategy::ParserDwa`]. A part
+    /// that already has a static preparation is never downgraded to
+    /// [`MaskStrategy::TokenTrie`].
+    pub fn mask_strategy(mut self, strategy: MaskStrategy) -> Self {
+        self.mask_strategy = strategy;
+        self
+    }
+
+    /// Sets the boundary parser strategy for the whole compile.
+    pub fn boundary_mask_strategy(mut self, strategy: BoundaryMaskStrategy) -> Self {
+        self.boundary_mask_strategy = strategy;
         self
     }
 }
@@ -67,8 +87,6 @@ pub struct Module {
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     pub(crate) source: Arc<Grammar<'static>>,
-    pub(crate) mask_strategy: MaskStrategy,
-    pub(crate) boundary_mask_strategy: BoundaryMaskStrategy,
     pub(crate) prepared: BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>,
     pub(crate) bindings: OrdMap<String, BoundValue>,
     pub(crate) certificate: Arc<OnceLock<Result<Arc<Certificate>>>>,
@@ -161,61 +179,49 @@ fn own_local(grammar: &Grammar<'_>) -> Grammar<'static> {
     }
 }
 
-pub(crate) fn resolve_engine(strategy: MaskStrategy, prepared: &BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>) -> MaskStrategy {
-    match strategy {
-        MaskStrategy::Auto => {
-            if prepared.contains_key(&MaskStrategy::ParserDwa) {
-                MaskStrategy::ParserDwa
-            } else if prepared.contains_key(&MaskStrategy::TokenClassTrie) {
-                MaskStrategy::TokenClassTrie
-            } else {
-                MaskStrategy::ParserDwa
-            }
-        }
+/// A retained static preparation, if any, in preference order.
+fn retained_static(prepared: &BTreeMap<MaskStrategy, Arc<dyn RetainedPreparation>>) -> Option<MaskStrategy> {
+    if prepared.contains_key(&MaskStrategy::ParserDwa) {
+        Some(MaskStrategy::ParserDwa)
+    } else if prepared.contains_key(&MaskStrategy::TokenClassTrie) {
+        Some(MaskStrategy::TokenClassTrie)
+    } else {
+        None
+    }
+}
+
+/// Resolve the strategy for a whole compile.
+///
+/// A static part that is already retained is never replaced by dynamic
+/// [`MaskStrategy::TokenTrie`] compilation, so a `TokenTrie` request after a
+/// static precompile keeps the static parts. `Auto` prefers retained work and
+/// falls back to [`MaskStrategy::ParserDwa`].
+pub(crate) fn resolve_compile_strategy(
+    requested: MaskStrategy,
+    modules: &[Module],
+) -> MaskStrategy {
+    match requested {
+        MaskStrategy::TokenTrie => modules
+            .iter()
+            .find_map(|m| retained_static(&m.node.prepared))
+            .unwrap_or(MaskStrategy::TokenTrie),
+        MaskStrategy::Auto => modules
+            .iter()
+            .find_map(|m| retained_static(&m.node.prepared))
+            .unwrap_or(MaskStrategy::ParserDwa),
         explicit => explicit,
     }
 }
 
-pub(crate) fn target_boundary(_strategy: MaskStrategy, _boundary: BoundaryMaskStrategy) -> BoundaryTriggerDetail {
+pub(crate) fn target_boundary() -> BoundaryTriggerDetail {
     // The public boundary trigger is always the LLM token set. BoundaryMaskStrategy
-    // is retained for the separate boundary-parser wiring and no longer selects
-    // the trigger detail here.
+    // selects the boundary-parser wiring only.
     BoundaryTriggerDetail::TokenSet
 }
 
-/// Compilation settings are per-module: `mask_strategy` applies at compile time
-/// and `boundary_mask_strategy` selects the boundary parser.
+/// Compilation settings for a [`Module`] assembly are supplied to
+/// [`Module::compile_with`] and [`Module::precompile_with`].
 impl Module {
-    /// The mask computation strategy.
-    pub fn mask_strategy(&self) -> MaskStrategy {
-        self.node.mask_strategy
-    }
-
-    /// Sets the mask computation strategy, applied at compile time.
-    ///
-    /// The returned `Result` reserves room for future strategy validation.
-    pub fn set_mask_strategy(&mut self, strategy: MaskStrategy) -> Result<()> {
-        Arc::make_mut(&mut self.node).mask_strategy = strategy;
-        Ok(())
-    }
-
-    /// The boundary parser strategy.
-    pub fn boundary_mask_strategy(&self) -> BoundaryMaskStrategy {
-        self.node.boundary_mask_strategy
-    }
-
-    /// Sets the boundary parser strategy for this module.
-    ///
-    /// A [`BoundaryMaskStrategy::ParserDwa`] build that exceeds its budget
-    /// returns [`Error::ResourceLimit`] with a `boundary_parser_dwa:` message;
-    /// [`BoundaryMaskStrategy::Auto`] (the default) falls back to
-    /// [`BoundaryMaskStrategy::TokenTrie`] (`FAST_BUILD`) instead of failing.
-    /// The returned `Result` reserves room for future strategy validation.
-    pub fn set_boundary_mask_strategy(&mut self, strategy: BoundaryMaskStrategy) -> Result<()> {
-        Arc::make_mut(&mut self.node).boundary_mask_strategy = strategy;
-        Ok(())
-    }
-
     #[cfg(test)]
     pub(crate) fn force_boundary_dwa_decline(&mut self) {
         Arc::make_mut(&mut self.node)
@@ -247,8 +253,6 @@ impl Module {
             let module = Module {
                 node: Arc::new(Node {
                     source: Arc::new(own_local(grammar)),
-                    mask_strategy: MaskStrategy::Auto,
-                    boundary_mask_strategy: BoundaryMaskStrategy::Auto,
                     prepared: BTreeMap::new(),
                     bindings,
                     certificate: Arc::new(OnceLock::new()),
@@ -447,33 +451,42 @@ impl Module {
     }
 
     /// Retains vocabulary-specific compilation artifacts for every module in
-    /// this assembly.
+    /// this assembly with default options.
     ///
-    /// Modules using [`MaskStrategy::TokenTrie`] retain no work and are compiled
-    /// from source by [`Self::compile`].
+    /// Modules resolved to [`MaskStrategy::TokenTrie`] retain no work and are
+    /// compiled from source by [`Self::compile`].
     pub fn precompile(&mut self, vocab: &Vocab) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, true))
+        self.precompile_with(vocab, &CompileOptions::default())
     }
 
-    /// Internal compile_with preparation: retain compilation artifacts and the
+    /// Retains vocabulary-specific compilation artifacts for every module in
+    /// this assembly using `options`.
+    ///
+    /// The options decide which static parts are built and stored. Modules
+    /// resolved to [`MaskStrategy::TokenTrie`] retain no work.
+    pub fn precompile_with(&mut self, vocab: &Vocab, options: &CompileOptions) -> Result<()> {
+        with_deep_stack(|| self.precompile_on_stack(vocab, options, true))
+    }
+
+    /// Internal compile preparation: retain compilation artifacts and the
     /// default boundary token set.
-    fn precompile_for_compile(&mut self, vocab: &Vocab) -> Result<()> {
-        with_deep_stack(|| self.precompile_on_stack(vocab, true))
+    fn precompile_for_compile(&mut self, vocab: &Vocab, options: &CompileOptions) -> Result<()> {
+        with_deep_stack(|| self.precompile_on_stack(vocab, options, true))
     }
 
-    fn precompile_on_stack(&mut self, vocab: &Vocab, build_boundary: bool) -> Result<()> {
+    fn precompile_on_stack(&mut self, vocab: &Vocab, options: &CompileOptions, build_boundary: bool) -> Result<()> {
         self.validate_targets(Some(vocab))?;
         let modules = self.index()?;
+        let engine = resolve_compile_strategy(options.mask_strategy, &modules);
+        let target_b = target_boundary();
 
         type JobKey = (usize, MaskStrategy, u8);
         let mut locals: HashMap<JobKey, Arc<dyn RetainedPreparation>> = HashMap::new();
 
         for m in &modules {
-            let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
             if engine == MaskStrategy::TokenTrie {
                 continue;
             }
-            let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             if let Some(p) = m.node.prepared.get(&engine) {
                 // `boundary_trigger` records the requested detail; the trigger
@@ -486,11 +499,9 @@ impl Module {
 
         let mut seen = std::collections::HashSet::new();
         let jobs: Vec<&Module> = modules.iter().filter(|m| {
-            let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
             if engine == MaskStrategy::TokenTrie {
                 return false;
             }
-            let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             !locals.contains_key(&key) && seen.insert(key)
         }).collect();
@@ -498,8 +509,6 @@ impl Module {
         let results = jobs.par_iter().map(|m| {
             #[cfg(test)]
             let _probe = preparation_probe::enter(m);
-            let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
-            let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
             let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
             m.prepare_local_for(vocab, engine, target_b, build_boundary)
                 .map(|p| (key, retain_local(p)))
@@ -512,10 +521,8 @@ impl Module {
             let mut next = m.clone();
             let mut c = m.certificate()?.as_ref().clone();
             c.target(vocab)?;
-            let engine = resolve_engine(m.node.mask_strategy, &m.node.prepared);
             let node = Arc::make_mut(&mut next.node);
             if engine != MaskStrategy::TokenTrie {
-                let target_b = target_boundary(engine, m.node.boundary_mask_strategy);
                 let key = (Arc::as_ptr(&m.node.source.parsed_component) as usize, engine, target_b as u8);
                 node.prepared.insert(engine, locals[&key].clone());
             }
@@ -552,7 +559,6 @@ impl Module {
         if matches!(source.source, GrammarSource::Lark(_)) {
             let resolved = source.resolve_lark(vocab)?;
             let mut module = Module::new(&resolved);
-            module.set_mask_strategy(engine)?;
             let mut instances = HashMap::<usize, Module>::new();
             for m in module.index()? {
                 let mut next = m.clone();
@@ -677,20 +683,12 @@ impl Module {
             return Err(error("expanded Module runtime construction exceeds its limit"));
         }
         // TOKEN_TRIE compiles the whole composition as one ordinary Dynamic
-        // grammar, inlined at source level. Auto parts join either kind of
-        // composition; explicit strategies of the other kind are an error.
-        let token_trie = resolve_engine(self.node.mask_strategy, &self.node.prepared) == MaskStrategy::TokenTrie;
-        let conflicting = |m: &Module| match m.node.mask_strategy {
-            MaskStrategy::TokenTrie => !token_trie,
-            MaskStrategy::ParserDwa | MaskStrategy::TokenClassTrie => token_trie,
-            _ => false,
-        };
-        if modules.iter().any(conflicting) {
-            return Err(error("cannot combine TOKEN_TRIE parts with PARSER_DWA or TOKEN_CLASS_TRIE parts in one composition"));
-        }
+        // grammar, inlined at source level. One resolved strategy applies to
+        // every part, including composed children.
+        let engine = resolve_compile_strategy(options.mask_strategy, &modules);
+        let token_trie = engine == MaskStrategy::TokenTrie;
         // EXPERIMENT: one route report per top-level Module compile.
         let experiment = crate::compiler::terminal_ended_rescue::RescueExperiment::read();
-        let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
         if token_trie {
             let result = self.flatten_source()?.compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?;
             let result = result.with_end_tokens(&options.end_tokens)?;
@@ -718,10 +716,7 @@ impl Module {
                 let source = grammar.rescue_source_grammar(vocab)?;
                 let mut constraint =
                     crate::compiler::terminal_ended_rescue::rescue(&source, vocab)?;
-                apply_final_boundary_trigger(
-                    &mut constraint,
-                    target_boundary(engine, self.node.boundary_mask_strategy),
-                )?;
+                apply_final_boundary_trigger(&mut constraint, target_boundary())?;
                 constraint.with_end_tokens(&options.end_tokens)
             };
             if te_first {
@@ -742,10 +737,16 @@ impl Module {
             let attempt = {
                 let budget = crate::compiler::build_budget::BuildBudgetScope::enter();
                 let end_tokens = options.end_tokens.clone();
+                let compile_options = options.clone();
                 budget.install(move || {
                     crate::error::catch_template_attempt(move || -> Result<RuntimeConstraint> {
-                        prepared.precompile_for_compile(vocab)?;
-                        let constraint = prepared.materialize(vocab, &mut HashMap::new())?;
+                        prepared.precompile_for_compile(vocab, &compile_options)?;
+                        let constraint = prepared.materialize(
+                            vocab,
+                            &mut HashMap::new(),
+                            engine,
+                            compile_options.boundary_mask_strategy,
+                        )?;
                         ensure_runnable_constraint(&constraint)?;
                         constraint.with_end_tokens(&end_tokens)
                     })
@@ -796,7 +797,7 @@ impl Module {
                     }
                     // Only Auto may pick a different exact strategy; an explicit
                     // strategy request is never silently replaced.
-                    if self.node.mask_strategy == MaskStrategy::Auto {
+                    if options.mask_strategy == MaskStrategy::Auto {
                         if let Ok(grammar) = self.flatten_source() {
                             let constraint = grammar
                                 .compile_token_trie(vocab, BoundaryTriggerDetail::TokenSet)?
@@ -821,10 +822,15 @@ impl Module {
         result
     }
 
-    fn materialize(&self, vocab: &Vocab, cache: &mut HashMap<usize, RuntimeConstraint>) -> Result<RuntimeConstraint> {
+    fn materialize(
+        &self,
+        vocab: &Vocab,
+        cache: &mut HashMap<usize, RuntimeConstraint>,
+        engine: MaskStrategy,
+        boundary_strategy: BoundaryMaskStrategy,
+    ) -> Result<RuntimeConstraint> {
         let id = Arc::as_ptr(&self.node) as usize;
         if let Some(c) = cache.get(&id) { return Ok(c.clone()); }
-        let engine = resolve_engine(self.node.mask_strategy, &self.node.prepared);
         let local = self.node.prepared.get(&engine).ok_or_else(|| error("missing local compilation"))?;
         // Rebuilding the pre-composition parent is only needed when the rare
         // `Auto` boundary decline has to redo composition, so keep it in a
@@ -842,7 +848,7 @@ impl Module {
         let active = parent.late_grammar_slots.iter().map(|s| s.name.as_str()).collect::<BTreeSet<_>>();
         let children = self.node.bindings.iter().filter(|(name, _)| active.contains(name.as_str())).map(|(name, value)| {
             let child = match value {
-                BoundValue::Module(child) => child.materialize(vocab, cache)?,
+                BoundValue::Module(child) => child.materialize(vocab, cache, engine, boundary_strategy)?,
                 BoundValue::Token(t) => self.event_adapter(&[(t.id(), t.id())], vocab, parent.has_template_parser(), engine)?,
                 BoundValue::ExactTokens(t) => self.event_adapter(t.range_pairs(), vocab, parent.has_template_parser(), engine)?,
             };
@@ -872,7 +878,6 @@ impl Module {
                 Ok(composed)
             };
             parent = compose(parent)?;
-            let boundary_strategy = self.node.boundary_mask_strategy;
             if boundary_strategy != BoundaryMaskStrategy::TokenTrie
                 && parent.has_template_parser()
                 && matches!(engine, MaskStrategy::ParserDwa | MaskStrategy::Auto)
@@ -907,7 +912,7 @@ impl Module {
                     parent = compose(build_base()?)?;
                 }
             }
-            let target_b = target_boundary(engine, self.node.boundary_mask_strategy);
+            let target_b = target_boundary();
             apply_final_boundary_trigger(&mut parent, target_b)?;
             // A composed trigger is the union of the parent's own set and the
             // precomputed sets of its children. Sorted merge keeps this cheap.
@@ -934,8 +939,8 @@ impl Module {
     }
 
     pub(super) fn to_source(&self) -> Result<Grammar<'static>> {
-        if !self.node.prepared.is_empty() || self.node.mask_strategy != MaskStrategy::default() || self.node.boundary_mask_strategy != BoundaryMaskStrategy::default() {
-            return Err(error("expressions with configured or precompiled operands cannot be converted to source Grammar; bind directly to Module instead"));
+        if !self.node.prepared.is_empty() {
+            return Err(error("expressions with precompiled operands cannot be converted to source Grammar; bind directly to Module instead"));
         }
         self.flatten_source()
     }
@@ -1080,6 +1085,62 @@ mod precompile_boundary_tests {
         old.extend_from_slice(&bytes[8..]);
         let error = Module::load(&old, Some(&vocab)).expect_err("old Module artifact must be rejected");
         assert!(error.to_string().contains("unsupported Module artifact version"), "{error}");
+    }
+
+    #[test]
+    fn compile_after_precompile_never_downgrades_static_parts() {
+        let vocab = vocab();
+        let grammar = Grammar::from_ebnf(r#"start ::= "x" "y" | "xy""#);
+        let mut module = Module::new(&grammar);
+        module
+            .precompile_with(
+                &vocab,
+                &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+            )
+            .expect("precompile with ParserDwa");
+        let prepared_trigger = module
+            .node
+            .prepared
+            .get(&MaskStrategy::ParserDwa)
+            .and_then(|prepared| tokens(&prepared.prepared().inner))
+            .expect("ParserDwa preparation must carry a Tokens trigger");
+
+        let compiled = module
+            .compile_with(
+                &vocab,
+                CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie),
+            )
+            .expect("TokenTrie compile after ParserDwa precompile");
+        assert!(
+            !compiled.uses_dynamic_runtime(),
+            "a TokenTrie request must not replace retained static parts with dynamic compilation"
+        );
+        let compiled_trigger = tokens(&compiled).expect("compiled Module must carry Tokens");
+        assert!(
+            Arc::ptr_eq(&prepared_trigger, &compiled_trigger),
+            "compile must reuse the precompiled Tokens Arc"
+        );
+        assert!(
+            module.node.prepared.contains_key(&MaskStrategy::ParserDwa),
+            "compile must not discard the retained static part"
+        );
+
+        let expected = Module::new(&grammar)
+            .compile_with(&vocab, CompileOptions::default())
+            .expect("plain ParserDwa compile");
+        fn compare(a: &crate::ConstraintState<'_>, b: &crate::ConstraintState<'_>, depth: usize) {
+            assert_eq!(a.mask(), b.mask(), "mask mismatch at depth {depth}");
+            assert_eq!(a.is_accepting(), b.is_accepting(), "acceptance mismatch at depth {depth}");
+            if depth == 0 { return; }
+            for token in a.mask() {
+                let mut next_a = a.clone();
+                if next_a.commit_token(token).is_err() { continue; }
+                let mut next_b = b.clone();
+                next_b.commit_token(token).expect("same masks accept the same token");
+                compare(&next_a, &next_b, depth - 1);
+            }
+        }
+        compare(&compiled.start(), &expected.start(), 3);
     }
 }
 
@@ -1237,9 +1298,11 @@ mod boundary_strategy_tests {
                 r#"glrm 1; start start; extern grammar child; nt start = "x" child;"#,
             ));
             parent.bind("child", child.clone()).unwrap();
-            parent.set_boundary_mask_strategy(strategy).unwrap();
             parent
-                .compile_with(&vocab, CompileOptions::default())
+                .compile_with(
+                    &vocab,
+                    CompileOptions::default().boundary_mask_strategy(strategy),
+                )
                 .unwrap()
         };
         let static_boundary = compile(BoundaryMaskStrategy::ParserDwa);
@@ -1275,9 +1338,11 @@ mod boundary_error_tests {
             parent
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
                 .unwrap();
-            parent.set_boundary_mask_strategy(strategy).unwrap();
             parent.force_boundary_dwa_decline();
-            parent.compile_with(&vocab, CompileOptions::default())
+            parent.compile_with(
+                &vocab,
+                CompileOptions::default().boundary_mask_strategy(strategy),
+            )
         };
         let error = compile(BoundaryMaskStrategy::ParserDwa).unwrap_err();
         match error {
@@ -1304,9 +1369,11 @@ mod boundary_error_tests {
             parent
                 .bind("child", Module::new(&Grammar::from_ebnf(r#"start ::= "y""#)))
                 .unwrap();
-            parent.set_boundary_mask_strategy(strategy).unwrap();
             parent.force_boundary_dwa_decline();
-            parent.compile_with(&vocab, CompileOptions::default())
+            parent.compile_with(
+                &vocab,
+                CompileOptions::default().boundary_mask_strategy(strategy),
+            )
         };
         compile(BoundaryMaskStrategy::ParserDwa).expect_err("explicit ParserDwa must report the budget decline");
         let auto = compile(BoundaryMaskStrategy::Auto).expect("Auto must fall back to the token-trie boundary");

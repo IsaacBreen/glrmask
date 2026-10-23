@@ -8,7 +8,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use crate::{Grammar, MaskStrategy, Module, Vocab};
+use crate::{CompileOptions, Grammar, MaskStrategy, Module, Vocab};
 
 const NULLABLE_AMBIGUOUS: &str = "start: n0\nn0: \"a\" | n0 n0 |\n";
 
@@ -17,15 +17,17 @@ fn vocab() -> Vocab {
 }
 
 fn token_trie() -> crate::runtime::Constraint {
-    let mut module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
-    module.set_mask_strategy(MaskStrategy::TokenTrie).unwrap();
-    module.compile(&vocab()).unwrap()
+    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
+    module
+        .compile_with(&vocab(), CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+        .unwrap()
 }
 
 fn mode_constraint(mode: MaskStrategy) -> crate::runtime::Constraint {
-    let mut module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
-    module.set_mask_strategy(mode).unwrap();
-    module.compile(&vocab()).unwrap()
+    let module = Module::new(&Grammar::from_lark(NULLABLE_AMBIGUOUS));
+    module
+        .compile_with(&vocab(), CompileOptions::default().mask_strategy(mode))
+        .unwrap()
 }
 
 /// Run `body` on a worker thread; panic if it does not finish in 10 s.
