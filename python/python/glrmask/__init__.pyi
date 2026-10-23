@@ -31,7 +31,7 @@ for token_id, expected in [(0, [True, False, False]),
                            (2, [False, False, True])]:
     assert state.mask().tolist() == expected
     state.commit_token(token_id)
-assert not state.mask().any()
+assert state.is_accepting()
 ```
 
 Python masks are NumPy Boolean arrays indexed by original model token ID.
@@ -247,7 +247,7 @@ class Module:
     ) -> Constraint:
         """Compiles the module assembly against `vocab`.
 
-        Requires every extern to be bound. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
+        Requires every extern to be bound; `end_tokens` are admitted once the grammar is complete and must be committed before stopping. The strategies apply to the whole compile, including every composed child, and never downgrade a part that already has a static preparation.
         """
         ...
     @property
@@ -401,13 +401,19 @@ class ConstraintState:
         """
         ...
     def commit_token(self, token_id: int) -> bool:
-        """Commits one model token event; returns false when it is disallowed."""
+        """Commits one model token event.
+
+        Returns an error if the token is not allowed; the state is then unusable, so clone it first to try a token speculatively."""
         ...
     def commit_tokens(self, token_ids: Sequence[int]) -> bool:
-        """Commits model token IDs in order; returns false at the first disallowed event."""
+        """Commits model token IDs in order.
+
+        Stops with an error at the first disallowed token; the state is then unusable."""
         ...
     def commit_bytes(self, data: bytes) -> bool:
-        """Commits raw bytes rather than a model token event; returns false when disallowed."""
+        """Commits raw bytes rather than a model token event.
+
+        Does not substitute for committing a token-set or end-token event."""
         ...
     def is_accepting(self) -> bool:
         """Whether the input so far is a complete match.

@@ -13,7 +13,7 @@ GLRMask supports general context-free grammars, including ambiguous ones. It acc
 `@glrmask/node` is a Node.js addon over the same Rust compiler and decoding engine. Use Node.js 22 or newer. Install a package built from this source revision:
 
 ```sh
-npm install /absolute/path/to/glrmask-node-0.4.0.tgz
+npm install /absolute/path/to/glrmask-node-1.0.0.tgz
 ```
 
 Produce the tarball as described in [Building from source](#building-from-source). The package provides CommonJS, ESM, and TypeScript entry points.
