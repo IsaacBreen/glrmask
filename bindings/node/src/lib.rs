@@ -2,6 +2,7 @@
 
 //! Native Node-API bindings. Public JS classes live in index.cjs.
 mod arrays;
+use module_api::NativeModule;
 use glrmask_binding_core::{self as core, glrmask as g};
 use napi::{bindgen_prelude::*, Env, Task, Unknown};
 use napi_derive::napi;
@@ -177,6 +178,21 @@ impl NativeGrammar {
             Ok(AsyncTask::new(CompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(end, mode, boundary)? }))
         })
     }
+    #[napi]
+    pub fn precompile_sync(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<NativeModule> {
+        call(|| {
+            let mut m = g::Module::new(&*live(&self.inner)?);
+            m.precompile_with(&*live(&vocab.inner)?, &grammar_compile_options(Vec::new(), mode, boundary)?)?;
+            Ok(NativeModule::new(m))
+        })
+    }
+    #[napi]
+    pub fn precompile(&self, vocab: &NativeVocab, mode: f64, boundary: f64) -> napi::Result<AsyncTask<GrammarPrecompileTask>> {
+        call(|| {
+            let m = g::Module::new(&*live(&self.inner)?);
+            Ok(AsyncTask::new(GrammarPrecompileTask { module: m, vocab: live(&vocab.inner)?.clone(), options: grammar_compile_options(Vec::new(), mode, boundary)? }))
+        })
+    }
 }
 
 #[napi]
@@ -246,6 +262,15 @@ impl Task for CompileTask {
     type JsValue = NativeConstraint;
     fn compute(&mut self) -> napi::Result<Self::Output> { call(|| Ok(Arc::new(self.module.compile_with(&self.vocab, self.options.clone())?))) }
     fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeConstraint { inner: Handle::new(value) }) }
+}
+
+pub struct GrammarPrecompileTask { module: g::Module, vocab: g::Vocab, options: g::CompileOptions }
+#[napi]
+impl Task for GrammarPrecompileTask {
+    type Output = g::Module;
+    type JsValue = NativeModule;
+    fn compute(&mut self) -> napi::Result<Self::Output> { call(|| { self.module.precompile_with(&self.vocab, &self.options)?; Ok(self.module.clone()) }) }
+    fn resolve(&mut self, _: Env, value: Self::Output) -> napi::Result<Self::JsValue> { Ok(NativeModule::new(value)) }
 }
 
 enum SaveObject { Module(g::Module), Constraint(Arc<g::Constraint>, bool) }

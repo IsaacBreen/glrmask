@@ -20,6 +20,10 @@ new api.ConstraintState();
 s[Symbol.dispose](); c.dispose();
 void [range, accepted, offset];
 
+const precompiled: api.Module = g.precompileSync(v, {maskStrategy: api.MaskStrategy.ParserDwa});
+const precompiledAsync: Promise<api.Module> = g.precompile(v);
+void [precompiled, precompiledAsync];
+
 const module = new api.Module(g);
 const expr = api.Expr.sequence(g, module, api.Expr.choice(g));
 const entry: api.Extern|undefined = module.externs.get('slot');

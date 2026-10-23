@@ -1312,6 +1312,54 @@ mod precompile_boundary_tests {
 }
 
 #[cfg(test)]
+mod grammar_precompile_tests {
+    use super::*;
+
+    fn vocab() -> Vocab {
+        Vocab::new(vec![
+            (0, b"x".to_vec()), (1, b"a".to_vec()), (2, b"b".to_vec()),
+            (3, b"y".to_vec()), (4, b"xay".to_vec()), (5, b"ab".to_vec()),
+        ])
+    }
+
+    const HOST: &str = "glrm 1; start start; extern grammar child; nt start = \"x\" child \"y\";";
+
+    #[test]
+    fn grammar_precompile_returns_a_module_that_retains_its_work() {
+        let vocab = vocab();
+        let options = CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa);
+        let child = Grammar::from_ebnf(r#"start ::= "a""#);
+
+        let module = child.precompile_with(&vocab, &options).expect("grammar precompile");
+        let builds = static_build_probe::builds(&module);
+        assert_eq!(builds, 1, "precompiling the grammar must build and retain one static preparation");
+
+        let compiled = module
+            .compile_with(&vocab, CompileOptions::default().mask_strategy(MaskStrategy::TokenTrie))
+            .expect("TokenTrie compile after a ParserDwa grammar precompile");
+        assert!(!compiled.uses_dynamic_runtime(), "the returned Module must keep its retained static work");
+        assert_eq!(static_build_probe::builds(&module), builds, "the static preparation must be reused, not rebuilt");
+        assert!(module.node.prepared.contains_key(&MaskStrategy::ParserDwa));
+
+        // Composing through the returned Module still matches the explicit
+        // Module::new + bind + precompile path.
+        let mut parent = Grammar::from_glrm(HOST).precompile(&vocab).expect("open parent precompile");
+        parent.bind("child", module).expect("bind child");
+        let composed = parent.compile(&vocab).expect("compile composed modules");
+        let mut state = composed.start();
+        assert!(state.commit_token(4).is_ok());
+        assert!(state.is_accepting());
+
+        let mut reference_parent = Module::new(&Grammar::from_glrm(HOST));
+        reference_parent.bind("child", Module::new(&child)).expect("bind reference child");
+        reference_parent.precompile(&vocab).expect("precompile reference parent");
+        let reference = reference_parent.compile(&vocab).expect("compile reference");
+        assert_eq!(composed.start().mask(), reference.start().mask());
+        assert_eq!(composed.start().is_accepting(), reference.start().is_accepting());
+    }
+}
+
+#[cfg(test)]
 mod boundary_gate_tests {
     use super::*;
     use crate::__private::VocabExt as _;

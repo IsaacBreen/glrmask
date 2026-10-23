@@ -73,6 +73,7 @@
     "Grammar.from_glrm": "Creates a grammar from GLRM source.\n\nGLRM supports typed extern slots; bind them before compiling a runnable root.",
     "Grammar.from_json_schema": "Creates a grammar from a JSON Schema document.\n\nAccepts JSON text or a JSON-serializable object; `format` is an annotation only.",
     "Grammar.from_lark": "Creates a grammar from Lark source.\n\n`profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.",
+    "Grammar.precompile": "Retains vocabulary-specific compilation artifacts and returns the module.\n\nEquivalent to `Module(self).precompile(vocab, ...)`.",
     "Grammar.compile": "Compiles the grammar against `vocab`.\n\nEquivalent to `Module(self).compile(vocab, ...)`.",
     "Grammar.__copy__": "An independent handle.",
     "Grammar.__deepcopy__": "An independent handle.",
@@ -226,5 +227,5 @@
     "python": "https://glrmask.com/api/python/",
     "rust": "https://docs.rs/glrmask/latest/glrmask/"
   },
-  "content_sha256": "73bd56fd00add6115c763620b244d0d3c575f07132facf095799d7cf1b0bbeca"
+  "content_sha256": "b9413fe6707a4a5ae06cd986fbcbe30b67415302fc3508bcdcd3cefcc81803ec"
 }

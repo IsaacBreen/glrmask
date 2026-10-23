@@ -691,6 +691,23 @@ impl<'a> Grammar<'a> {
         Module::new(self).compile(vocab)
     }
 
+    /// Retains vocabulary-specific compilation artifacts and returns a module.
+    ///
+    /// Equivalent to [`Module::new`] followed by [`Module::precompile`].
+    pub fn precompile(&self, vocab: &Vocab) -> Result<Module> {
+        self.precompile_with(vocab, &CompileOptions::default())
+    }
+
+    /// Retains vocabulary-specific compilation artifacts using `options` and
+    /// returns a module.
+    ///
+    /// Equivalent to [`Module::new`] followed by [`Module::precompile_with`].
+    pub fn precompile_with(&self, vocab: &Vocab, options: &CompileOptions) -> Result<Module> {
+        let mut module = Module::new(self);
+        module.precompile_with(vocab, options)?;
+        Ok(module)
+    }
+
     /// Compiles the grammar against `vocab` with root compile options.
     pub fn compile_with(
         &self,

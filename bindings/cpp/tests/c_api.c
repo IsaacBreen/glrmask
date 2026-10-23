@@ -22,6 +22,12 @@ int main(void) {
     glrmask_compile_options module_options=glrmask_default_compile_options();
     module_options.mask_strategy=GLRMASK_MASK_STRATEGY_TOKEN_CLASS_TRIE;
     CHECK(glrmask_module_precompile(module,vocab,&module_options)==GLRMASK_OK);
+    /* Grammar::precompile is the module-returning mirror of Grammar::compile. */
+    glrmask_module *from_grammar=NULL;glrmask_constraint *precompiled_constraint=NULL;
+    CHECK(glrmask_grammar_precompile(grammar,vocab,&module_options,&from_grammar)==GLRMASK_OK);
+    CHECK(glrmask_module_compile(from_grammar,vocab,NULL,&precompiled_constraint)==GLRMASK_OK);
+    glrmask_constraint_free(precompiled_constraint);glrmask_module_free(from_grammar);
+    CHECK(glrmask_grammar_precompile(grammar,vocab,NULL,NULL)==GLRMASK_INVALID_ARGUMENT);
     CHECK(glrmask_module_bind_token(module,"missing",7,0)!=GLRMASK_OK);
     CHECK(glrmask_module_save(module,&saved)==GLRMASK_OK);
     const uint8_t* artifact=NULL;size_t artifact_len=0;CHECK(glrmask_bytes_data(saved,&artifact,&artifact_len)==GLRMASK_OK);

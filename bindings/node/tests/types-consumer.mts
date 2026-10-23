@@ -8,6 +8,8 @@ const bytes = await c.save(); const loaded = await Constraint.load(bytes);
 const words: Uint32Array = loaded.start().mask();
 
 const module = new Module(Grammar.fromEbnf('start ::= "a"'));
+const precompiled: Module = await Grammar.fromEbnf('start ::= "a"').precompile(v, options);
+void precompiled;
 await module.precompile(v, {maskStrategy: MaskStrategy.TokenClassTrie});
 const expr = Expr.choice(module, Grammar.fromEbnf('start ::= "a"'));
 const restored = await Module.load(await module.save(), v);

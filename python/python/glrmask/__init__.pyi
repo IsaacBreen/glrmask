@@ -345,6 +345,18 @@ class Grammar:
         `profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.
         """
         ...
+    def precompile(
+        self,
+        vocab: Vocab,
+        *,
+        mask_strategy: MaskStrategy = MaskStrategy.AUTO,
+        boundary_mask_strategy: BoundaryMaskStrategy = BoundaryMaskStrategy.AUTO,
+    ) -> Module:
+        """Retains vocabulary-specific compilation artifacts and returns the module.
+
+        Equivalent to `Module(self).precompile(vocab, ...)`.
+        """
+        ...
     def compile(
         self,
         vocab: Vocab,

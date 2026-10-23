@@ -6,6 +6,11 @@
   composition. `Grammar` is immutable source without settings or bindings;
   `Grammar::compile` and `compile_with(CompileOptions)` are sugar over a
   default `Module`.
+- `Grammar::precompile` and `Grammar::precompile_with(CompileOptions)` return a
+  `Module` with its retained work, mirroring `Module::new` followed by
+  `Module::precompile`. The bindings expose the same mirror: Python
+  `grammar.precompile(vocab, ...)`, Node.js `grammar.precompile`/`precompileSync`,
+  C `glrmask_grammar_precompile`, and C++ `Grammar::precompile`.
 - `Module` holds bindings and retained work.
   `Module::bind` mutates in place and is atomic; each extern is bound once on
   its declaring module, and qualified `::` paths are rejected. A bound child

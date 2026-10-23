@@ -69,6 +69,8 @@ impl<'a> Grammar<'a> {
 
     pub fn compile(&self, vocab: &Vocab) -> Result<Constraint>;
     pub fn compile_with(&self, vocab: &Vocab, options: CompileOptions) -> Result<Constraint>;
+    pub fn precompile(&self, vocab: &Vocab) -> Result<Module>;
+    pub fn precompile_with(&self, vocab: &Vocab, options: &CompileOptions) -> Result<Module>;
 }
 
 pub struct Extern { /* private fields */ }

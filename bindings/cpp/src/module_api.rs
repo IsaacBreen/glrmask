@@ -44,6 +44,14 @@ clone_handle!(glrmask_expr_clone, glrmask_expr);
     ffi(|| unsafe { produce(out, || Ok(glrmask_module(g::Module::new(&read(p)?.0)))) })
 }
 
+#[unsafe(no_mangle)] pub unsafe extern "C" fn glrmask_grammar_precompile(p: *const glrmask_grammar, v: *const glrmask_vocab, o: *const glrmask_compile_options, out: *mut *mut glrmask_module) -> i32 {
+    ffi(|| unsafe { produce(out, || {
+        let mut module = g::Module::new(&read(p)?.0);
+        module.precompile_with(&read(v)?.0, &root_options(o)?)?;
+        Ok(glrmask_module(module))
+    }) })
+}
+
 macro_rules! bind_handle {($name:ident,$child:ty,$wrap:expr)=>{
     #[unsafe(no_mangle)] pub unsafe extern "C" fn $name(p:*mut glrmask_module,name:*const c_char,n:usize,child:*const $child)->i32 {
         ffi(||unsafe{let child=read(child)?.0.clone();let name=text(name,n)?;write(p)?.0.bind(name,$wrap(child))?;Ok(())})

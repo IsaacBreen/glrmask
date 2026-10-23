@@ -327,6 +327,8 @@ public:
     }
     /// Compiles the grammar against `vocab`.
     Constraint compile(const Vocab& vocab, const CompileOptions& options = {}) const;
+    /// Precompiles the grammar against `vocab` and returns a module.
+    Module precompile(const Vocab& vocab, const CompileOptions& options = {}) const;
 };
 
 /// One `Expr` operand: a grammar, module, expression, token or exact-token set.
@@ -379,6 +381,7 @@ public:
 class Module : public detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone> {
     using Base = detail::Owned<glrmask_module, glrmask_module_free, glrmask_module_clone>;
     explicit Module(glrmask_module* p) : Base(p) {}
+    friend class Grammar;
     static glrmask_module* create(const Grammar& grammar) {
         glrmask_module* p = nullptr; detail::check(glrmask_module_new(grammar.native_handle(), &p)); return p;
     }
@@ -509,6 +512,10 @@ public:
 inline Constraint Grammar::compile(const Vocab& vocab, const CompileOptions& options) const {
     const auto native = options.native(); glrmask_constraint* p = nullptr;
     detail::check(glrmask_grammar_compile(native_handle(), vocab.native_handle(), &native, &p)); return Constraint(p);
+}
+inline Module Grammar::precompile(const Vocab& vocab, const CompileOptions& options) const {
+    const auto native = options.native(); glrmask_module* p = nullptr;
+    detail::check(glrmask_grammar_precompile(native_handle(), vocab.native_handle(), &native, &p)); return Module(p);
 }
 inline Constraint Module::compile(const Vocab& vocab, const CompileOptions& options) const {
     const auto native = options.native(); glrmask_constraint* p = nullptr;

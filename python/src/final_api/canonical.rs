@@ -316,7 +316,7 @@ fn extract_binding(value: &Bound<'_, PyAny>) -> PyResult<glrmask::Binding> {
     ))
 }
 
-fn compile_options(
+pub(super) fn compile_options(
     mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
     boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
 ) -> glrmask::CompileOptions {

@@ -10,11 +10,11 @@ to the compile call, and `Grammar` stores no settings:
 use glrmask::{Grammar, Module, Result, Vocab};
 
 # fn demo(vocab: &Vocab, marker: u32) -> Result<()> {
-let mut child = Module::new(&Grammar::from_glrm(
+let child_grammar = Grammar::from_glrm(
     r#"extern token MARK start body nt body = "item" MARK"#,
-));
+);
+let mut child = child_grammar.precompile(vocab)?;
 child.bind("MARK", glrmask::Token::new(marker))?;
-child.precompile(vocab)?;
 let mut parent = Module::new(&Grammar::from_glrm(
     "extern grammar ITEM start root nt root = ITEM",
 ));
@@ -25,6 +25,11 @@ let constraint = parent.compile(vocab)?;
 # Ok(())
 # }
 ```
+
+`grammar.precompile(vocab)` is the module-returning mirror of
+`grammar.compile(vocab)`: it is `Module::new(&grammar)` followed by
+`Module::precompile`, so composed sub-grammars can be precompiled and bound in
+one step.
 
 Binding mutates the receiving handle atomically. In Rust, `clone()` produces an
 independent snapshot sharing immutable internals; in Python, use `copy()`.

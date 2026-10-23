@@ -540,3 +540,36 @@ fn focused_11_grammar_compile_equals_module_new_compile() {
         assert_eq!(c_grammar.start().is_accepting(), c_module.start().is_accepting());
     }
 }
+
+#[test]
+fn focused_12_grammar_precompile_returns_a_module() {
+    let v = vocab();
+    let child = Grammar::from_ebnf(r#"start ::= "a""#);
+
+    // The returned Module is bindable and compiles like Module::new.
+    let mut module = Grammar::from_glrm(HOST).precompile(&v).unwrap();
+    module.bind("child", child.precompile(&v).unwrap()).unwrap();
+    let c = module.compile(&v).unwrap();
+    let mut s = c.start();
+    assert!(allowed(&s.mask(), 4), "xay must compose the precompiled child");
+    s.commit_token(4).unwrap();
+    assert!(s.is_accepting());
+
+    // Masks equal the explicit Module::new + bind + precompile path.
+    let mut reference = Module::new(&Grammar::from_glrm(HOST));
+    reference.bind("child", Module::new(&child)).unwrap();
+    reference.precompile(&v).unwrap();
+    let reference = reference.compile(&v).unwrap();
+    assert_eq!(c.start().mask(), reference.start().mask());
+    assert_eq!(c.start().is_accepting(), reference.start().is_accepting());
+
+    // Options are honoured by precompile_with.
+    let configured = child
+        .precompile_with(
+            &v,
+            &CompileOptions::default().mask_strategy(MaskStrategy::ParserDwa),
+        )
+        .unwrap();
+    let plain = Module::new(&child).compile(&v).unwrap();
+    assert_eq!(configured.compile(&v).unwrap().start().mask(), plain.start().mask());
+}

@@ -172,6 +172,8 @@ GLRMASK_API glrmask_status glrmask_grammar_clone(const glrmask_grammar*,glrmask_
 GLRMASK_API void glrmask_grammar_free(glrmask_grammar*);
 /// Compiles a grammar against a vocabulary with root options.
 GLRMASK_API glrmask_status glrmask_grammar_compile(const glrmask_grammar*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_constraint**);
+/// Precompiles a grammar against a vocabulary and returns a module; options may be NULL for defaults.
+GLRMASK_API glrmask_status glrmask_grammar_precompile(const glrmask_grammar*,const glrmask_vocab*,const glrmask_compile_options*,glrmask_module**);
 
 /// Creates a module from a grammar with default settings.
 GLRMASK_API glrmask_status glrmask_module_new(const glrmask_grammar*,glrmask_module**);

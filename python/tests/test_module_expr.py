@@ -126,6 +126,35 @@ def test_wrong_paths_kinds_duplicates_and_vocab_are_atomic():
         token_parent.compile(v)
 
 
+def test_grammar_precompile_returns_a_module():
+    v = vocab()
+
+    # A grammar precompiles into a bindable Module, including while its own
+    # externs are still open.
+    open_grammar = g.Grammar.from_glrm(HOST)
+    module = open_grammar.precompile(v)
+    module.bind('child', source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA))
+    state = module.compile(v).start()
+    assert state.mask()[4]
+    state.commit_token(4)
+    assert state.is_accepting()
+
+    # Masks equal the explicit Module(grammar) + bind + precompile path.
+    reference = g.Module(g.Grammar.from_glrm(HOST))
+    reference.bind('child', g.Module(source()))
+    reference.precompile(v)
+    assert list(module.compile(v).start().mask()) == list(reference.compile(v).start().mask())
+    assert module.compile(v).start().is_accepting() == reference.compile(v).start().is_accepting()
+
+    # The returned Module retains work: its artifact carries the static
+    # preparation, survives a round-trip, and a TokenTrie compile keeps it.
+    retained = source().precompile(v, mask_strategy=g.MaskStrategy.PARSER_DWA)
+    assert len(retained.save()) > len(g.Module(source()).save())
+    restored = g.Module.load(retained.save(), v)
+    expected = list(g.Module(source()).compile(v).start().mask())
+    assert list(restored.compile(v, mask_strategy=g.MaskStrategy.TOKEN_TRIE).start().mask()) == expected
+
+
 def test_cross_vocab_precompile_load_and_exact_events_preserve_state():
     v = vocab()
     parent = g.Module(source())

@@ -286,6 +286,30 @@ impl PyGrammar {
         .map_err(api_error)
     }
 
+    /// Retains vocabulary-specific compilation artifacts and returns the module.
+    ///
+    /// Equivalent to `Module(self).precompile(vocab, ...)`.
+    #[pyo3(signature = (vocab, *, mask_strategy = None, boundary_mask_strategy = None))]
+    fn precompile(
+        slf: &Bound<'_, Self>,
+        py: Python<'_>,
+        vocab: &PyVocab,
+        mask_strategy: Option<PyRef<'_, PyMaskStrategy>>,
+        boundary_mask_strategy: Option<PyRef<'_, PyBoundaryMaskStrategy>>,
+    ) -> PyResult<canonical::PyModule> {
+        let grammar = slf.try_borrow()?.inner.clone();
+        let vocab = vocab.inner.clone();
+        let options = canonical::compile_options(mask_strategy, boundary_mask_strategy);
+        let module = py
+            .detach(move || {
+                let mut module = glrmask::Module::new(&grammar);
+                module.precompile_with(&vocab, &options)?;
+                Ok::<_, glrmask::Error>(module)
+            })
+            .map_err(api_error)?;
+        Ok(canonical::PyModule::from_inner(module))
+    }
+
     fn __copy__(&self) -> Self {
         Self {
             inner: self.inner.clone(),

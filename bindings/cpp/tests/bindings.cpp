@@ -347,6 +347,17 @@ void canonical_modules() {
     CHECK(ext_unbound.size() == 2);
     CHECK(ext_unbound[0].name == "first");
     CHECK(ext_unbound[1].name == "third");
+
+    // Grammar::precompile is the module-returning mirror of Grammar::compile.
+    auto open_host = host.precompile(v);
+    auto precompiled_child = Grammar::from_ebnf("start ::= \"a\"").precompile(
+        v, strategy_options(static_cast<unsigned>(MaskStrategy::ParserDwa)));
+    CHECK(precompiled_child.save().size() > Module(Grammar::from_ebnf("start ::= \"a\"")).save().size());
+    open_host.bind("child", precompiled_child);
+    auto precompiled_state = open_host.compile(
+        v, strategy_options(static_cast<unsigned>(MaskStrategy::TokenTrie))).start();
+    CHECK(allowed(precompiled_state.mask(), 3));
+    precompiled_state.commit_token(3); CHECK(precompiled_state.is_accepting());
 }
 
 int main(int argc, char** argv) {

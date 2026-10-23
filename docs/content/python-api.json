@@ -60,6 +60,7 @@
   "Grammar.from_glrm": "Creates a grammar from GLRM source.\n\nGLRM supports typed extern slots; bind them before compiling a runnable root.",
   "Grammar.from_json_schema": "Creates a grammar from a JSON Schema document.\n\nAccepts JSON text or a JSON-serializable object; `format` is an annotation only.",
   "Grammar.from_lark": "Creates a grammar from Lark source.\n\n`profile` selects `recognition` or `llm`; named token atoms require explicit `token_names`.",
+  "Grammar.precompile": "Retains vocabulary-specific compilation artifacts and returns the module.\n\nEquivalent to `Module(self).precompile(vocab, ...)`.",
   "Grammar.compile": "Compiles the grammar against `vocab`.\n\nEquivalent to `Module(self).compile(vocab, ...)`.",
   "Grammar.__copy__": "An independent handle.",
   "Grammar.__deepcopy__": "An independent handle.",

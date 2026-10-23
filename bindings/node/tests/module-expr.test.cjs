@@ -32,6 +32,35 @@ test('Module: copy and root-only final options',()=>{
   assert.throws(()=>new CompileOptions({bogus:true}),TypeError);
 });
 
+test('Grammar: precompile returns a bindable Module with retained work',async()=>{
+  const v=vocab();
+  const child=source();
+  const parent=host().precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa});
+  assert.ok(parent instanceof Module);
+  parent.bind('child',child.precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa}));
+  const state=parent.compileSync(v).start();
+  assert.ok(allowed(state,4));state.commitToken(4);assert.ok(state.isAccepting());
+
+  const reference=new Module(host());reference.bind('child',new Module(source()));reference.precompileSync(v);
+  assert.deepEqual(Array.from(parent.compileSync(v).start().mask()),Array.from(reference.compileSync(v).start().mask()));
+  assert.equal(parent.compileSync(v).start().isAccepting(),reference.compileSync(v).start().isAccepting());
+
+  // The asynchronous spelling returns the same bindable Module.
+  const asyncParent=await host().precompile(v,{boundaryMaskStrategy:BoundaryMaskStrategy.FastBuild});
+  assert.ok(asyncParent instanceof Module);
+  asyncParent.bind('child',await child.precompile(v));
+  accept(asyncParent,v,[4]);
+
+  // Retained work is serialized, survives a round-trip, and a TokenTrie
+  // compile keeps it instead of rebuilding dynamically.
+  const retained=source().precompileSync(v,{maskStrategy:MaskStrategy.ParserDwa});
+  const bytes=retained.saveSync();
+  assert.ok(bytes.length>new Module(source()).saveSync().length);
+  const restored=Module.loadSync(bytes,v);
+  assert.deepEqual(Array.from(restored.compileSync(v,{maskStrategy:MaskStrategy.TokenTrie}).start().mask()),
+    Array.from(new Module(source()).compileSync(v).start().mask()));
+});
+
 test('Module: retained work round-trips without stored settings',()=>{
   const v=vocab();
   const m=new Module(source());

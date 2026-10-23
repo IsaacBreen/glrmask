@@ -218,6 +218,14 @@ class Grammar extends Owned {
     return wrap(Grammar, invoke(() => native.NativeGrammar.fromSource('lark', string(source), profile, names)));
   }
   copy() { return wrap(Grammar, invoke(() => handle(this, Grammar).clone())); }
+  precompileSync(vocab, options) {
+    const s = compileSettings(options);
+    return wrap(Module, invoke(() => handle(this, Grammar).precompileSync(handle(vocab, Vocab), s.mode, s.boundary)));
+  }
+  async precompile(vocab, options) {
+    const s = compileSettings(options);
+    return wrap(Module, await invokeAsync(() => handle(this, Grammar).precompile(handle(vocab, Vocab), s.mode, s.boundary)));
+  }
   compileSync(vocab, options) {
     const s = compileSettings(options);
     const mod = new Module(this);

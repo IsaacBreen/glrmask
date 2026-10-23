@@ -194,6 +194,10 @@ export declare class Grammar implements Disposable {
   static fromLark(source: string, options?: LarkOptions): Grammar;
   /** An independent handle. */
   copy(): Grammar;
+  /** Retains vocabulary-specific compilation artifacts; equivalent to `new Module(this).precompile(vocab, ...)`. */
+  precompile(vocab: Vocab, options?: StrategyOptions | CompileOptions): Promise<Module>;
+  /** Retains vocabulary-specific compilation artifacts; equivalent to `new Module(this).precompileSync(vocab, ...)`. */
+  precompileSync(vocab: Vocab, options?: StrategyOptions | CompileOptions): Module;
   /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compile(vocab, ...)`. */
   compile(vocab: Vocab, options?: GrammarCompileOptions): Promise<Constraint>;
   /** Compiles the grammar against `vocab`; equivalent to `new Module(this).compileSync(vocab, ...)`. */
