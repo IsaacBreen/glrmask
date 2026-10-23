@@ -7372,12 +7372,11 @@ mod tests {
                     );
                 }
                 if !results[0] {
-                    // A failed commit leaves the state unchanged, so the four
-                    // variants must still agree on the pre-commit mask.
-                    for (index, (state, mask)) in states.iter().zip(&masks).enumerate() {
-                        assert_eq!(
-                            &state.mask(), mask,
-                            "state {index} changed after a failed commit at {path:?} token {token}",
+                    // A failed commit leaves every variant dead.
+                    for (index, state) in states.iter().enumerate() {
+                        assert!(
+                            state.mask().iter().all(|&word| word == 0),
+                            "state {index} still allows tokens after a failed commit at {path:?} token {token}",
                         );
                     }
                     failed = true;

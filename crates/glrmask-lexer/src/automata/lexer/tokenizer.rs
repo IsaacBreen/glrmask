@@ -10013,6 +10013,8 @@ impl Tokenizer {
                     Arc::clone(&owners),
                 )
             } else {
+                // Giant intersections have no bounded-code root coordinate;
+                // compile built those with the dynamic oracle, so load does too.
                 VirtualResidualRuntime::new_preserving_oracle_coordinate(
                     expression,
                     runtime_index,
@@ -10023,6 +10025,18 @@ impl Tokenizer {
                     Arc::clone(&allocator),
                     Arc::clone(&owners),
                 )
+                .or_else(|| {
+                    VirtualResidualRuntime::new_dynamic(
+                        expression,
+                        runtime_index,
+                        entry.terminal,
+                        self.num_terminals,
+                        physical_state_count,
+                        entry.root_state,
+                        Arc::clone(&allocator),
+                        Arc::clone(&owners),
+                    )
+                })
             };
             let oracle_and_runtime_ms = oracle_started
                 .map_or(0.0, |started| started.elapsed().as_secs_f64() * 1000.0);
