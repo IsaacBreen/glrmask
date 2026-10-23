@@ -21,8 +21,9 @@ tag, and only publishes after their complete validation jobs pass. It releases:
   macOS x64/arm64, Linux x64/arm64 × glibc/musl) through OIDC, with no
   shared npm credential or post-install native compilation;
 - **PyPI**: eight regular CPython abi3 wheels (manylinux, musllinux, macOS and Windows) plus sdist, using PyPI's short-lived OIDC credential;
-- **crates.io**: the `glrmask` *root crate*, using `rust-lang/crates-io-auth-action`
-  and a temporary token which is revoked after the job;
+- **crates.io**: the `glrmask` root crate and every changed internal crate, in
+  dependency order, using `rust-lang/crates-io-auth-action` and a temporary token
+  which is revoked after the job;
 - **C/C++**: sixteen tested, checksummed GitHub Release assets (eight platforms ×
   static/shared), including headers, native libraries, CMake installation and manifests.
 
@@ -31,12 +32,13 @@ C++ assets are never overwritten: a rerun verifies their recorded SHA-256 digest
 fails if they differ. Failure of a registry publish does not undo a successful publish
 to another registry; check each registry independently before retrying.
 
-**Important Rust workspace limit:** GLRMask's internal crates (e.g. `glrmask-vocab`,
-`glrmask-grammar`) have their own versions and crates.io release order. This workflow
-publishes only the root `glrmask` crate. Publish and verify any changed internal
-dependencies separately before tagging a new root version. If automating all workspace
-crates, each named crate needs its own trusted-publisher registration and dependency-
-order-aware release path; do not assume `cargo publish --workspace` is suitable here.
+**Rust workspace crates.** GLRMask's internal crates (e.g. `glrmask-vocab`,
+`glrmask-grammar`) have their own versions. `scripts/publish-crates.py` publishes every
+workspace crate whose version is not yet on crates.io, dependencies first, after
+packaging and verifying all of them together. Before uploading anything it fails if a
+version that is already published has different sources, which means a crate changed
+without a version bump: bump it, and the `=x.y.z` requirements on it, then retry. Run
+`python3 scripts/publish-crates.py` locally to do the same check without publishing.
 
 ## One-time registry registration
 
@@ -67,8 +69,13 @@ GitHub Actions environment **`release`** for all three OIDC services.
 3. **crates.io**: sign in, open the existing **`glrmask`** crate settings →
    Trusted Publishing → GitHub Actions. Enter owner `IsaacBreen`, repository
    `glrmask`, filename `release.yml`, environment `release`.
-   The owner already published `glrmask 0.3.0`, fulfilling the initial-publication
-   prerequisite.
+   Repeat this for every internal crate: crates.io trust is per crate. The crates are
+   `glrmask-invariant`, `glrmask-finite-automata`, `glrmask-weight`,
+   `glrmask-weighted-automata`, `glrmask-artifact`, `glrmask-vocab`, `glrmask-lexer`,
+   `glrmask-grammar`, `glrmask-glr`, `glrmask-json-schema`, `glrmask-dwa-merge`,
+   `glrmask-parser-dwa` and `glrmask-terminal-dwa`. All of them already have a
+   published version, fulfilling the initial-publication prerequisite. A crate added
+   later must be published once by hand before trusted publishing can be enabled.
    [Official crates.io instructions](https://crates.io/docs/trusted-publishing).
 4. **C/C++**: **no external publishing account**. GitHub releases receive prebuilt
    binaries using the workflow's scoped, short-lived `GITHUB_TOKEN`. No NuGet,
@@ -79,56 +86,19 @@ stable release tags (`v*`). This restricts the OIDC job identity. We do *not* st
 npm, PyPI, crates.io, or GitHub personal publishing credentials in Actions secrets.
 A published GitHub Release is the human decision to publish.
 
-## Internal crates for this release
-
-The internal crates changed since their last crates.io releases. Publish them in
-dependency order before the root `glrmask` crate. `glrmask-weight 0.1.1` and
-`glrmask-weighted-automata 0.1.1` are unchanged and already published.
-
-```sh
-cargo publish --locked -p glrmask-invariant@0.1.2
-cargo publish --locked -p glrmask-finite-automata@0.1.2
-cargo publish --locked -p glrmask-artifact@0.2.1
-cargo publish --locked -p glrmask-vocab@0.2.1
-cargo publish --locked -p glrmask-lexer@0.2.1
-cargo publish --locked -p glrmask-grammar@0.2.1
-cargo publish --locked -p glrmask-glr@0.2.1
-cargo publish --locked -p glrmask-json-schema@0.2.1
-cargo publish --locked -p glrmask-dwa-merge@0.2.1
-cargo publish --locked -p glrmask-parser-dwa@0.2.1
-cargo publish --locked -p glrmask-terminal-dwa@0.2.1
-cargo publish --locked -p glrmask@0.4.0
-```
-
-Verify the complete set locally first with a recent Cargo that supports local
-workspace registries:
-
-```sh
-cargo package --workspace --allow-dirty \
-  --exclude glrmask-binding-core --exclude glrmask-c --exclude glrmask-node \
-  --exclude _glrmask
-```
-
-`_glrmask` is the PyO3 extension and is built by the Python wheel job; it is not
-published to crates.io. Its package can be assembled without verification:
-
-```sh
-cargo package --workspace --allow-dirty --no-verify \
-  --exclude glrmask-binding-core --exclude glrmask-c --exclude glrmask-node
-```
-
 ## Before publishing a new release
 
 1. Update all three versions (Rust, Python, npm), documentation and changelog on `main`.
    Check that the new version is not already published on any registry. Do not
    repurpose the existing `v0.3.0` tag: it predates the merged native bindings.
-2. If internal Rust crates changed version, publish them first in dependency order.
+2. If an internal Rust crate changed, bump its version. `python3 scripts/publish-crates.py`
+   checks this.
 3. Confirm native and wheel CI are green on the source commit.
 4. In GitHub, **Draft a new release**, select or create **`vX.Y.Z`** pointing to the
    desired merged `main` commit, then **Publish release**. The OIDC release workflow
    builds, checks and publishes all four channels. A PR or tag push alone will not.
 5. Inspect the workflow, then verify install from npm and PyPI, root crate on
-   crates.io, and static/shared C++ GitHub assets. An unavailable registry or failed
+   crates.io crates, and static/shared C++ GitHub assets. An unavailable registry or failed
    artifact build should fail safely rather than publish unverified binaries.
 
 ## Security and maintenance

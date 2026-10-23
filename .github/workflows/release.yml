@@ -28,6 +28,7 @@ on:
       - '.github/workflows/native-bindings.yml'
       - '.github/workflows/python-wheels.yml'
       - 'scripts/check-release-version.py'
+      - 'scripts/publish-crates.py'
       - 'scripts/check-cpp-release-archives.py'
       - 'docs/releasing.md'
   release:
@@ -270,56 +271,37 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   crates:
-    name: crates.io - glrmask root crate
+    name: crates.io - glrmask and internal crates
     if: github.event_name == 'release'
     needs: verify
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     environment: release
     permissions:
       contents: read
       id-token: write
-    env:
-      RELEASE_VERSION: ${{ needs.verify.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Check crates.io published versions
-        id: existing
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import os, urllib.request, urllib.error
-          version=os.environ['RELEASE_VERSION']
-          url=f'https://crates.io/api/v1/crates/glrmask/{version}'
-          req=urllib.request.Request(url, headers={'User-Agent':'GLRMask-release-workflow/1.0 (https://github.com/IsaacBreen/glrmask)'})
-          try:
-              with urllib.request.urlopen(req, timeout=20) as response:
-                  if response.status != 200: raise RuntimeError('Unexpected crates.io response')
-                  exists=True
-          except urllib.error.HTTPError as exc:
-              if exc.code != 404: raise
-              exists=False
-          with open(os.environ['GITHUB_OUTPUT'],'a') as output:
-              output.write(f'exists={str(exists).lower()}\n')
-          print(f'crates.io glrmask {version} already exists: {exists}')
-          PY
       - name: Install stable Rust toolchain
-        if: steps.existing.outputs.exists == 'false'
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - name: Validate root crate publication
-        if: steps.existing.outputs.exists == 'false'
-        run: cargo publish --locked --dry-run -p glrmask
+      # Packages and verifies every crate together, and fails if an already-published
+      # version has different sources (a changed crate that was not version-bumped).
+      - name: Package, verify and check versions of all workspace crates
+        id: check
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+        run: python3 scripts/publish-crates.py --github-output
       - name: Exchange GitHub OIDC for short-lived crates.io credential
-        if: steps.existing.outputs.exists == 'false'
+        if: steps.check.outputs.pending == 'true'
         uses: rust-lang/crates-io-auth-action@v1
         id: auth
-      - name: Publish root crate
-        if: steps.existing.outputs.exists == 'false'
-        run: cargo publish --locked -p glrmask
+      - name: Publish unpublished crates in dependency order
+        if: steps.check.outputs.pending == 'true'
+        run: python3 scripts/publish-crates.py --publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
